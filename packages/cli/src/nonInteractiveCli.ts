@@ -1602,6 +1602,7 @@ export async function runNonInteractive(
         // initial query — early teammate messages will be picked
         // up on the next iteration.
         let isTeammateTurn = false;
+        let teammateContinuesToolTurn = false;
         if (!isFirstTurn && pendingTeammateMessages.length > 0) {
           const batch = pendingTeammateMessages.splice(0);
           const teammatePart = { text: batch.join('\n\n') };
@@ -1610,18 +1611,10 @@ export async function runNonInteractive(
               ...(currentMessages[0].parts || []),
               teammatePart,
             ];
+            teammateContinuesToolTurn = true;
           } else {
             currentMessages = [{ role: 'user', parts: [teammatePart] }];
           }
-          // Treat BOTH the standalone and the merged-into-tool-response
-          // cases as a teammate turn. Teammate text is fresh external
-          // input, so the loop detector must reset — otherwise a leader
-          // that polls task_list while teammate messages keep merging
-          // into its tool-response turns climbs the identical-tool-call
-          // counter and trips a false LoopDetected. The Teammate send
-          // path prepends nothing to the request, so a merged turn's
-          // leading functionResponse parts stay paired with their
-          // functionCall.
           isTeammateTurn = true;
         }
         hasUnsentToolResponse = false;
@@ -1657,6 +1650,7 @@ export async function runNonInteractive(
             type: sendType,
             modelOverride,
             ...(modelRoute && { modelRoute }),
+            ...(teammateContinuesToolTurn && { continuesToolTurn: true }),
             ...(isFirstTurn &&
               options.notificationDisplayText && {
                 notificationDisplayText: options.notificationDisplayText,
@@ -1773,6 +1767,11 @@ export async function runNonInteractive(
           currentMessages = [{ role: 'user', parts: toolResponseParts }];
           hasUnsentToolResponse = true;
         } else {
+          // Core settles an exact route once the response has no pending
+          // tools. Do not carry the wrapper's stale copy into an independent
+          // teammate turn.
+          modelRoute = undefined;
+
           // No more tool calls — check if teammates are active.
           const teamManager = config.getTeamManager();
           if (teamManager?.hasActiveTeammates()) {

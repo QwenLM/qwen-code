@@ -2814,6 +2814,14 @@ export const useGeminiStream = (
     await submitQuery(lastPrompt, SendMessageType.Retry);
   }, [streamingState, addItem, clearRetryCountdown, submitQuery]);
 
+  const clearRetryState = useCallback(() => {
+    clearRetryCountdown();
+    lastPromptRef.current = null;
+    lastPromptModelRouteRef.current = undefined;
+    lastPromptErroredRef.current = false;
+    modelRouteRef.current = undefined;
+  }, [clearRetryCountdown]);
+
   const handleApprovalModeChange = useCallback(
     async (newApprovalMode: ApprovalMode) => {
       // Auto-approve pending tool calls when switching to auto-approval modes
@@ -3825,6 +3833,7 @@ export const useGeminiStream = (
     thought,
     cancelOngoingRequest,
     retryLastPrompt,
+    clearRetryState,
     pendingToolCalls: toolCalls,
     handleApprovalModeChange,
     activePtyId,

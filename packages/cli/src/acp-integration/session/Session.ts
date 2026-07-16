@@ -2662,14 +2662,6 @@ export class Session implements SessionContext {
   }
 
   /**
-   * Mirrors the core send path for ACP model sends.
-   *
-   * Attempts automatic chat compression first, checks the session token limit,
-   * emits an ACP-visible notice when compression succeeds, and returns the ACP
-   * stop reason when the provider send should be skipped because the request
-   * was cancelled or the session token limit was exceeded.
-   */
-  /**
    * Create the MessageDisplay hook dispatcher for one model call's streamed
    * reply, or null when the hook isn't registered (the common case — keeps
    * the streaming loops zero-cost). The ACP surface consumes GeminiChat's

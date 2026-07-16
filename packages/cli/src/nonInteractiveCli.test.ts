@@ -10,6 +10,7 @@ import type {
   ToolRegistry,
   ServerGeminiStreamEvent,
   SessionMetrics,
+  TeamManager,
 } from '@qwen-code/qwen-code-core';
 import type { CLIUserMessage } from './nonInteractive/types.js';
 import {
@@ -437,6 +438,42 @@ describe('runNonInteractive', () => {
     for (const event of events) {
       yield event;
     }
+  }
+
+  function createMockTeamManager(initiallyActive = false) {
+    let active = initiallyActive;
+    let leaderMessageCallback: Parameters<
+      TeamManager['setLeaderMessageCallback']
+    >[0] = null;
+    const waitForTeammateActivity =
+      vi.fn<TeamManager['waitForTeammateActivity']>();
+    const manager = {
+      setLeaderMessageCallback: vi.fn(
+        (callback: Parameters<TeamManager['setLeaderMessageCallback']>[0]) => {
+          leaderMessageCallback = callback;
+        },
+      ),
+      getEventEmitter: vi.fn(() => ({
+        on: vi.fn(),
+        off: vi.fn(),
+      })),
+      hasActiveTeammates: vi.fn(() => active),
+      allRemainingStalled: vi.fn(() => false),
+      abortStalledTeammates: vi.fn(),
+      buildTeamStatusSummary: vi.fn(() => 'team status'),
+      waitForTeammateActivity,
+      drainLeaderInbox: vi.fn().mockResolvedValue(undefined),
+    } as unknown as TeamManager;
+    return {
+      manager,
+      waitForTeammateActivity,
+      setActive(value: boolean) {
+        active = value;
+      },
+      deliver(message: string) {
+        leaderMessageCallback?.(message, message);
+      },
+    };
   }
 
   it('should process input and write text output', async () => {
@@ -1996,13 +2033,15 @@ describe('runNonInteractive', () => {
       selection: { id: 'vision-agent', agentCapable: true },
       route,
     });
+    const team = createMockTeamManager();
+    vi.mocked(mockConfig.getTeamManager).mockReturnValue(team.manager);
     mockCoreExecuteToolCall.mockResolvedValue({
       responseParts: [{ text: 'tool result' }],
     });
     mockGeminiClient.sendMessageStream
       .mockReturnValueOnce(
-        createStreamFromEvents([
-          {
+        (async function* () {
+          yield {
             type: GeminiEventType.ToolCallRequest,
             value: {
               callId: 'tool-vision',
@@ -2011,8 +2050,9 @@ describe('runNonInteractive', () => {
               isClientInitiated: false,
               prompt_id: 'prompt-vision-route',
             },
-          },
-        ]),
+          } satisfies ServerGeminiStreamEvent;
+          team.deliver('teammate result');
+        })(),
       )
       .mockReturnValueOnce(
         createStreamFromEvents([
@@ -2047,17 +2087,89 @@ describe('runNonInteractive', () => {
     );
     expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
       2,
-      [{ text: 'tool result' }],
+      [{ text: 'tool result' }, { text: 'teammate result' }],
       expect.any(AbortSignal),
       'prompt-vision-route',
       expect.objectContaining({
-        type: SendMessageType.ToolResult,
+        type: SendMessageType.Teammate,
         modelRoute: route,
+        continuesToolTurn: true,
       }),
     );
     expect(visionRouteMocks.runWithRuntime).toHaveBeenCalledWith(
       route,
       expect.any(Function),
+    );
+  });
+
+  it('returns a standalone teammate message to the primary after a routed image turn', async () => {
+    setupMetricsMock();
+    const imagePart: Part = {
+      inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
+    };
+    const route = {
+      model: 'vision-agent',
+      contentGenerator: {},
+      contentGeneratorConfig: { model: 'vision-agent' },
+    };
+    const { handleAtCommand } = await import(
+      './ui/hooks/atCommandProcessor.js'
+    );
+    vi.mocked(handleAtCommand).mockResolvedValue({
+      processedQuery: [{ text: 'inspect this' }, imagePart],
+      shouldProceed: true,
+    });
+    vi.mocked(mockConfig.getDefaultVisionBridgeModel).mockReturnValue({
+      id: 'vision-agent',
+      agentCapable: true,
+    });
+    visionRouteMocks.resolve.mockResolvedValue({
+      status: 'ready',
+      selection: { id: 'vision-agent', agentCapable: true },
+      route,
+    });
+    const team = createMockTeamManager(true);
+    vi.mocked(mockConfig.getTeamManager).mockReturnValue(team.manager);
+    team.waitForTeammateActivity.mockImplementation(async () => {
+      team.deliver('independent teammate update');
+      team.setActive(false);
+      return 'message';
+    });
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'image turn done' },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'primary handled update' },
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'inspect @image.png',
+      'prompt-vision-teammate',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      1,
+      [{ text: 'inspect this' }, imagePart],
+      expect.any(AbortSignal),
+      'prompt-vision-teammate',
+      expect.objectContaining({
+        type: SendMessageType.UserQuery,
+        modelRoute: route,
+      }),
+    );
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      2,
+      [{ text: 'independent teammate update' }],
+      expect.any(AbortSignal),
+      'prompt-vision-teammate',
+      expect.not.objectContaining({ modelRoute: expect.anything() }),
     );
   });
 

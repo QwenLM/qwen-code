@@ -8773,6 +8773,7 @@ describe('GeminiChat', async () => {
           parts: [{ functionCall: { id: 'x', name: 't', args: {} } }],
         },
       ]);
+      chat.setPendingFullTurnRoute({ model: 'vision-agent' });
       plantMarkers(chat);
       expect(markers(chat).idx).toBe(0);
 
@@ -8780,6 +8781,7 @@ describe('GeminiChat', async () => {
 
       expect(markers(chat).idx).toBeNull();
       expect(markers(chat).record).toBeNull();
+      expect(chat.getPendingFullTurnRouteIdentity()).toBeUndefined();
     });
 
     it('stripThoughtsFromHistory() clears the partial-push markers', () => {

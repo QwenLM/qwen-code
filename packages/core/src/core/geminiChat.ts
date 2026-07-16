@@ -3425,6 +3425,8 @@ export class GeminiChat {
       current.baseUrl !== identity.baseUrl ||
       current.authType !== identity.authType
     ) {
+      // Resume may prepend startup context or repair history before restoring
+      // the route, so resolve the recorded boundary against the live array.
       const historyStart = historyStartContent
         ? this.history.indexOf(historyStartContent)
         : this.history.length;
@@ -3638,7 +3640,11 @@ export class GeminiChat {
   }
 
   truncateHistory(keepCount: number): void {
+    const previousLength = this.history.length;
     this.history = this.history.slice(0, keepCount);
+    if (this.history.length < previousLength) {
+      this.clearPendingFullTurnRoute();
+    }
     // Truncation can drop the entry the partial-push marker points at,
     // or leave it valid but shift the meaning of nearby indices. Reset
     // both fields rather than try to fix them up — they're per-send and

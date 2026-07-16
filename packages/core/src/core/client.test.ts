@@ -2487,6 +2487,24 @@ describe('Gemini Client (client.ts)', () => {
       expect(cacheClear).toHaveBeenCalled();
     });
 
+    it('truncateHistory records settlement for a pending full-turn route', () => {
+      mockFileReadCacheClear();
+      const recordMediaScrubCheckpoint = vi.fn();
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+        recordMediaScrubCheckpoint,
+      } as unknown as ReturnType<Config['getChatRecordingService']>);
+      client['chat'] = {
+        ...mockChatWithLengths(3, 2),
+        getPendingFullTurnRouteIdentity: vi.fn(() => ({
+          model: 'vision-agent',
+        })),
+      } as unknown as GeminiChat;
+
+      client.truncateHistory(2);
+
+      expect(recordMediaScrubCheckpoint).toHaveBeenCalledOnce();
+    });
+
     it('truncateHistory does NOT clear the cache when nothing was removed (keepCount >= history length)', () => {
       const cacheClear = mockFileReadCacheClear();
 
@@ -4671,6 +4689,57 @@ describe('Gemini Client (client.ts)', () => {
         route,
       );
       expect(replaceMedia).toHaveBeenCalled();
+    });
+
+    it('keeps a teammate message merged with tool results on the pending route', async () => {
+      const route: FullTurnModelRoute = {
+        model: 'vision-agent',
+        contentGenerator: mockContentGenerator,
+        contentGeneratorConfig: {
+          model: 'vision-agent',
+          authType: AuthType.USE_OPENAI,
+          modalities: { image: true },
+        },
+      };
+      const chat = client.getChat();
+      chat.setPendingFullTurnRoute(
+        { model: route.model, authType: AuthType.USE_OPENAI },
+        route,
+      );
+      const replaceMedia = vi.spyOn(
+        chat,
+        'replaceHistoricalMediaWithReferences',
+      );
+      const recordFullTurnRoute = vi.fn();
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+        recordNotification: vi.fn(),
+        recordFullTurnRoute,
+        recordMediaScrubCheckpoint: vi.fn(),
+        recordAttributionSnapshot: vi.fn(),
+      } as unknown as ReturnType<Config['getChatRecordingService']>);
+      mockTurnRunFn.mockReturnValue((async function* () {})());
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'tool result plus teammate update' }],
+          new AbortController().signal,
+          'prompt-routed-tool-teammate',
+          {
+            type: SendMessageType.Teammate,
+            modelRoute: route,
+            continuesToolTurn: true,
+          },
+        ),
+      );
+
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        route.model,
+        expect.any(Array),
+        expect.any(AbortSignal),
+        route,
+      );
+      expect(replaceMedia).toHaveBeenCalledOnce();
+      expect(recordFullTurnRoute).not.toHaveBeenCalled();
     });
 
     it('should merge editor context into the user request when ideMode is enabled', async () => {

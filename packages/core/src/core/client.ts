@@ -178,6 +178,8 @@ export interface SendMessageOptions {
   modelOverride?: string;
   /** Exact provider/runtime route for the current logical turn. */
   modelRoute?: FullTurnModelRoute;
+  /** A teammate message appended to an unsent tool result stays on that turn. */
+  continuesToolTurn?: boolean;
 }
 
 const EMPTY_RELEVANT_AUTO_MEMORY_RESULT: RelevantAutoMemoryPromptResult = {
@@ -672,8 +674,11 @@ export class GeminiClient {
     // Use the O(1) length getter rather than getHistory() — the latter
     // structuredClone's the entire history just to read .length, which
     // gets expensive in long-running sessions.
-    const prevLen = this.getChat().getHistoryLength();
-    this.getChat().truncateHistory(keepCount);
+    const chat = this.getChat();
+    const prevLen = chat.getHistoryLength();
+    const hadPendingFullTurnRoute =
+      chat.getPendingFullTurnRouteIdentity?.() !== undefined;
+    chat.truncateHistory(keepCount);
     // Decide whether to invalidate based on the *actual* post-truncate
     // length, not on the keepCount argument. Comparing keepCount alone
     // misses pathological inputs (e.g. NaN: slice(0, NaN) returns [],
@@ -681,6 +686,9 @@ export class GeminiClient {
     // the clear, reintroducing the file_unchanged placeholder bug).
     const newLen = this.getChat().getHistoryLength();
     if (newLen < prevLen) {
+      if (hadPendingFullTurnRoute) {
+        this.config.getChatRecordingService()?.recordMediaScrubCheckpoint();
+      }
       debugLogger.debug(
         `[FILE_READ_CACHE] clear after truncateHistory(keep=${keepCount}, prev=${prevLen}, new=${newLen})`,
       );
@@ -1910,20 +1918,22 @@ export class GeminiClient {
       messageType === SendMessageType.Cron ||
       messageType === SendMessageType.Notification ||
       messageType === SendMessageType.Teammate;
+    const startsIndependentRoute =
+      startsIndependentTurn && options?.continuesToolTurn !== true;
     const chat = this.getChat();
     const pendingRouteIdentity = chat.getPendingFullTurnRouteIdentity?.();
     const incomingRouteIdentity = options?.modelRoute
       ? getFullTurnModelRouteIdentity(options.modelRoute)
       : undefined;
     const continuesPendingRoute =
-      !startsIndependentTurn &&
+      !startsIndependentRoute &&
       pendingRouteIdentity &&
       incomingRouteIdentity &&
       pendingRouteIdentity.model === incomingRouteIdentity.model &&
       pendingRouteIdentity.baseUrl === incomingRouteIdentity.baseUrl &&
       pendingRouteIdentity.authType === incomingRouteIdentity.authType;
     if (pendingRouteIdentity && !continuesPendingRoute) {
-      if (startsIndependentTurn) {
+      if (startsIndependentRoute) {
         chat.replaceHistoricalMediaWithReferences?.();
         this.config.getChatRecordingService()?.recordMediaScrubCheckpoint();
         chat.clearPendingFullTurnRoute?.();

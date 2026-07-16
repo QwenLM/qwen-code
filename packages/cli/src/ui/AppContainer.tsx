@@ -1868,6 +1868,7 @@ export const AppContainer = (props: AppContainerProps) => {
     thought,
     cancelOngoingRequest,
     retryLastPrompt,
+    clearRetryState,
     handleApprovalModeChange,
     activePtyId,
     loopDetectionConfirmationRequest,
@@ -3241,6 +3242,7 @@ export const AppContainer = (props: AppContainerProps) => {
           }
 
           geminiClient.truncateHistory(apiTruncateIndex);
+          clearRetryState();
 
           // Strip suppressOnRestore flags and filter out collapse-summary items
           // so rewound items remain visible without stale summary text
@@ -3316,7 +3318,7 @@ export const AppContainer = (props: AppContainerProps) => {
         setIsRewindSelectorOpen(false);
       }
     },
-    [config, historyManager, refreshStatic, buffer],
+    [config, historyManager, refreshStatic, buffer, clearRetryState],
   );
 
   const handleDoubleEscRewind = useDoublePress(openRewindSelector, (pending) =>

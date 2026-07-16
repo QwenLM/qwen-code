@@ -578,6 +578,54 @@ describe('useGeminiStream', () => {
       );
     });
 
+    it('clears the routed retry snapshot after a conversation rewind', async () => {
+      enableBridge();
+      const route = {
+        model: 'vision-agent',
+        contentGenerator: {},
+        contentGeneratorConfig: {
+          model: 'vision-agent',
+          authType: AuthType.USE_OPENAI,
+          modalities: { image: true },
+        },
+      } as FullTurnModelRoute;
+      mockResolveFullTurnVisionRoute.mockResolvedValue({
+        status: 'ready',
+        route,
+        selection: { id: 'vision-agent', agentCapable: true },
+      });
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield* [];
+          throw new Error('vision route failed');
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+      await waitFor(() =>
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1),
+      );
+
+      act(() => {
+        result.current.clearRetryState();
+      });
+      await act(async () => {
+        await result.current.retryLastPrompt();
+      });
+
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: 'No failed request to retry.',
+        }),
+        expect.any(Number),
+      );
+    });
+
     it('schedules tools with the active full-turn route', async () => {
       enableBridge();
       const route = {

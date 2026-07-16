@@ -188,6 +188,7 @@ describe('AppContainer State Management', () => {
   let mockConfig: Config;
   let mockSettings: LoadedSettings;
   let mockInitResult: InitializationResult;
+  let mockClearRetryState: Mock;
 
   // Create typed mocks for all hooks
   const mockedUseHistory = useHistory as Mock;
@@ -302,6 +303,7 @@ describe('AppContainer State Management', () => {
       shellConfirmationRequest: null,
       confirmationRequest: null,
     });
+    mockClearRetryState = vi.fn();
     mockedUseGeminiStream.mockReturnValue({
       streamingState: 'idle',
       submitQuery: vi.fn(),
@@ -310,6 +312,7 @@ describe('AppContainer State Management', () => {
       thought: null,
       cancelOngoingRequest: vi.fn(),
       retryLastPrompt: vi.fn(),
+      clearRetryState: mockClearRetryState,
       streamingResponseLengthRef: { current: 0 },
       isReceivingContent: false,
     });
@@ -560,6 +563,7 @@ describe('AppContainer State Management', () => {
       rewind,
       getHistoryShallow,
       truncateHistory,
+      clearRetryState: mockClearRetryState,
       rewindRecording,
       snapshots,
     };
@@ -3998,6 +4002,7 @@ describe('AppContainer State Management', () => {
 
       expect(harness.rewind).toHaveBeenCalledWith('prompt-2', true);
       expect(harness.truncateHistory).toHaveBeenCalledWith(2);
+      expect(harness.clearRetryState).toHaveBeenCalledOnce();
       expect(harness.loadHistory).toHaveBeenCalledWith([
         rewindUserItem(1, 'first prompt', 'prompt-1'),
         { id: 2, type: 'gemini', text: 'first response' },
