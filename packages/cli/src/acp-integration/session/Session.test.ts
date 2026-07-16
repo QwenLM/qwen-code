@@ -3711,7 +3711,7 @@ describe('Session', () => {
       mockChat.clearPendingFullTurnRoute = vi.fn();
       mockChat.sendMessageStream = vi.fn().mockResolvedValue(
         (async function* () {
-          throw new Error('route stream failed');
+          yield Promise.reject(new Error('route stream failed'));
         })(),
       );
 

@@ -4603,7 +4603,7 @@ describe('Gemini Client (client.ts)', () => {
       } as unknown as ReturnType<Config['getChatRecordingService']>);
       mockTurnRunFn.mockReturnValue(
         (async function* () {
-          throw new Error('new turn failed');
+          yield Promise.reject(new Error('new turn failed'));
         })(),
       );
 
