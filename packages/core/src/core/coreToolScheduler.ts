@@ -4430,7 +4430,7 @@ export class CoreToolScheduler {
             toolResult.llmContent,
           );
           let responseParts = convertToFunctionErrorResponse(
-            toolName,
+            providerToolName(scheduledCall.request),
             callId,
             timeoutContent,
             operationalErrorMessage,

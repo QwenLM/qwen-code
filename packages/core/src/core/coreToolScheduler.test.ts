@@ -1547,6 +1547,67 @@ describe('CoreToolScheduler', () => {
     }
   });
 
+  it('uses the provider-facing name when a deferred proxy target times out', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'partial cron output',
+      returnDisplay: 'partial cron output',
+      error: {
+        message: 'Cron creation timed out.',
+        type: ToolErrorType.EXECUTION_TIMEOUT,
+      },
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.CRON_CREATE,
+        new MockTool({
+          name: ToolNames.CRON_CREATE,
+          shouldDefer: true,
+          execute,
+        }),
+      ],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        presentedProxySchemas: new Set([ToolNames.CRON_CREATE]),
+      });
+
+    await scheduler.schedule(
+      {
+        callId: 'proxy-timeout',
+        name: ToolNames.DEFERRED_TOOL_CALL,
+        args: {
+          name: ToolNames.CRON_CREATE,
+          arguments: { schedule: '0 9 * * *' },
+        },
+        isClientInitiated: false,
+        prompt_id: 'prompt-proxy-timeout',
+      },
+      new AbortController().signal,
+    );
+
+    expect(execute).toHaveBeenCalledWith({ schedule: '0 9 * * *' });
+    const completedCall = (
+      onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
+    )[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.request.name).toBe(ToolNames.CRON_CREATE);
+      expect(completedCall.request.providerName).toBe(
+        ToolNames.DEFERRED_TOOL_CALL,
+      );
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.EXECUTION_TIMEOUT,
+      );
+      expect(completedCall.response.responseParts[0].functionResponse?.id).toBe(
+        'proxy-timeout',
+      );
+      expect(
+        completedCall.response.responseParts[0].functionResponse?.name,
+      ).toBe(ToolNames.DEFERRED_TOOL_CALL);
+    }
+  });
+
   it('keeps a tool-produced timeout as an error after a later parent abort', async () => {
     const parentController = new AbortController();
     const execute = vi.fn().mockImplementation(
