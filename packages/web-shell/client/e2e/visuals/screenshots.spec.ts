@@ -266,12 +266,16 @@ for (const theme of THEMES) {
 
       // Restore the tiled layout (#6951): the solo pane returns to the split and
       // the hidden pane reappears — so the maximize control is back on both
-      // panes. Captures the restore path so a regression there is caught too.
+      // panes. Assert the restore path (behavioral coverage) but do NOT capture
+      // a screenshot: the restored layout is visually identical to the tiled
+      // `split view` shot above, and the reappearing pane re-renders its content
+      // just after this click, so the capture is byte-nondeterministic between
+      // identical runs — a flaky, redundant view that surfaces false-positive
+      // "changed" previews unrelated to the PR under review.
       await page.getByRole('button', { name: 'Restore pane' }).click();
       await expect(
         page.getByRole('button', { name: 'Maximize pane' }).first(),
       ).toBeVisible();
-      await captureScreenshot(page, `split-view-restored-${theme}`);
     });
 
     test(`sidebar attention`, async ({ page }, testInfo) => {
@@ -335,6 +339,57 @@ for (const theme of THEMES) {
       await expect(sidebar.getByText('Run test suite')).toBeVisible();
       await expect(sidebar.getByText('Draft release notes')).toBeVisible();
       await captureScreenshot(page, `sidebar-attention-${theme}`);
+    });
+
+    test(`workspace sidebar`, async ({ page }, testInfo) => {
+      // Two workspaces make the sidebar group sessions per workspace and tag the
+      // primary one — the surface the "primary workspace" label/badge lives on.
+      // Every other scenario here is single-workspace, where that tag never
+      // renders (it is gated on more than one displayed workspace), so this is
+      // the only scenario that can surface a change to the workspace labels.
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          workspaces: [
+            {
+              id: 'ws-primary',
+              cwd: '/tmp/qwen-web-shell-e2e',
+              primary: true,
+              trusted: true,
+            },
+            {
+              id: 'ws-api',
+              cwd: '/tmp/qwen-api-service',
+              primary: false,
+              trusted: true,
+            },
+          ],
+        },
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      // Each workspace renders a section headed by its basename; the primary one
+      // also carries a "Primary" tag. Assert both workspace names and the tag so
+      // a regression in the grouping or the (removable) primary label fails an
+      // assertion, not only the visually-reviewed screenshot.
+      const sidebar = page.getByRole('complementary');
+      await expect(
+        sidebar.getByText('qwen-web-shell-e2e', { exact: true }),
+      ).toBeVisible();
+      await expect(
+        sidebar.getByText('qwen-api-service', { exact: true }),
+      ).toBeVisible();
+      await expect(sidebar.getByText('Primary', { exact: true })).toBeVisible();
+      // The primary workspace auto-expands and streams its session rows in via a
+      // per-workspace fetch. Wait for a row before capturing so the async load
+      // has settled — otherwise the row list races the screenshot and the
+      // capture is byte-nondeterministic between runs (the flake this scenario
+      // was added to replace).
+      await expect(sidebar.getByText('E2E Harness Session')).toBeVisible();
+      await captureScreenshot(page, `workspace-sidebar-${theme}`);
     });
 
     test(`slash menu`, async ({ page }, testInfo) => {
