@@ -448,6 +448,64 @@ export function coverageFromTranscripts(
   };
 }
 
+/**
+ * How a Step 4/5 step's agents got their prompt — four shapes, four different fixes.
+ *
+ * `ok` — an agent was launched with the prompt the CLI built and opened its brief.
+ * `not-built` — `agent-prompt --role <r>` never ran: the step was skipped.
+ * `not-launched` — the prompt was built and nothing was launched with it.
+ * `rewritten` — an agent ran and opened the brief, but no agent got the built prompt
+ *   intact: the orchestrator wrote the launch itself.
+ * `brief-unread` — an agent got the built prompt and never opened the brief it names.
+ */
+type Delivery =
+  | 'ok'
+  | 'not-built'
+  | 'not-launched'
+  | 'rewritten'
+  | 'brief-unread';
+
+/** What to say, and what to do about it, for each way a step's delivery failed. */
+type GapText = Record<Exclude<Delivery, 'ok'>, string>;
+
+const REVERSE_AUDIT_GAP: GapText = {
+  'not-built':
+    'no auditor ran — Step 5 builds its prompt with `agent-prompt --role ' +
+    'reverse-audit --findings <file>`, and none was recorded, so the pass that ' +
+    'looks for what Step 3 missed never happened',
+  'not-launched':
+    'its prompt was built, but no agent was launched with it — the pass that ' +
+    'looks for what Step 3 missed did not run',
+  rewritten:
+    'an auditor ran and opened its brief, but **no agent was launched with the ' +
+    'prompt the CLI built** — the launch was written by hand instead of pasted. ' +
+    'What the agent was actually asked is not what this skill guarantees: pass ' +
+    '`--findings <file>` so there is nothing to assemble, and paste that output ' +
+    'verbatim — no round number, no summary of your own, no rewording',
+  'brief-unread':
+    'it was launched with the built prompt but never opened its brief, so it ' +
+    'audited without the gaps-only method and the finding format it was launched ' +
+    'to follow',
+};
+
+const VERIFY_GAP: GapText = {
+  'not-built':
+    'the review posts findings, but no verifier ran — Step 4 builds its prompt ' +
+    'with `agent-prompt --role verify --findings <file>`, and none was recorded, ' +
+    'so the findings were never verified',
+  'not-launched':
+    'its prompt was built, but no agent was launched with it, so the posted ' +
+    'findings were not verified',
+  rewritten:
+    'a verifier ran and opened its brief, but **no agent was launched with the ' +
+    'prompt the CLI built** — the launch was written by hand instead of pasted. ' +
+    'Pass `--findings <file>` so there is nothing to assemble, and paste that ' +
+    'output verbatim — no shard number, no summary of your own, no rewording',
+  'brief-unread':
+    'it was launched with the built prompt but never opened its brief, so it ' +
+    'ruled on the findings without the verdict bar it was launched to apply',
+};
+
 export interface VerificationReport {
   /** True when every required Step 4/5 agent ran and read its brief. */
   ok: boolean;
@@ -493,25 +551,52 @@ export function verificationGaps(
   const built = readRecordedPrompts(planPath);
   const gaps: string[] = [];
 
-  // A role whose prompt the CLI recorded, and which an agent was then launched with
-  // verbatim AND opened the brief it points at. The same two-author proof the
-  // roster check uses — a delivered launch prompt and a successful call naming the
-  // brief file — asked of a key rather than a plan-derived role.
-  const ranAndReadBrief = (key: string): boolean => {
+  // How a step's agents actually got their prompt. The floor needs the four shapes
+  // apart, not one boolean, because the fix for each is different — and a refusal
+  // that names the wrong one is a refusal that gets argued with.
+  //
+  // Dogfooded, exactly that happened: an auditor HAD run and HAD opened its brief;
+  // the orchestrator had merely rewritten the launch prompt. The gap said "no agent
+  // was launched with it that opened its brief" — false as written. The orchestrator
+  // read it, called it "a transcript visibility issue", and reported an **Approve**
+  // over the capped verdict. It was wrong about the mechanism and right that the
+  // message did not describe what happened. So the message describes what happened.
+  const deliveryOf = (key: string): Delivery => {
     const b = built.get(key);
-    if (b === undefined || b.trim() === '') return false;
-    const brief = briefPath(planPath, key);
+    if (b === undefined || b.trim() === '') return 'not-built';
     // Match the brief as a whole JSON string value, quotes included — the same
     // lesson `parseTranscript` learned for the diff path: a bare substring credits
     // `…/x.brief.md.bak` for `…/x.brief.md`. `successfulCallArgs` are already
     // `JSON.stringify(args)`, so the quoted path is what a real read of the brief
     // leaves in them.
-    const needle = JSON.stringify(brief);
-    return records.some(
-      (r) =>
-        wasDeliveredVerbatim(r.launchPrompt, b) &&
-        r.successfulCallArgs.some((a) => a.includes(needle)),
+    const needle = JSON.stringify(briefPath(planPath, key));
+    const opened = (r: AgentRecord) =>
+      r.successfulCallArgs.some((a) => a.includes(needle));
+    const gotTheBuiltPrompt = records.filter((r) =>
+      wasDeliveredVerbatim(r.launchPrompt, b),
     );
+    if (gotTheBuiltPrompt.some(opened)) return 'ok';
+    if (gotTheBuiltPrompt.length > 0) return 'brief-unread';
+    // Nothing was launched with the built prompt. Did anything open this key's brief
+    // anyway? Then an agent DID run — on a launch the orchestrator wrote itself. A
+    // different failure, with a different fix, and the one the message used to deny.
+    if (records.some(opened)) return 'rewritten';
+    return 'not-launched';
+  };
+
+  /** The best shape across a step's keys — the floor is one agent, not all of them. */
+  const bestDelivery = (keys: string[]): Delivery => {
+    if (keys.length === 0) return 'not-built';
+    const rank: Record<Delivery, number> = {
+      ok: 0,
+      'brief-unread': 1,
+      rewritten: 2,
+      'not-launched': 3,
+      'not-built': 4,
+    };
+    return keys
+      .map(deliveryOf)
+      .sort((a, b) => rank[a] - rank[b])[0] as Delivery;
   };
 
   // Step 5: reverse audit. Required on EVERY high-effort review — it is the pass
@@ -525,15 +610,9 @@ export function verificationGaps(
   const reverseKeys = [...built.keys()].filter(
     (k) => k === 'reverse-audit' || k.startsWith('reverse-audit--'),
   );
-  if (!reverseKeys.some(ranAndReadBrief)) {
-    gaps.push(
-      reverseKeys.length === 0
-        ? 'reverse audit — no auditor ran (Step 5 builds its prompt with ' +
-            '`agent-prompt --role reverse-audit`; none was recorded, so the pass ' +
-            'that looks for what Step 3 missed was skipped)'
-        : 'reverse audit — its prompt was built, but no agent was launched with ' +
-            'it that opened its brief, so the reverse-audit pass did not run',
-    );
+  const reverse = bestDelivery(reverseKeys);
+  if (reverse !== 'ok') {
+    gaps.push(`reverse audit — ${REVERSE_AUDIT_GAP[reverse]}`);
   }
 
   // Step 4: verify. Required when the review posts a finding a verifier rules on —
@@ -543,15 +622,9 @@ export function verificationGaps(
   // non-deterministic body Criticals, and excludes deterministic `[build]`/`[test]`
   // findings, which are pre-confirmed and skip verification by design. A review that
   // confirmed nothing has nothing to verify.
-  if (opts.postsFindings && !ranAndReadBrief('verify')) {
-    gaps.push(
-      built.has('verify')
-        ? 'verification — its prompt was built, but no agent was launched with it ' +
-            'that opened its brief, so the posted findings were not verified'
-        : 'verification — the review posts findings, but no verifier ran (Step 4 ' +
-            'builds its prompt with `agent-prompt --role verify`; none was ' +
-            'recorded, so the findings were not verified)',
-    );
+  if (opts.postsFindings) {
+    const verify = deliveryOf('verify');
+    if (verify !== 'ok') gaps.push(`verification — ${VERIFY_GAP[verify]}`);
   }
 
   return { ok: gaps.length === 0, gaps };

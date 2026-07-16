@@ -952,14 +952,16 @@ describe('an agent that paged its chunk still read it', () => {
 describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', () => {
   // A Step 4/5 agent as a real run leaves it: the CLI's record of the prompt it
   // built (`agent-prompt --role <role>`), the brief that prompt points at, and the
-  // harness's transcript of an agent launched with it. `launch: false` models a
-  // prompt built but never handed to an agent; `opensBrief: false` an agent that
-  // ran but never opened the brief. To model a step skipped wholesale, do not set
-  // the key up at all — there is then no record and no transcript.
+  // harness's transcript of an agent launched with it. The opts model each way
+  // delivery fails: `launch: false` — built, never handed to an agent;
+  // `opensBrief: false` — launched with the built prompt, never opened the brief;
+  // `rewritten: true` — an agent ran and opened the brief, but the orchestrator
+  // wrote the launch itself (the real 3A run this precision exists for). To model a
+  // step skipped wholesale, do not set the key up at all.
   function step45(
     planPath: string,
     key: string,
-    opts: { launch?: boolean; opensBrief?: boolean } = {},
+    opts: { launch?: boolean; opensBrief?: boolean; rewritten?: boolean } = {},
   ): void {
     const d = promptRecordDir(planPath);
     mkdirSync(d, { recursive: true });
@@ -971,7 +973,20 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
       `read_file(file_path="${DIFF}")`;
     writeFileSync(join(d, `${encodeURIComponent(key)}.txt`), prompt);
     if (opts.launch === false) return;
-    transcript(`v-${key.replace(/[^a-z0-9]/gi, '_')}`, prompt, {
+    const id = `v-${key.replace(/[^a-z0-9]/gi, '_')}`;
+    if (opts.rewritten) {
+      // Kept the brief pointer, threw the rest away and wrote its own preamble —
+      // verbatim word-for-word from a real run's transcript.
+      transcript(
+        id,
+        `You are performing a reverse audit of PR #1, which hardens things. ` +
+          `**Your brief is a file. Read it first.**\n` +
+          `read_file(file_path="${brief}")`,
+        { calls: 2, opens: [brief] },
+      );
+      return;
+    }
+    transcript(id, prompt, {
       calls: 2,
       opens: opts.opensBrief === false ? [] : [brief],
     });
@@ -999,12 +1014,49 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     expect(r.gaps.join(' ')).toMatch(/reverse audit — no auditor ran/);
   });
 
+  it('names a rewritten launch as itself, not as an agent that never ran', () => {
+    // The real 3A run this precision exists for: two auditors ran, made 16 and 23
+    // tool calls, and opened their brief — the orchestrator had simply written the
+    // launch itself. The old message said "no agent was launched with it that opened
+    // its brief", which was false as written; the orchestrator read it, called it a
+    // "transcript visibility issue", and reported an Approve over the capped verdict.
+    const p = plan();
+    step45(p, 'reverse-audit', { rewritten: true });
+    const r = verificationGaps(p, { postsFindings: false }, ENV);
+    expect(r.ok).toBe(false);
+    const gap = r.gaps.join(' ');
+    // It says what happened: the agent ran and read the brief …
+    expect(gap).toMatch(/an auditor ran and opened its brief/);
+    // … and what was actually wrong, with the fix.
+    expect(gap).toMatch(
+      /no agent was launched with the \*\*prompt the CLI built|prompt the CLI built/,
+    );
+    expect(gap).toMatch(/--findings/);
+    // And it must NOT claim the agent never ran or never read its brief.
+    expect(gap).not.toMatch(/no auditor ran/);
+    expect(gap).not.toMatch(/never opened its brief/);
+  });
+
+  it('names a rewritten verifier launch as itself too', () => {
+    const p = plan();
+    step45(p, 'reverse-audit');
+    step45(p, 'verify', { rewritten: true });
+    const gap = verificationGaps(p, { postsFindings: true }, ENV).gaps.join(
+      ' ',
+    );
+    expect(gap).toMatch(/a verifier ran and opened its brief/);
+    expect(gap).toMatch(/prompt the CLI built/);
+    expect(gap).not.toMatch(/no verifier ran/);
+  });
+
   it('flags a reverse audit built but whose agent never opened its brief', () => {
     const p = plan();
     step45(p, 'reverse-audit', { opensBrief: false });
     const r = verificationGaps(p, { postsFindings: false }, ENV);
     expect(r.ok).toBe(false);
-    expect(r.gaps.join(' ')).toMatch(/reverse audit — its prompt was built/);
+    expect(r.gaps.join(' ')).toMatch(
+      /reverse audit — it was launched with the built prompt but never opened its brief/,
+    );
   });
 
   it('flags a reverse audit whose prompt was built but never launched', () => {
@@ -1012,7 +1064,9 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     step45(p, 'reverse-audit', { launch: false });
     const r = verificationGaps(p, { postsFindings: false }, ENV);
     expect(r.ok).toBe(false);
-    expect(r.gaps.join(' ')).toMatch(/reverse audit — its prompt was built/);
+    expect(r.gaps.join(' ')).toMatch(
+      /reverse audit — its prompt was built, but no agent was launched with it/,
+    );
   });
 
   it('counts a Step 3B per-chunk reverse auditor (reverse-audit--chunk-N)', () => {
@@ -1044,7 +1098,9 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     step45(p, 'reverse-audit');
     step45(p, 'verify', { opensBrief: false });
     const r = verificationGaps(p, { postsFindings: true }, ENV);
-    expect(r.gaps.join(' ')).toMatch(/verification — its prompt was built/);
+    expect(r.gaps.join(' ')).toMatch(
+      /verification — it was launched with the built prompt but never opened its brief/,
+    );
   });
 
   it('flags a verifier whose prompt was built but never launched', () => {
@@ -1055,6 +1111,8 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     step45(p, 'reverse-audit');
     step45(p, 'verify', { launch: false });
     const r = verificationGaps(p, { postsFindings: true }, ENV);
-    expect(r.gaps.join(' ')).toMatch(/verification — its prompt was built/);
+    expect(r.gaps.join(' ')).toMatch(
+      /verification — its prompt was built, but no agent was launched with it/,
+    );
   });
 });

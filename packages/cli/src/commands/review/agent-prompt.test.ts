@@ -364,11 +364,14 @@ describe('agent-prompt (command boundary)', () => {
     try {
       const plan = join(dir, 'plan.json');
       writeFileSync(plan, JSON.stringify(PLAN));
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '- **[Critical]** x.ts:1 — y');
       expect(() =>
         (agentPromptCommand.handler as (a: unknown) => void)({
           plan,
           role: 'reverse-audit',
           chunk: 14,
+          findings,
         }),
       ).not.toThrow();
       const recorded = readRecordedPrompts(plan);
@@ -392,10 +395,13 @@ describe('agent-prompt (command boundary)', () => {
     try {
       const plan = join(dir, 'plan.json');
       writeFileSync(plan, JSON.stringify(PLAN));
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '- **[Critical]** x.ts:1 — y');
       expect(() =>
         (agentPromptCommand.handler as (a: unknown) => void)({
           plan,
           role: 'verify',
+          findings,
         }),
       ).not.toThrow();
       const recorded = readRecordedPrompts(plan);
@@ -550,28 +556,78 @@ describe('--findings — fold the list in, print one block, record the block alo
     expect(printed).not.toContain('Nothing is confirmed yet');
   });
 
-  it('the record is byte-identical whether or not --findings was passed', () => {
-    // Proves the shared per-shard/round key is unaffected: two verify shards with
-    // different findings record the SAME launch block, so both match it. Same plan
-    // both times (the record embeds the plan-derived brief path), differing only in
-    // whether findings were folded into what was PRINTED.
-    const dir = tmp('ap-nof-');
+  it('two shards with different findings record the same launch block', () => {
+    // The property the shared per-shard/round key rests on: the findings are printed,
+    // never recorded, so shard 2's record does not overwrite shard 1's with a
+    // different block — both shards' launches match the one record by the add-only
+    // delivery rule. Same plan both times (the record embeds the plan-derived brief
+    // path); only the folded-in list differs.
+    const dir = tmp('ap-shards-');
     const plan = join(dir, 'plan.json');
     writeFileSync(plan, JSON.stringify(PLAN));
-    const findings = join(dir, 'f.md');
-    writeFileSync(findings, '- **[Critical]** foo.ts:10 — x');
+    const shard1 = join(dir, 'f1.md');
+    const shard2 = join(dir, 'f2.md');
+    writeFileSync(shard1, '- **[Critical]** foo.ts:10 — first shard');
+    writeFileSync(shard2, '- **[Suggestion]** bar.ts:99 — second shard');
+
     (agentPromptCommand.handler as (a: unknown) => void)({
       plan,
       role: 'verify',
-      findings,
+      findings: shard1,
     });
-    const withFindings = readRecordedPrompts(plan).get('verify')!;
+    const recAfter1 = readRecordedPrompts(plan).get('verify')!;
+    const printed1 = (writeStdoutLine as unknown as Mock).mock
+      .calls[0][0] as string;
+
     (agentPromptCommand.handler as (a: unknown) => void)({
       plan,
       role: 'verify',
+      findings: shard2,
     });
-    const withoutFindings = readRecordedPrompts(plan).get('verify')!;
-    expect(withFindings).toBe(withoutFindings);
+    const recAfter2 = readRecordedPrompts(plan).get('verify')!;
+    const printed2 = (writeStdoutLine as unknown as Mock).mock
+      .calls[1][0] as string;
+
+    expect(recAfter1).toBe(recAfter2); // the record never carried either list
+    expect(recAfter2).not.toContain('first shard');
+    expect(recAfter2).not.toContain('second shard');
+    // Each shard got its OWN list, and both still match the one record.
+    expect(printed1).toContain('first shard');
+    expect(printed2).toContain('second shard');
+    expect(wasDeliveredVerbatim(printed1, recAfter2)).toBe(true);
+    expect(wasDeliveredVerbatim(printed2, recAfter2)).toBe(true);
+  });
+
+  it('refuses a findings-taking role launched without --findings', () => {
+    // There is no bare-block path left to hand-assemble. Dogfooded on a real 3A
+    // review, the orchestrator skipped --findings, hand-wrote the auditor's launch,
+    // and the delivery check capped the verdict — which it then talked past. A role
+    // that takes findings must be given them, so the command prints one block and
+    // there is nothing to assemble.
+    for (const role of ['verify', 'reverse-audit']) {
+      expect(() =>
+        (agentPromptCommand.handler as (a: unknown) => void)({
+          plan: '/nonexistent/plan.json',
+          role,
+        }),
+      ).toThrow(new RegExp(`--role ${role} needs --findings`));
+    }
+    // The guard runs before the plan is read, so the message is about the call.
+    expect(() =>
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan: '/nonexistent/plan.json',
+        role: 'reverse-audit',
+      }),
+    ).toThrow(
+      /an early reverse-audit round with nothing confirmed yet passes an empty file/,
+    );
+    // A role that does NOT take findings is unaffected.
+    expect(() =>
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan: '/nonexistent/plan.json',
+        role: '2',
+      }),
+    ).toThrow(/cannot read the plan/);
   });
 
   it('cannot read the findings file — says so, does not review without them', () => {
@@ -732,11 +788,14 @@ describe('buildWholeDiffBlock — the agents that walk the whole diff', () => {
     try {
       const plan = join(dir, 'plan.json');
       writeFileSync(plan, JSON.stringify(PLAN));
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '- x');
       expect(() =>
         (agentPromptCommand.handler as (a: unknown) => void)({
           plan,
           role: 'reverse-audit',
           chunk: 999,
+          findings,
         }),
       ).toThrow(/the plan has no chunk 999/);
     } finally {

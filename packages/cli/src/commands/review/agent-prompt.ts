@@ -1076,6 +1076,22 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     // `--findings` folds a findings list into the printed prompt, for the two roles
     // that take one: the verifier rules on findings, the reverse auditor avoids
     // re-reporting them. Declared on the brief (`acceptsFindings`), like `acceptsChunk`.
+    // A role that TAKES findings must be GIVEN them. Without this the command still
+    // printed a bare launch block, and the caller was left to prepend the list by
+    // hand — the one assembly step left in the skill, and measurably where the
+    // prompt got rewritten: dogfooded on a real 3A review, the orchestrator skipped
+    // `--findings`, hand-wrote the auditor's launch, and the delivery check capped
+    // the verdict (which it then talked its way past). There is no bare-block path
+    // to hand-assemble any more. An early reverse-audit round with nothing confirmed
+    // yet passes an empty file — the command says so in the prompt.
+    if (!hasFindings && BRIEFS[role]?.acceptsFindings) {
+      bad(
+        `--role ${role} needs --findings <file>: it is launched with a findings ` +
+          `list folded in, and this command builds that block so there is nothing ` +
+          `for you to assemble. Write the list to a file and pass it — an early ` +
+          `reverse-audit round with nothing confirmed yet passes an empty file.`,
+      );
+    }
     if (hasFindings && !BRIEFS[role]?.acceptsFindings) {
       const findingRoles = (Object.keys(BRIEFS) as RoleId[]).filter(
         (r) => BRIEFS[r].acceptsFindings,

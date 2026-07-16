@@ -484,7 +484,7 @@ qwen review agent-prompt --plan <the plan report from Step 1> --role verify \
   [--rules <the rules file from Step 2, if the project has any>]
 ```
 
-**Paste what it prints verbatim — the whole block, findings and all. Do not prepend, append, reword, or add a shard number.** `--findings` folds the list in for you precisely so there is no hand-assembly step left to drift: dogfooded, the step that used to have you prepend the list by hand is where the prompt got paraphrased — a summary inserted, the "nothing replaces the brief" line truncated — and Step 6's check caught it and capped the verdict. The command records the findings-free launch block, so every shard's record still matches (the findings are an add-only prefix). In worktree mode the verifier's `working_dir` is the PR worktree (same rule as Step 3), so its reads and re-checks resolve against the PR's code.
+**`--findings` is required for this role — the command refuses without it**, because a bare block is a block you would assemble by hand, and hand-assembly is the one step this skill measured drifting. **Paste what it prints verbatim — the whole block, findings and all. Do not prepend, append, reword, or add a shard number.** Dogfooded twice: the step that used to have you prepend the list by hand is where the prompt got paraphrased — a summary inserted, the "nothing replaces the brief" line truncated — and Step 6's check caught it and capped the verdict. The command records the findings-free launch block, so every shard's record still matches (the findings are an add-only prefix). In worktree mode the verifier's `working_dir` is the PR worktree (same rule as Step 3), so its reads and re-checks resolve against the PR's code.
 
 The brief holds the method the orchestrator used to spell out here and that a paraphrase kept dropping: trace the failure scenario through the real code rather than voting on the finding's prose; engage the diff's own documented intent before calling a documented change a regression (the rule a run skipped when it auto-posted a false "leaks tokens" Critical); and the one-way, quote-the-contradiction bar on **rejecting a Critical**. Read the brief to know what a verdict means; do not re-derive it here.
 
@@ -538,7 +538,7 @@ qwen review agent-prompt --plan <the plan report from Step 1> --role reverse-aud
   [--rules <the rules file from Step 2>]
 ```
 
-**Paste what it prints verbatim — the whole block. Do not prepend, append, reword, or add a round number** (track the round in your own notes, not in the prompt). `--findings` folds the cumulative list in so there is no hand-assembly step to drift — the same paraphrase Step 6's check caught and capped a real run on, even though the auditor had opened its brief. The command records the findings-free launch block, so every round's record still matches. It also gives each auditor its diff reads — the whole plan in 3A, one chunk's range in 3B (a Step 3B auditor handed the whole 5 800-line diff is the most context-starved agent in the pipeline, on exactly the PRs where the reverse audit matters most). In worktree mode its `working_dir` is the PR worktree.
+**`--findings` is required for this role — the command refuses without it** (an early round with nothing confirmed yet passes an empty file; the command tells the auditor so). **Paste what it prints verbatim — the whole block. Do not prepend, append, reword, or add a round number** (track the round in your own notes, not in the prompt). A real run skipped `--findings`, hand-wrote the auditor's launch keeping only the brief pointer, and Step 6's check capped the verdict — the auditors had run and read their brief, but not one of them got the prompt the CLI built. The command records the findings-free launch block, so every round's record still matches. It also gives each auditor its diff reads — the whole plan in 3A, one chunk's range in 3B (a Step 3B auditor handed the whole 5 800-line diff is the most context-starved agent in the pipeline, on exactly the PRs where the reverse audit matters most). In worktree mode its `working_dir` is the PR worktree.
 
 The brief holds what the auditor is for: hunt only the **gaps** no prior agent caught, report only Critical or Suggestion, apply the Exclusion Criteria, and end with a substantive receipt (`No issues found — <what it re-examined>`) — a bare "No issues found." fails the substantive-return check below and triggers the one relaunch.
 
@@ -639,6 +639,8 @@ The rules it applies — so you can read the line it gives you, not so you can a
 - **Comment** — suggestions but no blockers, **or** an Approve that a cap took away: an uncoverable chunk, a chunk nobody read, a dimension nobody reviewed, a **reverse audit that never ran** (or a **verifier** that never ran on a review with findings), an existing blocker you could not rule on, a PR whose discussion you could not read. A review that did not read part of the diff — or never looked for what it missed — cannot certify it.
 
 **Why this is a command and not a paragraph.** It was a paragraph, and the paragraph was skipped. Dogfooded, a run read the coverage check's refusal, concluded that "the agents clearly did their job", never called `compose-review` at all, and printed **`Review complete — Approve`** — a verdict it had composed itself, from prose, on a review whose gate had just refused. There is now one place a verdict exists. Skipping the command does not get you a different one; it gets you none.
+
+**And you may not overrule the line it gives you.** The failure came back in a subtler shape, on a later dogfood: the run _did_ call `compose-review`, _did_ read `Verdict: Comment — an Approve was NOT available: a dimension nobody reviewed`, and then wrote — in its next thought — _"the compose-review flagged reverse audit as unreviewed (transcript visibility issue — the reverse audit did run substantively)"_, and reported **Approve** to the user and into the saved report. It was wrong: the auditors had run, but the orchestrator had hand-written their launch prompts, so they never got the prompt the CLI built — which is precisely what the gap said, and precisely the run's own doing. **A cap you can explain is still a cap.** If you believe a gap is wrong, the answer is to make the step verifiable — relaunch it with the prompt `agent-prompt` printed, verbatim — and run `compose-review` again. It is never to keep the verdict you preferred and narrate the gap away. The verdict you print, and the verdict in the report you save, are the one this command computed; when they differ from it, the review is lying to the person who trusted it.
 
 Append a follow-up tip after the verdict (high effort only — a quick pass emits no verdict and uses Step 3C's tip instead; its "post comments" follow-up is declined per Step 3C). Choose based on remaining state:
 
@@ -874,6 +876,14 @@ Report content should include:
 - Build & test results (Agent 7 output summary) — high effort only
 - All findings with verification status
 - Verdict (high effort only — a quick pass claims none)
+
+**The report's verdict is not yours to type.** Interpolate it from the file Step 6 already wrote, so the archived record cannot disagree with the computed one:
+
+```bash
+- **Verdict:** $(jq -r '.event' .qwen/tmp/qwen-review-{target}-composed.json)$(jq -r 'if (.cappedBy | length) > 0 then " (capped by " + (.cappedBy | join(", ")) + ")" else "" end' .qwen/tmp/qwen-review-{target}-composed.json)
+```
+
+A run that had read `Verdict: Comment — an Approve was NOT available` wrote `**Verdict:** Approve` into its saved report minutes later. The terminal is prose and the archive is forever; this line is the one place the archive can be made to tell the truth for free. If the composed event is not the one you expected, fix the run — not the report.
 
 ### Incremental review cache
 
