@@ -240,14 +240,6 @@ function roleLabel(req: RequiredAgent): string {
   return req.file ? `${base} — ${req.file}` : base;
 }
 
-/** The exact call that would have built it. An error a reader can act on names the fix. */
-function promptFlags(req: RequiredAgent): string {
-  if (req.role === 'chunk') return `--chunk ${req.chunk}`;
-  return req.file
-    ? `--role ${req.role} --file ${req.file}`
-    : `--role ${req.role}`;
-}
-
 /** Something a reader can act on. `agentName` is `general-purpose` for all of them. */
 function label(rec: AgentRecord, chunk: number | null): string {
   if (chunk !== null) return `chunk ${chunk}`;
@@ -376,13 +368,45 @@ export function coverageFromTranscripts(
   // emitting.
   const missingRoles: string[] = [];
   const unreadBriefs: string[] = [];
-  for (const req of requiredAgents(plan as unknown as RosterPlan)) {
+  const roster = requiredAgents(plan as unknown as RosterPlan);
+
+  // A role with no recorded prompt says one thing only: the brief never reached an
+  // agent. It does *not* say nobody reviewed the dimension — an orchestrator that
+  // writes the launch itself gets an agent that runs, reads the diff and reports real
+  // findings, having never seen the severity bar or the finding format the brief
+  // carries. Dogfooded on #7012: this gate reported all twelve roles "never ran" on a
+  // review that posted two Criticals with line numbers. Both readings are bad; they
+  // are not the same bad, and they are not fixed the same way, so the text may not
+  // pick the one it cannot prove.
+  const briefless = roster.filter((r) => !built.has(r.key));
+
+  // Every role briefless is one failure — the run did not use the prompt builder —
+  // not N. Said once per dimension it becomes N lines that bury the single fact
+  // explaining all of them, and those N lines are what a PR author reads as the
+  // review: on #7012 the whole CHANGES_REQUESTED body was twelve of them, while the
+  // findings that needed acting on sat inline, below the fold.
+  const nobodyBuiltAnything =
+    roster.length > 1 && briefless.length === roster.length;
+  if (nobodyBuiltAnything) {
+    // Phrased to read under the `Not reviewed: ` prefix `compose-review` renders it
+    // with, which is where a PR author meets it.
+    missingRoles.push(
+      `every dimension — none of the ${roster.length} required agents was launched ` +
+        `with a prompt this skill built, so this diff was reviewed, if at all, from ` +
+        `prompts the run wrote for itself: the severity bar, the finding format and ` +
+        `this project's own rules never reached an agent`,
+    );
+  }
+
+  for (const req of roster) {
     const b = built.get(req.key);
     if (b === undefined) {
-      missingRoles.push(
-        `${roleLabel(req)} — no prompt was built for it ` +
-          `(\`agent-prompt ${promptFlags(req)}\` never ran)`,
-      );
+      if (!nobodyBuiltAnything) {
+        missingRoles.push(
+          `${roleLabel(req)} — its brief never reached an agent, so this dimension ` +
+            `was reviewed, if at all, from a prompt the run wrote for itself`,
+        );
+      }
       continue;
     }
     const agent = records.find((r) => wasDeliveredVerbatim(r.launchPrompt, b));

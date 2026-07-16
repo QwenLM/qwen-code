@@ -24,6 +24,7 @@ import {
   existsSync,
   mkdirSync,
   utimesSync,
+  readdirSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -741,7 +742,7 @@ describe('worked, but not on the diff', () => {
 // The failure no other check in this file can see. Every other question is asked of
 // an agent that ran; an agent that never ran leaves no transcript to ask.
 describe('the roster — who should have been here', () => {
-  it('catches the agent that was never launched at all', () => {
+  it('catches the dimension whose brief never reached an agent', () => {
     // Dogfooded, a real PR review simply never launched Agent 0 — issue fidelity —
     // and nothing in the run could tell. The other eight dimensions ran and did
     // real work, so every check passed, and the review certified a diff whose
@@ -755,11 +756,57 @@ describe('the roster — who should have been here', () => {
     const r = coverageFromTranscripts(p, ENV);
     expect(r.missingRoles).toHaveLength(1);
     expect(r.missingRoles[0]).toContain('Cross-file tracer');
-    expect(r.missingRoles[0]).toContain('--role 1c');
     expect(r.ok).toBe(false);
     // And it is not confused with the agents that *did* run.
     expect(r.idleAgents).toEqual([]);
     expect(r.coveredChunks).toEqual([1, 2]);
+  });
+
+  it('does not claim the agent never ran — it cannot see that, and it has been wrong', () => {
+    // A missing record proves the *brief* never arrived. It does not prove nobody
+    // reviewed the dimension: an orchestrator that writes the launch by hand gets an
+    // agent that runs, reads the diff and reports real findings, having never seen
+    // the severity bar the brief carries. On #7012 this gate told a PR author twelve
+    // dimensions "never ran" on a review that had just posted two Criticals with
+    // line numbers — the agents were right there in the same comment. Both failures
+    // are worth reporting; only one of them is provable from a missing file.
+    const p = planPr();
+    rmSync(join(promptRecordDir(p), '1c.txt'), { force: true });
+    rmSync(join(dir, 'subagents', 'S1', 'agent-r-1c.jsonl'), { force: true });
+    transcript('sec', wholeDiff(), { calls: 8 });
+
+    const [gap] = coverageFromTranscripts(p, ENV).missingRoles;
+    expect(gap).not.toMatch(/never (ran|launched)/i);
+    expect(gap).toContain('brief never reached an agent');
+    // And it says what the reader loses, rather than leaving them to guess.
+    expect(gap).toContain('if at all');
+  });
+
+  it('says one thing once when no role was briefed, not the same thing per dimension', () => {
+    // The whole public CHANGES_REQUESTED body on #7012 was twelve of these, one per
+    // dimension, naming an internal command the PR author cannot run — while the
+    // findings that needed acting on sat inline, below the fold. Twelve lines also
+    // bury the single fact that explains all twelve: the run never used the prompt
+    // builder at all.
+    const p = planPr();
+    for (const f of readdirSync(promptRecordDir(p))) {
+      rmSync(join(promptRecordDir(p), f), { force: true });
+    }
+    transcript('sec', wholeDiff(), { calls: 8 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.ok).toBe(false);
+    expect(r.missingRoles).toHaveLength(1);
+    // It reads under the `Not reviewed: ` prefix compose-review renders it with.
+    expect(r.missingRoles[0]).toMatch(/^every dimension — /);
+    const roster = requiredAgents(
+      JSON.parse(readFileSync(p, 'utf8')) as RosterPlan,
+    );
+    expect(r.missingRoles[0]).toContain(`${roster.length} required`);
+    expect(roster.length).toBeGreaterThan(1); // or there is nothing to collapse
+    // The author is told what they lost, not which internal command to go run.
+    expect(r.missingRoles[0]).not.toContain('agent-prompt');
+    expect(r.missingRoles[0]).not.toMatch(/--role/);
   });
 
   it('catches a prompt that was built and then never used', () => {

@@ -132,11 +132,19 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
   // asked of an agent that ran; an agent that never ran leaves nothing to ask.
   if (report.missingRoles.length > 0) {
     writeStderrLine(
-      `ERROR: ${report.missingRoles.length} required agent(s) never ran — ` +
-        `${report.missingRoles.join('; ')}. The roster comes from the plan, not ` +
-        `from anything this run wrote. A dimension nobody reviewed cannot be ` +
-        `certified clean: build each prompt with the call named above and launch ` +
-        `an agent with it, verbatim.`,
+      // No count: when no role was briefed at all, `missingRoles` collapses to one
+      // line covering the whole roster, and a leading "1" would undercount it by the
+      // size of the review.
+      `ERROR: required briefs never reached their agents — ` +
+        `${report.missingRoles.join('; ')}. The roster comes from the ` +
+        `plan, not from anything this run wrote. Writing the launch yourself does ` +
+        `not substitute: the agent runs and may even find something, but the ` +
+        `severity bar, the finding format and this project's rules live in the ` +
+        `brief it was never given, and a dimension reviewed without them cannot ` +
+        `be certified clean. Build each prompt with \`qwen review agent-prompt ` +
+        `--role <n>\` — the role number is in each label above, and a per-file ` +
+        `role takes \`--file <path>\` — then launch an agent with what it prints, ` +
+        `verbatim.`,
     );
   }
   if (report.unreadBriefs.length > 0) {

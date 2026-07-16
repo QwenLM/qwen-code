@@ -557,6 +557,24 @@ describe('composeReview — stacked states compose, none erased', () => {
     expect(r.body).not.toContain('no blockers');
   });
 
+  it('reads as a sentence when no role was briefed at all', () => {
+    // The register this lands in matters as much as the fact. On #7012 the public
+    // CHANGES_REQUESTED body was twelve lines of the review's own plumbing, each
+    // naming an internal command (`agent-prompt --role 2`) the PR author has no way
+    // to run, while the two Criticals that needed acting on sat inline below. The
+    // author needs one thing from this: which of the review they should not trust.
+    const gap =
+      'every dimension — none of the 12 required agents was launched with a ' +
+      'prompt this skill built, so this diff was reviewed, if at all, from prompts ' +
+      'the run wrote for itself: the severity bar, the finding format and this ' +
+      "project's own rules never reached an agent";
+    const r = composeReview(base({ unreviewedDimensions: [gap] }));
+
+    expect(r.body).toContain(`Not reviewed: ${gap}.`);
+    expect(r.body).not.toMatch(/agent-prompt|--role|--chunk/);
+    expect(r.event).not.toBe('APPROVE'); // it still caps, as it always did
+  });
+
   it('RC with body Criticals plus unread scope carries both disclosures', () => {
     const r = composeReview(
       base({
