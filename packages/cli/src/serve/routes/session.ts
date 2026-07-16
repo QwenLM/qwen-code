@@ -105,6 +105,21 @@ const WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES = 64 * 1024;
 const TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR =
   'Transcript pagination state exceeds the safe limit';
 const GENERATION_HEARTBEAT_MS = 15_000;
+const PRIMARY_ONLY_LIVE_SESSION_ROUTES = [
+  'POST /session/:id/branch',
+  'POST /session/:id/fork',
+  'POST /session/:id/cd',
+] as const;
+type PrimaryOnlyLiveSessionRoute =
+  (typeof PRIMARY_ONLY_LIVE_SESSION_ROUTES)[number];
+
+function isPrimaryOnlyLiveSessionRoute(
+  route: string,
+): route is PrimaryOnlyLiveSessionRoute {
+  return (PRIMARY_ONLY_LIVE_SESSION_ROUTES as readonly string[]).includes(
+    route,
+  );
+}
 
 function formatGenerationSse(
   event: string,
@@ -836,12 +851,12 @@ export function registerSessionRoutes(
 
   const sendNonPrimarySessionRouteUnsupported = (
     res: Response,
-    route: string,
+    route: PrimaryOnlyLiveSessionRoute,
     sessionId: string,
     runtime: WorkspaceRuntime,
   ): void => {
     res.status(400).json({
-      error: `Route "${route}" is primary-only for non-primary workspace sessions in Phase 2a.`,
+      error: `Route "${route}" is only available for primary workspace sessions.`,
       code: 'non_primary_session_route_not_supported',
       sessionId,
       workspaceId: runtime.workspaceId,
@@ -1058,16 +1073,18 @@ export function registerSessionRoutes(
     return key;
   };
 
-  const withMutableSession =
-    (
-      route: string,
-      handler: (
-        req: Request,
-        res: Response,
-        sessionId: string,
-      ) => Promise<void> | void,
-    ): RequestHandler =>
-    async (req, res) => {
+  const withPrimaryOnlyMutableSession = (
+    route: string,
+    handler: (
+      req: Request,
+      res: Response,
+      sessionId: string,
+    ) => Promise<void> | void,
+  ): RequestHandler => {
+    if (!isPrimaryOnlyLiveSessionRoute(route)) {
+      throw new Error(`Unregistered primary-only session route: ${route}`);
+    }
+    return async (req, res) => {
       const sessionId = requireSessionId(req, res);
       if (sessionId === null) return;
       const runtime = resolveLiveSessionRuntime(sessionId, res, route);
@@ -1084,6 +1101,7 @@ export function registerSessionRoutes(
         sendBridgeError(res, err, { route, sessionId });
       }
     };
+  };
 
   app.post('/session', mutate(), async (req, res) => {
     const body = safeBody(req);
@@ -1328,7 +1346,7 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/branch',
     mutate(),
-    withMutableSession(
+    withPrimaryOnlyMutableSession(
       'POST /session/:id/branch',
       async (req, res, sessionId) => {
         const body = safeBody(req);
@@ -1370,7 +1388,7 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/fork',
     mutate(),
-    withMutableSession(
+    withPrimaryOnlyMutableSession(
       'POST /session/:id/fork',
       async (req, res, sessionId) => {
         const body = safeBody(req);
@@ -1397,29 +1415,32 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/cd',
     mutate(),
-    withMutableSession('POST /session/:id/cd', async (req, res, sessionId) => {
-      const body = safeBody(req);
-      const targetPath = body['path'];
-      if (
-        typeof targetPath !== 'string' ||
-        targetPath.length === 0 ||
-        !path.isAbsolute(targetPath)
-      ) {
-        res.status(400).json({
-          error: '`path` is required and must be an absolute path',
-          code: 'invalid_path',
-        });
-        return;
-      }
-      const clientId = parseClientIdHeader(req, res);
-      if (clientId === null) return;
-      const result = await bridge.changeSessionCwd(
-        sessionId,
-        { path: targetPath },
-        clientId !== undefined ? { clientId } : undefined,
-      );
-      res.status(200).json(result);
-    }),
+    withPrimaryOnlyMutableSession(
+      'POST /session/:id/cd',
+      async (req, res, sessionId) => {
+        const body = safeBody(req);
+        const targetPath = body['path'];
+        if (
+          typeof targetPath !== 'string' ||
+          targetPath.length === 0 ||
+          !path.isAbsolute(targetPath)
+        ) {
+          res.status(400).json({
+            error: '`path` is required and must be an absolute path',
+            code: 'invalid_path',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const result = await bridge.changeSessionCwd(
+          sessionId,
+          { path: targetPath },
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json(result);
+      },
+    ),
   );
 
   app.get('/session/:id/status', (req, res) => {

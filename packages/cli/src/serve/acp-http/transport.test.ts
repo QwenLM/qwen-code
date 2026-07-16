@@ -879,6 +879,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     nextBridge?: FakeBridge;
     fsFactory?: WorkspaceFileSystemFactory;
     boundWorkspace?: string;
+    daemonEnv?: Readonly<NodeJS.ProcessEnv>;
   }): Promise<void> {
     server.closeAllConnections?.();
     await new Promise<void>((r) => server.close(() => r()));
@@ -890,6 +891,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       boundWorkspace,
       workspace: fakeWorkspace,
       enabled: true,
+      daemonEnv: opts.daemonEnv,
       fsFactory: opts.fsFactory,
       sessionShellCommandEnabled: opts.sessionShellCommandEnabled,
       workspaceRememberLane: new WorkspaceRememberTaskLane(
@@ -5233,7 +5235,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   });
 
   it('dispatches _qwen/workspace/setup-github', async () => {
-    await restartServer({ fsFactory: makeFileFsFactory({}) });
+    await restartServer({
+      fsFactory: makeFileFsFactory({}),
+      daemonEnv: { HTTPS_PROXY: 'http://runtime-proxy.example:8080' },
+    });
     const connId = await initialize();
     const connStream = await openStream(connId);
     const got = takeFrames(connStream, 1);
@@ -5258,6 +5263,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect.objectContaining({
         cwd: '/ws',
         workspaceRoot: '/ws',
+        proxy: 'http://runtime-proxy.example:8080',
         abortSignal: expect.any(AbortSignal),
         fileOps: expect.any(Object),
       }),

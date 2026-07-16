@@ -29,7 +29,13 @@ import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
 
+const setupGithubMock = vi.hoisted(() => vi.fn());
+
 vi.mock('../../utils/stdioHelpers.js', () => ({ writeStderrLine: vi.fn() }));
+vi.mock('../../services/setup-github.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../services/setup-github.js')>()),
+  setupGithub: setupGithubMock,
+}));
 
 const PARENT_ENV: WorkspaceRuntimeEnvMetadata = {
   mode: 'parent-process',
@@ -67,13 +73,14 @@ function makeRuntime(input: {
   primary: boolean;
   trusted: boolean;
   bridge: HttpAcpBridge;
+  env?: WorkspaceRuntimeEnvMetadata;
 }): WorkspaceRuntime {
   return {
     workspaceId: input.id,
     workspaceCwd: input.cwd,
     primary: input.primary,
     trusted: input.trusted,
-    env: PARENT_ENV,
+    env: input.env ?? PARENT_ENV,
     bridge: input.bridge,
     workspaceService: {} as unknown as DaemonWorkspaceService,
     routeFileSystemFactory: {
@@ -140,6 +147,17 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
   let workspaceVoiceConnection: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
+    setupGithubMock.mockReset();
+    setupGithubMock.mockImplementation(async ({ cwd }: { cwd: string }) => ({
+      kind: 'github_setup',
+      workspaceCwd: cwd,
+      gitRepoRoot: cwd,
+      releaseTag: 'v1.2.3',
+      readmeUrl: 'https://example.test/readme',
+      workflows: [],
+      gitignore: { path: '.gitignore', status: 'unchanged' },
+      warnings: [],
+    }));
     primaryBridge = makeBridge();
     secondaryBridge = makeBridge();
     const untrustedBridge = makeBridge();
@@ -150,6 +168,13 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       primary: false,
       trusted: true,
       bridge: secondaryBridge,
+      env: {
+        mode: 'runtime-overlay',
+        overlayKeys: ['HTTPS_PROXY'],
+        effectiveEnv: {
+          HTTPS_PROXY: 'http://secondary-proxy.example:8080',
+        },
+      },
     });
     workspaceRegistry = createWorkspaceRegistry([
       makeRuntime({
@@ -158,6 +183,11 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
         primary: true,
         trusted: true,
         bridge: primaryBridge,
+        env: {
+          mode: 'runtime-overlay',
+          overlayKeys: ['HTTPS_PROXY'],
+          effectiveEnv: { HTTPS_PROXY: 'http://primary-proxy.example:8080' },
+        },
       }),
       secondaryRuntime,
       makeRuntime({
@@ -189,6 +219,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     handle = mountAcpHttp(app, primaryBridge, {
       boundWorkspace: '/ws',
       workspace: {} as unknown as DaemonWorkspaceService,
+      fsFactory: workspaceRegistry.primary.routeFileSystemFactory,
       enabled: true,
       workspaceRegistry,
       deviceFlowRegistry,
@@ -352,6 +383,36 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       expect.stringContaining(
         '/workspaces/secondary-id/acp connection established',
       ),
+    );
+  });
+
+  it('keeps setup-github proxy fallback scoped to the owning runtime', async () => {
+    const secondary = await sendWsRequest('/workspaces/secondary-id/acp', {
+      jsonrpc: '2.0',
+      id: 2,
+      method: '_qwen/workspace/setup-github',
+      params: { consent: true },
+    });
+    expect(secondary['result']).toMatchObject({ workspaceCwd: '/ws-b' });
+    expect(setupGithubMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cwd: '/ws-b',
+        proxy: 'http://secondary-proxy.example:8080',
+      }),
+    );
+
+    const primary = await sendWsRequest('/acp', {
+      jsonrpc: '2.0',
+      id: 3,
+      method: '_qwen/workspace/setup-github',
+      params: { consent: true },
+    });
+    expect(primary['result']).toMatchObject({ workspaceCwd: '/ws' });
+    expect(setupGithubMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cwd: '/ws',
+        proxy: 'http://primary-proxy.example:8080',
+      }),
     );
   });
 
