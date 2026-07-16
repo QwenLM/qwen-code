@@ -346,6 +346,30 @@ function tokeniseSegment(segment: string): string[] | null {
   return tokens.slice(i);
 }
 
+const EXIT_ONE_IS_NOT_ERROR_COMMANDS = new Set([
+  'grep',
+  'rg',
+  'diff',
+  'test',
+  '[',
+  'find',
+]);
+
+function isShellExitError(command: string, exitCode: number | null) {
+  if (exitCode === null || exitCode === 0) return false;
+  if (exitCode >= 2) return true;
+
+  const segments = splitCommands(command);
+  if (segments.length !== 1) return true;
+
+  const tokens = tokeniseSegment(segments[0]!);
+  const executable = tokens?.[0];
+  if (!executable) return true;
+
+  const commandName = path.basename(path.win32.basename(executable));
+  return !EXIT_ONE_IS_NOT_ERROR_COMMANDS.has(commandName);
+}
+
 const SUDO_FLAGS_WITH_VALUE = new Set([
   '-u',
   '-g',
@@ -2865,11 +2889,22 @@ export class ShellToolInvocation extends BaseToolInvocation<
             error: {
               message:
                 result.error.message +
-                  (longRunHint ? `\n\n---\n${longRunHint}` : ''),
+                (longRunHint ? `\n\n---\n${longRunHint}` : ''),
               type: ToolErrorType.SHELL_EXECUTE_ERROR,
             },
           }
-        : {};
+        : isShellExitError(this.params.command, result.exitCode)
+          ? {
+              error: {
+                // Schedulers use error.message as the model-facing response.
+                message:
+                  typeof llmContent === 'string'
+                    ? llmContent
+                    : returnDisplayMessage,
+                type: ToolErrorType.SHELL_EXECUTE_ERROR,
+              },
+            }
+          : {};
 
     return {
       llmContent,

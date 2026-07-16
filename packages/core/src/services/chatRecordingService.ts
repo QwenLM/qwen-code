@@ -289,7 +289,7 @@ export interface ChatRecord {
    * Tool call metadata for UI recovery.
    * Contains enriched info (displayName, status, result, etc.) not in API format.
    */
-  toolCallResult?: Partial<ToolCallResponseInfo>;
+  toolCallResult?: Partial<ToolCallResponseInfo> & { status?: Status };
 
   /**
    * Payload for records that need non-API metadata. For chat compression, this
