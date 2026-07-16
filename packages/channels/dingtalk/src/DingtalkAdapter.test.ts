@@ -113,6 +113,12 @@ vi.mock('@qwen-code/channel-base', async () => {
         _sessionId: string,
         _messageIds: string[],
       ): void {}
+      protected supportsProactiveTarget(target: SessionTarget): boolean {
+        return target.threadId === undefined;
+      }
+      protected supportsProactiveWebhookTarget(target: SessionTarget): boolean {
+        return this.supportsProactiveTarget(target);
+      }
 
       constructor(
         name: string,
@@ -840,6 +846,110 @@ describe('DingtalkChannel prompt reactions', () => {
       stderr.mockRestore();
       fetchSpy.mockRestore();
     }
+  });
+});
+
+describe('DingtalkChannel inbound media', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  function attachImage(
+    channel: DingtalkChannelInstance,
+    envelope: Envelope,
+    downloadCode: string,
+  ): Promise<void> {
+    return (
+      channel as unknown as {
+        attachMedia(
+          envelope: Envelope,
+          downloadCode: string,
+          mediaType: 'image',
+        ): Promise<void>;
+      }
+    ).attachMedia(envelope, downloadCode, 'image');
+  }
+
+  it('refreshes the app access token after its TTL while the stream stays connected', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-14T00:00:00Z'));
+    const channel = createChannel();
+    let tokenCall = 0;
+    const mediaTokens: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.startsWith('https://oapi.dingtalk.com/gettoken')) {
+          tokenCall++;
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                errcode: 0,
+                access_token: `app-token-${tokenCall}`,
+                expires_in: 60,
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        if (
+          url === 'https://api.dingtalk.com/v1.0/robot/messageFiles/download'
+        ) {
+          mediaTokens.push(
+            (init?.headers as Record<string, string>)[
+              'x-acs-dingtalk-access-token'
+            ],
+          );
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ downloadUrl: 'https://example.com/image' }),
+              { status: 200 },
+            ),
+          );
+        }
+        return Promise.resolve(
+          new Response(new Uint8Array([1, 2, 3]), {
+            status: 200,
+            headers: { 'content-type': 'image/png' },
+          }),
+        );
+      },
+    );
+    const firstEnvelope = {} as Envelope;
+    const secondEnvelope = {} as Envelope;
+    await attachImage(channel, firstEnvelope, 'download-code-1');
+    vi.advanceTimersByTime(61_000);
+    await attachImage(channel, secondEnvelope, 'download-code-2');
+
+    expect(tokenCall).toBe(2);
+    expect(mediaTokens).toEqual(['app-token-1', 'app-token-2']);
+    expect(firstEnvelope.attachments).toHaveLength(1);
+    expect(secondEnvelope.attachments).toHaveLength(1);
+  });
+
+  it('keeps media attachment best-effort when app token refresh fails', async () => {
+    const channel = createChannel();
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+      new Error(
+        'request failed for https://oapi.dingtalk.com/gettoken?appkey=client-id&appsecret=client-secret',
+      ),
+    );
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    await expect(
+      attachImage(channel, {} as Envelope, 'download-code'),
+    ).resolves.toBeUndefined();
+    expect(stderrSpy).toHaveBeenCalledWith(
+      '[DingTalk:test-dingtalk] Cannot download media: access token refresh failed.\n',
+    );
+    const logged = stderrSpy.mock.calls.map((call) => String(call[0])).join('');
+    expect(logged).toContain(
+      '[DingTalk:test-dingtalk] access token fetch failed.\n',
+    );
+    expect(logged).not.toContain('client-secret');
   });
 });
 
@@ -1902,9 +2012,17 @@ describe('DingtalkChannel proactive send', () => {
     isGroup: true,
   };
 
+  const directTarget: SessionTarget = {
+    channelName: 'test-dingtalk',
+    senderId: 'webhook:github-ci',
+    chatId: 'manager-user-id',
+    isGroup: false,
+  };
+
   function proactive(channel: DingtalkChannelInstance) {
     return channel as unknown as {
       supportsProactiveTarget(target: SessionTarget): boolean;
+      supportsProactiveWebhookTarget(target: SessionTarget): boolean;
       pushProactive(target: SessionTarget, text: string): Promise<void>;
     };
   }
@@ -1938,6 +2056,8 @@ describe('DingtalkChannel proactive send', () => {
       spy,
       sendCalls: () =>
         calls('https://api.dingtalk.com/v1.0/robot/groupMessages/send'),
+      directSendCalls: () =>
+        calls('https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend'),
       tokenCalls: () => calls('https://oapi.dingtalk.com/gettoken'),
     };
   }
@@ -1951,30 +2071,33 @@ describe('DingtalkChannel proactive send', () => {
     expect(createChannel().supportsProactiveSend()).toBe(true);
   });
 
-  it('accepts only group conversation targets', () => {
+  it('accepts direct-message targets only for webhooks', () => {
     const channel = proactive(createChannel());
     expect(channel.supportsProactiveTarget(groupTarget)).toBe(true);
+    expect(channel.supportsProactiveTarget(directTarget)).toBe(false);
+    expect(channel.supportsProactiveWebhookTarget(groupTarget)).toBe(true);
+    expect(channel.supportsProactiveWebhookTarget(directTarget)).toBe(true);
     expect(
-      channel.supportsProactiveTarget({ ...groupTarget, isGroup: false }),
-    ).toBe(false);
-    expect(
-      channel.supportsProactiveTarget({
+      channel.supportsProactiveWebhookTarget({
         channelName: groupTarget.channelName,
         senderId: groupTarget.senderId,
         chatId: groupTarget.chatId,
       }),
     ).toBe(false);
     expect(
-      channel.supportsProactiveTarget({
+      channel.supportsProactiveWebhookTarget({
         ...groupTarget,
         chatId: 'https://oapi.dingtalk.com/robot/sendBySession?session=abc',
       }),
     ).toBe(false);
     expect(
-      channel.supportsProactiveTarget({ ...groupTarget, chatId: '' }),
+      channel.supportsProactiveWebhookTarget({ ...groupTarget, chatId: '' }),
     ).toBe(false);
     expect(
-      channel.supportsProactiveTarget({ ...groupTarget, threadId: '7' }),
+      channel.supportsProactiveWebhookTarget({
+        ...groupTarget,
+        threadId: '7',
+      }),
     ).toBe(false);
   });
 
@@ -1995,17 +2118,113 @@ describe('DingtalkChannel proactive send', () => {
     const body = JSON.parse(String(init.body));
     expect(body.robotCode).toBe('client-id');
     expect(body.openConversationId).toBe(groupTarget.chatId);
+    expect(body.userIds).toBeUndefined();
     expect(body.msgKey).toBe('sampleMarkdown');
     expect(msgParamOf(sends[0]!).title).toBe('Result');
     expect(msgParamOf(sends[0]!).text).toContain('loop output');
   });
 
-  it('reuses the cached token across sends', async () => {
+  it('sends proactive direct messages through the one-to-one robot API', async () => {
+    const channel = proactive(createChannel());
+    const { directSendCalls, tokenCalls } = stubProactiveFetch();
+
+    await channel.pushProactive(directTarget, '# Result\nloop output');
+
+    expect(tokenCalls()).toHaveLength(1);
+    const sends = directSendCalls();
+    expect(sends).toHaveLength(1);
+    const init = sends[0]![1] as RequestInit;
+    expect(init.method).toBe('POST');
+    expect(
+      (init.headers as Record<string, string>)['x-acs-dingtalk-access-token'],
+    ).toBe('proactive-token');
+    const body = JSON.parse(String(init.body));
+    expect(body.robotCode).toBe('client-id');
+    expect(body.userIds).toEqual([directTarget.chatId]);
+    expect(body.openConversationId).toBeUndefined();
+    expect(body.msgKey).toBe('sampleMarkdown');
+    expect(msgParamOf(sends[0]!).title).toBe('Result');
+    expect(msgParamOf(sends[0]!).text).toContain('loop output');
+  });
+
+  it('rejects direct messages when DingTalk reports an invalid recipient', async () => {
+    const channel = proactive(createChannel());
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    stubProactiveFetch(
+      () =>
+        new Response(
+          JSON.stringify({ invalidStaffIdList: [directTarget.chatId] }),
+          { status: 200 },
+        ),
+    );
+
+    await expect(channel.pushProactive(directTarget, 'hello')).rejects.toThrow(
+      'DingTalk proactive send failed: invalid direct recipient',
+    );
+  });
+
+  it('rejects direct messages when DingTalk reports a rate-limited recipient', async () => {
+    const channel = proactive(createChannel());
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    stubProactiveFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            flowControlledStaffIdList: [directTarget.chatId],
+          }),
+          { status: 200 },
+        ),
+    );
+
+    await expect(channel.pushProactive(directTarget, 'hello')).rejects.toThrow(
+      'DingTalk proactive send failed: direct recipient rate limited',
+    );
+  });
+
+  it('rejects direct messages when DingTalk returns malformed JSON', async () => {
+    const channel = proactive(createChannel());
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const response = new Response('<html>bad gateway</html>', { status: 200 });
+    stubProactiveFetch(() => response);
+
+    await expect(channel.pushProactive(directTarget, 'hello')).rejects.toThrow(
+      'DingTalk proactive send failed: invalid JSON response',
+    );
+
+    expect(response.bodyUsed).toBe(true);
+    const logged = writeSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain(
+      'proactive send failed (dm, chunk 1/1): invalid JSON response',
+    );
+  });
+
+  it('accepts direct messages when DingTalk rejects only other recipients', async () => {
+    const channel = proactive(createChannel());
+    const { directSendCalls } = stubProactiveFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            invalidStaffIdList: ['other-user'],
+            flowControlledStaffIdList: ['another-user'],
+          }),
+          { status: 200 },
+        ),
+    );
+
+    await expect(
+      channel.pushProactive(directTarget, 'hello'),
+    ).resolves.toBeUndefined();
+    expect(directSendCalls()).toHaveLength(1);
+  });
+
+  it('reuses the cached token across group and direct-message sends', async () => {
     const channel = proactive(createChannel());
     const { tokenCalls } = stubProactiveFetch();
 
     await channel.pushProactive(groupTarget, 'first');
-    await channel.pushProactive(groupTarget, 'second');
+    await channel.pushProactive(directTarget, 'second');
 
     expect(tokenCalls()).toHaveLength(1);
   });
@@ -2027,17 +2246,17 @@ describe('DingtalkChannel proactive send', () => {
   it('stops at the first failed chunk', async () => {
     const channel = proactive(createChannel());
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-    const { sendCalls } = stubProactiveFetch(
+    const { directSendCalls } = stubProactiveFetch(
       () => new Response('denied', { status: 403 }),
     );
 
     const longLine = 'x'.repeat(100);
     const longText = Array.from({ length: 50 }, () => longLine).join('\n');
-    await expect(channel.pushProactive(groupTarget, longText)).rejects.toThrow(
+    await expect(channel.pushProactive(directTarget, longText)).rejects.toThrow(
       'HTTP 403',
     );
 
-    expect(sendCalls()).toHaveLength(1);
+    expect(directSendCalls()).toHaveLength(1);
   });
 
   it('surfaces API detail in the error and log on failure', async () => {
@@ -2053,11 +2272,44 @@ describe('DingtalkChannel proactive send', () => {
 
     const logged = writeSpy.mock.calls.map((c) => String(c[0])).join('');
     expect(logged).toContain(
-      'proactive send failed (chunk 1/1): HTTP 403 perm denied',
+      'proactive send failed (group, chunk 1/1): HTTP 403 perm denied',
     );
   });
 
-  it('refreshes the token and retries once on 401', async () => {
+  it('includes the direct target kind in network-error logs', async () => {
+    const channel = proactive(createChannel());
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    stubProactiveFetch(() => {
+      throw new Error('connection reset');
+    });
+
+    await expect(channel.pushProactive(directTarget, 'hello')).rejects.toThrow(
+      'DingTalk proactive send failed: connection reset',
+    );
+
+    const logged = writeSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain(
+      'proactive send error (dm, chunk 1/1): Error: connection reset',
+    );
+  });
+
+  it('refreshes the token and retries a direct message once on 401', async () => {
+    const channel = proactive(createChannel());
+    const { directSendCalls, tokenCalls } = stubProactiveFetch((sendCall) =>
+      sendCall === 0
+        ? new Response('expired', { status: 401 })
+        : new Response('{}', { status: 200 }),
+    );
+
+    await channel.pushProactive(directTarget, 'hello');
+
+    expect(directSendCalls()).toHaveLength(2);
+    expect(tokenCalls()).toHaveLength(2);
+  });
+
+  it('refreshes the token and retries a group message once on 401', async () => {
     const channel = proactive(createChannel());
     const { sendCalls, tokenCalls } = stubProactiveFetch((sendCall) =>
       sendCall === 0

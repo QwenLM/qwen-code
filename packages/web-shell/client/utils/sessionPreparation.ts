@@ -2,15 +2,19 @@ import {
   DAEMON_APPROVAL_MODES,
   type DaemonApprovalMode,
 } from '@qwen-code/webui/daemon-react-sdk';
+import { WEB_SHELL_SESSION_SOURCE_TYPE } from '../constants/sessions';
+
+const SESSION_CREATED_CALLBACK_TIMEOUT_MS = 30_000;
 
 type PromptSessionActions = {
   createSession: (options?: {
     workspaceCwd?: string;
     approvalMode?: DaemonApprovalMode;
-  }) => Promise<unknown>;
+    sourceType?: string;
+  }) => Promise<{ sessionId: string }>;
   attachSession: () => Promise<void>;
-  closeSession: () => Promise<void>;
   clearSession: () => Promise<void>;
+  releaseSession: (sessionId: string) => Promise<void>;
   setModel: (modelId: string) => Promise<unknown>;
 };
 
@@ -23,12 +27,18 @@ export async function createAndAttachSessionForPrompt({
   modelId,
   modeId,
   workspaceCwd,
+  onSessionCreated,
+  onSessionAllocated,
+  getCurrentSessionId,
   warn = console.warn,
 }: {
   sessionActions: PromptSessionActions;
   modelId?: string;
   modeId?: string;
   workspaceCwd?: string;
+  onSessionCreated?: (sessionId: string) => Promise<void> | void;
+  onSessionAllocated?: (sessionId: string) => void;
+  getCurrentSessionId: () => string | undefined;
   warn?: (message?: unknown, ...optionalParams: unknown[]) => void;
 }): Promise<void> {
   // Seed the approval mode in the create request itself so the daemon applies
@@ -39,20 +49,70 @@ export async function createAndAttachSessionForPrompt({
   // The model, by contrast, stays a best-effort follow-up below.
   const approvalMode =
     modeId && isDaemonApprovalMode(modeId) ? modeId : undefined;
-  await sessionActions.createSession({
+  const { sessionId } = await sessionActions.createSession({
     workspaceCwd,
+    sourceType: WEB_SHELL_SESSION_SOURCE_TYPE,
     ...(approvalMode ? { approvalMode } : {}),
   });
+  onSessionAllocated?.(sessionId);
+  let preparationStep = 'prepare new session';
   try {
+    if (onSessionCreated) {
+      preparationStep = 'run onSessionCreated';
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          onSessionCreated(sessionId),
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(
+              () => reject(new Error('onSessionCreated timed out')),
+              SESSION_CREATED_CALLBACK_TIMEOUT_MS,
+            );
+          }),
+        ]);
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+    preparationStep = 'verify session identity';
+    const sessionIdBeforeAttach = getCurrentSessionId();
+    if (
+      sessionIdBeforeAttach !== undefined &&
+      sessionIdBeforeAttach !== sessionId
+    ) {
+      throw new Error(
+        `Session changed before attach: expected ${sessionId}, found ${sessionIdBeforeAttach}`,
+      );
+    }
+    preparationStep = 'attach new session';
     await sessionActions.attachSession();
+    preparationStep = 'verify attached session';
+    const sessionIdAfterAttach = getCurrentSessionId();
+    if (
+      sessionIdAfterAttach !== undefined &&
+      sessionIdAfterAttach !== sessionId
+    ) {
+      throw new Error(
+        `Session changed while attaching: expected ${sessionId}, found ${sessionIdAfterAttach}`,
+      );
+    }
   } catch (error) {
-    warn('[WebShell] failed to attach new session:', error);
-    await sessionActions.closeSession().catch((closeError: unknown) => {
-      warn('[WebShell] failed to close unattached session:', closeError);
-    });
-    await sessionActions.clearSession().catch((clearError: unknown) => {
-      warn('[WebShell] failed to clear unattached session:', clearError);
-    });
+    warn(`[WebShell] failed to ${preparationStep}:`, error);
+    await sessionActions
+      .releaseSession(sessionId)
+      .catch((releaseError: unknown) => {
+        warn('[WebShell] failed to release unattached session:', releaseError);
+      });
+    const currentSessionId = getCurrentSessionId();
+    if (currentSessionId === undefined || currentSessionId === sessionId) {
+      await sessionActions.clearSession().catch((clearError: unknown) => {
+        warn('[WebShell] failed to clear unattached session:', clearError);
+      });
+    } else {
+      warn(
+        `[WebShell] skipping clearSession: expected ${sessionId}, found ${currentSessionId}`,
+      );
+    }
     throw error;
   }
   // The model still needs a post-create call: `POST /session` only accepts a

@@ -9,6 +9,7 @@ import {
   InvalidSessionTranscriptCursorError,
   recordDaemonBridgeError,
   recordDaemonError,
+  SessionTranscriptPageTooLargeError,
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
   TrustGateError,
@@ -36,6 +37,7 @@ import {
   SessionBusyError,
   SessionConflictError,
   SessionLimitExceededError,
+  SessionNotArchivedError,
   SessionNotFoundError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
@@ -44,9 +46,14 @@ import {
   WorkspaceInitRaceError,
   WorkspaceInitSymlinkError,
   WorkspaceMismatchError,
+  WorkspaceDrainingError,
   TotalSessionLimitExceededError,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
+import {
+  WorkspaceSkillNotFoundError,
+  WorkspaceSkillNotToggleableError,
+} from '../workspace-service/types.js';
 
 export type BridgeErrorContext = {
   route?: string;
@@ -151,6 +158,24 @@ export function sendBridgeError(
   ctx?: BridgeErrorContext,
   daemonLog?: DaemonLogger,
 ): void {
+  if (err instanceof WorkspaceSkillNotFoundError) {
+    res.status(404).json({
+      error: err.message,
+      code: 'skill_not_found',
+      skillName: err.skillName,
+    });
+    return;
+  }
+  if (err instanceof WorkspaceSkillNotToggleableError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'skill_not_toggleable',
+      skillName: err.skillName,
+      reason: err.reason,
+      ...(err.lockedScope ? { lockedScope: err.lockedScope } : {}),
+    });
+    return;
+  }
   if (err instanceof InvalidSessionTranscriptCursorError) {
     res.status(400).json({
       error: err.message,
@@ -167,6 +192,16 @@ export function sendBridgeError(
     });
     return;
   }
+  if (err instanceof SessionTranscriptPageTooLargeError) {
+    res.status(413).json({
+      error: err.message,
+      code: 'transcript_page_too_large',
+      sessionId: err.sessionId,
+      pageBytes: err.pageBytes,
+      maxBytes: err.maxBytes,
+    });
+    return;
+  }
   if (err instanceof SessionTranscriptTooLargeError) {
     res.status(413).json({
       error: err.message,
@@ -174,6 +209,15 @@ export function sendBridgeError(
       sessionId: err.sessionId,
       snapshotSize: err.snapshotSize,
       maxBytes: err.maxBytes,
+    });
+    return;
+  }
+  if (err instanceof WorkspaceDrainingError) {
+    res.set('Retry-After', '5');
+    res.status(503).json({
+      error: err.message,
+      code: 'workspace_draining',
+      workspaceCwd: err.workspaceCwd,
     });
     return;
   }
@@ -279,6 +323,14 @@ export function sendBridgeError(
     res.status(409).json({
       error: err.message,
       code: 'session_archived',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof SessionNotArchivedError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'session_not_archived',
       sessionId: err.sessionId,
     });
     return;

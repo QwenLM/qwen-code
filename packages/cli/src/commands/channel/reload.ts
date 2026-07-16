@@ -5,6 +5,12 @@ import {
   QWEN_DAEMON_URL_ENV,
   QWEN_SERVER_TOKEN_ENV,
 } from '../../serve/channel-worker-env.js';
+import {
+  channelStartupFailureBody,
+  formatChannelStartupFailures,
+  safeChannelCommandErrorMessage,
+  sanitizeChannelCommandValue,
+} from './startup-failure-format.js';
 
 const DEFAULT_DAEMON_URL = 'http://127.0.0.1:4170';
 
@@ -19,6 +25,8 @@ interface ChannelReloadResultLike {
     pid?: number;
     restartCount?: number;
     error?: string;
+    startupFailures?: unknown;
+    startupFailuresTruncated?: unknown;
   };
 }
 
@@ -68,7 +76,7 @@ export const reloadCommand: CommandModule<unknown, ReloadArgs> = {
       })
       .option('token', {
         type: 'string',
-        description: `Bearer token (default: $${QWEN_SERVER_TOKEN_ENV})`,
+        description: `Bearer token (default: $${QWEN_SERVER_TOKEN_ENV} or $${QWEN_DAEMON_TOKEN_ENV})`,
       })
       .option('timeout', {
         type: 'number',
@@ -83,9 +91,7 @@ export const reloadCommand: CommandModule<unknown, ReloadArgs> = {
       sdk = (await import('@qwen-code/sdk/daemon')) as unknown as DaemonSdkLike;
     } catch (err) {
       writeStderrLine(
-        `[Channel] Failed to load daemon SDK: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        `[Channel] Failed to load daemon SDK: ${safeChannelCommandErrorMessage(err)}`,
       );
       process.exit(1);
     }
@@ -110,13 +116,20 @@ export const reloadCommand: CommandModule<unknown, ReloadArgs> = {
         ...(worker.error ? [`error=${worker.error}`] : []),
       ];
       writeStdoutLine(`[Channel] Reloaded (${parts.join(', ')}).`);
+      for (const line of formatChannelStartupFailures(worker)) {
+        writeStdoutLine(line);
+      }
       process.exit(0);
     } catch (err) {
+      const safeBaseUrl = sanitizeChannelCommandValue(baseUrl, 2048);
       writeStderrLine(
-        `[Channel] Reload failed (${baseUrl}): ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        `[Channel] Reload failed (${safeBaseUrl}): ${safeChannelCommandErrorMessage(err)}`,
       );
+      for (const line of formatChannelStartupFailures(
+        channelStartupFailureBody(err),
+      )) {
+        writeStderrLine(line);
+      }
       process.exit(1);
     }
   },

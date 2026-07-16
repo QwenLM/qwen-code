@@ -671,10 +671,7 @@ function writeShims(packageRoot) {
   const unixShim = `#!/usr/bin/env sh
 set -e
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-if [ "\${1:-}" = "serve" ]; then
-  exec "$ROOT/node/bin/node" "$ROOT/lib/cli-entry.js" "$@"
-fi
-exec "$ROOT/node/bin/node" --expose-gc "$ROOT/lib/cli.js" "$@"
+QWEN_CODE_LAUNCHER_PATH="$ROOT/bin/qwen" exec "$ROOT/node/bin/node" "$ROOT/lib/cli-entry.js" "$@"
 `;
   const unixShimPath = path.join(binDir, 'qwen');
   fs.writeFileSync(unixShimPath, unixShim);
@@ -683,11 +680,7 @@ exec "$ROOT/node/bin/node" --expose-gc "$ROOT/lib/cli.js" "$@"
   const windowsShim = `@echo off
 setlocal
 set "ROOT=%~dp0.."
-if "%~1"=="serve" goto serve
-"%ROOT%\\node\\node.exe" --expose-gc "%ROOT%\\lib\\cli.js" %*
-exit /b %ERRORLEVEL%
-
-:serve
+set "QWEN_CODE_LAUNCHER_PATH=%ROOT%\\bin\\qwen.cmd"
 "%ROOT%\\node\\node.exe" "%ROOT%\\lib\\cli-entry.js" %*
 exit /b %ERRORLEVEL%
 `;

@@ -328,7 +328,10 @@ export class HistoryReplayer {
     await this.toolCallEmitter.emitResult({
       toolName,
       callId,
-      success: !result?.error,
+      success:
+        result?.status === undefined
+          ? !result?.error
+          : result.status === 'success' && !result.error,
       message: record.message.parts,
       resultDisplay: result?.resultDisplay,
       artifacts: result?.artifacts,
@@ -426,7 +429,7 @@ export class HistoryReplayer {
     for (const item of payload.outputHistoryItems) {
       const text = typeof item['text'] === 'string' ? item['text'] : '';
       if (text) {
-        await this.messageEmitter.emitAgentMessage(
+        await this.messageEmitter.emitSlashCommandOutput(
           text.replace(/\n/g, '  \n'),
           record.timestamp,
         );

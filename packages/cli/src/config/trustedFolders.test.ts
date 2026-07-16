@@ -664,6 +664,28 @@ describe('getWorkspaceTrustStatus', () => {
       explicitTrustLevel: null,
     });
   });
+
+  it('does not mutate the cached config when a preview override is passed', () => {
+    mockRules['/home/user/projectA'] = TrustLevel.TRUST_FOLDER;
+
+    // Prime the module cache from disk, then snapshot the loaded config.
+    const before = { ...loadTrustedFolders().user.config };
+
+    // A read-only "preview" check with a tentative override config that adds a
+    // folder not present on disk.
+    const overrideConfig = {
+      ...before,
+      '/home/user/preview': TrustLevel.DO_NOT_TRUST,
+    };
+    getWorkspaceTrustStatus(mockSettings, '/home/user/preview', overrideConfig);
+
+    // The cached config must be unchanged — the tentative preview must not leak
+    // into subsequent reads.
+    expect(loadTrustedFolders().user.config).toEqual(before);
+    expect(
+      loadTrustedFolders().user.config['/home/user/preview'],
+    ).toBeUndefined();
+  });
 });
 
 describe('isWorkspaceTrusted with IDE override', () => {

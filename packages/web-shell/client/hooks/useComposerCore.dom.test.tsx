@@ -75,7 +75,31 @@ afterEach(() => {
   latest = null;
 });
 
-describe('useComposerCore inline tags', () => {
+describe('useComposerCore tags', () => {
+  it('keeps the composer API stable across tag updates', async () => {
+    await mount();
+    const api = latest!.handle;
+
+    act(() => {
+      api.addTags([{ id: 'orders', value: 'orders' }]);
+    });
+
+    expect(latest!.handle).toBe(api);
+  });
+
+  it('does not rerender when removing a missing tag', async () => {
+    await mount();
+    const render = latest;
+    const dispatch = vi.spyOn(latest!.viewRef.current!, 'dispatch');
+
+    act(() => {
+      latest!.handle.removeTag('missing');
+    });
+
+    expect(latest).toBe(render);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
   it('falls back when inline custom tag rendering throws', async () => {
     const error = new Error('boom');
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});

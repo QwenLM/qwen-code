@@ -104,4 +104,55 @@ describe('WorkspaceGitState', () => {
     expect(resolveBranchNameMock).toHaveBeenCalledTimes(2);
     expect(watchRepoBranchMock).toHaveBeenCalledOnce();
   });
+
+  it('disposes only the removed workspace watcher', async () => {
+    const firstDispose = vi.fn();
+    const secondDispose = vi.fn();
+    resolveBranchNameMock.mockResolvedValue('main');
+    watchRepoBranchMock
+      .mockResolvedValueOnce(firstDispose)
+      .mockResolvedValueOnce(secondDispose);
+    const state = new WorkspaceGitState();
+    const bridge = {
+      publishWorkspaceEvent: vi.fn(),
+    } as unknown as AcpSessionBridge;
+    await state.getStatus('/first', bridge);
+    await state.getStatus('/second', bridge);
+
+    state.disposeWorkspace('/first');
+    await vi.waitFor(() => expect(firstDispose).toHaveBeenCalledOnce());
+    expect(secondDispose).not.toHaveBeenCalled();
+
+    state.dispose();
+    await vi.waitFor(() => expect(secondDispose).toHaveBeenCalledOnce());
+  });
+
+  it('keeps a replacement entry when the disposed creation later fails', async () => {
+    let rejectFirst!: (error: Error) => void;
+    const firstBranch = new Promise<string>((_resolve, reject) => {
+      rejectFirst = reject;
+    });
+    resolveBranchNameMock
+      .mockReturnValueOnce(firstBranch)
+      .mockResolvedValue('main');
+    watchRepoBranchMock.mockResolvedValue(vi.fn());
+    const state = new WorkspaceGitState();
+    const bridge = {
+      publishWorkspaceEvent: vi.fn(),
+    } as unknown as AcpSessionBridge;
+
+    const first = state.getStatus('/same', bridge);
+    state.disposeWorkspace('/same');
+    await expect(state.getStatus('/same', bridge)).resolves.toMatchObject({
+      branch: 'main',
+    });
+    rejectFirst(new Error('old watcher failed'));
+    await expect(first).rejects.toThrow('old watcher failed');
+
+    await expect(state.getStatus('/same', bridge)).resolves.toMatchObject({
+      branch: 'main',
+    });
+    expect(resolveBranchNameMock).toHaveBeenCalledTimes(2);
+    state.dispose();
+  });
 });

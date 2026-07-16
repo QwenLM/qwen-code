@@ -192,6 +192,13 @@ export interface DaemonWorkspaceService {
     enabled: boolean,
   ): Promise<{ toolName: string; enabled: boolean }>;
 
+  /** Toggle a skill in the workspace's skills.disabled settings list. */
+  setWorkspaceSkillEnabled(
+    ctx: WorkspaceRequestContext,
+    skillName: string,
+    enabled: boolean,
+  ): Promise<WorkspaceSkillToggleResult>;
+
   /** Scaffold (init) a QWEN.md file in the workspace. */
   initWorkspace(
     ctx: WorkspaceRequestContext,
@@ -300,6 +307,49 @@ export interface WorkspaceVoiceSettingsUpdate {
   voiceModel?: string;
 }
 
+export type WorkspaceSkillToggleActivation = 'applied' | 'deferred' | 'partial';
+
+export interface WorkspaceSkillToggleResult {
+  skillName: string;
+  enabled: boolean;
+  changed: boolean;
+  activation: WorkspaceSkillToggleActivation;
+  sessionsRefreshed: number;
+  sessionsFailed: number;
+}
+
+export interface PersistDisabledSkillResult {
+  changed: boolean;
+  disabled: string[];
+}
+
+export type WorkspaceSkillNotToggleableReason =
+  | 'not_user_invocable'
+  | 'inactive_extension'
+  | 'locked';
+
+export class WorkspaceSkillNotFoundError extends Error {
+  constructor(readonly skillName: string) {
+    super(`Skill not found: ${skillName}`);
+    this.name = 'WorkspaceSkillNotFoundError';
+  }
+}
+
+export class WorkspaceSkillNotToggleableError extends Error {
+  constructor(
+    readonly skillName: string,
+    readonly reason: WorkspaceSkillNotToggleableReason,
+    readonly lockedScope?: 'system' | 'user' | 'systemDefaults',
+  ) {
+    super(
+      lockedScope
+        ? `Skill ${skillName} is locked by ${lockedScope} settings`
+        : `Skill ${skillName} is not toggleable: ${reason}`,
+    );
+    this.name = 'WorkspaceSkillNotToggleableError';
+  }
+}
+
 /** Discriminated union for MCP server restart outcomes. */
 export type RestartMcpServerResult =
   | { serverName: string; restarted: true; durationMs: number }
@@ -307,7 +357,11 @@ export type RestartMcpServerResult =
       serverName: string;
       restarted: false;
       skipped: true;
-      reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+      reason:
+        | 'in_flight'
+        | 'disabled'
+        | 'budget_would_exceed'
+        | 'authentication_required';
     }
   | {
       serverName: string;
@@ -374,6 +428,13 @@ export interface DaemonWorkspaceServiceDeps {
     enabled: boolean,
   ) => Promise<void>;
 
+  /** Persist a skill enable/disable change to workspace settings. */
+  persistDisabledSkills: (
+    workspace: string,
+    skillName: string,
+    enabled: boolean,
+  ) => Promise<PersistDisabledSkillResult>;
+
   persistSetting?: (
     workspace: string,
     scope: SettingScope,
@@ -385,6 +446,12 @@ export interface DaemonWorkspaceServiceDeps {
     workspace: string,
     writes: WorkspaceSettingsWrite[],
   ) => Promise<void>;
+
+  /** Runtime-local environment used by workspace Voice operations. */
+  voiceEnv?: Readonly<Record<string, string | undefined>>;
+
+  /** Force Voice settings writes into this scope for workspace-qualified ACP. */
+  voiceSettingsScope?: SettingScope;
 
   /** Reload daemon-side process.env from .env / settings.env. */
   reloadDaemonEnv?: (workspace: string) => Promise<EnvReloadResult>;

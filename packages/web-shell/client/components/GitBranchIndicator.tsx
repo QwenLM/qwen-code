@@ -5,6 +5,12 @@
  */
 
 import styles from './ChatEditor.module.css';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from './ui/tooltip';
 
 function GitBranchIcon() {
   return (
@@ -25,21 +31,31 @@ function GitBranchIcon() {
 export function GitBranchIndicator({
   branch,
   ariaLabel,
+  compact = false,
 }: {
   branch: string;
   ariaLabel: string;
+  compact?: boolean;
 }) {
   return (
-    <output
-      className={styles.gitBranchChip}
-      title={branch}
-      aria-label={ariaLabel}
-      data-web-shell-git-branch
-    >
-      <span className={styles.gitBranchIcon}>
-        <GitBranchIcon />
-      </span>
-      <span className={styles.gitBranchText}>{branch}</span>
-    </output>
+    <TooltipProvider delayDuration={300}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <output
+            className={`${styles.gitBranchChip} ${
+              compact ? styles.gitBranchChipCompact : ''
+            }`}
+            aria-label={ariaLabel}
+            data-web-shell-git-branch
+          >
+            <span className={styles.gitBranchIcon}>
+              <GitBranchIcon />
+            </span>
+            <span className={styles.gitBranchText}>{branch}</span>
+          </output>
+        </TooltipTrigger>
+        <TooltipContent side="top">{branch}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }

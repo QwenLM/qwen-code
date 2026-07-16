@@ -14,6 +14,7 @@ import type {
   DaemonForkSessionResult,
   DaemonInputAnnotation,
   DaemonSessionBtwResult,
+  DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
@@ -179,6 +180,7 @@ export type DaemonNoticeOperation =
   | 'rewind_session'
   | 'refresh_commands'
   | 'recap_session'
+  | 'generate_session_content'
   | 'btw_session'
   | 'branch_session'
   | 'fork_session'
@@ -329,8 +331,14 @@ export interface DaemonSessionActions {
   listSessions(options?: {
     pageSize?: number;
   }): Promise<DaemonSessionSummary[]>;
-  loadSession(sessionId: string): Promise<void>;
-  resumeSession(sessionId: string): Promise<void>;
+  loadSession(
+    sessionId: string,
+    options?: { workspaceCwd?: string },
+  ): Promise<void>;
+  resumeSession(
+    sessionId: string,
+    options?: { workspaceCwd?: string },
+  ): Promise<void>;
   /**
    * Create a daemon session and update local session state. Callers that need
    * transcript/event streaming must follow with `attachSession()`.
@@ -342,10 +350,13 @@ export interface DaemonSessionActions {
    * `options.approvalMode` seeds the session's approval mode in the create
    * request itself, so the daemon applies it atomically at spawn instead of
    * requiring a follow-up `setApprovalMode` call.
+   *
+   * `options.sourceType` records immutable creator attribution.
    */
   createSession(options?: {
     workspaceCwd?: string;
     approvalMode?: DaemonApprovalMode;
+    sourceType?: string;
   }): Promise<DaemonSession>;
   attachSession(): Promise<void>;
   clearSession(): Promise<void>;
@@ -359,6 +370,10 @@ export interface DaemonSessionActions {
   }): Promise<DaemonSessionContextUsageStatus>;
   renameSession(displayName: string): Promise<SessionMetadataResult>;
   recapSession(): Promise<DaemonSessionRecapResult>;
+  generateSessionContent(
+    prompt: string,
+    opts?: { signal?: AbortSignal },
+  ): AsyncGenerator<DaemonSessionGenerationEvent>;
   getRewindSnapshots(): Promise<{ snapshots: DaemonRewindSnapshotInfo[] }>;
   rewindSession(
     promptId: string,

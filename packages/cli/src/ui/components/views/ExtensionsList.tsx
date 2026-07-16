@@ -43,6 +43,7 @@ export const ExtensionsList = () => {
               break;
             case ExtensionUpdateState.UPDATE_AVAILABLE:
             case ExtensionUpdateState.UPDATED_NEEDS_RESTART:
+            case ExtensionUpdateState.UPDATED_WITH_WARNINGS:
               stateColor = 'yellow';
               break;
             case ExtensionUpdateState.ERROR:

@@ -38,8 +38,12 @@ curl -s http://127.0.0.1:4170/health
 # {"status":"ok"}
 
 curl -s 'http://127.0.0.1:4170/health?deep=1' | jq
-# {"status":"ok","workspaceCwd":"/path","sessions":N,...}
+# {"status":"ok","workspaceCount":N,"sessions":N,...}
 ```
+
+Deep health totals all managed workspace runtimes, including runtimes still
+draining. It is an informational counter snapshot, not per-workspace readiness;
+use `/daemon/status` when individual workspace or transport diagnostics matter.
 
 A 401 on loopback means `--require-auth` is likely enabled. Use `QWEN_SERVE_DEBUG=1` at startup to see boot logs.
 

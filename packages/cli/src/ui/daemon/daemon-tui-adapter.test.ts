@@ -122,6 +122,46 @@ async function waitFor(assertion: () => void): Promise<void> {
 }
 
 describe('reduceDaemonEventToTuiUpdates', () => {
+  it('preserves a sanitized vision bridge notice as structured output', () => {
+    const updates = reduceDaemonEventToTuiUpdates({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tool-pdf',
+          kind: 'read_file',
+          title: 'Read PDF',
+          status: 'completed',
+          rawOutput: {
+            type: 'vision_bridge_notice',
+            summary: 'Transcribed\x1b]0;bad\x07 PDF pages 1-4',
+            notice: 'Converted via qwen-vl-max.\u202e',
+          },
+        },
+      },
+    });
+
+    expect(updates).toMatchObject([
+      {
+        type: 'tool_group_update',
+        item: {
+          tools: [
+            {
+              resultDisplay: {
+                type: 'vision_bridge_notice',
+                summary: 'Transcribed PDF pages 1-4',
+                notice: 'Converted via qwen-vl-max.',
+              },
+            },
+          ],
+        },
+      },
+    ]);
+  });
+
   it('maps assistant, tool, model, and disconnect daemon events while suppressing thought history', () => {
     expect(
       reduceDaemonEventToTuiUpdates({

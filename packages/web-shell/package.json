@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/web-shell",
-  "version": "0.19.9",
+  "version": "0.19.10",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -28,6 +28,7 @@
     "test:coverage": "vitest run --config vitest.config.ts --coverage",
     "test:e2e:smoke": "playwright test --config playwright.config.ts --grep @smoke",
     "test:e2e": "playwright test --config playwright.config.ts",
+    "test:e2e:visuals": "playwright test --config playwright.visuals.config.ts",
     "test:e2e:report": "playwright show-report client/e2e/playwright-report",
     "verify": "npm run lint && npm run format:check && npm run typecheck && npm run test:ci"
   },

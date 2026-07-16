@@ -68,11 +68,41 @@ function formatUiLanguageDisplay(lang: SupportedLanguage): string {
 }
 
 /**
- * Sets the UI language and persists it to user settings.
+ * Parses `--project` / `--global` scope flags from a UI-language argument
+ * string, returning the resolved scope and the argument with the flags removed.
+ * Mirrors the scope handling in `modelCommand` so UI-language edits can target
+ * workspace or user settings (e.g. from the web-shell settings panel's
+ * Workspace/User tab) instead of always writing user scope.
+ */
+function parseUiScopeFlags(input: string): {
+  scope: SettingScope | undefined;
+  remaining: string;
+  hasProject: boolean;
+  hasGlobal: boolean;
+} {
+  let remaining = input;
+  const hasProject = /(?:^|\s)--project(?:\s|$)/.test(remaining);
+  const hasGlobal = /(?:^|\s)--global(?:\s|$)/.test(remaining);
+  let scope: SettingScope | undefined;
+  if (hasProject) {
+    scope = SettingScope.Workspace;
+    remaining = remaining.replace(/(?:^|\s)--project(?:\s|$)/, ' ').trim();
+  }
+  if (hasGlobal) {
+    scope = SettingScope.User;
+    remaining = remaining.replace(/(?:^|\s)--global(?:\s|$)/, ' ').trim();
+  }
+  return { scope, remaining, hasProject, hasGlobal };
+}
+
+/**
+ * Sets the UI language and persists it to the given scope (user settings by
+ * default).
  */
 async function setUiLanguage(
   context: CommandContext,
   lang: SupportedLanguage,
+  scope: SettingScope = SettingScope.User,
 ): Promise<MessageActionReturn> {
   const { services } = context;
 
@@ -88,7 +118,7 @@ async function setUiLanguage(
 
   if (services.settings?.setValue) {
     try {
-      services.settings.setValue(SettingScope.User, 'general.language', lang);
+      services.settings.setValue(scope, 'general.language', lang);
     } catch (error) {
       debugLogger.warn('Failed to save language setting:', error);
     }
@@ -277,7 +307,34 @@ export const languageCommand: SlashCommand = {
         context: CommandContext,
         args: string,
       ): Promise<MessageActionReturn> => {
-        const trimmedArgs = args.trim();
+        const { scope, remaining, hasProject, hasGlobal } = parseUiScopeFlags(
+          args.trim(),
+        );
+        if (hasProject && hasGlobal) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: t(
+              'Cannot use both --project and --global. Choose one scope flag.',
+            ),
+          };
+        }
+        // Workspace settings are ignored on merge when untrusted, so a
+        // --project save would silently not take effect — reject it up front.
+        if (
+          scope === SettingScope.Workspace &&
+          context.services.settings &&
+          !context.services.settings.isTrusted
+        ) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: t(
+              'Workspace is untrusted; run /trust first or use --global.',
+            ),
+          };
+        }
+        const trimmedArgs = remaining;
 
         if (!trimmedArgs) {
           return {
@@ -313,7 +370,7 @@ export const languageCommand: SlashCommand = {
           };
         }
 
-        return setUiLanguage(context, targetLang);
+        return setUiLanguage(context, targetLang, scope);
       },
 
       // Nested subcommands for each supported language (e.g., /language ui zh-CN)
