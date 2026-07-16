@@ -4635,7 +4635,9 @@ class QwenAgent implements Agent {
             modelOptions,
             currentModelId,
             currentAuth,
-            config.getCurrentModelRegistryBaseUrl?.(),
+            activeRuntimeSnapshot
+              ? undefined
+              : config.getCurrentModelRegistryBaseUrl?.(),
           )
         : undefined;
       const providers = new Map<string, ServeWorkspaceProviderStatus>();

@@ -3496,6 +3496,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         id: 'runtime-qwen-plus',
         authType: 'qwen',
       }),
+      getCurrentModelRegistryBaseUrl: vi
+        .fn()
+        .mockReturnValue('https://stale.example/v1'),
       getModel: vi.fn().mockReturnValue('qwen-plus'),
       getAllConfiguredModels: vi.fn().mockReturnValue([
         {
@@ -3542,6 +3545,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ],
     });
     expect(vi.mocked(tokenLimit)).toHaveBeenCalledWith('runtime-qwen-plus');
+    expect(mockConfig.getCurrentModelRegistryBaseUrl).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
