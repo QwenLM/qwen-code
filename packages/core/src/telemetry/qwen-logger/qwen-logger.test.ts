@@ -27,7 +27,6 @@ import {
   SkillLaunchEvent,
   ProtocolTagSanitizedEvent,
 } from '../types.js';
-import type { ToolCallEvent } from '../types.js';
 import type { RumEvent, RumPayload } from './event-types.js';
 
 const debugLoggerSpy = vi.hoisted(() => ({

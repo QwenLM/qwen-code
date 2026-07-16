@@ -2306,6 +2306,70 @@ describe('CoreToolScheduler', () => {
     expect(outputOf('smallBatchTool')).toBe('b'.repeat(3000));
   });
 
+  it('does not commit deferred tool presentations when batch budget offloads the schema block', async () => {
+    const presentedProxySchemas = new Set<string>();
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.TOOL_SEARCH,
+        new MockTool({
+          name: ToolNames.TOOL_SEARCH,
+          execute: vi.fn().mockResolvedValue({
+            llmContent: `<functions>${'a'.repeat(9000)}</functions>`,
+            returnDisplay: 'Loaded 1 tool(s)',
+            deferredToolPresentations: [
+              { name: ToolNames.CRON_CREATE, schemaFingerprint: 'schema' },
+            ],
+          }),
+        }),
+      ],
+      [
+        'smallBatchTool',
+        new MockTool({
+          name: 'smallBatchTool',
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'b'.repeat(3000),
+            returnDisplay: 'small',
+          }),
+        }),
+      ],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        presentedProxySchemas,
+        toolOutputBatchBudget: 10_000,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'tool-search-offloaded-schema',
+          name: ToolNames.TOOL_SEARCH,
+          args: { query: 'cron' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-search',
+        },
+        {
+          callId: 'small',
+          name: 'smallBatchTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-search',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    expect(outputOfFirstCall(onAllToolCallsComplete)).toContain(
+      'Tool output was too large and has been truncated',
+    );
+    expect(presentedProxySchemas.has(ToolNames.CRON_CREATE)).toBe(false);
+  });
+
   it('offloads timeout error detail while preserving failure metadata', async () => {
     const timeoutResult = (detail: string): ToolResult => ({
       llmContent: detail,

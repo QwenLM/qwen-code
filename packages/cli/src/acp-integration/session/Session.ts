@@ -39,7 +39,6 @@ import type {
   DeferredToolPresentation,
   VisionBridgeResult,
   MemoryWriteCandidate,
-  ToolErrorType,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -5626,13 +5625,13 @@ export class Session implements SessionContext {
           // Create response parts first (needed for emitResult and recordToolResult)
           const responseParts = toolResult.error
             ? convertToFunctionErrorResponse(
-                toolName,
+                responseToolName,
                 callId,
                 toolResult.llmContent,
                 toolResult.error.message,
               )
             : convertToFunctionResponse(
-                toolName,
+                responseToolName,
                 callId,
                 toolResult.llmContent,
               );
