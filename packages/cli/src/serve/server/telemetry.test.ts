@@ -33,7 +33,11 @@ import {
   resolveDaemonTelemetryRoute,
   setDaemonTelemetryWorkspace,
 } from './telemetry.js';
-import { MAX_CLIENT_ID_LENGTH } from './request-helpers.js';
+import {
+  getDeferredRuntimeRequestTiming,
+  MAX_CLIENT_ID_LENGTH,
+  setDeferredRuntimeRequestTiming,
+} from './request-helpers.js';
 
 function mockReq(method: string, path: string): Request {
   return { method, path, get: () => undefined } as unknown as Request;
@@ -53,6 +57,12 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
       (workspace: string) => `hash:${workspace}`,
     );
     coreMocks.spanSetAttribute.mockImplementation(() => undefined);
+  });
+
+  it('has no deferred timing for ordinary requests', () => {
+    expect(getDeferredRuntimeRequestTiming(mockReq('GET', '/health'))).toBe(
+      undefined,
+    );
   });
 
   it('calls recordRequest with (durationMs, statusCode) once the response finishes on a matched route', () => {
@@ -82,6 +92,39 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     );
     res.emit('finish');
     expect(recordRequest).toHaveBeenCalledWith(expect.any(Number), 503);
+  });
+
+  it('includes deferred runtime wait in the request span', () => {
+    const req = mockReq('POST', '/session');
+    const startedAt = new Date(Date.now() - 25);
+    setDeferredRuntimeRequestTiming(req, {
+      startedAt,
+      path: 'joined',
+      waitMs: 24.5,
+    });
+    const res = mockRes(200);
+
+    daemonTelemetryMiddleware(() => '/ws')(
+      req,
+      res,
+      vi.fn() as unknown as NextFunction,
+    );
+    res.emit('finish');
+
+    expect(coreMocks.withDaemonRequestSpan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        startTime: startedAt,
+        deferredRuntimeWaitMs: 24.5,
+        deferredRuntimePath: 'joined',
+      }),
+      expect.any(Function),
+    );
+    expect(coreMocks.recordDaemonHttpRequest).toHaveBeenCalledWith(
+      expect.any(Number),
+      'POST /session',
+      200,
+      'joined',
+    );
   });
 
   it('fires exactly once even if both finish and close emit', () => {
