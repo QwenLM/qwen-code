@@ -12,6 +12,22 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { z } from 'zod';
 
+export const ACP_ROUTE_ID_PREFIX = 'qwen-route:v1:';
+
+function getRouteEndpointIdentity(baseUrl: string | undefined): string | null {
+  if (!baseUrl) return null;
+  try {
+    const url = new URL(baseUrl);
+    url.username = '';
+    url.password = '';
+    url.search = '';
+    url.hash = '';
+    return url.href;
+  } catch {
+    return sanitizeProviderBaseUrl(baseUrl).split(/[?#]/, 1)[0] ?? null;
+  }
+}
+
 /**
  * ACP model IDs use `${modelId}(${authType})` when that route is unique.
  * Colliding routes receive an opaque selector from `buildAcpModelOptions`.
@@ -22,11 +38,11 @@ import { z } from 'zod';
  * format. If the encoding here evolves (new authTypes, runtime prefix changes,
  * etc.), update that file too.
  */
-export function formatAcpModelId(modelId: string, authType: AuthType): string {
+function formatAcpModelId(modelId: string, authType: AuthType): string {
   return `${modelId}(${authType})`;
 }
 
-export interface AcpModelOption {
+interface AcpModelOption {
   model: AvailableModel;
   modelId: string;
   effectiveModelId: string;
@@ -55,17 +71,26 @@ export function buildAcpModelOptions(
       (counts.get(candidate.legacyModelId) ?? 0) + 1,
     );
   }
-  const discriminatorCounts = new Map<string, number>();
+  const discriminators = new Set<string>();
 
   return candidates.map(({ model, effectiveModelId, legacyModelId }) => {
     const discriminator = [
       legacyModelId,
       model.label,
       model.envKey ?? null,
+      model.registryBaseUrl === undefined,
+      getRouteEndpointIdentity(model.registryBaseUrl ?? model.baseUrl),
     ] as const;
     const discriminatorKey = JSON.stringify(discriminator);
-    const occurrence = discriminatorCounts.get(discriminatorKey) ?? 0;
-    discriminatorCounts.set(discriminatorKey, occurrence + 1);
+    if (
+      counts.get(legacyModelId) !== 1 &&
+      discriminators.has(discriminatorKey)
+    ) {
+      throw new Error(
+        `ACP model routes for "${legacyModelId}" need distinct names, envKey values, or public endpoints.`,
+      );
+    }
+    discriminators.add(discriminatorKey);
 
     return {
       model,
@@ -73,8 +98,8 @@ export function buildAcpModelOptions(
       modelId:
         counts.get(legacyModelId) === 1
           ? legacyModelId
-          : `qwen-route:v1:${createHash('sha256')
-              .update(JSON.stringify([...discriminator, occurrence]))
+          : `${ACP_ROUTE_ID_PREFIX}${createHash('sha256')
+              .update(discriminatorKey)
               .digest('base64url')
               .slice(0, 16)}`,
     };
@@ -88,6 +113,7 @@ export function resolveAcpModelOption(
   modelId: string;
   authType: AuthType;
   baseUrl?: string;
+  registryBaseUrl?: string | null;
   isRuntime: boolean;
 } | null {
   const matched = buildAcpModelOptions(models).find(
@@ -100,6 +126,9 @@ export function resolveAcpModelOption(
     ...(matched.model.registryBaseUrl !== undefined
       ? { baseUrl: matched.model.registryBaseUrl }
       : {}),
+    ...(!matched.model.isRuntimeModel
+      ? { registryBaseUrl: matched.model.registryBaseUrl ?? null }
+      : {}),
     isRuntime: matched.model.isRuntimeModel === true,
   };
 }
@@ -108,27 +137,23 @@ export function getCurrentAcpModelId(
   options: readonly AcpModelOption[],
   modelId: string,
   authType?: AuthType,
-  baseUrl?: string,
+  registryBaseUrl?: string | null,
 ): string {
   if (!modelId || !authType) return modelId;
   const matching = options.filter(
     (option) =>
       option.effectiveModelId === modelId && option.model.authType === authType,
   );
-  const exact = matching.find(
-    (option) => option.model.registryBaseUrl === baseUrl,
-  );
-  if (exact) return exact.modelId;
   if (matching[0]?.model.isRuntimeModel) return matching[0].modelId;
-  if (baseUrl !== undefined) {
-    const implicit = matching.find(
-      (option) =>
-        option.model.registryBaseUrl === undefined &&
-        option.model.baseUrl === baseUrl,
+  if (registryBaseUrl !== undefined) {
+    const exact = matching.find(
+      (option) => (option.model.registryBaseUrl ?? null) === registryBaseUrl,
     );
-    return implicit?.modelId ?? modelId;
+    return exact?.modelId ?? modelId;
   }
-  return matching[0]?.modelId ?? formatAcpModelId(modelId, authType);
+  return matching.length === 1
+    ? matching[0]!.modelId
+    : formatAcpModelId(modelId, authType);
 }
 
 export function sanitizeProviderBaseUrl(baseUrl: string): string {

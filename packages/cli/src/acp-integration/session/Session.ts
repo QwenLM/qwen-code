@@ -191,6 +191,7 @@ import {
   type HistoryItemGoalStatus,
 } from '../../ui/types.js';
 import {
+  ACP_ROUTE_ID_PREFIX,
   buildAcpModelOptions,
   getCurrentAcpModelId,
   parseAcpModelOption,
@@ -4064,10 +4065,7 @@ export class Session implements SessionContext {
       rawModelId,
       this.config.getAllConfiguredModels(),
     );
-    if (
-      !resolvedRoute &&
-      /^qwen-route:v1:[A-Za-z0-9_-]{16}$/.test(rawModelId)
-    ) {
+    if (!resolvedRoute && rawModelId.startsWith(ACP_ROUTE_ID_PREFIX)) {
       throw RequestError.invalidParams(
         undefined,
         `Unknown or stale model route: "${rawModelId}"`,
@@ -4113,10 +4111,10 @@ export class Session implements SessionContext {
       activeRuntimeSnapshot?.id ?? effectiveModelId,
       activeRuntimeSnapshot?.authType ?? effectiveAuthType,
       activeRuntimeSnapshot
-        ? activeRuntimeSnapshot.baseUrl
+        ? undefined
         : resolvedRoute
-          ? resolvedRoute.baseUrl
-          : after?.baseUrl,
+          ? resolvedRoute.registryBaseUrl
+          : this.config.getCurrentModelRegistryBaseUrl?.(),
     );
 
     // Notify attached clients of an in-session model switch so a

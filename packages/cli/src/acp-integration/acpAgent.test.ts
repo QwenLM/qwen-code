@@ -650,19 +650,6 @@ vi.mock('./session/Session.js', () => ({
     availableSkills: [],
   }),
 }));
-vi.mock('../utils/acpModelUtils.js', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('../utils/acpModelUtils.js')>();
-  return {
-    ...actual,
-    formatAcpModelId: vi.fn(
-      (modelId: string, authType: string) => `${modelId}(${authType})`,
-    ),
-    parseAcpBaseModelId: vi.fn((modelId: string) =>
-      modelId.replace(/\([^)]+\)$/, ''),
-    ),
-  };
-});
 vi.mock('../utils/languageUtils.js', () => ({
   updateOutputLanguageFile: vi.fn(),
   writeOutputLanguageAndRegisterPath: vi.fn(
@@ -3644,6 +3631,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         model: 'shared-model',
         baseUrl: 'https://two.example/v1',
       }),
+      getCurrentModelRegistryBaseUrl: vi
+        .fn()
+        .mockReturnValue('https://two.example/v1'),
       getAllConfiguredModels: vi.fn().mockReturnValue([
         {
           id: 'shared-model',

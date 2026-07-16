@@ -216,7 +216,7 @@ export class ModelRegistry {
     const models = this.modelsByAuthType.get(authType);
     if (!models) return [];
 
-    return Array.from(models.entries()).map(([key, model]) => ({
+    return Array.from(models.values()).map((model) => ({
       id: model.id,
       label: model.name,
       description: model.description,
@@ -229,9 +229,9 @@ export class ModelRegistry {
       // always defined on `ResolvedModelConfig` — no fallback needed here.
       modalities: model.generationConfig.modalities,
       baseUrl: model.baseUrl,
-      ...(key === model.id
-        ? {}
-        : { registryBaseUrl: key.slice(model.id.length + 1) }),
+      ...(model.registryBaseUrl !== undefined
+        ? { registryBaseUrl: model.registryBaseUrl }
+        : {}),
       envKey: model.envKey,
       fastOnly: model.fastOnly,
       voiceOnly: model.voiceOnly,
@@ -247,13 +247,13 @@ export class ModelRegistry {
   getModel(
     authType: AuthType,
     modelId: string,
-    baseUrl?: string,
+    baseUrl?: string | null,
   ): ResolvedModelConfig | undefined {
     const models = this.modelsByAuthType.get(authType);
     if (!models) return undefined;
 
-    if (baseUrl) {
-      return models.get(modelRegistryKey(modelId, baseUrl));
+    if (baseUrl !== undefined) {
+      return models.get(modelRegistryKey(modelId, baseUrl ?? undefined));
     }
 
     // Try plain id key first (models registered without explicit baseUrl)
@@ -318,6 +318,7 @@ export class ModelRegistry {
       authType,
       name: config.name || config.id,
       baseUrl: config.baseUrl || this.getDefaultBaseUrl(authType),
+      ...(config.baseUrl ? { registryBaseUrl: config.baseUrl } : {}),
       generationConfig,
       capabilities: config.capabilities || {},
     };

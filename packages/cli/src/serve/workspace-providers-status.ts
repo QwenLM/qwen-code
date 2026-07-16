@@ -102,6 +102,13 @@ function buildWorkspaceProvidersStatus(
         : resolvedCliConfig.sources['baseUrl']
           ? resolvedCliConfig.baseUrl || undefined
           : undefined;
+    const currentRegistryBaseUrl =
+      modelCameFromSettings && currentAuth
+        ? settings.model?.baseUrl !== undefined
+          ? settings.model.baseUrl || null
+          : (modelsConfig.getResolvedModel(currentAuth, currentModelId)
+              ?.registryBaseUrl ?? null)
+        : undefined;
     const modelOptions = buildAcpModelOptions(
       modelsConfig.getAllConfiguredModels(),
     );
@@ -110,7 +117,7 @@ function buildWorkspaceProvidersStatus(
           modelOptions,
           currentModelId,
           currentAuth,
-          currentBaseUrl,
+          currentRegistryBaseUrl,
         )
       : undefined;
     const fastModelId =

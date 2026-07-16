@@ -7416,12 +7416,12 @@ describe('createAcpSessionBridge', () => {
       });
       const session = await bridge.spawnOrAttach({
         workspaceCwd: WS_A,
-        modelServiceId: 'qwen3-coder',
+        modelServiceId: 'qwen-route:v1:abcdefghijklmnop',
       });
       expect(session.attached).toBe(false);
       expect(setModelCalls).toHaveLength(1);
       expect(setModelCalls[0]?.sessionId).toBe(session.sessionId);
-      expect(setModelCalls[0]?.modelId).toBe('qwen3-coder');
+      expect(setModelCalls[0]?.modelId).toBe('qwen-route:v1:abcdefghijklmnop');
       const abort = new AbortController();
       const iter = bridge.subscribeEvents(session.sessionId, {
         signal: abort.signal,
@@ -7430,6 +7430,10 @@ describe('createAcpSessionBridge', () => {
       const it = iter[Symbol.asyncIterator]();
       const switched = await it.next();
       expect(switched.value?.type).toBe('model_switched');
+      expect(switched.value?.data).toEqual({
+        sessionId: session.sessionId,
+        modelId: 'qwen-route:v1:abcdefghijklmnop',
+      });
       const settingsChanged = await it.next();
       expect(settingsChanged.value?.type).toBe('settings_changed');
       expect(settingsChanged.value?.originatorClientId).toBe(session.clientId);

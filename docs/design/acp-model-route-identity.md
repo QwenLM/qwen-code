@@ -11,8 +11,8 @@ Core already treats `(authType, modelId, configured baseUrl)` as the registry id
 Build ACP model options from the existing configured-model list:
 
 - Keep `modelId(authType)` when it is unique. This preserves existing IDs for the normal case.
-- When multiple options would share that ID, replace each with a deterministic `qwen-route:v1:<digest>` selector derived from non-secret model metadata and its occurrence within otherwise identical entries.
-- Never include or hash `baseUrl` in the wire selector. Endpoint URLs may contain credentials, and an unkeyed digest would still allow offline guessing.
+- When multiple options would share that ID, replace each with a deterministic `qwen-route:v1:<digest>` selector derived from non-secret model metadata and the public endpoint identity (credentials, query, and fragment removed).
+- Reject routes that remain indistinguishable after sanitization instead of using array order, which could remap an old selector after configuration reordering.
 - Continue using `ModelInfo.name` and provider metadata for display. The route ID is an opaque machine selector.
 
 Core exposes the original optional registry `baseUrl` alongside the resolved display endpoint. The same option builder supplies ACP session models, config options, live provider status, and daemon workspace provider status so every client sees the same ID while the server retains the exact registry discriminator.

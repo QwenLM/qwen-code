@@ -4635,7 +4635,7 @@ class QwenAgent implements Agent {
             modelOptions,
             currentModelId,
             currentAuth,
-            config.getContentGeneratorConfig?.()?.baseUrl,
+            config.getCurrentModelRegistryBaseUrl?.(),
           )
         : undefined;
       const providers = new Map<string, ServeWorkspaceProviderStatus>();
@@ -9361,8 +9361,9 @@ class QwenAgent implements Agent {
       modelOptions,
       activeRuntimeSnapshot?.id ?? rawCurrentModelId,
       activeRuntimeSnapshot?.authType ?? currentAuthType,
-      activeRuntimeSnapshot?.baseUrl ??
-        config.getContentGeneratorConfig?.()?.baseUrl,
+      activeRuntimeSnapshot
+        ? undefined
+        : config.getCurrentModelRegistryBaseUrl?.(),
     );
 
     const mappedAvailableModels = modelOptions.map(({ model, modelId }) => ({
@@ -9406,8 +9407,9 @@ class QwenAgent implements Agent {
       modelOptions,
       activeRuntimeSnapshot?.id ?? rawCurrentModelId,
       activeRuntimeSnapshot?.authType ?? currentAuthType,
-      activeRuntimeSnapshot?.baseUrl ??
-        config.getContentGeneratorConfig?.()?.baseUrl,
+      activeRuntimeSnapshot
+        ? undefined
+        : config.getCurrentModelRegistryBaseUrl?.(),
     );
 
     const modeOptions = APPROVAL_MODES.map((mode) => ({
