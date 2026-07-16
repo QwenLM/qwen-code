@@ -142,9 +142,8 @@ Copy reuses `copyToClipboard()` (pbcopy / xclip → xsel / clip, falling back to
 
 ### Settings
 
-Add under `ui` in `settingsSchema.ts` (following the `vimMode` boolean pattern):
-
-- `ui.textSelection.enabled` (default `true`; effective only in VP mode).
+No separate setting is added. Selection is part of the virtualized-history
+viewport and is active whenever `ui.useTerminalBuffer` is enabled.
 
 ## Wide characters and visual text (PR 1)
 
@@ -223,7 +222,7 @@ PR 2 (follow-up) — cross-screen selection and semantic copy fidelity, as descr
 
 ## Rollout
 
-Ships behind `ui.textSelection.enabled` (default on in VP mode). Because the feature is VP-only and VP mode is itself opt-in (`ui.useTerminalBuffer` defaults off), the blast radius is limited to users who have already opted into VP mode. Holding Shift/Option while dragging remains the terminal-dependent native-selection fallback.
+The feature is VP-only, and VP mode is itself opt-in (`ui.useTerminalBuffer` defaults off), so the blast radius is limited to users who have already opted into VP mode. Holding Shift/Option while dragging remains the terminal-dependent native-selection fallback.
 
 ## Open questions
 

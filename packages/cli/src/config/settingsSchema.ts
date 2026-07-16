@@ -1035,30 +1035,8 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: false,
         description:
-          'Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled. Drag to select text in the viewport (double/triple click selects a word/line), copied on release; see ui.textSelection. To use the terminal’s own selection instead, hold Shift (or Option on macOS) while dragging.',
+          'Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled. Drag to select text in the viewport (double/triple click selects a word/line), copied on release. To use the terminal’s own selection instead, hold Shift (or Option on macOS) while dragging.',
         showInDialog: true,
-      },
-      textSelection: {
-        type: 'object',
-        label: 'Mouse Text Selection (Virtualized History)',
-        category: 'UI',
-        requiresRestart: false,
-        default: {},
-        description:
-          'Mouse text selection in the virtualized-history viewport: drag to select, double/triple click to select a word/line, and copy. Only applies when Virtualized History is enabled.',
-        showInDialog: false,
-        properties: {
-          enabled: {
-            type: 'boolean',
-            label: 'Enable Mouse Text Selection',
-            category: 'UI',
-            requiresRestart: false,
-            default: true,
-            description:
-              'Select text with the mouse in the virtualized-history viewport. Disable to turn off application-level selection while keeping other viewport mouse interactions.',
-            showInDialog: true,
-          },
-        },
       },
       showScrollbar: {
         type: 'boolean',

@@ -375,20 +375,9 @@
           "default": false
         },
         "useTerminalBuffer": {
-          "description": "Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled. Drag to select text in the viewport (double/triple click selects a word/line), copied on release; see ui.textSelection. To use the terminal’s own selection instead, hold Shift (or Option on macOS) while dragging.",
+          "description": "Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled. Drag to select text in the viewport (double/triple click selects a word/line), copied on release. To use the terminal’s own selection instead, hold Shift (or Option on macOS) while dragging.",
           "type": "boolean",
           "default": false
-        },
-        "textSelection": {
-          "description": "Mouse text selection in the virtualized-history viewport: drag to select, double/triple click to select a word/line, and copy. Only applies when Virtualized History is enabled.",
-          "type": "object",
-          "properties": {
-            "enabled": {
-              "description": "Select text with the mouse in the virtualized-history viewport. Disable to turn off application-level selection while keeping other viewport mouse interactions.",
-              "type": "boolean",
-              "default": true
-            }
-          }
         },
         "showScrollbar": {
           "description": "Show the auto-hiding scrollbar in the in-app scrollable viewport (Virtualized History). The bar appears while scrolling and fades out when idle. Disable to hide it entirely.",
