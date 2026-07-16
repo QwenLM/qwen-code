@@ -123,8 +123,10 @@ export class StreamingToolCallParser {
         // adopt the remapped slot while it has not yet been claimed by an id:
         // once it has one, the remap only exists to route later id-less
         // continuation chunks, so a brand-new id must not hijack that slot.
+        // The remap is deliberately left in place — the re-registration on the
+        // common path below keeps `index -> actualIndex` alive so subsequent
+        // id-less continuation chunks at this provider index still resolve here.
         actualIndex = this.pendingIndexRemaps.get(index)!;
-        this.pendingIndexRemaps.delete(index);
         this.idToIndexMap.set(id, actualIndex);
       } else {
         // New tool call ID
