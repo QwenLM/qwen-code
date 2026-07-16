@@ -3601,6 +3601,11 @@ export class GeminiChat {
     let hasFinishReason = false;
     const protocolTagDetector = new LeadingProtocolTagLeakDetector();
     let protocolTextWasSuppressed = false;
+    const currentUserTurn = this.history[this.history.length - 1];
+    const isToolResultContinuation =
+      currentUserTurn?.role === 'user' &&
+      currentUserTurn.parts?.some((part) => part.functionResponse) === true;
+    let deferredFinishReason: FinishReason | undefined;
     // Captured if the upstream stream throws mid-iteration (typical on weak
     // networks: SSE drops between `content_block_stop` of a tool_use and the
     // terminal `message_stop`). We still build / record / push a partial
@@ -3637,6 +3642,13 @@ export class GeminiChat {
           const content = candidate?.content;
           if (content?.parts) {
             content.parts = content.parts.flatMap((part) => {
+              if (
+                isToolResultContinuation &&
+                !part.thought &&
+                part.text?.trim() === '(empty content)'
+              ) {
+                return [];
+              }
               if (typeof part.text !== 'string' || part.thought) return [part];
               const text = protocolTagDetector.accept(part.text);
               if (text) return [{ ...part, text }];
@@ -3740,6 +3752,17 @@ export class GeminiChat {
           }
         }
 
+        if (isToolResultContinuation) {
+          // Do not let consumers commit Finished before post-stream validation
+          // can reject a semantically empty continuation.
+          for (const candidate of chunk.candidates ?? []) {
+            if (candidate.finishReason) {
+              deferredFinishReason ??= candidate.finishReason;
+              delete candidate.finishReason;
+            }
+          }
+        }
+
         if (!protocolTextWasSuppressed || !protocolTagDetector.blockingOutput) {
           yield chunk;
         }
@@ -3802,12 +3825,16 @@ export class GeminiChat {
     // 1. There's a tool call (tool calls can end without explicit finish reasons), OR
     // 2. There's a finish reason AND we have non-empty response text or thought text
     //
-    // Note: Thoughts-only responses are valid for models that use thinking modes.
+    // Thought-only responses remain valid for ordinary user turns. After a tool
+    // result, they do not advance the agent without text or another tool call.
     const hasAnyContent = contentText || thoughtText;
+    const lacksVisibleToolResultProgress =
+      isToolResultContinuation &&
+      (!contentText || contentText === '(empty content)');
     if (
       streamError === null &&
       !hasToolCall &&
-      (!hasFinishReason || !hasAnyContent)
+      (!hasFinishReason || !hasAnyContent || lacksVisibleToolResultProgress)
     ) {
       if (!hasFinishReason) {
         throw new InvalidStreamError(
@@ -3946,6 +3973,12 @@ export class GeminiChat {
         ...consolidatedHistoryParts,
       ],
     });
+    if (deferredFinishReason) {
+      yield {
+        candidates: [{ finishReason: deferredFinishReason }],
+        usageMetadata,
+      } as GenerateContentResponse;
+    }
   }
 
   /**
