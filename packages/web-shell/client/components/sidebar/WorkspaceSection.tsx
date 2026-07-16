@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
@@ -213,13 +214,20 @@ export function WorkspaceSection({
     searchQuery,
   ]);
 
+  // Log a poll failure only on the success→failure transition, not on every
+  // 60s/focus tick, so an unreachable workspace doesn't spam a long-lived tab.
+  const gitPollFailed = useRef(false);
   const loadGitStatus = useCallback(async () => {
     if (!onOpenGitDiff || !workspace.trusted) return;
     try {
       const status = await client.workspaceByCwd(workspace.cwd).workspaceGit();
+      gitPollFailed.current = false;
       setGitStatus(status);
     } catch (err) {
-      console.warn('[WorkspaceSection] git status poll failed:', err);
+      if (!gitPollFailed.current) {
+        console.warn('[WorkspaceSection] git status poll failed:', err);
+        gitPollFailed.current = true;
+      }
       setGitStatus(undefined);
     }
   }, [client, onOpenGitDiff, workspace.cwd, workspace.trusted]);

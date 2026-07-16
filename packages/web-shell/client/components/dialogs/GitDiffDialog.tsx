@@ -250,7 +250,9 @@ function DiffFileRow({
         className={styles.fileHeader}
         onClick={toggle}
         aria-expanded={open}
-        aria-label={t(open ? 'gitDiff.collapse' : 'gitDiff.expand')}
+        aria-label={t(open ? 'gitDiff.collapse' : 'gitDiff.expand', {
+          path: displayName,
+        })}
       >
         <span className={styles.fileStats}>
           {file.isBinary ? (

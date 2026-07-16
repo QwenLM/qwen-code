@@ -44,8 +44,8 @@ const EN: Messages = {
   'gitDiff.noDiff': 'No changes to display',
   'gitDiff.fileError': 'Failed to load this diff',
   'gitDiff.hidden': (v) => `${v?.count ?? 0} more file(s) not shown`,
-  'gitDiff.expand': 'Show file changes',
-  'gitDiff.collapse': 'Hide file changes',
+  'gitDiff.expand': (v) => `Show changes for ${v?.path ?? 'file'}`,
+  'gitDiff.collapse': (v) => `Hide changes for ${v?.path ?? 'file'}`,
   'workspace.paneLabel': (v) => `Workspace: ${v?.name ?? ''}`,
   'about.auth': 'Auth',
   'about.baseUrl': 'Base URL',
@@ -2075,8 +2075,8 @@ const ZH: Messages = {
   'gitDiff.noDiff': '无差异可显示',
   'gitDiff.fileError': '加载此差异失败',
   'gitDiff.hidden': (v) => `还有 ${v?.count ?? 0} 个文件未显示`,
-  'gitDiff.expand': '显示文件变更',
-  'gitDiff.collapse': '隐藏文件变更',
+  'gitDiff.expand': (v) => `显示 ${v?.path ?? '文件'} 的变更`,
+  'gitDiff.collapse': (v) => `隐藏 ${v?.path ?? '文件'} 的变更`,
   'workspace.paneLabel': (v) => `工作区：${v?.name ?? ''}`,
   // Tool display names (chat-stream badge labels). Keyed by `toolName.<wire>`;
   // a wire name with no entry here falls back to the English display name via

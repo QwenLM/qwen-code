@@ -102,9 +102,9 @@ export interface DaemonWorkspaceGitStatus {
 export interface DaemonWorkspaceGitDiffFile {
   /** Repo-root-relative path (render after sanitizing — git allows odd bytes). */
   path: string;
-  /** Lines added; `undefined` for binary files. */
+  /** Lines added (`0` for binary files). */
   added?: number;
-  /** Lines removed; `undefined` for binary files. */
+  /** Lines removed (`0` for binary files). */
   removed?: number;
   isBinary: boolean;
   isUntracked: boolean;

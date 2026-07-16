@@ -1222,6 +1222,11 @@ export function App({
   const [selectedWorkspaceGitStatus, setSelectedWorkspaceGitStatus] = useState<
     DaemonWorkspaceGitStatus | undefined
   >(undefined);
+  // The workspace the chip's status was last fetched for. On a workspace switch
+  // we clear the status immediately so the chip never shows the previous repo's
+  // branch/dirty counts while the new fetch is in flight; same-workspace
+  // re-runs (branch change, focus, poll) keep the live value to avoid flicker.
+  const gitStatusWorkspaceCwdRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     // Active workspace: the connected session's workspace, else the workspace
     // picked for the next session (locked / selected / primary).
@@ -1231,8 +1236,13 @@ export function App({
         selectedWorkspaceCwd ??
         workspaces.find((entry) => entry.primary)?.cwd);
     if (!activeWorkspaceCwd) {
+      gitStatusWorkspaceCwdRef.current = undefined;
       setSelectedWorkspaceGitStatus(undefined);
       return;
+    }
+    if (gitStatusWorkspaceCwdRef.current !== activeWorkspaceCwd) {
+      gitStatusWorkspaceCwdRef.current = activeWorkspaceCwd;
+      setSelectedWorkspaceGitStatus(undefined);
     }
     let cancelled = false;
     const fetchStatus = () => {

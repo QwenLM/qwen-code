@@ -5,6 +5,7 @@
  */
 
 import type { DaemonWorkspaceGitStatus } from '@qwen-code/sdk/daemon';
+import { CircleDotIcon, LayersIcon, TriangleAlertIcon } from 'lucide-react';
 import { useI18n } from '../i18n';
 import styles from './ChatEditor.module.css';
 import {
@@ -22,53 +23,6 @@ function GitBranchIcon() {
       <circle cx="6" cy="19" r="2.5" stroke="currentColor" strokeWidth="1.8" />
       <path
         d="M6 7.5v9M8.5 12h3.25A6.25 6.25 0 0 0 18 5.75"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
-
-function GitDetachedIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <circle cx="12" cy="12" r="8.5" stroke="currentColor" strokeWidth="1.8" />
-      <circle cx="12" cy="12" r="2.5" fill="currentColor" />
-      <path
-        d="M12 3.5v3M12 17.5v3"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
-
-function GitWarningIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path
-        d="M12 4.5 21 20H3L12 4.5Z"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M12 10v4M12 17h.01"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
-
-function GitStashIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path
-        d="M4 8h16M6 12h12M9 16h6"
         stroke="currentColor"
         strokeWidth="1.8"
         strokeLinecap="round"
@@ -171,7 +125,7 @@ export function GitBranchIndicator({
     <>
       <span className={styles.gitBranchIconWrap}>
         <span className={styles.gitBranchIcon}>
-          {s.detached ? <GitDetachedIcon /> : <GitBranchIcon />}
+          {s.detached ? <CircleDotIcon /> : <GitBranchIcon />}
         </span>
         {compact && tone && (
           <span
@@ -191,7 +145,7 @@ export function GitBranchIndicator({
           )}
           {s.conflicted > 0 && (
             <span className={styles.gitBranchConflicted}>
-              <GitWarningIcon />
+              <TriangleAlertIcon />
               {s.conflicted}
             </span>
           )}
@@ -204,7 +158,7 @@ export function GitBranchIndicator({
           )}
           {s.stashCount > 0 && (
             <span className={styles.gitBranchStash}>
-              <GitStashIcon />
+              <LayersIcon />
               {s.stashCount}
             </span>
           )}
@@ -248,7 +202,7 @@ export function GitBranchIndicator({
                   {phrase}
                 </div>
               ))
-            ) : status ? (
+            ) : status?.computedAt !== undefined ? (
               <div className={styles.gitBranchTooltipRow}>{t('git.clean')}</div>
             ) : null}
           </div>
