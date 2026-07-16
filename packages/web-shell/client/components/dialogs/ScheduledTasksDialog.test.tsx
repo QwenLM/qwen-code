@@ -964,6 +964,14 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     const wsSelect = findWorkspaceSelect();
     expect(wsSelect).toBeDefined();
     expect(wsSelect!.querySelectorAll('option')).toHaveLength(2);
+    // Options show the workspace basename only — no "(primary)" tag on the
+    // primary entry (the label this PR removed). Guards the visible dropdown
+    // text, which the count/value assertions above do not cover.
+    expect(
+      Array.from(wsSelect!.querySelectorAll('option')).map(
+        (o) => o.textContent,
+      ),
+    ).toEqual(['main', 'other']);
 
     // Choose the secondary workspace.
     act(() => {
