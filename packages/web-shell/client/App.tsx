@@ -2290,6 +2290,18 @@ export function App({
       // split, or dropping back to that chat, is exactly what it was before.
       if (!externalSplitControlled) {
         splitFoldedByShrinkRef.current = true;
+        // …except when the chat has no session of its own — the common case
+        // when the split was entered from the Session Overview or a `?split=a,b`
+        // link. A bare fold would then strand the user on an empty "new chat",
+        // so land on the split's first (leftmost) pane instead. Guarded on the
+        // *empty* chat so it never re-points a chat that already has a session
+        // (which would wipe its git branch / change the session+URL it drops
+        // back to). Best-effort: a load failure (e.g. a non-primary-workspace
+        // pane the single connection can't own) just leaves the empty chat.
+        const firstPane = splitSessionIdsRef.current[0];
+        if (firstPane && !currentSessionIdRef.current) {
+          void sessionActions.loadSession(firstPane).catch(() => undefined);
+        }
       }
     }
   }, [
@@ -2298,6 +2310,7 @@ export function App({
     mainView,
     notifyControlledSplitClose,
     externalSplitControlled,
+    sessionActions,
   ]);
   // Land focus on the composer after a shrink-driven split close so keyboard
   // users aren't dropped onto <body> — but not when the chat now shows an
