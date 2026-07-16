@@ -232,11 +232,19 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob.indexOf('EFF_WM="${EVAL_WM}"')).toBeLessThan(
       reviewScanJob.indexOf('N_FAILED_CHECKS='),
     );
+    // The else-branch floor is the behavioral change: fall back to the immutable
+    // CREATED_WM, never the mutable head commit date (PUSH_WM) that buried feedback.
+    expect(reviewScanJob).toContain('EFF_WM="${CREATED_WM}"');
     expect(reviewScanJob).toContain('echo "targets=[]" >> "${GITHUB_OUTPUT}"');
     expect(reviewScanJob).toContain('active checks in flight; skipping until');
     // Staleness bound must sit above legitimate check runtimes (review-address is
     // capped at 120m) so an active run is never aged out mid-flight.
     expect(reviewScanJob).toContain('PENDING_STALE_MIN=240');
+    // The staleness filter itself, not just the constant: a check only blocks if
+    // its start is newer than the cutoff (flipping the comparison would break it).
+    expect(reviewScanJob).toContain(
+      '.startedAt // .completedAt // .updatedAt // $cut',
+    );
     // Round is the max across markers so a terminal handoff marker is honored
     // regardless of its timestamp.
     expect(reviewScanJob).toContain('map(.round) | max // 0');
@@ -450,6 +458,9 @@ describe('qwen-autofix workflow', () => {
     expect(prepareBranchAndFeedbackStep).toContain(
       'gsub("[^A-Za-z0-9 _./()-]"; "") | .[0:80]',
     );
+    // Failed checks render the specific check name (falling back to workflow
+    // name), so a "Test" job failing on a non-test step is identifiable.
+    expect(prepareBranchAndFeedbackStep).toContain('.name // .workflowName');
     expect(prepareBranchAndFeedbackStep).not.toContain(
       '.detailsUrl // .targetUrl',
     );
@@ -1110,6 +1121,9 @@ describe('qwen-autofix workflow', () => {
     // must still post a handoff + marker so the loop never goes silent.
     expect(reviewAddressReportStep).toContain('POST_HANDOFF=true');
     expect(reviewAddressReportStep).toContain('"${JOB_STATUS:-}" != "success"');
+    // The env declaration must exist, else JOB_STATUS is always empty at runtime,
+    // the :- default fires, and "!= success" is always true → over-eager handoffs.
+    expect(reviewAddressReportStep).toContain("JOB_STATUS: '${{ job.status }}'");
     // ...but a published run (OUTCOME fixed/noop) must NOT post a handoff, even if
     // a later always() step fails the job — otherwise it contradicts the success.
     expect(reviewAddressReportStep).toContain('"${OUTCOME:-unknown}" != "fixed"');
