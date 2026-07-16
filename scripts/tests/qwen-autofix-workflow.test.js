@@ -957,14 +957,10 @@ describe('qwen-autofix workflow', () => {
       expect(step).toContain('npm run build');
       expect(step).toContain('npm run typecheck');
       expect(step).toContain('npm run lint');
-      // Mirror CI's settings-schema freshness gate deterministically: regenerate
-      // and fail if the committed artifact is dirty. Invisible to
+      // Mirror CI's settings-schema freshness gate via the generator's in-process
+      // --check (single source of truth, no disk write). Invisible to
       // build/typecheck/lint/vitest, so it must be asserted explicitly.
-      expect(step).toContain('npm run generate:settings-schema');
-      expect(step).toContain(
-        'packages/vscode-ide-companion/schemas/settings.schema.json',
-      );
-      expect(step).toContain('is out of date');
+      expect(step).toContain('npm run generate:settings-schema -- --check');
       expect(step).toContain(
         'No package changes detected; skipping package tests.',
       );
@@ -1143,16 +1139,25 @@ describe('qwen-autofix workflow', () => {
     expect(reviewAddressReportStep).toContain(
       'MARK_TS="${NEWEST:-${WATERMARK:-9999-12-31T23:59:59Z}}"',
     );
-    // A pre-prepare crash must NOT claim MAX_ROUNDS attempts were made.
+    // A pre-prepare crash must NOT claim MAX_ROUNDS attempts were made, and since
+    // the terminal marker makes the scan skip forever, the headline must state the
+    // real recovery (delete the marker), not promise a re-trigger the guard ignores.
     expect(reviewAddressReportStep).toContain('could not start evaluation');
+    expect(reviewAddressReportStep).toContain(
+      'delete this bot\'s terminal',
+    );
     // Truncate UTF-8 safely so a split multi-byte sequence can't corrupt the body,
     // and keep the `|| true` — iconv -c exits 1 when it discards a byte, which under
     // set -eo pipefail would abort the step and skip the marker (a silent stall).
     expect(reviewAddressReportStep).toContain(
       "iconv -f utf-8 -t utf-8 -c | sed 's/<!--[^>]*-->//g' || true",
     );
-    // Prefer the actionable failure.md over the generic handoff.md wrapper.
-    expect(reviewAddressReportStep).toContain('for f in failure.md handoff.md');
+    // Prefer failure.md, but also attach the agent's success outputs so a verify
+    // gate failing after an agent success (e.g. the schema gate) shows the real
+    // summary instead of a false "crashed or timed out".
+    expect(reviewAddressReportStep).toContain(
+      'for f in failure.md handoff.md address-summary.md no-action.md',
+    );
     expect(reviewAddressReportStep).toContain(
       'Could not address the latest feedback automatically',
     );

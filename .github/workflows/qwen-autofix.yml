@@ -783,18 +783,15 @@ jobs:
           npm run typecheck
           npm run lint
 
-          # Mirror CI's settings-schema freshness gate: regenerating must not
-          # change the committed artifact. Catches a settingsSchema.ts edit that
-          # forgot to regenerate settings.schema.json — invisible to
-          # build/typecheck/lint/vitest but a hard CI failure.
-          SCHEMA_FILE='packages/vscode-ide-companion/schemas/settings.schema.json'
-          npm run generate:settings-schema
-          if [[ -n "$(git status --porcelain "${SCHEMA_FILE}")" ]]; then
-            echo "❌ ${SCHEMA_FILE} is out of date. Run: npm run generate:settings-schema"
-            git --no-pager diff -- "${SCHEMA_FILE}" || true
+          # Mirror CI's settings-schema freshness gate via the generator's
+          # in-process --check (no disk write): fails if the committed
+          # settings.schema.json is stale — invisible to build/typecheck/lint/
+          # vitest but a hard CI failure. --check keeps this in lockstep with CI
+          # and the review-address gate (single source of truth in the generator).
+          npm run generate:settings-schema -- --check || {
             echo "outcome=failed" >> "${GITHUB_OUTPUT}"
             exit 1
-          fi
+          }
 
           # Run changed/related tests for the packages this fix touches.
           # --changed follows the import graph so transitive breakage is caught.
@@ -1476,18 +1473,14 @@ jobs:
           # no-op/unchanged return: on a stale-schema PR the agent can wrongly
           # write no-action.md, and without this the no-op path would report the
           # feedback as evaluated (acted=false) while CI stays red — the exact bug
-          # this PR fixes. So it runs on EVERY path. Uses the core dist already
-          # built in the install step; the generator reads settingsSchema.ts via
-          # tsx. Mirrors CI's "Check settings schema is up-to-date" step, which is
-          # invisible to build/typecheck/lint/vitest.
-          SCHEMA_FILE='packages/vscode-ide-companion/schemas/settings.schema.json'
-          npm run generate:settings-schema
-          if [[ -n "$(git status --porcelain "${SCHEMA_FILE}")" ]]; then
-            echo "❌ ${SCHEMA_FILE} is out of date. Run: npm run generate:settings-schema"
-            git --no-pager diff -- "${SCHEMA_FILE}" || true
+          # this PR fixes. So it runs on EVERY path. The generator's in-process
+          # --check (no disk write, so the no-op git-diff below is unaffected) uses
+          # the core dist already built in the install step and mirrors CI's "Check
+          # settings schema is up-to-date" step, invisible to build/typecheck/lint.
+          npm run generate:settings-schema -- --check || {
             echo "outcome=failed" >> "${GITHUB_OUTPUT}"
             exit 1
-          fi
+          }
 
           if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then
             # No new commit. That is only legitimate as a deliberate no-action.
@@ -1696,12 +1689,17 @@ jobs:
               echo "::error::CI_DEV_BOT_PAT authenticates as ${bot_actor}; expected ${AUTOFIX_BOT}."
               exit 1
             fi
-            # Prefer the agent's detailed failure.md over the generic handoff.md
-            # (run-agent.mjs writes a wrapper handoff.md whenever it wrote a
-            # failure.md; failure.md carries the actionable diagnosis a maintainer
-            # needs). Fall back to a generic notice only if it wrote neither.
+            # Attach the most actionable agent output. failure.md first (its
+            # diagnosis; run-agent.mjs wraps it in a generic handoff.md, so prefer
+            # failure.md). Then the agent's SUCCESS outputs: on the OUTCOME=failed
+            # path where the agent committed a fix but a post-agent verify gate then
+            # failed (most notably the schema-freshness gate), only
+            # address-summary.md/no-action.md exist and "Push and report" is
+            # skipped, so this handoff is their only route to the PR — otherwise the
+            # comment would wrongly say "crashed or timed out". Generic notice only
+            # if none exist.
             DETAIL_FILE=''
-            for f in failure.md handoff.md; do
+            for f in failure.md handoff.md address-summary.md no-action.md; do
               if [[ -s "${WORKDIR}/${f}" ]]; then DETAIL_FILE="${WORKDIR}/${f}"; break; fi
             done
             # If feedback was actually read (prepare ran), stamp its newest ts so
@@ -1722,10 +1720,14 @@ jobs:
               HEADLINE="🤖 Could not address the latest feedback automatically (round ${MARK_ROUND}/${MAX_ROUNDS}). A human should take over this PR."
             else
               # Crashed/timed out before reading the feedback: mark terminal so the
-              # scan skips, but say so plainly — do NOT imply MAX_ROUNDS attempts
-              # were made when zero rounds of evaluation actually happened.
+              # scan skips (it can't advance the watermark without a read), but say
+              # so plainly — do NOT imply MAX_ROUNDS attempts were made when zero
+              # rounds happened. Because the marker is terminal, the max-round guard
+              # skips this PR on EVERY future scan, including a forced dispatch, so
+              # the headline must state the real recovery (delete the marker) rather
+              # than promise a re-trigger that the guard would ignore.
               MARK_ROUND="${MAX_ROUNDS}"
-              HEADLINE="🤖 AutoFix could not start evaluation — it crashed or timed out before reading the feedback, so no fix was attempted. A human should take over (re-trigger if the failure looks transient)."
+              HEADLINE="🤖 AutoFix could not start evaluation — it crashed or timed out before reading the feedback, so no fix was attempted. This PR is now marked terminal and future scans (including forced dispatch) will skip it. To recover: delete this bot's terminal \`autofix-eval\` marker comment, then re-trigger if the failure looked transient."
             fi
             {
               echo "${HEADLINE}"
