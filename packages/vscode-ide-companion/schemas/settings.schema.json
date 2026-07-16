@@ -384,12 +384,7 @@
           "type": "object",
           "properties": {
             "enabled": {
-              "description": "Select text with the mouse in the virtualized-history viewport. Disable to leave the mouse to the terminal.",
-              "type": "boolean",
-              "default": true
-            },
-            "copyOnSelect": {
-              "description": "Copy the selection to the clipboard automatically when the mouse is released.",
+              "description": "Select text with the mouse in the virtualized-history viewport. Disable to turn off application-level selection while keeping other viewport mouse interactions.",
               "type": "boolean",
               "default": true
             }

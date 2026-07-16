@@ -1055,17 +1055,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: false,
             default: true,
             description:
-              'Select text with the mouse in the virtualized-history viewport. Disable to leave the mouse to the terminal.',
-            showInDialog: true,
-          },
-          copyOnSelect: {
-            type: 'boolean',
-            label: 'Copy on Select',
-            category: 'UI',
-            requiresRestart: false,
-            default: true,
-            description:
-              'Copy the selection to the clipboard automatically when the mouse is released.',
+              'Select text with the mouse in the virtualized-history viewport. Disable to turn off application-level selection while keeping other viewport mouse interactions.',
             showInDialog: true,
           },
         },

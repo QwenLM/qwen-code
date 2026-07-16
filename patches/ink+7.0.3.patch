@@ -167,7 +167,7 @@ index ef659f3..cbdb068 100644
 +        const { output, outputHeight, staticOutput, cells } = render(this.rootNode, this.isScreenReaderEnabled, selection);
 +        if (cells && this.frameController) {
 +            this.frameController.publishFrame({
-+                width: cells[0]?.length ?? 0,
++                width: cells.reduce((width, row) => Math.max(width, row.length), 0),
 +                height: cells.length,
 +                cells,
 +            });

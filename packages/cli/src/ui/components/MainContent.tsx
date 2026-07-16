@@ -148,8 +148,6 @@ export const MainContent = () => {
   const settings = useContext(SettingsContext);
   const textSelectionEnabled =
     settings?.merged.ui?.textSelection?.enabled ?? true;
-  const textSelectionCopyOnSelect =
-    settings?.merged.ui?.textSelection?.copyOnSelect ?? true;
 
   const { historyItemsWithSourceCopyOffsets, pendingStartSourceCopyOffsets } =
     useMemo(() => {
@@ -444,7 +442,6 @@ export const MainContent = () => {
         />
         <TextSelectionController
           isActive={!uiState.dialogsVisible && textSelectionEnabled}
-          copyOnSelect={textSelectionCopyOnSelect}
           getViewportRect={() => scrollRef.current?.getViewportRect() ?? null}
           getScrollState={() =>
             scrollRef.current?.getScrollState() ?? {

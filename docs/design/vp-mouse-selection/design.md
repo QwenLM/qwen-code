@@ -8,7 +8,7 @@ This document proposes an application-level text selection and copy system for V
 
 The feature is delivered in **two PRs** with a deliberately conservative first release:
 
-- **PR 1 (this branch, #6937)** — the design (this commit) followed by the Ink frame-buffer foundation and a **visible-region visual selection** MVP: drag-select within the currently visible viewport, word/line selection, copy-on-select, and manual copy. Copy returns the **visual cells** as shown on screen; it does not yet rejoin soft-wrapped lines or exclude gutters. Selection clears on scroll/resize/streaming.
+- **PR 1 (this branch, #6937)** — the design followed by the Ink frame-buffer foundation and a **visible-region visual selection** MVP: drag-select within the currently visible viewport, word/line selection, and copy-on-select. Copy returns the **visual cells** as shown on screen; it does not yet rejoin soft-wrapped lines or exclude gutters. Selection clears on scroll/resize/streaming.
 - **PR 2 (follow-up)** — completion: cross-screen selection (off-screen accumulation, edge auto-scroll, reverse drag) and **semantic copy fidelity** (soft-wrap rejoin, gutter/decoration exclusion), which require renderer-level semantic metadata rather than a raw grid.
 
 This split follows the "Simplicity First" principle: PR 1 solves the core problem (mouse select-and-copy of what's on screen) with a small, well-scoped Ink patch and no per-renderer text serialization; the deeper renderer semantic extension is isolated in PR 2 so it can be reviewed against its own cost.
@@ -21,11 +21,9 @@ The design was revised after an implementation-feasibility audit against the Ink
 
 - Mouse click-drag selects text within the currently visible viewport, with a visible highlight.
 - Double-click selects a visual word; triple-click selects a visual line.
-- Releasing the mouse copies the selection to the system clipboard (copy-on-select, on by default and configurable).
-- Keyboard: `Ctrl+Shift+C` copies; `Esc` clears the selection.
+- Releasing the mouse copies the selection to the system clipboard.
 - Copy delivers the visual cells as displayed, across local (pbcopy/xclip/xsel/clip), remote (OSC 52), and multiplexer (tmux/screen passthrough) environments, reusing existing clipboard infrastructure. Wide characters (CJK/emoji) and their spacer cells are handled; per-line trailing padding is trimmed.
 - Selection clears deterministically on any non-selection scroll, resize, or streaming/layout change.
-- An escape hatch returns the mouse to the terminal for users who prefer native selection.
 
 ### PR 2 — completion (follow-up)
 
@@ -140,31 +138,13 @@ Anchors are stored in **virtual-row space** so a selection stays pinned to conte
 
 ### Copy
 
-Copy reuses `copyToClipboard()` (pbcopy / xclip → xsel / clip, falling back to `writeOsc52()` for remote, wrapped for tmux/screen). One correction from the audit drives an API change: `writeOsc52()` **skips entirely and returns false** when the payload exceeds ~75 KB (`MAX_OSC52_BYTES`); it does not truncate, and `copyToClipboard(): Promise<void>` cannot report truncation. PR 1 changes the clipboard call to return a result and, when the only available channel is OSC 52 and the selection exceeds the cap, surfaces a **copy failure** ("selection too large to copy over remote channel") rather than reporting success. Local tools have no such cap. (UTF-8-safe truncation is possible but out of scope for v1.)
+Copy reuses `copyToClipboard()` (pbcopy / xclip → xsel / clip, falling back to `writeOsc52()` for remote, wrapped for tmux/screen). `writeOsc52()` skips entirely and returns false when the payload exceeds ~75 KB (`MAX_OSC52_BYTES`); it does not truncate. The selection controller records clipboard failures in the debug log. User-facing failure feedback and manual copy are follow-up work.
 
-`copyOnSelect` (default on) copies on release/multi-click and keeps the highlight. When off, copy is manual via keybinding.
-
-### Keybindings and key preemption
-
-Existing bindings constrain choices: `Ctrl+C` is `QUIT`, `Ctrl+V`/`Cmd+V` are `PASTE_CLIPBOARD_IMAGE`, and `Ctrl+S` is already `SHOW_MORE_LINES`. So:
-
-- Copy: `Ctrl+Shift+C` (primary reliable binding); `Cmd+C` on macOS as best-effort where the terminal does not intercept it for its own Edit>Copy.
-- Clear selection: `Esc` when a selection exists.
-
-`KeypressContext` broadcasts with no priority. Selection adds a lightweight preemption: `SelectionContext` exposes `hasSelection`; a high-priority handler ahead of the broadcast consumes copy/clear keys, and for any other key clears the selection first (then lets the key through), mirroring how native terminals drop a selection as you type.
-
-### Settings and escape hatch
+### Settings
 
 Add under `ui` in `settingsSchema.ts` (following the `vimMode` boolean pattern):
 
 - `ui.textSelection.enabled` (default `true`; effective only in VP mode).
-- `ui.textSelection.copyOnSelect` (default `true`).
-
-Retain a global escape hatch that fully disables the CLI's mouse ownership and hands the mouse back to the terminal for native selection/scrollback — covering patch defects, accessibility, and users who prefer native behavior. Default off under a screen reader.
-
-### Transient hints and "copied" feedback
-
-There is no general toast component. Following the existing `Footer` pattern (`ctrlCPressedOnce`), add a timed UIState field rendered in the footer: a "✓ copied N chars" confirmation after a successful copy (not written into history), and a drag hint pointing at Shift/Option native selection or the escape hatch when selection is disabled/unavailable.
 
 ## Wide characters and visual text (PR 1)
 
@@ -203,7 +183,7 @@ Per-renderer copy rules must be decided as product rules, not by auto-excluding 
 | Render loop               | Selection→state→render feedback                      | `setSelection` dedups and schedules exactly one repaint via Ink throttle        |
 | Scroll/frame offset drift | `frameAnchor` bottom-pin, non-zero `viewportRect.y`  | Corrected formula; reuse `layoutRowForEvent`; integration tests per scroll pos  |
 | Mouse arbitration         | Scrollbar/composer/footer press starts selection     | Hit-test viewport content region; fall through otherwise                        |
-| OSC 52 size cap           | Oversized remote payload silently "succeeds"         | Clipboard API returns a result; surface copy failure over remote-only cap       |
+| OSC 52 size cap           | Oversized remote payload is not copied               | Existing API rejects; selection controller writes the failure to the debug log  |
 | Ink patch maintenance     | Upgrades must re-apply; internal API drift           | Minimal patch; frame-shape guard test; pursue upstream                          |
 | Performance               | Large history + per-drag repaint                     | Highlight is one immutable transform; repaint bounded by Ink `maxFps` (~30)     |
 | Non-VP mode               | Enabling ownership would hijack native selection     | Strictly VP-gated                                                               |
@@ -216,8 +196,8 @@ PR 1 (this branch) — each milestone a separate, reviewable commit; no semantic
 - **M0 — Ink frame-buffer foundation (go/no-go).** The `FrameController` (getFrame/setSelection/subscribe), the pre-serialization immutable highlight transform, and throttled invalidation, with a minimal real consumer. This is the feasibility gate.
 - **M1 — Selection state machine + coordinate mapping (visible region).** press/drag/release → visual-cell range → `getSelectedText` → copy. No highlight yet.
 - **M2 — Highlight** via `setSelection`.
-- **M3 — Copy interactions.** copy-on-select + `Ctrl+Shift+C` + `Esc` + footer "copied" + key preemption + mouse arbitration + clipboard result/OSC 52 handling.
-- **M4 — Word/visual-line selection + settings + escape hatch + drag hint + docs.**
+- **M3 — Copy interaction.** Copy-on-select through the existing clipboard utility.
+- **M4 — Word/visual-line selection + settings + invalidation + docs.**
 
 PR 2 (follow-up) — cross-screen selection and semantic copy fidelity, as described above.
 
@@ -229,24 +209,23 @@ PR 2 (follow-up) — cross-screen selection and semantic copy fidelity, as descr
 - Coordinates are correct for short, full-screen, and overflow frames, and when other UI sits above/below the viewport.
 - Scrollbar, composer, and footer never start history selection.
 - Double/triple click and forward/backward drag are stable within the visible region.
-- Local clipboard, OSC 52 failure, and payload cap never falsely report "copied".
+- Clipboard failures are recorded in the debug log; no success message is shown.
 - Static mode and non-VP mouse behavior show no regression.
 - Repaint frequency respects Ink's default `maxFps` (~30, ~33 ms); the throttle is Ink's, not an app-side 16 ms timer.
 - Real terminal/tmux E2E covers drag-select, highlight, and clipboard payload.
 
 ## Testing strategy
 
-- **Unit** — coordinate mapping (wide chars, scroll offset, frame anchor); `selection-text.ts` visual extraction; key-preemption handler; mouse arbitration; clipboard result/OSC 52 boundary.
+- **Unit** — coordinate mapping (wide chars, scroll offset, frame anchor); `selection-text.ts` visual extraction; mouse arbitration.
 - **Snapshot** — `getSelectedText` (visual) over markdown, a diff, a table, and tool output, asserting extracted text matches the _visible_ text.
 - **Patch guard** — asserts the exposed frame's shape/dimensions so an Ink upgrade breaks loudly.
 - **E2E** — interactive tmux harness: drag-select across wrapped visual lines and multiple items, confirm clipboard/OSC 52 payload. Follows the `.qwen/e2e-tests/` workflow.
 
 ## Rollout
 
-Ships behind `ui.textSelection.enabled` (default on in VP mode) with a global escape hatch. Because the feature is VP-only and VP mode is itself opt-in (`ui.useTerminalBuffer` defaults off), the blast radius is limited to users who have already opted into VP mode.
+Ships behind `ui.textSelection.enabled` (default on in VP mode). Because the feature is VP-only and VP mode is itself opt-in (`ui.useTerminalBuffer` defaults off), the blast radius is limited to users who have already opted into VP mode. Holding Shift/Option while dragging remains the terminal-dependent native-selection fallback.
 
 ## Open questions
 
 - Is deepening the Ink patch to a frame controller acceptable to maintainers for PR 1, and the semantic-frame extension for PR 2? PR 2 is a renderer semantic change and should be evaluated at that risk level.
 - For PR 2's `selectable`/copy rules: confirm the per-renderer product decisions (diff `+/-`, table borders, tool-output glyphs) before implementation.
-- `Cmd+C` on macOS is frequently intercepted by the terminal's Edit menu; do we treat `Ctrl+Shift+C` as the sole guaranteed manual-copy binding and `Cmd+C` as best-effort?

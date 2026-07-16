@@ -5,7 +5,8 @@
  */
 
 import { useCallback, useEffect, useRef } from 'react';
-import { useStdout } from 'ink';
+import { useStdout, type ReadonlyFrame } from 'ink';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { useMouseEvents } from '../hooks/useMouseEvents.js';
 import type { MouseEvent } from '../utils/mouse.js';
 import { copyToClipboard } from '../utils/commandUtils.js';
@@ -26,11 +27,35 @@ interface ScrollState {
   innerHeight: number;
 }
 
+const sameFrameContent = (
+  previous: ReadonlyFrame | null,
+  current: ReadonlyFrame,
+): boolean => {
+  if (
+    !previous ||
+    previous.width !== current.width ||
+    previous.height !== current.height
+  ) {
+    return false;
+  }
+  return previous.cells.every((row, y) => {
+    const currentRow = current.cells[y];
+    return (
+      currentRow?.length === row.length &&
+      row.every((cell, x) => {
+        const currentCell = currentRow[x];
+        return (
+          currentCell?.value === cell.value &&
+          currentCell.fullWidth === cell.fullWidth
+        );
+      })
+    );
+  });
+};
+
 export interface TextSelectionControllerProps {
   /** Selection is only handled while active (VP mode, no dialog, focused). */
   isActive: boolean;
-  /** Copy the selection to the clipboard on release (iTerm2-style). */
-  copyOnSelect: boolean;
   /** Reads from the history viewport; called at event time (may be null early). */
   getViewportRect: () => ViewportRect | null;
   getScrollState: () => ScrollState;
@@ -39,6 +64,7 @@ export interface TextSelectionControllerProps {
 
 /** Max gap between clicks (ms) to count as a double/triple click. */
 const MULTI_CLICK_MS = 400;
+const debugLogger = createDebugLogger('TEXT_SELECTION');
 
 interface ClickRecord {
   x: number;
@@ -61,8 +87,9 @@ export function TextSelectionController(
   const { stdout } = useStdout();
   const selectionRef = useRef(new SelectionState());
   const dragScrollTopRef = useRef<number | null>(null);
+  const baselineScrollTopRef = useRef<number>(0);
   const baselineScrollHeightRef = useRef<number>(0);
-  const baselineFrameHeightRef = useRef<number>(0);
+  const baselineFrameRef = useRef<ReadonlyFrame | null>(null);
   const lastClickRef = useRef<ClickRecord | null>(null);
   const bufferRef = useRef<ScreenBuffer | undefined>(undefined);
   const propsRef = useRef(props);
@@ -95,22 +122,20 @@ export function TextSelectionController(
   }, [getBuffer]);
 
   const recordBaseline = useCallback(() => {
-    baselineScrollHeightRef.current =
-      propsRef.current.getScrollState().scrollHeight;
-    baselineFrameHeightRef.current = getBuffer()?.dimensions.height ?? 0;
+    const scrollState = propsRef.current.getScrollState();
+    baselineScrollTopRef.current = scrollState.scrollTop;
+    baselineScrollHeightRef.current = scrollState.scrollHeight;
+    baselineFrameRef.current = getBuffer()?.frame ?? null;
   }, [getBuffer]);
 
-  const copyIfEnabled = useCallback(() => {
-    if (!propsRef.current.copyOnSelect) {
-      return;
-    }
+  const copySelection = useCallback(() => {
     const normalized = selectionRef.current.normalized();
     const text = normalized
       ? getSelectedText(getBuffer()?.frame ?? null, normalized)
       : '';
     if (text) {
-      void copyToClipboard(text).catch(() => {
-        // Copy-failure feedback is a follow-up.
+      void copyToClipboard(text).catch((error: unknown) => {
+        debugLogger.warn('Failed to copy selected text:', error);
       });
     }
   }, [getBuffer]);
@@ -186,7 +211,7 @@ export function TextSelectionController(
             selection.selectSpan(span, count === 2 ? 'word' : 'line');
             recordBaseline();
             applyHighlight();
-            copyIfEnabled();
+            copySelection();
             return;
           }
         }
@@ -230,14 +255,14 @@ export function TextSelectionController(
           return;
         }
         applyHighlight();
-        copyIfEnabled();
+        copySelection();
         return;
       }
     },
     [
       clearSelection,
       applyHighlight,
-      copyIfEnabled,
+      copySelection,
       recordBaseline,
       mapEvent,
       getBuffer,
@@ -254,21 +279,22 @@ export function TextSelectionController(
   // A resize reflows content, which changes the frame/scroll height, so the
   // frame subscription already covers it (no extra stdout 'resize' listener,
   // which would trip the max-listeners warning). Our own highlight renders keep
-  // both heights unchanged, so this does not feed back into a render loop.
+  // the frame's characters and dimensions unchanged, so this does not feed back
+  // into a render loop.
   useEffect(() => {
     const buffer = getBuffer();
     if (!buffer) {
       return;
     }
-    return buffer.subscribe(() => {
+    return buffer.subscribe((frame) => {
       if (selectionRef.current.isEmpty) {
         return;
       }
-      const scrollHeight = propsRef.current.getScrollState().scrollHeight;
-      const frameHeight = buffer.frame?.height ?? 0;
+      const { scrollTop, scrollHeight } = propsRef.current.getScrollState();
       if (
+        scrollTop !== baselineScrollTopRef.current ||
         scrollHeight !== baselineScrollHeightRef.current ||
-        frameHeight !== baselineFrameHeightRef.current
+        !sameFrameContent(baselineFrameRef.current, frame)
       ) {
         clearSelection();
       }
