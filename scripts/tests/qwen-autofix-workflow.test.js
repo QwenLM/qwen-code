@@ -253,6 +253,9 @@ describe('qwen-autofix workflow', () => {
     // createdAt, or an empty floor if the metadata query failed.
     expect(reviewScanJob).not.toContain('commit.committer.date');
     expect(reviewScanJob).toContain('.createdAt // ""');
+    // A failed metadata fetch (empty branch) must skip the candidate, not fall
+    // through to an address job that fails on `git checkout -B "" origin/`.
+    expect(reviewScanJob).toContain('could not fetch PR metadata');
   });
 
   it('falls back to existing issue backlog only when review has no target', () => {
@@ -1138,7 +1141,7 @@ describe('qwen-autofix workflow', () => {
     // WATERMARK), or the scan's `ts=([^ ]+)` regex would not match the terminal
     // marker and the PR would be re-handed-off every cycle.
     expect(reviewAddressReportStep).toContain(
-      'MARK_TS="${NEWEST:-${WATERMARK:-unknown}}"',
+      'MARK_TS="${NEWEST:-${WATERMARK:-9999-12-31T23:59:59Z}}"',
     );
     // A pre-prepare crash must NOT claim MAX_ROUNDS attempts were made.
     expect(reviewAddressReportStep).toContain('could not start evaluation');
@@ -1204,6 +1207,9 @@ describe('qwen-autofix workflow', () => {
     expect(runPostHandoff({ ...base, OUTCOME: 'failed', JOB_STATUS: 'failure' })).toBe('true');
     expect(runPostHandoff({ ...base, OUTCOME: '', JOB_STATUS: 'failure' })).toBe('true');
     expect(runPostHandoff({ ...base, OUTCOME: '', JOB_STATUS: 'cancelled' })).toBe('true');
+    // Empty OUTCOME with a *successful* job — documents that no handoff is posted
+    // (verify runs always(), so in practice OUTCOME is set on a successful job).
+    expect(runPostHandoff({ ...base, OUTCOME: '', JOB_STATUS: 'success' })).toBe('false');
 
     // Terminal-round transition: feedback read (NEWEST set) → normal increment;
     // feedback never read (empty) → MAX_ROUNDS so the scan skips instead of

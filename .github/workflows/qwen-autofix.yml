@@ -993,6 +993,14 @@ jobs:
               "${WORKDIR}/bot-prs.json")"
           fi
 
+          # Pending-check staleness bound (invariant across candidate PRs, computed
+          # once): ignore a check stuck far past any legitimate runtime. The bound
+          # must sit ABOVE real check durations here — review-pr can take ~50m and
+          # review-address is capped at 120m — so an active run keeps blocking and
+          # is never aged out mid-flight (which would enqueue the PR against a live
+          # check and double-process the feedback).
+          PENDING_STALE_MIN=240
+          PENDING_CUTOFF="$(date -u -d "${PENDING_STALE_MIN} minutes ago" +%Y-%m-%dT%H:%M:%SZ)"
           TARGETS='[]'
           for PR in ${CANDIDATES}; do
             # One PR fetch for the branch name, check rollup, and creation time (the
@@ -1000,6 +1008,15 @@ jobs:
             PR_META="$(gh pr view "${PR}" --repo "${REPO}" \
               --json headRefName,statusCheckRollup,createdAt 2> /dev/null || echo '{}')"
             BRANCH="$(jq -r '.headRefName // ""' <<< "${PR_META}")"
+            if [[ -z "${BRANCH}" ]]; then
+              # Metadata fetch failed (transient API error / rate limit). Skip rather
+              # than fall through with an empty branch, which would make the address
+              # job fail at `git checkout -B "" origin/` and post a misleading "could
+              # not start evaluation" handoff. Retried on the next scan. (This also
+              # means CREATED_WM below is only reached with a populated PR_META.)
+              echo "⚠️ #${PR}: could not fetch PR metadata (API error); skipping until next scan"
+              continue
+            fi
             # Extract issue number: autofix/issue-<N> → N; otherwise use PR number.
             if [[ "${BRANCH}" == "${BRANCH_PREFIX}"* ]]; then
               ISSUE="${BRANCH#"${BRANCH_PREFIX}"}"
@@ -1007,17 +1024,9 @@ jobs:
               ISSUE="${PR}"
             fi
             CHECKS_JSON="$(jq -c '.statusCheckRollup // []' <<< "${PR_META}")"
-            # A check that never reports back would otherwise skip this PR forever,
-            # so ignore ones stuck far past any legitimate runtime. The bound must
-            # sit ABOVE real check durations in this repo — review-pr can take ~50m
-            # and review-address is capped at 120m — so an active run keeps
-            # blocking and is never aged out mid-flight (which would enqueue the PR
-            # against a live check and double-process the feedback). startedAt is
-            # the only staleness clock: a check blocks only if it started within
-            # the bound; one with no startedAt (queued, not yet running) is not
-            # blocking (the next scan re-checks once it starts).
-            PENDING_STALE_MIN=240
-            PENDING_CUTOFF="$(date -u -d "${PENDING_STALE_MIN} minutes ago" +%Y-%m-%dT%H:%M:%SZ)"
+            # startedAt is the only staleness clock: a check blocks only if it
+            # started within the bound; one with no startedAt (queued, not yet
+            # running) is not blocking (the next scan re-checks once it starts).
             HAS_PENDING_CHECKS="$(jq -r --arg cut "${PENDING_CUTOFF}" '
               [ .[]
                 | select((.status // .state // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED"))
@@ -1043,6 +1052,11 @@ jobs:
             # Eval markers the bot left after a previous evaluation carry the
             # newest feedback timestamp it already considered, plus the round.
             # Only our own comments are trusted, so a spoofed marker is ignored.
+            # NOTE: this regex is POSITIONAL — group .[0]=ts, .[2]=round — and must
+            # match the marker string emitted at every write site verbatim (search
+            # `autofix-eval ts=`: the push/report success, noop, and handoff steps).
+            # Inserting or reordering a field here or at any write site silently
+            # corrupts round tracking; keep the `ts= acted= round=` order in lockstep.
             MARKERS="$(jq -c --arg ab "${AUTOFIX_BOT}" '
               [ .[] | select((.user.login // "") == $ab) | (.body // "")
                 | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+) -->") ] | .[]
@@ -1696,10 +1710,13 @@ jobs:
             # watermark cannot advance — mark the round terminal (MAX_ROUNDS) so the
             # scan's max-round guard skips this PR instead of re-handing-off every
             # tick, without pretending the unread feedback was evaluated. The final
-            # "unknown" fallback guards a cascading API failure that left WATERMARK
-            # empty too: an empty ts= would not match the scan's `ts=([^ ]+)` regex,
-            # so the terminal marker would be ignored and the PR re-handed-off.
-            MARK_TS="${NEWEST:-${WATERMARK:-unknown}}"
+            # sentinel guards a cascading API failure that left WATERMARK empty too:
+            # an empty ts= would not match the scan's `ts=([^ ]+)` regex, so the
+            # terminal marker would be ignored and the PR re-handed-off. A far-future
+            # ISO-8601 date is used (not a bare word) so it is both non-empty AND
+            # sorts above any real timestamp in EVAL_WM's max, belt-and-suspenders
+            # with the terminal round.
+            MARK_TS="${NEWEST:-${WATERMARK:-9999-12-31T23:59:59Z}}"
             if [[ -n "${NEWEST:-}" ]]; then
               MARK_ROUND="$(( ROUND + 1 ))"
               HEADLINE="🤖 Could not address the latest feedback automatically (round ${MARK_ROUND}/${MAX_ROUNDS}). A human should take over this PR."
