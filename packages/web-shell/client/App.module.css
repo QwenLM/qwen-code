@@ -8,6 +8,13 @@
   --font-sans:
     -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   --radius: 6px;
+  /* Theme-independent session/workspace accent palette — single source of truth
+     for the sidebar group dots, overview badges, and split-pane workspace
+     accents. Kept here (not per-theme) since the values don't vary by theme. */
+  --accent-red: #ff5a5f;
+  --accent-orange: #ff8a2a;
+  --accent-yellow: #f6c431;
+  --accent-green: #69c987;
   position: relative;
   display: flex;
   flex-direction: column;

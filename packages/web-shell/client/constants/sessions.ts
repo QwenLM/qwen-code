@@ -11,3 +11,4 @@
  */
 export const SESSION_LIST_PAGE_SIZE = 1000;
 export const SESSION_ORGANIZATION_FEATURE = 'session_organization';
+export const WEB_SHELL_SESSION_SOURCE_TYPE = 'default';

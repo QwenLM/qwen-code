@@ -5,6 +5,8 @@ import { createRoot } from 'react-dom/client';
 import { describe, expect, it, vi } from 'vitest';
 import { getTranslator } from '../i18n';
 import { WorkspaceIndicator } from './WorkspaceIndicator';
+import styles from './ChatEditor.module.css';
+import accentStyles from './WorkspaceAccent.module.css';
 
 // Radix Tooltip only mounts its content while open, and opens on a mouse
 // `pointermove` over the trigger after `delayDuration`. jsdom has no
@@ -95,6 +97,90 @@ describe('WorkspaceIndicator', () => {
     act(() => root.unmount());
     container.remove();
     vi.useRealTimers();
+  });
+
+  it('tints the chip with the workspace accent so it stays distinct when compact', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <WorkspaceIndicator
+          name="api"
+          title="/work/api"
+          ariaLabel="Workspace: api"
+          color="blue"
+          compact
+        />,
+      );
+    });
+
+    const chip = container.querySelector<HTMLElement>(
+      '[data-web-shell-workspace]',
+    );
+    if (!chip) throw new Error('workspace chip was not rendered');
+    // The accent (color-name class + the accented modifier) rides on the chip
+    // even in compact mode, where the name is hidden — so the icon-only chip is
+    // still distinguishable per workspace instead of a generic folder. Assert on
+    // the imported class names (not string literals) so a CSS-module naming
+    // change can't silently make these substring checks meaningless.
+    expect(chip.className).toContain(styles.workspaceChipCompact);
+    expect(chip.className).toContain(accentStyles.blue);
+    expect(chip.className).toContain(styles.workspaceChipAccented);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('applies the accent in expanded mode too, not only when compact', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <WorkspaceIndicator
+          name="infra"
+          title="/work/infra"
+          ariaLabel="Workspace: infra"
+          color="purple"
+        />,
+      );
+    });
+
+    const chip = container.querySelector<HTMLElement>(
+      '[data-web-shell-workspace]',
+    );
+    if (!chip) throw new Error('workspace chip was not rendered');
+    // Guards against a refactor that accidentally gates the accent on `compact`:
+    // the accent classes must be present, and the compact class absent.
+    expect(chip.className).toContain(accentStyles.purple);
+    expect(chip.className).toContain(styles.workspaceChipAccented);
+    expect(chip.className).not.toContain(styles.workspaceChipCompact);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('adds no accent classes when no color is given', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <WorkspaceIndicator name="api" title="/work/api" ariaLabel="ws" />,
+      );
+    });
+
+    const chip = container.querySelector<HTMLElement>(
+      '[data-web-shell-workspace]',
+    );
+    expect(chip?.className).not.toContain(styles.workspaceChipAccented);
+
+    act(() => root.unmount());
+    container.remove();
   });
 
   it('localizes the accessible workspace label', () => {

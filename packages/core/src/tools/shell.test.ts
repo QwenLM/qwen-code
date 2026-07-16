@@ -2608,6 +2608,123 @@ describe('ShellTool', () => {
       });
     });
 
+    it('reports a foreground non-zero exit as a tool error', async () => {
+      const invocation = shellTool.build({
+        command: 'failing-command',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: 'failed output',
+        exitCode: 3,
+        error: null,
+      });
+
+      const result = await promise;
+
+      expect(result.returnDisplay).toContain('failed output');
+      expect(result.error).toEqual({
+        message: expect.stringContaining('Exit Code: 3'),
+        type: ToolErrorType.SHELL_EXECUTE_ERROR,
+      });
+      expect(result.error?.message).toContain('failed output');
+    });
+
+    it.each([
+      'grep pattern file',
+      'rg pattern file',
+      'diff before after',
+      'test -f missing',
+      '[ -f missing ]',
+      '[[ -f missing ]]',
+      '"C:\\\\tools\\\\grep.exe" pattern file',
+    ])('does not report exit 1 from %s as a tool error', async (command) => {
+      const invocation = shellTool.build({
+        command,
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: 'negative result',
+        exitCode: 1,
+        error: null,
+      });
+
+      const result = await promise;
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('Exit Code: 1');
+    });
+
+    it('does not report exit 1 from a pipeline ending in grep as a tool error', async () => {
+      const invocation = shellTool.build({
+        command: 'ps aux | grep missing-process',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: '',
+        exitCode: 1,
+        error: null,
+      });
+
+      const result = await promise;
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('Exit Code: 1');
+    });
+
+    it('reports exit 1 from find as a tool error', async () => {
+      const invocation = shellTool.build({
+        command: 'find missing-directory',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: 'find: missing-directory: No such file or directory',
+        exitCode: 1,
+        error: null,
+      });
+
+      const result = await promise;
+
+      expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
+    });
+
+    it('does not exempt exit 1 from a mixed compound command', async () => {
+      const invocation = shellTool.build({
+        command: 'false && ps aux | grep pattern',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: '',
+        exitCode: 1,
+        error: null,
+      });
+
+      const result = await promise;
+
+      expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
+    });
+
+    it('reports exit 2 from an allowlisted command as a tool error', async () => {
+      const invocation = shellTool.build({
+        command: 'grep pattern file',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: 'grep failed',
+        exitCode: 2,
+        error: null,
+      });
+
+      const result = await promise;
+
+      expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
+    });
+
     describe('long-running foreground hint', () => {
       // Auto-bg advisory. Threshold = effectiveTimeout / 2 — for the
       // default 120s timeout that's 60_000ms, which the tests below

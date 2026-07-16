@@ -990,6 +990,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     sessionId: string,
     state: 'active' | 'archived' = 'active',
     parentSessionId?: string,
+    sourceType?: string,
+    sourceId?: string,
   ): Promise<void> {
     const chatsDir = path.join(
       new Storage('/ws').getProjectDir(),
@@ -1021,6 +1023,23 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           type: 'system',
           subtype: 'parent_session',
           systemPayload: { parentSessionId },
+          cwd: '/ws',
+        }),
+      );
+    }
+    if (sourceType !== undefined) {
+      lines.push(
+        JSON.stringify({
+          uuid: `${sessionId}-source-1`,
+          parentUuid: `${sessionId}-user-1`,
+          sessionId,
+          timestamp: '2026-06-30T00:00:00.000Z',
+          type: 'system',
+          subtype: 'session_source',
+          systemPayload: {
+            sourceType,
+            ...(sourceId !== undefined ? { sourceId } : {}),
+          },
           cwd: '/ws',
         }),
       );
@@ -6671,6 +6690,50 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
             sessions: [{ sessionId, color: 'purple', groupId: null }],
           },
         });
+        reader.close();
+      });
+    });
+
+    it('session/list organized default source includes legacy sessions', async () => {
+      await withRuntimeDir(async () => {
+        const legacyId = '550e8400-e29b-41d4-a716-446655440014';
+        const defaultId = '550e8400-e29b-41d4-a716-446655440015';
+        const scheduledId = '550e8400-e29b-41d4-a716-446655440016';
+        await writeStoredSession(legacyId);
+        await writeStoredSession(defaultId, 'active', undefined, 'default');
+        await writeStoredSession(
+          scheduledId,
+          'active',
+          undefined,
+          'scheduled_task',
+          'task-1',
+        );
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        const reader = frameReader(await streamRes);
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 87,
+          method: 'session/list',
+          params: {
+            workspaceCwd: '/ws',
+            view: 'organized',
+            group: 'all',
+            sourceType: 'default',
+            _meta: { size: 20 },
+          },
+        });
+        const frame = (await reader.next()) as {
+          result: { sessions: Array<{ sessionId: string }> };
+        };
+        expect(
+          frame.result.sessions.map((session) => session.sessionId),
+        ).toEqual(expect.arrayContaining([legacyId, defaultId]));
+        expect(
+          frame.result.sessions.map((session) => session.sessionId),
+        ).not.toContain(scheduledId);
         reader.close();
       });
     });

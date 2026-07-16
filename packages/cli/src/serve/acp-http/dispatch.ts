@@ -1348,11 +1348,6 @@ export class AcpDispatcher {
           if ('error' in parsedSource) {
             throw new AcpParamError(parsedSource.error);
           }
-          if (parsedSource.sourceType !== undefined && view === 'organized') {
-            throw new AcpParamError(
-              '`sourceType` is not supported with `view` "organized"',
-            );
-          }
           const result = await listWorkspaceSessionsForResponse(
             this.bridge,
             workspaceCwd,

@@ -15,6 +15,7 @@ const {
   workspaceActions,
   active,
   archived,
+  useSessions,
   listWorkspaceSessions,
   archiveSessionsData,
   unarchiveSessionsData,
@@ -42,6 +43,11 @@ const {
     notFound: [],
     errors: [],
   });
+  const active = makeSessions();
+  const archived = makeSessions();
+  const useSessions = vi.fn((options?: { archiveState?: string }) =>
+    options?.archiveState === 'archived' ? archived : active,
+  );
   return {
     connection: {
       status: 'connected',
@@ -78,8 +84,9 @@ const {
       removeWorkspace: vi.fn(),
       listSessionGroups: vi.fn(),
     },
-    active: makeSessions(),
-    archived: makeSessions(),
+    active,
+    archived,
+    useSessions,
     listWorkspaceSessions,
     archiveSessionsData,
     unarchiveSessionsData,
@@ -91,8 +98,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useActions: () => ({ renameSession: vi.fn() }),
   useWorkspace: () => workspace,
   useWorkspaceActions: () => workspaceActions,
-  useSessions: (options?: { archiveState?: string }) =>
-    options?.archiveState === 'archived' ? archived : active,
+  useSessions,
 }));
 
 const { I18nProvider } = await import('../../i18n');
@@ -318,6 +324,7 @@ beforeEach(() => {
   active.reload.mockResolvedValue(undefined);
   archived.reload.mockReset();
   archived.reload.mockResolvedValue(undefined);
+  useSessions.mockClear();
   active.sessions.length = 0;
   archived.sessions.length = 0;
 });
@@ -401,6 +408,16 @@ describe('WebShellSidebar workspace removal', () => {
 
     expect(container.textContent).toContain('Secondary archived');
     expect(container.textContent).not.toContain('Primary archived');
+    expect(
+      useSessions.mock.calls.every(
+        ([options]) => !Object.hasOwn(options ?? {}, 'sourceType'),
+      ),
+    ).toBe(true);
+    expect(
+      listSecondarySessions.mock.calls.every(
+        ([options]) => !Object.hasOwn(options ?? {}, 'sourceType'),
+      ),
+    ).toBe(true);
   });
 
   it('shows only the locked workspace without registration controls', () => {
