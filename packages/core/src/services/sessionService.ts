@@ -46,6 +46,7 @@ import {
   type RebuiltSessionArtifactSnapshot,
 } from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
+import { SessionTranscriptTooLargeError } from './session-transcript-reader.js';
 
 const debugLogger = createDebugLogger('SESSION');
 
@@ -90,6 +91,10 @@ export interface SessionListItem {
    * any. Read from the transcript's `parent_session` record. Absent for a
    * top-level session. */
   parentSessionId?: string;
+  /** Immutable creator attribution read from `session_source`. */
+  sourceType?: string;
+  /** Optional source-specific identifier paired with `sourceType`. */
+  sourceId?: string;
   /** True when the item was read from the archive directory. */
   isArchived?: boolean;
 }
@@ -408,6 +413,15 @@ export class SessionService {
    * undefined rather than throwing — a missing link must never fail a restore.
    */
   async readParentSessionId(sessionId: string): Promise<string | undefined> {
+    return (await this.readCreationMetadata(sessionId)).parentSessionId;
+  }
+
+  /** Reads immutable creation metadata for an active or archived session. */
+  async readCreationMetadata(sessionId: string): Promise<{
+    parentSessionId?: string;
+    sourceType?: string;
+    sourceId?: string;
+  }> {
     for (const state of ['active', 'archived'] as const) {
       const filePath = this.getSessionFilePath(sessionId, state);
       try {
@@ -424,14 +438,15 @@ export class SessionService {
         ) {
           continue;
         }
-        const parent = this.extractParentSessionIdFromRecords(records);
-        if (parent) return parent;
+        return this.extractCreationMetadataFromRecords(records);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
-        this.warn(`readParentSessionId: failed to read ${sessionId}: ${error}`);
+        this.warn(
+          `readCreationMetadata: failed to read ${sessionId}: ${error}`,
+        );
       }
     }
-    return undefined;
+    return {};
   }
 
   async getSessionLocation(sessionId: string): Promise<SessionLocation> {
@@ -599,20 +614,45 @@ export class SessionService {
    * within that window. No extra file open, unlike the title (which re-anchors
    * at EOF and needs its own tail-then-head scan).
    */
-  private extractParentSessionIdFromRecords(
-    records: ChatRecord[],
-  ): string | undefined {
+  private extractCreationMetadataFromRecords(records: ChatRecord[]): {
+    parentSessionId?: string;
+    sourceType?: string;
+    sourceId?: string;
+  } {
+    let parentSessionId: string | undefined;
+    let sourceType: string | undefined;
+    let sourceId: string | undefined;
     for (const record of records) {
       if (record.type === 'system' && record.subtype === 'parent_session') {
         const payload = record.systemPayload as
           | { parentSessionId?: unknown }
           | undefined;
-        if (typeof payload?.parentSessionId === 'string') {
-          return payload.parentSessionId;
+        if (
+          parentSessionId === undefined &&
+          typeof payload?.parentSessionId === 'string'
+        ) {
+          parentSessionId = payload.parentSessionId;
+        }
+      }
+      if (record.type === 'system' && record.subtype === 'session_source') {
+        const payload = record.systemPayload as
+          | { sourceType?: unknown; sourceId?: unknown }
+          | undefined;
+        if (
+          sourceType === undefined &&
+          typeof payload?.sourceType === 'string'
+        ) {
+          sourceType = payload.sourceType;
+          sourceId =
+            typeof payload.sourceId === 'string' ? payload.sourceId : undefined;
         }
       }
     }
-    return undefined;
+    return {
+      ...(parentSessionId ? { parentSessionId } : {}),
+      ...(sourceType ? { sourceType } : {}),
+      ...(sourceId !== undefined ? { sourceId } : {}),
+    };
   }
 
   /**
@@ -920,7 +960,7 @@ export class SessionService {
       const prompt = this.extractFirstPromptFromRecords(records);
 
       const titleInfo = this.readSessionTitleInfoFromFile(filePath, tailBuffer);
-      const parentSessionId = this.extractParentSessionIdFromRecords(records);
+      const source = this.extractCreationMetadataFromRecords(records);
       items.push({
         sessionId: firstRecord.sessionId,
         cwd: firstRecord.cwd,
@@ -933,7 +973,11 @@ export class SessionService {
         // and `countSessionMessages` for the rationale.
         customTitle: titleInfo.title,
         titleSource: titleInfo.source,
-        ...(parentSessionId ? { parentSessionId } : {}),
+        ...(source.parentSessionId
+          ? { parentSessionId: source.parentSessionId }
+          : {}),
+        ...(source.sourceType ? { sourceType: source.sourceType } : {}),
+        ...(source.sourceId !== undefined ? { sourceId: source.sourceId } : {}),
         isArchived,
       });
     }
@@ -1077,8 +1121,49 @@ export class SessionService {
   async loadSession(
     sessionId: string,
   ): Promise<ResumedSessionData | undefined> {
-    const chatsDir = this.getChatsDir();
-    const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+    return this.loadSessionFromState(sessionId, 'active');
+  }
+
+  /**
+   * Reads an archived session without changing its archive state.
+   * Daemon load/resume paths must continue to use {@link loadSession}.
+   */
+  async loadArchivedSession(
+    sessionId: string,
+    options: { maxBytes: number },
+  ): Promise<ResumedSessionData | undefined> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
+      return undefined;
+    }
+    const filePath = this.getSessionFilePath(sessionId, 'archived');
+    let stats: fs.Stats;
+    try {
+      stats = fs.statSync(filePath);
+      if (stats.size > options.maxBytes) {
+        throw new SessionTranscriptTooLargeError(
+          sessionId,
+          stats.size,
+          options.maxBytes,
+        );
+      }
+    } catch (error) {
+      if (error instanceof SessionTranscriptTooLargeError) {
+        throw error;
+      }
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw error;
+      }
+      return undefined;
+    }
+    return this.loadSessionFromState(sessionId, 'archived', stats);
+  }
+
+  private async loadSessionFromState(
+    sessionId: string,
+    state: SessionArchiveState,
+    stats?: fs.Stats,
+  ): Promise<ResumedSessionData | undefined> {
+    const filePath = this.getSessionFilePath(sessionId, state);
 
     const records = await this.readAllRecords(filePath);
     if (records.length === 0) {
@@ -1123,7 +1208,7 @@ export class SessionService {
     }
 
     const lastMessage = messages[messages.length - 1];
-    const stats = fs.statSync(filePath);
+    stats ??= fs.statSync(filePath);
 
     const conversation: ConversationRecord = {
       sessionId: firstRecord.sessionId,
@@ -1550,12 +1635,15 @@ export class SessionService {
       records,
       activeMessages,
     ).filter(
-      // A fork is a fresh top-level session, NOT a `create_sub_session` child.
-      // Copying the source's `parent_session` record would make the fork report
-      // the original's parent as its own, so `?parentSessionId=` lists the fork
-      // as a direct child of a session that never spawned it. Drop the lineage.
+      // A fork is a fresh top-level session with its own creation metadata.
+      // Inheriting either record would falsely attribute the fork to the
+      // source session's parent or creator.
       (record) =>
-        !(record.type === 'system' && record.subtype === 'parent_session'),
+        !(
+          record.type === 'system' &&
+          (record.subtype === 'parent_session' ||
+            record.subtype === 'session_source')
+        ),
     );
     if (sourceRecords.length === 0) {
       throw new Error(`Source session not found or empty: ${sourceSessionId}`);

@@ -57,6 +57,12 @@ function getWorkflowStep(job, stepName) {
 }
 
 describe('package scripts', () => {
+  it('exposes the local PR verification runner', () => {
+    expect(readPackageJson().scripts['verify:pr']).toBe(
+      'node scripts/verify-pr.js',
+    );
+  });
+
   it('keeps the serve fast-path bundle check outside unit test scripts', () => {
     const packageJson = readPackageJson();
 

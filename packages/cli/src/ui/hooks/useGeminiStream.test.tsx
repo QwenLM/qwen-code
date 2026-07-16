@@ -449,6 +449,7 @@ describe('useGeminiStream', () => {
         convertedCount: 1,
         omittedCount: 0,
         modelId: 'vm',
+        egressOccurred: true,
       });
       const { result, mockSendMessageStream } = renderTestHook();
       await act(async () => {

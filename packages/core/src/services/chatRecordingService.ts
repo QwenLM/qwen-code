@@ -253,6 +253,7 @@ export interface ChatRecord {
     | 'mid_turn_user_message'
     | 'custom_title'
     | 'parent_session'
+    | 'session_source'
     | 'rewind'
     | 'agent_bootstrap'
     | 'agent_launch_prompt'
@@ -303,6 +304,7 @@ export interface ChatRecord {
     | AttributionSnapshotPayload
     | CustomTitleRecordPayload
     | ParentSessionRecordPayload
+    | SessionSourceRecordPayload
     | NotificationRecordPayload
     | RewindRecordPayload
     | AgentBootstrapRecordPayload
@@ -443,6 +445,12 @@ export interface ParentSessionRecordPayload {
   parentSessionId: string;
 }
 
+/** Immutable attribution describing which integration created the session. */
+export interface SessionSourceRecordPayload {
+  sourceType: string;
+  sourceId?: string;
+}
+
 /**
  * Stored payload for UI telemetry replay.
  */
@@ -551,6 +559,9 @@ export class ChatRecordingService {
    * idempotent — a bridge retry (after a failed response) must not append a
    * second `parent_session` record for the same immutable lineage. */
   private currentParentSessionId: string | undefined;
+  /** Immutable creator attribution once recorded. */
+  private currentSourceType: string | undefined;
+  private currentSourceId: string | undefined;
   /**
    * How many auto-title attempts have been made this process.
    *
@@ -1496,6 +1507,39 @@ export class ChatRecordingService {
     } catch (error) {
       if (error !== this.writeFailure) {
         debugLogger.error('Error saving parent session record:', error);
+      }
+      return false;
+    }
+  }
+
+  /** Persist immutable creator attribution near the start of the transcript. */
+  async recordSessionSource(
+    sourceType: string,
+    sourceId?: string,
+  ): Promise<boolean> {
+    if (this.currentSourceType !== undefined) {
+      return (
+        this.currentSourceType === sourceType &&
+        this.currentSourceId === sourceId
+      );
+    }
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'session_source',
+        systemPayload: {
+          sourceType,
+          ...(sourceId !== undefined ? { sourceId } : {}),
+        },
+      };
+      await this.appendRecordStrict(record);
+      this.currentSourceType = sourceType;
+      this.currentSourceId = sourceId;
+      return true;
+    } catch (error) {
+      if (error !== this.writeFailure) {
+        debugLogger.error('Error saving session source:', error);
       }
       return false;
     }

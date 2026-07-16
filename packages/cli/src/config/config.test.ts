@@ -2870,7 +2870,7 @@ describe('loadCliConfig with includeDirectories', () => {
 
     expect(config.getManagedAutoMemoryEnabled()).toBe(true);
     expect(config.getManagedAutoDreamEnabled()).toBe(true);
-    expect(config.getAutoSkillEnabled()).toBe(true);
+    expect(config.getAutoSkillEnabled()).toBe(false);
   });
 
   it('autoSkillConfirm: defaults to true when unset', async () => {
@@ -3045,6 +3045,19 @@ describe('loadCliConfig safe mode', () => {
 
   it('should ignore settings-sourced approvalMode in safe mode', async () => {
     process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    const settings = {
+      tools: {
+        approvalMode: 'yolo',
+      },
+    } as unknown as Settings;
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);
+  });
+
+  it('should force DEFAULT approval mode in bare mode regardless of settings', async () => {
+    process.argv = ['node', 'script.js', '--bare'];
     const argv = await parseArguments();
     const settings = {
       tools: {
@@ -3510,11 +3523,11 @@ describe('loadCliConfig approval mode', () => {
     vi.restoreAllMocks();
   });
 
-  it('should default to DEFAULT approval mode when no flags are set', async () => {
+  it('should default to AUTO approval mode when no flags are set', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
-    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);
+    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.AUTO);
   });
 
   it('should set PLAN approval mode when --approval-mode=plan', async () => {
@@ -3614,6 +3627,13 @@ describe('loadCliConfig approval mode', () => {
         isTrusted: false,
         source: 'file',
       });
+    });
+
+    it('should override default AUTO mode to DEFAULT', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv, undefined, []);
+      expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);
     });
 
     it('should override --approval-mode=yolo to DEFAULT', async () => {

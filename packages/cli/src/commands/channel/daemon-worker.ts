@@ -1,9 +1,12 @@
 import type { CommandModule } from 'yargs';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import {
-  appendChannelMemory,
+  addChannelMemoryEntries,
   clearChannelMemory,
+  listChannelMemoryEntries,
   readChannelMemory,
+  removeChannelMemoryEntries,
+  updateChannelMemoryEntry,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
 import {
@@ -34,6 +37,15 @@ import {
   isChannelWebhookTaskMessage,
   type ChannelWebhookEnqueueErrorCode,
 } from '../../serve/channel-webhook-ipc.js';
+import { sanitizeWorkerDiagnostic } from '../../serve/channel-worker-diagnostics.js';
+import {
+  isChannelStartupReportAckMessage,
+  MAX_CHANNEL_STARTUP_FAILURES,
+  MAX_CHANNEL_STARTUP_FAILURE_CHANNEL_LENGTH,
+  MAX_CHANNEL_STARTUP_FAILURE_CODE_LENGTH,
+  MAX_CHANNEL_STARTUP_FAILURE_MESSAGE_LENGTH,
+  type ChannelStartupReportMessage,
+} from '../../serve/channel-worker-startup-ipc.js';
 import { isLoopbackBind } from '../../serve/loopback-binds.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { resolveProxyUrl } from './proxy.js';
@@ -129,6 +141,7 @@ export interface RunChannelDaemonWorkerOptions {
   selection: ServeChannelSelection;
   loadDaemonSdk?: () => Promise<DaemonSdkLike>;
   sendReady?: (ready: ChannelDaemonWorkerReady) => void;
+  reportStartup?: (message: ChannelStartupReportMessage) => Promise<void>;
   startupSignal?: AbortSignal;
 }
 
@@ -283,6 +296,50 @@ function throwIfStartupAborted(signal: AbortSignal | undefined): void {
   }
 }
 
+function readConnectErrorMessage(error: unknown): string {
+  if (
+    (typeof error === 'object' && error !== null) ||
+    typeof error === 'function'
+  ) {
+    try {
+      const message = Reflect.get(error, 'message');
+      if (typeof message === 'string' && message.length > 0) {
+        return message;
+      }
+    } catch {
+      return 'Channel connection failed.';
+    }
+  }
+  try {
+    const message = String(error);
+    return message.length > 0 ? message : 'Channel connection failed.';
+  } catch {
+    return 'Channel connection failed.';
+  }
+}
+
+function readConnectErrorCode(error: unknown): string | undefined {
+  if (
+    !(
+      (typeof error === 'object' && error !== null) ||
+      typeof error === 'function'
+    )
+  ) {
+    return undefined;
+  }
+  try {
+    const code = Reflect.get(error, 'code');
+    if (typeof code === 'string') {
+      return code.trim().length > 0 ? code : undefined;
+    }
+    return typeof code === 'number' && Number.isFinite(code)
+      ? String(code)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function runChannelDaemonWorker(
   opts: RunChannelDaemonWorkerOptions,
 ): Promise<ChannelDaemonWorkerHandle> {
@@ -365,6 +422,11 @@ export async function runChannelDaemonWorker(
 
   const channels = new Map<string, ChannelBase>();
   const connected: string[] = [];
+  let connectFailureCount = 0;
+  const diagnosticRedaction = {
+    ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
+    workerEnv: process.env,
+  };
   const disconnectAll = () => {
     for (const channel of channels.values()) {
       try {
@@ -415,7 +477,10 @@ export async function runChannelDaemonWorker(
             router: createdRouter,
             channelMemory: {
               readChannelMemory,
-              appendChannelMemory,
+              listChannelMemoryEntries,
+              addChannelMemoryEntries,
+              updateChannelMemoryEntry,
+              removeChannelMemoryEntries,
               clearChannelMemory,
             },
             memoryIntentClassifier: new BridgeChannelMemoryIntentClassifier(
@@ -443,10 +508,9 @@ export async function runChannelDaemonWorker(
         if (startupSignal?.aborted) {
           throw err;
         }
-        const safeMessage = sanitizeLogText(
-          err instanceof Error ? err.message : String(err),
-          512,
-        );
+        const message = readConnectErrorMessage(err);
+        const code = readConnectErrorCode(err);
+        const safeMessage = sanitizeLogText(message, 512);
         writeStderrLine(
           `[Channel] Failed to connect "${safeName}": ${safeMessage}`,
         );
@@ -454,6 +518,46 @@ export async function runChannelDaemonWorker(
           channel.disconnect();
         } catch {
           // best-effort
+        }
+        connectFailureCount += 1;
+        if (connectFailureCount <= MAX_CHANNEL_STARTUP_FAILURES) {
+          const reportMessage =
+            sanitizeWorkerDiagnostic(
+              message,
+              MAX_CHANNEL_STARTUP_FAILURE_MESSAGE_LENGTH,
+              diagnosticRedaction,
+            ) || 'Channel connection failed.';
+          const reportCode = code
+            ? sanitizeWorkerDiagnostic(
+                code,
+                MAX_CHANNEL_STARTUP_FAILURE_CODE_LENGTH,
+                diagnosticRedaction,
+              )
+            : undefined;
+          await abortableStartup(
+            opts.reportStartup?.({
+              type: 'channel_startup_failure',
+              failure: {
+                channel:
+                  sanitizeWorkerDiagnostic(
+                    name,
+                    MAX_CHANNEL_STARTUP_FAILURE_CHANNEL_LENGTH,
+                    diagnosticRedaction,
+                  ) || '<unnamed>',
+                phase: 'connect',
+                ...(reportCode ? { code: reportCode } : {}),
+                message: reportMessage,
+              },
+            }),
+            startupSignal,
+          );
+        } else if (connectFailureCount === MAX_CHANNEL_STARTUP_FAILURES + 1) {
+          await abortableStartup(
+            opts.reportStartup?.({
+              type: 'channel_startup_failures_truncated',
+            }),
+            startupSignal,
+          );
         }
       }
     }
@@ -558,6 +662,57 @@ function assertInternalDaemonWorkerInvocation(): void {
   }
 }
 
+function reportStartupToSupervisor(
+  message: ChannelStartupReportMessage,
+  signal: AbortSignal,
+): Promise<void> {
+  if (signal.aborted) {
+    return Promise.reject(startupAbortError());
+  }
+  const send = process.send;
+  if (!send) {
+    return Promise.reject(new Error('Channel worker IPC is unavailable.'));
+  }
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      process.removeListener('message', onMessage);
+      process.removeListener('disconnect', onDisconnect);
+      signal.removeEventListener('abort', onAbort);
+    };
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error);
+      else resolve();
+    };
+    const onMessage = (value: unknown) => {
+      if (isChannelStartupReportAckMessage(value)) {
+        finish();
+      }
+    };
+    const onDisconnect = () => {
+      finish(new Error('Channel worker IPC disconnected during startup.'));
+    };
+    const onAbort = () => {
+      finish(startupAbortError());
+    };
+    process.on('message', onMessage);
+    process.once('disconnect', onDisconnect);
+    signal.addEventListener('abort', onAbort, { once: true });
+    try {
+      send.call(process, message, (error) => {
+        if (error) {
+          finish(new Error('Channel worker startup report failed.'));
+        }
+      });
+    } catch {
+      finish(new Error('Channel worker startup report failed.'));
+    }
+  });
+}
+
 export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
   command: 'daemon-worker',
   describe: false,
@@ -608,6 +763,8 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
         workspace,
         selection,
         startupSignal: startupAbortController.signal,
+        reportStartup: (message) =>
+          reportStartupToSupervisor(message, startupAbortController.signal),
         sendReady: (ready) => {
           process.send?.({ type: 'ready', ...ready });
         },

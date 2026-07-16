@@ -15,15 +15,18 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 import {
   composeReview,
   composeReviewCommand,
+  verdictLine,
   type ComposeReviewInput,
   type ComposeReviewResult,
 } from './compose-review.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
+  writeStderrLine: vi.fn(),
 }));
 
 const MODEL = 'test-model';
@@ -46,19 +49,34 @@ afterEach(() => {
 
 const DIFF = '/abs/diff.txt';
 
-/** Write a plan with two chunks, and return its path. */
-function plan(): string {
+/**
+ * Write a plan with two chunks, and return its path.
+ *
+ * A territory fan-out captured cross-repo, with no deletions: the smallest plan
+ * whose roster is exactly the chunks plus the test matrix. `coveredPlan()` below
+ * satisfies that one. A plan that requires nothing is not a plan any capture
+ * command writes, and coverage now reads the roster out of it.
+ */
+function plan(opts: { step45?: boolean } = {}): string {
   const p = join(dir, 'plan.json');
   writeFileSync(
     p,
     JSON.stringify({
       diffPathAbsolute: DIFF,
+      srcDiffLines: 5000,
+      diffLines: 5000,
+      files: [{ path: 'a.ts', kind: 'source', removedLines: 0, heavy: false }],
       chunks: [
         { id: 1, startLine: 1, endLine: 100 },
         { id: 2, startLine: 101, endLine: 200 },
       ],
     }),
   );
+  // Every high-effort review runs Step 4 (verify) and Step 5 (reverse audit), and
+  // `composeReview` now proves they did — so a fixture meaning "a review that did
+  // everything right" includes them, exactly as it includes the roster. Pass
+  // `{ step45: false }` for a run that skipped one or both (the gap tests).
+  if (opts.step45 !== false) recordStep45(p);
   // Backdate it. The transcripts are written first and the stale-transcript
   // filter is `mtime < planMtime`; on a filesystem with millisecond granularity
   // both land in the same tick and the comparison flips at random. An explicit
@@ -68,12 +86,49 @@ function plan(): string {
   return p;
 }
 
+/**
+ * Lay down the Step 4 verifier and Step 5 reverse auditor a complete high-effort
+ * review runs: each one's recorded prompt, its brief, and the harness's transcript
+ * of an agent launched with it that opened the brief. Neither names a line range,
+ * so neither grants chunk coverage — they answer only "did the step run", which is
+ * what `verificationGaps` asks. Pass a subset of `keys` to model a skipped step.
+ */
+function recordStep45(
+  planPath: string,
+  keys: string[] = ['verify', 'reverse-audit'],
+): void {
+  const d = promptRecordDir(planPath);
+  mkdirSync(d, { recursive: true });
+  for (const key of keys) {
+    const brief = briefPath(planPath, key);
+    writeFileSync(brief, `The ${key} brief.`);
+    const launch =
+      `You are review agent \`${key}\`.\n` +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}")`;
+    // Match production (`prompt-record.ts`): the record filename is the
+    // percent-encoded key. A no-op for `verify`/`reverse-audit`, but a future role
+    // whose name `encodeURIComponent` transforms would otherwise be written to a
+    // name the reader never looks for.
+    writeFileSync(join(d, `${encodeURIComponent(key)}.txt`), launch);
+    transcript(`v-${key.replace(/[^a-z0-9]/gi, '_')}`, launch, {
+      toolCalls: 2,
+      opens: [brief],
+    });
+  }
+}
+
 /** Write one agent transcript, as the harness would. */
 function transcript(
   id: string,
   launchPrompt: string,
-  opts: { toolCalls?: number; text?: string } = {},
+  opts: { toolCalls?: number; text?: string; opens?: string[] } = {},
 ): void {
+  const pointedAtBriefs = [
+    ...launchPrompt.matchAll(/read_file\(file_path="([^"]*\.brief\.md)"\)/g),
+  ].map((m) => m[1]);
+  const working = (opts.toolCalls ?? 0) > 0;
+  const opens = opts.opens ?? (working ? pointedAtBriefs : []);
   const base = { agentId: id, agentName: 'general-purpose', sessionId: 'S1' };
   const lines: string[] = [
     JSON.stringify({
@@ -111,6 +166,35 @@ function transcript(
       }),
     );
   }
+  for (const path of opens) {
+    lines.push(
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            { functionCall: { name: 'read_file', args: { file_path: path } } },
+          ],
+        },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'read_file',
+                response: { output: 'brief' },
+              },
+            },
+          ],
+        },
+      }),
+    );
+  }
   lines.push(
     JSON.stringify({
       ...base,
@@ -127,9 +211,43 @@ function transcript(
   );
 }
 
-/** A prompt the CLI would have built: it names the diff and the read. */
+/**
+ * A prompt the CLI would have built: it names the diff and the read of THIS
+ * chunk's lines. The offsets are the chunk's own, as `agent-prompt` emits them —
+ * coverage is attributed from the range delivered, not from the words `chunk N`.
+ */
 function goodPrompt(chunk: number): string {
-  return `You are reviewing chunk ${chunk} of 2.\nread_file(file_path="${DIFF}", offset=0, limit=100)`;
+  const offset = (chunk - 1) * 100;
+  const brief = briefPath(join(dir, 'plan.json'), `chunk-${chunk}`);
+  return (
+    `You are reviewing chunk ${chunk} of 2.\n` +
+    `read_file(file_path="${brief}")\n` +
+    `read_file(file_path="${DIFF}", offset=${offset}, limit=100)`
+  );
+}
+
+/** Lay down the CLI's record of the prompt it built for `chunk`. */
+function recordBuilt(planPath: string, chunk: number): void {
+  const d = promptRecordDir(planPath);
+  mkdirSync(d, { recursive: true });
+  writeFileSync(join(d, `chunk-${chunk}.txt`), goodPrompt(chunk));
+  writeFileSync(briefPath(planPath, `chunk-${chunk}`), `chunk-${chunk} brief`);
+}
+
+/**
+ * The one whole-diff agent this plan's roster requires, built and launched.
+ *
+ * Its prompt names no line ranges, so it grants no coverage — a review may not
+ * certify lines on the strength of "somebody had the file open".
+ */
+function recordMatrix(planPath: string): void {
+  const d = promptRecordDir(planPath);
+  mkdirSync(d, { recursive: true });
+  const brief = briefPath(planPath, 'test-matrix');
+  writeFileSync(brief, 'The test-matrix brief.');
+  const launch = `You are the test-coverage matrix agent.\nread_file(file_path="${brief}")\nread_file(file_path="${DIFF}")`;
+  writeFileSync(join(d, 'test-matrix.txt'), launch);
+  transcript('tm', launch, { toolCalls: 2, opens: [brief] });
 }
 
 /** The prompt the orchestrator actually sent, 23 times: no diff anywhere. */
@@ -137,11 +255,23 @@ function blindPrompt(chunk: number): string {
   return `The changes are in chunk ${chunk} of 2, covering lines 1-100 of the diff.`;
 }
 
-/** Both chunks reviewed by agents that opened the diff. */
-function coveredPlan(): string {
+/**
+ * Both chunks reviewed by agents that opened the diff, and Step 4/5 ran — a
+ * complete high-effort review. Pass a subset of keys to model a run that skipped a
+ * step (what the (B) gap tests are about); `plan({ step45: false })` suppresses the
+ * default pair so this controls them exactly.
+ */
+function coveredPlan(
+  step45Keys: string[] = ['verify', 'reverse-audit'],
+): string {
   transcript('a1', goodPrompt(1), { toolCalls: 3 });
   transcript('a2', goodPrompt(2), { toolCalls: 2 });
-  return plan();
+  const p = plan({ step45: false });
+  recordBuilt(p, 1);
+  recordBuilt(p, 2);
+  recordMatrix(p);
+  recordStep45(p, step45Keys);
+  return p;
 }
 
 /** Agents given the diff, that never opened it — and said so at length. */
@@ -817,5 +947,195 @@ describe('coverage is recomputed, never accepted', () => {
       modelId: MODEL,
     });
     expect(r.event).toBe('APPROVE');
+  });
+});
+
+describe('the Step 4/5 gate — verify and reverse audit must have run (high effort)', () => {
+  it('caps a clean APPROVE to COMMENT when the reverse audit never ran', () => {
+    // The high-value catch: a zero-finding high-effort review that skipped the pass
+    // meant to find what Step 3 missed cannot certify the diff clean. compose-review
+    // runs only at high effort, so reverse audit is always owed here.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['verify']), // reverse audit absent
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.body).toMatch(/reverse audit — no auditor ran/);
+  });
+
+  it('discloses that posted findings were not verified when Step 4 was skipped', () => {
+    // A confirmed Critical still blocks — a cap never softens a REQUEST_CHANGES —
+    // but the body says the posted findings were not verified.
+    const r = composeReview({
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['reverse-audit']), // verifier absent
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toMatch(/verification — the review posts findings/);
+  });
+
+  it('does not require a verifier on a review that confirmed nothing', () => {
+    // C=0, S=0: nothing to verify. The reverse audit ran, so this approves.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['reverse-audit']), // verifier absent, none needed
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('APPROVE');
+    expect(r.body).not.toMatch(/verification/);
+  });
+
+  it('approves a review that ran both verify and the reverse audit', () => {
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(), // both present
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('APPROVE');
+  });
+
+  it('requires a verifier for a body Critical that is not pre-confirmed', () => {
+    // A non-deterministic Critical that could not be anchored still posts (in the
+    // body) and still had to be verified — so a missing verifier is disclosed even
+    // with no inline findings.
+    const r = composeReview({
+      bodyCriticals: ['a real blocker that could not be anchored'],
+      planPath: coveredPlan(['reverse-audit']), // verifier absent
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toMatch(/verification — the review posts findings/);
+  });
+
+  it('does not require a verifier for a deterministic [build]/[test] body Critical', () => {
+    // A `[build]`/`[test]` finding is pre-confirmed and skips verification by design,
+    // so a review whose only finding is one must not be told its findings were
+    // unverified — that would post a false disclosure on a correct review.
+    const r = composeReview({
+      bodyCriticals: ['[build] `npm run build` failed: TS2345 in x.ts'],
+      planPath: coveredPlan(['reverse-audit']), // verifier absent, none needed
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).not.toMatch(/verification/);
+  });
+});
+
+// `verdictLine` is what Step 6 prints — the one place a verdict exists for the
+// user. It had no test, and a review of this change found the reason to want one.
+describe('verdictLine — the terminal verdict, and its dangling colon', () => {
+  const line = (over: Partial<ComposeReviewResult>): string =>
+    verdictLine({
+      event: 'COMMENT',
+      body: '',
+      baseEvent: 'COMMENT',
+      cappedBy: [],
+      downgraded: false,
+      downgradedFrom: null,
+      ...over,
+    });
+
+  it('names a cap that took an Approve away', () => {
+    expect(
+      line({
+        event: 'COMMENT',
+        baseEvent: 'APPROVE',
+        cappedBy: ['unreviewed-dimension'],
+      }),
+    ).toBe(
+      'Verdict: Comment — an Approve was NOT available: a dimension nobody reviewed',
+    );
+  });
+
+  it('does not leave a dangling colon when a downgrade ALONE took the Approve', () => {
+    // The bug the review caught: `baseEvent` APPROVE, no cap state, `downgraded`
+    // true — the old code joined an empty `cappedBy` and printed
+    // "an Approve was NOT available:  — downgraded …", a colon over nothing.
+    const out = line({
+      event: 'COMMENT',
+      baseEvent: 'APPROVE',
+      cappedBy: [],
+      downgraded: true,
+      downgradedFrom: 'Approve',
+    });
+    expect(out).toBe(
+      'Verdict: Comment — an Approve was NOT available: a presubmit check failed',
+    );
+    expect(out).not.toContain(':  ');
+    expect(out).not.toMatch(/:\s*—/);
+  });
+
+  it('lists a cap AND a downgrade together when both took the Approve', () => {
+    expect(
+      line({
+        event: 'COMMENT',
+        baseEvent: 'APPROVE',
+        cappedBy: ['uncoverable-chunk'],
+        downgraded: true,
+        downgradedFrom: 'Approve',
+      }),
+    ).toBe(
+      'Verdict: Comment — an Approve was NOT available: part of the diff cannot be read at all; a presubmit check failed',
+    );
+  });
+
+  it('says a Suggestion-only Comment was downgraded, without claiming a lost Approve', () => {
+    // baseEvent COMMENT: there was no Approve to lose, but the presubmit still
+    // moved the event and the user should see it.
+    expect(
+      line({
+        event: 'COMMENT',
+        baseEvent: 'COMMENT',
+        downgraded: true,
+        downgradedFrom: null,
+      }),
+    ).toBe('Verdict: Comment — downgraded by a presubmit check');
+  });
+
+  it('says a Request changes downgraded to Comment still has blockers', () => {
+    // The case a review caught: a presubmit downgrade (self-PR, failing CI) moves a
+    // REQUEST_CHANGES — a review with confirmed Criticals — down to COMMENT. Printed
+    // as a bare "Comment — downgraded", an operator reads "nothing blocking" while
+    // blockers were posted inline. `downgradedFrom` distinguishes it from a
+    // Suggestion-only Comment; `baseEvent` cannot (a cap may already have softened
+    // the RC before the downgrade ran).
+    const out = line({
+      event: 'COMMENT',
+      baseEvent: 'REQUEST_CHANGES',
+      downgraded: true,
+      downgradedFrom: 'Request changes',
+    });
+    expect(out).toContain('Request changes');
+    expect(out).toContain('blockers are still posted');
+    expect(out).not.toBe('Verdict: Comment — downgraded by a presubmit check');
+  });
+
+  it('never names a cap on a Request changes — the blocker earned it, no cap softens it', () => {
+    expect(
+      line({
+        event: 'REQUEST_CHANGES',
+        baseEvent: 'REQUEST_CHANGES',
+        cappedBy: ['unreviewed-dimension'],
+      }),
+    ).toBe('Verdict: Request changes');
+  });
+
+  it('is bare for a clean Approve', () => {
+    expect(line({ event: 'APPROVE', baseEvent: 'APPROVE' })).toBe(
+      'Verdict: Approve',
+    );
   });
 });

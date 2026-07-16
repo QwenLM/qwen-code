@@ -350,6 +350,7 @@ describe('DaemonWorkspaceProvider', () => {
 
     expect(actions).toBeDefined();
     expect(typeof actions?.loadMcpStatus).toBe('function');
+    expect(typeof actions?.reloadMcp).toBe('function');
     expect(typeof actions?.loadSkillsStatus).toBe('function');
     expect(typeof actions?.listAgents).toBe('function');
     expect(typeof actions?.globWorkspace).toBe('function');

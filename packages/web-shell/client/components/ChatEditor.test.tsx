@@ -3,21 +3,31 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { I18nProvider } from '../i18n';
-import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
-import type {
-  ComposerTagClickHandler,
-  ComposerTagRenderer,
-  WebShellComposerTag,
+import {
+  WebShellCustomizationProvider,
+  type ComposerTagClickHandler,
+  type ComposerTagRenderer,
+  type WebShellComposerTag,
+  type WebShellCustomization,
 } from '../customization';
-import { WebShellCustomizationProvider } from '../customization';
+import { I18nProvider } from '../i18n';
+import type { SlashMenuState } from '../hooks/useComposerCore';
+import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
 import { WebShellPortalRootContext } from '../portalRoot';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
+Element.prototype.scrollIntoView = vi.fn();
+
 const mockComposerCoreState = vi.hoisted(() => ({
   composerTags: [] as WebShellComposerTag[],
   removeTopTag: vi.fn(),
+}));
+
+const composerCoreState = vi.hoisted(() => ({
+  slashMenu: null as SlashMenuState | null,
+  focus: vi.fn(),
+  closeSlashMenu: vi.fn(),
 }));
 
 Object.defineProperty(window, 'matchMedia', {
@@ -38,7 +48,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
     useComposerCore: () => ({
       containerRef: React.createRef<HTMLDivElement>(),
       viewRef: { current: null },
-      focus: vi.fn(),
+      focus: composerCoreState.focus,
       submitText: vi.fn(),
       clearText: vi.fn(),
       getText: vi.fn(() => ''),
@@ -92,8 +102,8 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
       disabled: false,
       onAcceptFollowup: vi.fn(),
       onDismissFollowup: vi.fn(),
-      slashMenu: null,
-      closeSlashMenu: vi.fn(),
+      slashMenu: composerCoreState.slashMenu,
+      closeSlashMenu: composerCoreState.closeSlashMenu,
       selectSlashCompletion: vi.fn(),
       acceptSlashCompletion: vi.fn(),
       atMenu: null,
@@ -115,6 +125,9 @@ const mounted: Array<{
 }> = [];
 
 afterEach(() => {
+  composerCoreState.slashMenu = null;
+  composerCoreState.focus.mockReset();
+  composerCoreState.closeSlashMenu.mockReset();
   for (const { root, container, portalRoot } of mounted.splice(0)) {
     act(() => root.unmount());
     container.remove();
@@ -131,10 +144,21 @@ function renderChatEditor(props: {
   visibleToolbarActions?: readonly ComposerToolbarAction[];
   renderComposerTagTooltip?: ComposerTagRenderer;
   onComposerTagClick?: ComposerTagClickHandler;
+  currentMode?: string;
+  currentModel?: string;
+  availableModels?: Array<{ id: string; label?: string }>;
+  onSelectMode?: (mode: string) => void;
+  onSelectModel?: (model: string) => void;
+  customization?: WebShellCustomization;
 }) {
-  const { renderComposerTagTooltip, onComposerTagClick, ...chatEditorProps } =
-    props;
+  const {
+    customization,
+    renderComposerTagTooltip,
+    onComposerTagClick,
+    ...chatEditorProps
+  } = props;
   const container = document.createElement('div');
+  container.dataset.webShellRoot = '';
   const portalRoot = document.createElement('div');
   portalRoot.dataset.webShellPortalRoot = '';
   document.body.appendChild(container);
@@ -146,7 +170,11 @@ function renderChatEditor(props: {
     root.render(
       <WebShellPortalRootContext.Provider value={portalRoot}>
         <WebShellCustomizationProvider
-          value={{ renderComposerTagTooltip, onComposerTagClick }}
+          value={{
+            ...customization,
+            renderComposerTagTooltip,
+            onComposerTagClick,
+          }}
         >
           <I18nProvider language="en">
             <ChatEditor
@@ -204,7 +232,12 @@ describe('ChatEditor workspace toolbar integration', () => {
     });
     const chip = container.querySelector('[aria-label="Workspace: api"]');
     expect(chip).not.toBeNull();
-    expect(chip?.getAttribute('title')).toBe('/work/api');
+    // The full cwd is surfaced via the hover tooltip (mirroring the git branch
+    // chip), not a native `title` attribute.
+    expect(chip?.getAttribute('data-web-shell-workspace-title')).toBe(
+      '/work/api',
+    );
+    expect(chip?.getAttribute('title')).toBeNull();
     expect(
       container.querySelector('[data-web-shell-workspace]'),
     ).not.toBeNull();
@@ -219,7 +252,7 @@ describe('ChatEditor workspace toolbar integration', () => {
     expect(
       container
         .querySelector('[data-web-shell-workspace]')
-        ?.getAttribute('title'),
+        ?.getAttribute('data-web-shell-workspace-title'),
     ).toBe('api');
   });
 
@@ -389,5 +422,230 @@ describe('ChatEditor top composer tag tooltip', () => {
       accessibleTooltip?.id,
     );
     expect(tag?.hasAttribute('aria-describedby')).toBe(false);
+  });
+});
+
+describe('ChatEditor toolbar popovers', () => {
+  it('opens the approval mode popover and restores editor focus after selection', async () => {
+    const onSelectMode = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: ['approvalMode'],
+      onSelectMode,
+    });
+    const focusTarget = document.createElement('input');
+    container.appendChild(focusTarget);
+    composerCoreState.focus.mockImplementation(() => focusTarget.focus());
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')
+        ?.click();
+    });
+
+    const popover = document.querySelector('[data-web-shell-toolbar-popover]');
+    expect(popover).not.toBeNull();
+    expect(popover?.getAttribute('data-side')).toBe('top');
+
+    const yolo = Array.from(popover?.querySelectorAll('button') ?? []).find(
+      (button) => button.textContent?.includes('(yolo)'),
+    );
+    await act(async () => {
+      yolo?.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(onSelectMode).toHaveBeenCalledWith('yolo');
+    expect(document.activeElement).toBe(focusTarget);
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).toBeNull();
+  });
+
+  it('observes custom toolbar render roots when measuring available width', () => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+    const observed = new Set<Element>();
+    globalThis.ResizeObserver = class ResizeObserverMock {
+      constructor(_callback: ResizeObserverCallback) {}
+
+      observe(element: Element) {
+        observed.add(element);
+      }
+
+      unobserve() {}
+
+      disconnect() {}
+    };
+
+    try {
+      renderChatEditor({
+        visibleToolbarActions: [],
+        customization: {
+          renderComposerToolbarStart: () => (
+            <span data-test-toolbar-start>start</span>
+          ),
+          renderComposerToolbarEnd: () => (
+            <span data-test-toolbar-end>end</span>
+          ),
+          renderComposerToolbarRight: () => (
+            <span data-test-toolbar-right>right</span>
+          ),
+        },
+      });
+
+      expect(
+        observed.has(document.querySelector('[data-test-toolbar-start]')!),
+      ).toBe(true);
+      expect(
+        observed.has(document.querySelector('[data-test-toolbar-end]')!),
+      ).toBe(true);
+      expect(
+        observed.has(document.querySelector('[data-test-toolbar-right]')!),
+      ).toBe(true);
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
+  it('opens a searchable model popover and selects the filtered model', () => {
+    const onSelectModel = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      availableModels: [
+        { id: 'qwen-plus', label: 'Qwen Plus' },
+        { id: 'qwen-max', label: 'Qwen Max' },
+      ],
+      onSelectModel,
+    });
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+        ?.click();
+    });
+
+    const search = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-toolbar-popover] input[type="search"]',
+    );
+    expect(search).not.toBeNull();
+    expect(document.activeElement).toBe(search);
+    expect(search?.getAttribute('data-slot')).toBe('input');
+    act(() => {
+      const valueSetter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set;
+      valueSetter?.call(search, 'max');
+      search?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    const options = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-toolbar-popover] button',
+      ),
+    );
+    expect(options.map((option) => option.textContent)).toEqual(['Qwen Max']);
+    act(() => options[0]?.click());
+
+    expect(onSelectModel).toHaveBeenCalledWith('qwen-max');
+  });
+
+  it('switches between sibling toolbar popovers without dismissing the target', async () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['approvalMode', 'model'],
+      currentModel: 'qwen-plus',
+      availableModels: [{ id: 'qwen-plus', label: 'Qwen Plus' }],
+    });
+    const modeButton = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-mode-button]',
+    );
+    const modelButton = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-model-button]',
+    );
+
+    act(() => modeButton?.click());
+    expect(modeButton?.getAttribute('aria-expanded')).toBe('true');
+
+    await act(async () => {
+      modelButton?.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(modelButton?.getAttribute('aria-expanded')).toBe('true');
+    expect(
+      document.querySelector(
+        '[data-web-shell-toolbar-popover] input[type="search"]',
+      ),
+    ).not.toBeNull();
+
+    await act(async () => {
+      modeButton?.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(modeButton?.getAttribute('aria-expanded')).toBe('true');
+    expect(
+      document.querySelector(
+        '[data-web-shell-toolbar-popover] input[type="search"]',
+      ),
+    ).toBeNull();
+  });
+});
+
+describe('ChatEditor slash command popovers', () => {
+  it('uses shadcn popovers for the command panel and hover detail', () => {
+    composerCoreState.slashMenu = {
+      kind: 'command',
+      from: 0,
+      to: 1,
+      query: '',
+      selectedIndex: 0,
+      items: [
+        {
+          id: 'help',
+          label: '/help',
+          apply: '/help',
+          detail: 'Show available commands',
+          section: 'Commands',
+        },
+        {
+          id: 'history-collapse',
+          label: '/history collapse-on-resume',
+          apply: '/history collapse-on-resume',
+          section: 'Commands',
+        },
+      ],
+    };
+
+    renderChatEditor({ visibleToolbarActions: [] });
+
+    const panel = document.querySelector('[data-web-shell-slash-menu]');
+    expect(panel?.getAttribute('data-slot')).toBe('popover-content');
+    expect(
+      panel
+        ?.querySelectorAll('[role="option"]')[1]
+        ?.hasAttribute('data-has-description'),
+    ).toBe(false);
+
+    const composingEscape = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+      isComposing: true,
+    });
+    act(() => document.body.dispatchEvent(composingEscape));
+    expect(composingEscape.defaultPrevented).toBe(false);
+    expect(document.querySelector('[data-web-shell-slash-menu]')).toBe(panel);
+
+    const command = panel?.querySelector<HTMLButtonElement>('[role="option"]');
+    act(() => {
+      command?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+    });
+
+    const detail = document.querySelector('[data-web-shell-slash-detail]');
+    expect(detail?.getAttribute('data-slot')).toBe('popover-content');
+    expect(detail?.textContent).toContain('Show available commands');
+
+    act(() => {
+      detail?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    });
+    expect(composerCoreState.closeSlashMenu).not.toHaveBeenCalled();
   });
 });

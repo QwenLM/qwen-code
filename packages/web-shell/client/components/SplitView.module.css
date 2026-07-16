@@ -144,6 +144,12 @@
   min-height: 0;
 }
 
+/* While one pane is maximized, its siblings are hidden (but stay mounted, so
+   their sessions keep streaming). The lone visible slot then fills the row. */
+.paneSlot[data-pane-hidden] {
+  display: none;
+}
+
 .empty {
   flex: 1 1 auto;
   display: flex;

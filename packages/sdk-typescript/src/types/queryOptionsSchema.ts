@@ -217,7 +217,7 @@ export const QueryOptionsSchema = z
       >((val) => typeof val === 'function', { message: 'stderr must be a function' })
       .optional(),
     logLevel: z.enum(['debug', 'info', 'warn', 'error']).optional(),
-    maxSessionTurns: z.number().optional(),
+    maxSessionTurns: z.number().int().optional(),
     coreTools: z.array(z.string()).optional(),
     excludeTools: z.array(z.string()).optional(),
     allowedTools: z.array(z.string()).optional(),

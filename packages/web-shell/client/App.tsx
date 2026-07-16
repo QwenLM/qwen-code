@@ -95,6 +95,7 @@ import { useIsLargeScreen } from './hooks/useIsLargeScreen';
 import { MAX_SPLIT_PANES, parseSplitSessionIds } from './utils/splitUrl';
 import { ScheduledTasksDialog } from './components/dialogs/ScheduledTasksDialog';
 import { ExtensionsManagerPage } from './components/extensions/ExtensionsManagerPage';
+import { PluginManagerPage } from './components/plugins/PluginManagerPage';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { isAskUserPermission } from './utils/askUserPermission';
 import { ToolApproval } from './components/messages/ToolApproval';
@@ -163,7 +164,7 @@ import {
   type StatusInfo,
 } from './components/messages/StatusMessage';
 import type { SerializedMcpStatusMessage } from './components/messages/McpStatusMessage';
-import { McpDialog } from './components/dialogs/McpDialog';
+import { McpManagerPage } from './components/mcp/McpManagerPage';
 import {
   GOAL_STATUS_ACTIVE_EVENT,
   parseGoalStatusMessage,
@@ -435,6 +436,10 @@ export interface WebShellApi {
   openSplitView: () => void;
   /** Open the Session Overview panel, matching the built-in sidebar button. */
   openSessionOverview: () => void;
+  /** Open the compact session drawer, matching the hamburger control. */
+  openSessionDrawer: () => void;
+  /** Start a new session using the same lifecycle as the built-in New Chat action. */
+  createNewSession: () => Promise<boolean>;
 }
 
 export type WebShellComposerPlaceholderState = ComposerPlaceholderState;
@@ -1052,8 +1057,10 @@ export function App({
     string | null
   >(null);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
+  const [forceMobileDrawer, setForceMobileDrawer] = useState(false);
   const closeMobileDrawer = useCallback(() => {
     setMobileDrawerOpen(false);
+    setForceMobileDrawer(false);
   }, []);
   // The Session Overview panel (mission control for managing many sessions at
   // once) is only offered on large screens; below that there is no room for it
@@ -1066,13 +1073,17 @@ export function App({
   const splitSidebarHasRoom = useIsLargeScreen('(min-width: 1200px)');
 
   useEffect(() => {
+    if (!sidebarOptions.enabled) closeMobileDrawer();
+  }, [closeMobileDrawer, sidebarOptions.enabled]);
+
+  useEffect(() => {
     const mql = window.matchMedia('(max-width: 760px)');
     const handler = (e: MediaQueryListEvent) => {
-      if (!e.matches) setMobileDrawerOpen(false);
+      if (!e.matches) closeMobileDrawer();
     };
     mql.addEventListener('change', handler);
     return () => mql.removeEventListener('change', handler);
-  }, []);
+  }, [closeMobileDrawer]);
 
   useEffect(() => {
     if (!mobileDrawerOpen) return;
@@ -2096,7 +2107,7 @@ export function App({
   // chat view (message list + composer), not as a modal overlay. Only one may be
   // active at a time; null means the normal chat view is shown.
   const [activePanel, setActivePanel] = useState<
-    'settings' | 'status' | 'sessions' | 'extensions' | null
+    'settings' | 'status' | 'sessions' | 'extensions' | 'mcp' | 'plugins' | null
   >(null);
   const closePanel = useCallback(() => setActivePanel(null), []);
   // The Settings/Status panel (activePanel) and the Scheduled Tasks page
@@ -2106,16 +2117,42 @@ export function App({
   // Status left the panel rendered behind the Scheduled Tasks overlay, looking
   // like the button did nothing.
   const openPanel = useCallback(
-    (panel: 'settings' | 'status' | 'sessions' | 'extensions') => {
+    (
+      panel:
+        | 'settings'
+        | 'status'
+        | 'sessions'
+        | 'extensions'
+        | 'mcp'
+        | 'plugins',
+    ) => {
       setMainView('chat');
       setActivePanel(panel);
     },
     [],
   );
+  const loadMcpManagerMessage = useCallback(async () => {
+    const status = await workspaceActions.loadMcpStatus();
+    setMcpDialogMessage({
+      status,
+      toolsByServer: {},
+      resourcesByServer: {},
+      showDescriptions: false,
+      showSchema: false,
+      showTips: false,
+    });
+  }, [workspaceActions]);
   const openScheduledTasks = useCallback(() => {
     setActivePanel(null);
     setMainView('scheduledTasks');
   }, []);
+  const openSessionDrawer = useCallback(() => {
+    if (!sidebarOptions.enabled) return;
+    setActivePanel(null);
+    setMainView('chat');
+    setForceMobileDrawer(true);
+    setMobileDrawerOpen(true);
+  }, [sidebarOptions.enabled]);
   // Open the in-window split view showing 2+ sessions side by side. `splitSessionIds`
   // is the live pane set — SplitView mirrors add/remove back into it via
   // onPanesChange — so it must be preserved across entries, not blindly reset.
@@ -2166,22 +2203,6 @@ export function App({
     openSplitView,
     splitSessionIds,
   ]);
-  const shellApi = useMemo<WebShellApi>(
-    () => ({
-      openSplitView: () => requestOpenSplitView(),
-      openSessionOverview: () => openPanel('sessions'),
-    }),
-    [openPanel, requestOpenSplitView],
-  );
-  useEffect(() => {
-    assignShellRef(shellRef, shellApi);
-  }, [shellApi, shellRef]);
-  useEffect(
-    () => () => {
-      assignShellRef(shellRef, null);
-    },
-    [shellRef],
-  );
   useEffect(() => {
     if (!externalSplitControlled) return;
     const requested = externalSplitSignature
@@ -2292,6 +2313,7 @@ export function App({
   // closes, so keyboard users aren't stranded on an element that is hidden.
   const panelBackRef = useRef<HTMLButtonElement | null>(null);
   const panelHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  const pluginTabRef = useRef<HTMLButtonElement | null>(null);
   const prevActivePanelRef = useRef(activePanel);
   const prevApprovalOverlayRef = useRef(approvalOverlayActive);
   useEffect(() => {
@@ -2302,6 +2324,10 @@ export function App({
     if (activePanel) {
       if (activePanel === 'extensions') {
         panelHeadingRef.current?.focus();
+        return;
+      }
+      if (activePanel === 'plugins') {
+        pluginTabRef.current?.focus();
         return;
       }
       // Covers null→panel and panel→panel: the Back button lives outside the
@@ -3621,6 +3647,7 @@ export function App({
       // Starting a new chat means the user wants to see it — leave any open
       // Settings/Status panel so the fresh chat is visible (no-op when closed).
       closePanel();
+      setMainView('chat');
       let focusRequest: number | undefined;
       try {
         const clearPromise = (
@@ -3646,11 +3673,40 @@ export function App({
       sessionActions,
     ],
   );
+  const shellApi = useMemo<WebShellApi>(
+    () => ({
+      openSplitView: () => {
+        closeMobileDrawer();
+        requestOpenSplitView();
+      },
+      openSessionOverview: () => {
+        closeMobileDrawer();
+        openPanel('sessions');
+      },
+      openSessionDrawer,
+      createNewSession: () => createNewSession(),
+    }),
+    [
+      closeMobileDrawer,
+      createNewSession,
+      openPanel,
+      openSessionDrawer,
+      requestOpenSplitView,
+    ],
+  );
+  useEffect(() => {
+    assignShellRef(shellRef, shellApi);
+  }, [shellApi, shellRef]);
+  useEffect(
+    () => () => {
+      assignShellRef(shellRef, null);
+    },
+    [shellRef],
+  );
   const handleMissingSessionNewSession = useCallback(async () => {
     if (creatingMissingSessionRef.current) return;
     creatingMissingSessionRef.current = true;
     setIsCreatingMissingSession(true);
-    setMainView('chat');
     try {
       const success = await createNewSession();
       if (success) {
@@ -4378,53 +4434,16 @@ export function App({
             const mcpArg = text.slice(match[0].length).trim().toLowerCase();
             workspaceActions
               .loadMcpStatus()
-              .then(async (status) => {
-                const toolsByServer: Record<
-                  string,
-                  Awaited<ReturnType<typeof workspaceActions.loadMcpTools>>
-                > = {};
-                const resourcesByServer: Record<
-                  string,
-                  Awaited<ReturnType<typeof workspaceActions.loadMcpResources>>
-                > = {};
-                await Promise.all(
-                  (status?.servers ?? []).map(async (server) => {
-                    // Tools and resources load in parallel; a failure in one
-                    // must not hide the other, and per-server failures still
-                    // let sibling servers render.
-                    await Promise.all([
-                      (async () => {
-                        try {
-                          toolsByServer[server.name] =
-                            await workspaceActions.loadMcpTools(server.name);
-                        } catch {
-                          // Allow partial failure — other servers still render
-                        }
-                      })(),
-                      (async () => {
-                        // Skip the round-trip for servers that advertise no
-                        // resources (or older daemons that omit the count).
-                        if (!server.resourceCount) return;
-                        try {
-                          resourcesByServer[server.name] =
-                            await workspaceActions.loadMcpResources(
-                              server.name,
-                            );
-                        } catch {
-                          // Allow partial failure — other servers still render
-                        }
-                      })(),
-                    ]);
-                  }),
-                );
+              .then((status) => {
                 setMcpDialogMessage({
                   status,
-                  toolsByServer,
-                  resourcesByServer,
+                  toolsByServer: {},
+                  resourcesByServer: {},
                   showDescriptions: mcpArg === 'desc',
                   showSchema: mcpArg === 'schema',
                   showTips: !mcpArg,
                 });
+                openPanel('mcp');
               })
               .catch((error: unknown) => {
                 reportError(error, 'Failed to load MCP status');
@@ -5719,18 +5738,6 @@ export function App({
               <ToolsDialog />
             </DialogShell>
           )}
-          {mcpDialogMessage && (
-            <DialogShell
-              title={t('mcp.manageServers')}
-              size="lg"
-              onClose={() => setMcpDialogMessage(null)}
-            >
-              <McpDialog
-                message={mcpDialogMessage}
-                onClose={() => setMcpDialogMessage(null)}
-              />
-            </DialogShell>
-          )}
           {tasksDialogMessage && (
             <DialogShell
               title={t('tasks.title')}
@@ -5921,6 +5928,7 @@ export function App({
                 className={[
                   styles.mobileDrawer,
                   mobileDrawerOpen ? styles.mobileDrawerOpen : undefined,
+                  forceMobileDrawer ? styles.mobileDrawerForced : undefined,
                 ]
                   .filter(Boolean)
                   .join(' ')}
@@ -5940,6 +5948,10 @@ export function App({
                   onOpenSettings={() => {
                     closeMobileDrawer();
                     openPanel('settings');
+                  }}
+                  onOpenPlugins={() => {
+                    closeMobileDrawer();
+                    openPanel('plugins');
                   }}
                   onOpenDaemonStatus={() => {
                     closeMobileDrawer();
@@ -5969,12 +5981,16 @@ export function App({
                     );
                   }}
                   onNewSession={(workspaceCwd) => {
-                    setMainView('chat');
                     return createNewSession(workspaceCwd);
                   }}
                   onLoadSession={(sessionId, workspaceCwd) => {
                     setMainView('chat');
                     return loadSidebarSession(sessionId, workspaceCwd);
+                  }}
+                  onSelectCurrentSession={() => {
+                    closeMobileDrawer();
+                    setMainView('chat');
+                    closePanel();
                   }}
                   onError={reportError}
                   mobileOpen={mobileDrawerOpen}
@@ -6016,6 +6032,7 @@ export function App({
                       .filter(Boolean)
                       .join(' ')}
                     onClick={() => {
+                      setForceMobileDrawer(false);
                       setMobileDrawerOpen((open) => !open);
                     }}
                     aria-label={t('sidebar.toggleMenu')}
@@ -6048,10 +6065,16 @@ export function App({
                         ? t('daemon.title')
                         : activePanel === 'extensions'
                           ? t('extensions.manage.title')
-                        : t('sessionsOverview.title')
+                          : activePanel === 'mcp'
+                            ? t('mcp.title')
+                            : activePanel === 'plugins'
+                              ? t('plugins.title')
+                              : t('sessionsOverview.title')
                   }
                 >
-                  {activePanel !== 'extensions' && (
+                  {activePanel !== 'extensions' &&
+                    activePanel !== 'mcp' &&
+                    activePanel !== 'plugins' && (
                     <div className={styles.panelHeader}>
                     <button
                       ref={panelBackRef}
@@ -6157,6 +6180,28 @@ export function App({
                         onClose={closePanel}
                         initialFocusRef={panelHeadingRef}
                       />
+                    ) : activePanel === 'mcp' && mcpDialogMessage ? (
+                      <McpManagerPage
+                        message={mcpDialogMessage}
+                        onClose={() => {
+                          setMcpDialogMessage(null);
+                          closePanel();
+                        }}
+                      />
+                    ) : activePanel === 'plugins' ? (
+                      <PluginManagerPage
+                        mcpMessage={mcpDialogMessage}
+                        loadMcpMessage={async () => {
+                          try {
+                            await loadMcpManagerMessage();
+                          } catch (error) {
+                            reportError(error, 'Failed to load MCP status');
+                            throw error;
+                          }
+                        }}
+                        onClose={closePanel}
+                        initialFocusRef={pluginTabRef}
+                      />
                     ) : (
                       <SessionOverviewPanel
                         onOpenSession={handleOpenSessionFromOverview}
@@ -6218,7 +6263,6 @@ export function App({
                         // describe the task in natural language; the agent
                         // creates it via its cron_create tool. Focus is deferred
                         // so the new session's composer is mounted/visible first.
-                        setMainView('chat');
                         void createNewSession().then((created) => {
                           // If the new session couldn't be started,
                           // createNewSession already surfaced the error — do NOT
@@ -6414,6 +6458,13 @@ export function App({
                                 onReviewChanges={openReviewPanel}
                                 onOpenArtifact={openArtifactPanel}
                                 onOpenScheduledTask={openScheduledTaskPanel}
+                                generateContent={
+                                  connection.capabilities?.features.includes(
+                                    'session_generation',
+                                  )
+                                    ? sessionActions.generateSessionContent
+                                    : undefined
+                                }
                               />
                             );
 

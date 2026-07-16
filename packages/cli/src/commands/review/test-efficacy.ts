@@ -47,6 +47,7 @@ import {
 import { dirname, join, isAbsolute, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { probeWorktreePath } from './lib/paths.js';
+import { isWorkspaceMember } from './lib/workspaces.js';
 
 export type ProbeVerdict = 'gated' | 'inert' | 'inconclusive';
 
@@ -55,45 +56,11 @@ export interface FileEntry {
   kind: string;
 }
 
-/**
- * Does `npm test --workspaces` reach this file?
- *
- * A test outside every workspace glob is collected by nothing. This is the
- * whole of the #6486 unreachability finding, and it needs no execution at all —
- * just the root `package.json`.
- *
- * Globs here are npm workspace globs, not full minimatch: a trailing `/*` means
- * "one path segment", a leading `!` excludes. Anything fancier is treated as a
- * literal prefix, which errs toward calling a file REACHABLE — the safe
- * direction, since a false "unreachable" finding would be posted to a PR.
- */
-export function isWorkspaceMember(
-  filePath: string,
-  workspaceGlobs: string[],
-): boolean {
-  const norm = filePath.replace(/^\.\//, '');
-  const matches = (glob: string): boolean => {
-    const g = glob.replace(/^!/, '').replace(/\/$/, '');
-    if (g.endsWith('/*')) {
-      const base = g.slice(0, -2);
-      if (!norm.startsWith(`${base}/`)) return false;
-      // `packages/*` owns `packages/cli/**`, not `packages/channels/base/**`
-      // — but the latter is listed explicitly, and negation is handled below.
-      return true;
-    }
-    return norm === g || norm.startsWith(`${g}/`);
-  };
-  // npm evaluates the globs IN ORDER — a positive glob listed after a negation
-  // re-includes what the negation excluded. So walk them in order and let the
-  // last match win; a two-pass filter (all negations, then all positives) would
-  // let a negation win wherever it sat and file a false `unreachable`.
-  let member = false;
-  for (const g of workspaceGlobs) {
-    if (!matches(g)) continue;
-    member = !g.startsWith('!');
-  }
-  return member;
-}
+// `isWorkspaceMember` now lives in `lib/workspaces.ts`, where `build-test` needs
+// the same npm-workspace-glob walk to decide which packages a diff touches.
+// Imported (this module still calls it) and re-exported (its tests and callers
+// still import it from here).
+export { isWorkspaceMember };
 
 export interface EfficacyPlan {
   /** Test files the diff adds or changes that the test command never collects. */

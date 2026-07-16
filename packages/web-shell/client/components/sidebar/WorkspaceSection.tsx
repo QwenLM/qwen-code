@@ -13,6 +13,10 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import { FolderClosedIcon, FolderOpenIcon } from 'lucide-react';
 import { SESSION_LIST_PAGE_SIZE } from '../../constants/sessions';
+import {
+  readWorkspaceCollapsedGroupIds,
+  writeWorkspaceCollapsedGroupIds,
+} from './collapsedSessionSections';
 import { SessionGroupSection } from './SessionGroupSection';
 import styles from './WorkspaceSection.module.css';
 
@@ -109,8 +113,8 @@ export function WorkspaceSection({
   const [groups, setGroups] = useState<DaemonSessionGroup[]>([]);
   const [loadError, setLoadError] = useState(false);
   const [internalExpanded, setInternalExpanded] = useState(false);
-  const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<string>>(
-    () => new Set(),
+  const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<string>>(() =>
+    readWorkspaceCollapsedGroupIds(workspace.id),
   );
   const [actionsVisible, setActionsVisible] = useState(false);
   const expanded = controlledExpanded ?? internalExpanded;
@@ -121,6 +125,12 @@ export function WorkspaceSection({
   useEffect(() => {
     if (controlledExpanded === undefined) setInternalExpanded(false);
   }, [controlledExpanded, workspace.id]);
+
+  // The render site keys this component by workspace id, so an id change
+  // always remounts and the lazy useState initializer re-reads storage.
+  useEffect(() => {
+    writeWorkspaceCollapsedGroupIds(workspace.id, collapsedGroupIds);
+  }, [collapsedGroupIds, workspace.id]);
 
   useEffect(() => {
     if (controlledExpanded === undefined && autoExpandKey) {

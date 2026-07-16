@@ -64,6 +64,71 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('drops silent-shell heartbeat tool updates instead of rewriting the tool block', () => {
+    const events = normalizeDaemonEvent({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-1',
+          status: 'in_progress',
+          _meta: {
+            toolName: 'run_shell_command',
+            shellProgress: { type: 'shell_progress', elapsedMs: 10_000 },
+          },
+        },
+      },
+    });
+
+    expect(events).toEqual([]);
+
+    // A real terminal update for the same call still normalizes.
+    const completed = normalizeDaemonEvent({
+      id: 2,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-1',
+          status: 'completed',
+          _meta: { toolName: 'run_shell_command' },
+        },
+      },
+    });
+    expect(completed).toMatchObject([
+      { type: 'tool.update', toolCallId: 'call-1', status: 'completed' },
+    ]);
+  });
+
+  it('normalizes an in_progress frame that carries a kind (the drop is scoped to kind-less heartbeats)', () => {
+    // The `kind === undefined` condition is load-bearing: an in_progress
+    // frame WITH a kind is not a bare heartbeat and must pass through to a
+    // tool.update, even if it also carries shellProgress.
+    const events = normalizeDaemonEvent({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-1',
+          status: 'in_progress',
+          kind: 'execute',
+          _meta: {
+            toolName: 'run_shell_command',
+            shellProgress: { type: 'shell_progress', elapsedMs: 10_000 },
+          },
+        },
+      },
+    });
+    expect(events).toMatchObject([
+      { type: 'tool.update', toolCallId: 'call-1', status: 'in_progress' },
+    ]);
+  });
+
   it('stores input annotations on locally appended user messages', () => {
     const store = createDaemonTranscriptStore();
     const inputAnnotations = [
