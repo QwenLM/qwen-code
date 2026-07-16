@@ -1487,6 +1487,7 @@ export default {
   'to paste images': '画像を貼り付け',
   'for external editor': '外部エディタ用',
   '? for shortcuts': '? でショートカット表示',
+  'Pasting…': '貼り付け中…',
   'Invalid approval mode "{{arg}}". Valid modes: {{modes}}':
     '無効な承認モード "{{arg}}" です。有効なモード: {{modes}}',
   'Approval mode set to "{{mode}}"': '承認モードを "{{mode}}" に設定しました',

@@ -73,6 +73,7 @@ export default {
   'Type your message or @path/to/file':
     'Tapez votre message ou @chemin/vers/fichier',
   '? for shortcuts': '? pour les raccourcis',
+  'Pasting…': 'Collage…',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "Appuyez sur 'i' pour le mode INSERTION et 'Esc' pour le mode NORMAL.",
   'Cancel operation / Clear input (double press)':
