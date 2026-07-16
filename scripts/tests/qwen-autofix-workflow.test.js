@@ -957,10 +957,17 @@ describe('qwen-autofix workflow', () => {
       expect(step).toContain('npm run build');
       expect(step).toContain('npm run typecheck');
       expect(step).toContain('npm run lint');
-      // Mirror CI's settings-schema freshness gate via the generator's in-process
-      // --check (single source of truth, no disk write). Invisible to
+      // Mirror CI's freshness gate with regenerate + `git status --porcelain`
+      // (version-agnostic — the generator's --check was reverted from main by
+      // #7031, so it must NOT be relied on). Invisible to
       // build/typecheck/lint/vitest, so it must be asserted explicitly.
-      expect(step).toContain('npm run generate:settings-schema -- --check');
+      expect(step).toContain('npm run generate:settings-schema');
+      // Must NOT rely on the generator's --check (reverted from main by #7031).
+      expect(step).not.toContain('generate:settings-schema -- --check');
+      expect(step).toContain(
+        'packages/vscode-ide-companion/schemas/settings.schema.json',
+      );
+      expect(step).toContain('is out of date');
       expect(step).toContain(
         'No package changes detected; skipping package tests.',
       );
@@ -1230,6 +1237,32 @@ describe('qwen-autofix workflow', () => {
       });
     expect(runMarkRound({ NEWEST: '2026-07-16T00:00:00Z' })).toBe('3');
     expect(runMarkRound({ NEWEST: '' })).toBe('5');
+
+    // Behaviorally replay the pending-staleness jq filter against sample checks so
+    // a flipped comparison (which would age out live checks → double-processing)
+    // is caught, not just string-matched.
+    const jqFilter = reviewScanJob.match(
+      /--arg cut "\$\{PENDING_CUTOFF\}" '([\s\S]*?)' <<< "\$\{CHECKS_JSON\}"/,
+    )?.[1];
+    expect(jqFilter).toBeTruthy();
+    const runStaleness = (checks) =>
+      execFileSync(
+        'jq',
+        ['-r', '--arg', 'cut', '2026-07-16T00:00:00Z', jqFilter],
+        { input: JSON.stringify(checks), encoding: 'utf8' },
+      ).trim();
+    // Started AFTER the cutoff (recent) → active → blocks.
+    expect(
+      runStaleness([{ status: 'IN_PROGRESS', startedAt: '2026-07-16T01:00:00Z', workflowName: 'CI' }]),
+    ).toBe('true');
+    // Started BEFORE the cutoff (stuck past the bound) → dead → does not block.
+    expect(
+      runStaleness([{ status: 'IN_PROGRESS', startedAt: '2026-07-15T00:00:00Z', workflowName: 'CI' }]),
+    ).toBe('false');
+    // Queued, never started (no startedAt) → does not block.
+    expect(
+      runStaleness([{ status: 'QUEUED', workflowName: 'CI' }]),
+    ).toBe('false');
   });
 
   it('writes agent output to a log and marks loop guard failures for handoff', () => {
