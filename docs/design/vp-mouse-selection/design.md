@@ -124,7 +124,7 @@ SGR bytes ─(KeypressContext reassembly)→ MouseEvent{ action, col, row, shift
   double / triple click                            → selectWordAt / selectLineAt (≈500ms, 1-cell threshold)
 ```
 
-Coordinate mapping (corrected per audit — the VP frame is **not** unconditionally top-anchored; `frameAnchor()` is top-anchored only when the frame fits and bottom-pinned with a negative anchor on overflow, which `layoutRowForEvent()` already corrects):
+Coordinate mapping assumes Ink clears and homes the alternate screen before the first frame. A fitting frame is therefore top-anchored, while an overflowing frame is bottom-pinned with a negative `frameAnchor()`:
 
 ```text
 layoutRow   = terminalRow - 1 - frameAnchor

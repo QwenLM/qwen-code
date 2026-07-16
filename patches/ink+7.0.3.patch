@@ -126,7 +126,7 @@ index cc849f0..25d6b33 100644
  //# sourceMappingURL=index.js.map
 \ No newline at end of file
 diff --git a/node_modules/ink/build/ink.js b/node_modules/ink/build/ink.js
-index ef659f3..cbdb068 100644
+index ef659f3..fbba275 100644
 --- a/node_modules/ink/build/ink.js
 +++ b/node_modules/ink/build/ink.js
 @@ -17,6 +17,7 @@ import { hideCursorEscape, showCursorEscape } from './cursor-helpers.js';
@@ -175,6 +175,14 @@ index ef659f3..cbdb068 100644
          this.options.onRender?.({ renderTime: performance.now() - startTime });
          // If <Static> output isn't empty, it means new children have been added to it
          const hasStaticOutput = staticOutput && staticOutput !== '\n';
+@@ -642,6 +658,7 @@ export default class Ink {
+         this.alternateScreen = this.resolveAlternateScreenOption(enabled, this.interactive);
+         if (this.alternateScreen) {
+             this.writeBestEffort(this.options.stdout, ansiEscapes.enterAlternativeScreen);
++            this.writeBestEffort(this.options.stdout, ansiEscapes.clearTerminal);
+             this.writeBestEffort(this.options.stdout, hideCursorEscape);
+         }
+     }
 diff --git a/node_modules/ink/build/output.d.ts b/node_modules/ink/build/output.d.ts
 index 0f4523f..1ceda6a 100644
 --- a/node_modules/ink/build/output.d.ts

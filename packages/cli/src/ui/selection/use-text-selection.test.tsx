@@ -52,6 +52,25 @@ const makeFrame = (text: string): ReadonlyFrame => ({
   ],
 });
 
+const makeTwoLineFrame = (first: string, second: string): ReadonlyFrame => ({
+  width: Math.max(first.length, second.length),
+  height: 2,
+  cells: [makeFrame(first).cells[0], makeFrame(second).cells[0]],
+});
+
+const makeWideFrame = (): ReadonlyFrame => ({
+  width: 4,
+  height: 1,
+  cells: [
+    [
+      { type: 'char', value: 'a', fullWidth: false, styles: [] },
+      { type: 'char', value: '中', fullWidth: true, styles: [] },
+      { type: 'char', value: '', fullWidth: false, styles: [] },
+      { type: 'char', value: 'b', fullWidth: false, styles: [] },
+    ],
+  ],
+});
+
 const makeEvent = (
   name: MouseEvent['name'],
   col: number,
@@ -75,6 +94,7 @@ describe('TextSelectionController', () => {
     scrollHeight: number;
     innerHeight: number;
   };
+  let viewportRect: { x: number; y: number; width: number; height: number };
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -82,6 +102,7 @@ describe('TextSelectionController', () => {
     setSelection = vi.fn();
     listener = undefined;
     scrollState = { scrollTop: 0, scrollHeight: 1, innerHeight: 1 };
+    viewportRect = { x: 0, y: 0, width: frame.width, height: 1 };
     vi.mocked(copyToClipboard).mockResolvedValue(undefined);
     vi.mocked(getScreenBuffer).mockReturnValue({
       get frame() {
@@ -104,7 +125,7 @@ describe('TextSelectionController', () => {
     render(
       <TextSelectionController
         isActive
-        getViewportRect={() => ({ x: 0, y: 0, width: 5, height: 1 })}
+        getViewportRect={() => viewportRect}
         getScrollState={() => scrollState}
         hitTestScrollbar={() => false}
       />,
@@ -129,6 +150,47 @@ describe('TextSelectionController', () => {
       ey: 0,
     });
     expect(copyToClipboard).toHaveBeenCalledWith('hello');
+  });
+
+  it('includes the release cell when no move event is emitted', () => {
+    const handler = mount();
+    handler(makeEvent('left-press', 1));
+    handler(makeEvent('left-release', 5));
+
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 0,
+      ex: 4,
+      ey: 0,
+    });
+    expect(copyToClipboard).toHaveBeenCalledWith('hello');
+  });
+
+  it('does not treat a click after a drag as a double-click', () => {
+    vi.spyOn(Date, 'now').mockReturnValueOnce(1000).mockReturnValueOnce(1100);
+    const handler = mount();
+    selectHello(handler);
+
+    handler(makeEvent('left-press', 1));
+
+    expect(copyToClipboard).toHaveBeenCalledTimes(1);
+    expect(copyToClipboard).toHaveBeenLastCalledWith('hello');
+  });
+
+  it('snaps a wide-character spacer to the leading cell', () => {
+    frame = makeWideFrame();
+    const handler = mount();
+    handler(makeEvent('left-press', 3));
+    handler(makeEvent('move', 4));
+    handler(makeEvent('left-release', 4));
+
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 1,
+      sy: 0,
+      ex: 3,
+      ey: 0,
+    });
+    expect(copyToClipboard).toHaveBeenCalledWith('中b');
   });
 
   it('records clipboard failures in the debug log', async () => {
@@ -170,6 +232,18 @@ describe('TextSelectionController', () => {
     setSelection.mockClear();
 
     listener!(makeFrame('hello'));
+
+    expect(setSelection).not.toHaveBeenCalled();
+  });
+
+  it('keeps a selection when content outside the viewport changes', () => {
+    frame = makeTwoLineFrame('hello', 'prompt');
+    viewportRect = { x: 0, y: 0, width: 5, height: 1 };
+    const handler = mount();
+    selectHello(handler);
+    setSelection.mockClear();
+
+    listener!(makeTwoLineFrame('hello', 'footer'));
 
     expect(setSelection).not.toHaveBeenCalled();
   });

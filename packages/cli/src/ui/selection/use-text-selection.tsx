@@ -27,31 +27,39 @@ interface ScrollState {
   innerHeight: number;
 }
 
-const sameFrameContent = (
+const sameViewportContent = (
   previous: ReadonlyFrame | null,
   current: ReadonlyFrame,
+  rect: ViewportRect,
 ): boolean => {
-  if (
-    !previous ||
-    previous.width !== current.width ||
-    previous.height !== current.height
-  ) {
+  if (!previous) {
     return false;
   }
-  return previous.cells.every((row, y) => {
-    const currentRow = current.cells[y];
-    return (
-      currentRow?.length === row.length &&
-      row.every((cell, x) => {
-        const currentCell = currentRow[x];
-        return (
-          currentCell?.value === cell.value &&
-          currentCell.fullWidth === cell.fullWidth
-        );
-      })
-    );
-  });
+  for (let y = rect.y; y < rect.y + rect.height; y++) {
+    for (let x = rect.x; x < rect.x + rect.width; x++) {
+      const cell = previous.cells[y]?.[x];
+      const currentCell = current.cells[y]?.[x];
+      if (
+        cell?.value !== currentCell?.value ||
+        cell?.fullWidth !== currentCell?.fullWidth
+      ) {
+        return false;
+      }
+    }
+  }
+  return true;
 };
+
+const sameViewportRect = (
+  previous: ViewportRect | null,
+  current: ViewportRect | null,
+): current is ViewportRect =>
+  previous !== null &&
+  current !== null &&
+  previous.x === current.x &&
+  previous.y === current.y &&
+  previous.width === current.width &&
+  previous.height === current.height;
 
 export interface TextSelectionControllerProps {
   /** Selection is only handled while active (VP mode, no dialog, focused). */
@@ -90,6 +98,7 @@ export function TextSelectionController(
   const baselineScrollTopRef = useRef<number>(0);
   const baselineScrollHeightRef = useRef<number>(0);
   const baselineFrameRef = useRef<ReadonlyFrame | null>(null);
+  const baselineViewportRectRef = useRef<ViewportRect | null>(null);
   const lastClickRef = useRef<ClickRecord | null>(null);
   const bufferRef = useRef<ScreenBuffer | undefined>(undefined);
   const propsRef = useRef(props);
@@ -126,6 +135,7 @@ export function TextSelectionController(
     baselineScrollTopRef.current = scrollState.scrollTop;
     baselineScrollHeightRef.current = scrollState.scrollHeight;
     baselineFrameRef.current = getBuffer()?.frame ?? null;
+    baselineViewportRectRef.current = propsRef.current.getViewportRect();
   }, [getBuffer]);
 
   const copySelection = useCallback(() => {
@@ -161,7 +171,14 @@ export function TextSelectionController(
         terminalHeight,
         frameHeight,
       );
-      return { point, rect };
+      const row = buffer.frame?.cells[point.y];
+      const snappedPoint =
+        point.x > 0 &&
+        row?.[point.x]?.value === '' &&
+        row[point.x - 1]?.fullWidth
+          ? { ...point, x: point.x - 1 }
+          : point;
+      return { point: snappedPoint, rect };
     },
     [getBuffer, stdout],
   );
@@ -227,6 +244,7 @@ export function TextSelectionController(
         if (!selection.dragging) {
           return;
         }
+        lastClickRef.current = null;
         // A scroll under the drag invalidates coordinates in B1.
         if (
           propsRef.current.getScrollState().scrollTop !==
@@ -248,6 +266,10 @@ export function TextSelectionController(
         // Word/line click-selects are not drags; leave them intact.
         if (!selection.dragging) {
           return;
+        }
+        const mapped = mapEvent(event);
+        if (mapped) {
+          selection.extend(clampToViewport(mapped.point, mapped.rect));
         }
         selection.finish();
         if (selection.isCollapsed || selection.isEmpty) {
@@ -291,10 +313,12 @@ export function TextSelectionController(
         return;
       }
       const { scrollTop, scrollHeight } = propsRef.current.getScrollState();
+      const viewportRect = propsRef.current.getViewportRect();
       if (
         scrollTop !== baselineScrollTopRef.current ||
         scrollHeight !== baselineScrollHeightRef.current ||
-        !sameFrameContent(baselineFrameRef.current, frame)
+        !sameViewportRect(baselineViewportRectRef.current, viewportRect) ||
+        !sameViewportContent(baselineFrameRef.current, frame, viewportRect)
       ) {
         clearSelection();
       }
