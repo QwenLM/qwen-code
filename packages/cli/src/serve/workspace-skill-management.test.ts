@@ -294,7 +294,7 @@ describe('workspace Skill management', () => {
 
     await expect(
       installWorkspaceSkill(workspace, {
-        name: 'x'.repeat(101),
+        name: 'x'.repeat(257),
         scope: 'workspace',
         source: { type: 'folder', path: source },
       }),

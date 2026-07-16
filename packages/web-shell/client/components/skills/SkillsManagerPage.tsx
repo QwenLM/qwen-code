@@ -189,7 +189,7 @@ export function SkillsManagerPage({
   const [busySkill, setBusySkill] = useState<string | null>(null);
   const [installOpen, setInstallOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
-  const [installNotice, setInstallNotice] = useState<string | null>(null);
+  const [listNotice, setListNotice] = useState<string | null>(null);
   const [notice, setNotice] = useState<{
     skillName: string;
     text: string;
@@ -278,11 +278,9 @@ export function SkillsManagerPage({
   async function installSkill(
     request: Parameters<typeof install>[0],
   ): Promise<void> {
-    setInstallNotice(null);
+    setListNotice(null);
     await install(request);
-    setInstallNotice(
-      t('skills.install.succeeded', { name: request.name.trim() }),
-    );
+    setListNotice(t('skills.install.succeeded', { name: request.name.trim() }));
     await reload().catch(() => undefined);
   }
 
@@ -294,7 +292,8 @@ export function SkillsManagerPage({
       await remove(selectedSkill.name, scope);
       setDeleteOpen(false);
       setSelectedName(null);
-      await reload();
+      setListNotice(t('skills.delete.succeeded', { name: selectedSkill.name }));
+      await reload().catch(() => undefined);
     } catch (deleteError) {
       setDeleteOpen(false);
       setNotice({
@@ -526,7 +525,13 @@ export function SkillsManagerPage({
               ) : null}
             </CardContent>
           </Card>
-          <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+          <AlertDialog
+            open={deleteOpen}
+            onOpenChange={(open) => {
+              if (!open && busySkill !== null) return;
+              setDeleteOpen(open);
+            }}
+          >
             <AlertDialogContent>
               <AlertDialogHeader>
                 <AlertDialogTitle>{t('skills.delete.title')}</AlertDialogTitle>
@@ -605,10 +610,10 @@ export function SkillsManagerPage({
           </Alert>
         ) : null}
 
-        {installNotice ? (
+        {listNotice ? (
           <Alert>
             <InfoIcon />
-            <AlertDescription>{installNotice}</AlertDescription>
+            <AlertDescription>{listNotice}</AlertDescription>
           </Alert>
         ) : null}
 

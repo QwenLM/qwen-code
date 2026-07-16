@@ -1697,6 +1697,8 @@ const EN: Messages = {
   'skills.delete.description': (v) =>
     `Delete “${v?.name ?? ''}” from disk? This cannot be undone.`,
   'skills.delete.failed': 'Failed to delete skill.',
+  'skills.delete.succeeded': (v) =>
+    `Skill “${v?.name ?? ''}” deleted successfully.`,
   'skills.delete.title': 'Delete skill?',
   'skills.empty': 'No skills available.',
   'skills.count': (v) =>
@@ -3708,6 +3710,7 @@ const ZH: Messages = {
   'skills.delete.description': (v) =>
     `确定从磁盘删除“${v?.name ?? ''}”吗？此操作无法撤销。`,
   'skills.delete.failed': '删除技能失败。',
+  'skills.delete.succeeded': (v) => `技能“${v?.name ?? ''}”删除成功。`,
   'skills.delete.title': '删除技能？',
   'skills.empty': '没有可用 skill。',
   'skills.count': (v) =>

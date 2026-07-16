@@ -114,7 +114,7 @@ describe('workspace Skill management routes', () => {
     const response = await request(harness.app)
       .post('/workspace/skills/install')
       .send({
-        name: 'x'.repeat(101),
+        name: 'x'.repeat(257),
         scope: 'workspace',
         source: { type: 'folder', path: '/tmp/skill' },
       });

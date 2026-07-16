@@ -37,7 +37,7 @@ const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 6 * 1024 * 1024;
 const MAX_PATH_LENGTH = 512;
 const MAX_PATH_DEPTH = 16;
-export const MAX_WORKSPACE_SKILL_NAME_LENGTH = 100;
+export const MAX_WORKSPACE_SKILL_NAME_LENGTH = 256;
 const execFileAsync = promisify(execFile);
 
 export class WorkspaceSkillManagementError extends Error {

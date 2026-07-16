@@ -293,9 +293,16 @@ export function registerWorkspaceQualifiedSkillsRoutes(
         res,
       );
       if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
-      const skillName = req.params['name'];
+      const rawSkillName = req.params['name'];
       const scope = parseDeleteScope(req, res);
-      if (!skillName || !scope) return;
+      if (!rawSkillName || !scope) return;
+      let skillName: string;
+      try {
+        skillName = validateWorkspaceSkillName(rawSkillName);
+      } catch (error) {
+        sendSkillManagementError(res, error);
+        return;
+      }
       const clientId = parseAndValidateWorkspaceClientId(
         req,
         res,
