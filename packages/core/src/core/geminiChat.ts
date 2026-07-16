@@ -3829,8 +3829,7 @@ export class GeminiChat {
     // result, they do not advance the agent without text or another tool call.
     const hasAnyContent = contentText || thoughtText;
     const lacksVisibleToolResultProgress =
-      isToolResultContinuation &&
-      (!contentText || contentText === '(empty content)');
+      isToolResultContinuation && !contentText;
     if (
       streamError === null &&
       !hasToolCall &&
@@ -3840,6 +3839,12 @@ export class GeminiChat {
         throw new InvalidStreamError(
           'Model stream ended without a finish reason.',
           'NO_FINISH_REASON',
+        );
+      }
+      if (lacksVisibleToolResultProgress) {
+        throw new InvalidStreamError(
+          'Model stream ended after a tool result without visible progress.',
+          'NO_TOOL_RESULT_PROGRESS',
         );
       }
       throw new InvalidStreamError(

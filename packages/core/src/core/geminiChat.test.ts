@@ -1480,7 +1480,7 @@ describe('GeminiChat', async () => {
         expect(mockLogContentRetry).toHaveBeenLastCalledWith(
           mockConfig,
           expect.objectContaining({
-            error_type: 'NO_RESPONSE_TEXT',
+            error_type: 'NO_TOOL_RESULT_PROGRESS',
             model: 'test-model',
           }),
         );
@@ -1496,6 +1496,76 @@ describe('GeminiChat', async () => {
           role: 'model',
           parts: [{ text: 'Finished the analysis.' }],
         });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should not retry tool result continuations that make another tool call', async () => {
+      vi.useFakeTimers();
+      try {
+        chat.setHistory([
+          { role: 'user', parts: [{ text: 'inspect the project' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  args: { path: '/tmp/example' },
+                },
+              },
+            ],
+          },
+        ]);
+
+        vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+          streamResponse(
+            stopResponse([
+              {
+                functionCall: {
+                  id: 'call_list_files',
+                  name: 'list_files',
+                  args: { path: '/tmp' },
+                },
+              },
+            ]),
+          ),
+        );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          {
+            message: [
+              {
+                functionResponse: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  response: { output: 'file contents' },
+                },
+              },
+            ],
+          },
+          'prompt-id-tool-result-next-tool-call',
+        );
+        const events = await collectStreamWithFakeTimers(stream);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(1);
+        expect(
+          events.some((event) => event.type === StreamEventType.RETRY),
+        ).toBe(false);
+        expect(
+          events.some(
+            (event) =>
+              event.type === StreamEventType.CHUNK &&
+              event.value.candidates?.[0]?.content?.parts?.some(
+                (part) => part.functionCall?.id === 'call_list_files',
+              ),
+          ),
+        ).toBe(true);
       } finally {
         vi.useRealTimers();
       }

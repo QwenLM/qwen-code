@@ -11,6 +11,7 @@ export class InvalidStreamError extends Error {
   readonly type:
     | 'NO_FINISH_REASON'
     | 'NO_RESPONSE_TEXT'
+    | 'NO_TOOL_RESULT_PROGRESS'
     | 'PROTOCOL_TAG_LEAK'
     | 'MALFORMED_TOOL_CALL';
 
