@@ -2429,6 +2429,7 @@ describe('DaemonSessionProvider', () => {
       await flushPromises();
       assistantChunk.resolve();
       await flushPromises();
+      await flushTranscriptDispatch();
     });
     expect(blocks).toMatchObject([
       { kind: 'user', text: 'cancel me' },
@@ -2532,6 +2533,7 @@ describe('DaemonSessionProvider', () => {
       await flushPromises();
       assistantChunk.resolve();
       await flushPromises();
+      await flushTranscriptDispatch();
     });
     expect(blocks).toMatchObject([
       { kind: 'user', text: 'fail later' },
@@ -2556,6 +2558,68 @@ describe('DaemonSessionProvider', () => {
         message: 'Prompt failed: network down',
       },
     ]);
+  });
+
+  it('coalesces a burst of streamed chunks into one complete ordered transcript', async () => {
+    // A burst of buffered SSE events — e.g. the stream catching up after the
+    // tab was hidden — must drain into a complete, correctly-ordered
+    // transcript even though transcript dispatch is batched onto a macrotask.
+    // Regression guard for the batched-dispatch path losing or reordering
+    // events.
+    const CHUNK_COUNT = 100;
+    const burstDrained = createDeferred<void>();
+    const session = createMockSession({
+      events: async function* burstEvents(opts: { signal?: AbortSignal } = {}) {
+        for (let i = 0; i < CHUNK_COUNT; i += 1) {
+          yield {
+            id: i + 1,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: `chunk-${i} ` },
+              },
+            },
+          };
+        }
+        burstDrained.resolve();
+        // Stay alive so the consumer loop does not end (which would flush
+        // synchronously) — exercise the batched macrotask flush instead.
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) {
+            resolve();
+            return;
+          }
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await burstDrained.promise;
+      await flushPromises();
+      await flushTranscriptDispatch();
+    });
+
+    const assistant = blocks.find((block) => block.kind === 'assistant');
+    const text = (assistant as { text?: string } | undefined)?.text ?? '';
+    // No chunk lost, and all in order.
+    let lastIndex = -1;
+    for (let i = 0; i < CHUNK_COUNT; i += 1) {
+      const idx = text.indexOf(`chunk-${i} `);
+      expect(idx).toBeGreaterThan(lastIndex);
+      lastIndex = idx;
+    }
   });
 
   it('does not insert abort errors from shell commands into the transcript', async () => {
@@ -4507,6 +4571,10 @@ describe('DaemonSessionProvider', () => {
 
       await renderWithProvider(<Harness />, { autoConnect: true });
       await act(async () => {
+        await flushPromises();
+        // Batched transcript dispatch rides a setTimeout; under fake timers
+        // advance it so the passive assistant chunk lands before asserting.
+        await vi.advanceTimersByTimeAsync(0);
         await flushPromises();
       });
       expect(blocks).toMatchObject([
@@ -7472,6 +7540,7 @@ describe('DaemonSessionProvider', () => {
     await act(async () => {
       await reattachDelivered.promise;
       await flushPromises();
+      await flushTranscriptDispatch();
     });
     expect(blocks).not.toEqual(
       expect.arrayContaining([
@@ -8442,6 +8511,16 @@ function createDeferred<T>(): {
 }
 
 async function flushPromises(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+// Transcript dispatch is batched onto a macrotask (setTimeout 0) so a burst of
+// SSE events coalesces into one reducer pass. Stay-alive mock generators never
+// end the consumer loop (which would flush synchronously), so tests that assert
+// transcript state mid-stream drain the batched dispatch here.
+async function flushTranscriptDispatch(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
   await Promise.resolve();
   await Promise.resolve();
 }
