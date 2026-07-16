@@ -6458,6 +6458,13 @@ export function App({
                                 onReviewChanges={openReviewPanel}
                                 onOpenArtifact={openArtifactPanel}
                                 onOpenScheduledTask={openScheduledTaskPanel}
+                                generateContent={
+                                  connection.capabilities?.features.includes(
+                                    'session_generation',
+                                  )
+                                    ? sessionActions.generateSessionContent
+                                    : undefined
+                                }
                               />
                             );
 

@@ -36,11 +36,20 @@ const INSPECT_PATTERNS: RegExp[] = [
   /^show memory\s+(\S+)$/iu,
 ];
 
-const REMOVE_PATTERNS: RegExp[] = [/^忘掉\s+(\S+)$/u, /^forget\s+(\S+)$/iu];
+const REMOVE_PATTERNS: RegExp[] = [
+  /^忘掉\s+(\S+)$/u,
+  /^删除\s+(\S+)$/u,
+  /^删掉\s+(\S+)$/u,
+  /^forget\s+(\S+)$/iu,
+  /^delete\s+(\S+)$/iu,
+  /^remove\s+(\S+)$/iu,
+];
 
 const UPDATE_PATTERNS: RegExp[] = [
   /^把\s+(\S+)\s+改成\s*(.+)$/su,
+  /^更新\s+(\S+)\s+为\s*(.+)$/su,
   /^update\s+(\S+)\s+to\s+(.+)$/isu,
+  /^change\s+(\S+)\s+to\s+(.+)$/isu,
 ];
 
 const MEMORY_ID_PATTERN = /^m-[a-f0-9]{12}$/u;

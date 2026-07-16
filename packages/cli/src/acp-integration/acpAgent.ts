@@ -292,6 +292,11 @@ import {
   formatContextUsageText,
 } from '../ui/commands/contextCommand.js';
 import type { HistoryItemContextUsage } from '../ui/types.js';
+import {
+  executeGeneration,
+  GENERATION_MAX_PROMPT_BYTES,
+  GENERATION_TIMEOUT_MS,
+} from './generation.js';
 
 const debugLogger = createDebugLogger('ACP_AGENT');
 const QWEN_ACP_LOCAL_READ_ROOTS_ENV = 'QWEN_ACP_LOCAL_READ_ROOTS';
@@ -2749,6 +2754,10 @@ class QwenAgent implements Agent {
     string,
     { state: 'succeeded' | 'failed'; error?: string }
   >();
+  private readonly generationControllers = new Map<
+    string,
+    { sessionId: string; controller: AbortController }
+  >();
   private readonly transcriptReplayConfigCache = new Map<
     string,
     TranscriptReplayConfigCacheEntry
@@ -3023,6 +3032,11 @@ class QwenAgent implements Agent {
     sessionId: string,
     opts?: { requireFlush?: boolean },
   ): Promise<void> {
+    for (const [requestId, generation] of this.generationControllers) {
+      if (generation.sessionId !== sessionId) continue;
+      generation.controller.abort();
+      this.generationControllers.delete(requestId);
+    }
     const session = this.sessions.get(sessionId);
     if (!session) {
       this.mcpPool?.releaseSession(sessionId);
@@ -3120,6 +3134,10 @@ class QwenAgent implements Agent {
   }
 
   disposeSessions(): void {
+    for (const generation of this.generationControllers.values()) {
+      generation.controller.abort();
+    }
+    this.generationControllers.clear();
     for (const session of this.sessions.values()) {
       session.dispose();
     }
@@ -7501,6 +7519,71 @@ class QwenAgent implements Agent {
           `recap ext-method completed for session=${sessionId} result=${recap ? `len=${recap.length}` : 'null'}`,
         );
         return { sessionId, recap };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionGenerationStart: {
+        const sessionId = params['sessionId'];
+        const requestId = params['requestId'];
+        const prompt = params['prompt'];
+        if (
+          typeof sessionId !== 'string' ||
+          typeof requestId !== 'string' ||
+          typeof prompt !== 'string' ||
+          prompt.trim().length === 0 ||
+          Buffer.byteLength(prompt, 'utf8') > GENERATION_MAX_PROMPT_BYTES
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid generation request',
+          );
+        }
+        if (this.generationControllers.has(requestId)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Duplicate generation requestId',
+          );
+        }
+
+        const session = this.sessionOrThrow(sessionId);
+        const controller = new AbortController();
+        this.generationControllers.set(requestId, { sessionId, controller });
+        const signal = AbortSignal.any([
+          controller.signal,
+          AbortSignal.timeout(GENERATION_TIMEOUT_MS),
+        ]);
+        try {
+          const result = await executeGeneration(
+            session.getConfig(),
+            requestId,
+            prompt,
+            signal,
+            async (event) => {
+              await this.connection.extNotification(
+                'qwen/notify/session/generation/event',
+                { v: 1, sessionId, requestId, event },
+              );
+            },
+          );
+          return { sessionId, requestId, ...result };
+        } finally {
+          this.generationControllers.delete(requestId);
+        }
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionGenerationCancel: {
+        const sessionId = params['sessionId'];
+        const requestId = params['requestId'];
+        if (typeof sessionId !== 'string' || typeof requestId !== 'string') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid generation cancellation request',
+          );
+        }
+        const generation = this.generationControllers.get(requestId);
+        const cancelled = generation?.sessionId === sessionId;
+        if (cancelled) {
+          generation.controller.abort();
+          this.generationControllers.delete(requestId);
+        }
+        return { sessionId, requestId, cancelled };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionBtw: {
         const sessionId = params['sessionId'];

@@ -10,6 +10,7 @@ import type {
   DaemonSessionContextStatus,
   DaemonSessionClient,
   DaemonSessionBtwResult,
+  DaemonSessionGenerationEvent,
   CreateSessionRequest,
   DaemonForkSessionResult,
   DaemonMidTurnMessageResult,
@@ -895,6 +896,19 @@ export function createDaemonSessionActions({
           'recap_session',
         );
       }
+    },
+
+    async *generateSessionContent(
+      prompt: string,
+      opts?: { signal?: AbortSignal },
+    ): AsyncGenerator<DaemonSessionGenerationEvent> {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Generate content failed',
+        'generate_session_content',
+      );
+      yield* session.generateContent(prompt, opts);
     },
 
     async getRewindSnapshots(): Promise<{

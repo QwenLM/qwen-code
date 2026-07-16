@@ -348,6 +348,7 @@ export type {
   DaemonRewindResult,
   DaemonRewindSnapshotInfo,
   DaemonSessionBtwResult,
+  DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
   DaemonPendingPromptSummary,
   DaemonPendingPromptsResult,

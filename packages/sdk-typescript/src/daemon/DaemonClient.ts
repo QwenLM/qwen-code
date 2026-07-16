@@ -111,6 +111,7 @@ import type {
   DaemonMcpManageAction,
   DaemonMcpManageResult,
   DaemonSessionBtwResult,
+  DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
@@ -161,10 +162,72 @@ import type {
   DaemonWorkspaceTrustStatus,
   DaemonUnarchiveSessionsResult,
 } from './types.js';
+import { parseSseStream } from './sse.js';
 
 const WORKSPACE_MEMORY_REMEMBER_PATH = '/workspace/memory/remember';
 const WORKSPACE_MEMORY_FORGET_PATH = '/workspace/memory/forget';
 const WORKSPACE_MEMORY_DREAM_PATH = '/workspace/memory/dream';
+
+function parseSessionGenerationEvent(
+  value: unknown,
+): DaemonSessionGenerationEvent | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const event = value as Record<string, unknown>;
+  if (event['v'] !== 1 || typeof event['type'] !== 'string') return undefined;
+
+  const requestId = event['requestId'];
+  const modelSource = event['modelSource'];
+  const validRequestId = typeof requestId === 'string' && requestId.length > 0;
+  const validModelSource = modelSource === 'fast' || modelSource === 'main';
+  const validTokenCount = (count: unknown) =>
+    count === undefined ||
+    (typeof count === 'number' && Number.isSafeInteger(count) && count >= 0);
+
+  if (event['type'] === 'started') {
+    if (
+      !validRequestId ||
+      typeof event['model'] !== 'string' ||
+      !validModelSource
+    ) {
+      return undefined;
+    }
+  } else if (event['type'] === 'thinking') {
+    if (!validRequestId) return undefined;
+  } else if (event['type'] === 'delta') {
+    if (
+      !validRequestId ||
+      !Number.isSafeInteger(event['seq']) ||
+      (event['seq'] as number) < 0 ||
+      typeof event['text'] !== 'string' ||
+      event['text'].length === 0
+    ) {
+      return undefined;
+    }
+  } else if (event['type'] === 'done') {
+    if (
+      !validRequestId ||
+      typeof event['model'] !== 'string' ||
+      !validModelSource ||
+      !validTokenCount(event['inputTokens']) ||
+      !validTokenCount(event['outputTokens'])
+    ) {
+      return undefined;
+    }
+  } else if (event['type'] === 'error') {
+    if (
+      typeof event['code'] !== 'string' ||
+      typeof event['message'] !== 'string'
+    ) {
+      return undefined;
+    }
+  } else {
+    return undefined;
+  }
+
+  return event as unknown as DaemonSessionGenerationEvent;
+}
 
 /**
  * SDK-side HTTP client for the `qwen serve` daemon. Sibling to
@@ -2434,6 +2497,36 @@ export class DaemonClient {
     );
     if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/recap');
     return (await res.json()) as DaemonSessionRecapResult;
+  }
+
+  async *generateSessionContent(
+    sessionId: string,
+    prompt: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): AsyncGenerator<DaemonSessionGenerationEvent> {
+    const res = await this.transport.fetch(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/generate`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          {
+            'Content-Type': 'application/json',
+            Accept: 'text/event-stream',
+          },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({ prompt }),
+        signal: opts?.signal,
+      },
+    );
+    if (!res.ok) {
+      throw await this.failOnError(res, 'POST /session/:id/generate');
+    }
+    if (!res.body) throw new Error('Generation response body is missing');
+    for await (const event of parseSseStream(res.body, opts?.signal)) {
+      const generationEvent = parseSessionGenerationEvent(event);
+      if (generationEvent) yield generationEvent;
+    }
   }
 
   async btwSession(

@@ -923,6 +923,8 @@ const EN: Messages = {
     `Delete "${v?.name ?? ''}"? This cannot be undone.`,
   'sidebar.clients': (v) => `${v?.count ?? 0} client(s)`,
   'sidebar.running': 'Running',
+  'sidebar.waitingForApproval': 'Waiting for approval',
+  'sidebar.userInputNeeded': 'User input needed',
   'sidebar.completedUnread': 'Finished',
   'sidebar.pin': 'Pin',
   'sidebar.unpin': 'Unpin',
@@ -1897,7 +1899,9 @@ const EN: Messages = {
     `Searched ${v?.count ?? 0} time${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.updatedTodos': (v) =>
     `Updated task list${v?.count === 1 ? '' : ` ${v?.count ?? 0} times`}`,
-  'toolGroup.summary.askedUser': 'Asked user',
+  'toolGroup.summary.provideInformation': 'Provide information',
+  'toolGroup.summary.askedQuestions': (v) =>
+    `Asked ${v?.count ?? 0} question${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.otherTools': (v) =>
     `Called ${v?.count ?? 0} other tool${v?.count === 1 ? '' : 's'}`,
   'toolGroup.running': (v) =>
@@ -1911,6 +1915,16 @@ const EN: Messages = {
   'thinking.doneBriefly': 'Thought briefly',
   'thinking.done': (v) =>
     v?.duration ? `Thought for ${v.duration}` : 'Done thinking',
+  'thinking.translate': 'Translate',
+  'thinking.translation': 'Translated thinking',
+  'thinking.translating': 'Translating...',
+  'thinking.translationThinking': 'Thinking...',
+  'thinking.translationFailed': 'Translation failed',
+  'thinking.retranslate': 'Translate again',
+  'thinking.cancelTranslation': 'Cancel',
+  'thinking.closeTranslation': 'Close',
+  'thinking.inputTokens': (v) => `Input tokens: ${v?.count ?? '--'}`,
+  'thinking.outputTokens': (v) => `Output tokens: ${v?.count ?? '--'}`,
   'sessionsOverview.count': (v) => `${v?.count ?? 0} sessions`,
   'sessionsOverview.current': 'Current',
   'sessionsOverview.empty': 'No sessions yet',
@@ -2918,6 +2932,8 @@ const ZH: Messages = {
     `确定删除“${v?.name ?? ''}”吗？删除后不可恢复。`,
   'sidebar.clients': (v) => `${v?.count ?? 0} 个客户端`,
   'sidebar.running': '运行中',
+  'sidebar.waitingForApproval': '等待批准',
+  'sidebar.userInputNeeded': '需要用户输入',
   'sidebar.completedUnread': '刚完成',
   'sidebar.pin': '置顶',
   'sidebar.unpin': '取消置顶',
@@ -3825,7 +3841,8 @@ const ZH: Messages = {
     Number(v?.count ?? 0) > 1
       ? `已更新任务清单 ${v?.count ?? 0} 次`
       : '已更新任务清单',
-  'toolGroup.summary.askedUser': '已询问用户',
+  'toolGroup.summary.provideInformation': '补充信息',
+  'toolGroup.summary.askedQuestions': (v) => `已询问 ${v?.count ?? 0} 个问题`,
   'toolGroup.summary.otherTools': (v) => `调用了 ${v?.count ?? 0} 个工具`,
   'toolGroup.running': (v) =>
     `正在执行 ${v?.name ?? '工具'}${v?.duration ? ` ${v.duration}` : ''}${
@@ -3837,6 +3854,16 @@ const ZH: Messages = {
   'thinking.running': (v) => `正在思考${v?.duration ? ` ${v.duration}` : ''}`,
   'thinking.doneBriefly': '思考片刻',
   'thinking.done': (v) => (v?.duration ? `已思考 ${v.duration}` : '思考完成'),
+  'thinking.translate': '翻译',
+  'thinking.translation': '思考翻译',
+  'thinking.translating': '正在翻译…',
+  'thinking.translationThinking': '思考中…',
+  'thinking.translationFailed': '翻译失败',
+  'thinking.retranslate': '重新翻译',
+  'thinking.cancelTranslation': '取消',
+  'thinking.closeTranslation': '关闭',
+  'thinking.inputTokens': (v) => `发送 Token：${v?.count ?? '--'}`,
+  'thinking.outputTokens': (v) => `生成 Token：${v?.count ?? '--'}`,
   'welcome.changeModel': '(/model 切换)',
   'welcome.defaultModel': '未知模型',
   'sessionsOverview.count': (v) => `${v?.count ?? 0} 个会话`,
