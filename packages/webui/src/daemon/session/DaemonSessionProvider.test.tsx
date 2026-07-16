@@ -33,7 +33,10 @@ import {
   type DaemonSessionNotice,
   type DaemonWorkspaceEventSignals,
 } from './DaemonSessionProvider.js';
-import { DaemonWorkspaceProvider } from '../workspace/DaemonWorkspaceProvider.js';
+import {
+  DaemonWorkspaceProvider,
+  useOptionalDaemonWorkspace,
+} from '../workspace/DaemonWorkspaceProvider.js';
 import {
   clearSidechannelMidTurnInjected,
   getSidechannelMidTurnInjected,
@@ -877,6 +880,46 @@ describe('DaemonSessionProvider', () => {
 
     expect(connection?.status).toBe('connected');
     expect(sdkMocks.capabilities).toHaveBeenCalledTimes(1);
+  });
+
+  it('updates session connection capabilities after a workspace refresh', async () => {
+    sdkMocks.sessions.push(createMockSession());
+    let connection: DaemonConnectionState | undefined;
+    let refreshCapabilities: (() => Promise<unknown>) | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      refreshCapabilities = useOptionalDaemonWorkspace()?.refreshCapabilities;
+      return null;
+    }
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root?.render(
+        <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:4170">
+          <DaemonSessionProvider suppressOwnUserEcho>
+            <Harness />
+          </DaemonSessionProvider>
+        </DaemonWorkspaceProvider>,
+      );
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    sdkMocks.capabilities.mockResolvedValueOnce({
+      workspaceCwd: '/mock-workspace',
+      features: ['workspace_runtime_removal'],
+    });
+
+    await act(async () => {
+      await refreshCapabilities?.();
+    });
+
+    expect(connection?.capabilities?.features).toContain(
+      'workspace_runtime_removal',
+    );
   });
 
   it('uses session context models over workspace provider defaults', async () => {

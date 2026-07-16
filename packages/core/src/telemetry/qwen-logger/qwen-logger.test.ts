@@ -25,6 +25,7 @@ import {
   IdeConnectionType,
   HookCallEvent,
   SkillLaunchEvent,
+  ProtocolTagSanitizedEvent,
 } from '../types.js';
 import type { ToolCallEvent } from '../types.js';
 import type { RumEvent, RumPayload } from './event-types.js';
@@ -360,28 +361,31 @@ describe('QwenLogger', () => {
   });
 
   describe('event handlers', () => {
-    it('records the provider-facing name for proxied tool calls', () => {
+    it('logs protocol tag sanitization without model content', () => {
       const logger = QwenLogger.getInstance(mockConfig)!;
       const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
-      const event = {
-        function_name: 'cron_create',
-        'tool.provider_name': 'deferred_tool_call',
-        prompt_id: 'prompt-1',
-        response_id: 'response-1',
-        success: true,
-        duration_ms: 12,
-      } as ToolCallEvent;
+      const event = new ProtocolTagSanitizedEvent({
+        model: 'test-model',
+        promptId: 'prompt-id',
+        responseId: 'response-id',
+        tagName: 'thinking',
+        toolCallCount: 3,
+      });
 
-      logger.logToolCallEvent(event);
+      logger.logProtocolTagSanitizedEvent(event);
 
       expect(enqueueSpy).toHaveBeenCalledWith(
         expect.objectContaining({
-          type: 'tool',
-          name: 'tool_call#cron_create',
-          properties: expect.objectContaining({
-            tool_name: 'cron_create',
-            'tool.provider_name': 'deferred_tool_call',
-          }),
+          event_type: 'action',
+          type: 'misc',
+          name: 'protocol_tag_sanitized',
+          properties: {
+            model: 'test-model',
+            prompt_id: 'prompt-id',
+            response_id: 'response-id',
+            tag_name: 'thinking',
+            tool_call_count: 3,
+          },
         }),
       );
     });

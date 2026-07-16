@@ -113,6 +113,7 @@ import {
 import {
   createDaemonWorkspaceService,
   type DaemonWorkspaceService,
+  type DaemonWorkspaceServiceDeps,
 } from './workspace-service/index.js';
 import { registerCapabilitiesRoutes } from './routes/capabilities.js';
 import {
@@ -128,10 +129,12 @@ import {
   registerSseEventsRoutes,
 } from './routes/sse-events.js';
 import {
+  registerWorkspaceQualifiedVoiceRoutes,
   registerWorkspaceVoiceRoutes,
   type WorkspaceVoiceRouteDeps,
 } from './routes/workspace-voice.js';
 import { registerWorkspaceModelsRoutes } from './routes/workspace-models.js';
+import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.js';
 import { registerA2uiActionRoutes } from './routes/a2ui-action.js';
 import { setRateLimiter } from './rate-limit.js';
 import { resolveAcpHttpEnabled } from './acp-http-enabled.js';
@@ -177,7 +180,11 @@ import {
   registerWorkspaceLifecycleRoutes,
   registerWorkspaceQualifiedLifecycleRoutes,
 } from './routes/workspace-lifecycle.js';
-import { registerWorkspaceManagementRoutes } from './routes/workspace-management.js';
+import {
+  registerWorkspaceManagementRoutes,
+  type WorkspaceManagementHandle,
+  type WorkspaceRuntimeRemovalController,
+} from './routes/workspace-management.js';
 import type { WorkspaceRegistrationStore } from './workspace-registration-store.js';
 import {
   registerWorkspaceGitRoutes,
@@ -193,6 +200,10 @@ import {
   registerWorkspaceQualifiedToolsRoutes,
   registerWorkspaceToolsRoutes,
 } from './routes/workspace-tools.js';
+import {
+  registerWorkspaceQualifiedSkillsRoutes,
+  registerWorkspaceSkillsRoutes,
+} from './routes/workspace-skills.js';
 import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
 import {
   parseChannelWebhookConfigLenient,
@@ -304,7 +315,10 @@ function describeRegistryPrimaryForConflict(
 function getRuntimeEffectiveEnv(
   metadata: WorkspaceRuntimeEnvMetadata | undefined,
 ): Readonly<Record<string, string | undefined>> | undefined {
-  return metadata?.effectiveEnv;
+  if (!metadata || metadata.mode === 'parent-process') {
+    return metadata?.effectiveEnv;
+  }
+  return metadata.effectiveEnv ?? {};
 }
 
 export interface ServeAppDeps {
@@ -423,6 +437,7 @@ export interface ServeAppDeps {
     toolName: string,
     enabled: boolean,
   ) => Promise<void>;
+  persistDisabledSkills?: DaemonWorkspaceServiceDeps['persistDisabledSkills'];
   contextFilename?: string;
   persistSetting?: (
     workspace: string,
@@ -453,9 +468,11 @@ export interface ServeAppDeps {
   workspaceRegistry?: WorkspaceRegistry;
   createWorkspaceRuntime?: (cwd: string) => Promise<WorkspaceRuntime>;
   workspaceRegistrationStore?: WorkspaceRegistrationStore;
+  workspaceRuntimeRemoval?: WorkspaceRuntimeRemovalController;
   primaryWorkspaceTrusted?: boolean;
   primaryRuntimeEnv?: WorkspaceRuntimeEnvMetadata;
   voiceTranscriber?: WorkspaceVoiceRouteDeps['transcribe'];
+  voiceCoordinator?: WorkspaceVoiceCoordinator;
 }
 
 /**
@@ -519,6 +536,11 @@ export function createServeApp(
   getPort: () => number = () => opts.port,
   deps: ServeAppDeps = {},
 ): Application {
+  if (deps.workspaceRuntimeRemoval && !deps.voiceCoordinator) {
+    throw new Error(
+      'createServeApp: deps.workspaceRuntimeRemoval requires the matching deps.voiceCoordinator.',
+    );
+  }
   const app = express();
   // Forward `maxSessions` into the default-constructed bridge so
   // direct callers of `createServeApp` (tests, embeds) get the same
@@ -655,6 +677,15 @@ export function createServeApp(
       persistSettingAvailable: deps.persistSetting !== undefined,
       sessionArtifactsPersistenceAvailable:
         deps.sessionArtifactsPersistenceAvailable !== false,
+      sessionGenerationAvailable: () => {
+        const runtimes = workspaceRegistry.list();
+        return (
+          runtimes.length > 0 &&
+          runtimes.every(
+            (runtime) => runtime.bridge.generateSessionContent !== undefined,
+          )
+        );
+      },
       // Registry injection supplies the primary workspace service through the
       // runtime, so it has the same reload surface as legacy deps.workspace.
       reloadAvailable:
@@ -683,8 +714,15 @@ export function createServeApp(
       multiWorkspaceSessionsEnabled: () => workspaceRegistry.list().length > 1,
       persistentWorkspaceRegistrationAvailable:
         deps.workspaceRegistrationStore !== undefined,
+      workspaceRuntimeRemovalAvailable:
+        deps.workspaceRuntimeRemoval !== undefined,
       ...(primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {}),
     });
+  (
+    app.locals as {
+      invalidateServeFeaturesCache?: () => void;
+    }
+  ).invalidateServeFeaturesCache = invalidateServeFeaturesCache;
   const statusProvider =
     deps.statusProvider ??
     createDaemonStatusProvider(
@@ -791,12 +829,20 @@ export function createServeApp(
         primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {},
       ),
       workspaceSkillsStatusProvider: createWorkspaceSkillsStatusProvider(),
+      ...(primaryEffectiveEnv ? { voiceEnv: primaryEffectiveEnv } : {}),
       isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools:
         deps.persistDisabledTools ??
         (async () => {
           throw new Error(
             'setWorkspaceToolEnabled requires persistDisabledTools in ServeAppDeps',
+          );
+        }),
+      persistDisabledSkills:
+        deps.persistDisabledSkills ??
+        (async () => {
+          throw new Error(
+            'setWorkspaceSkillEnabled requires persistDisabledSkills in ServeAppDeps',
           );
         }),
       queryWorkspaceStatus: (method, idle) =>
@@ -844,6 +890,8 @@ export function createServeApp(
   (app.locals as { workspaceRegistry?: WorkspaceRegistry }).workspaceRegistry =
     workspaceRegistry;
   const primaryRuntime = workspaceRegistry.primary;
+  const voiceCoordinator =
+    deps.voiceCoordinator ?? new WorkspaceVoiceCoordinator();
   const primaryBoundWorkspace = primaryRuntime.workspaceCwd;
   const primaryBridge = primaryRuntime.bridge;
   const primaryWorkspace = primaryRuntime.workspaceService;
@@ -851,6 +899,12 @@ export function createServeApp(
   const workspaceGitState = new WorkspaceGitState();
   (app.locals as { stopWorkspaceGitState?: () => void }).stopWorkspaceGitState =
     () => workspaceGitState.dispose();
+  (
+    app.locals as {
+      stopWorkspaceGitStateForWorkspace?: (workspaceCwd: string) => void;
+    }
+  ).stopWorkspaceGitStateForWorkspace = (workspaceCwd) =>
+    workspaceGitState.disposeWorkspace(workspaceCwd);
   const workspaceQualifiedAcpEnabled = resolveAcpHttpEnabled();
 
   // Order matters: rejection guards (CORS / Host allowlist / bearer auth)
@@ -889,7 +943,7 @@ export function createServeApp(
   const healthDemoRoutes = createHealthDemoRoutes({
     opts,
     getPort,
-    bridge: primaryBridge,
+    workspaceRegistry,
     getActiveSseCount,
     getRateLimiter: () => rateLimiter,
   });
@@ -1000,33 +1054,49 @@ export function createServeApp(
   });
 
   app.use(
-    daemonTelemetryMiddleware((req) => {
-      const match = req.path.match(/^\/workspaces\/([^/]+)/);
-      const rawSelector = match?.[1];
-      if (rawSelector) {
-        try {
-          const selector = decodeURIComponent(rawSelector);
-          const byId = workspaceRegistry.getByWorkspaceId(selector);
-          if (byId) return byId.workspaceCwd;
-          if (isPortableAbsolutePath(selector)) {
-            const runtime = resolveRegisteredWorkspaceRuntimeByPathSelector(
-              workspaceRegistry,
-              selector,
-            );
-            if (runtime) return runtime.workspaceCwd;
+    daemonTelemetryMiddleware(
+      (req) => {
+        const match = req.path.match(/^\/workspaces\/([^/]+)/);
+        const rawSelector = match?.[1];
+        if (rawSelector) {
+          try {
+            const selector = decodeURIComponent(rawSelector);
+            const byId = workspaceRegistry.getByWorkspaceId(selector);
+            if (byId) return byId.workspaceCwd;
+            if (isPortableAbsolutePath(selector)) {
+              const runtime = resolveRegisteredWorkspaceRuntimeByPathSelector(
+                workspaceRegistry,
+                selector,
+              );
+              if (runtime) return runtime.workspaceCwd;
+            }
+          } catch {
+            return primaryBoundWorkspace;
           }
-        } catch {
-          return primaryBoundWorkspace;
         }
-      }
-      return primaryBoundWorkspace;
-    }, deps.recordDaemonRequest),
+        return primaryBoundWorkspace;
+      },
+      deps.recordDaemonRequest,
+      (sessionId) => {
+        try {
+          const owner = workspaceRegistry.resolveLiveSessionOwner(sessionId);
+          return owner.kind === 'found'
+            ? owner.runtime.workspaceCwd
+            : undefined;
+        } catch {
+          return undefined;
+        }
+      },
+    ),
   );
 
   const buildWorkspaceCtx = createBuildWorkspaceCtx(primaryBoundWorkspace);
 
   const acpHandleRef: { current?: AcpHttpHandle } = {};
-  const workspaceRememberLane = new WorkspaceRememberTaskLane(primaryBridge);
+  const workspaceRememberLane = new WorkspaceRememberTaskLane(
+    primaryBridge,
+    primaryBoundWorkspace,
+  );
 
   // Plan C CDP tunnel (issue #5626): process-scoped registry pairing the
   // extension `/acp` connection with the `/cdp` puppeteer endpoint. Inert until
@@ -1148,6 +1218,7 @@ export function createServeApp(
     mutate,
     safeBody,
     sendBridgeError,
+    workspaceRegistry,
     ...(deps.maxExtensionOperationHistory === undefined
       ? {}
       : { maxExtensionOperationHistory: deps.maxExtensionOperationHistory }),
@@ -1196,13 +1267,23 @@ export function createServeApp(
   });
 
   // Dynamic workspace registration.
-  registerWorkspaceManagementRoutes(app, {
+  const workspaceManagementHandle = registerWorkspaceManagementRoutes(app, {
     workspaceRegistry,
     mutate,
     safeBody,
     createWorkspaceRuntime: deps.createWorkspaceRuntime,
     workspaceRegistrationStore: deps.workspaceRegistrationStore,
+    getAcpHandle: () => acpHandleRef.current,
+    runtimeRemoval: deps.workspaceRuntimeRemoval,
   });
+  (
+    app.locals as { workspaceManagementHandle?: WorkspaceManagementHandle }
+  ).workspaceManagementHandle = workspaceManagementHandle;
+  (
+    app.locals as {
+      workspaceRuntimeRemoval?: WorkspaceRuntimeRemovalController;
+    }
+  ).workspaceRuntimeRemoval = deps.workspaceRuntimeRemoval;
 
   const broadcastSettingsChanged = (
     key: string,
@@ -1261,9 +1342,23 @@ export function createServeApp(
     persistSetting: deps.persistSetting,
     persistSettings: deps.persistSettings,
     transcribe: deps.voiceTranscriber,
+    env: getRuntimeEffectiveEnv(primaryRuntime.env),
+    acquireVoiceLease: () => voiceCoordinator.acquire(primaryRuntime),
     broadcastSettingsChanged,
     parseAndValidateClientId: (req, res) =>
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+  });
+  registerWorkspaceQualifiedVoiceRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    persistSetting: deps.persistSetting,
+    persistSettings: deps.persistSettings,
+    transcribe: deps.voiceTranscriber,
+    acquireVoiceLease: (runtime) => voiceCoordinator.acquire(runtime),
+    parseAndValidateClientId: (req, res, runtime) =>
+      parseAndValidateWorkspaceClientId(req, res, runtime.bridge),
+    invalidateServeFeaturesCache,
   });
   if (deps.persistSettings) {
     registerWorkspaceModelsRoutes(app, {
@@ -1415,6 +1510,20 @@ export function createServeApp(
     safeBody,
     sendBridgeError,
   });
+  registerWorkspaceSkillsRoutes(app, {
+    workspaceRuntime: primaryRuntime,
+    mutate,
+    safeBody,
+    sendBridgeError,
+    parseAndValidateClientId: (req, res) =>
+      parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+  });
+  registerWorkspaceQualifiedSkillsRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    sendBridgeError,
+  });
 
   // Durable scheduled-tasks CRUD (the Web Shell "Scheduled tasks" page).
   // Reads/writes the per-project cron file only; firing stays with the
@@ -1499,21 +1608,21 @@ export function createServeApp(
     // its own cron file + bridge, so a bound task created through the
     // workspace-qualified route fires (and survives a restart) exactly like a
     // primary-workspace one — otherwise a secondary workspace's tasks would be
-    // written to disk but silently never revived. The registry is fully
-    // populated (primary + every `--workspace`) before createServeApp runs.
-    // A workspace ADDED at runtime (Phase 4 add-workspace) isn't looped here, so
-    // its bound-task sessions aren't kept resident for the rest of this process;
-    // once persisted it registers as a boot workspace and is covered on the next
-    // restart, which is when its rehydration matters most anyway.
-    const keepaliveStops = workspaceRegistry.list().map((runtime) => {
+    // written to disk but silently never revived.
+    const keepaliveStops = new Map<string, () => void>();
+    const startKeepaliveForWorkspace = (runtime: WorkspaceRuntime) => {
+      if (keepaliveStops.has(runtime.workspaceCwd)) return;
       const keepalive = startScheduledTaskKeepalive({
         bridge: runtime.bridge,
         boundWorkspace: runtime.workspaceCwd,
         intervalMs: keepaliveIntervalMs,
       });
       rehydrateWorkspace(runtime.bridge, runtime.workspaceCwd);
-      return keepalive.stop;
-    });
+      keepaliveStops.set(runtime.workspaceCwd, keepalive.stop);
+    };
+    for (const runtime of workspaceRegistry.list()) {
+      startKeepaliveForWorkspace(runtime);
+    }
 
     // Park a combined stop fn on `app.locals` (same pattern as `fsFactory` /
     // `boundWorkspace` / `acpHandle` above) so the shutdown sequence in
@@ -1522,8 +1631,24 @@ export function createServeApp(
     (
       app.locals as { stopScheduledTaskKeepalive?: () => void }
     ).stopScheduledTaskKeepalive = () => {
-      for (const stop of keepaliveStops) stop();
+      for (const stop of keepaliveStops.values()) stop();
+      keepaliveStops.clear();
     };
+    (
+      app.locals as {
+        stopScheduledTaskKeepaliveForWorkspace?: (workspaceCwd: string) => void;
+      }
+    ).stopScheduledTaskKeepaliveForWorkspace = (workspaceCwd) => {
+      keepaliveStops.get(workspaceCwd)?.();
+      keepaliveStops.delete(workspaceCwd);
+    };
+    (
+      app.locals as {
+        startScheduledTaskKeepaliveForWorkspace?: (
+          runtime: WorkspaceRuntime,
+        ) => void;
+      }
+    ).startScheduledTaskKeepaliveForWorkspace = startKeepaliveForWorkspace;
   }
 
   registerPermissionRoutes(app, {
@@ -1598,9 +1723,15 @@ export function createServeApp(
         path: '/voice/stream',
         onConnection: createVoiceWsConnectionHandler(primaryBoundWorkspace, {
           env: getRuntimeEffectiveEnv(primaryRuntime.env),
+          acquireVoiceLease: () => voiceCoordinator.acquire(primaryRuntime),
         }),
       },
     ],
+    workspaceVoiceConnection: (runtime, ws, req) =>
+      createVoiceWsConnectionHandler(runtime.workspaceCwd, {
+        env: getRuntimeEffectiveEnv(runtime.env),
+        acquireVoiceLease: () => voiceCoordinator.acquire(runtime),
+      })(ws, req),
   });
   if (acpHandleRef.current) {
     app.locals['acpHandle'] = acpHandleRef.current;

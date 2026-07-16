@@ -11,8 +11,14 @@ import type {
   ChannelWorkerGroupSnapshot,
 } from './channel-worker-group.js';
 import { ChannelWorkerReconcileError } from './channel-worker-group.js';
-import { ChannelWorkerStopError } from './channel-worker-supervisor.js';
-import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
+import {
+  ChannelWorkerStartupError,
+  ChannelWorkerStopError,
+} from './channel-worker-supervisor.js';
+import type {
+  ChannelStartupAttemptFailure,
+  ChannelWorkerSnapshot,
+} from './channel-worker-supervisor.js';
 import type { ChannelWorkspaceGroup } from './channel-workspace-grouping.js';
 import type { ServeChannelSelection } from './types.js';
 
@@ -53,17 +59,28 @@ export class ChannelWorkerControlError extends Error {
     | 'daemon_draining';
   readonly rolledBack?: boolean;
   readonly rollbackError?: string;
+  readonly startupFailures?: ChannelStartupAttemptFailure[];
+  readonly startupFailuresTruncated?: boolean;
 
   constructor(
     code: ChannelWorkerControlError['code'],
     message: string,
-    details: { rolledBack?: boolean; rollbackError?: string } = {},
+    details: {
+      rolledBack?: boolean;
+      rollbackError?: string;
+      startupFailures?: readonly ChannelStartupAttemptFailure[];
+      startupFailuresTruncated?: boolean;
+    } = {},
   ) {
     super(message);
     this.name = 'ChannelWorkerControlError';
     this.code = code;
     this.rolledBack = details.rolledBack;
     this.rollbackError = details.rollbackError;
+    this.startupFailures = details.startupFailures?.map((failure) => ({
+      ...failure,
+    }));
+    this.startupFailuresTruncated = details.startupFailuresTruncated;
   }
 }
 
@@ -96,6 +113,12 @@ export interface ChannelWorkerManager {
   enqueueWebhookTask(
     task: ChannelWebhookTask,
   ): ReturnType<ChannelWorkerGroup['enqueueWebhookTask']>;
+  beginWorkspaceDrain(workspaceCwd: string): void;
+  cancelWorkspaceDrain(workspaceCwd: string): void;
+  workspaceActivity(workspaceCwd: string): number;
+  removeWorkspace(workspaceCwd: string): Promise<void>;
+  restoreWorkspace(workspaceCwd: string): Promise<void>;
+  refreshWorkspaces(): Promise<void>;
   workerChanged(): void;
   shutdown(): Promise<void>;
   killAllSync(): void;
@@ -139,6 +162,27 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function startupFailureDetails(error: unknown): {
+  startupFailures?: readonly ChannelStartupAttemptFailure[];
+  startupFailuresTruncated?: boolean;
+} {
+  if (
+    !(
+      error instanceof ChannelWorkerStartupError ||
+      error instanceof ChannelWorkerReconcileError
+    ) ||
+    !error.startupFailures
+  ) {
+    return {};
+  }
+  return {
+    startupFailures: error.startupFailures,
+    ...(error.startupFailuresTruncated
+      ? { startupFailuresTruncated: true }
+      : {}),
+  };
+}
+
 export function createChannelWorkerManager(
   opts: CreateChannelWorkerManagerOptions,
 ): ChannelWorkerManager {
@@ -150,6 +194,7 @@ export function createChannelWorkerManager(
   let draining = false;
   let hardKilled = false;
   let lane: Promise<void> = Promise.resolve();
+  const workspaceDrains = new Set<string>();
 
   const snapshot = (): ChannelWorkerControlState => ({
     enabled:
@@ -226,6 +271,7 @@ export function createChannelWorkerManager(
           ...(error.rollbackError
             ? { rollbackError: error.rollbackError }
             : {}),
+          ...startupFailureDetails(error),
         },
       );
     }
@@ -234,6 +280,7 @@ export function createChannelWorkerManager(
         ? 'channel_worker_stop_failed'
         : fallbackCode,
       errorMessage(error),
+      startupFailureDetails(error),
     );
   };
 
@@ -292,10 +339,14 @@ export function createChannelWorkerManager(
         );
       }
       group = candidate;
+      for (const workspaceCwd of workspaceDrains) {
+        candidate.beginWorkspaceDrain(workspaceCwd);
+      }
       notify();
       try {
         await candidate.start();
       } catch (error) {
+        const startupDetails = startupFailureDetails(error);
         let cleanupError: unknown;
         try {
           await candidate.stop();
@@ -317,8 +368,12 @@ export function createChannelWorkerManager(
           'channel_worker_start_failed',
           errorMessage(error),
           cleanupError
-            ? { rolledBack: false, rollbackError: errorMessage(cleanupError) }
-            : { rolledBack: true },
+            ? {
+                rolledBack: false,
+                rollbackError: errorMessage(cleanupError),
+                ...startupDetails,
+              }
+            : { rolledBack: true, ...startupDetails },
         );
       }
       commit(selection, targetGroups);
@@ -439,6 +494,54 @@ export function createChannelWorkerManager(
         ) as ReturnType<ChannelWorkerGroup['enqueueWebhookTask']>;
       }
       return group.enqueueWebhookTask(task);
+    },
+    beginWorkspaceDrain(workspaceCwd) {
+      workspaceDrains.add(workspaceCwd);
+      group?.beginWorkspaceDrain(workspaceCwd);
+    },
+    cancelWorkspaceDrain(workspaceCwd) {
+      workspaceDrains.delete(workspaceCwd);
+      group?.cancelWorkspaceDrain(workspaceCwd);
+    },
+    workspaceActivity(workspaceCwd) {
+      return group?.workspaceActivity(workspaceCwd) ?? 0;
+    },
+    removeWorkspace(workspaceCwd) {
+      return enqueue(async () => {
+        try {
+          await group?.removeWorkspace(workspaceCwd);
+          notify();
+        } finally {
+          workspaceDrains.delete(workspaceCwd);
+        }
+      });
+    },
+    restoreWorkspace(workspaceCwd) {
+      return enqueue(async () => {
+        await group?.restoreWorkspace(workspaceCwd);
+        notify();
+      });
+    },
+    refreshWorkspaces() {
+      return enqueue(async () => {
+        if (!group || !committedSelection) return;
+        setTransition('reconciling', committedSelection);
+        let targetGroups: readonly ChannelWorkspaceGroup[];
+        try {
+          targetGroups = await opts.resolveGroups(committedSelection, 'reload');
+        } catch (error) {
+          setTransition('idle');
+          throw error;
+        }
+        if (hardKilled) throw drainingError();
+        try {
+          await group.reconcile(targetGroups);
+        } catch (error) {
+          setTransition('idle');
+          throw classifyFailure(error, 'channel_worker_start_failed');
+        }
+        commit(committedSelection, targetGroups);
+      });
     },
     workerChanged: notify,
     shutdown() {

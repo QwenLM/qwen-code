@@ -36,6 +36,7 @@ import { useContext, act } from 'react';
 import {
   AppContainer,
   dedupeNewestFirst,
+  getSpeculativeToolResult,
   getNextRenderMode,
   isInputActiveForState,
   isRenderModeToggleKey,
@@ -413,6 +414,26 @@ describe('AppContainer State Management', () => {
       shouldOpenAuthDialog: false,
       geminiMdFileCount: 0,
     } as InitializationResult;
+  });
+
+  describe('speculative tool results', () => {
+    it('renders error envelopes as failed tools', () => {
+      expect(
+        getSpeculativeToolResult({
+          error: 'Command timed out.\npartial output',
+        }),
+      ).toEqual({
+        text: 'Command timed out.\npartial output',
+        status: ToolCallStatus.Error,
+      });
+    });
+
+    it('keeps output envelopes successful', () => {
+      expect(getSpeculativeToolResult({ output: 'done' })).toEqual({
+        text: 'done',
+        status: ToolCallStatus.Success,
+      });
+    });
   });
 
   afterEach(() => {

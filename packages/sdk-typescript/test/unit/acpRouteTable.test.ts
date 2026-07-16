@@ -463,6 +463,12 @@ describe('acpRouteTable – matchRoute', () => {
     expect(result!.mapping.method).toBe('_qwen/workspace/mcp');
   });
 
+  it('POST /workspace/mcp/reload maps to _qwen/workspace/mcp/reload', () => {
+    const result = matchRoute('/workspace/mcp/reload', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/mcp/reload');
+  });
+
   it('GET /workspace/skills maps to _qwen/workspace/skills', () => {
     const result = matchRoute('/workspace/skills', 'GET');
     expect(result).not.toBeNull();
@@ -898,6 +904,11 @@ describe('acpRouteTable – matchRoute', () => {
 
   it('returns null for removed route /session/:id/approval-mode', () => {
     expect(matchRoute('/session/s12/approval-mode', 'POST')).toBeNull();
+  });
+
+  it('keeps rewind routes off ACP so strict REST auth cannot be bypassed', () => {
+    expect(matchRoute('/session/s12/rewind/snapshots', 'GET')).toBeNull();
+    expect(matchRoute('/session/s12/rewind', 'POST')).toBeNull();
   });
 
   // ---- Unknown/unmatched routes ---------------------------------------

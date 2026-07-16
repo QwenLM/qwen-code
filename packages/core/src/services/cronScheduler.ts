@@ -307,6 +307,11 @@ export class CronScheduler {
   private fileWatcher: fsSync.FSWatcher | null = null;
   private lockProbeTimer: ReturnType<typeof setInterval> | null = null;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  // Test-only auto-fire timers (QWEN_CODE_TEST_CRON_FAST). Each timer
+  // fires its job via forceFireJob after a short delay so integration
+  // tests don't wait for the wall-clock minute boundary. Cleared on
+  // stop()/destroy() so a session teardown never leaks a pending fire.
+  private testFireTimers = new Map<string, ReturnType<typeof setTimeout>>();
   // Catch-up work detected before start() installed onFire — flushed
   // through onFire as soon as it exists.
   private pendingFires: PendingFire[] = [];
@@ -365,6 +370,26 @@ export class CronScheduler {
     };
 
     this.jobs.set(id, job);
+
+    // Test seam: when QWEN_CODE_TEST_CRON_FAST is set, schedule an
+    // auto-fire for newly created session-only jobs so integration tests
+    // don't wait up to 60s for the wall-clock minute boundary. The timer
+    // fires once after the configured delay (default 5s), then the normal
+    // tick takes over for subsequent fires of recurring jobs. Timers are
+    // tracked in testFireTimers and cleared on stop()/destroy().
+    if (process.env['QWEN_CODE_TEST_CRON_FAST'] === '1' && !job.durable) {
+      const delayMs = Number(process.env['QWEN_CODE_TEST_CRON_DELAY_MS']) || 5000;
+      const timer = setTimeout(() => {
+        this.testFireTimers.delete(id);
+        this.forceFireJob(id);
+      }, delayMs);
+      timer.unref();
+      this.testFireTimers.set(id, timer);
+      debugLogger.debug(
+        `Test seam: auto-fire scheduled for job ${id} in ${delayMs}ms`,
+      );
+    }
+
     return job;
   }
 
@@ -1149,6 +1174,22 @@ export class CronScheduler {
   }
 
   /**
+   * Immediately fires a job by ID, bypassing the cron schedule check.
+   * Sets lastFiredAt to prevent the normal tick from re-firing the same
+   * minute slot. Returns true if the job existed and was fired, false
+   * otherwise. Primarily a test seam (see QWEN_CODE_TEST_CRON_FAST in
+   * create()); also useful for manual debug triggers.
+   */
+  forceFireJob(id: string): boolean {
+    const job = this.jobs.get(id);
+    if (!job || !this.onFire) return false;
+    job.lastFiredAt = Date.now();
+    debugLogger.debug(`forceFireJob: firing ${id} (${job.cronExpr})`);
+    this.onFire(job);
+    return true;
+  }
+
+  /**
    * Starts the scheduler tick. Calls `onFire` when a job is due.
    * Only fires when called — does not auto-fire missed intervals.
    */
@@ -1194,6 +1235,10 @@ export class CronScheduler {
       clearTimeout(this.debounceTimer);
       this.debounceTimer = null;
     }
+    // Clear any pending test-seam auto-fire timers so a torn-down
+    // scheduler never leaks a late forceFireJob call.
+    for (const timer of this.testFireTimers.values()) clearTimeout(timer);
+    this.testFireTimers.clear();
     if (this.wakeups.size > 0) {
       debugLogger.debug(`stop() discarding ${this.wakeups.size} wakeup(s)`);
       this.wakeups.clear();

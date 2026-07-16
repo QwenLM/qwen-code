@@ -480,6 +480,8 @@ export default {
     'Manage existing subagents (view, edit, delete).',
   'Create a new subagent with guided setup.':
     'Create a new subagent with guided setup.',
+  'Create a reusable skill from a knowledge source (file, URL, conversation, or text).':
+    'Create a reusable skill from a knowledge source (file, URL, conversation, or text).',
 
   // ============================================================================
   // Agents - Management Dialog
@@ -2636,6 +2638,15 @@ export default {
     'Unable to auto-update this standalone installation. Please reinstall from:',
   'Manual update required. Please reinstall Qwen Code.':
     'Manual update required. Please reinstall Qwen Code.',
+  'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.':
+    'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.',
+  'Update Qwen Code on the host, then restart the sandbox.':
+    'Update Qwen Code on the host, then restart the sandbox.',
+  'The update will be installed after you exit this session.':
+    'The update will be installed after you exit this session.',
+  'Run /update to install the update on the host.':
+    'Run /update to install the update on the host.',
+  'Run /update to install the update.': 'Run /update to install the update.',
   '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
     '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.',
 

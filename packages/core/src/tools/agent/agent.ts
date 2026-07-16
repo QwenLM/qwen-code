@@ -97,6 +97,7 @@ import {
   ApprovalMode,
   Config,
   normalizeMaxSubagentDepth,
+  validateMaxSessionTurns,
 } from '../../config/config.js';
 import { createDenialState } from '../../permissions/denialTracking.js';
 import { isTeammate } from '../../agents/team/identity.js';
@@ -570,7 +571,8 @@ function applyPersistedCliFlagOverrides(
     ov.getModel = () => flags.model;
   }
   if (flags.maxSessionTurns !== undefined) {
-    ov.getMaxSessionTurns = () => flags.maxSessionTurns;
+    const maxSessionTurns = validateMaxSessionTurns(flags.maxSessionTurns);
+    ov.getMaxSessionTurns = () => maxSessionTurns;
   }
   if (flags.maxToolCalls !== undefined) {
     ov.getMaxToolCalls = () => flags.maxToolCalls;

@@ -297,9 +297,9 @@ export interface CapabilitiesEnvelope {
    *   - Omit `cwd` on `POST /session` — the route falls back to this
    *     path when the body has no `cwd` field.
    *
-   * When `features` contains `multi_workspace_sessions`, `workspaces[]`
-   * lists every registered runtime. `workspaceCwd` remains the primary
-   * entry for old clients.
+   * Newer daemons list every registered runtime in `workspaces[]`, including
+   * the primary runtime when `multi_workspace_sessions` is absent.
+   * `workspaceCwd` remains the primary entry for old clients.
    *
    * Optional at the type level (matches the SDK's `DaemonCapabilities`
    * type) because the field is an additive extension of the v=1
@@ -308,12 +308,13 @@ export interface CapabilitiesEnvelope {
    * current server code always populates it.
    */
   workspaceCwd?: string;
-  /** Registered session runtimes, present only for multi-workspace daemons. */
+  /** Registered session runtimes. Older single-workspace daemons may omit it. */
   workspaces?: Array<{
     id: string;
     cwd: string;
     primary: boolean;
     trusted: boolean;
+    removable?: boolean;
   }>;
   /**
    * Transport families this daemon supports. Always includes `'rest'`;

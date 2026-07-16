@@ -766,18 +766,20 @@ fn perform_ax_click(
     if role == "AXPopUpButton" {
         let children = unsafe { copy_children(element) };
         if !children.is_empty() {
-            let options: Vec<String> = children.iter()
-                .filter_map(|&child| {
-                    let t = unsafe { copy_string_attr(child, "AXTitle") }.unwrap_or_default();
-                    let v = unsafe { copy_string_attr(child, "AXValue") }.unwrap_or_default();
-                    if t.is_empty() && v.is_empty() { return None; }
-                    Some(if v.is_empty() || v == t {
-                        format!("\"{t}\"")
-                    } else {
-                        format!("\"{t}\" (value: {v})")
-                    })
-                })
-                .collect();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let mut options = Vec::new();
+            for &child in children.iter().take(100) {
+                if std::time::Instant::now() >= deadline { break; }
+                let t = unsafe { copy_string_attr(child, "AXTitle") }.unwrap_or_default();
+                if std::time::Instant::now() >= deadline { break; }
+                let v = unsafe { copy_string_attr(child, "AXValue") }.unwrap_or_default();
+                if t.is_empty() && v.is_empty() { continue; }
+                options.push(if v.is_empty() || v == t {
+                    format!("\"{t}\"")
+                } else {
+                    format!("\"{t}\" (value: {v})")
+                });
+            }
             for &child in &children { unsafe { CFRelease(child as _); } }
 
             if !options.is_empty() {

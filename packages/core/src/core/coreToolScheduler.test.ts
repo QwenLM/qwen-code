@@ -41,8 +41,10 @@ import type {
 } from './coreToolScheduler.js';
 import {
   CoreToolScheduler,
+  convertToFunctionErrorResponse,
   convertToFunctionResponse,
   extractToolFilePaths,
+  isToolCallConcurrencySafe,
 } from './coreToolScheduler.js';
 import type { Part, PartListUnion } from '@google/genai';
 import {
@@ -1485,6 +1487,7 @@ describe('CoreToolScheduler', () => {
     const previousTimeout = process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'];
     process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'] = '30';
     try {
+      const parentController = new AbortController();
       let toolSawAbort = false;
       // A tool that never settles on its own — it resolves only once its
       // AbortSignal fires, proving the timeout actually cancels the tool
@@ -1494,6 +1497,7 @@ describe('CoreToolScheduler', () => {
           new Promise<ToolResult>((resolve) => {
             signal?.addEventListener('abort', () => {
               toolSawAbort = true;
+              parentController.abort();
               resolve({
                 llmContent: 'aborted late',
                 returnDisplay: 'aborted late',
@@ -1520,7 +1524,7 @@ describe('CoreToolScheduler', () => {
             prompt_id: 'prompt-timeout',
           },
         ],
-        new AbortController().signal,
+        parentController.signal,
       );
 
       const completedCall = (
@@ -1534,6 +1538,139 @@ describe('CoreToolScheduler', () => {
         expect(completedCall.response.error?.message).toContain('timed out');
       }
       expect(toolSawAbort).toBe(true);
+    } finally {
+      if (previousTimeout === undefined) {
+        delete process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'];
+      } else {
+        process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'] = previousTimeout;
+      }
+    }
+  });
+
+  it('keeps a tool-produced timeout as an error after a later parent abort', async () => {
+    const parentController = new AbortController();
+    const execute = vi.fn().mockImplementation(
+      () =>
+        new Promise<ToolResult>((resolve) => {
+          resolve({
+            llmContent: 'Command timed out.\npartial output',
+            returnDisplay: 'Command timed out.\npartial output',
+            error: {
+              message: 'Command timed out.',
+              type: ToolErrorType.EXECUTION_TIMEOUT,
+            },
+          });
+          parentController.abort();
+        }),
+    );
+    const toolsByName = new Map<string, MockTool>([
+      ['shell', new MockTool({ name: 'shell', execute })],
+    ]);
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockImplementation(async (request: { eventName: string }) =>
+          request.eventName === 'PostToolUseFailure'
+            ? {
+                type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+                correlationId: 'failure-hook',
+                success: true,
+                output: {
+                  hookSpecificOutput: {
+                    additionalContext: 'inspect the partial output',
+                  },
+                },
+              }
+            : {
+                type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+                correlationId: 'pre-hook',
+                success: true,
+                output: { decision: 'allow' },
+              },
+        ),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        messageBus,
+        disableHooks: false,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'shell-timeout',
+          name: 'shell',
+          args: { command: 'sleep 10' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-timeout',
+        },
+      ],
+      parentController.signal,
+    );
+
+    const completedCall = (
+      onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
+    )[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.error?.message).toBe('Command timed out.');
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.EXECUTION_TIMEOUT,
+      );
+      expect(completedCall.response.resultDisplay).toContain('partial output');
+      expect(
+        completedCall.response.responseParts[0].functionResponse?.response,
+      ).toEqual({
+        error:
+          'Command timed out.\npartial output\n\ninspect the partial output',
+      });
+      expect(
+        completedCall.response.responseParts[0].functionResponse?.response,
+      ).not.toHaveProperty('output');
+    }
+    expect(messageBus.request).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventName: 'PostToolUseFailure',
+        input: expect.objectContaining({
+          error: 'Command timed out.',
+          is_interrupt: false,
+        }),
+      }),
+      expect.anything(),
+    );
+  });
+
+  it('keeps parent cancellation when the scheduler timeout fires later', async () => {
+    const previousTimeout = process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'];
+    process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'] = '30';
+    try {
+      const parentController = new AbortController();
+      const execute = vi.fn(() => new Promise<ToolResult>(() => {}));
+      const toolsByName = new Map<string, MockTool>([
+        ['read_file', new MockTool({ name: 'read_file', execute })],
+      ]);
+      const { scheduler, onAllToolCallsComplete } =
+        createSchedulerForLegacyToolTests({ toolsByName });
+
+      setTimeout(() => parentController.abort(), 5);
+      await scheduler.schedule(
+        [
+          {
+            callId: 'parent-first',
+            name: 'read_file',
+            args: { file_path: 'a.ts' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-parent-first',
+          },
+        ],
+        parentController.signal,
+      );
+
+      const completedCall = (
+        onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
+      )[0];
+      expect(completedCall.status).toBe('cancelled');
     } finally {
       if (previousTimeout === undefined) {
         delete process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'];
@@ -1867,6 +2004,60 @@ describe('CoreToolScheduler', () => {
     expect(outputOfFirstCall(onAllToolCallsComplete)).toBe('small output');
   });
 
+  it('preserves display output when a tool omits model-facing content', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: undefined,
+      returnDisplay: 'completed',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        'malformedTool',
+        new MockTool({
+          name: 'malformedTool',
+          // SAFETY: This deliberately violates ToolResult to exercise the
+          // runtime boundary used by untyped custom tool adapters.
+          execute: execute as (
+            params: Record<string, unknown>,
+          ) => Promise<ToolResult>,
+        }),
+      ],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({ toolsByName });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'c-malformed',
+          name: 'malformedTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p-malformed',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completedCall = (
+      onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
+    )[0];
+    expect(completedCall.status).toBe('success');
+    if (completedCall.status === 'success') {
+      expect(completedCall.response.responseParts).toEqual([
+        {
+          functionResponse: {
+            id: 'c-malformed',
+            name: 'malformedTool',
+            response: {
+              output: '(malformedTool completed with no output)',
+            },
+          },
+        },
+      ]);
+      expect(completedCall.response.resultDisplay).toBe('completed');
+    }
+  });
+
   it('applies the per-tool budget for a tool invoked via a legacy alias', async () => {
     // Regression (C1): limitsTool read getTool(request.name) with the raw alias
     // ('task'), which the registry stores only under the canonical name
@@ -2115,55 +2306,52 @@ describe('CoreToolScheduler', () => {
     expect(outputOf('smallBatchTool')).toBe('b'.repeat(3000));
   });
 
-  it('does not commit deferred tool presentations when batch budget offloads the schema block', async () => {
-    const presentedProxySchemas = new Set<string>();
+  it('offloads timeout error detail while preserving failure metadata', async () => {
+    const timeoutResult = (detail: string): ToolResult => ({
+      llmContent: detail,
+      returnDisplay: 'partial output',
+      error: {
+        message: 'Command timed out.',
+        type: ToolErrorType.EXECUTION_TIMEOUT,
+      },
+    });
     const toolsByName = new Map<string, MockTool>([
       [
-        ToolNames.TOOL_SEARCH,
+        'bigTimeoutTool',
         new MockTool({
-          name: ToolNames.TOOL_SEARCH,
-          execute: vi.fn().mockResolvedValue({
-            llmContent: `<functions>${'a'.repeat(9000)}</functions>`,
-            returnDisplay: 'Loaded 1 tool(s)',
-            deferredToolPresentations: [
-              { name: ToolNames.CRON_CREATE, schemaFingerprint: 'schema' },
-            ],
-          }),
+          name: 'bigTimeoutTool',
+          execute: vi.fn().mockResolvedValue(timeoutResult('a'.repeat(9000))),
         }),
       ],
       [
-        'smallBatchTool',
+        'smallTimeoutTool',
         new MockTool({
-          name: 'smallBatchTool',
-          execute: vi.fn().mockResolvedValue({
-            llmContent: 'b'.repeat(3000),
-            returnDisplay: 'small',
-          }),
+          name: 'smallTimeoutTool',
+          execute: vi.fn().mockResolvedValue(timeoutResult('b'.repeat(3000))),
         }),
       ],
     ]);
     const { scheduler, onAllToolCallsComplete } =
       createSchedulerForLegacyToolTests({
         toolsByName,
-        presentedProxySchemas,
         toolOutputBatchBudget: 10_000,
       });
 
     await scheduler.schedule(
       [
         {
-          callId: 'tool-search-offloaded-schema',
-          name: ToolNames.TOOL_SEARCH,
-          args: { query: 'cron' },
-          isClientInitiated: false,
-          prompt_id: 'prompt-search',
-        },
-        {
-          callId: 'small',
-          name: 'smallBatchTool',
+          callId: 'big-timeout',
+          name: 'bigTimeoutTool',
           args: {},
           isClientInitiated: false,
-          prompt_id: 'prompt-search',
+          prompt_id: 'p',
+        },
+        {
+          callId: 'small-timeout',
+          name: 'smallTimeoutTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p',
         },
       ],
       new AbortController().signal,
@@ -2173,10 +2361,26 @@ describe('CoreToolScheduler', () => {
       expect(onAllToolCallsComplete).toHaveBeenCalled();
     });
 
-    expect(outputOfFirstCall(onAllToolCallsComplete)).toContain(
-      'Tool output was too large and has been truncated',
+    const calls = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    const big = calls.find((call) => call.request.name === 'bigTimeoutTool');
+    const small = calls.find(
+      (call) => call.request.name === 'smallTimeoutTool',
     );
-    expect(presentedProxySchemas.has(ToolNames.CRON_CREATE)).toBe(false);
+    expect(big?.status).toBe('error');
+    expect(small?.status).toBe('error');
+    if (big?.status === 'error' && small?.status === 'error') {
+      const bigResponse =
+        big.response.responseParts[0].functionResponse?.response;
+      expect(bigResponse?.['error']).toContain(
+        'Tool output was too large and has been truncated',
+      );
+      expect(bigResponse).not.toHaveProperty('output');
+      expect(big.response.error?.message).toBe('Command timed out.');
+      expect(big.response.errorType).toBe(ToolErrorType.EXECUTION_TIMEOUT);
+      expect(
+        small.response.responseParts[0].functionResponse?.response,
+      ).toEqual({ error: 'b'.repeat(3000) });
+    }
   });
 
   it('preserves PostToolBatch additionalContext in the offload preview tail', async () => {
@@ -4829,6 +5033,85 @@ describe('convertToFunctionResponse', () => {
   });
 });
 
+describe('convertToFunctionErrorResponse', () => {
+  const toolName = 'testTool';
+  const callId = 'call1';
+
+  it('moves converted text to error and removes output', () => {
+    const [part] = convertToFunctionErrorResponse(
+      toolName,
+      callId,
+      'timeout detail\npartial output',
+      'timeout summary',
+    );
+
+    expect(part.functionResponse).toEqual({
+      name: toolName,
+      id: callId,
+      response: { error: 'timeout detail\npartial output' },
+    });
+    expect(part.functionResponse?.response).not.toHaveProperty('output');
+  });
+
+  it('uses the fallback for empty converted content', () => {
+    const [part] = convertToFunctionErrorResponse(
+      toolName,
+      callId,
+      '',
+      'timeout summary',
+    );
+
+    expect(part.functionResponse?.response).toEqual({
+      error: 'timeout summary',
+    });
+  });
+
+  it.each([[] satisfies Part[], {} satisfies Part])(
+    'uses the fallback instead of the success placeholder for %j',
+    (content) => {
+      const [part] = convertToFunctionErrorResponse(
+        toolName,
+        callId,
+        content,
+        'actual failure',
+      );
+
+      expect(part.functionResponse?.response).toEqual({
+        error: 'actual failure',
+      });
+    },
+  );
+
+  it('prefers an existing error and preserves media and response fields', () => {
+    const content = {
+      functionResponse: {
+        id: callId,
+        name: toolName,
+        response: {
+          error: 'existing error',
+          output: 'must be removed',
+          code: 408,
+        },
+        parts: [{ inlineData: { mimeType: 'image/png', data: 'base64...' } }],
+      },
+    } satisfies Part;
+
+    const [part] = convertToFunctionErrorResponse(
+      toolName,
+      callId,
+      content,
+      'fallback',
+    );
+
+    expect(part.functionResponse).toEqual({
+      id: callId,
+      name: toolName,
+      response: { error: 'existing error', code: 408 },
+      parts: [{ inlineData: { mimeType: 'image/png', data: 'base64...' } }],
+    });
+  });
+});
+
 class MockEditToolInvocation extends BaseToolInvocation<
   Record<string, unknown>,
   ToolResult
@@ -5500,6 +5783,152 @@ describe('CoreToolScheduler cancellation during executing with live output', () 
     expect(retainedOutput).toContain('head-');
     expect(retainedOutput).toContain('-tail');
     expect(retainedOutput).toContain('truncated from');
+
+    abortController.abort();
+    await schedulePromise;
+  });
+
+  it('forwards shell heartbeats without replacing liveOutput', async () => {
+    class HeartbeatInvocation extends BaseToolInvocation<
+      { id: string },
+      ToolResult
+    > {
+      getDescription(): string {
+        return `Heartbeat tool ${this.params.id}`;
+      }
+
+      async execute(
+        signal: AbortSignal,
+        updateOutput?: (output: ToolResultDisplay) => void,
+      ): Promise<ToolResult> {
+        updateOutput?.('real output');
+        updateOutput?.({ type: 'shell_progress', elapsedMs: 10_000 });
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) return resolve();
+          const onAbort = () => {
+            signal.removeEventListener('abort', onAbort);
+            resolve();
+          };
+          signal.addEventListener('abort', onAbort, { once: true });
+        });
+        return { llmContent: 'done', returnDisplay: 'done' };
+      }
+    }
+
+    class HeartbeatTool extends BaseDeclarativeTool<
+      { id: string },
+      ToolResult
+    > {
+      constructor() {
+        super(
+          'heartbeat-tool',
+          'Heartbeat Tool',
+          'Emits a heartbeat and waits for abort',
+          Kind.Other,
+          {
+            type: 'object',
+            properties: { id: { type: 'string' } },
+            required: ['id'],
+          },
+          true,
+          true,
+        );
+      }
+      protected createInvocation(params: { id: string }) {
+        return new HeartbeatInvocation(params);
+      }
+    }
+
+    const tool = new HeartbeatTool();
+    const mockToolRegistry = {
+      getTool: () => tool,
+      ensureTool: async () => tool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => tool,
+      getToolByDisplayName: () => tool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const outputUpdateHandler = vi.fn();
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getToolRegistry: () => mockToolRegistry,
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      isInteractive: () => true,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      outputUpdateHandler,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const abortController = new AbortController();
+    const schedulePromise = scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: 'heartbeat-tool',
+          args: { id: 'x' },
+          isClientInitiated: true,
+          prompt_id: 'prompt-heartbeat',
+        },
+      ],
+      abortController.signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(outputUpdateHandler).toHaveBeenCalledTimes(2);
+    });
+
+    // Both the display chunk and the heartbeat reach the handler...
+    expect(outputUpdateHandler.mock.calls[0][1]).toBe('real output');
+    expect(outputUpdateHandler.mock.calls[1][1]).toMatchObject({
+      type: 'shell_progress',
+      elapsedMs: 10_000,
+    });
+
+    // ...but liveOutput only ever holds the display chunk.
+    const liveOutputs = onToolCallsUpdate.mock.calls
+      .map((call) => call[0][0] as ToolCall)
+      .filter(
+        (call): call is ExecutingToolCall =>
+          call.status === 'executing' && call.liveOutput !== undefined,
+      )
+      .map((call) => call.liveOutput);
+    expect(liveOutputs).toContain('real output');
+    expect(
+      liveOutputs.some(
+        (out) =>
+          typeof out === 'object' &&
+          out !== null &&
+          (out as { type?: string }).type === 'shell_progress',
+      ),
+    ).toBe(false);
 
     abortController.abort();
     await schedulePromise;
@@ -7939,8 +8368,47 @@ describe('CoreToolScheduler telemetry spans', () => {
       }),
     });
 
-    expect(completedCalls[0].status).toBe('error');
+    const completedCall = completedCalls[0];
+    expect(completedCall?.status).toBe('error');
+    if (completedCall?.status !== 'error') {
+      throw new Error('expected an errored tool call');
+    }
+    expect(completedCall.response.resultDisplay).toBe('sensitive /secret/path');
     expectSanitizedFailure(spanRecord, 'Tool execution failed', 'tool_error');
+  });
+
+  it('preserves a structured tool display when the tool returns an error', async () => {
+    const resultDisplay = {
+      type: 'vision_bridge_notice' as const,
+      summary: 'Failed to read PDF after rendering pages 20-23',
+      notice:
+        'Vision bridge (qwen3-vl-plus) failed after sending images to dashscope.aliyuncs.com.',
+    };
+    const { completedCalls } = await runSingleTool({
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'original PDF extraction error',
+        returnDisplay: resultDisplay,
+        error: {
+          message: 'No extractable text layer.',
+          type: ToolErrorType.READ_CONTENT_FAILURE,
+        },
+      }),
+    });
+
+    expect(completedCalls[0]).toMatchObject({
+      status: 'error',
+      response: {
+        resultDisplay,
+        error: { message: 'No extractable text layer.' },
+        responseParts: [
+          {
+            functionResponse: {
+              response: { error: 'No extractable text layer.' },
+            },
+          },
+        ],
+      },
+    });
   });
 
   it('preserves PostToolUseFailure artifacts on toolResult.error responses', async () => {
@@ -11639,6 +12107,60 @@ describe('Fire hook functions integration', () => {
         release();
         await schedulePromise;
       }
+    });
+
+    describe('isToolCallConcurrencySafe', () => {
+      it('treats agent tools as safe regardless of resolved kind', () => {
+        expect(isToolCallConcurrencySafe(ToolNames.AGENT, undefined, {})).toBe(
+          true,
+        );
+        expect(isToolCallConcurrencySafe(ToolNames.AGENT, Kind.Other, {})).toBe(
+          true,
+        );
+      });
+
+      it('treats pure-read kinds as safe', () => {
+        expect(isToolCallConcurrencySafe('read_file', Kind.Read, {})).toBe(
+          true,
+        );
+        expect(isToolCallConcurrencySafe('grep', Kind.Search, {})).toBe(true);
+        expect(isToolCallConcurrencySafe('fetch', Kind.Fetch, {})).toBe(true);
+      });
+
+      it('treats mutating kinds as unsafe', () => {
+        expect(isToolCallConcurrencySafe('edit', Kind.Edit, {})).toBe(false);
+        expect(isToolCallConcurrencySafe('rm', Kind.Delete, {})).toBe(false);
+        expect(isToolCallConcurrencySafe('mv', Kind.Move, {})).toBe(false);
+        expect(isToolCallConcurrencySafe('think', Kind.Think, {})).toBe(false);
+      });
+
+      it('treats a read-only shell command as safe and a mutating one as unsafe', () => {
+        expect(
+          isToolCallConcurrencySafe('shell', Kind.Execute, {
+            command: 'git status',
+          }),
+        ).toBe(true);
+        expect(
+          isToolCallConcurrencySafe('shell', Kind.Execute, {
+            command: 'rm -rf build',
+          }),
+        ).toBe(false);
+      });
+
+      it('treats a shell call with a non-string command as unsafe (fail-closed)', () => {
+        expect(isToolCallConcurrencySafe('shell', Kind.Execute, {})).toBe(
+          false,
+        );
+        expect(
+          isToolCallConcurrencySafe('shell', Kind.Execute, { command: 42 }),
+        ).toBe(false);
+      });
+
+      it('treats an unresolved (undefined) kind on a non-agent tool as unsafe', () => {
+        expect(isToolCallConcurrencySafe('mystery_tool', undefined, {})).toBe(
+          false,
+        );
+      });
     });
 
     it('should run concurrency-safe tools in parallel and unsafe tools sequentially', async () => {

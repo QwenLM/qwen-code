@@ -21,7 +21,10 @@ let sessionsState: any[];
 let otherWorkspaceSessions: Record<string, any[]>;
 // Stable client object (assigned once per test) so the other-workspace hook's
 // load callback keeps a stable identity and its effect doesn't loop.
-let workspaceClient: { listWorkspaceSessions: ReturnType<typeof vi.fn> };
+let workspaceClient: {
+  listWorkspaceSessions: ReturnType<typeof vi.fn>;
+  workspaceByCwd: ReturnType<typeof vi.fn>;
+};
 // Stable across renders (assigned once per test) so SplitView's reload effects,
 // which depend on `reload`'s identity, don't re-fire on every render.
 let reloadMock: ReturnType<typeof vi.fn>;
@@ -63,8 +66,17 @@ vi.mock('./ChatPane', () => ({
     // Let a test force a render crash to exercise the per-pane ErrorBoundary.
     if (props.title === 'BOOM') throw new Error('pane exploded');
     return (
-      <div data-testid="chat-pane" data-pane-workspace={props.workspaceCwd}>
+      <div
+        data-testid="chat-pane"
+        data-pane-workspace={props.workspaceCwd}
+        data-maximized={props.isMaximized ? 'true' : 'false'}
+      >
         <span data-testid="pane-title">{props.title}</span>
+        {props.onToggleMaximize && (
+          <button data-testid="pane-maximize" onClick={props.onToggleMaximize}>
+            max
+          </button>
+        )}
         {props.onClose && (
           <button data-testid="pane-close" onClick={props.onClose}>
             x
@@ -97,6 +109,11 @@ beforeEach(() => {
     listWorkspaceSessions: vi.fn(
       async (cwd: string) => otherWorkspaceSessions[cwd] ?? [],
     ),
+    workspaceByCwd: vi.fn((cwd: string) => ({
+      listWorkspaceSessions: vi.fn(
+        async () => otherWorkspaceSessions[cwd] ?? [],
+      ),
+    })),
   };
   reloadMock = vi.fn();
 });
@@ -364,6 +381,258 @@ describe('SplitView', () => {
     expect(titles()).toEqual(['Two']);
   });
 
+  function maximizeButtons(): HTMLElement[] {
+    return Array.from(
+      container!.querySelectorAll('[data-testid="pane-maximize"]'),
+    );
+  }
+  function hiddenSlots(): HTMLElement[] {
+    return Array.from(container!.querySelectorAll('[data-pane-hidden]'));
+  }
+
+  it('offers a maximize toggle only when more than one pane is open', () => {
+    // A lone pane already fills the split — nothing to maximize against.
+    render();
+    expect(maximizeButtons()).toHaveLength(0);
+    // Adding a second pane makes the toggle available on both.
+    openPicker();
+    const options = container!.querySelectorAll('[role="option"] button');
+    act(() =>
+      options[0].dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    expect(maximizeButtons()).toHaveLength(2);
+  });
+
+  it('maximizing a pane hides the others but keeps them all mounted', () => {
+    render({ sessionIds: ['s1', 's2', 's3'] });
+    expect(panes()).toHaveLength(3);
+    expect(hiddenSlots()).toHaveLength(0);
+
+    act(() =>
+      maximizeButtons()[0].dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+    // All three panes stay mounted (their sessions keep streaming)…
+    expect(panes()).toHaveLength(3);
+    // …but the two non-maximized slots are hidden, leaving one visible.
+    expect(hiddenSlots()).toHaveLength(2);
+    // The maximized pane reflects its state down to ChatPane.
+    const maximized = container!.querySelector('[data-maximized="true"]');
+    expect(
+      maximized?.querySelector('[data-testid="pane-title"]')?.textContent,
+    ).toBe('One');
+  });
+
+  it('toggles back to the tiled layout when the maximized pane’s button is clicked again', () => {
+    render({ sessionIds: ['s1', 's2'] });
+    act(() =>
+      maximizeButtons()[0].dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+    expect(hiddenSlots()).toHaveLength(1);
+    // The still-mounted maximized pane's own toggle restores the split.
+    act(() =>
+      maximizeButtons()[0].dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+    expect(hiddenSlots()).toHaveLength(0);
+    expect(container!.querySelector('[data-maximized="true"]')).toBeNull();
+  });
+
+  it('restores the tiled layout on Escape', () => {
+    render({ sessionIds: ['s1', 's2'] });
+    act(() =>
+      maximizeButtons()[0].dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+    expect(hiddenSlots()).toHaveLength(1);
+    // A plain Escape (not aimed at the composer or picker) restores all panes.
+    act(() =>
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      ),
+    );
+    expect(hiddenSlots()).toHaveLength(0);
+  });
+
+  it('keeps a pane maximized when Escape originates from an editable field', () => {
+    render({ sessionIds: ['s1', 's2'] });
+    act(() =>
+      maximizeButtons()[0].dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+    expect(hiddenSlots()).toHaveLength(1);
+    // Escape from the composer cancels the turn / closes its menus — it must not
+    // also un-maximize. An <input> stands in for the CodeMirror editor here.
+    const input = document.createElement('input');
+    container!.appendChild(input);
+    act(() =>
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      ),
+    );
+    expect(hiddenSlots()).toHaveLength(1);
+    input.remove();
+  });
+
+  it('moves maximize to another pane when its toggle is clicked', () => {
+    render({ sessionIds: ['s1', 's2', 's3'] });
+    // Maximize s1.
+    act(() =>
+      maximizeButtons()[0].dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+    let maximized = container!.querySelector('[data-maximized="true"]');
+    expect(
+      maximized?.querySelector('[data-testid="pane-title"]')?.textContent,
+    ).toBe('One');
+    // Click s2's toggle while s1 is maximized — maximize MOVES to s2 (it does
+    // not restore to tiled). Guards the toggle's switch branch, which a
+    // "clear on any second click" regression would break.
+    act(() =>
+      maximizeButtons()[1].dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+    maximized = container!.querySelector('[data-maximized="true"]');
+    expect(
+      maximized?.querySelector('[data-testid="pane-title"]')?.textContent,
+    ).toBe('Two');
+    // Exactly one pane maximized, the other two hidden.
+    expect(container!.querySelectorAll('[data-maximized="true"]')).toHaveLength(
+      1,
+    );
+    expect(hiddenSlots()).toHaveLength(2);
+  });
+
+  it('closes the picker on Escape without un-maximizing', () => {
+    render({ sessionIds: ['s1', 's2'] });
+    act(() =>
+      maximizeButtons()[0].dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+    expect(hiddenSlots()).toHaveLength(1);
+    // Open the add-session picker, then press Escape: it closes the picker but
+    // must NOT also un-maximize — Escape defers to the open picker first.
+    openPicker();
+    expect(container!.querySelector('[role="listbox"]')).not.toBeNull();
+    act(() =>
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      ),
+    );
+    expect(container!.querySelector('[role="listbox"]')).toBeNull();
+    expect(hiddenSlots()).toHaveLength(1);
+  });
+
+  it('drops maximize when the maximized pane is closed', () => {
+    // Uncontrolled so the close button removes the pane locally (a controlled
+    // split only reports removals up via onPanesChange).
+    render();
+    openPicker();
+    const options = container!.querySelectorAll('[role="option"] button');
+    act(() =>
+      options[0].dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    expect(panes()).toHaveLength(2); // seed 'Three' + added 'One'
+    // Maximize the seed pane, then close it via its (visible) close button.
+    act(() =>
+      maximizeButtons()[0].dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+    expect(hiddenSlots()).toHaveLength(1);
+    const closes = container!.querySelectorAll('[data-testid="pane-close"]');
+    act(() =>
+      closes[0].dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    // The lone survivor tiles normally — maximize was dropped with its pane.
+    expect(titles()).toEqual(['One']);
+    expect(hiddenSlots()).toHaveLength(0);
+  });
+
+  it('drops maximize when a controlled sync removes the maximized pane', () => {
+    render({ sessionIds: ['s1', 's2'] });
+    act(() =>
+      maximizeButtons()[0].dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+    expect(hiddenSlots()).toHaveLength(1);
+    // The parent drops the maximized session (s1) from the split…
+    act(() =>
+      root!.render(
+        <I18nProvider language="en">
+          <SplitView onExit={() => {}} sessionIds={['s2']} />
+        </I18nProvider>,
+      ),
+    );
+    // …so nothing stays maximized — the lone survivor tiles normally.
+    expect(titles()).toEqual(['Two']);
+    expect(hiddenSlots()).toHaveLength(0);
+  });
+
+  it('clears a stale maximize when a controlled split shrinks to one pane then regrows', () => {
+    const rerender = (ids: string[]) =>
+      act(() =>
+        root!.render(
+          <I18nProvider language="en">
+            <SplitView onExit={() => {}} sessionIds={ids} />
+          </I18nProvider>,
+        ),
+      );
+    render({ sessionIds: ['s1', 's2'] });
+    act(() =>
+      maximizeButtons()[0].dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+    expect(hiddenSlots()).toHaveLength(1); // s1 maximized, s2 hidden
+    // The parent drops the *other* pane, leaving the maximized one alone — the
+    // stale maximize must clear (it can't hold against a single pane)…
+    rerender(['s1']);
+    expect(titles()).toEqual(['One']);
+    expect(hiddenSlots()).toHaveLength(0);
+    // …so re-adding a pane shows a clean tiled split, not a silently re-hidden
+    // one from the earlier maximize.
+    rerender(['s1', 's2']);
+    expect(titles()).toEqual(['One', 'Two']);
+    expect(hiddenSlots()).toHaveLength(0);
+  });
+
+  it('reveals a newly added pane by exiting maximize', () => {
+    // Uncontrolled so the picker mounts the new pane locally.
+    render();
+    openPicker();
+    let options = container!.querySelectorAll('[role="option"] button');
+    act(() =>
+      options[0].dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    expect(panes()).toHaveLength(2);
+    act(() =>
+      maximizeButtons()[0].dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+    expect(hiddenSlots()).toHaveLength(1);
+    // Adding another session drops the maximize so the new pane isn't hidden
+    // behind a still-maximized one.
+    openPicker();
+    options = container!.querySelectorAll('[role="option"] button');
+    act(() =>
+      options[0].dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    expect(panes()).toHaveLength(3);
+    expect(hiddenSlots()).toHaveLength(0);
+  });
+
   it('reloads the session list when the picker opens (never a stale list)', () => {
     render({ sessionIds: ['s1'] });
     // `useSessions` only fetches on mount; nothing reloads until the user acts.
@@ -501,6 +770,31 @@ describe('SplitView', () => {
         ?.querySelector('[data-testid="chat-pane"]')
         ?.getAttribute('data-pane-workspace'),
     ).toBe('/wsB');
+  });
+
+  it('loads and attaches only the locked secondary workspace', async () => {
+    connectionState.capabilities = MULTI_WORKSPACE_CAPS;
+    otherWorkspaceSessions['/wsB'] = [
+      { sessionId: 'b1', workspaceCwd: '/wsB', displayName: 'Beta' },
+    ];
+
+    render({
+      sessionIds: ['b1'],
+      includeOtherWorkspaces: false,
+      workspaceCwd: '/wsB',
+    });
+    await flushAsync();
+
+    expect(titles()).toEqual(['Beta']);
+    expect(
+      container!
+        .querySelector('[data-session="b1"]')
+        ?.getAttribute('data-workspace'),
+    ).toBe('/wsB');
+    openPicker();
+    expect(pickerOptions().some((option) => option.includes('One'))).toBe(
+      false,
+    );
   });
 
   it('remounts a deep-linked pane under its workspace once the session list resolves', async () => {

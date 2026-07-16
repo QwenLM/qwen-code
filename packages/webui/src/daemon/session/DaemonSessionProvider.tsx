@@ -301,6 +301,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   });
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
+  useEffect(() => {
+    if (!workspace?.capabilities) return;
+    setConnection((current) =>
+      current.capabilities === workspace.capabilities
+        ? current
+        : { ...current, capabilities: workspace.capabilities },
+    );
+  }, [workspace?.capabilities]);
   const noticeIdRef = useRef(0);
   const [notices, setNotices] = useState<DaemonSessionNotice[]>([]);
   const addNotice = useCallback<AddDaemonSessionNotice>((input) => {
@@ -1720,7 +1728,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         }),
         createDetachedSession: (
           workspaceCwd?: string,
-          overrides?: Pick<CreateSessionRequest, 'approvalMode'>,
+          overrides?: Pick<CreateSessionRequest, 'approvalMode' | 'sourceType'>,
         ) => {
           const client =
             workspaceClientRef.current ??
@@ -1737,6 +1745,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               sessionRef.current?.workspaceCwd,
             ...(overrides?.approvalMode !== undefined
               ? { approvalMode: overrides.approvalMode }
+              : {}),
+            ...(overrides?.sourceType !== undefined
+              ? { sourceType: overrides.sourceType }
               : {}),
           };
           const requestClientId = clientId
@@ -2323,6 +2334,7 @@ function bumpWorkspaceEventSignals(
       case 'workspace.mcp.child_refused':
       case 'workspace.mcp.server_restarted':
       case 'workspace.mcp.server_restart_refused':
+      case 'workspace.mcp.server_changed':
         mcp += 1;
         break;
       case 'workspace.extensions.changed':

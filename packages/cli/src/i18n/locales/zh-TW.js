@@ -442,6 +442,8 @@ export default {
   'Manage existing subagents (view, edit, delete).':
     '管理現有子智能體（查看、編輯、刪除）',
   'Create a new subagent with guided setup.': '通過引導式設置創建新的子智能體',
+  'Create a reusable skill from a knowledge source (file, URL, conversation, or text).':
+    '從知識源（檔案、URL、對話或文字）建立可重複使用的技能。',
   Agents: '智能體',
   'Choose Action': '選擇操作',
   'Edit {{name}}': '編輯 {{name}}',
@@ -2226,6 +2228,15 @@ export default {
     '無法自動更新此獨立安裝。請從以下位址重新安裝：',
   'Manual update required. Please reinstall Qwen Code.':
     '需要手動更新。請重新安裝 Qwen Code。',
+  'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.':
+    '此工作階段使用自訂沙箱映像 {{image}}。請更新該映像並重新啟動 Qwen Code。',
+  'Update Qwen Code on the host, then restart the sandbox.':
+    '請在主機上更新 Qwen Code，然後重新啟動沙箱。',
+  'The update will be installed after you exit this session.':
+    '結束目前工作階段後將自動安裝更新。',
+  'Run /update to install the update on the host.':
+    '執行 /update 在主機上安裝更新。',
+  'Run /update to install the update.': '執行 /update 安裝更新。',
   '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
     '⚠️ 歷史記錄缺口：此處之前的會話記錄已遺失（儲存中斷），且無法找回。',
 

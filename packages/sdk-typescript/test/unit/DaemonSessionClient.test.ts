@@ -569,6 +569,33 @@ describe('DaemonSessionClient', () => {
     expect(calls[0]?.signal).toBe(ctrl.signal);
   });
 
+  it('forwards generation through DaemonClient with the bound clientId', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      sseResponse(
+        'event: done\ndata: {"v":1,"type":"done","requestId":"r-1","model":"fast","modelSource":"fast","inputTokens":4,"outputTokens":2}\n\n',
+      ),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    const events = [];
+    for await (const event of session.generateContent('Translate this')) {
+      events.push(event);
+    }
+
+    expect(events).toHaveLength(1);
+    expect(calls[0]?.url).toBe('http://daemon/session/s-1/generate');
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+  });
+
   it('forwards pending prompt list requests with encoded session id and clientId', async () => {
     const { fetch, calls } = recordingFetch(() =>
       jsonResponse(200, {

@@ -188,6 +188,7 @@ class FakeBridge {
   }
   async killSession(sessionId: string) {
     this.killed.push(sessionId);
+    return true;
   }
 
   loadShouldThrow = false;
@@ -987,6 +988,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     sessionId: string,
     state: 'active' | 'archived' = 'active',
     parentSessionId?: string,
+    sourceType?: string,
+    sourceId?: string,
   ): Promise<void> {
     const chatsDir = path.join(
       new Storage('/ws').getProjectDir(),
@@ -1018,6 +1021,23 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           type: 'system',
           subtype: 'parent_session',
           systemPayload: { parentSessionId },
+          cwd: '/ws',
+        }),
+      );
+    }
+    if (sourceType !== undefined) {
+      lines.push(
+        JSON.stringify({
+          uuid: `${sessionId}-source-1`,
+          parentUuid: `${sessionId}-user-1`,
+          sessionId,
+          timestamp: '2026-06-30T00:00:00.000Z',
+          type: 'system',
+          subtype: 'session_source',
+          systemPayload: {
+            sourceType,
+            ...(sourceId !== undefined ? { sourceId } : {}),
+          },
           cwd: '/ws',
         }),
       );
@@ -1168,6 +1188,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     };
     expect(result.agentCapabilities._meta.qwen.methods).toContain(
       '_qwen/session/shell',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).not.toContain(
+      '_qwen/session/rewind',
     );
   });
 
@@ -4620,7 +4643,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     for (const f of frames) expect(f.error?.code).toBe(-32602);
   });
 
-  it('session/new orphan: DELETE before spawn resolves → bridge.killSession', async () => {
+  it('session/new orphan: DELETE before spawn resolves removes the persisted session', async () => {
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
     let release: () => void = () => {};
     bridge.gate = new Promise<void>((r) => (release = r));
     const connId = await initialize();
@@ -4638,6 +4664,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     release(); // spawn resolves AFTER destroy
     await new Promise((r) => setTimeout(r, 40));
     expect(bridge.killed).toContain('sess-1');
+    expect(removeSession).toHaveBeenCalledWith('sess-1');
+    removeSession.mockRestore();
   });
 
   it('session/load orphan (attached:false) → killSession, not detach', async () => {
@@ -6656,6 +6684,50 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
             sessions: [{ sessionId, color: 'purple', groupId: null }],
           },
         });
+        reader.close();
+      });
+    });
+
+    it('session/list organized default source includes legacy sessions', async () => {
+      await withRuntimeDir(async () => {
+        const legacyId = '550e8400-e29b-41d4-a716-446655440014';
+        const defaultId = '550e8400-e29b-41d4-a716-446655440015';
+        const scheduledId = '550e8400-e29b-41d4-a716-446655440016';
+        await writeStoredSession(legacyId);
+        await writeStoredSession(defaultId, 'active', undefined, 'default');
+        await writeStoredSession(
+          scheduledId,
+          'active',
+          undefined,
+          'scheduled_task',
+          'task-1',
+        );
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        const reader = frameReader(await streamRes);
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 87,
+          method: 'session/list',
+          params: {
+            workspaceCwd: '/ws',
+            view: 'organized',
+            group: 'all',
+            sourceType: 'default',
+            _meta: { size: 20 },
+          },
+        });
+        const frame = (await reader.next()) as {
+          result: { sessions: Array<{ sessionId: string }> };
+        };
+        expect(
+          frame.result.sessions.map((session) => session.sessionId),
+        ).toEqual(expect.arrayContaining([legacyId, defaultId]));
+        expect(
+          frame.result.sessions.map((session) => session.sessionId),
+        ).not.toContain(scheduledId);
         reader.close();
       });
     });

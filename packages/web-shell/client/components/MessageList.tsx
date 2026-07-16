@@ -32,6 +32,7 @@ import {
 import { useI18n } from '../i18n';
 import { useWebShellPortalRoot } from '../portalRoot';
 import { MessageItem } from './MessageItem';
+import type { SessionContentGenerator } from './messages/AssistantMessage';
 import { MessageTimestamp } from './MessageTimestamp';
 import {
   TurnOutputs,
@@ -94,6 +95,7 @@ interface MessageListProps {
   onOpenArtifact?: (artifactId: string, previewContent?: string) => void;
   onOpenScheduledTask?: (task: TurnOutputScheduledTask) => void;
   onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
+  generateContent?: SessionContentGenerator;
 }
 
 function getLastUserMessageId(messages: Message[]): string | null {
@@ -2194,6 +2196,7 @@ export const MessageList = memo(
       onOpenArtifact,
       onOpenScheduledTask,
       onTurnOutputOpen,
+      generateContent,
     },
     ref,
   ) {
@@ -3332,6 +3335,7 @@ export const MessageList = memo(
                 flashTarget,
               )}
               assistantTurnFooterInfo={assistantTurnFooterInfo}
+              generateContent={generateContent}
             />
           );
         };
@@ -3358,6 +3362,7 @@ export const MessageList = memo(
         tailContentIndex,
         pendingApproval,
         onShowContextDetail,
+        generateContent,
         headerOffset,
         visibleItems,
         flashTarget,
