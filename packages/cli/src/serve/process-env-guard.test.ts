@@ -262,6 +262,20 @@ describe('serve process.env guard', () => {
     });
   });
 
+  it('detects computed process.env access expressions', () => {
+    expect(
+      findProcessEnvAccesses(
+        'example.ts',
+        ['process.env[DYNAMIC_VAR];', 'process.env[`TEMPLATE_${key}`];'].join(
+          '\n',
+        ),
+      ),
+    ).toEqual({
+      'computed:`TEMPLATE_${key}`': 1,
+      'computed:DYNAMIC_VAR': 1,
+    });
+  });
+
   it('allows only documented process-scoped process.env expressions', () => {
     const actual = new Map<string, Readonly<Record<string, number>>>();
     for (const root of scannedRoots) {
