@@ -96,6 +96,7 @@ import { RadioGroup, RadioGroupItem } from '../ui/radio-group';
 import { Separator } from '../ui/separator';
 import { Spinner } from '../ui/spinner';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
+import type { EmbeddedManagerPage } from '../plugins/manager-page';
 type Scope = 'user' | 'workspace';
 type Mutation = 'enable' | 'disable';
 type T = ReturnType<typeof useI18n>['t'];
@@ -110,6 +111,7 @@ const UPDATE_AVAILABLE: DaemonExtensionUpdateState = 'update available';
 interface ExtensionsManagerPageProps {
   onClose: () => void;
   initialFocusRef?: Ref<HTMLHeadingElement>;
+  embedded?: EmbeddedManagerPage;
 }
 
 function extensionTitle(extension: DaemonExtensionEntry): string {
@@ -384,6 +386,7 @@ function ExtensionInteractionDialog({
 export function ExtensionsManagerPage({
   onClose,
   initialFocusRef,
+  embedded,
 }: ExtensionsManagerPageProps) {
   const { t } = useI18n();
   const connection = useConnection();
@@ -417,13 +420,14 @@ export function ExtensionsManagerPage({
   const [submittingInteraction, setSubmittingInteraction] = useState(false);
   const [operationsRecovered, setOperationsRecovered] = useState(false);
   const mutationInFlightRef = useRef(false);
+  const uninstallInFlightNameRef = useRef<string | null>(null);
   const interactionOperationIdRef = useRef<string | null>(null);
   const cardRefs = useRef(new Map<string, HTMLDivElement>());
   const returnFocusNameRef = useRef<string | null>(null);
   const [pendingMutation, setPendingMutation] = useState<{
     operationId: string;
     name: string;
-    suppressMessage?: boolean;
+    operation?: string;
   } | null>(null);
 
   const clearInteraction = useCallback((operationId?: string) => {
@@ -461,12 +465,30 @@ export function ExtensionsManagerPage({
         .loadExtensionsStatus()
         .then((status) => {
           const nextExtensions = status.extensions ?? [];
-          setExtensions(nextExtensions);
+          setExtensions((current) => {
+            const uninstallName = uninstallInFlightNameRef.current;
+            if (
+              !uninstallName ||
+              nextExtensions.some(
+                (extension) => extension.name === uninstallName,
+              )
+            ) {
+              return nextExtensions;
+            }
+            const uninstallingExtension = current.find(
+              (extension) => extension.name === uninstallName,
+            );
+            return uninstallingExtension
+              ? [...nextExtensions, uninstallingExtension]
+              : nextExtensions;
+          });
           if (!preserveMessage) {
             setMessage(status.errors?.[0]?.error ?? null);
           }
           setSelectedName((name) =>
-            preserveSelectedExtensionName(name, nextExtensions),
+            name && uninstallInFlightNameRef.current === name
+              ? name
+              : preserveSelectedExtensionName(name, nextExtensions),
           );
         })
         .catch((error: unknown) => {
@@ -516,11 +538,16 @@ export function ExtensionsManagerPage({
         );
         if (activeMutation) {
           mutationInFlightRef.current = true;
+          if (activeMutation.operation === 'uninstall') {
+            uninstallInFlightNameRef.current =
+              activeMutation.name ?? 'extension';
+          }
           setPendingMutation(
             (current) =>
               current ?? {
                 operationId: activeMutation.operationId,
                 name: activeMutation.name ?? 'extension',
+                operation: activeMutation.operation,
               },
           );
           setBusyName((current) => current ?? activeMutation.name ?? null);
@@ -702,6 +729,10 @@ export function ExtensionsManagerPage({
             setPendingMutation(null);
             setBusyName(null);
             mutationInFlightRef.current = false;
+            if (pendingMutation.operation === 'uninstall') {
+              uninstallInFlightNameRef.current = null;
+              void load(true);
+            }
           }
           return;
         }
@@ -711,6 +742,10 @@ export function ExtensionsManagerPage({
           setPendingMutation(null);
           setBusyName(null);
           mutationInFlightRef.current = false;
+          if (operation.operation === 'uninstall') {
+            uninstallInFlightNameRef.current = null;
+            void load(true);
+          }
           return;
         }
         if (
@@ -723,7 +758,9 @@ export function ExtensionsManagerPage({
                 error: operation.result?.error ?? '',
               }),
             );
-          } else if (!pendingMutation.suppressMessage) {
+          } else if (operation.operation === 'uninstall') {
+            setMessage(null);
+          } else {
             setMessage(
               mutationSuccessMessage(
                 operation.operation,
@@ -737,6 +774,7 @@ export function ExtensionsManagerPage({
           setBusyName(null);
           mutationInFlightRef.current = false;
           if (operation.operation === 'uninstall') {
+            uninstallInFlightNameRef.current = null;
             setSelectedName(null);
           }
           if (operation.operation === 'update') {
@@ -749,11 +787,9 @@ export function ExtensionsManagerPage({
           void load(true);
           return;
         }
-        if (!pendingMutation.suppressMessage) {
-          setMessage(
-            mutationMessage(operation.operation, pendingMutation.name, t),
-          );
-        }
+        setMessage(
+          mutationMessage(operation.operation, pendingMutation.name, t),
+        );
         timer = setTimeout(() => void poll(), 1000);
       } catch (error) {
         if (cancelled) return;
@@ -763,6 +799,10 @@ export function ExtensionsManagerPage({
           setPendingMutation(null);
           setBusyName(null);
           mutationInFlightRef.current = false;
+          if (pendingMutation.operation === 'uninstall') {
+            uninstallInFlightNameRef.current = null;
+            void load(true);
+          }
           return;
         }
         timer = setTimeout(() => void poll(), retryDelay);
@@ -842,20 +882,24 @@ export function ExtensionsManagerPage({
     (
       name: string,
       run: (clientId?: string) => Promise<unknown>,
-      options: { suppressMessage?: boolean } = {},
+      options: { operation?: string; startMessage?: string } = {},
     ): boolean => {
       const clientId = connection.clientId;
       if (
         !operationsRecovered ||
         pendingInstall ||
         pendingMutation ||
+        checkingName ||
         mutationInFlightRef.current
       ) {
         return false;
       }
       mutationInFlightRef.current = true;
+      if (options.operation === 'uninstall') {
+        uninstallInFlightNameRef.current = name;
+      }
       setBusyName(name);
-      setMessage(null);
+      setMessage(options.startMessage ?? null);
       let startedPolling = false;
       run(clientId)
         .then((result) => {
@@ -871,13 +915,11 @@ export function ExtensionsManagerPage({
             setPendingMutation({
               operationId,
               name,
-              suppressMessage: options.suppressMessage,
+              operation: options.operation,
             });
             return;
           }
-          if (!options.suppressMessage) {
-            setMessage(t('extensions.manage.queued', { name }));
-          }
+          setMessage(t('extensions.manage.queued', { name }));
         })
         .catch((error: unknown) => {
           setMessage(error instanceof Error ? error.message : String(error));
@@ -886,6 +928,9 @@ export function ExtensionsManagerPage({
           if (!startedPolling) {
             mutationInFlightRef.current = false;
             setBusyName(null);
+            if (options.operation === 'uninstall') {
+              uninstallInFlightNameRef.current = null;
+            }
             void load(true);
           }
         });
@@ -893,6 +938,7 @@ export function ExtensionsManagerPage({
     },
     [
       connection.clientId,
+      checkingName,
       load,
       operationsRecovered,
       pendingInstall,
@@ -905,6 +951,10 @@ export function ExtensionsManagerPage({
     () => extensions.find((extension) => extension.name === selectedName),
     [extensions, selectedName],
   );
+
+  useEffect(() => {
+    embedded?.onDetailChange(Boolean(selectedExtension));
+  }, [embedded, selectedExtension]);
 
   const filteredExtensions = useMemo(
     () => filterExtensions(extensions, query),
@@ -955,7 +1005,27 @@ export function ExtensionsManagerPage({
       </BreadcrumbList>
     </Breadcrumb>
   );
-  const navigation = standaloneNavigation;
+  const navigation = embedded ? (
+    selectedExtension ? (
+      <Breadcrumb className="sticky -top-4 z-10 -mx-5 -mt-4 border-b bg-background px-5 py-3">
+        <BreadcrumbList className="h-8 text-sm">
+          <BreadcrumbItem>
+            <BreadcrumbLink asChild>
+              <button type="button" onClick={embedded.onRoot}>
+                {t('extensions.manage.title')}
+              </button>
+            </BreadcrumbLink>
+          </BreadcrumbItem>
+          <BreadcrumbSeparator />
+          <BreadcrumbItem>
+            <BreadcrumbPage>{extensionTitle(selectedExtension)}</BreadcrumbPage>
+          </BreadcrumbItem>
+        </BreadcrumbList>
+      </Breadcrumb>
+    ) : null
+  ) : (
+    standaloneNavigation
+  );
 
   if (selectedExtension) {
     const details = selectedExtension.details;
@@ -985,7 +1055,10 @@ export function ExtensionsManagerPage({
                 { scope },
                 clientId,
               ),
-        { suppressMessage: true },
+        {
+          operation: mutation,
+          startMessage: mutationMessage(mutation, selectedExtension.name, t),
+        },
       );
     const commands = details?.commands ?? [];
     const skills = details?.skills ?? [];
@@ -1024,6 +1097,7 @@ export function ExtensionsManagerPage({
                 <Button
                   variant="ghost"
                   size="icon"
+                  disabled={busy || checking}
                   aria-label={t('extensions.manage.actions')}
                 >
                   {busy || checking ? <Spinner /> : <EllipsisVerticalIcon />}
@@ -1042,18 +1116,28 @@ export function ExtensionsManagerPage({
                       busy || checking || updateState !== UPDATE_AVAILABLE
                     }
                     onSelect={() =>
-                      runMutation(selectedExtension.name, (clientId) =>
-                        actions.updateExtension(
-                          selectedExtension.name,
-                          clientId,
-                        ),
+                      runMutation(
+                        selectedExtension.name,
+                        (clientId) =>
+                          actions.updateExtension(
+                            selectedExtension.name,
+                            clientId,
+                          ),
+                        {
+                          operation: 'update',
+                          startMessage: mutationMessage(
+                            'update',
+                            selectedExtension.name,
+                            t,
+                          ),
+                        },
                       )
                     }
                   >
                     {t('extensions.manage.update')}
                   </DropdownMenuItem>
                   <DropdownMenuItem
-                    disabled={busy}
+                    disabled={busy || checking}
                     onSelect={() => toggleScope('user')}
                   >
                     {mutation === 'enable'
@@ -1062,7 +1146,7 @@ export function ExtensionsManagerPage({
                     · {t('settings.scope.user')}
                   </DropdownMenuItem>
                   <DropdownMenuItem
-                    disabled={busy}
+                    disabled={busy || checking}
                     onSelect={() => toggleScope('workspace')}
                   >
                     {mutation === 'enable'
@@ -1075,7 +1159,7 @@ export function ExtensionsManagerPage({
                 <DropdownMenuGroup>
                   <DropdownMenuItem
                     variant="destructive"
-                    disabled={busy}
+                    disabled={busy || checking}
                     onSelect={(event) => {
                       event.preventDefault();
                       setActionsOpen(false);
@@ -1234,8 +1318,18 @@ export function ExtensionsManagerPage({
                 onClick={() => {
                   if (!uninstallName) return;
                   if (
-                    runMutation(uninstallName, (clientId) =>
-                      actions.uninstallExtension(uninstallName, clientId),
+                    runMutation(
+                      uninstallName,
+                      (clientId) =>
+                        actions.uninstallExtension(uninstallName, clientId),
+                      {
+                        operation: 'uninstall',
+                        startMessage: mutationMessage(
+                          'uninstall',
+                          uninstallName,
+                          t,
+                        ),
+                      },
                     )
                   ) {
                     setUninstallName(null);
@@ -1365,8 +1459,8 @@ export function ExtensionsManagerPage({
                               variant="secondary"
                               className={
                                 extension.isActive
-                                  ? 'bg-[var(--success-bg)] text-[var(--success-color)]'
-                                  : undefined
+                                  ? 'bg-[var(--success-bg)] text-[10px] text-[var(--success-color)]'
+                                  : 'text-[10px]'
                               }
                             >
                               {statusLabel(extension, t)}
@@ -1375,10 +1469,12 @@ export function ExtensionsManagerPage({
                         </div>
                         {state === UPDATE_AVAILABLE ? (
                           <div className="mt-1">
-                            <Badge>{updateLabel(state, t)}</Badge>
+                            <Badge className="text-[10px]">
+                              {updateLabel(state, t)}
+                            </Badge>
                           </div>
                         ) : null}
-                        <CardDescription className="mt-0.5 truncate">
+                        <CardDescription className="mt-1 truncate text-xs">
                           {extension.description ||
                             t('extensions.manage.noDescription')}
                         </CardDescription>

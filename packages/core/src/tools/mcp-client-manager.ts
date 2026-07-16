@@ -701,6 +701,16 @@ export class McpClientManager {
     };
   }
 
+  /** Returns this manager's status for a server without consulting the
+   * process-wide compatibility status registry. */
+  getServerStatus(serverName: string): MCPServerStatus {
+    return (
+      this.pooledConnections.get(serverName)?.client.getStatus() ??
+      this.clients.get(serverName)?.getStatus() ??
+      MCPServerStatus.DISCONNECTED
+    );
+  }
+
   /** Resolved budget mode (env-var or constructor-supplied). */
   getMcpBudgetMode(): McpBudgetMode {
     return this.budgetMode;

@@ -362,6 +362,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_github_setup',
       'workspace_mcp_restart',
       'session_recap',
+      'session_generation',
       'session_btw',
       'mcp_workspace_pool',
       'mcp_pool_restart',

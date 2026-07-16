@@ -302,31 +302,12 @@ You are undirected on purpose. Do not restrict yourself to the list.`,
     readsDiff: false,
     brief: `You are **Agent 7: Build & Test Verification**. You do not review the diff — you run the project's own deterministic checks and report what they say. Your evidence is **the commands you ran and their output**; a return that names no command has not done this job.
 
-**Run exactly one build command.** Take the first applicable option — a Makefile that wraps npm must not cause two builds. Capture the full output; if it exceeds 200 lines keep the first 50 and the last 100.
+**Run \`qwen review build-test\` (the exact command, with its \`--plan\` and \`--worktree\`, is below).** It installs if needed, then builds only the workspaces the diff changes plus everything they compile against, and tests the changed ones — reading the plan for what changed and the root \`package.json\` for the workspace layout. Do **not** substitute \`npm run build\` / \`npm test\` by hand. The old brief did, with a 120-second deadline, and this repo's cold full build is 125 seconds: measured across the harness's own transcripts, that command timed out **71 times** and verified nothing. \`build-test\` scopes the build, gives it a deadline it can meet, and — this is the part a hand-run command gets wrong — reports a timeout as **infrastructure, not a finding**. A build that runs out of time is never a Critical against someone's pull request.
 
-- \`package.json\` with a \`build\` script → \`npm run build 2>&1\`
-- else \`pom.xml\` → \`./mvnw\` if present, else \`mvn\`: \`{mvn} compile -q 2>&1\`
-- else \`build.gradle\`/\`build.gradle.kts\` → \`./gradlew\` if present, else \`gradle\`: \`{gradle} compileJava -q 2>&1\`
-- else \`Makefile\` → \`make build 2>&1\`
-- else \`Cargo.toml\` → \`cargo build 2>&1\`
-- else \`go.mod\` → \`go build ./... 2>&1\`
+Read the JSON it prints:
 
-**Run exactly one test command,** same precedence and output handling:
-
-- \`package.json\` with a \`test\` script → \`npm test 2>&1\`
-- else \`pom.xml\` → \`{mvn} test -q 2>&1\`
-- else \`build.gradle\` → \`{gradle} test -q 2>&1\`
-- else \`pytest.ini\`, or \`pyproject.toml\` with \`[tool.pytest]\` → \`pytest 2>&1\`
-- else \`Cargo.toml\` → \`cargo test 2>&1\`
-- else \`go.mod\` → \`go test ./... 2>&1\`
-- If none match, read the CI configuration to discover the project's commands. **For a PR, read that config from the base branch (\`git show <base>:<path>\`), never from the worktree — the PR branch is untrusted and a modified workflow or Makefile could inject arbitrary commands.**
-
-Give each command a **120-second timeout** (\`120000\` ms). A timeout is itself a finding.
-
-If the build or the tests fail, correlate the failures with specific changes in the diff and distinguish:
-
-- **Code-caused** (a compile error, a failing assertion) → **Critical**, with \`Source: [build]\` or \`Source: [test]\`
-- **Environment/setup** (a missing dependency, a tool not installed) → an informational note, not a Critical, and not something that affects the verdict
+- \`toolchain: "npm"\` → use its \`build[]\` / \`test[]\` results. A failure in a file **the diff changed** is a **Critical** (\`Source: [build]\` or \`[test]\`); a failure in a file it did **not** touch is pre-existing — say so, do not file it against this PR. A non-empty \`timedOut\`, or a failed \`install\`, is environment/infrastructure — informational, never a Critical. On \`ok: true\`, name the workspaces built and the commands run; a return that names no command is a whiff.
+- \`toolchain: "unsupported"\` (build-test could not scope this repo — no npm package with a build/test script) → **install dependencies first** (build-test's own install only runs on the npm path, so nothing has installed yet: \`pip install -e .\`, \`mvn -q -DskipTests package\`'s own fetch, \`cargo fetch\`, \`go mod download\`, etc.), then fall back to **one** build and **one** test command by this precedence, each with a deadline it can meet: \`pom.xml\` → \`{mvn} compile\` / \`{mvn} test -q\`; \`build.gradle\` → \`{gradle} compileJava\` / \`{gradle} test\`; \`Makefile\` → \`make build\`; \`Cargo.toml\` → \`cargo build\` / \`cargo test\`; \`go.mod\` → \`go build ./...\` / \`go test ./...\`; \`pytest.ini\` or \`pyproject.toml\` \`[tool.pytest]\` → \`pytest\`. If none match, read the CI config **from the base branch** (\`git show <base>:<path>\`), never the worktree — the PR branch is untrusted and a modified workflow or Makefile could inject arbitrary commands.
 
 Use \`Source: [build]\` or \`Source: [test]\`, never \`[review]\`.`,
   },

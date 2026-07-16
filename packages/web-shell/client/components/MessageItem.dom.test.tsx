@@ -55,7 +55,11 @@ vi.mock('./messages/AssistantMessage', async () => {
         customFooter,
       );
     },
-    ThinkingMessage: () => null,
+    ThinkingMessage: ({ generateContent }: { generateContent?: unknown }) =>
+      React.createElement('div', {
+        'data-testid': 'thinking',
+        'data-has-generator': generateContent !== undefined ? 'true' : 'false',
+      }),
   };
 });
 vi.mock('./messages/SystemMessage', () => ({ SystemMessage: () => null }));
@@ -106,6 +110,8 @@ const userMsg = (id: string, content: string): Message =>
   ({ id, role: 'user', content, timestamp: 0 }) as Message;
 const assistantMsg = (id: string, content: string): Message =>
   ({ id, role: 'assistant', content, timestamp: 0 }) as Message;
+const thinkingMsg = (id: string, content: string): Message =>
+  ({ id, role: 'thinking', content, timestamp: 0 }) as Message;
 
 function item(message: Message) {
   return <MessageItem message={message} />;
@@ -186,6 +192,36 @@ describe('MessageItem selectable wrapper', () => {
     // The message body renders inside the wrapper, so the CSS descendant
     // selector `[data-user-selectable] *` still re-enables selection.
     expect(wrapper.querySelector('[data-testid="user-ok"]')).not.toBeNull();
+  });
+});
+
+describe('MessageItem generation updates', () => {
+  it('rerenders a thinking message when generation becomes available', () => {
+    const message = thinkingMsg('1', 'reasoning');
+    const { root, container } = renderWithRoot(
+      <I18nProvider language="en">
+        <MessageItem message={message} />
+      </I18nProvider>,
+    );
+    expect(
+      container
+        .querySelector('[data-testid="thinking"]')
+        ?.getAttribute('data-has-generator'),
+    ).toBe('false');
+
+    const generateContent = async function* () {};
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <MessageItem message={message} generateContent={generateContent} />
+        </I18nProvider>,
+      ),
+    );
+    expect(
+      container
+        .querySelector('[data-testid="thinking"]')
+        ?.getAttribute('data-has-generator'),
+    ).toBe('true');
   });
 });
 

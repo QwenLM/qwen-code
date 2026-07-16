@@ -82,7 +82,9 @@ function makeRuntimeBridge(): HttpAcpBridge {
     resume: vi.fn(),
     preheat: vi.fn().mockResolvedValue(undefined),
     sessionCount: 0,
+    pendingPermissionCount: 0,
     activePromptCount: 0,
+    lastActivityAt: null,
     getDaemonStatusSnapshot: vi.fn().mockReturnValue(BASE_BRIDGE_SNAPSHOT),
     isChannelLive: vi.fn().mockReturnValue(true),
   } as unknown as HttpAcpBridge;
@@ -3193,6 +3195,64 @@ describe('runQwenServe runtime startup failures', () => {
       if (!closed) {
         await handle.close();
       }
+    }
+  });
+
+  it('returns retryable bootstrap deep health while starting deferred runtime', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-deep-first-')),
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      expect(createBridge).not.toHaveBeenCalled();
+      const bootstrapRes = await fetch(`${handle.url}/health?deep=1`);
+      expect(bootstrapRes.status).toBe(503);
+      expect(bootstrapRes.headers.get('retry-after')).toBe('1');
+      expect(await bootstrapRes.json()).toEqual({
+        status: 'degraded',
+        reason: 'bootstrap',
+      });
+
+      await vi.waitFor(() => expect(createBridge).toHaveBeenCalledTimes(1), {
+        timeout: 500,
+      });
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+
+      const runtimeRes = await fetch(`${handle.url}/health?deep=1`);
+      expect(runtimeRes.status).toBe(200);
+      expect(await runtimeRes.json()).toMatchObject({
+        status: 'ok',
+        workspaceCount: 1,
+        sessions: 0,
+      });
+    } finally {
+      await handle.close();
     }
   });
 

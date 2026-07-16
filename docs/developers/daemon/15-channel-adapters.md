@@ -176,6 +176,8 @@ The daemon reads channel settings from `settings.json` when each worker starts (
 
 If a replacement fails, newly started workers are stopped and old workers are restored before the request returns. A supervisor that cannot observe exit after SIGTERM and SIGKILL retains its child reference and fails stop; the manager keeps the PID lease and never starts a second worker. Webhook configuration and routing change only when selection commit succeeds. Runtime selections are process-local and disappear on daemon restart.
 
+Adapter `connect()` failures are reported separately from worker lifecycle errors. The worker sends each bounded, credential-redacted failure over startup IPC and waits for a supervisor acknowledgement before trying the next adapter. A partially connected worker remains running and exposes `startupFailures` in its snapshot. If every adapter in a dynamic attempt fails, the `502 channel_worker_start_failed` response carries workspace-annotated attempted failures while `state` reflects the rollback result; subsequent GET responses do not retain the attempt. Daemon boot with no connected adapter remains fail-fast. The optional adapter `code` is diagnostic only, and the current `phase` is `connect`.
+
 ## Dependencies
 
 - `packages/channels/base/` — `ChannelBase`, `DaemonChannelBridge`, `types.ts` (`ChannelConfig`, `Envelope`, `SessionScope`, `ChannelPlugin`).
