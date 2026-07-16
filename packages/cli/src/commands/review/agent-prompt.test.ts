@@ -26,7 +26,11 @@ import {
   buildRoleLaunchPrompt,
   agentPromptCommand,
 } from './agent-prompt.js';
-import { readRecordedPrompts, briefPath } from './lib/prompt-record.js';
+import {
+  readRecordedPrompts,
+  briefPath,
+  wasDeliveredVerbatim,
+} from './lib/prompt-record.js';
 
 const PLAN = {
   diffPathAbsolute: '/abs/.qwen/tmp/qwen-review-pr-6771-diff.txt',
@@ -394,6 +398,145 @@ describe('agent-prompt (command boundary)', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// Dogfooded on a real 3A review: the orchestrator delivered Step 3 prompts verbatim
+// but PARAPHRASED the Step 4/5 ones — added "(round 2)", inserted its own summary,
+// truncated the "nothing replaces the brief" line — because it hand-prepended the
+// findings list. `--findings` removes that assembly step: the command folds the list
+// in and prints one block. The record stays findings-free, so the shared key still
+// matches by the add-only delivery rule.
+describe('--findings — fold the list in, print one block, record the block alone', () => {
+  beforeEach(() => {
+    (writeStdoutLine as unknown as Mock).mockClear();
+  });
+
+  function run(args: Record<string, unknown>): {
+    printed: string;
+    plan: string;
+  } {
+    const dir = mkdtempSync(join(tmpdir(), 'ap-find-'));
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(PLAN));
+    const findings = join(dir, 'findings.md');
+    writeFileSync(
+      findings,
+      '- **[Critical]** foo.ts:10 — the collision drops arguments\n' +
+        '- **[Suggestion]** bar.ts:5 — stale comment',
+    );
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      findings,
+      ...args,
+    });
+    const printed = (writeStdoutLine as unknown as Mock).mock
+      .calls[0][0] as string;
+    return { printed, plan };
+  }
+
+  it('a verifier gets the findings folded above, and the record is findings-free', () => {
+    const { printed, plan } = run({ role: 'verify' });
+    // Printed: the findings section AND the findings themselves.
+    expect(printed).toContain('## The findings you are ruling on');
+    expect(printed).toContain('foo.ts:10 — the collision drops arguments');
+    // and the line the orchestrator used to truncate away.
+    expect(printed).toContain('does not replace the brief; read it first');
+    // Recorded: the launch block ALONE — no findings baked in.
+    const recorded = readRecordedPrompts(plan).get('verify')!;
+    expect(recorded).not.toContain('foo.ts:10');
+    expect(recorded.startsWith('You are review agent `verify`')).toBe(true);
+    // The whole point: the delivery check still passes on the folded prompt, because
+    // the recorded block appears in order within it (findings are an add-only prefix).
+    expect(wasDeliveredVerbatim(printed, recorded)).toBe(true);
+  });
+
+  it('a reverse auditor gets the do-not-re-report framing', () => {
+    const { printed, plan } = run({ role: 'reverse-audit' });
+    expect(printed).toContain('Already confirmed — do not re-report these');
+    expect(printed).toContain('foo.ts:10 — the collision drops arguments');
+    const recorded = readRecordedPrompts(plan).get('reverse-audit')!;
+    expect(recorded).not.toContain('foo.ts:10');
+    expect(wasDeliveredVerbatim(printed, recorded)).toBe(true);
+  });
+
+  it('an empty findings file tells the reverse auditor nothing is confirmed yet', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ap-find0-'));
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(PLAN));
+    const findings = join(dir, 'f.md');
+    writeFileSync(findings, '   \n  ');
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+    });
+    const printed = (writeStdoutLine as unknown as Mock).mock
+      .calls[0][0] as string;
+    expect(printed).toContain('Nothing is confirmed yet');
+    expect(printed).not.toContain('do not re-report');
+  });
+
+  it('the record is byte-identical whether or not --findings was passed', () => {
+    // Proves the shared per-shard/round key is unaffected: two verify shards with
+    // different findings record the SAME launch block, so both match it. Same plan
+    // both times (the record embeds the plan-derived brief path), differing only in
+    // whether findings were folded into what was PRINTED.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-nof-'));
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(PLAN));
+    const findings = join(dir, 'f.md');
+    writeFileSync(findings, '- **[Critical]** foo.ts:10 — x');
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'verify',
+      findings,
+    });
+    const withFindings = readRecordedPrompts(plan).get('verify')!;
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'verify',
+    });
+    const withoutFindings = readRecordedPrompts(plan).get('verify')!;
+    expect(withFindings).toBe(withoutFindings);
+  });
+
+  it('cannot read the findings file — says so, does not review without them', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ap-findbad-'));
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(PLAN));
+    expect(() =>
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'verify',
+        findings: join(dir, 'no-such.md'),
+      }),
+    ).toThrow(/cannot read the findings/);
+  });
+
+  it.each([
+    [
+      'a dimension role',
+      { role: '2', findings: '/f' },
+      /--findings folds a findings list into the prompt, only for a role that takes one/,
+    ],
+    [
+      'no role',
+      { findings: '/f' },
+      /--findings folds a findings list into a --role verify \/ --role reverse-audit/,
+    ],
+    [
+      'whole-diff',
+      { 'whole-diff': true, findings: '/f' },
+      /--whole-diff builds the diff-reading block alone/,
+    ],
+  ])('rejects --findings with %s', (_, extra, pattern) => {
+    expect(() =>
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan: '/nonexistent/plan.json',
+        ...extra,
+      }),
+    ).toThrow(pattern as RegExp);
   });
 });
 

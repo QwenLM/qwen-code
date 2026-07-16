@@ -58,6 +58,11 @@ interface AgentPromptArgs {
   /** Build only the diff-reading block (Agent 8, whose brief lives nowhere else). */
   wholeDiff?: boolean;
   rules?: string;
+  /**
+   * A file of findings to fold into a verify/reverse-audit prompt, so the caller
+   * pastes one block instead of hand-prepending the list. Printed, not recorded.
+   */
+  findings?: string;
 }
 
 /** The plan report, as far as this command needs it. */
@@ -921,6 +926,47 @@ export function buildRoleLaunchPrompt(
   return parts.join('\n');
 }
 
+/**
+ * The findings block folded above a verify / reverse-audit launch prompt, so the
+ * caller pastes one thing instead of hand-assembling it.
+ *
+ * This is what gets *printed*; it is not recorded (the record stays the findings-
+ * free launch block, so the shared per-shard/round key still matches by the add-only
+ * delivery rule). Its closing line restates that the brief is authoritative — the
+ * exact sentence the orchestrator truncated when it used to build this by hand.
+ */
+function findingsSection(role: RoleId, content: string): string {
+  const body = content.trim();
+  if (role === 'verify') {
+    return [
+      '## The findings you are ruling on',
+      '',
+      'Rule on each below — one verdict, traced through the real code, as your brief ' +
+        'defines. This list does not replace the brief; read it first.',
+      '',
+      body || '(no findings were provided — there is nothing to verify)',
+    ].join('\n');
+  }
+  // A reverse auditor: the list is what NOT to re-report. Empty is meaningful — an
+  // early round on a clean review has nothing confirmed yet, and must be told so
+  // rather than handed a bare heading.
+  return body
+    ? [
+        '## Already confirmed — do not re-report these',
+        '',
+        'These are already on the review; a gap that repeats one is not a gap. Your ' +
+          'job is what they missed. This list does not replace the brief; read it first.',
+        '',
+        body,
+      ].join('\n')
+    : [
+        '## Nothing is confirmed yet',
+        '',
+        'No prior finding to avoid — hunt every gap. This note does not replace the ' +
+          'brief; read it first.',
+      ].join('\n');
+}
+
 function runAgentPrompt(args: AgentPromptArgs): void {
   // Exactly one primary mode: a territory chunk, a named role, or the bare
   // whole-diff block. A call that named none used to fall through to the chunk
@@ -929,14 +975,16 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   const hasChunk = typeof args.chunk === 'number';
   const hasRole = typeof args.role === 'string' && args.role.length > 0;
   const hasFile = typeof args.file === 'string' && args.file.length > 0;
+  const hasFindings =
+    typeof args.findings === 'string' && args.findings.length > 0;
   const hasWhole = !!args.wholeDiff;
   const bad = (msg: string): never => {
     throw new Error(`agent-prompt: ${msg}`);
   };
   if (hasWhole) {
-    if (hasChunk || hasRole || hasFile) {
+    if (hasChunk || hasRole || hasFile || hasFindings) {
       bad(
-        '--whole-diff builds the diff-reading block alone; it takes no --chunk, --role or --file.',
+        '--whole-diff builds the diff-reading block alone; it takes no --chunk, --role, --file or --findings.',
       );
     }
   } else if (hasRole) {
@@ -966,6 +1014,25 @@ function runAgentPrompt(args: AgentPromptArgs): void {
           `role "${role}" does not take --file.`,
       );
     }
+    // `--findings` folds a findings list into the printed prompt, for the two roles
+    // that take one: the verifier rules on findings, the reverse auditor avoids
+    // re-reporting them. Declared on the brief (`acceptsFindings`), like `acceptsChunk`.
+    if (hasFindings && !BRIEFS[role]?.acceptsFindings) {
+      const findingRoles = (Object.keys(BRIEFS) as RoleId[]).filter(
+        (r) => BRIEFS[r].acceptsFindings,
+      );
+      bad(
+        `--findings folds a findings list into the prompt, only for a role that ` +
+          `takes one (${findingRoles.join(', ')}); role "${role}" does not.`,
+      );
+    }
+  } else if (hasFindings) {
+    // `--findings` with no role: it has no prompt to fold into. A territory chunk
+    // agent reviews the diff, not a findings list.
+    bad(
+      '--findings folds a findings list into a --role verify / --role reverse-audit ' +
+        'prompt; it needs one of those roles.',
+    );
   } else if (!hasChunk) {
     bad(
       'pass exactly one of --chunk <id> (a Step 3B territory agent), --role ' +
@@ -1052,8 +1119,31 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     );
     prompt = buildChunkLaunchPrompt(report, id, briefFile);
   }
+
+  // Record the findings-FREE launch prompt, and print the one the caller pastes.
+  // For a verifier / reverse auditor given `--findings`, those differ: the printed
+  // prompt folds the findings in so there is no hand-assembly step to drift, but the
+  // record stays the launch block alone. The delivery check is add-only — the built
+  // block must appear in order in what the agent got — so a printed prompt that is
+  // `<findings>\n\n<block>` still matches the recorded `<block>`, and the per-shard
+  // (verify) / per-round (reverse-audit) key keeps working without baking a
+  // different findings list into each one's record.
+  let printed = prompt;
+  if (hasFindings && args.role) {
+    const role = args.role as RoleId;
+    let content: string;
+    try {
+      content = readFileSync(args.findings as string, 'utf8');
+    } catch (err) {
+      throw new Error(
+        `agent-prompt: cannot read the findings ${args.findings}: ` +
+          `${(err as Error).message}. Omit --findings, or pass a path that resolves.`,
+      );
+    }
+    printed = `${findingsSection(role, content)}\n\n${prompt}`;
+  }
   recordPrompt(args.plan, key, prompt);
-  writeStdoutLine(prompt);
+  writeStdoutLine(printed);
 }
 
 export const agentPromptCommand: CommandModule = {
@@ -1100,6 +1190,14 @@ export const agentPromptCommand: CommandModule = {
         describe:
           'Path to the project rules file from `load-rules` (omit when the ' +
           'review has none)',
+      })
+      .option('findings', {
+        type: 'string',
+        describe:
+          'Path to a file of findings to fold into a --role verify (the shard it ' +
+          'rules on) / --role reverse-audit (the cumulative confirmed list) prompt, ' +
+          'so you paste ONE block. The findings are printed, not recorded — paste ' +
+          'the whole output verbatim, do not add a round number or reword it.',
       }),
   handler: (argv) => {
     runAgentPrompt({
@@ -1109,6 +1207,7 @@ export const agentPromptCommand: CommandModule = {
       file: argv['file'] as string | undefined,
       wholeDiff: argv['whole-diff'] === true,
       rules: argv['rules'] as string | undefined,
+      findings: argv['findings'] as string | undefined,
     });
   },
 };
