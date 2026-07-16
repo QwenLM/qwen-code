@@ -74,7 +74,14 @@ export async function scanZip(file) {
 
 const scriptPath = fileURLToPath(import.meta.url);
 const packageRoot = path.resolve(path.dirname(scriptPath), '..');
-const roots = [path.join(packageRoot, 'dist/extension')];
+const extensionRoot = path.join(packageRoot, 'dist/extension');
+if (
+  process.env.EXTENSION_OUT_DIR &&
+  path.resolve(packageRoot, process.env.EXTENSION_OUT_DIR) !== extensionRoot
+) {
+  throw new Error('Release artifact scan requires dist/extension output');
+}
+const roots = [extensionRoot];
 const metafiles = [path.join(packageRoot, 'dist/esbuild.json')];
 const archives = [path.join(packageRoot, 'chrome-extension.zip')];
 

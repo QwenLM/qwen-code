@@ -252,7 +252,7 @@ Expected: build and final package scan pass.
 Run daemon without browser env flags:
 
 ```bash
-node packages/cli/dist/index.js serve --port 4170 --hostname 127.0.0.1 --no-web
+node packages/cli/dist/index.js serve --port 4170 --hostname 127.0.0.1
 ```
 
 Load the built extension ZIP or unpacked `packages/chrome-extension/dist/extension`.
@@ -320,15 +320,15 @@ Draft PR must state:
 
 ## Validation Results
 
-Validated on `origin/main` at `536cb713c6`:
+Automated validation after syncing `origin/main` on 2026-07-16:
 
-- Extension tests: 54 passed.
-- Relevant CLI pairing, reverse MCP, ACP transport, and serve tests: 478 passed.
-- Release-script tests: 3 passed.
-- `npm run lint`, `npm run build`, `npm run typecheck`, and `npm run bundle`: passed.
-- Extension `test:release`: passed, including ZIP creation and artifact scan.
-- Real Chrome smoke test: pairing succeeded without browser environment flags, the Web Shell iframe loaded, `qwen-browser-tools` registered, and all 20 tools were discoverable.
-- Main npm tarball: 23,231,294 bytes and 833 files; path and content scans found no `chrome-devtools-mcp`, Puppeteer, extension ZIP/manifest, or native browser-MCP source.
+- Extension `test:release`: 58 tests passed, including typecheck, ZIP creation, and artifact scan.
+- Relevant CLI session authentication, ACP bridge, and Web Shell tests: 101 tests passed.
+- `npm run lint`, `npm run build`, `npm run typecheck`, `npm run bundle`, and `npm run prepare:package`: passed.
+- Main npm tarball: 23.4 MB and 833 files; path and content scans found no `chrome-devtools-mcp`, Puppeteer, extension ZIP/manifest, or native browser-MCP source.
+- Full `npm run verify:pr` passed every deterministic stage and all other workspaces. One unrelated CLI webhook test ended with `socket hang up`; the exact test passed twice in isolation.
+
+The real Chrome smoke test in Task 6 remains the final manual release check.
 
 ## Acceptance Criteria
 

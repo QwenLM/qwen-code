@@ -21,6 +21,7 @@ const MAX_HEADER_VALUE_CHARS = 1_024;
 const MAX_STACK_FRAMES = 50;
 const MAX_SCREENSHOT_BASE64_CHARS = 8 * 1_048_576;
 const MAX_TEXT_RESULT_CHARS = 1_048_576;
+const TRUNCATED_MARKER = '... [truncated]';
 const EVALUATION_TIMEOUT_MS = 20_000;
 const PAGE_FETCH_TIMEOUT_MS = 15_000;
 const NAVIGATION_TIMEOUT_MS = 10_000;
@@ -144,6 +145,17 @@ function sanitizeText(input: string): string {
       for (const name of url.searchParams.keys()) {
         if (SECRET.test(name)) url.searchParams.set(name, '[REDACTED]');
       }
+      if (url.hash.length > 1) {
+        const fragment = new URLSearchParams(url.hash.slice(1));
+        let redacted = false;
+        for (const name of fragment.keys()) {
+          if (SECRET.test(name)) {
+            fragment.set(name, '[REDACTED]');
+            redacted = true;
+          }
+        }
+        if (redacted) url.hash = fragment.toString();
+      }
       value = url.toString();
     } catch {
       // Keep malformed URLs available for the assignment redactors.
@@ -169,8 +181,7 @@ function sanitizeValue(value: unknown, key?: string): unknown {
 
 function truncateText(value: string, maxChars: number): string {
   if (value.length <= maxChars) return value;
-  const marker = '... [truncated]';
-  return `${value.slice(0, Math.max(0, maxChars - marker.length))}${marker}`;
+  return `${value.slice(0, Math.max(0, maxChars - TRUNCATED_MARKER.length))}${TRUNCATED_MARKER}`;
 }
 
 function compactStack(value: unknown): unknown {
@@ -271,7 +282,11 @@ export const BROWSER_TOOLS: readonly BrowserToolDefinition[] = [
   tool(
     'press_key',
     'Press a keyboard key in the active page.',
-    { key: stringProperty('Key value such as Enter, Escape, or Tab.') },
+    {
+      key: stringProperty(
+        'Special key such as Enter, Escape, or Tab, or one printable character.',
+      ),
+    },
     ['key'],
   ),
   tool('scroll_page', 'Scroll the page by a number of CSS pixels.', {
@@ -551,6 +566,10 @@ export class BrowserTools implements BrowserToolHandler {
     const entry = object(entries[current + offset]);
     if (typeof entry['id'] !== 'number')
       throw new Error('No history entry available');
+    const url = typeof entry['url'] === 'string' ? entry['url'] : '';
+    if (!/^https?:/i.test(url) && url !== 'about:blank') {
+      throw new Error(`Chrome does not allow debugging this page: ${url}`);
+    }
     const generation = this.navigationGeneration;
     await this.session.send('Page.navigateToHistoryEntry', {
       entryId: entry['id'],
@@ -684,15 +703,18 @@ export class BrowserTools implements BrowserToolHandler {
       ArrowRight: { code: 'ArrowRight', keyCode: 39 },
     };
     const mapped = keys[key];
+    if (!mapped) {
+      if ([...key].length !== 1) {
+        throw new Error(`Unsupported key: ${key}`);
+      }
+      await this.session.send('Input.insertText', { text: key });
+      return text(`Pressed ${key}.`);
+    }
     const params = {
       key,
-      ...(mapped
-        ? {
-            code: mapped.code,
-            windowsVirtualKeyCode: mapped.keyCode,
-            nativeVirtualKeyCode: mapped.keyCode,
-          }
-        : {}),
+      code: mapped.code,
+      windowsVirtualKeyCode: mapped.keyCode,
+      nativeVirtualKeyCode: mapped.keyCode,
     };
     await this.session.send('Input.dispatchKeyEvent', {
       type: 'keyDown',
@@ -731,8 +753,22 @@ export class BrowserTools implements BrowserToolHandler {
   }
 
   private async evaluate(expression: string): Promise<BrowserToolResult> {
+    const maxChars = MAX_TEXT_RESULT_CHARS - TRUNCATED_MARKER.length;
     const result = await this.session.send('Runtime.evaluate', {
-      expression,
+      expression: `(async () => {
+        const value = await (0, eval)(${JSON.stringify(expression)});
+        let serialized;
+        try {
+          serialized = JSON.stringify(value);
+        } catch {
+          serialized = String(value);
+        }
+        if (serialized === undefined) serialized = 'undefined';
+        return {
+          text: serialized.slice(0, ${maxChars}),
+          truncated: serialized.length > ${maxChars},
+        };
+      })()`,
       awaitPromise: true,
       returnByValue: true,
       userGesture: true,
@@ -741,7 +777,13 @@ export class BrowserTools implements BrowserToolHandler {
     const exception = result['exceptionDetails'];
     if (exception) throw new Error(this.exceptionText(exception));
     const remote = object(result['result']);
-    return json('value' in remote ? remote['value'] : remote['description']);
+    const value = object(remote['value']);
+    if (typeof value['text'] !== 'string') {
+      return json('value' in remote ? remote['value'] : remote['description']);
+    }
+    return text(
+      `${sanitizeText(value['text'])}${value['truncated'] === true ? TRUNCATED_MARKER : ''}`,
+    );
   }
 
   private getConsole(id: number): BrowserToolResult {

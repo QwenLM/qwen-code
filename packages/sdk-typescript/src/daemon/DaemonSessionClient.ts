@@ -70,6 +70,8 @@ export interface DaemonSessionClientOptions {
   lastEventId?: number;
   /** Compacted replay snapshot from daemon load response. */
   replaySnapshot?: DaemonReplaySnapshot;
+  /** Original request fields retained for an automatic session reattach. */
+  restore?: RestoreSessionRequest;
   /**
    * Local per-session prompt cap. The counter is shared with the parent
    * `DaemonClient`; other session clients using the same parent instance
@@ -110,6 +112,7 @@ export class DaemonSessionClient {
   /** In-flight `reattach()` so concurrent prompts re-register only once. */
   private reattaching?: Promise<void>;
   private readonly promptLimit: number;
+  private readonly restore: RestoreSessionRequest | undefined;
   private readonly _pendingPrompts = new Map<
     string,
     {
@@ -128,6 +131,7 @@ export class DaemonSessionClient {
       liveJournal: [],
     };
     this.lastSeenEventId = validateLastEventId(opts.lastEventId);
+    this.restore = opts.restore;
     this.promptLimit =
       opts.maxPendingPromptsPerSession === undefined
         ? opts.client.maxPendingPromptsPerSession
@@ -178,6 +182,7 @@ export class DaemonSessionClient {
       client,
       session,
       hasActivePrompt: session.hasActivePrompt,
+      restore: req,
       lastEventId,
     });
   }
@@ -206,6 +211,7 @@ export class DaemonSessionClient {
       session,
       hasActivePrompt,
       state,
+      restore: req,
       lastEventId: serverLastEventId ?? 0,
       replaySnapshot: {
         compactedReplay: compactedReplay ?? [],
@@ -237,6 +243,7 @@ export class DaemonSessionClient {
       session,
       hasActivePrompt,
       state,
+      restore: req,
       lastEventId: serverLastEventId ?? 0,
     });
   }
@@ -388,7 +395,10 @@ export class DaemonSessionClient {
     // restore path resolves the workspace key before its existing-session fast
     // path, and that resolution rejects a missing/relative path.
     this.reattaching = this.client
-      .resumeSession(this.sessionId, { workspaceCwd: this.workspaceCwd })
+      .resumeSession(this.sessionId, {
+        ...this.restore,
+        workspaceCwd: this.workspaceCwd,
+      })
       .then((session) => {
         // Refresh only the clientId; leave the SSE cursor and ACP state intact.
         this.session.clientId = session.clientId;

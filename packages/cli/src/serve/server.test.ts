@@ -8125,6 +8125,43 @@ describe('createServeApp', () => {
   });
 
   describe('POST /session/:id/load and /resume', () => {
+    it.each(['load', 'resume'] as const)(
+      'requires pairing to %s a live Chrome extension session',
+      async (action) => {
+        const bridge = fakeBridge({
+          summaryImpl: (sessionId) => ({
+            sessionId,
+            workspaceCwd: WS_BOUND,
+            sourceType: 'default',
+            sourceId: 'chrome_extension',
+          }),
+        });
+        const app = createServeApp(
+          {
+            ...baseOpts,
+            workspace: WS_BOUND,
+            verifyExtensionPairingCredential: (credential) =>
+              credential === 'paired-credential',
+          },
+          undefined,
+          { bridge },
+        );
+
+        const rejected = await request(app)
+          .post(`/session/extension-session/${action}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({});
+        expect(rejected.status).toBe(401);
+        expect(rejected.body.code).toBe('extension_pairing_rejected');
+
+        const accepted = await request(app)
+          .post(`/session/extension-session/${action}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ extensionPairingCredential: 'paired-credential' });
+        expect(accepted.status).toBe(200);
+      },
+    );
+
     it('falls back to bound workspace and uses the route session id', async () => {
       for (const action of ['load', 'resume'] as const) {
         const bridge = fakeBridge();

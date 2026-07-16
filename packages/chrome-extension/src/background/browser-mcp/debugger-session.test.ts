@@ -183,13 +183,35 @@ describe('ChromeDebuggerSession', () => {
     );
 
     await session.withAttached(() => session.send('Runtime.enable'));
+    expect(detach).toHaveBeenCalledWith({ tabId: 7 }, expect.any(Function));
+    expect(attach).toHaveBeenNthCalledWith(
+      2,
+      { tabId: 8 },
+      '1.3',
+      expect.any(Function),
+    );
     expect(sendCommand).toHaveBeenLastCalledWith(
-      { tabId: 7 },
+      { tabId: 8 },
       'Runtime.enable',
       {},
       expect.any(Function),
     );
     await session.detach();
+  });
+
+  it('rejects a restricted active target before each operation', async () => {
+    query
+      .mockResolvedValueOnce([{ id: 7, url: 'https://one.example' }])
+      .mockResolvedValueOnce([{ id: 7, url: 'chrome://settings' }]);
+    const session = new ChromeDebuggerSession();
+
+    await session.withAttached(() => session.send('Runtime.enable'));
+    await expect(
+      session.withAttached(() => session.send('Runtime.evaluate')),
+    ).rejects.toThrow('does not allow debugging');
+
+    expect(detach).toHaveBeenCalledWith({ tabId: 7 }, expect.any(Function));
+    expect(sendCommand).toHaveBeenCalledTimes(1);
   });
 
   it('surfaces debugger attachment and command errors', async () => {

@@ -105,6 +105,16 @@ interface RegisterSessionRoutesDeps {
 const WEB_SHELL_SESSION_SOURCE = 'default';
 const CHROME_EXTENSION_SESSION_SOURCE_ID = 'chrome_extension';
 
+function isChromeExtensionSessionSource(source: {
+  sourceType?: string;
+  sourceId?: string;
+}): boolean {
+  return (
+    source.sourceType === CHROME_EXTENSION_SESSION_SOURCE_ID ||
+    source.sourceId === CHROME_EXTENSION_SESSION_SOURCE_ID
+  );
+}
+
 const WORKSPACE_TRANSCRIPT_PAGE_SOURCE_MAX_BYTES = 4 * 1024 * 1024;
 const WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
 const WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES = 64 * 1024;
@@ -1307,6 +1317,30 @@ export function registerSessionRoutes(
         return;
       }
       try {
+        const sessionService = new SessionService(workspaceCwd);
+        const metadata = await sessionService.readCreationMetadata(sessionId);
+        let source = metadata;
+        try {
+          source = {
+            ...metadata,
+            ...runtime.bridge.getSessionSummary(sessionId),
+          };
+        } catch {
+          // A persisted session has no live summary until restore succeeds.
+        }
+        if (isChromeExtensionSessionSource(source)) {
+          const credential = body['extensionPairingCredential'];
+          if (
+            typeof credential !== 'string' ||
+            deps.verifyExtensionPairingCredential?.(credential) !== true
+          ) {
+            res.status(401).json({
+              error: 'Chrome extension pairing credential rejected',
+              code: 'extension_pairing_rejected',
+            });
+            return;
+          }
+        }
         const session = await archiveCoordinator.runSharedMany(
           [sessionId],
           async () => {
@@ -1314,9 +1348,6 @@ export function registerSessionRoutes(
             // Recover the persisted parent lineage so the restored live entry
             // reports it (the bridge otherwise creates the entry without it, and
             // status calls would show a restored sub-session as top-level).
-            const metadata = await new SessionService(
-              workspaceCwd,
-            ).readCreationMetadata(sessionId);
             return action === 'load'
               ? await runtime.bridge.loadSession({
                   sessionId,

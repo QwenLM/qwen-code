@@ -754,6 +754,9 @@ describe('DaemonSessionProvider', () => {
     await renderWithProvider(<Harness />, {
       autoConnect: true,
       sessionId: undefined,
+      createSessionRequest: {
+        extensionPairingCredential: 'paired-credential',
+      },
     });
     expect(
       sdkMocks.MockDaemonSessionClient.createOrAttach,
@@ -768,6 +771,7 @@ describe('DaemonSessionProvider', () => {
     ).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
+        extensionPairingCredential: 'paired-credential',
         sessionScope: 'thread',
         workspaceCwd: '/mock-workspace',
       }),
@@ -4604,7 +4608,12 @@ describe('DaemonSessionProvider', () => {
       return null;
     }
 
-    await renderWithProvider(<Harness />, { autoConnect: true });
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      createSessionRequest: {
+        extensionPairingCredential: 'paired-credential',
+      },
+    });
     await act(async () => {
       await flushPromises();
     });
@@ -4625,6 +4634,7 @@ describe('DaemonSessionProvider', () => {
     expect(
       sdkMocks.MockDaemonSessionClient.createOrAttach.mock.calls[0]?.[1],
     ).toMatchObject({
+      extensionPairingCredential: 'paired-credential',
       workspaceCwd: '/mock-workspace',
       sessionScope: 'thread',
     });

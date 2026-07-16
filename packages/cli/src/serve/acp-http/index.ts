@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import type { Application, Request, Response } from 'express';
@@ -202,6 +202,7 @@ function delay(ms: number): Promise<void> {
 function buildChromeDevToolsMcpRuntimeConfig(
   localPort: number | undefined,
   hostname: string | undefined,
+  accessToken: string,
 ): Record<string, unknown> | undefined {
   if (
     localPort === undefined ||
@@ -221,7 +222,7 @@ function buildChromeDevToolsMcpRuntimeConfig(
     command,
     args: [
       '--wsEndpoint',
-      `ws://${formatCdpEndpointHost(hostname)}:${localPort}/cdp`,
+      `ws://${formatCdpEndpointHost(hostname)}:${localPort}/cdp?access_token=${encodeURIComponent(accessToken)}`,
     ],
     alwaysLoadTools: true,
     [RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG]: true,
@@ -580,6 +581,10 @@ export function mountAcpHttp(
   if (!enabled) return undefined;
 
   const path = opts.path ?? '/acp';
+  const cdpTunnelAccessToken = randomBytes(32).toString('base64url');
+  const expectedCdpTunnelAccessTokenHash = createHash('sha256')
+    .update(cdpTunnelAccessToken)
+    .digest();
   const dispatcherRef: { current?: AcpDispatcher } = {};
   // Lifecycle gate: once `dispose()` runs, late/in-flight HTTP requests get a
   // 503 instead of racing torn-down registries (issue #6378 daemon shutdown).
@@ -693,6 +698,7 @@ export function mountAcpHttp(
     const runtimeConfig = buildChromeDevToolsMcpRuntimeConfig(
       localPort,
       opts.hostname,
+      cdpTunnelAccessToken,
     );
     if (!runtimeConfig) {
       cdpMcpTerminalSkipLogged = true;
@@ -1525,6 +1531,27 @@ export function mountAcpHttp(
 
       // ── /cdp branch: hand the upgraded socket to the CDP-tunnel glue ──
       if (isCdpPath) {
+        const accessToken = new URL(
+          req.url ?? '',
+          'ws://127.0.0.1',
+        ).searchParams.get('access_token');
+        const actualAccessTokenHash = accessToken
+          ? createHash('sha256').update(accessToken).digest()
+          : undefined;
+        if (
+          !actualAccessTokenHash ||
+          actualAccessTokenHash.length !==
+            expectedCdpTunnelAccessTokenHash.length ||
+          !timingSafeEqual(
+            expectedCdpTunnelAccessTokenHash,
+            actualAccessTokenHash,
+          )
+        ) {
+          logReject('cdp-access-token-mismatch');
+          socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+          socket.destroy();
+          return;
+        }
         wss!.handleUpgrade(req, socket, head, (ws: WebSocket) => {
           if (disposed) {
             ws.close(1012, 'Server shutting down');
@@ -2052,7 +2079,6 @@ export function mountAcpHttp(
                 ? clientInfo['name']
                 : undefined;
             const requiresExtensionPairing =
-              opts.clientMcpOverWs === true &&
               clientName === CDP_BRIDGE_CLIENT_NAME;
             if (requiresExtensionPairing) {
               clientMcpAuthorized =

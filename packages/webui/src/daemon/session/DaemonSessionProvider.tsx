@@ -602,27 +602,33 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ? await restoreMethod(
                   client,
                   restoreSessionId,
-                  { workspaceCwd: effectWorkspaceCwd },
+                  {
+                    workspaceCwd: effectWorkspaceCwd,
+                    extensionPairingCredential:
+                      createSessionRequestRef.current
+                        ?.extensionPairingCredential,
+                  },
                   requestClientId,
                 )
               : reconnectSessionId
                 ? await DaemonSessionClient.load(
                     client,
                     reconnectSessionId,
-                    { workspaceCwd: effectWorkspaceCwd },
+                    {
+                      workspaceCwd: effectWorkspaceCwd,
+                      extensionPairingCredential:
+                        createSessionRequestRef.current
+                          ?.extensionPairingCredential,
+                    },
                     requestClientId,
                   )
                 : await DaemonSessionClient.createOrAttach(
                     client,
                     {
-                      ...(modelServiceId !== undefined
-                        ? { modelServiceId }
-                        : {}),
+                      ...createSessionRequestRef.current,
                       ...(shouldCreateFreshSession
                         ? { sessionScope: 'thread' as const }
-                        : sessionScope !== undefined
-                          ? { sessionScope }
-                          : {}),
+                        : {}),
                       workspaceCwd: effectWorkspaceCwd,
                     },
                     requestClientId,

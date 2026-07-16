@@ -167,12 +167,35 @@ describe('BrowserTools', () => {
 
     session.send.mockResolvedValueOnce({
       currentIndex: 1,
-      entries: [{ id: 10 }, { id: 11 }],
+      entries: [
+        { id: 10, url: 'https://example.test/previous' },
+        { id: 11, url: 'https://example.test/current' },
+      ],
     });
     await tools.callTool('go_back', {});
     expect(session.send).toHaveBeenCalledWith('Page.navigateToHistoryEntry', {
       entryId: 10,
     });
+  });
+
+  it('rejects restricted navigation history entries', async () => {
+    await tools.callTool('list_console_messages', {});
+    session.send.mockResolvedValueOnce({
+      currentIndex: 1,
+      entries: [
+        { id: 10, url: 'file:///tmp/secret.txt' },
+        { id: 11, url: 'https://example.test/current' },
+      ],
+    });
+
+    const result = await tools.callTool('go_back', {});
+
+    expect(result.isError).toBe(true);
+    expect(resultText(result)).toContain('does not allow debugging');
+    expect(session.send).not.toHaveBeenCalledWith(
+      'Page.navigateToHistoryEntry',
+      expect.anything(),
+    );
   });
 
   it('rejects screenshots that would exceed the WebSocket frame budget', async () => {
@@ -190,7 +213,12 @@ describe('BrowserTools', () => {
   it('caps evaluated text results to the reverse WebSocket frame budget', async () => {
     await tools.callTool('list_console_messages', {});
     session.send.mockResolvedValueOnce({
-      result: { value: 'a'.repeat(2 * 1_048_576) },
+      result: {
+        value: {
+          text: 'a'.repeat(1_048_576 - '... [truncated]'.length),
+          truncated: true,
+        },
+      },
     });
 
     const result = await tools.callTool('evaluate_script', {
@@ -200,6 +228,12 @@ describe('BrowserTools', () => {
 
     expect(output.length).toBeLessThanOrEqual(1_048_576);
     expect(output.endsWith('... [truncated]')).toBe(true);
+    expect(session.send).toHaveBeenLastCalledWith(
+      'Runtime.evaluate',
+      expect.objectContaining({
+        expression: expect.stringContaining('serialized.slice(0,'),
+      }),
+    );
   });
 
   it('caps snapshot text and redacts secrets from the page URL', async () => {
@@ -217,7 +251,7 @@ describe('BrowserTools', () => {
     const tab = await session.getTab();
     vi.spyOn(session, 'getTab').mockResolvedValue({
       ...tab,
-      url: 'https://user:password@example.test/?access_token=secret&name=qwen',
+      url: 'https://user:password@example.test/?access_token=secret&name=qwen#access_token=fragment-secret&route=home',
     });
 
     const output = resultText(await tools.callTool('take_snapshot', {}));
@@ -227,6 +261,23 @@ describe('BrowserTools', () => {
     expect(output).not.toContain('password');
     expect(output).not.toContain('secret');
     expect(output).toContain('name=qwen');
+    expect(output).toContain('route=home');
+  });
+
+  it('preserves non-secret URL fragments', async () => {
+    session.send.mockImplementation(async (method: string) => {
+      if (method === 'Accessibility.getFullAXTree') return { nodes: [] };
+      return {};
+    });
+    const tab = await session.getTab();
+    vi.spyOn(session, 'getTab').mockResolvedValue({
+      ...tab,
+      url: 'https://example.test/#/settings',
+    });
+
+    const output = resultText(await tools.callTool('take_snapshot', {}));
+
+    expect(output).toContain('https://example.test/#/settings');
   });
 
   it('fills snapshot controls and rejects stale refs', async () => {
@@ -367,6 +418,17 @@ describe('BrowserTools', () => {
       }),
     );
 
+    await tools.callTool('press_key', { key: 'a' });
+    expect(session.send).toHaveBeenCalledWith('Input.insertText', {
+      text: 'a',
+    });
+
+    const unsupportedKey = await tools.callTool('press_key', {
+      key: 'NotAKey',
+    });
+    expect(unsupportedKey.isError).toBe(true);
+    expect(resultText(unsupportedKey)).toContain('Unsupported key');
+
     await tools.callTool('scroll_page', { x: 2, y: 300 });
     expect(session.send).toHaveBeenCalledWith('Runtime.evaluate', {
       expression: 'window.scrollBy(2, 300)',
@@ -391,7 +453,7 @@ describe('BrowserTools', () => {
     expect(session.send).toHaveBeenLastCalledWith(
       'Runtime.evaluate',
       expect.objectContaining({
-        expression: expect.stringContaining('fetch("/api"'),
+        expression: expect.stringContaining('fetch(\\"/api\\"'),
         timeout: 20_000,
       }),
     );

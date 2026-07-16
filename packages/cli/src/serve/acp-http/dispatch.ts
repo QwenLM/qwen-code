@@ -141,6 +141,7 @@ function errMsg(err: unknown): string {
 }
 
 const debugLogger = createDebugLogger('ACP_HTTP_DISPATCH');
+const CHROME_EXTENSION_SESSION_SOURCE_ID = 'chrome_extension';
 
 type PermissionResponse = Parameters<
   HttpAcpBridge['respondToSessionPermission']
@@ -1097,6 +1098,21 @@ export class AcpDispatcher {
             }
             return;
           }
+          if (
+            source.sourceType === CHROME_EXTENSION_SESSION_SOURCE_ID ||
+            source.sourceId === CHROME_EXTENSION_SESSION_SOURCE_ID
+          ) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`chrome_extension` is reserved session metadata',
+                ),
+              );
+            }
+            return;
+          }
           // ACP standard: session/new MUST create a new isolated session.
           // Always use sessionScope 'thread' regardless of client params.
           // The REST surface (POST /session) supports 'single' for
@@ -1184,6 +1200,23 @@ export class AcpDispatcher {
               const metadata = await new SessionService(
                 cwd,
               ).readCreationMetadata(sessionId);
+              let source = metadata;
+              try {
+                source = {
+                  ...metadata,
+                  ...this.bridge.getSessionSummary(sessionId),
+                };
+              } catch {
+                // A persisted session has no live summary until restore.
+              }
+              if (
+                source.sourceType === CHROME_EXTENSION_SESSION_SOURCE_ID ||
+                source.sourceId === CHROME_EXTENSION_SESSION_SOURCE_ID
+              ) {
+                throw new AcpParamError(
+                  'Chrome extension sessions can only be restored by the paired extension',
+                );
+              }
               return method === 'session/load'
                 ? await this.bridge.loadSession({
                     sessionId,

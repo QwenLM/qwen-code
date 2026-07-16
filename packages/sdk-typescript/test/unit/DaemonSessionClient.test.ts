@@ -1565,7 +1565,10 @@ describe('DaemonSessionClient clientId self-heal', () => {
     });
   }
 
-  function newSession(client: DaemonClient): DaemonSessionClient {
+  function newSession(
+    client: DaemonClient,
+    extensionPairingCredential?: string,
+  ): DaemonSessionClient {
     return new DaemonSessionClient({
       client,
       session: {
@@ -1574,6 +1577,7 @@ describe('DaemonSessionClient clientId self-heal', () => {
         attached: true,
         clientId: 'client-1',
       },
+      restore: { extensionPairingCredential },
       maxPendingPromptsPerSession: 10,
     });
   }
@@ -1600,7 +1604,7 @@ describe('DaemonSessionClient clientId self-heal', () => {
       return jsonResponse(500, { error: `unexpected ${req.url}` });
     });
     const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
-    const session = newSession(client);
+    const session = newSession(client, 'paired-credential');
 
     await expect(
       session.prompt({ prompt: [{ type: 'text', text: 'hi' }] }),
@@ -1618,7 +1622,12 @@ describe('DaemonSessionClient clientId self-heal', () => {
     // resume re-registers without sending the stale clientId.
     const resumeReq = calls.find((c) => c.url.endsWith('/session/s-1/resume'));
     expect(resumeReq?.headers['x-qwen-client-id']).toBeUndefined();
-    expect(resumeReq?.body).toBe(JSON.stringify({ cwd: '/work/a' }));
+    expect(resumeReq?.body).toBe(
+      JSON.stringify({
+        cwd: '/work/a',
+        extensionPairingCredential: 'paired-credential',
+      }),
+    );
   });
 
   it('re-registers and retries once on the non-blocking prompt path', async () => {

@@ -62,7 +62,8 @@ export class ChromeDebuggerSession implements DebuggerSession {
     });
     await previous;
     try {
-      const { tabId } = await this.ensureAttached();
+      if (this.attaching) await this.attaching;
+      const { tabId } = await this.attachActiveTab(this.attachGeneration);
       this.pinnedTabId = tabId;
       return await operation();
     } finally {

@@ -149,10 +149,6 @@ export function createExtensionPairingManager(
         failedAttempts = 0;
         failedAttemptWindowStartedAt = currentTime;
       }
-      if (failedAttempts >= MAX_FAILED_ATTEMPTS) {
-        return { ok: false, error: 'too_many_attempts' };
-      }
-
       const submittedProof = decodeProof(request.clientProof);
       const codeKey = hash(code);
       const expectedProof = hmac(
@@ -165,6 +161,9 @@ export function createExtensionPairingManager(
         !submittedProof ||
         !timingSafeEqual(expectedProof, submittedProof)
       ) {
+        if (failedAttempts >= MAX_FAILED_ATTEMPTS) {
+          return { ok: false, error: 'too_many_attempts' };
+        }
         failedAttempts += 1;
         return { ok: false, error: 'invalid_proof' };
       }

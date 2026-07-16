@@ -75,8 +75,8 @@ describe('createExtensionPairingManager', () => {
     expect(manager.verifyCredential('anything')).toBe(false);
   });
 
-  it('locks pairing after repeated invalid proofs', () => {
-    let now = 1_000;
+  it('throttles invalid proofs without blocking a valid proof', () => {
+    const now = 1_000;
     const manager = createExtensionPairingManager({
       now: () => now,
       randomBytes: (size) => Buffer.alloc(size, 2),
@@ -89,16 +89,11 @@ describe('createExtensionPairingManager', () => {
         error: 'invalid_proof',
       });
     }
-    expect(manager.confirm(pairingRequest(manager))).toEqual({
+    expect(manager.confirm(invalidRequest)).toEqual({
       ok: false,
       error: 'too_many_attempts',
     });
-
-    now += 60_000;
-    expect(manager.confirm(invalidRequest)).toEqual({
-      ok: false,
-      error: 'invalid_proof',
-    });
+    expect(manager.confirm(pairingRequest(manager)).ok).toBe(true);
   });
 
   it('rejects expired pairing material and rotates its nonce', () => {

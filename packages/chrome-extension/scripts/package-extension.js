@@ -15,6 +15,12 @@ const packageRoot = path.resolve(
   '..',
 );
 const extensionRoot = path.join(packageRoot, 'dist/extension');
+if (
+  process.env.EXTENSION_OUT_DIR &&
+  path.resolve(packageRoot, process.env.EXTENSION_OUT_DIR) !== extensionRoot
+) {
+  throw new Error('Release packaging requires dist/extension output');
+}
 const archive = path.join(packageRoot, 'chrome-extension.zip');
 
 await rm(archive, { force: true });
