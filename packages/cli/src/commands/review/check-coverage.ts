@@ -111,8 +111,8 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         `that never named the diff file — ${report.blindAgents.join(', ')}. They ` +
         `could not have read the diff, whatever they returned. Do NOT relaunch ` +
         `them as they are: a second blind agent reads no more than the first. ` +
-        `Build each prompt with \`qwen review agent-prompt --plan <plan> ` +
-        `--chunk <id>\` and pass it verbatim.`,
+        `Build each prompt with \`"\${QWEN_CODE_CLI:-qwen}" review agent-prompt ` +
+        `--plan <plan> --chunk <id>\` and pass it verbatim.`,
     );
   }
   // The prompt was built in code and then edited on the way to the agent. Nothing
@@ -125,7 +125,8 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         `\`agent-prompt\` prints a prompt to be passed VERBATIM; a summary of it is ` +
         `not it. The last run to paraphrase one dropped the rule against reciting a ` +
         `stock sentence and replaced the project's review rules with three sentences ` +
-        `of its own. Re-run \`qwen review agent-prompt\` and pass its output ` +
+        `of its own. Re-run \`"\${QWEN_CODE_CLI:-qwen}" review agent-prompt\` and ` +
+        `pass its output ` +
         `unedited — copy it, do not retype it.`,
     );
   }
@@ -144,10 +145,11 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         `severity bar, the finding format and this project's rules live in the ` +
         `brief it was never given, and a dimension reviewed without them cannot ` +
         `be certified clean. Build every required prompt in one call — ` +
-        `\`qwen review agent-prompt --plan <plan> --roster\` — and launch one ` +
-        `agent per block it prints, verbatim; \`--role <n>\` rebuilds a single ` +
-        `one (the role number is in each label above; a per-file role takes ` +
-        `\`--file <path>\`).\n` +
+        `\`"\${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan <plan> --roster\` ` +
+        `— and launch one agent per block it prints, verbatim. To rebuild a ` +
+        `single one: \`--role <n>\` (the role number is in each label above; a ` +
+        `per-file role takes \`--file <path>\`), or \`--chunk <id>\` for a ` +
+        `chunk agent.\n` +
         // Where it looked, because "the builder never ran" and "the builder ran
         // against a different --plan" are indistinguishable from a missing file and
         // are fixed differently. The record dir hangs off the plan path as given, so
@@ -180,8 +182,8 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
       'NOTE: a chunk counts as read when an agent was pointed at its lines AND ' +
         'the harness recorded that agent opening the diff. An agent handed the ' +
         'diff with no line ranges covers nothing. Build every whole-diff ' +
-        "agent's prompt with `qwen review agent-prompt --plan <plan> " +
-        '--whole-diff` and paste it verbatim ahead of its brief.',
+        'agent\'s prompt with `"${QWEN_CODE_CLI:-qwen}" review agent-prompt ' +
+        '--plan <plan> --whole-diff` and paste it verbatim ahead of its brief.',
     );
   }
   if (report.idleAgents.length > 0) {

@@ -78,9 +78,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // thing that knows its own path, so it publishes it; `getShellContextEnvVars` passes
 // it to every shell subprocess, and a caller prefers it over a bare `qwen`.
 //
-// `||=`, not `=`: the relaunch below re-enters as dist/cli.js, which must keep
-// pointing callers back at *this* wrapper (the part with the shebang), not at itself.
-process.env['QWEN_CODE_CLI'] ||= fileURLToPath(import.meta.url);
+// Assignment, not `||=`: an inherited value is another session's CLI — an outer
+// qwen shelling out to this one — and honouring it re-creates the exact skew above,
+// one level up. Each entry stamps itself, so nested sessions each call their own
+// build. Nothing downstream overwrites this: the spawn below runs dist/cli.js,
+// which never re-executes this wrapper, and the post-update relaunch re-enters
+// through the launcher's own wrapper — which stamps the updated entry, as it must.
+process.env['QWEN_CODE_CLI'] = fileURLToPath(import.meta.url);
 
 const cliPathCandidates = [
   join(__dirname, 'cli.js'),
