@@ -22,8 +22,21 @@ export function isSubAgentToolCall(tool: ACPToolCall): boolean {
 export function isBackgroundSubAgentToolCall(tool: ACPToolCall): boolean {
   if (!isSubAgentToolCall(tool)) return false;
   const rawOutput = getRecord(tool.rawOutput);
+  const name = tool.toolName.toLowerCase();
+  const args = tool.args;
+  const isTopLevelQwenAgent =
+    name === 'agent' && tool.parentToolCallId === undefined;
+  const defaultsToBackground =
+    isTopLevelQwenAgent &&
+    args?.run_in_background === undefined &&
+    args?.working_dir === undefined &&
+    args?.name === undefined;
+  const explicitlyBackground =
+    args?.run_in_background === true &&
+    (name !== 'agent' || isTopLevelQwenAgent);
   return (
     rawOutput?.['status'] === 'background' ||
-    tool.args?.run_in_background === true
+    explicitlyBackground ||
+    defaultsToBackground
   );
 }

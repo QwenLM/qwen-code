@@ -660,9 +660,29 @@ describe('extractToolResults', () => {
     })
   })
 
-  it('does NOT emit task_backgrounded for foreground Agent with agentId in result', () => {
-    // Foreground Agent tool (no run_in_background) — agentId in result should be ignored
+  it('detects background Agent by default when the flag is omitted', () => {
     toolIndex.register('toolu_agent', 'Agent', { _intent: 'Explore codebase', prompt: 'Find auth code' })
+
+    const blocks: ContentBlock[] = [
+      makeToolResultBlock('toolu_agent', 'Background agent launched.\nagentId: default_bg_xyz'),
+    ]
+
+    const events = extractToolResults(blocks, null, undefined, toolIndex)
+
+    expect(events).toHaveLength(2)
+    expect(events[1]).toMatchObject({
+      type: 'task_backgrounded',
+      toolUseId: 'toolu_agent',
+      taskId: 'default_bg_xyz',
+    })
+  })
+
+  it('does NOT emit task_backgrounded for an explicit foreground Agent with agentId in result', () => {
+    toolIndex.register('toolu_agent', 'Agent', {
+      _intent: 'Explore codebase',
+      prompt: 'Find auth code',
+      run_in_background: false,
+    })
 
     const blocks: ContentBlock[] = [
       makeToolResultBlock('toolu_agent', 'Found auth in /src/auth.ts\nagentId: fg_agent_xyz'),
@@ -674,6 +694,39 @@ describe('extractToolResults', () => {
     expect(events).toHaveLength(1)
     expect(events[0]).toMatchObject({ type: 'tool_result', toolUseId: 'toolu_agent' })
   })
+
+  it.each([undefined, true])(
+    'does NOT emit task_backgrounded for a nested Agent when the flag is %s',
+    (runInBackground) => {
+      toolIndex.register('toolu_nested_agent', 'Agent', {
+        prompt: 'Find auth code',
+        ...(runInBackground === undefined
+          ? {}
+          : { run_in_background: runInBackground }),
+      })
+
+      const blocks: ContentBlock[] = [
+        makeToolResultBlock(
+          'toolu_nested_agent',
+          'Found auth code\nagentId: nested_agent_xyz',
+        ),
+      ]
+
+      const events = extractToolResults(
+        blocks,
+        'parent_agent',
+        undefined,
+        toolIndex,
+      )
+
+      expect(events).toHaveLength(1)
+      expect(events[0]).toMatchObject({
+        type: 'tool_result',
+        toolUseId: 'toolu_nested_agent',
+        parentToolUseId: 'parent_agent',
+      })
+    },
+  )
 
   it('detects background Shell from shell_id in result', () => {
     toolIndex.register('toolu_bash', 'Bash', { command: 'npm test', description: 'Run tests' })

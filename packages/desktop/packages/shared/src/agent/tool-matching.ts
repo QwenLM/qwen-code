@@ -263,7 +263,14 @@ export function extractToolResults(
 
       // Detect background tasks/shells from results
       if (entry) {
-        const bgEvents = detectBackgroundEvents(toolUseId, entry, resultStr, isError, turnId);
+        const bgEvents = detectBackgroundEvents(
+          toolUseId,
+          entry,
+          resultStr,
+          isError,
+          turnId,
+          sdkParentToolUseId ?? undefined,
+        );
         events.push(...bgEvents);
       }
     }
@@ -395,15 +402,26 @@ function detectBackgroundEvents(
   resultStr: string,
   isError: boolean,
   turnId?: string,
+  parentToolUseId?: string,
 ): AgentEvent[] {
   const events: AgentEvent[] = [];
 
   // Background Task detection — Task/Agent tool with agentId in result.
-  // Only trigger when the tool was explicitly launched with run_in_background: true.
-  // Without this guard, foreground Agent tools whose result text happens to contain
-  // "agentId:" would be spuriously marked as backgrounded — and since no task_completed
-  // event ever arrives for them, they'd stay stuck in 'backgrounded' status forever.
-  const wasRunInBackground = entry.input?.run_in_background === true;
+  // Qwen Agent calls default to background unless they explicitly opt out or
+  // use a launch shape that stays foreground. Task keeps its provider-specific
+  // explicit opt-in behavior.
+  const normalizedToolName = entry.name.toLowerCase();
+  const isTopLevelQwenAgent =
+    normalizedToolName === 'agent' && parentToolUseId === undefined;
+  const defaultsToBackground =
+    isTopLevelQwenAgent &&
+    entry.input.run_in_background === undefined &&
+    entry.input.working_dir === undefined &&
+    entry.input.name === undefined;
+  const wasRunInBackground =
+    (entry.input.run_in_background === true &&
+      (normalizedToolName !== 'agent' || isTopLevelQwenAgent)) ||
+    defaultsToBackground;
   if (isParentTaskTool(entry.name) && wasRunInBackground && !isError && resultStr) {
     const agentIdMatch = resultStr.match(/agentId:\s*([a-zA-Z0-9_-]+)/);
     if (agentIdMatch?.[1]) {

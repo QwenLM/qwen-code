@@ -47,8 +47,9 @@ The runtime resolves one-shot subagent execution in this order:
 2. A valid top-level fork uses the existing detached fork path.
 3. A nested ordinary subagent runs in the foreground, even when background was
    requested, so its result returns to the nested caller.
-4. An ordinary subagent with `working_dir` runs in the foreground because the
-   caller owns that worktree's lifecycle.
+4. An ordinary subagent with `working_dir` and no configured background
+   default runs in the foreground because the caller owns that worktree's
+   lifecycle. An explicit or configured background request remains invalid.
 5. For any other top-level ordinary subagent:
    - `run_in_background: false` runs in the foreground.
    - `run_in_background: true` runs in the background.
@@ -75,8 +76,9 @@ describe background as the default and tell callers to pass
 
 The `working_dir` exception must be resolved before the existing incompatibility
 guard. An omitted background parameter must not turn previously valid pinned
-review launches into errors. An explicit `run_in_background: true` with
-`working_dir` remains invalid, preserving the existing safety check.
+review launches into errors. An explicit `run_in_background: true` or an agent
+configured with `background: true` remains incompatible with `working_dir`,
+preserving the existing safety check.
 
 ## Result Flow
 
