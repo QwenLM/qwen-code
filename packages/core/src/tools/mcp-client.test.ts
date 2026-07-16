@@ -2038,6 +2038,39 @@ describe('mcp-client', () => {
         expect((transport as any)._fetch).toEqual(expect.any(Function));
       });
 
+      it('captures OAuth challenges from the initial HTTP handshake', async () => {
+        const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+          new Response(null, {
+            status: 401,
+            headers: {
+              'www-authenticate':
+                'Bearer resource_metadata="https://test-server/.well-known/oauth-protected-resource"',
+            },
+          }),
+        );
+        const serverName = 'handshake-oauth-server';
+        const serverConfig = { httpUrl: 'https://test-server/mcp' };
+        const transport = await createTransport(
+          serverName,
+          serverConfig,
+          false,
+        );
+        const transportFetch = (
+          transport as unknown as { _fetch: typeof fetch }
+        )._fetch;
+
+        const response = await transportFetch(serverConfig.httpUrl, {
+          method: 'POST',
+        });
+
+        expect(response.status).toBe(401);
+        expect(mcpServerRequiresOAuth.get(serverName)).toBe(true);
+        await expect(
+          probeMcpServerForOAuth(serverName, serverConfig),
+        ).resolves.toBe(true);
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+      });
+
       it('treats 400 from optional GET SSE stream as unsupported', async () => {
         const fetchFn = vi
           .fn<typeof fetch>()
