@@ -695,6 +695,29 @@ describe('extractToolResults', () => {
     expect(events[0]).toMatchObject({ type: 'tool_result', toolUseId: 'toolu_agent' })
   })
 
+  it('does NOT emit task_backgrounded for an omitted-flag fork Agent', () => {
+    // Mirrors core's `!isForkRequested` guard: a `subagent_type: "fork"`
+    // fallback stays foreground, so no background event even with an agentId
+    // in the result.
+    toolIndex.register('toolu_fork_agent', 'Agent', {
+      _intent: 'Handle a detached chore',
+      prompt: 'Handle the detached chore',
+      subagent_type: 'fork',
+    })
+
+    const blocks: ContentBlock[] = [
+      makeToolResultBlock('toolu_fork_agent', 'Done.\nagentId: fork_agent_xyz'),
+    ]
+
+    const events = extractToolResults(blocks, null, undefined, toolIndex)
+
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({
+      type: 'tool_result',
+      toolUseId: 'toolu_fork_agent',
+    })
+  })
+
   it.each([undefined, true])(
     'does NOT emit task_backgrounded for a nested Agent when the flag is %s',
     (runInBackground) => {

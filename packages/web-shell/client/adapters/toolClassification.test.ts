@@ -16,6 +16,14 @@ describe('isBackgroundSubAgentToolCall', () => {
     expect(isBackgroundSubAgentToolCall(agentTool())).toBe(true);
   });
 
+  it('keeps an omitted-flag fork request in the foreground', () => {
+    // Mirrors core's `!isForkRequested` guard: a `subagent_type: "fork"`
+    // fallback stays foreground even when run_in_background is omitted.
+    expect(
+      isBackgroundSubAgentToolCall(agentTool({ subagent_type: 'fork' })),
+    ).toBe(false);
+  });
+
   it('keeps an explicit foreground agent out of the background group', () => {
     expect(
       isBackgroundSubAgentToolCall(agentTool({ run_in_background: false })),

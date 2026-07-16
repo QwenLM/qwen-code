@@ -4060,6 +4060,35 @@ describe('AgentTool', () => {
       );
     });
 
+    it('lets an explicit run_in_background: false override a config with background: true', async () => {
+      // Precedence contract: the explicit tool parameter wins over the
+      // subagent config's background flag (`run_in_background ?? config`).
+      // A `||` here would let background: true override the explicit false
+      // and detach the agent when the caller asked for an inline result.
+      const explicitBackgroundConfig: SubagentConfig = {
+        ...bgSubagent,
+        name: 'file-search',
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+        explicitBackgroundConfig,
+      );
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+        run_in_background: false,
+      });
+      const result = await invocation.execute();
+
+      expect(partToString(result.llmContent)).toBe('Monitor done');
+      expect(mockRegistry.register).toHaveBeenCalledWith(
+        expect.objectContaining({ isBackgrounded: false }),
+      );
+    });
+
     it('downgrades a background request from a nested sub-agent to an awaited foreground run', async () => {
       // Background delegation is top-level-only in v1: a nested launcher
       // cannot honor the background completion contract (send_message /
