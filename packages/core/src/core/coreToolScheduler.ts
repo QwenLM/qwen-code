@@ -475,7 +475,14 @@ const FS_PATH_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   ToolNames.NOTEBOOK_EDIT,
 ]);
 
-function canonicalToolName(toolName: string): string {
+/**
+ * Resolve a tool name through the legacy-alias migration map (e.g.
+ * `search_file_content` → `grep`) to its canonical form. Exported so callers
+ * that classify tools by name/kind — the headless partitioner in
+ * nonInteractiveCli — resolve the same registry entry the interactive
+ * scheduler and executor do, instead of missing on an alias.
+ */
+export function canonicalToolName(toolName: string): string {
   return (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
 }
 

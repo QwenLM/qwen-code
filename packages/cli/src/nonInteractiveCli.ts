@@ -43,6 +43,7 @@ import {
   markDuplicateProviderToolCallResponseSent,
   findRepeatedDuplicateProviderToolCall,
   isToolCallConcurrencySafe,
+  canonicalToolName,
   parsePositiveIntegerEnv,
   partitionByConcurrencySafety,
 } from '@qwen-code/qwen-code-core';
@@ -314,9 +315,12 @@ export interface RunNonInteractiveOptions {
  *
  * Reuses core's `partitionByConcurrencySafety` so the headless and
  * interactive runtimes share one partition algorithm and can't diverge on
- * which tool sets they parallelize. Kinds are resolved from the tool
- * registry; an unregistered tool resolves to `undefined`, which
- * {@link isToolCallConcurrencySafe} treats as unsafe.
+ * which tool sets they parallelize. Kinds are resolved from the registry
+ * under the tool's canonical name (via `canonicalToolName`, as execution and
+ * the interactive scheduler do) so a legacy alias — e.g. `search_file_content`
+ * for `grep` — classifies with the same safety and doesn't parallelize
+ * differently from the TUI. An unregistered tool resolves to `undefined`,
+ * which {@link isToolCallConcurrencySafe} treats as unsafe.
  */
 function partitionHeadlessToolCalls(
   requests: ToolCallRequestInfo[],
@@ -326,7 +330,7 @@ function partitionHeadlessToolCalls(
   return partitionByConcurrencySafety(requests, (request) =>
     isToolCallConcurrencySafe(
       request.name,
-      registry.getTool(request.name)?.kind,
+      registry.getTool(canonicalToolName(request.name))?.kind,
       request.args,
     ),
   );
@@ -1395,9 +1399,15 @@ export async function runNonInteractive(
             }
 
             if (!sessionEnded && abortController.signal.aborted) {
-              // Finalised the in-budget calls above; now unwind exactly as
-              // the serial path's per-iteration abort check would (budget
-              // overrun → exit 55, SIGINT → exit 130; routeAbort discerns).
+              // A budget overrun (or SIGINT) tripped mid-launch; finalise the
+              // launched calls above, then unwind. Note this is not fully
+              // equivalent to the serial path: serial awaits each in-budget
+              // call to completion before the tick that trips, whereas here
+              // the in-budget siblings were launched before the aborting tick,
+              // so when their execution reaches the scheduler's abort re-check
+              // they resolve as cancelled rather than completing. The run still
+              // exits identically (budget overrun → 55, SIGINT → 130;
+              // routeAbort discerns) and sends nothing to the model.
               await routeAbort();
             }
           } else {

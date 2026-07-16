@@ -1379,6 +1379,56 @@ describe('runNonInteractive', () => {
         }
       }
     });
+
+    it('canonicalizes legacy tool aliases so they partition like the interactive path', async () => {
+      setupMetricsMock();
+      // `search_file_content` is a legacy alias for `grep_search`
+      // (Kind.Search, concurrency-safe). The registry only knows the canonical
+      // name, so the partitioner must canonicalize before the kind lookup —
+      // otherwise these classify unsafe → sequential here while the TUI runs
+      // them in parallel.
+      vi.mocked(mockToolRegistry.getTool).mockImplementation(
+        (name: string) =>
+          (name === 'grep_search'
+            ? { kind: Kind.Search }
+            : undefined) as unknown as ReturnType<
+            typeof mockToolRegistry.getTool
+          >,
+      );
+
+      const total = 2;
+      const startOrder: string[] = [];
+      let started = 0;
+      let openGate!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        openGate = resolve;
+      });
+      mockCoreExecuteToolCall.mockImplementation(
+        async (_config: unknown, req: { callId: string }) => {
+          startOrder.push(req.callId);
+          started += 1;
+          if (started === total) openGate();
+          await gate;
+          return { responseParts: [{ text: `resp-${req.callId}` }] };
+        },
+      );
+
+      mockGeminiClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents(
+            toolCallEvents(['s1', 's2'], 'search_file_content', 'p-alias'),
+          ),
+        )
+        .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+      await runNonInteractive(mockConfig, mockSettings, 'go', 'p-alias');
+
+      // Both alias calls run in parallel (the gate opens only once both have
+      // started); a raw-name lookup would classify them sequential and this
+      // would deadlock.
+      expect(started).toBe(total);
+      expect(startOrder).toEqual(['s1', 's2']);
+    });
   });
 
   it('should ignore duplicate provider tool-call ids across rounds', async () => {
