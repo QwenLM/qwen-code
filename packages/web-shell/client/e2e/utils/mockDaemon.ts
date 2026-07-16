@@ -45,6 +45,8 @@ export interface WebShellDaemonScenario {
   skills: DaemonWorkspaceSkillsStatus;
   settings: DaemonWorkspaceSettingsStatus;
   extensions: DaemonWorkspaceExtensionsStatus;
+  extensionOperations: ExtensionActiveOperations;
+  extensionUpdateCheck: ExtensionUpdateCheckResponse;
   sessions: DaemonSessionSummary[];
   sessionGroups: DaemonSessionGroup[];
   events: DaemonEvent[];
@@ -70,6 +72,8 @@ type ScenarioOverrides = Partial<
     | 'skills'
     | 'settings'
     | 'extensions'
+    | 'extensionOperations'
+    | 'extensionUpdateCheck'
     | 'sessions'
     | 'sessionGroups'
     | 'state'
@@ -80,6 +84,8 @@ type ScenarioOverrides = Partial<
   skills?: Partial<DaemonWorkspaceSkillsStatus>;
   settings?: Partial<DaemonWorkspaceSettingsStatus>;
   extensions?: Partial<DaemonWorkspaceExtensionsStatus>;
+  extensionOperations?: Partial<ExtensionActiveOperations>;
+  extensionUpdateCheck?: Partial<ExtensionUpdateCheckResponse>;
   sessions?: DaemonSessionSummary[];
   sessionGroups?: DaemonSessionGroup[];
   state?: Partial<DaemonSessionState>;
@@ -232,6 +238,17 @@ export function createWebShellDaemonScenario(
     ...(overrides.extensions ?? {}),
   };
 
+  const extensionOperations: ExtensionActiveOperations = {
+    v: 1,
+    operations: [],
+    ...(overrides.extensionOperations ?? {}),
+  };
+
+  const extensionUpdateCheck: ExtensionUpdateCheckResponse = {
+    states: {},
+    ...(overrides.extensionUpdateCheck ?? {}),
+  };
+
   const sessions = overrides.sessions ?? [
     {
       sessionId,
@@ -265,6 +282,8 @@ export function createWebShellDaemonScenario(
     skills,
     settings,
     extensions,
+    extensionOperations,
+    extensionUpdateCheck,
     sessions,
     sessionGroups: overrides.sessionGroups ?? [],
     events: overrides.events ?? [],
@@ -586,19 +605,16 @@ async function handleDaemonRoute(
     return;
   }
   if (method === 'GET' && path === '/workspace/extensions/operations') {
-    // No install/update runs in the visual scenarios, so the manager polls an
-    // idle operations list (an empty poll) instead of hitting a 401 that would
-    // paint an error banner across the captured page.
-    await json(route, {
-      v: 1,
-      operations: [],
-    } satisfies ExtensionActiveOperations);
+    // The manager polls in-flight operations on mount. Defaults to an idle
+    // (empty) list so the capture has no error banner; a scenario can seed
+    // `extensionOperations` to preview an in-progress install/update.
+    await json(route, scenario.extensionOperations);
     return;
   }
   if (method === 'POST' && path === '/workspace/extensions/check-updates') {
-    // The manager kicks off an update check on mount; report "no updates for
-    // any extension" so the visual doesn't paint an update-check error banner.
-    await json(route, { states: {} } satisfies ExtensionUpdateCheckResponse);
+    // The manager kicks off an update check on mount. Defaults to "no updates
+    // available", overridable via the scenario's `extensionUpdateCheck`.
+    await json(route, scenario.extensionUpdateCheck);
     return;
   }
   if (method === 'GET' && path === '/workspace/mcp') {

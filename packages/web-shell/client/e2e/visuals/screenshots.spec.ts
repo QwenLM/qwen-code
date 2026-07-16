@@ -141,11 +141,18 @@ for (const theme of THEMES) {
         resolveBaseURL(testInfo),
       );
       await gotoSession(page, scenario, daemon, theme);
-      // Open the full-page Extensions manager via the `/extensions` command,
-      // then wait for a mocked extension row to render (proves a full manager
-      // PAGE — not just a transcript/dialog — is reachable in this harness).
+      // Open the full-page Extensions manager via the `/extensions` command.
+      // Gate on the page heading — a stable structural role, unlike card text a
+      // refactor could reshape or that could also match a toast/sidebar — to
+      // prove the manager PAGE (not a transcript/dialog) is reachable, then
+      // confirm a seeded card rendered via its button role.
       await submitLocalCommand(page, '/extensions');
-      await expect(page.getByText('Context7')).toBeVisible();
+      await expect(
+        page.getByRole('heading', { name: 'Manage Extensions' }),
+      ).toBeVisible();
+      await expect(
+        page.getByRole('button', { name: 'Context7' }),
+      ).toBeVisible();
       await captureScreenshot(page, `extensions-manager-${theme}`);
     });
 
