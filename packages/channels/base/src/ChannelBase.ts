@@ -2925,38 +2925,48 @@ export abstract class ChannelBase {
     }
 
     if (intent.kind === 'natural_update') {
-      this.setPendingChannelMemoryMutation(envelope, {
+      const pending = this.setPendingChannelMemoryMutation(envelope, {
         kind: 'update',
         id: intent.id,
         expectedText: intent.expectedText,
         proposedText: intent.text,
       });
-      await this.sendMessage(
-        envelope.chatId,
-        [
-          `Update channel memory ${intent.id}?`,
-          `Before: ${sanitizePromptText(intent.expectedText).trim()}`,
-          `After: ${sanitizePromptText(intent.text).trim()}`,
-          'Say "确认更新记忆" or "confirm memory update" within 60 seconds.',
-        ].join('\n'),
-      );
+      try {
+        await this.sendMessage(
+          envelope.chatId,
+          [
+            `Update channel memory ${intent.id}?`,
+            `Before: ${sanitizePromptText(intent.expectedText).trim()}`,
+            `After: ${sanitizePromptText(intent.text).trim()}`,
+            'Say "确认更新记忆" or "confirm memory update" within 60 seconds.',
+          ].join('\n'),
+        );
+      } catch (error) {
+        this.deletePendingChannelMemoryMutationIfMatches(envelope, pending);
+        throw error;
+      }
       return;
     }
 
     if (intent.kind === 'natural_remove') {
-      this.setPendingChannelMemoryMutation(envelope, {
+      const pending = this.setPendingChannelMemoryMutation(envelope, {
         kind: 'remove',
         id: intent.id,
         expectedText: intent.expectedText,
       });
-      await this.sendMessage(
-        envelope.chatId,
-        [
-          `Remove channel memory ${intent.id}?`,
-          sanitizePromptText(intent.expectedText).trim(),
-          'Say "确认删除记忆" or "confirm memory removal" within 60 seconds.',
-        ].join('\n'),
-      );
+      try {
+        await this.sendMessage(
+          envelope.chatId,
+          [
+            `Remove channel memory ${intent.id}?`,
+            sanitizePromptText(intent.expectedText).trim(),
+            'Say "确认删除记忆" or "confirm memory removal" within 60 seconds.',
+          ].join('\n'),
+        );
+      } catch (error) {
+        this.deletePendingChannelMemoryMutationIfMatches(envelope, pending);
+        throw error;
+      }
       return;
     }
 
@@ -3065,7 +3075,6 @@ export abstract class ChannelBase {
       let changed: boolean;
       const isUpdate = intent.kind === 'update';
       const id = intent.id;
-      this.deletePendingChannelMemoryMutation(envelope);
       try {
         if (isUpdate) {
           ({ changed } = await channelMemory.updateChannelMemoryEntry(
@@ -3157,15 +3166,18 @@ export abstract class ChannelBase {
   }
 
   private channelMemoryPendingKey(envelope: Envelope): string {
-    return `${this.name}:${envelope.chatId}:${envelope.threadId ?? ''}:${
-      envelope.senderId ?? ''
-    }`;
+    return JSON.stringify([
+      this.name,
+      envelope.chatId,
+      envelope.threadId ?? null,
+      envelope.senderId ?? null,
+    ]);
   }
 
   private setPendingChannelMemoryMutation(
     envelope: Envelope,
     mutation: PendingChannelMemoryMutationInput,
-  ): void {
+  ): PendingChannelMemoryMutation {
     const now = Date.now();
     for (const [pendingKey, pending] of this.pendingChannelMemoryMutations) {
       if (pending.expiresAt < now) {
@@ -3173,10 +3185,12 @@ export abstract class ChannelBase {
       }
     }
     this.deletePendingChannelMemoryMutation(envelope);
+    const pending = { ...mutation, expiresAt: now + 60_000 };
     this.pendingChannelMemoryMutations.set(
       this.channelMemoryPendingKey(envelope),
-      { ...mutation, expiresAt: now + 60_000 },
+      pending,
     );
+    return pending;
   }
 
   private takePendingChannelMemoryMutation<
@@ -3205,6 +3219,16 @@ export abstract class ChannelBase {
     this.pendingChannelMemoryMutations.delete(
       this.channelMemoryPendingKey(envelope),
     );
+  }
+
+  private deletePendingChannelMemoryMutationIfMatches(
+    envelope: Envelope,
+    pending: PendingChannelMemoryMutation,
+  ): void {
+    const key = this.channelMemoryPendingKey(envelope);
+    if (this.pendingChannelMemoryMutations.get(key) === pending) {
+      this.pendingChannelMemoryMutations.delete(key);
+    }
   }
 
   private async classifyChannelMemoryIntent(
@@ -3795,6 +3819,9 @@ export abstract class ChannelBase {
 
     let memoryIntent: ResolvedChannelMemoryIntent | null =
       parseChannelMemoryIntent(envelope.text);
+    if (memoryIntent?.kind === 'update' || memoryIntent?.kind === 'remove') {
+      this.deletePendingChannelMemoryMutation(envelope);
+    }
     if (
       !memoryIntent &&
       this.shouldClassifyChannelMemoryIntent(envelope.text)

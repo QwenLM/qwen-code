@@ -114,9 +114,9 @@ deterministic fast path. A natural request with no match reports that no entry
 matched.
 
 Pending update, removal, and clear confirmations apply only to the sender and
-chat or thread that created them. A newer executable memory mutation replaces
-an older pending one for that sender and target. Pending confirmations are
-discarded when the channel process restarts.
+chat or thread that created them. A newer clear, natural update, or natural
+removal proposal replaces an older pending one for that sender and target.
+Pending confirmations are discarded when the channel process restarts.
 
 The legacy slash aliases `/remember-channel`, `/channel-memory`, and
 `/forget-channel` have been removed. They are no longer channel-memory
