@@ -661,6 +661,9 @@ vi.mock('../utils/languageUtils.js', () => ({
     .fn()
     .mockReturnValue('/mock/.qwen/output-language.md'),
   resolveOutputLanguage: vi.fn((v: string | null | undefined) => v ?? 'auto'),
+  resolveOutputLanguageOrPreserveAuto: vi.fn(
+    (v: string | null | undefined) => v ?? 'auto',
+  ),
   isAutoLanguage: vi.fn(() => false),
   OUTPUT_LANGUAGE_AUTO: 'auto',
 }));
@@ -729,7 +732,7 @@ import {
 import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
 import {
   isAutoLanguage,
-  resolveOutputLanguage,
+  resolveOutputLanguageOrPreserveAuto,
   updateOutputLanguageFile,
   writeOutputLanguageAndRegisterPath,
 } from '../utils/languageUtils.js';
@@ -10622,7 +10625,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(isAutoLanguage).mockReturnValue(false);
-    vi.mocked(resolveOutputLanguage).mockImplementation(
+    vi.mocked(resolveOutputLanguageOrPreserveAuto).mockImplementation(
       (v: string | null | undefined) => v ?? 'auto',
     );
     mockConnectionState.reset();
@@ -11261,7 +11264,7 @@ describe('sessionLanguage multi-session propagation', () => {
     await agent.newSession({ cwd: '/proj-a', mcpServers: [] });
     await agent.newSession({ cwd: '/proj-b', mcpServers: [] });
 
-    vi.mocked(resolveOutputLanguage).mockClear();
+    vi.mocked(resolveOutputLanguageOrPreserveAuto).mockClear();
     vi.mocked(updateOutputLanguageFile).mockClear();
     vi.mocked(writeOutputLanguageAndRegisterPath).mockClear();
 
@@ -11279,7 +11282,7 @@ describe('sessionLanguage multi-session propagation', () => {
       'auto',
       '/proj-b/.qwen/output-language.md',
     );
-    expect(resolveOutputLanguage).not.toHaveBeenCalled();
+    expect(resolveOutputLanguageOrPreserveAuto).toHaveBeenCalledWith('auto');
 
     mockConnectionState.resolve();
     await agentPromise;

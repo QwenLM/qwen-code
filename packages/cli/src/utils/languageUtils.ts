@@ -13,10 +13,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Storage } from '@qwen-code/qwen-code-core';
-import {
-  detectSystemLanguage,
-  getLanguageNameFromLocale,
-} from '../i18n/index.js';
+import { getLanguageNameFromLocale } from '../i18n/index.js';
 import { SUPPORTED_LANGUAGES } from '../i18n/languages.js';
 
 const LLM_OUTPUT_LANGUAGE_RULE_FILENAME = 'output-language.md';
@@ -69,17 +66,27 @@ export function normalizeOutputLanguage(language: string): string {
 }
 
 /**
- * Resolves the output language for legacy/fixed-language callers.
- * Callers that need dynamic auto behavior should preserve 'auto'.
+ * Resolves an explicit output language to its canonical form.
  */
-export function resolveOutputLanguage(
+export function resolveOutputLanguage(value: string): string {
+  if (isAutoLanguage(value)) {
+    throw new Error(
+      'resolveOutputLanguage does not accept auto; use resolveOutputLanguageOrPreserveAuto instead.',
+    );
+  }
+  return normalizeOutputLanguage(value);
+}
+
+/**
+ * Preserves 'auto' as the dynamic same-language mode, otherwise resolves an
+ * explicit language to its canonical form.
+ */
+export function resolveOutputLanguageOrPreserveAuto(
   value: string | undefined | null,
 ): string {
-  if (isAutoLanguage(value)) {
-    const detectedLocale = detectSystemLanguage();
-    return getLanguageNameFromLocale(detectedLocale);
-  }
-  return normalizeOutputLanguage(value!);
+  return isAutoLanguage(value)
+    ? OUTPUT_LANGUAGE_AUTO
+    : resolveOutputLanguage(value!);
 }
 
 /**
@@ -178,20 +185,27 @@ function parseOutputLanguageFromContent(content: string): string | null {
 }
 
 /**
- * Reads the current output language from the rule file.
- * Returns null if the file doesn't exist or can't be parsed.
+ * Reads the current output-language file content.
  */
-function readOutputLanguageFromFile(): string | null {
+function readOutputLanguageFileContent(): string | null {
   const filePath = getOutputLanguageFilePath();
   if (!fs.existsSync(filePath)) {
     return null;
   }
   try {
-    const content = fs.readFileSync(filePath, 'utf-8');
-    return parseOutputLanguageFromContent(content);
+    return fs.readFileSync(filePath, 'utf-8');
   } catch {
     return null;
   }
+}
+
+function isGeneratedOutputLanguageFileContent(
+  content: string,
+  language: string,
+): boolean {
+  return (
+    content.trimEnd() === generateOutputLanguageFileContent(language).trimEnd()
+  );
 }
 
 /**
@@ -223,9 +237,7 @@ export function updateOutputLanguageFile(
   settingValue: string,
   targetPath?: string,
 ): void {
-  const resolved = isAutoLanguage(settingValue)
-    ? OUTPUT_LANGUAGE_AUTO
-    : resolveOutputLanguage(settingValue);
+  const resolved = resolveOutputLanguageOrPreserveAuto(settingValue);
   writeOutputLanguageFile(resolved, targetPath);
 }
 
@@ -264,11 +276,20 @@ export function writeOutputLanguageAndRegisterPath(
  */
 export function initializeLlmOutputLanguage(outputLanguage?: string): void {
   // Check if the file already exists and has valid content
-  const currentFileLanguage = readOutputLanguageFromFile();
+  const currentFileContent = readOutputLanguageFileContent();
+  const currentFileLanguage =
+    currentFileContent === null
+      ? null
+      : parseOutputLanguageFromContent(currentFileContent);
   const shouldMigrateFixedFileToAuto =
     outputLanguage?.trim().toLowerCase() === OUTPUT_LANGUAGE_AUTO &&
     currentFileLanguage !== null &&
-    !isAutoLanguage(currentFileLanguage);
+    !isAutoLanguage(currentFileLanguage) &&
+    currentFileContent !== null &&
+    isGeneratedOutputLanguageFileContent(
+      currentFileContent,
+      currentFileLanguage,
+    );
 
   // If file exists with valid language, preserve it unless explicit auto needs migration.
   if (currentFileLanguage && !shouldMigrateFixedFileToAuto) {
@@ -276,8 +297,6 @@ export function initializeLlmOutputLanguage(outputLanguage?: string): void {
   }
 
   // File doesn't exist or has invalid content, create it with configured language behavior
-  const resolved = isAutoLanguage(outputLanguage)
-    ? OUTPUT_LANGUAGE_AUTO
-    : resolveOutputLanguage(outputLanguage);
+  const resolved = resolveOutputLanguageOrPreserveAuto(outputLanguage);
   writeOutputLanguageFile(resolved);
 }

@@ -26,7 +26,7 @@ import {
 import {
   OUTPUT_LANGUAGE_AUTO,
   isAutoLanguage,
-  resolveOutputLanguage,
+  resolveOutputLanguageOrPreserveAuto,
   writeOutputLanguageAndRegisterPath,
 } from '../../utils/languageUtils.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
@@ -44,9 +44,7 @@ function getCurrentOutputLanguage(context?: CommandContext): {
   const settingValue =
     context?.services?.settings?.merged?.general?.outputLanguage ||
     OUTPUT_LANGUAGE_AUTO;
-  const resolved = isAutoLanguage(settingValue)
-    ? OUTPUT_LANGUAGE_AUTO
-    : resolveOutputLanguage(settingValue);
+  const resolved = resolveOutputLanguageOrPreserveAuto(settingValue);
   return { setting: settingValue, resolved };
 }
 
@@ -153,9 +151,7 @@ async function setOutputLanguage(
 ): Promise<MessageActionReturn> {
   try {
     const isAuto = isAutoLanguage(language);
-    const resolved = isAuto
-      ? OUTPUT_LANGUAGE_AUTO
-      : resolveOutputLanguage(language);
+    const resolved = resolveOutputLanguageOrPreserveAuto(language);
     // Save 'auto' as-is to settings, or normalize other values
     const settingValue = isAuto ? OUTPUT_LANGUAGE_AUTO : resolved;
 

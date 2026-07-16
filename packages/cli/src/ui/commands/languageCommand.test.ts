@@ -76,7 +76,10 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 import * as i18n from '../../i18n/index.js';
 import { SUPPORTED_LANGUAGES } from '../../i18n/languages.js';
 import { languageCommand } from './languageCommand.js';
-import { initializeLlmOutputLanguage } from '../../utils/languageUtils.js';
+import {
+  initializeLlmOutputLanguage,
+  writeOutputLanguageFile,
+} from '../../utils/languageUtils.js';
 
 describe('languageCommand', () => {
   let mockContext: CommandContext;
@@ -521,6 +524,50 @@ describe('languageCommand', () => {
       });
     });
 
+    it('should preserve auto through the full output command path', async () => {
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+
+      const refreshHierarchicalMemory = vi.fn().mockResolvedValue(undefined);
+      const refreshSystemInstruction = vi.fn().mockResolvedValue(undefined);
+      const getGeminiClient = vi
+        .fn()
+        .mockReturnValue({ refreshSystemInstruction });
+      (
+        mockContext.services as unknown as {
+          config: Record<string, unknown>;
+        }
+      ).config = {
+        getModel: vi.fn().mockReturnValue('test-model'),
+        getOutputLanguageFilePath: vi.fn().mockReturnValue(undefined),
+        setOutputLanguageFilePath: vi.fn(),
+        refreshHierarchicalMemory,
+        getGeminiClient,
+      };
+
+      const result = await languageCommand.action(mockContext, 'output auto');
+
+      expect(mockContext.services.settings?.setValue).toHaveBeenCalledWith(
+        expect.anything(),
+        'general.outputLanguage',
+        'auto',
+      );
+      const writtenContent = vi.mocked(fs.writeFileSync).mock
+        .calls[0][1] as string;
+      expect(writtenContent).toContain('# Output language preference: auto');
+      expect(writtenContent).toContain(
+        "Respond in the same language as the user's input.",
+      );
+      expect(writtenContent).not.toContain('Chinese');
+      expect(i18n.detectSystemLanguage).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: 'LLM output language set to Auto (follow user input)',
+      });
+    });
+
     it('should apply the new output language to the running session without requiring a restart', async () => {
       if (!languageCommand.action) {
         throw new Error('The language command must have an action.');
@@ -945,13 +992,14 @@ describe('languageCommand', () => {
       expect(i18n.detectSystemLanguage).not.toHaveBeenCalled();
     });
 
-    it('should migrate an existing fixed-language file when setting is explicitly auto', () => {
+    it('should migrate an existing generated fixed-language file when setting is explicitly auto', () => {
+      writeOutputLanguageFile('Chinese');
+      const generatedFixedLanguageContent = vi.mocked(fs.writeFileSync).mock
+        .calls[0][1] as string;
+      vi.mocked(fs.writeFileSync).mockClear();
+
       vi.mocked(fs.existsSync).mockReturnValue(true);
-      vi.mocked(fs.readFileSync).mockReturnValue(
-        `# Output language preference: Chinese
-<!-- qwen-code:llm-output-language: Chinese -->
-`,
-      );
+      vi.mocked(fs.readFileSync).mockReturnValue(generatedFixedLanguageContent);
 
       initializeLlmOutputLanguage('auto');
 
