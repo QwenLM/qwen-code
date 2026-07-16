@@ -4393,6 +4393,76 @@ describe('useGeminiStream', () => {
       });
     });
 
+    it('repairs the fence when an oversized thought is split inside a code block', async () => {
+      vi.useFakeTimers();
+
+      const splitLimit = 16_384;
+      vi.mocked(findLastSafeSplitPoint).mockImplementation(
+        (s: string, max?: number) =>
+          max !== undefined && s.length > max ? max : s.length,
+      );
+
+      // A reasoning stream whose fenced code block spans the char-cap boundary.
+      const codeBody = Array.from(
+        { length: 2000 },
+        (_, i) => `const x${i} = ${i};`,
+      ).join('\n');
+      const longThought = '```ts\n' + codeBody;
+      expect(longThought.length).toBeGreaterThan(splitLimit);
+
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      const mockStream = (async function* () {
+        yield {
+          type: ServerGeminiEventType.Thought,
+          value: { description: longThought },
+        };
+        await holdStream;
+      })();
+      mockSendMessageStream.mockReturnValue(mockStream);
+
+      const { result } = renderTestHook();
+      act(() => {
+        void result.current.submitQuery('test query');
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(60);
+      });
+
+      const thoughtItems = mockAddItem.mock.calls
+        .map(([item]) => item as HistoryItem)
+        .filter(
+          (item) =>
+            item.type === 'gemini_thought' ||
+            item.type === 'gemini_thought_content',
+        );
+      // The committed head is a self-contained fenced block (opening fence +
+      // synthetic closing fence), not an unterminated one.
+      expect(thoughtItems.length).toBeGreaterThanOrEqual(1);
+      const head = thoughtItems[0]!;
+      expect(head.text.startsWith('```ts')).toBe(true);
+      expect(head.text.trimEnd().endsWith('```')).toBe(true);
+      // The pending tail re-opens the fence (with a continued gutter directive)
+      // instead of leaking code as prose.
+      const pendingText = result.current.pendingHistoryItems[0]?.text ?? '';
+      expect(pendingText.startsWith('```ts')).toBe(true);
+      expect(pendingText).toContain('qwen-code:start-line=');
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+      await act(async () => {
+        releaseStream();
+      });
+    });
+
     it('splits oversized streamed content by rendered height so the pending item stays bounded', async () => {
       vi.useFakeTimers();
 

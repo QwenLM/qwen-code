@@ -904,10 +904,7 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
         lang,
         availableTerminalHeight,
         contentWidth - CODE_BLOCK_PREFIX_PADDING,
-        undefined,
-        settings,
-        undefined,
-        startLineNumber,
+        { settings, startLineNumber },
       );
       return (
         <Box paddingLeft={CODE_BLOCK_PREFIX_PADDING} flexDirection="column">
@@ -922,10 +919,7 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
     lang,
     availableTerminalHeight,
     contentWidth - CODE_BLOCK_PREFIX_PADDING,
-    undefined,
-    settings,
-    undefined,
-    startLineNumber,
+    { settings, startLineNumber },
   );
 
   return (

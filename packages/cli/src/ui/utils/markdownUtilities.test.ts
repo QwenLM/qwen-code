@@ -9,6 +9,7 @@ import {
   findLastSafeSplitPoint,
   splitFencedMarkdown,
   parseCodeFenceInfo,
+  getEnclosingFenceInfo,
 } from './markdownUtilities.js';
 
 describe('markdownUtilities', () => {
@@ -198,6 +199,38 @@ describe('markdownUtilities', () => {
       expect(parseCodeFenceInfo(undefined)).toEqual({
         lang: null,
         startLine: 1,
+      });
+    });
+  });
+
+  describe('getEnclosingFenceInfo', () => {
+    it('returns null when the index is not inside a fence', () => {
+      const content = 'plain intro\n\n```ts\ncode\n```\n\nafter';
+      expect(getEnclosingFenceInfo(content, 3)).toBeNull(); // in the intro
+      expect(getEnclosingFenceInfo(content, content.length - 2)).toBeNull(); // after the closed block
+    });
+
+    it('reports the language and start line of the enclosing code block', () => {
+      const content = '```python\nline1\nline2\n';
+      const idx = content.indexOf('line2');
+      expect(getEnclosingFenceInfo(content, idx)).toEqual({
+        lang: 'python',
+        startLine: 1,
+      });
+    });
+
+    it('surfaces the mermaid language so the caller can keep the block whole', () => {
+      const content = '```mermaid\ngraph TD\nA-->B\n';
+      const idx = content.indexOf('A-->B');
+      expect(getEnclosingFenceInfo(content, idx)?.lang).toBe('mermaid');
+    });
+
+    it('carries the accumulated start-line directive from a re-opened fence', () => {
+      const content = '```ts qwen-code:start-line=7\nline7\nline8\n';
+      const idx = content.indexOf('line8');
+      expect(getEnclosingFenceInfo(content, idx)).toEqual({
+        lang: 'ts',
+        startLine: 7,
       });
     });
   });

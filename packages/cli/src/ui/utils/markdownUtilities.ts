@@ -68,41 +68,14 @@ const findNextFence = (
 };
 
 /**
- * Checks if a given character index is inside a fenced code block (``` or ~~~).
- * A fence only closes a block opened with the SAME character AND a run at least
- * as long (mirroring CommonMark / MarkdownDisplay), so a ``` inside a ~~~ block
- * — or a shorter run inside a longer fence — does not toggle the state.
- */
-const isIndexInsideCodeBlock = (
-  content: string,
-  indexToTest: number,
-): boolean => {
-  let openChar: '`' | '~' | '' = '';
-  let openLen = 0;
-  let searchPos = 0;
-  while (searchPos < content.length) {
-    const fence = findNextFence(content, searchPos);
-    if (!fence || fence.index >= indexToTest) break;
-    if (openChar === '') {
-      openChar = fence.char;
-      openLen = fence.length;
-    } else if (fence.char === openChar && fence.length >= openLen) {
-      openChar = '';
-      openLen = 0;
-    }
-    searchPos = fence.index + fence.length;
-  }
-  return openChar !== '';
-};
-
-/**
  * Returns the fenced code block (``` or ~~~) that encloses `indexToTest`, or
  * null when the index is not inside one. Reports the fence's start index, its
  * exact opening delimiter run (e.g. "```" or "~~~~") and the info string that
  * followed it on the same line (e.g. "python", "ts"), so a split can re-open an
- * identical fence. Open/close matching mirrors findLastSafeSplitPoint's rules:
- * a fence only closes a block opened with the SAME character AND a run at least
- * as long.
+ * identical fence. Open/close matching mirrors CommonMark / MarkdownDisplay: a
+ * fence only closes a block opened with the SAME character AND a run at least as
+ * long, so a ``` inside a ~~~ block — or a shorter run inside a longer fence —
+ * does not toggle the state.
  */
 const getEnclosingFence = (
   content: string,
@@ -129,6 +102,13 @@ const getEnclosingFence = (
     infoString: content.slice(open.index + open.len, fenceLineEnd),
   };
 };
+
+/**
+ * Checks if a given character index is inside a fenced code block (``` or ~~~).
+ * Shares its fence-matching rules with {@link getEnclosingFence}.
+ */
+const isIndexInsideCodeBlock = (content: string, index: number): boolean =>
+  getEnclosingFence(content, index) !== null;
 
 /**
  * Finds the starting index of the code block (``` or ~~~) that encloses the

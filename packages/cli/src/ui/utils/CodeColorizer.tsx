@@ -220,22 +220,32 @@ export function colorizeLine(
  *
  * @param code The code string to highlight.
  * @param language The language identifier (e.g., 'javascript', 'css', 'html')
- * @param tabWidth The number of spaces to replace each tab character with, default is 4
- * @param startLineNumber The number shown for the first line, default 1. Lets a
- *   code block that was split across streaming commits (see splitFencedMarkdown)
- *   continue its gutter numbering instead of restarting at 1.
+ * @param availableHeight Optional cap on rendered rows (older lines are clipped).
+ * @param maxWidth Optional cap on rendered width.
+ * @param options Presentation overrides:
+ *   - `theme` — theme to use (defaults to the active theme)
+ *   - `settings` — loaded settings (drives showLineNumbers)
+ *   - `tabWidth` — spaces per tab, default 4
+ *   - `startLineNumber` — the number shown for the first line, default 1. Lets a
+ *     code block that was split across streaming commits (see splitFencedMarkdown)
+ *     continue its gutter numbering instead of restarting at 1.
  * @returns A React.ReactNode containing Ink <Text> elements for the highlighted code.
  */
+export interface ColorizeCodeOptions {
+  theme?: Theme;
+  settings?: LoadedSettings;
+  tabWidth?: number;
+  startLineNumber?: number;
+}
+
 export function colorizeCode(
   code: string,
   language: string | null,
   availableHeight?: number,
   maxWidth?: number,
-  theme?: Theme,
-  settings?: LoadedSettings,
-  tabWidth = 4,
-  startLineNumber = 1,
+  options: ColorizeCodeOptions = {},
 ): React.ReactNode {
+  const { theme, settings, tabWidth = 4, startLineNumber = 1 } = options;
   const firstLineNumber = Math.max(1, Math.trunc(startLineNumber));
   const codeToHighlight = code
     .replace(/\n$/, '')
