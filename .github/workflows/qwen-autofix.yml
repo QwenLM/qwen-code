@@ -1002,8 +1002,11 @@ jobs:
               ISSUE="${PR}"
             fi
             HEAD_SHA="$(gh api "repos/${REPO}/pulls/${PR}" --jq '.head.sha')"
-            CHECKS_JSON="$(gh pr view "${PR}" --repo "${REPO}" \
-              --json statusCheckRollup --jq '.statusCheckRollup // []' 2> /dev/null || echo '[]')"
+            # One PR fetch for both the check rollup and the creation time (used
+            # as the watermark floor below) — avoids a second round-trip per PR.
+            PR_META="$(gh pr view "${PR}" --repo "${REPO}" \
+              --json statusCheckRollup,createdAt 2> /dev/null || echo '{}')"
+            CHECKS_JSON="$(jq -c '.statusCheckRollup // []' <<< "${PR_META}")"
             # Only block on checks that started recently. A check wedged in a
             # pending state (e.g. a review workflow that never reports back) would
             # otherwise skip this PR forever; ignore anything pending longer than
@@ -1026,7 +1029,7 @@ jobs:
             # branch is synced with main ("Update branch"/base merge), so an early
             # base-sync merge cannot bury a comment made before the first eval.
             # Fall back to the head commit date only if createdAt is unavailable.
-            CREATED_WM="$(gh pr view "${PR}" --repo "${REPO}" --json createdAt --jq '.createdAt' 2> /dev/null || echo '')"
+            CREATED_WM="$(jq -r '.createdAt // ""' <<< "${PR_META}")"
             if [[ -z "${CREATED_WM}" ]]; then
               CREATED_WM="$(gh api "repos/${REPO}/commits/${HEAD_SHA}" --jq '.commit.committer.date' 2> /dev/null || echo '')"
             fi
@@ -1629,16 +1632,19 @@ jobs:
             done
           } >> "${GITHUB_STEP_SUMMARY}"
 
-          # Always leave a visible handoff + eval marker on failure — including an
-          # infra/agent crash that happened before the verify gate ran (OUTCOME
-          # unset) and so wrote no failure.md/handoff.md. Without this the loop
-          # goes SILENT: no comment, no marker, so the next scan re-targets the
-          # same feedback forever and the maintainer sees nothing. Writing a marker
-          # advances the round (and, once feedback was read, the watermark) so a
-          # deterministic failure hands off to a human instead of respinning.
+          # Always leave a visible handoff + eval marker on any non-success end —
+          # a verify failure, an infra/agent crash before the verify gate ran
+          # (OUTCOME unset, no failure.md/handoff.md), OR a cancellation such as
+          # the 120-minute job timeout (job.status = "cancelled"). Without this the
+          # loop goes SILENT: no comment, no marker, so the next scan re-targets
+          # the same feedback with the same round forever and the maintainer sees
+          # nothing. Writing a marker advances the round (and, once feedback was
+          # read, the watermark) so it hands off to a human instead of respinning.
+          # This step only runs on failure()/cancelled()/dry-run, and dry-run is
+          # excluded here, so "not success" means a real failure or cancellation.
           POST_HANDOFF=false
           if [[ "${DRY_RUN}" != "true" && -n "${GITHUB_TOKEN:-}" ]]; then
-            if [[ "${OUTCOME:-unknown}" == "failed" || "${JOB_STATUS:-}" == "failure" ]]; then
+            if [[ "${OUTCOME:-unknown}" == "failed" || "${JOB_STATUS:-}" != "success" ]]; then
               POST_HANDOFF=true
             fi
           fi

@@ -685,6 +685,10 @@ describe('qwen-autofix workflow', () => {
       'run_shell_command(npm run typecheck)',
       'run_shell_command(npm run lint)',
       'run_shell_command(npx vitest)',
+      // The agent must be able to regenerate a committed generated artifact
+      // (e.g. settings.schema.json) so a settingsSchema.ts edit does not trip
+      // CI's schema-freshness gate — invisible to build/typecheck/lint/vitest.
+      'run_shell_command(npm run generate:settings-schema)',
     ]) {
       expect(developFixStep).toContain(command);
       expect(triageAndAddressStep).toContain(command);
@@ -930,6 +934,14 @@ describe('qwen-autofix workflow', () => {
       expect(step).toContain('npm run build');
       expect(step).toContain('npm run typecheck');
       expect(step).toContain('npm run lint');
+      // Mirror CI's settings-schema freshness gate deterministically: regenerate
+      // and fail if the committed artifact is dirty. Invisible to
+      // build/typecheck/lint/vitest, so it must be asserted explicitly.
+      expect(step).toContain('npm run generate:settings-schema');
+      expect(step).toContain(
+        'packages/vscode-ide-companion/schemas/settings.schema.json',
+      );
+      expect(step).toContain('is out of date');
       expect(step).toContain(
         'No package changes detected; skipping package tests.',
       );
@@ -1074,7 +1086,7 @@ describe('qwen-autofix workflow', () => {
     // or agent crash before the verify gate (OUTCOME unset, JOB_STATUS failure)
     // must still post a handoff + marker so the loop never goes silent.
     expect(reviewAddressReportStep).toContain('POST_HANDOFF=true');
-    expect(reviewAddressReportStep).toContain('"${JOB_STATUS:-}" == "failure"');
+    expect(reviewAddressReportStep).toContain('"${JOB_STATUS:-}" != "success"');
     expect(reviewAddressReportStep).toContain(
       '<!-- autofix-eval ts=${MARK_TS} acted=false round=${NEXT_ROUND} -->',
     );
