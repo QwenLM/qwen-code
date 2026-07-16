@@ -101,6 +101,12 @@ import {
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 
+function isDeferredProxyControlTool(name: string): boolean {
+  return (
+    name === ToolNames.TOOL_SEARCH || name === ToolNames.DEFERRED_TOOL_CALL
+  );
+}
+
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
 
@@ -1022,7 +1028,7 @@ describe('Gemini Client (client.ts)', () => {
         { name: 'cron_create', description: 'schedule' },
       ]);
       toolRegistry.getTool.mockImplementation((name: string) =>
-        name === ToolNames.TOOL_SEARCH ? ({} as never) : null,
+        isDeferredProxyControlTool(name) ? ({} as never) : null,
       );
       vi.mocked(getInitialChatHistory).mockResolvedValueOnce([
         [
@@ -1144,7 +1150,7 @@ describe('Gemini Client (client.ts)', () => {
         { name: 'cron_create', description: 'schedule' },
       ]);
       toolRegistry.getTool.mockImplementation((name: string) =>
-        name === ToolNames.TOOL_SEARCH ? ({} as never) : null,
+        isDeferredProxyControlTool(name) ? ({} as never) : null,
       );
       vi.mocked(getInitialChatHistory).mockResolvedValueOnce([
         [
@@ -1201,9 +1207,9 @@ describe('Gemini Client (client.ts)', () => {
         { name: 'cron_create', description: 'schedule' },
         { name: 'cron_list', description: 'list' },
       ]);
-      // ToolSearch is available so we DON'T enter the eager-reveal branch.
+      // The complete proxy surface is available, so eager reveal stays off.
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        isDeferredProxyControlTool(n) ? ({} as never) : null,
       );
       reg.revealDeferredTool.mockClear();
 
@@ -1228,7 +1234,7 @@ describe('Gemini Client (client.ts)', () => {
       const reg = getRegistryMock();
       reg.getDeferredToolSummary.mockReturnValue([]);
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        isDeferredProxyControlTool(n) ? ({} as never) : null,
       );
       reg.clearProxySchemaPresentations.mockClear();
 
@@ -1260,7 +1266,7 @@ describe('Gemini Client (client.ts)', () => {
         { name: 'cron_list', description: 'list' },
       ]);
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search'
+        isDeferredProxyControlTool(n)
           ? ({} as never)
           : n === 'cron_create'
             ? ({
@@ -1326,6 +1332,85 @@ describe('Gemini Client (client.ts)', () => {
       );
     });
 
+    it.each([
+      [ToolNames.TOOL_SEARCH, new Set<string>([ToolNames.DEFERRED_TOOL_CALL])],
+      [ToolNames.DEFERRED_TOOL_CALL, new Set<string>([ToolNames.TOOL_SEARCH])],
+    ])(
+      'does not restore proxy state when %s is unavailable',
+      async (_missingControlTool, availableControlTools) => {
+        const reg = getRegistryMock();
+        const cronCreateSchema = {
+          name: 'cron_create',
+          description: 'schedule',
+          parametersJsonSchema: {
+            type: 'object',
+            properties: {
+              schedule: { type: 'string' },
+            },
+            required: ['schedule'],
+          },
+        };
+        reg.getDeferredToolSummary.mockReturnValue([
+          { name: 'cron_create', description: 'schedule' },
+        ]);
+        reg.getTool.mockImplementation((name: string) => {
+          if (availableControlTools.has(name)) return {} as never;
+          if (name === 'cron_create') {
+            return { schema: cronCreateSchema } as never;
+          }
+          return null;
+        });
+        reg.isProxyEligibleDeferredTool.mockImplementation(
+          (name: string) => name === 'cron_create',
+        );
+        reg.markProxySchemaPresented.mockClear();
+        reg.revealDeferredTool.mockClear();
+
+        await client.startChat([
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'proxy-success-without-control-tool',
+                  name: ToolNames.DEFERRED_TOOL_CALL,
+                  args: {
+                    name: 'cron_create',
+                    arguments: { schedule: '0 9 * * *' },
+                  },
+                },
+              } as never,
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'proxy-success-without-control-tool',
+                  name: ToolNames.DEFERRED_TOOL_CALL,
+                  response: { output: 'cron created' },
+                },
+              } as never,
+            ],
+          },
+        ]);
+
+        expect(reg.markProxySchemaPresented).not.toHaveBeenCalled();
+        expect(reg.revealDeferredTool).toHaveBeenCalledWith('cron_create');
+        const restoredSchemaText = client
+          .getHistory()
+          .flatMap((entry) => entry.parts ?? [])
+          .map((part) => part.text ?? '')
+          .find((text) =>
+            text.includes(
+              'Current schemas for deferred tools restored from session history',
+            ),
+          );
+        expect(restoredSchemaText).toBeUndefined();
+      },
+    );
+
     it('does not restore proxy presentations from failed deferred_tool_call history', async () => {
       const reg = getRegistryMock();
       const cronCreateSchema = {
@@ -1343,7 +1428,7 @@ describe('Gemini Client (client.ts)', () => {
         { name: 'cron_create', description: 'schedule' },
       ]);
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search'
+        isDeferredProxyControlTool(n)
           ? ({} as never)
           : n === 'cron_create'
             ? ({ schema: cronCreateSchema } as never)
@@ -1414,7 +1499,7 @@ describe('Gemini Client (client.ts)', () => {
         { name: 'cron_create', description: 'schedule' },
       ]);
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search'
+        isDeferredProxyControlTool(n)
           ? ({} as never)
           : n === 'cron_create'
             ? ({
@@ -1487,7 +1572,7 @@ describe('Gemini Client (client.ts)', () => {
         { name: 'cron_list', description: 'list' },
       ]);
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search'
+        isDeferredProxyControlTool(n)
           ? ({} as never)
           : n === 'cron_create'
             ? ({
@@ -1571,7 +1656,7 @@ describe('Gemini Client (client.ts)', () => {
         { name: 'cron_list', description: 'list' },
       ]);
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        isDeferredProxyControlTool(n) ? ({} as never) : null,
       );
       reg.markProxySchemaPresented.mockClear();
 
@@ -1631,21 +1716,21 @@ describe('Gemini Client (client.ts)', () => {
       expect(reg.revealDeferredTool).toHaveBeenCalledWith('cron_list');
     });
 
-    it('does NOT eagerly reveal when ToolSearch is available', async () => {
-      // When ToolSearch IS registered, deferred tools stay hidden until
+    it('does NOT eagerly reveal when the proxy surface is available', async () => {
+      // With both control tools registered, deferred tools stay hidden until
       // the model discovers them — that's the whole point of deferral.
       const reg = getRegistryMock();
       reg.getDeferredToolSummary.mockReturnValue([
         { name: 'cron_create', description: 'schedule' },
       ]);
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        isDeferredProxyControlTool(n) ? ({} as never) : null,
       );
       reg.revealDeferredTool.mockClear();
 
       await client.startChat();
 
-      // No history scan match, ToolSearch available → no reveal at all.
+      // No history scan match, complete proxy surface → no reveal at all.
       expect(reg.revealDeferredTool).not.toHaveBeenCalled();
     });
 
@@ -2026,7 +2111,7 @@ describe('Gemini Client (client.ts)', () => {
     it('queues and drains a reminder for newly registered MCP deferred tools', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        isDeferredProxyControlTool(n) ? ({} as never) : null,
       );
       reg.getDeferredToolSummary.mockReturnValue([
         {
@@ -2075,7 +2160,7 @@ describe('Gemini Client (client.ts)', () => {
     it('does not announce MCP removal before an added tool was drained', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        isDeferredProxyControlTool(n) ? ({} as never) : null,
       );
       const tool = {
         name: 'mcp__flaky__do',
@@ -2099,7 +2184,7 @@ describe('Gemini Client (client.ts)', () => {
     it('omits already-revealed deferred tools from added reminders', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        isDeferredProxyControlTool(n) ? ({} as never) : null,
       );
       reg.getDeferredToolSummary.mockReturnValue([
         { name: 'mcp__server__alpha', description: 'a', serverName: 'server' },
@@ -2128,7 +2213,7 @@ describe('Gemini Client (client.ts)', () => {
     it('re-announces an MCP tool after its server disconnects and reconnects', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        isDeferredProxyControlTool(n) ? ({} as never) : null,
       );
       const tool = {
         name: 'mcp__flaky__do',
@@ -2164,7 +2249,7 @@ describe('Gemini Client (client.ts)', () => {
     it('announces removed MCP deferred tools after disconnect', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        isDeferredProxyControlTool(n) ? ({} as never) : null,
       );
       const tool = {
         name: 'mcp__gone__do',
@@ -2252,7 +2337,7 @@ describe('Gemini Client (client.ts)', () => {
     it('does not append the same added MCP reminder twice', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        isDeferredProxyControlTool(n) ? ({} as never) : null,
       );
       reg.getDeferredToolSummary.mockReturnValue([
         {
@@ -2280,7 +2365,7 @@ describe('Gemini Client (client.ts)', () => {
     it('does not drain queued MCP reminders on tool-result turns', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        isDeferredProxyControlTool(n) ? ({} as never) : null,
       );
       reg.getDeferredToolSummary.mockReturnValue([
         {

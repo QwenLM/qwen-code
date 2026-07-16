@@ -11120,6 +11120,45 @@ describe('Session', () => {
       );
     });
 
+    it('shows the target and provider route when ACP hard-denies a proxy call', async () => {
+      const targetTool = mockAllowedToolWithBuild(
+        core.ToolNames.CRON_CREATE,
+        vi.fn().mockReturnValue({
+          params: {},
+          execute: vi.fn(),
+          getDefaultPermission: vi.fn().mockResolvedValue('deny'),
+          getDescription: vi.fn().mockReturnValue(core.ToolNames.CRON_CREATE),
+          toolLocations: vi.fn().mockReturnValue([]),
+        }),
+      );
+      mockToolRegistry.getTool.mockReturnValue(targetTool);
+      mockToolRegistry.ensureTool.mockResolvedValue(targetTool);
+      mockToolRegistry.isProxyEligibleDeferredTool.mockReturnValue(true);
+      mockToolRegistry.hasPresentedProxySchema.mockReturnValue(true);
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-proxy-denied', [
+        {
+          id: 'proxy_denied',
+          name: core.ToolNames.DEFERRED_TOOL_CALL,
+          args: {
+            name: core.ToolNames.CRON_CREATE,
+            arguments: { schedule: '0 9 * * *' },
+          },
+        },
+      ]);
+
+      expect(result.parts[0]?.functionResponse).toEqual({
+        id: 'proxy_denied',
+        name: core.ToolNames.DEFERRED_TOOL_CALL,
+        response: {
+          error:
+            'Tool "cron_create" is denied: the tool\'s default permission is \'deny\'. (tool "cron_create" via "deferred_tool_call")',
+        },
+      });
+    });
+
     it('executes the deferred tool instance authorized by normalization', async () => {
       const logToolCallSpy = vi
         .spyOn(core, 'logToolCall')

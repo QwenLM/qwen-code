@@ -15,8 +15,10 @@ import {
 } from '../tools/tool-registry.js';
 import type { ToolCallRequestInfo } from './turn.js';
 import {
+  formatPermissionToolIdentity,
   normalizeDeferredToolCallRequest,
   providerToolName,
+  withPermissionToolIdentity,
 } from './deferred-tool-call-normalization.js';
 
 const baseConfigParams = {
@@ -248,5 +250,30 @@ describe('normalizeDeferredToolCallRequest', () => {
       expect(result.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
       expect(result.error.message).toContain('has not been fetched');
     }
+  });
+});
+
+describe('permission tool identity', () => {
+  it('keeps ordinary tool messages unchanged', () => {
+    const ordinaryRequest = request(ToolNames.READ_FILE);
+
+    expect(formatPermissionToolIdentity(ordinaryRequest)).toBe('"read_file"');
+    expect(withPermissionToolIdentity('policy says no', ordinaryRequest)).toBe(
+      'policy says no',
+    );
+  });
+
+  it('shows both the target and provider route for proxy calls', () => {
+    const proxyRequest = {
+      ...request(ToolNames.CRON_CREATE),
+      providerName: ToolNames.DEFERRED_TOOL_CALL,
+    };
+
+    expect(formatPermissionToolIdentity(proxyRequest)).toBe(
+      '"cron_create" via "deferred_tool_call"',
+    );
+    expect(withPermissionToolIdentity('policy says no', proxyRequest)).toBe(
+      'policy says no (tool "cron_create" via "deferred_tool_call")',
+    );
   });
 });

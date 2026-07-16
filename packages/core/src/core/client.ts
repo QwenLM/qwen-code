@@ -904,6 +904,20 @@ export class GeminiClient {
   }
 
   /**
+   * Whether both control tools required for deferred proxy calls are
+   * registered in the warmed registry. Treating either tool alone as
+   * sufficient would let history restore a proxy route that the current
+   * session cannot safely declare and execute end to end.
+   */
+  private isDeferredToolProxyAvailable(): boolean {
+    const toolRegistry = this.config.getToolRegistry();
+    return Boolean(
+      toolRegistry.getTool(ToolNames.TOOL_SEARCH) &&
+        toolRegistry.getTool(ToolNames.DEFERRED_TOOL_CALL),
+    );
+  }
+
+  /**
    * Computes the deferred-tools list that should be announced through
    * user-role system reminders.
    *
@@ -911,21 +925,20 @@ export class GeminiClient {
    * inspects the registry's eager state and would otherwise miss factory-
    * backed deferred tools.
    *
-   * Side effect: when ToolSearch is not registered (e.g. `--exclude-tools
-   * tool_search` or a deny rule), every deferred tool is eagerly revealed
-   * here so it lands in the declaration list. Skipping this would leave the
-   * tool both off the declarations AND off the deferred-summary list (since
-   * `undefined` is returned in that branch) — a silent disappearance that's
-   * harder to diagnose than seeing the tool name absent from `/mcp` output.
+   * Side effect: when ToolSearch or the deferred proxy wrapper is not
+   * registered, every deferred tool is eagerly revealed here so it lands in
+   * the declaration list. Skipping this would leave the tool both off the
+   * declarations AND off the deferred-summary list (since `undefined` is
+   * returned in that branch) — a silent disappearance that's harder to
+   * diagnose than seeing the tool name absent from `/mcp` output.
    *
-   * Returns `undefined` when ToolSearch is unavailable: reminders must not
-   * advertise tools the model has no way to load on demand.
+   * Returns `undefined` when the deferred proxy surface is unavailable:
+   * reminders must not advertise tools the model cannot call through it.
    */
   private resolveDeferredToolsForReminder(): DeferredToolSummary[] | undefined {
     const toolRegistry = this.config.getToolRegistry();
     const deferredSummary = toolRegistry.getDeferredToolSummary();
-    const toolSearchAvailable = !!toolRegistry.getTool(ToolNames.TOOL_SEARCH);
-    if (!toolSearchAvailable) {
+    if (!this.isDeferredToolProxyAvailable()) {
       if (deferredSummary.length > 0) {
         for (const t of deferredSummary) {
           toolRegistry.revealDeferredTool(t.name);
@@ -1268,6 +1281,11 @@ export class GeminiClient {
       const toolRegistry = this.config.getToolRegistry();
       await profiler.time('tool_registry_warm', () => toolRegistry.warmAll());
       toolRegistry.clearProxySchemaPresentations();
+      // A successful call in old history may rebuild presentation state only
+      // when this session still exposes the complete proxy surface. Direct
+      // calls to real deferred names are restored independently below, so the
+      // compatibility path remains available when proxying is disabled.
+      const deferredProxyAvailable = this.isDeferredToolProxyAvailable();
       // Resume support: when a transcript contains prior calls to a deferred
       // tool, re-reveal that tool so `setTools()` below sends its schema in
       // the declaration list. Without this, the model sees history like
@@ -1286,7 +1304,10 @@ export class GeminiClient {
           for (const entry of effectiveExtraHistory) {
             for (const part of entry.parts ?? []) {
               const call = part.functionCall;
-              if (call?.name === ToolNames.DEFERRED_TOOL_CALL) {
+              if (
+                deferredProxyAvailable &&
+                call?.name === ToolNames.DEFERRED_TOOL_CALL
+              ) {
                 const targetName = call.args?.['name'];
                 if (typeof targetName === 'string') {
                   if (call.id) {
@@ -1303,7 +1324,10 @@ export class GeminiClient {
               // an id fall back to FIFO ordering from the no-id queue. A
               // response whose id is absent from the map is skipped rather
               // than consuming the no-id queue, to avoid mis-pairing.
-              if (response?.name === ToolNames.DEFERRED_TOOL_CALL) {
+              if (
+                deferredProxyAvailable &&
+                response?.name === ToolNames.DEFERRED_TOOL_CALL
+              ) {
                 let targetName: string | undefined;
                 if (response.id) {
                   targetName = pendingProxyTargetsById.get(response.id);
@@ -1331,7 +1355,10 @@ export class GeminiClient {
                   toolRegistry.revealDeferredTool(callName);
                   continue;
                 }
-                if (callName === ToolNames.DEFERRED_TOOL_CALL) {
+                if (
+                  deferredProxyAvailable &&
+                  callName === ToolNames.DEFERRED_TOOL_CALL
+                ) {
                   const targetName = part.functionCall?.args?.['name'];
                   if (
                     typeof targetName === 'string' &&

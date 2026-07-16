@@ -1120,7 +1120,7 @@ describe('CoreToolScheduler', () => {
     },
   );
 
-  it('uses the provider-facing proxy name in deferred permission denial text', async () => {
+  it('shows target and proxy identities in deferred permission denial text', async () => {
     const execute = vi.fn();
     const toolsByName = new Map<string, MockTool>([
       [
@@ -1160,7 +1160,10 @@ describe('CoreToolScheduler', () => {
     expect(completedCall.status).toBe('error');
     if (completedCall.status === 'error') {
       expect(completedCall.response.error?.message).toBe(
-        'Qwen Code requires permission to use deferred_tool_call, but that permission was declined.',
+        'Qwen Code requires permission to use "cron_create" via "deferred_tool_call", but that permission was declined.',
+      );
+      expect(completedCall.response.resultDisplay).toBe(
+        completedCall.response.error?.message,
       );
       expect(
         completedCall.response.responseParts[0].functionResponse?.name,
@@ -10054,7 +10057,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     );
   });
 
-  it('PM hard-deny path emits failure_kind=permission_denied (#4321)', async () => {
+  it('PM hard-deny path preserves proxy identity and emits failure_kind=permission_denied (#4321)', async () => {
     // _schedule line ~1444: finalPermission === 'deny' branch sets the
     // span failure with the PERMISSION_DENIED kind. Without test
     // coverage, dropping setToolSpanFailure on this branch would
@@ -10065,7 +10068,13 @@ describe('CoreToolScheduler telemetry spans', () => {
       ToolResult
     > {
       constructor() {
-        super('hardDenyTool', 'hardDenyTool', 'Always deny', Kind.Other, {});
+        super(
+          ToolNames.CRON_CREATE,
+          ToolNames.CRON_CREATE,
+          'Always deny',
+          Kind.Other,
+          {},
+        );
       }
       protected createInvocation(params: Record<string, unknown>) {
         return new (class extends BaseToolInvocation<
@@ -10098,6 +10107,8 @@ describe('CoreToolScheduler telemetry spans', () => {
       discoverTools: async () => {},
       getAllTools: () => [],
       getToolsByServer: () => [],
+      isProxyEligibleDeferredTool: () => true,
+      hasPresentedProxySchema: () => true,
     } as unknown as ToolRegistry;
     const mockConfig = {
       getSessionId: () => 'test-session-id',
@@ -10121,9 +10132,10 @@ describe('CoreToolScheduler telemetry spans', () => {
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
     } as unknown as Config;
+    const onAllToolCallsComplete = vi.fn();
     const scheduler = new CoreToolScheduler({
       config: mockConfig,
-      onAllToolCallsComplete: vi.fn(),
+      onAllToolCallsComplete,
       onToolCallsUpdate: vi.fn(),
       getPreferredEditor: () => 'vscode',
       onEditorClose: vi.fn(),
@@ -10132,8 +10144,8 @@ describe('CoreToolScheduler telemetry spans', () => {
       [
         {
           callId: 'deny-1',
-          name: 'hardDenyTool',
-          args: {},
+          name: ToolNames.DEFERRED_TOOL_CALL,
+          args: { name: ToolNames.CRON_CREATE, arguments: {} },
           isClientInitiated: false,
           prompt_id: 'prompt-deny',
         },
@@ -10142,12 +10154,24 @@ describe('CoreToolScheduler telemetry spans', () => {
     );
 
     const toolSpan = toolSpanRecords.find(
-      (r) => r.name === 'tool.hardDenyTool',
+      (r) => r.name === `tool.${ToolNames.CRON_CREATE}`,
     );
     expect(toolSpan?.ended).toBe(true);
     expect(toolSpan?.spanAttributes['tool.failure_kind']).toBe(
       'permission_denied',
     );
+    const completedCall = (
+      onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
+    )[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.error?.message).toBe(
+        'Tool "cron_create" is denied: the tool\'s default permission is \'deny\'. (tool "cron_create" via "deferred_tool_call")',
+      );
+      expect(
+        completedCall.response.responseParts[0].functionResponse?.name,
+      ).toBe(ToolNames.DEFERRED_TOOL_CALL);
+    }
   });
 
   it('non-interactive deny path emits failure_kind=non_interactive_denied (#4321)', async () => {

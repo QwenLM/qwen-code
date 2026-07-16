@@ -58,8 +58,10 @@ import { fileURLToPath } from 'node:url';
 import { ToolNames } from '../tools/tool-names.js';
 import {
   canonicalToolName,
+  formatPermissionToolIdentity,
   normalizeDeferredToolCallRequest,
   providerToolName,
+  withPermissionToolIdentity,
 } from './deferred-tool-call-normalization.js';
 import {
   collectAvailableSkillEntries,
@@ -2047,7 +2049,7 @@ export class CoreToolScheduler {
           const ruleInfo = matchingRule
             ? ` Matching deny rule: "${matchingRule}".`
             : '';
-          const permissionErrorMessage = `Qwen Code requires permission to use "${providerToolName(effectiveReqInfo)}", but that permission was declined.${ruleInfo}`;
+          const permissionErrorMessage = `Qwen Code requires permission to use ${formatPermissionToolIdentity(effectiveReqInfo)}, but that permission was declined.${ruleInfo}`;
           newToolCalls.push({
             status: 'error',
             request: effectiveReqInfo,
@@ -2071,9 +2073,10 @@ export class CoreToolScheduler {
                 excludedTool.toLowerCase().trim() === normalizedToolName,
             );
             if (excludedMatch) {
-              const deniedToolName =
-                effectiveReqInfo.providerName ?? excludedMatch;
-              const permissionErrorMessage = `Qwen Code requires permission to use ${deniedToolName}, but that permission was declined.`;
+              const deniedToolIdentity = effectiveReqInfo.providerName
+                ? formatPermissionToolIdentity(effectiveReqInfo)
+                : excludedMatch;
+              const permissionErrorMessage = `Qwen Code requires permission to use ${deniedToolIdentity}, but that permission was declined.`;
               newToolCalls.push({
                 status: 'error',
                 request: effectiveReqInfo,
@@ -2375,7 +2378,11 @@ export class CoreToolScheduler {
               'error',
               createErrorResponse(
                 reqInfo,
-                new Error(denyMessage ?? `Tool "${reqInfo.name}" is denied.`),
+                new Error(
+                  denyMessage
+                    ? withPermissionToolIdentity(denyMessage, reqInfo)
+                    : `Tool ${formatPermissionToolIdentity(reqInfo)} is denied.`,
+                ),
                 ToolErrorType.EXECUTION_DENIED,
               ),
             );
@@ -2574,7 +2581,7 @@ export class CoreToolScheduler {
               this.config.getInputFormat() !== InputFormat.STREAM_JSON;
 
             if (isNonInteractiveDeny) {
-              const errorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined (non-interactive mode cannot prompt for confirmation).`;
+              const errorMessage = `Qwen Code requires permission to use ${formatPermissionToolIdentity(reqInfo)}, but that permission was declined (non-interactive mode cannot prompt for confirmation).`;
               this.setStatusInternal(
                 reqInfo.callId,
                 'error',
@@ -2657,8 +2664,12 @@ export class CoreToolScheduler {
                     createErrorResponse(
                       reqInfo,
                       new Error(
-                        hookResult.denyMessage ||
-                          `Permission denied by hook for "${reqInfo.name}"`,
+                        hookResult.denyMessage
+                          ? withPermissionToolIdentity(
+                              hookResult.denyMessage,
+                              reqInfo,
+                            )
+                          : `Permission denied by hook for ${formatPermissionToolIdentity(reqInfo)}`,
                       ),
                       ToolErrorType.EXECUTION_DENIED,
                     ),
@@ -2677,7 +2688,7 @@ export class CoreToolScheduler {
             // Background agents can't show interactive prompts.
             // Auto-deny after hooks have had a chance to decide.
             if (this.config.getShouldAvoidPermissionPrompts?.()) {
-              const errorMessage = `Tool "${reqInfo.name}" requires permission, but background agents cannot prompt for confirmation. The tool call was denied.`;
+              const errorMessage = `Tool ${formatPermissionToolIdentity(reqInfo)} requires permission, but background agents cannot prompt for confirmation. The tool call was denied.`;
               this.setStatusInternal(
                 reqInfo.callId,
                 'error',

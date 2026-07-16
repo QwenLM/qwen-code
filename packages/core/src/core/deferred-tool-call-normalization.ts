@@ -20,6 +20,7 @@ export type DeferredToolCallNormalizationResult =
       ok: false;
       error: Error;
       providerName: string;
+      /** Canonical attempted target used only for internal diagnostics. */
       targetName?: string;
       errorType: ToolErrorType;
     };
@@ -30,6 +31,34 @@ export function canonicalToolName(toolName: string): string {
 
 export function providerToolName(request: ToolCallRequestInfo): string {
   return request.providerName ?? request.name;
+}
+
+/**
+ * Permission checks run against the normalized target, but a proxied request
+ * entered through the provider-declared wrapper. Show both identities to the
+ * user without changing the response name selected by {@link providerToolName}.
+ */
+export function formatPermissionToolIdentity(
+  request: ToolCallRequestInfo,
+): string {
+  const targetName = canonicalToolName(request.name);
+  return request.providerName
+    ? `"${targetName}" via "${request.providerName}"`
+    : `"${targetName}"`;
+}
+
+/**
+ * Policy rules and PermissionRequest hooks may provide an authoritative custom
+ * reason that omits tool identity. Preserve that reason and append identity
+ * only for proxy calls; ordinary tool denial text remains byte-for-byte intact.
+ */
+export function withPermissionToolIdentity(
+  message: string,
+  request: ToolCallRequestInfo,
+): string {
+  return request.providerName
+    ? `${message} (tool ${formatPermissionToolIdentity(request)})`
+    : message;
 }
 
 /**
@@ -65,6 +94,8 @@ export async function normalizeDeferredToolCallRequest(
       '`deferred_tool_call.name` must be the exact deferred tool name returned by tool_search.',
     );
   }
+  // Resolve the attempted identity before validating target arguments so a
+  // malformed call can still be counted and observed against the right tool.
   const canonicalTarget = canonicalToolName(targetName);
   const targetArgs = request.args['arguments'];
   if (

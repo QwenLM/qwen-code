@@ -48,8 +48,10 @@ import {
   LoopTickResolver,
   convertToFunctionResponse,
   createDuplicateProviderToolCallResponse,
+  formatPermissionToolIdentity,
   normalizeDeferredToolCallRequest,
   providerToolName,
+  withPermissionToolIdentity,
   findRepeatedDuplicateProviderToolCall,
   markDuplicateProviderToolCallResponseSent,
   createDebugLogger,
@@ -4771,6 +4773,9 @@ export class Session implements SessionContext {
       toolRegistry,
     );
     if (!normalizedRequest.ok) {
+      // Failure still has three distinct identities: responses must use the
+      // provider-declared wrapper, while telemetry/retry isolation use the
+      // attempted target and recordings retain the structured error type.
       responseToolName = normalizedRequest.providerName;
       telemetryProviderName = normalizedRequest.providerName;
       telemetryToolName =
@@ -4921,7 +4926,11 @@ export class Session implements SessionContext {
 
           if (finalPermission === 'deny') {
             return earlyErrorResponse(
-              new Error(denyMessage ?? `Tool "${toolName}" is denied.`),
+              new Error(
+                denyMessage
+                  ? withPermissionToolIdentity(denyMessage, effectiveRequest)
+                  : `Tool ${formatPermissionToolIdentity(effectiveRequest)} is denied.`,
+              ),
               toolName,
             );
           }
@@ -5126,8 +5135,12 @@ export class Session implements SessionContext {
                 } else {
                   return earlyErrorResponse(
                     new Error(
-                      hookResult.denyMessage ||
-                        `Permission denied by hook for "${toolName}"`,
+                      hookResult.denyMessage
+                        ? withPermissionToolIdentity(
+                            hookResult.denyMessage,
+                            effectiveRequest,
+                          )
+                        : `Permission denied by hook for ${formatPermissionToolIdentity(effectiveRequest)}`,
                     ),
                     toolName,
                   );
