@@ -117,6 +117,7 @@ describe('session-start-profiler', () => {
     const records: SessionStartProfileRecord[] = [];
     const profiler = createSessionStartProfiler(SessionStartSource.Resume, {
       enabled: true,
+      sessionId: 'session-123',
       now: clockFrom([10, 12, 15, 16, 21, 30]),
       writeRecord: (record) => records.push(record),
       getTimestamp: () => new Date('2026-07-06T00:00:00.000Z'),
@@ -141,6 +142,7 @@ describe('session-start-profiler', () => {
         timestamp: '2026-07-06T00:00:00.000Z',
         source: 'resume',
         ok: true,
+        sessionId: 'session-123',
         totalMs: 20,
         stages: {
           initial_chat_history: 3,

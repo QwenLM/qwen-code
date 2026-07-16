@@ -848,6 +848,7 @@ describe('createAcpSessionBridge', () => {
     const operations: string[] = [];
     const events: string[] = [];
     const spanAttributes = new Map<string, Record<string, unknown>>();
+    const eventAttributes = new Map<string, Record<string, unknown>>();
     const telemetry: BridgeTelemetry = {
       captureContext: () => {
         events.push('capture');
@@ -869,15 +870,21 @@ describe('createAcpSessionBridge', () => {
           events.push(`span:${operation}:end`);
         }
       },
-      event() {},
+      event(name, attributes) {
+        events.push(`event:${name}`);
+        eventAttributes.set(name, attributes);
+      },
       injectPromptContext(request) {
         events.push('inject');
         const meta =
           (request as { _meta?: Record<string, unknown> })._meta ?? {};
+        const sanitizedMeta = { ...meta };
+        delete sanitizedMeta['qwen.telemetry.traceparent'];
+        delete sanitizedMeta['qwen.telemetry.tracestate'];
         return {
           ...request,
           _meta: {
-            ...meta,
+            ...sanitizedMeta,
             'qwen.telemetry.traceparent': 'daemon-traceparent',
           },
         };
@@ -897,6 +904,7 @@ describe('createAcpSessionBridge', () => {
         _meta: {
           keep: 'value',
           'qwen.telemetry.traceparent': 'client-spoof',
+          'qwen.telemetry.tracestate': 'client-state',
         },
       } as PromptRequest,
       undefined,
@@ -907,6 +915,7 @@ describe('createAcpSessionBridge', () => {
       expect.arrayContaining([
         'channel.spawn',
         'channel.initialize',
+        'channel.wait',
         'session.new',
         'prompt.dispatch',
       ]),
@@ -921,10 +930,124 @@ describe('createAcpSessionBridge', () => {
       keep: 'value',
       'qwen.telemetry.traceparent': 'daemon-traceparent',
     });
+    expect(handle.agent.promptCalls[0]!._meta).not.toHaveProperty(
+      'qwen.telemetry.tracestate',
+    );
+    expect(handle.agent.newSessionCalls[0]!._meta).toMatchObject({
+      'qwen.telemetry.traceparent': 'daemon-traceparent',
+    });
+    expect(handle.agent.newSessionCalls[0]!._meta).not.toHaveProperty(
+      'qwen.telemetry.tracestate',
+    );
     expect(session.clientId).toBeDefined();
     expect(spanAttributes.get('prompt.dispatch')).toMatchObject({
       'qwen-code.client_id': session.clientId,
     });
+    const channelId =
+      spanAttributes.get('channel.spawn')?.['qwen-code.daemon.acp_channel.id'];
+    expect(channelId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    expect(spanAttributes.get('channel.initialize')).toMatchObject({
+      'qwen-code.daemon.acp_channel.id': channelId,
+    });
+    expect(spanAttributes.get('channel.wait')).toMatchObject({
+      'qwen-code.daemon.channel.path': 'spawned_on_request',
+    });
+    expect(spanAttributes.get('session.new')).toMatchObject({
+      'qwen-code.daemon.acp_channel.id': channelId,
+      'qwen-code.daemon.channel.path': 'spawned_on_request',
+    });
+    expect(eventAttributes.get('session.new.completed')).toMatchObject({
+      'session.id': session.sessionId,
+      'qwen-code.daemon.acp_channel.id': channelId,
+    });
+  });
+
+  it('profiles Session channel waits as joined or reused', async () => {
+    const handle = makeChannel();
+    const factoryStarted = deferred<void>();
+    const releaseFactory = deferred<void>();
+    const spans: Array<{
+      operation: string;
+      attributes: Record<string, string | number | boolean>;
+    }> = [];
+    const telemetry: BridgeTelemetry = {
+      captureContext: () => undefined,
+      async runWithContext(_captured, fn) {
+        return await fn();
+      },
+      async withSpan(operation, attributes, fn) {
+        spans.push({ operation, attributes });
+        return await fn();
+      },
+      event() {},
+      injectPromptContext: (request) => request,
+    };
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      telemetry,
+      channelFactory: async () => {
+        factoryStarted.resolve(undefined);
+        await releaseFactory.promise;
+        return handle.channel;
+      },
+    });
+
+    const preheat = bridge.preheat();
+    await factoryStarted.promise;
+    const joinedSession = bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    releaseFactory.resolve(undefined);
+    await Promise.all([preheat, joinedSession]);
+    await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    expect(
+      spans
+        .filter(({ operation }) => operation === 'channel.wait')
+        .map(({ attributes }) => attributes['qwen-code.daemon.channel.path']),
+    ).toEqual(['joined', 'reused']);
+    expect(spans.some(({ operation }) => operation === 'channel.preheat')).toBe(
+      true,
+    );
+    await bridge.shutdown();
+  });
+
+  it('ends the channel wait span and propagates channel spawn failures', async () => {
+    const channelError = new Error('channel spawn failed');
+    const events: string[] = [];
+    const telemetry: BridgeTelemetry = {
+      captureContext: () => undefined,
+      async runWithContext(_captured, fn) {
+        return await fn();
+      },
+      async withSpan(operation, _attributes, fn) {
+        events.push(`${operation}:start`);
+        try {
+          return await fn();
+        } finally {
+          events.push(`${operation}:end`);
+        }
+      },
+      event() {},
+      injectPromptContext: (request) => request,
+    };
+    const bridge = makeBridge({
+      telemetry,
+      channelFactory: async () => {
+        throw channelError;
+      },
+    });
+
+    await expect(bridge.spawnOrAttach({ workspaceCwd: WS_A })).rejects.toBe(
+      channelError,
+    );
+    expect(events).toEqual([
+      'channel.wait:start',
+      'channel.spawn:start',
+      'channel.spawn:end',
+      'channel.wait:end',
+    ]);
+    await bridge.shutdown();
   });
 
   it('forwards childEnvOverrides to the channelFactory at spawn time (#4247 R6 line 216)', async () => {

@@ -307,6 +307,7 @@ function extractLoadReplayResponse(state: BridgeSessionState): {
  */
 
 interface ChannelInfo {
+  id: string;
   channel: AcpChannel;
   connection: ClientSideConnection;
   /** Shared BridgeClient — its methods route ACP params by sessionId. */
@@ -1825,11 +1826,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     if (inFlightChannelSpawn) return await inFlightChannelSpawn;
 
     const promise = (async () => {
+      const acpChannelId = randomUUID();
       const channel = await telemetry.withSpan(
         'channel.spawn',
         {
           'qwen-code.daemon.bridge.operation': 'channel.spawn',
           'qwen-code.daemon.channel.reused': false,
+          'qwen-code.daemon.acp_channel.id': acpChannelId,
         },
         async () => await channelFactory(boundWorkspace, childEnvOverrides),
       );
@@ -1933,6 +1936,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // initialize succeeds so callers don't attach to a still-
       // handshaking channel.
       const info: ChannelInfo = {
+        id: acpChannelId,
         channel,
         connection,
         client,
@@ -2083,6 +2087,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           'channel.initialize',
           {
             'qwen-code.daemon.bridge.operation': 'channel.initialize',
+            'qwen-code.daemon.acp_channel.id': acpChannelId,
           },
           async () =>
             await withTimeout(
@@ -2169,7 +2174,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // repeated failing creates would still find this channel via
     // `ensureChannel`, never spawning a fresh one. Tear down the
     // empty channel so the next attempt gets a clean spawn.
-    const ci = await ensureChannel();
+    const channelPath =
+      channelInfo && !channelInfo.isDying
+        ? 'reused'
+        : inFlightChannelSpawn
+          ? 'joined'
+          : 'spawned_on_request';
+    const ci = await telemetry.withSpan(
+      'channel.wait',
+      {
+        'qwen-code.daemon.bridge.operation': 'channel.wait',
+        'qwen-code.daemon.channel.path': channelPath,
+      },
+      ensureChannel,
+    );
     ci.sessionSpawnsInFlight++;
     let sessionRegistered = false;
     let sessionRemovedDuringInitialization = false;
@@ -2186,16 +2204,28 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           {
             'qwen-code.daemon.bridge.operation': 'session.new',
             'qwen-code.daemon.session_scope': effectiveScope,
+            'qwen-code.daemon.channel.path': channelPath,
+            'qwen-code.daemon.acp_channel.id': ci.id,
           },
-          async () =>
-            await withTimeout(
-              ci.connection.newSession({
-                cwd: boundWorkspace,
-                mcpServers: [],
-              }),
+          async () => {
+            // This legacy-named helper sanitizes and injects trace metadata
+            // for any ACP request, not only prompts.
+            const response = await withTimeout(
+              ci.connection.newSession(
+                telemetry.injectPromptContext({
+                  cwd: boundWorkspace,
+                  mcpServers: [],
+                }),
+              ),
               initTimeoutMs,
               'newSession',
-            ),
+            );
+            telemetry.event('session.new.completed', {
+              'session.id': response.sessionId,
+              'qwen-code.daemon.acp_channel.id': ci.id,
+            });
+            return response;
+          },
         );
       } catch (err) {
         // Only reap when this newSession was the channel's first/only
@@ -7580,11 +7610,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
     async preheat() {
       if (shuttingDown) return;
-      const ci = await ensureChannel();
-      const idleMs = resolvedChannelIdleTimeoutMs();
-      if (idleMs > 0 && hasNoChannelWork(ci)) {
-        await startIdleTimer(ci);
-      }
+      await telemetry.withSpan(
+        'channel.preheat',
+        { 'qwen-code.daemon.bridge.operation': 'channel.preheat' },
+        async () => {
+          const ci = await ensureChannel();
+          const idleMs = resolvedChannelIdleTimeoutMs();
+          if (idleMs > 0 && hasNoChannelWork(ci)) {
+            await startIdleTimer(ci);
+          }
+        },
+      );
     },
   };
 
