@@ -31,12 +31,12 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function render(node: ReactNode): HTMLElement {
+function render(node: ReactNode, language: 'en' | 'zh-CN' = 'en'): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
-    root.render(<I18nProvider language="en">{node}</I18nProvider>);
+    root.render(<I18nProvider language={language}>{node}</I18nProvider>);
   });
   mounted.push({ root, container });
   return container;
@@ -53,6 +53,7 @@ function renderCompletedThinking(
   const tree = (isStreaming: boolean) => (
     <I18nProvider language={language}>
       <ThinkingMessage
+        messageId={`completed-${durationMs}-${language}`}
         content="private chain of thought"
         isStreaming={isStreaming}
         timestamp={0}
@@ -93,7 +94,11 @@ describe('AssistantMessage thinking logic', () => {
 
   it('keeps replayed completed thinking durationless', () => {
     const container = render(
-      <ThinkingMessage content="private chain of thought" timestamp={0} />,
+      <ThinkingMessage
+        messageId="replayed"
+        content="private chain of thought"
+        timestamp={0}
+      />,
     );
 
     expect(container.textContent).toContain('Done thinking');
@@ -127,6 +132,7 @@ describe('AssistantMessage thinking logic', () => {
 
     const container = render(
       <ThinkingMessage
+        messageId="running"
         content="private chain of thought"
         isStreaming
         timestamp={0}
@@ -134,6 +140,244 @@ describe('AssistantMessage thinking logic', () => {
     );
 
     expect(container.textContent).toContain('Thinking 2s');
+
+    const toggle = container.querySelector<HTMLButtonElement>('button');
+    act(() => toggle?.parentElement?.click());
+    expect(toggle?.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('only translates completed thinking and reuses the in-memory result', async () => {
+    const generateContent = vi.fn(async function* () {
+      yield {
+        v: 1 as const,
+        type: 'started' as const,
+        requestId: 'request-1',
+        model: 'fast-model',
+        modelSource: 'fast' as const,
+      };
+      yield {
+        v: 1 as const,
+        type: 'thinking' as const,
+        requestId: 'request-1',
+      };
+      yield {
+        v: 1 as const,
+        type: 'delta' as const,
+        requestId: 'request-1',
+        seq: 0,
+        text: '翻译结果',
+      };
+      yield {
+        v: 1 as const,
+        type: 'done' as const,
+        requestId: 'request-1',
+        model: 'fast-model',
+        modelSource: 'fast' as const,
+        inputTokens: 12,
+        outputTokens: 4,
+      };
+    });
+    const container = render(
+      <ThinkingMessage
+        messageId="translated-thinking"
+        content="private chain of thought"
+        generateContent={generateContent}
+      />,
+      'zh-CN',
+    );
+    const translateButton =
+      container.querySelector<HTMLButtonElement>('button[title="翻译"]');
+    expect(translateButton).not.toBeNull();
+    expect(translateButton?.tagName).toBe('BUTTON');
+
+    const thinkingToggle = container.querySelector<HTMLButtonElement>(
+      'button[title="展开思考"]',
+    );
+    act(() => thinkingToggle?.click());
+
+    await act(async () => translateButton?.click());
+    expect(document.body.textContent).toContain('翻译结果');
+    expect(document.body.textContent).toContain('发送 Token：12');
+    expect(document.body.textContent).toContain('生成 Token：4');
+
+    const closeButton = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === '关闭');
+    expect(closeButton?.disabled).toBe(false);
+    act(() => closeButton?.click());
+    expect(document.body.textContent).not.toContain('思考翻译');
+
+    await act(async () => translateButton?.click());
+    expect(generateContent).toHaveBeenCalledTimes(1);
+
+    const retranslateButton = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === '重新翻译');
+    await act(async () => retranslateButton?.click());
+    expect(generateContent).toHaveBeenCalledTimes(2);
+  });
+
+  it('only offers translation when the UI language is Chinese', () => {
+    const container = render(
+      <ThinkingMessage
+        messageId="english-thinking"
+        content="private chain of thought"
+        generateContent={async function* () {}}
+      />,
+    );
+
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('button[title="Expand thinking"]')
+        ?.click(),
+    );
+    expect(container.querySelector('button[title="Translate"]')).toBeNull();
+  });
+
+  it('shows a failure when generation completes without translated text', async () => {
+    const generateContent = async function* () {
+      yield {
+        v: 1 as const,
+        type: 'done' as const,
+        requestId: 'empty-translation',
+        model: 'fast-model',
+        modelSource: 'fast' as const,
+      };
+    };
+    const container = render(
+      <ThinkingMessage
+        messageId="empty-translation"
+        content="private chain of thought"
+        generateContent={generateContent}
+      />,
+      'zh-CN',
+    );
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('button[title="翻译"]')
+        ?.click();
+    });
+
+    expect(document.body.textContent).toContain('翻译失败');
+    expect(document.body.textContent).not.toContain('正在翻译…');
+  });
+
+  it('cancels an in-flight translation from the popover footer', async () => {
+    let requestSignal: AbortSignal | undefined;
+    const generateContent = vi.fn(async function* (
+      _prompt: string,
+      opts?: { signal?: AbortSignal },
+    ) {
+      requestSignal = opts?.signal;
+      yield {
+        v: 1 as const,
+        type: 'started' as const,
+        requestId: 'cancel-translation',
+        model: 'fast-model',
+        modelSource: 'fast' as const,
+      };
+      await new Promise<void>((resolve) => {
+        requestSignal?.addEventListener('abort', () => resolve(), {
+          once: true,
+        });
+      });
+    });
+    const container = render(
+      <ThinkingMessage
+        messageId="cancel-translation"
+        content="private chain of thought"
+        generateContent={generateContent}
+      />,
+      'zh-CN',
+    );
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('button[title="翻译"]')
+        ?.click();
+    });
+    const cancelButton = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === '取消');
+    expect(cancelButton?.disabled).toBe(false);
+    await act(async () => cancelButton?.click());
+
+    expect(requestSignal?.aborted).toBe(true);
+    expect(document.body.textContent).not.toContain('思考翻译');
+  });
+
+  it('shows a thinking status when generation emits thinking', async () => {
+    let continueGeneration: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      continueGeneration = resolve;
+    });
+    const generateContent = async function* () {
+      yield {
+        v: 1 as const,
+        type: 'started' as const,
+        requestId: 'request-thinking',
+        model: 'fast-model',
+        modelSource: 'fast' as const,
+      };
+      yield {
+        v: 1 as const,
+        type: 'thinking' as const,
+        requestId: 'request-thinking',
+      };
+      await gate;
+      yield {
+        v: 1 as const,
+        type: 'delta' as const,
+        requestId: 'request-thinking',
+        seq: 0,
+        text: '翻译结果',
+      };
+      yield {
+        v: 1 as const,
+        type: 'done' as const,
+        requestId: 'request-thinking',
+        model: 'fast-model',
+        modelSource: 'fast' as const,
+      };
+    };
+    const container = render(
+      <ThinkingMessage
+        messageId="thinking-translation"
+        content="private chain of thought"
+        generateContent={generateContent}
+      />,
+      'zh-CN',
+    );
+
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('button[title="展开思考"]')
+        ?.click(),
+    );
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('button[title="翻译"]')
+        ?.click();
+    });
+    expect(document.body.textContent).toContain('思考中…');
+
+    await act(async () => continueGeneration?.());
+    expect(document.body.textContent).toContain('翻译结果');
+  });
+
+  it('does not offer translation while thinking is streaming', () => {
+    const container = render(
+      <ThinkingMessage
+        messageId="still-running"
+        content="private chain of thought"
+        isStreaming
+        generateContent={async function* () {}}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.querySelector('button[title="翻译"]')).toBeNull();
   });
 });
 

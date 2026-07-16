@@ -11,8 +11,14 @@ import type {
   ChannelWorkerGroupSnapshot,
 } from './channel-worker-group.js';
 import { ChannelWorkerReconcileError } from './channel-worker-group.js';
-import { ChannelWorkerStopError } from './channel-worker-supervisor.js';
-import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
+import {
+  ChannelWorkerStartupError,
+  ChannelWorkerStopError,
+} from './channel-worker-supervisor.js';
+import type {
+  ChannelStartupAttemptFailure,
+  ChannelWorkerSnapshot,
+} from './channel-worker-supervisor.js';
 import type { ChannelWorkspaceGroup } from './channel-workspace-grouping.js';
 import type { ServeChannelSelection } from './types.js';
 
@@ -53,17 +59,28 @@ export class ChannelWorkerControlError extends Error {
     | 'daemon_draining';
   readonly rolledBack?: boolean;
   readonly rollbackError?: string;
+  readonly startupFailures?: ChannelStartupAttemptFailure[];
+  readonly startupFailuresTruncated?: boolean;
 
   constructor(
     code: ChannelWorkerControlError['code'],
     message: string,
-    details: { rolledBack?: boolean; rollbackError?: string } = {},
+    details: {
+      rolledBack?: boolean;
+      rollbackError?: string;
+      startupFailures?: readonly ChannelStartupAttemptFailure[];
+      startupFailuresTruncated?: boolean;
+    } = {},
   ) {
     super(message);
     this.name = 'ChannelWorkerControlError';
     this.code = code;
     this.rolledBack = details.rolledBack;
     this.rollbackError = details.rollbackError;
+    this.startupFailures = details.startupFailures?.map((failure) => ({
+      ...failure,
+    }));
+    this.startupFailuresTruncated = details.startupFailuresTruncated;
   }
 }
 
@@ -143,6 +160,27 @@ function isPartial(workers: readonly ChannelWorkerGroupSnapshot[]): boolean {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function startupFailureDetails(error: unknown): {
+  startupFailures?: readonly ChannelStartupAttemptFailure[];
+  startupFailuresTruncated?: boolean;
+} {
+  if (
+    !(
+      error instanceof ChannelWorkerStartupError ||
+      error instanceof ChannelWorkerReconcileError
+    ) ||
+    !error.startupFailures
+  ) {
+    return {};
+  }
+  return {
+    startupFailures: error.startupFailures,
+    ...(error.startupFailuresTruncated
+      ? { startupFailuresTruncated: true }
+      : {}),
+  };
 }
 
 export function createChannelWorkerManager(
@@ -233,6 +271,7 @@ export function createChannelWorkerManager(
           ...(error.rollbackError
             ? { rollbackError: error.rollbackError }
             : {}),
+          ...startupFailureDetails(error),
         },
       );
     }
@@ -241,6 +280,7 @@ export function createChannelWorkerManager(
         ? 'channel_worker_stop_failed'
         : fallbackCode,
       errorMessage(error),
+      startupFailureDetails(error),
     );
   };
 
@@ -306,6 +346,7 @@ export function createChannelWorkerManager(
       try {
         await candidate.start();
       } catch (error) {
+        const startupDetails = startupFailureDetails(error);
         let cleanupError: unknown;
         try {
           await candidate.stop();
@@ -327,8 +368,12 @@ export function createChannelWorkerManager(
           'channel_worker_start_failed',
           errorMessage(error),
           cleanupError
-            ? { rolledBack: false, rollbackError: errorMessage(cleanupError) }
-            : { rolledBack: true },
+            ? {
+                rolledBack: false,
+                rollbackError: errorMessage(cleanupError),
+                ...startupDetails,
+              }
+            : { rolledBack: true, ...startupDetails },
         );
       }
       commit(selection, targetGroups);

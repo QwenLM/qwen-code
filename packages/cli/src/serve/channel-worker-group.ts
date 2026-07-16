@@ -5,12 +5,14 @@
  */
 
 import type {
+  ChannelStartupAttemptFailure,
   ChannelWorkerLogEntry,
   ChannelWorkerRestartPolicy,
   ChannelWorkerSnapshot,
   ChannelWorkerSupervisor,
   CreateChannelWorkerSupervisorOptions,
 } from './channel-worker-supervisor.js';
+import { ChannelWorkerStartupError } from './channel-worker-supervisor.js';
 import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
 import type { ChannelWorkspaceGroup } from './channel-workspace-grouping.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
@@ -31,6 +33,8 @@ export class ChannelWorkerReconcileError extends Error {
   readonly rolledBack: boolean;
   readonly rollbackError?: string;
   readonly stopFailed: boolean;
+  readonly startupFailures?: ChannelStartupAttemptFailure[];
+  readonly startupFailuresTruncated?: boolean;
 
   constructor(
     message: string,
@@ -38,6 +42,8 @@ export class ChannelWorkerReconcileError extends Error {
       rolledBack: boolean;
       rollbackError?: string;
       stopFailed?: boolean;
+      startupFailures?: readonly ChannelStartupAttemptFailure[];
+      startupFailuresTruncated?: boolean;
     },
   ) {
     super(message);
@@ -45,6 +51,10 @@ export class ChannelWorkerReconcileError extends Error {
     this.rolledBack = options.rolledBack;
     this.rollbackError = options.rollbackError;
     this.stopFailed = options.stopFailed === true;
+    this.startupFailures = options.startupFailures?.map((failure) => ({
+      ...failure,
+    }));
+    this.startupFailuresTruncated = options.startupFailuresTruncated;
   }
 }
 
@@ -126,6 +136,19 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function startupFailureDetails(error: unknown): {
+  startupFailures?: readonly ChannelStartupAttemptFailure[];
+  startupFailuresTruncated?: boolean;
+} {
+  if (!(error instanceof ChannelWorkerStartupError)) return {};
+  return {
+    startupFailures: error.startupFailures,
+    ...(error.startupFailuresTruncated
+      ? { startupFailuresTruncated: true }
+      : {}),
+  };
+}
+
 export function createChannelWorkerGroup(
   opts: CreateChannelWorkerGroupOptions,
 ): ChannelWorkerGroup {
@@ -147,6 +170,13 @@ export function createChannelWorkerGroup(
     snapshot: ChannelWorkerSnapshot,
   ): ChannelWorkerGroupSnapshot => ({
     ...snapshot,
+    ...(snapshot.startupFailures
+      ? {
+          startupFailures: snapshot.startupFailures.map((failure) => ({
+            ...failure,
+          })),
+        }
+      : {}),
     workspaceId: entry.workspaceId,
     workspaceCwd: entry.workspaceCwd,
     primary: entry.primary,
@@ -503,6 +533,7 @@ export function createChannelWorkerGroup(
           }
         } catch (error) {
           reconcileOptions?.onRollingBack?.();
+          const startupDetails = startupFailureDetails(error);
           const cleanup = await stopEntriesForRollback(startedNew);
           if (cleanup.error) {
             for (const entry of cleanup.failedEntries) {
@@ -511,15 +542,20 @@ export function createChannelWorkerGroup(
             throw new ChannelWorkerReconcileError(errorMessage(error), {
               rolledBack: false,
               rollbackError: cleanup.error,
+              ...startupDetails,
             });
           }
           if (stopping) {
             throw new ChannelWorkerReconcileError(errorMessage(error), {
               rolledBack: false,
+              ...startupDetails,
             });
           }
           const rollback = await restoreEntries(stoppedOld);
-          throw new ChannelWorkerReconcileError(errorMessage(error), rollback);
+          throw new ChannelWorkerReconcileError(errorMessage(error), {
+            ...rollback,
+            ...startupDetails,
+          });
         }
 
         const committed = new Map(unchanged);

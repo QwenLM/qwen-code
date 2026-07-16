@@ -14,6 +14,7 @@ import {
 } from '../utils/mockDaemon';
 import {
   captureScreenshot,
+  completeReplay,
   fillComposer,
   gotoSession,
   installScenario,
@@ -58,6 +59,181 @@ for (const theme of THEMES) {
         page.locator('[data-web-shell-message-list] pre.shiki').first(),
       ).toBeVisible();
       await captureScreenshot(page, `session-transcript-${theme}`);
+    });
+
+    test(`mermaid diagram`, async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        events: [
+          userTextEvent('Diagram the tool-approval flow so I can review it.', {
+            id: 1,
+          }),
+          assistantTextEvent(
+            'Here is the tool-approval flow:\n\n' +
+              '```mermaid\n' +
+              'flowchart LR\n' +
+              '  A[Tool call] --> B{Trusted?}\n' +
+              '  B -->|Yes| C[Run]\n' +
+              '  B -->|No| D{Approve?}\n' +
+              '  D -->|Yes| C\n' +
+              '  D -->|No| E[Cancel]\n' +
+              '  C --> F[Result]\n' +
+              '```',
+            { id: 2 },
+          ),
+          turnCompleteEvent('prompt-mermaid', { id: 3 }),
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      // MermaidBlock lazy-imports `mermaid` and renders asynchronously (behind a
+      // ~150ms timer), swapping a "rendering…" placeholder for the injected
+      // `<svg id="mermaid-N">`. Wait for that SVG so the diagram is captured
+      // rendered — not the placeholder — on every run.
+      await expect(
+        page.locator('[data-web-shell-message-list] svg[id^="mermaid-"]'),
+      ).toBeVisible();
+      await captureScreenshot(page, `mermaid-diagram-${theme}`);
+    });
+
+    test(`split view`, async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        events: [
+          userTextEvent('Review two sessions side by side.', { id: 1 }),
+          // Pane-neutral copy: the mock replays these same events into *both*
+          // panes, so wording that names "the first pane" would read wrong in
+          // the second one.
+          assistantTextEvent('Here are the two sessions, side by side.', {
+            id: 2,
+          }),
+          turnCompleteEvent('prompt-split', { id: 3 }),
+        ],
+      });
+      // Derive the second pane's session from the scenario's OWN sessions list
+      // rather than hardcoding an id: a rename/removal of the default entry
+      // would otherwise surface here as a confusing SSE connection timeout
+      // instead of a clear, self-explaining error.
+      const secondSessionId = scenario.sessions.find(
+        (s) => s.sessionId !== scenario.sessionId,
+      )?.sessionId;
+      if (!secondSessionId) {
+        throw new Error(
+          'split view scenario expects a second session in the list',
+        );
+      }
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      // Load the primary session (this also primes the theme), then enter the
+      // split via the `?split=a,b` deep link so two panes render side by side.
+      await gotoSession(page, scenario, daemon, theme);
+      await page.goto(
+        `/session/${encodeURIComponent(scenario.sessionId)}` +
+          `?split=${encodeURIComponent(scenario.sessionId)},${encodeURIComponent(secondSessionId)}` +
+          `&theme=${theme}`,
+      );
+      await expect(page.locator('[data-testid="split-view"]')).toBeVisible();
+      // Both panes reconnect on the split navigation; settle each replay so
+      // neither pane is stuck on the loading state.
+      await completeReplay(
+        page,
+        daemon,
+        scenario.sessionId,
+        scenario.events.length,
+      );
+      await completeReplay(page, daemon, secondSessionId, 0);
+      // The maximize control only appears with 2+ panes (#6951); waiting on it
+      // confirms the split actually rendered both panes.
+      await expect(
+        page.getByRole('button', { name: 'Maximize pane' }).first(),
+      ).toBeVisible();
+      await captureScreenshot(page, `split-view-${theme}`);
+
+      // Maximize the first pane (#6951): it fills the split and the other pane
+      // hides; the button flips to "Restore pane".
+      await page.getByRole('button', { name: 'Maximize pane' }).first().click();
+      await expect(
+        page.getByRole('button', { name: 'Restore pane' }),
+      ).toBeVisible();
+      await captureScreenshot(page, `split-view-maximized-${theme}`);
+
+      // Restore the tiled layout (#6951): the solo pane returns to the split and
+      // the hidden pane reappears — so the maximize control is back on both
+      // panes. Captures the restore path so a regression there is caught too.
+      await page.getByRole('button', { name: 'Restore pane' }).click();
+      await expect(
+        page.getByRole('button', { name: 'Maximize pane' }).first(),
+      ).toBeVisible();
+      await captureScreenshot(page, `split-view-restored-${theme}`);
+    });
+
+    test(`sidebar attention`, async ({ page }, testInfo) => {
+      const stamp = '2026-07-03T00:00:00.000Z';
+      const base = {
+        workspaceCwd: '/tmp/qwen-web-shell-e2e',
+        createdAt: stamp,
+        updatedAt: stamp,
+        clientCount: 1,
+      };
+      const scenario = createWebShellDaemonScenario({
+        sessionId: 'sess-running',
+        displayName: 'Run test suite',
+        sessions: [
+          {
+            ...base,
+            sessionId: 'sess-approval',
+            displayName: 'Deploy to staging',
+            hasActivePrompt: true,
+            isWaitingForPermission: true,
+          },
+          {
+            ...base,
+            sessionId: 'sess-question',
+            displayName: 'Refactor auth module',
+            hasActivePrompt: true,
+            isWaitingForUserQuestion: true,
+          },
+          {
+            ...base,
+            sessionId: 'sess-running',
+            displayName: 'Run test suite',
+            hasActivePrompt: true,
+          },
+          {
+            ...base,
+            sessionId: 'sess-idle',
+            displayName: 'Draft release notes',
+            clientCount: 0,
+            hasActivePrompt: false,
+          },
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      // The sidebar lists every session; #6956 adds an attention pill to the
+      // ones waiting on the user. Assert on session names (present on both
+      // `main` and the PR) so the frame is the same shape either way — the pill
+      // itself is the PR's diff that the before/after preview surfaces.
+      await expect(page.getByText('Deploy to staging')).toBeVisible();
+      await expect(page.getByText('Refactor auth module')).toBeVisible();
+      // Assert all four sessions render (not just the two waiting ones), so a
+      // regression that truncates the running or idle session is caught. The
+      // running session is also the loaded one, so its name shows in the main
+      // view too — scope to the sidebar landmark to keep the match unambiguous.
+      const sidebar = page.getByRole('complementary');
+      await expect(sidebar.getByText('Run test suite')).toBeVisible();
+      await expect(sidebar.getByText('Draft release notes')).toBeVisible();
+      await captureScreenshot(page, `sidebar-attention-${theme}`);
     });
 
     test(`slash menu`, async ({ page }, testInfo) => {

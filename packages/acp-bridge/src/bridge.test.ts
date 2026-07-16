@@ -89,6 +89,478 @@ function deferred<T>(): {
 }
 
 describe('createAcpSessionBridge', () => {
+  it('starts a workspace channel for MCP management without a session', async () => {
+    const handle = makeChannel({
+      extMethodImpl: async (method, params) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpManage) {
+          return {
+            serverName: (params as { serverName: string }).serverName,
+            action: (params as { action: string }).action,
+            ok: true,
+            changed: true,
+          };
+        }
+        if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
+          return {
+            v: 1,
+            workspaceCwd: WS_A,
+            initialized: true,
+            discoveryState: 'completed',
+            servers: [
+              {
+                name: 'aone',
+                disabled: true,
+                mcpStatus: 'disconnected',
+              },
+            ],
+          };
+        }
+        return {};
+      },
+    });
+    const channelFactory = vi.fn().mockResolvedValue(handle.channel);
+    const bridge = makeBridge({ channelFactory });
+
+    await expect(
+      bridge.manageMcpServer('aone', 'disable', undefined),
+    ).resolves.toMatchObject({
+      serverName: 'aone',
+      action: 'disable',
+      ok: true,
+      changed: true,
+    });
+    expect(channelFactory).toHaveBeenCalledTimes(1);
+    expect(handle.agent.extMethodCalls).toContainEqual({
+      method: SERVE_CONTROL_EXT_METHODS.workspaceMcpManage,
+      params: {
+        serverName: 'aone',
+        action: 'disable',
+        originatorClientId: undefined,
+      },
+    });
+    expect(handle.killed).toBe(true);
+    await expect(
+      bridge.queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceMcp,
+        () => ({ discoveryState: 'not_started', servers: [] }),
+      ),
+    ).resolves.toMatchObject({
+      discoveryState: 'completed',
+      servers: [expect.objectContaining({ name: 'aone', disabled: true })],
+    });
+    expect(channelFactory).toHaveBeenCalledTimes(1);
+
+    await bridge.shutdown();
+  });
+
+  it('starts a workspace channel when reconnecting an MCP server', async () => {
+    const handle = makeChannel({
+      extMethodImpl: async (method, params) =>
+        method === SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart
+          ? {
+              serverName: (params as { serverName: string }).serverName,
+              restarted: true,
+            }
+          : {},
+    });
+    const channelFactory = vi.fn().mockResolvedValue(handle.channel);
+    const bridge = makeBridge({ channelFactory });
+
+    await expect(
+      bridge.invokeWorkspaceCommand(
+        SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart,
+        { serverName: 'aone' },
+      ),
+    ).resolves.toEqual({ serverName: 'aone', restarted: true });
+    expect(channelFactory).toHaveBeenCalledTimes(1);
+    expect(handle.agent.extMethodCalls).toContainEqual({
+      method: SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart,
+      params: { serverName: 'aone' },
+    });
+    expect(handle.killed).toBe(true);
+    await expect(
+      bridge.invokeWorkspaceCommand('qwen/control/workspace/other'),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
+    expect(channelFactory).toHaveBeenCalledTimes(1);
+
+    await bridge.shutdown();
+  });
+
+  it('serves completed MCP status without restarting an idle channel', async () => {
+    const makeMcpChannel = () =>
+      makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize) {
+            return { accepted: true };
+          }
+          if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
+            return { discoveryState: 'completed', servers: [] };
+          }
+          return {};
+        },
+      });
+    const handle = makeMcpChannel();
+    const channelFactory = vi.fn().mockResolvedValue(handle.channel);
+    const bridge = makeBridge({ channelFactory });
+
+    await bridge.initializeWorkspaceMcp();
+    await bridge.queryWorkspaceStatus(
+      SERVE_STATUS_EXT_METHODS.workspaceMcp,
+      () => ({ discoveryState: 'not_started', servers: [] }),
+    );
+    expect(handle.killed).toBe(true);
+
+    await expect(
+      bridge.queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceMcp,
+        () => ({ discoveryState: 'not_started', servers: [] }),
+      ),
+    ).resolves.toMatchObject({ discoveryState: 'completed' });
+    expect(channelFactory).toHaveBeenCalledTimes(1);
+    expect(
+      handle.agent.extMethodCalls.filter(
+        (call) =>
+          call.method === SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize,
+      ),
+    ).toHaveLength(1);
+
+    await bridge.shutdown();
+  });
+
+  it('preserves other MCP states after disabling in a fresh child', async () => {
+    const discovery = makeChannel({
+      extMethodImpl: async (method) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize) {
+          return { accepted: true };
+        }
+        if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
+          return {
+            discoveryState: 'completed',
+            servers: [
+              {
+                name: 'aone',
+                disabled: false,
+                mcpStatus: 'connected',
+              },
+              {
+                name: 'yuque',
+                disabled: false,
+                mcpStatus: 'connected',
+              },
+            ],
+          };
+        }
+        return {};
+      },
+    });
+    const management = makeChannel({
+      extMethodImpl: async (method) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpManage) {
+          return {
+            serverName: 'aone',
+            action: 'disable',
+            ok: true,
+            changed: true,
+          };
+        }
+        if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
+          return {
+            discoveryState: 'not_started',
+            servers: [
+              {
+                name: 'aone',
+                disabled: true,
+                mcpStatus: 'disconnected',
+              },
+              {
+                name: 'yuque',
+                disabled: false,
+                mcpStatus: 'disconnected',
+              },
+            ],
+          };
+        }
+        return {};
+      },
+    });
+    const channelFactory = vi
+      .fn()
+      .mockResolvedValueOnce(discovery.channel)
+      .mockResolvedValueOnce(management.channel);
+    const bridge = makeBridge({ channelFactory });
+
+    await bridge.initializeWorkspaceMcp();
+    await bridge.queryWorkspaceStatus(
+      SERVE_STATUS_EXT_METHODS.workspaceMcp,
+      () => ({ discoveryState: 'not_started', servers: [] }),
+    );
+    await bridge.manageMcpServer('aone', 'disable', undefined);
+
+    await expect(
+      bridge.queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceMcp,
+        () => ({ discoveryState: 'not_started', servers: [] }),
+      ),
+    ).resolves.toMatchObject({
+      discoveryState: 'completed',
+      servers: [
+        expect.objectContaining({
+          name: 'aone',
+          disabled: true,
+          mcpStatus: 'disconnected',
+        }),
+        expect.objectContaining({
+          name: 'yuque',
+          disabled: false,
+          mcpStatus: 'connected',
+        }),
+      ],
+    });
+    expect(channelFactory).toHaveBeenCalledTimes(2);
+
+    await bridge.shutdown();
+  });
+
+  it('preserves other MCP states while polling authentication', async () => {
+    const discovery = makeChannel({
+      extMethodImpl: async (method) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize) {
+          return { accepted: true };
+        }
+        if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
+          return {
+            discoveryState: 'completed',
+            servers: [
+              { name: 'aone', mcpStatus: 'connected' },
+              { name: 'yuque', mcpStatus: 'connected' },
+            ],
+          };
+        }
+        return {};
+      },
+    });
+    let statusRequests = 0;
+    const authentication = makeChannel({
+      extMethodImpl: async (method) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpManage) {
+          return {
+            serverName: 'aone',
+            action: 'authenticate',
+            ok: true,
+            pending: true,
+          };
+        }
+        if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
+          statusRequests += 1;
+          return {
+            discoveryState: 'not_started',
+            servers: [
+              {
+                name: 'aone',
+                mcpStatus: statusRequests === 1 ? 'disconnected' : 'connected',
+                authenticationState:
+                  statusRequests === 1 ? 'pending' : 'succeeded',
+              },
+              { name: 'yuque', mcpStatus: 'disconnected' },
+            ],
+          };
+        }
+        return {};
+      },
+    });
+    const channelFactory = vi
+      .fn()
+      .mockResolvedValueOnce(discovery.channel)
+      .mockResolvedValueOnce(authentication.channel);
+    const bridge = makeBridge({ channelFactory });
+
+    await bridge.initializeWorkspaceMcp();
+    await bridge.queryWorkspaceStatus(
+      SERVE_STATUS_EXT_METHODS.workspaceMcp,
+      () => ({ discoveryState: 'not_started', servers: [] }),
+    );
+    await bridge.manageMcpServer('aone', 'authenticate', undefined);
+
+    await expect(
+      bridge.queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceMcp,
+        () => ({ discoveryState: 'not_started', servers: [] }),
+      ),
+    ).resolves.toMatchObject({
+      discoveryState: 'completed',
+      servers: [
+        expect.objectContaining({
+          name: 'aone',
+          mcpStatus: 'connected',
+          authenticationState: 'succeeded',
+        }),
+        expect.objectContaining({ name: 'yuque', mcpStatus: 'connected' }),
+      ],
+    });
+    expect(authentication.killed).toBe(true);
+
+    await bridge.shutdown();
+  });
+
+  it('preserves other MCP states after restarting in a fresh child', async () => {
+    const discovery = makeChannel({
+      extMethodImpl: async (method) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize) {
+          return { accepted: true };
+        }
+        if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
+          return {
+            discoveryState: 'completed',
+            servers: [
+              { name: 'aone', mcpStatus: 'disconnected' },
+              { name: 'yuque', mcpStatus: 'connected' },
+            ],
+          };
+        }
+        return {};
+      },
+    });
+    const restart = makeChannel({
+      extMethodImpl: async (method) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart) {
+          return { serverName: 'aone', restarted: true };
+        }
+        if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
+          return {
+            discoveryState: 'not_started',
+            servers: [
+              { name: 'aone', mcpStatus: 'connected' },
+              { name: 'yuque', mcpStatus: 'disconnected' },
+            ],
+          };
+        }
+        return {};
+      },
+    });
+    const channelFactory = vi
+      .fn()
+      .mockResolvedValueOnce(discovery.channel)
+      .mockResolvedValueOnce(restart.channel);
+    const bridge = makeBridge({ channelFactory });
+
+    await bridge.initializeWorkspaceMcp();
+    await bridge.queryWorkspaceStatus(
+      SERVE_STATUS_EXT_METHODS.workspaceMcp,
+      () => ({ discoveryState: 'not_started', servers: [] }),
+    );
+    await bridge.invokeWorkspaceCommand(
+      SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart,
+      { serverName: 'aone' },
+    );
+
+    await expect(
+      bridge.queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceMcp,
+        () => ({ discoveryState: 'not_started', servers: [] }),
+      ),
+    ).resolves.toMatchObject({
+      discoveryState: 'completed',
+      servers: [
+        expect.objectContaining({ name: 'aone', mcpStatus: 'connected' }),
+        expect.objectContaining({ name: 'yuque', mcpStatus: 'connected' }),
+      ],
+    });
+
+    await bridge.shutdown();
+  });
+
+  it('serves discovered MCP tools after an idle workspace channel is reaped', async () => {
+    let toolsRequests = 0;
+    const handle = makeChannel({
+      extMethodImpl: async (method) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize) {
+          return { accepted: true };
+        }
+        if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
+          return {
+            discoveryState: 'completed',
+            servers: [{ name: 'aone', mcpStatus: 'connected' }],
+          };
+        }
+        if (method === SERVE_STATUS_EXT_METHODS.workspaceMcpTools) {
+          toolsRequests += 1;
+          return {
+            v: 1,
+            workspaceCwd: WS_A,
+            serverName: 'aone',
+            initialized: true,
+            acpChannelLive: true,
+            tools:
+              toolsRequests === 1 ? [] : [{ name: 'search', isValid: true }],
+          };
+        }
+        if (method === SERVE_STATUS_EXT_METHODS.workspaceMcpResources) {
+          return {
+            v: 1,
+            workspaceCwd: WS_A,
+            serverName: 'aone',
+            initialized: true,
+            acpChannelLive: true,
+            resources: [],
+          };
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: vi.fn().mockResolvedValue(handle.channel),
+    });
+
+    await bridge.initializeWorkspaceMcp();
+    await expect(bridge.getWorkspaceMcpToolsStatus('aone')).resolves.toEqual(
+      expect.objectContaining({
+        acpChannelLive: true,
+        tools: [],
+      }),
+    );
+    await bridge.queryWorkspaceStatus(
+      SERVE_STATUS_EXT_METHODS.workspaceMcp,
+      () => ({ discoveryState: 'not_started', servers: [] }),
+    );
+    expect(handle.killed).toBe(true);
+    expect(toolsRequests).toBe(2);
+
+    await expect(bridge.getWorkspaceMcpToolsStatus('aone')).resolves.toEqual(
+      expect.objectContaining({
+        initialized: true,
+        acpChannelLive: false,
+        tools: [{ name: 'search', isValid: true }],
+      }),
+    );
+
+    await bridge.shutdown();
+  });
+
+  it('reaps a workspace channel when MCP discovery is never polled again', async () => {
+    vi.useFakeTimers();
+    const handle = makeChannel({
+      extMethodImpl: async (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize
+          ? { accepted: true }
+          : {},
+    });
+    const bridge = makeBridge({
+      channelFactory: vi.fn().mockResolvedValue(handle.channel),
+    });
+
+    try {
+      await bridge.initializeWorkspaceMcp();
+      expect(handle.killed).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(300_001);
+
+      expect(handle.killed).toBe(true);
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
   it('emits lifecycle events when a fresh session is registered and closed', async () => {
     const events: Array<{
       type: string;

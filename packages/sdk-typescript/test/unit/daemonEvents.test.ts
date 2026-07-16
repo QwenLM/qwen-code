@@ -2101,6 +2101,7 @@ describe('PR 21 — auth device-flow events', () => {
         | 'in_flight'
         | 'disabled'
         | 'budget_would_exceed'
+        | 'authentication_required'
         // F2 (#4175 commit 5): pool-mode hard restart failure carried
         // alongside the soft-skip reasons. The reducer treats it like
         // any other refusal — count + remember last — without a
@@ -2109,7 +2110,13 @@ describe('PR 21 — auth device-flow events', () => {
         // counter is the operator-meaningful signal ("this many
         // restart attempts didn't take effect").
         | 'restart_failed'
-      > = ['in_flight', 'disabled', 'budget_would_exceed', 'restart_failed'];
+      > = [
+        'in_flight',
+        'disabled',
+        'budget_would_exceed',
+        'authentication_required',
+        'restart_failed',
+      ];
       let state = initial;
       for (const [i, reason] of reasons.entries()) {
         state = reduceDaemonSessionEvent(state, {
@@ -2119,7 +2126,7 @@ describe('PR 21 — auth device-flow events', () => {
           data: { serverName: 'docs', reason },
         });
       }
-      expect(state.mcpRestartRefusedCount).toBe(4);
+      expect(state.mcpRestartRefusedCount).toBe(5);
       expect(state.mcpRestartCount).toBe(0);
       expect(state.lastMcpRestartRefused?.reason).toBe('restart_failed');
       // Bogus reason literal is rejected by the parser.
