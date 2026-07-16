@@ -14,6 +14,7 @@ import { useSettings } from '../contexts/SettingsContext.js';
 import { MermaidDiagram } from './MermaidDiagram.js';
 import { renderInlineLatex } from './latexRenderer.js';
 import { useRenderMode } from '../contexts/RenderModeContext.js';
+import { parseCodeFenceInfo } from './markdownUtilities.js';
 import {
   fitPendingSlice,
   splitMarkdownTableRow,
@@ -99,8 +100,7 @@ export function countMarkdownSourceBlocks(
 
     if (codeFenceMatch) {
       activeCodeFence = codeFenceMatch[1];
-      const lang =
-        codeFenceMatch[2]?.trim().split(/\s+/)[0]?.toLowerCase() || null;
+      const lang = parseCodeFenceInfo(codeFenceMatch[2]).lang?.toLowerCase();
       if (lang) {
         codeBlockLanguageCounts.set(
           lang,
@@ -381,6 +381,9 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   let codeBlockIndex = 0;
   let currentCodeBlockIndex = 0;
   let currentCodeBlockLangIndex = 0;
+  // Gutter start line for the current block: >1 when it continues a block that
+  // streaming split across commits (see splitFencedMarkdown).
+  let currentCodeBlockStartLine = 1;
   const codeBlockLanguageCounts = new Map<string, number>(
     sourceCopyIndexOffsets?.codeBlockLanguageCounts,
   );
@@ -424,6 +427,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
             isPending={isPending}
             availableTerminalHeight={availableTerminalHeight}
             contentWidth={contentWidth}
+            startLineNumber={currentCodeBlockStartLine}
           />,
         );
         inCodeBlock = false;
@@ -474,7 +478,9 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       codeBlockIndex += 1;
       currentCodeBlockIndex = codeBlockIndex;
       codeBlockFence = codeFenceMatch[1];
-      codeBlockLang = codeFenceMatch[2]?.trim().split(/\s+/)[0] || null;
+      const fenceInfo = parseCodeFenceInfo(codeFenceMatch[2]);
+      codeBlockLang = fenceInfo.lang;
+      currentCodeBlockStartLine = fenceInfo.startLine;
       if (codeBlockLang) {
         const normalizedLang = codeBlockLang.toLowerCase();
         const nextLangIndex =
@@ -735,6 +741,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         isPending={isPending}
         availableTerminalHeight={availableTerminalHeight}
         contentWidth={contentWidth}
+        startLineNumber={currentCodeBlockStartLine}
       />,
     );
   }
@@ -825,6 +832,9 @@ interface RenderCodeBlockProps {
   isPending: boolean;
   availableTerminalHeight?: number;
   contentWidth: number;
+  /** Gutter number for the first line; >1 when the block continues a block
+   * that streaming split across commits (see splitFencedMarkdown). */
+  startLineNumber?: number;
 }
 
 const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
@@ -835,6 +845,7 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
   isPending,
   availableTerminalHeight,
   contentWidth,
+  startLineNumber = 1,
 }) => {
   const settings = useSettings();
   const { renderMode } = useRenderMode();
@@ -895,6 +906,8 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
         contentWidth - CODE_BLOCK_PREFIX_PADDING,
         undefined,
         settings,
+        undefined,
+        startLineNumber,
       );
       return (
         <Box paddingLeft={CODE_BLOCK_PREFIX_PADDING} flexDirection="column">
@@ -911,6 +924,8 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
     contentWidth - CODE_BLOCK_PREFIX_PADDING,
     undefined,
     settings,
+    undefined,
+    startLineNumber,
   );
 
   return (
