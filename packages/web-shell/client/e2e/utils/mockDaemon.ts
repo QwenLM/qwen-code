@@ -19,6 +19,8 @@ import {
   type DaemonWorkspaceSkillsStatus,
   type DaemonWorkspaceToolsStatus,
   type DaemonWorkspaceVoiceStatus,
+  type ExtensionActiveOperations,
+  type ExtensionUpdateCheckResponse,
   type PermissionResponse,
   type PromptRequest,
 } from '@qwen-code/sdk/daemon';
@@ -42,6 +44,7 @@ export interface WebShellDaemonScenario {
   providers: DaemonWorkspaceProvidersStatus;
   skills: DaemonWorkspaceSkillsStatus;
   settings: DaemonWorkspaceSettingsStatus;
+  extensions: DaemonWorkspaceExtensionsStatus;
   sessions: DaemonSessionSummary[];
   sessionGroups: DaemonSessionGroup[];
   events: DaemonEvent[];
@@ -66,6 +69,7 @@ type ScenarioOverrides = Partial<
     | 'providers'
     | 'skills'
     | 'settings'
+    | 'extensions'
     | 'sessions'
     | 'sessionGroups'
     | 'state'
@@ -75,6 +79,7 @@ type ScenarioOverrides = Partial<
   providers?: Partial<DaemonWorkspaceProvidersStatus>;
   skills?: Partial<DaemonWorkspaceSkillsStatus>;
   settings?: Partial<DaemonWorkspaceSettingsStatus>;
+  extensions?: Partial<DaemonWorkspaceExtensionsStatus>;
   sessions?: DaemonSessionSummary[];
   sessionGroups?: DaemonSessionGroup[];
   state?: Partial<DaemonSessionState>;
@@ -218,6 +223,15 @@ export function createWebShellDaemonScenario(
     ...(overrides.settings ?? {}),
   };
 
+  const extensions: DaemonWorkspaceExtensionsStatus = {
+    v: 1,
+    workspaceCwd,
+    initialized: true,
+    extensions: [],
+    errors: [],
+    ...(overrides.extensions ?? {}),
+  };
+
   const sessions = overrides.sessions ?? [
     {
       sessionId,
@@ -250,6 +264,7 @@ export function createWebShellDaemonScenario(
     providers,
     skills,
     settings,
+    extensions,
     sessions,
     sessionGroups: overrides.sessionGroups ?? [],
     events: overrides.events ?? [],
@@ -442,6 +457,8 @@ function isDaemonPath(path: string): boolean {
     path === '/workspace/skills' ||
     path === '/workspace/tools' ||
     path === '/workspace/extensions' ||
+    path === '/workspace/extensions/operations' ||
+    path === '/workspace/extensions/check-updates' ||
     path === '/workspace/mcp' ||
     path === '/workspace/voice' ||
     /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path) ||
@@ -471,6 +488,12 @@ function isDaemonRoute(method: string, path: string): boolean {
   if (method === 'GET' && path === '/workspace/skills') return true;
   if (method === 'GET' && path === '/workspace/tools') return true;
   if (method === 'GET' && path === '/workspace/extensions') return true;
+  if (method === 'GET' && path === '/workspace/extensions/operations') {
+    return true;
+  }
+  if (method === 'POST' && path === '/workspace/extensions/check-updates') {
+    return true;
+  }
   if (method === 'GET' && path === '/workspace/mcp') return true;
   if (method === 'GET' && path === '/workspace/voice') return true;
   if (method === 'GET' && /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path)) {
@@ -560,6 +583,22 @@ async function handleDaemonRoute(
   }
   if (method === 'GET' && path === '/workspace/extensions') {
     await json(route, workspaceExtensions(scenario));
+    return;
+  }
+  if (method === 'GET' && path === '/workspace/extensions/operations') {
+    // No install/update runs in the visual scenarios, so the manager polls an
+    // idle operations list (an empty poll) instead of hitting a 401 that would
+    // paint an error banner across the captured page.
+    await json(route, {
+      v: 1,
+      operations: [],
+    } satisfies ExtensionActiveOperations);
+    return;
+  }
+  if (method === 'POST' && path === '/workspace/extensions/check-updates') {
+    // The manager kicks off an update check on mount; report "no updates for
+    // any extension" so the visual doesn't paint an update-check error banner.
+    await json(route, { states: {} } satisfies ExtensionUpdateCheckResponse);
     return;
   }
   if (method === 'GET' && path === '/workspace/mcp') {
@@ -878,13 +917,7 @@ function workspaceTools(
 function workspaceExtensions(
   scenario: WebShellDaemonScenario,
 ): DaemonWorkspaceExtensionsStatus {
-  return {
-    v: 1,
-    workspaceCwd: scenario.workspaceCwd,
-    initialized: true,
-    extensions: [],
-    errors: [],
-  };
+  return scenario.extensions;
 }
 
 function workspaceVoice(
