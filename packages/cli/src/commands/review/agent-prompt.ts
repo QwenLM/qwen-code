@@ -1028,10 +1028,16 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     }
   } else if (hasFindings) {
     // `--findings` with no role: it has no prompt to fold into. A territory chunk
-    // agent reviews the diff, not a findings list.
+    // agent reviews the diff, not a findings list. Name the roles it needs from the
+    // briefs, not a hardcoded pair — the wrong-role branch above already does, and a
+    // new `acceptsFindings` role must not leave this one telling a stale story.
+    const findingRoles = (Object.keys(BRIEFS) as RoleId[]).filter(
+      (r) => BRIEFS[r].acceptsFindings,
+    );
     bad(
-      '--findings folds a findings list into a --role verify / --role reverse-audit ' +
-        'prompt; it needs one of those roles.',
+      `--findings folds a findings list into a ` +
+        `${findingRoles.map((r) => `--role ${r}`).join(' / ')} prompt; ` +
+        'it needs one of those roles.',
     );
   } else if (!hasChunk) {
     bad(

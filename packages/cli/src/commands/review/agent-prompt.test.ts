@@ -11,7 +11,15 @@
 // is in the prompt, the read call is in the prompt, and the agent is not handed a
 // sentence to recite when it finds nothing.
 
-import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+  type Mock,
+} from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -408,15 +416,27 @@ describe('agent-prompt (command boundary)', () => {
 // in and prints one block. The record stays findings-free, so the shared key still
 // matches by the add-only delivery rule.
 describe('--findings — fold the list in, print one block, record the block alone', () => {
+  // Every temp dir this block makes, cleaned up after each test — the rest of the
+  // file uses try/finally; a helper-based block tracks and sweeps instead.
+  let dirs: string[] = [];
+  const tmp = (prefix: string): string => {
+    const d = mkdtempSync(join(tmpdir(), prefix));
+    dirs.push(d);
+    return d;
+  };
   beforeEach(() => {
     (writeStdoutLine as unknown as Mock).mockClear();
+    dirs = [];
+  });
+  afterEach(() => {
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
   });
 
   function run(args: Record<string, unknown>): {
     printed: string;
     plan: string;
   } {
-    const dir = mkdtempSync(join(tmpdir(), 'ap-find-'));
+    const dir = tmp('ap-find-');
     const plan = join(dir, 'plan.json');
     writeFileSync(plan, JSON.stringify(PLAN));
     const findings = join(dir, 'findings.md');
@@ -461,7 +481,7 @@ describe('--findings — fold the list in, print one block, record the block alo
   });
 
   it('an empty findings file tells the reverse auditor nothing is confirmed yet', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'ap-find0-'));
+    const dir = tmp('ap-find0-');
     const plan = join(dir, 'plan.json');
     writeFileSync(plan, JSON.stringify(PLAN));
     const findings = join(dir, 'f.md');
@@ -477,12 +497,32 @@ describe('--findings — fold the list in, print one block, record the block alo
     expect(printed).not.toContain('do not re-report');
   });
 
+  it('an empty findings file tells the verifier there is nothing to verify', () => {
+    // The verify branch of findingsSection handles empty differently from the
+    // reverse auditor's (which hunts every gap) — a verifier with no findings has
+    // nothing to rule on. Asymmetric handling is exactly what regresses unnoticed.
+    const dir = tmp('ap-vf0-');
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(PLAN));
+    const findings = join(dir, 'f.md');
+    writeFileSync(findings, '   \n  ');
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'verify',
+      findings,
+    });
+    const printed = (writeStdoutLine as unknown as Mock).mock
+      .calls[0][0] as string;
+    expect(printed).toContain('nothing to verify');
+    expect(printed).not.toContain('Nothing is confirmed yet');
+  });
+
   it('the record is byte-identical whether or not --findings was passed', () => {
     // Proves the shared per-shard/round key is unaffected: two verify shards with
     // different findings record the SAME launch block, so both match it. Same plan
     // both times (the record embeds the plan-derived brief path), differing only in
     // whether findings were folded into what was PRINTED.
-    const dir = mkdtempSync(join(tmpdir(), 'ap-nof-'));
+    const dir = tmp('ap-nof-');
     const plan = join(dir, 'plan.json');
     writeFileSync(plan, JSON.stringify(PLAN));
     const findings = join(dir, 'f.md');
@@ -502,7 +542,7 @@ describe('--findings — fold the list in, print one block, record the block alo
   });
 
   it('cannot read the findings file — says so, does not review without them', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'ap-findbad-'));
+    const dir = tmp('ap-findbad-');
     const plan = join(dir, 'plan.json');
     writeFileSync(plan, JSON.stringify(PLAN));
     expect(() =>
