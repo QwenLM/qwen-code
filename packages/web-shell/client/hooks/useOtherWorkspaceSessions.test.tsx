@@ -121,6 +121,7 @@ describe('useOtherWorkspaceSessions', () => {
     expect(listWorkspaceSessions).toHaveBeenCalledWith('/b', {
       pageSize: SESSION_LIST_PAGE_SIZE,
       archiveState: 'active',
+      sourceType: 'default',
     });
     expect(latest.sessions.map((s) => s.sessionId)).toEqual(['b1']);
   });

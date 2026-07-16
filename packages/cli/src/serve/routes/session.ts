@@ -2809,13 +2809,6 @@ export function registerSessionRoutes(
           });
           return;
         }
-        if (parsedSource.sourceType !== undefined && view === 'organized') {
-          res.status(400).json({
-            error: '`sourceType` is not supported with `view=organized`',
-            code: 'invalid_session_source_filter',
-          });
-          return;
-        }
         const options = {
           ...(cursor !== undefined ? { cursor } : {}),
           ...(size !== undefined ? { size } : {}),

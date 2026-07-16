@@ -731,6 +731,7 @@ describe('DaemonWorkspaceProvider', () => {
         group: 'all',
         cursor: 'cursor-1',
         pageSize: 10,
+        sourceType: 'default',
       });
       return null;
     }
@@ -747,6 +748,7 @@ describe('DaemonWorkspaceProvider', () => {
         cursor: 'cursor-1',
         view: 'organized',
         group: 'all',
+        sourceType: 'default',
       },
     );
     expect(result?.data).toEqual([session]);
