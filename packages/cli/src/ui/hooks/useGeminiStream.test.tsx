@@ -385,6 +385,108 @@ describe('useGeminiStream', () => {
     };
   };
 
+  describe('stream context acceptance', () => {
+    it('accepts context once after the first normal stream event', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'first',
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'second',
+          };
+        })(),
+      );
+      const onContextAccepted = vi.fn();
+      const onDelivered = vi.fn();
+      const onDeliveryFailed = vi.fn();
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery(
+          'test query',
+          SendMessageType.UserQuery,
+          undefined,
+          { onContextAccepted, onDelivered, onDeliveryFailed },
+        );
+      });
+
+      expect(onContextAccepted).toHaveBeenCalledOnce();
+      expect(onDelivered).toHaveBeenCalledOnce();
+      expect(onDeliveryFailed).not.toHaveBeenCalled();
+    });
+
+    it('reports delivery failure when the stream ends without events', async () => {
+      mockSendMessageStream.mockReturnValue((async function* () {})());
+      const onContextAccepted = vi.fn();
+      const onDelivered = vi.fn();
+      const onDeliveryFailed = vi.fn();
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery(
+          'test query',
+          SendMessageType.UserQuery,
+          undefined,
+          { onContextAccepted, onDelivered, onDeliveryFailed },
+        );
+      });
+
+      expect(onContextAccepted).not.toHaveBeenCalled();
+      expect(onDelivered).not.toHaveBeenCalled();
+      expect(onDeliveryFailed).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+      {
+        caseName: 'an error event',
+        createStream: () =>
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.Error,
+              value: { error: { message: 'provider error' } },
+            };
+          })(),
+      },
+      {
+        caseName: 'a cancellation event',
+        createStream: () =>
+          (async function* () {
+            yield { type: ServerGeminiEventType.UserCancelled };
+          })(),
+      },
+      {
+        caseName: 'a thrown stream error',
+        createStream: () =>
+          // eslint-disable-next-line require-yield
+          (async function* () {
+            throw new Error('stream failed');
+          })(),
+      },
+    ])('does not accept context after $caseName', async ({ createStream }) => {
+      mockSendMessageStream.mockReturnValue(createStream());
+      const onContextAccepted = vi.fn();
+      const onDelivered = vi.fn();
+      const onDeliveryFailed = vi.fn();
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery(
+          'test query',
+          SendMessageType.UserQuery,
+          undefined,
+          { onContextAccepted, onDelivered, onDeliveryFailed },
+        );
+      });
+
+      expect(onContextAccepted).not.toHaveBeenCalled();
+      expect(onDelivered).not.toHaveBeenCalled();
+      expect(onDeliveryFailed).toHaveBeenCalledOnce();
+    });
+  });
+
   it('queues background shell terminal notifications for the model loop', async () => {
     const { mockSendMessageStream } = renderTestHook();
     const displayText = 'Background shell "npm test" completed.';
@@ -749,6 +851,11 @@ describe('useGeminiStream', () => {
   });
 
   it('expands autonomous loop wakeup sentinels before queuing them', async () => {
+    mockSendMessageStream.mockImplementation(() =>
+      (async function* () {
+        yield { type: ServerGeminiEventType.Content, value: 'done' };
+      })(),
+    );
     let schedulerCallback:
       | ((job: { prompt: string; cronExpr?: string; missed?: boolean }) => void)
       | null = null;
@@ -3276,7 +3383,11 @@ describe('useGeminiStream', () => {
     const heldStream = (async function* () {
       await holdStream;
     })();
-    mockSendMessageStream.mockReturnValue(heldStream);
+    mockSendMessageStream.mockReturnValueOnce(heldStream).mockReturnValueOnce(
+      (async function* () {
+        yield { type: ServerGeminiEventType.Content, value: 'done' };
+      })(),
+    );
 
     const { result } = renderHook(() =>
       useGeminiStream(

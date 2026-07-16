@@ -2511,6 +2511,15 @@ export const useGeminiStream = (
           streamingResponseLengthRef.current = 0;
         }
 
+        // Stream rejection may be observed both while iterating and during
+        // post-processing. Report it once and suppress a later onDelivered.
+        let deliveryFailed = false;
+        const reportDeliveryFailure = () => {
+          if (deliveryFailed) return;
+          deliveryFailed = true;
+          metadata?.onDeliveryFailed?.();
+        };
+
         try {
           // Emit user message to dual output sidecar (if enabled).
           // Skip for tool-result submissions — those are emitted separately
@@ -2546,14 +2555,20 @@ export const useGeminiStream = (
               const rejected =
                 event.type === ServerGeminiEventType.Error ||
                 event.type === ServerGeminiEventType.UserCancelled;
-              if (!accepted && !rejected) {
+              // Error and cancellation events are not evidence that the model
+              // accepted the request context.
+              if (rejected) {
+                reportDeliveryFailure();
+              } else if (!accepted) {
                 accepted = true;
                 metadata?.onContextAccepted?.();
               }
               yield event;
             }
+            // A cleanly closed empty iterable still provides no evidence that
+            // the model received schema-bearing context, so fail closed.
             if (!accepted && !sawEvent) {
-              metadata?.onContextAccepted?.();
+              reportDeliveryFailure();
             }
           })();
 
@@ -2566,7 +2581,7 @@ export const useGeminiStream = (
           if (processingStatus === StreamProcessingStatus.UserCancelled) {
             submitPromptOnCompleteRef.current = null;
             isSubmittingQueryRef.current = false;
-            metadata?.onDeliveryFailed?.();
+            reportDeliveryFailure();
             return;
           }
 
@@ -2598,8 +2613,8 @@ export const useGeminiStream = (
           }
 
           if (lastPromptErroredRef.current) {
-            metadata?.onDeliveryFailed?.();
-          } else {
+            reportDeliveryFailure();
+          } else if (!deliveryFailed) {
             metadata?.onDelivered?.();
           }
 
@@ -2634,7 +2649,7 @@ export const useGeminiStream = (
             }
           }
         } catch (error: unknown) {
-          metadata?.onDeliveryFailed?.();
+          reportDeliveryFailure();
           if (error instanceof UnauthorizedError) {
             onAuthError('Session expired or is unauthorized.');
           } else if (!isNodeError(error) || error.name !== 'AbortError') {
