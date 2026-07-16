@@ -7737,11 +7737,15 @@ describe('createServeApp', () => {
       const res = await request(app)
         .post('/session')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .send({ extensionPairingCredential: 'paired-credential' });
+        .send({
+          sourceType: 'default',
+          extensionPairingCredential: 'paired-credential',
+        });
 
       expect(res.status).toBe(200);
       expect(bridge.calls[0]).toMatchObject({
-        sourceType: 'chrome_extension',
+        sourceType: 'default',
+        sourceId: 'chrome_extension',
       });
     });
 
@@ -7767,10 +7771,38 @@ describe('createServeApp', () => {
       expect(bridge.calls).toHaveLength(0);
     });
 
-    it('rejects client-supplied Chrome extension session metadata', async () => {
+    it.each([
+      { sourceType: 'chrome_extension' },
+      { sourceType: 'default', sourceId: 'chrome_extension' },
+    ])(
+      'rejects client-supplied Chrome extension session metadata: %j',
+      async (source) => {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send(source);
+
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('reserved_session_source');
+        expect(bridge.calls).toHaveLength(0);
+      },
+    );
+
+    it('rejects pairing credentials combined with non-Web-Shell source metadata', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(
-        { ...baseOpts, workspace: WS_BOUND },
+        {
+          ...baseOpts,
+          workspace: WS_BOUND,
+          verifyExtensionPairingCredential: () => true,
+        },
         undefined,
         { bridge },
       );
@@ -7778,10 +7810,14 @@ describe('createServeApp', () => {
       const res = await request(app)
         .post('/session')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .send({ sourceType: 'chrome_extension' });
+        .send({
+          sourceType: 'scheduled_task',
+          sourceId: 'task-123',
+          extensionPairingCredential: 'paired-credential',
+        });
 
       expect(res.status).toBe(400);
-      expect(res.body.code).toBe('reserved_session_source');
+      expect(res.body.code).toBe('extension_pairing_source_conflict');
       expect(bridge.calls).toHaveLength(0);
     });
 

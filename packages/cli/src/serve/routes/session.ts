@@ -102,7 +102,8 @@ interface RegisterSessionRoutesDeps {
   ) => boolean;
 }
 
-const CHROME_EXTENSION_SESSION_SOURCE = 'chrome_extension';
+const WEB_SHELL_SESSION_SOURCE = 'default';
+const CHROME_EXTENSION_SESSION_SOURCE_ID = 'chrome_extension';
 
 const WORKSPACE_TRANSCRIPT_PAGE_SOURCE_MAX_BYTES = 4 * 1024 * 1024;
 const WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
@@ -1134,9 +1135,12 @@ export function registerSessionRoutes(
       });
       return;
     }
-    if (source.sourceType === CHROME_EXTENSION_SESSION_SOURCE) {
+    if (
+      source.sourceType === CHROME_EXTENSION_SESSION_SOURCE_ID ||
+      source.sourceId === CHROME_EXTENSION_SESSION_SOURCE_ID
+    ) {
       res.status(400).json({
-        error: '`chrome_extension` is a reserved session source',
+        error: '`chrome_extension` is reserved session metadata',
         code: 'reserved_session_source',
       });
       return;
@@ -1151,7 +1155,11 @@ export function registerSessionRoutes(
         });
         return;
       }
-      if (source.sourceType !== undefined) {
+      if (
+        source.sourceType !== undefined &&
+        (source.sourceType !== WEB_SHELL_SESSION_SOURCE ||
+          source.sourceId !== undefined)
+      ) {
         res.status(400).json({
           error:
             '`extensionPairingCredential` cannot be combined with session source metadata',
@@ -1159,7 +1167,10 @@ export function registerSessionRoutes(
         });
         return;
       }
-      source = { sourceType: CHROME_EXTENSION_SESSION_SOURCE };
+      source = {
+        sourceType: WEB_SHELL_SESSION_SOURCE,
+        sourceId: CHROME_EXTENSION_SESSION_SOURCE_ID,
+      };
     }
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;

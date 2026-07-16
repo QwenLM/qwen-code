@@ -450,6 +450,7 @@ function sliceLineRange(
 export interface BridgeClientSessionEntry {
   sessionId: string;
   sourceType?: string;
+  sourceId?: string;
   events: EventBus;
   artifacts: SessionArtifactStore;
   recordingDegraded: boolean;
@@ -1086,7 +1087,10 @@ export class BridgeClient implements Client {
         typeof sessionId === 'string'
           ? this.resolveEntry(sessionId)
           : undefined;
-      if (entry?.sourceType !== 'chrome_extension') {
+      if (
+        entry?.sourceType !== 'default' ||
+        entry.sourceId !== 'chrome_extension'
+      ) {
         throw RequestError.invalidParams(
           undefined,
           'browser tools require a session created by the paired Chrome extension',

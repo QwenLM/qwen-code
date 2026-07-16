@@ -2429,7 +2429,7 @@ describe('BridgeClient — reverse tool channel (qwen/control/client_mcp/message
    */
   function makeClientWithRegistrar(
     registrar: ClientMcpRegistrar,
-    sourceType?: string,
+    source?: { sourceType?: string; sourceId?: string },
   ): BridgeClient {
     const sender: ClientMcpMessageSender = (serverName: string) =>
       registrar.hasServer(serverName)
@@ -2439,7 +2439,7 @@ describe('BridgeClient — reverse tool channel (qwen/control/client_mcp/message
     return new BridgeClient(
       ((sessionId: string | undefined) =>
         sessionId === 'extension-session'
-          ? ({ sourceType } as never)
+          ? ({ ...source } as never)
           : undefined) as never,
       (() => undefined) as never, // resolvePendingRestoreEvents
       { request: thrower } as never,
@@ -2530,10 +2530,10 @@ describe('BridgeClient — reverse tool channel (qwen/control/client_mcp/message
     await expect(denied).resolves.toMatchObject({ code: -32602 });
     expect(outbound).toHaveLength(0);
 
-    const allowedClient = makeClientWithRegistrar(
-      registrar,
-      'chrome_extension',
-    );
+    const allowedClient = makeClientWithRegistrar(registrar, {
+      sourceType: 'default',
+      sourceId: 'chrome_extension',
+    });
     const allowed = allowedClient.extMethod('qwen/control/client_mcp/message', {
       server: 'qwen-browser-tools',
       sessionId: 'extension-session',
