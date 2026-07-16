@@ -457,8 +457,11 @@ describe('--findings — fold the list in, print one block, record the block alo
 
   it('a verifier gets the findings folded above, and the record is findings-free', () => {
     const { printed, plan } = run({ role: 'verify' });
-    // Printed: the findings section AND the findings themselves.
+    // Printed: the findings section AND the findings themselves — and NOT the
+    // reverse auditor's framing (a branch swap in findingsSection would pass both
+    // tests if each only asserted its own heading).
     expect(printed).toContain('## The findings you are ruling on');
+    expect(printed).not.toContain('Already confirmed');
     expect(printed).toContain('foo.ts:10 — the collision drops arguments');
     // and the line the orchestrator used to truncate away.
     expect(printed).toContain('does not replace the brief; read it first');
@@ -474,6 +477,8 @@ describe('--findings — fold the list in, print one block, record the block alo
   it('a reverse auditor gets the do-not-re-report framing', () => {
     const { printed, plan } = run({ role: 'reverse-audit' });
     expect(printed).toContain('Already confirmed — do not re-report these');
+    // and NOT the verifier's framing — the mirror of the assertion above.
+    expect(printed).not.toContain('The findings you are ruling on');
     expect(printed).toContain('foo.ts:10 — the collision drops arguments');
     const recorded = readRecordedPrompts(plan).get('reverse-audit')!;
     expect(recorded).not.toContain('foo.ts:10');
