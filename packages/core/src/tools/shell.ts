@@ -65,7 +65,7 @@ import {
   splitCommands,
   stripShellWrapper,
 } from '../utils/shell-utils.js';
-import { parse } from 'shell-quote';
+import { parse, type ControlOperator } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
 import {
@@ -344,6 +344,65 @@ function tokeniseSegment(segment: string): string[] | null {
     }
   }
   return tokens.slice(i);
+}
+
+const EXIT_ONE_IS_NOT_ERROR_COMMANDS = new Set([
+  'grep',
+  'rg',
+  'diff',
+  'test',
+  '[',
+  '[[',
+]);
+
+const PIPELINE_ALLOWED_OPERATORS = new Set<ControlOperator['op']>([
+  '|',
+  '|&',
+  '<<<',
+  '>>',
+  '>&',
+  '<&',
+  '<',
+  '>',
+]);
+
+function getExitStatusSegment(command: string): string | null {
+  const segments = splitCommands(command);
+  if (segments.length === 1) return segments[0]!;
+
+  try {
+    const operators = parse(command, (key) => '$' + key).filter(
+      (token): token is ControlOperator =>
+        typeof token === 'object' && token !== null && 'op' in token,
+    );
+    if (
+      !operators.some(({ op }) => op === '|' || op === '|&') ||
+      operators.some(({ op }) => !PIPELINE_ALLOWED_OPERATORS.has(op))
+    ) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+
+  return segments.at(-1) ?? null;
+}
+
+function isShellExitError(command: string, exitCode: number | null) {
+  if (exitCode === null || exitCode === 0) return false;
+  if (exitCode >= 2) return true;
+
+  const exitStatusSegment = getExitStatusSegment(command);
+  if (!exitStatusSegment) return true;
+
+  const tokens = tokeniseSegment(exitStatusSegment);
+  const executable = tokens?.[0];
+  if (!executable) return true;
+
+  const commandName = path
+    .basename(path.win32.basename(executable))
+    .replace(/\.(?:exe|cmd|bat)$/i, '');
+  return !EXIT_ONE_IS_NOT_ERROR_COMMANDS.has(commandName);
 }
 
 const SUDO_FLAGS_WITH_VALUE = new Set([
@@ -2869,7 +2928,18 @@ export class ShellToolInvocation extends BaseToolInvocation<
               type: ToolErrorType.SHELL_EXECUTE_ERROR,
             },
           }
-        : {};
+        : isShellExitError(this.params.command, result.exitCode)
+          ? {
+              error: {
+                // Schedulers use error.message as the model-facing response.
+                message:
+                  typeof llmContent === 'string'
+                    ? llmContent
+                    : returnDisplayMessage,
+                type: ToolErrorType.SHELL_EXECUTE_ERROR,
+              },
+            }
+          : {};
 
     return {
       llmContent,
