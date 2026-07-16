@@ -995,32 +995,34 @@ jobs:
 
           TARGETS='[]'
           for PR in ${CANDIDATES}; do
-            BRANCH="$(gh pr view "${PR}" --repo "${REPO}" --json headRefName --jq '.headRefName')"
+            # One PR fetch for the branch name, check rollup, and creation time (the
+            # watermark floor below) — avoids extra round-trips per candidate PR.
+            PR_META="$(gh pr view "${PR}" --repo "${REPO}" \
+              --json headRefName,statusCheckRollup,createdAt 2> /dev/null || echo '{}')"
+            BRANCH="$(jq -r '.headRefName // ""' <<< "${PR_META}")"
             # Extract issue number: autofix/issue-<N> → N; otherwise use PR number.
             if [[ "${BRANCH}" == "${BRANCH_PREFIX}"* ]]; then
               ISSUE="${BRANCH#"${BRANCH_PREFIX}"}"
             else
               ISSUE="${PR}"
             fi
-            # One PR fetch for both the check rollup and the creation time (used
-            # as the watermark floor below) — avoids a second round-trip per PR.
-            PR_META="$(gh pr view "${PR}" --repo "${REPO}" \
-              --json statusCheckRollup,createdAt 2> /dev/null || echo '{}')"
             CHECKS_JSON="$(jq -c '.statusCheckRollup // []' <<< "${PR_META}")"
             # A check that never reports back would otherwise skip this PR forever,
             # so ignore ones stuck far past any legitimate runtime. The bound must
             # sit ABOVE real check durations in this repo — review-pr can take ~50m
             # and review-address is capped at 120m — so an active run keeps
             # blocking and is never aged out mid-flight (which would enqueue the PR
-            # against a live check and double-process the feedback). A check with
-            # no startedAt (queued but never started) is treated as not-blocking.
+            # against a live check and double-process the feedback). startedAt is
+            # the only staleness clock: a check blocks only if it started within
+            # the bound; one with no startedAt (queued, not yet running) is not
+            # blocking (the next scan re-checks once it starts).
             PENDING_STALE_MIN=240
             PENDING_CUTOFF="$(date -u -d "${PENDING_STALE_MIN} minutes ago" +%Y-%m-%dT%H:%M:%SZ)"
             HAS_PENDING_CHECKS="$(jq -r --arg cut "${PENDING_CUTOFF}" '
               [ .[]
                 | select((.status // .state // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED"))
                 | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
-                | select((.startedAt // .completedAt // .updatedAt // $cut) > $cut) ]
+                | select((.startedAt // $cut) > $cut) ]
               | length > 0
             ' <<< "${CHECKS_JSON}")"
             if [[ "${HAS_PENDING_CHECKS}" == "true" ]]; then
@@ -1714,8 +1716,12 @@ jobs:
               if [[ -n "${DETAIL_FILE}" ]]; then
                 echo "**What I found before stopping:**"
                 # -c drops any partial multi-byte sequence a byte-level head -c may
-                # have split, so the comment body stays valid UTF-8.
-                head -c 1500 "${DETAIL_FILE}" | iconv -f utf-8 -t utf-8 -c | sed 's/<!--[^>]*-->//g'
+                # have split, so the comment body stays valid UTF-8. iconv -c still
+                # EXITS 1 when it discards a byte, which under this shell's
+                # `set -eo pipefail` would abort the step and skip the marker + gh
+                # pr comment below — the exact silent stall this block prevents — so
+                # `|| true` keeps the (already-emitted) cleaned text and continues.
+                head -c 1500 "${DETAIL_FILE}" | iconv -f utf-8 -t utf-8 -c | sed 's/<!--[^>]*-->//g' || true
               else
                 echo "AutoFix failed before producing a verified commit (the run crashed or timed out before it could explain why)."
               fi

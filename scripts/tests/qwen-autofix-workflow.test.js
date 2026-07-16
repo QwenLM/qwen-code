@@ -240,11 +240,11 @@ describe('qwen-autofix workflow', () => {
     // Staleness bound must sit above legitimate check runtimes (review-address is
     // capped at 120m) so an active run is never aged out mid-flight.
     expect(reviewScanJob).toContain('PENDING_STALE_MIN=240');
-    // The staleness filter itself, not just the constant: a check only blocks if
-    // its start is newer than the cutoff (flipping the comparison would break it).
-    expect(reviewScanJob).toContain(
-      '.startedAt // .completedAt // .updatedAt // $cut',
-    );
+    // The staleness filter itself, including the comparison operator: a check only
+    // blocks if its start is newer than the cutoff. Asserting `> $cut` too means a
+    // flipped comparison (which would age out live checks → double-processing) is
+    // caught, not just a removed constant.
+    expect(reviewScanJob).toContain('.startedAt // $cut) > $cut');
     // Round is the max across markers so a terminal handoff marker is honored
     // regardless of its timestamp.
     expect(reviewScanJob).toContain('map(.round) | max // 0');
@@ -1142,8 +1142,12 @@ describe('qwen-autofix workflow', () => {
     );
     // A pre-prepare crash must NOT claim MAX_ROUNDS attempts were made.
     expect(reviewAddressReportStep).toContain('could not start evaluation');
-    // Truncate UTF-8 safely so a split multi-byte sequence can't corrupt the body.
-    expect(reviewAddressReportStep).toContain('iconv -f utf-8 -t utf-8 -c');
+    // Truncate UTF-8 safely so a split multi-byte sequence can't corrupt the body,
+    // and keep the `|| true` — iconv -c exits 1 when it discards a byte, which under
+    // set -eo pipefail would abort the step and skip the marker (a silent stall).
+    expect(reviewAddressReportStep).toContain(
+      "iconv -f utf-8 -t utf-8 -c | sed 's/<!--[^>]*-->//g' || true",
+    );
     // Prefer the actionable failure.md over the generic handoff.md wrapper.
     expect(reviewAddressReportStep).toContain('for f in failure.md handoff.md');
     expect(reviewAddressReportStep).toContain(
