@@ -1165,19 +1165,30 @@ interface BatchAbortState {
 }
 
 /**
- * Returns true if a scheduled tool call can safely execute concurrently
- * with other safe tools (no side effects, no shared mutable state).
+ * Returns true if a tool call can safely execute concurrently with other
+ * safe tools (no side effects, no shared mutable state), decided from its
+ * raw name/kind/args alone. Shared by the interactive scheduler's batch
+ * partitioning and the headless runner (`runNonInteractive`) so both
+ * runtimes parallelize exactly the same set of tools.
+ *
+ * `kind` is the resolved tool's {@link Kind}; pass `undefined` when the tool
+ * cannot be resolved from the registry, which is treated as unsafe (the call
+ * runs sequentially).
  */
-function isConcurrencySafe(call: ScheduledToolCall): boolean {
+export function isToolCallConcurrencySafe(
+  name: string,
+  kind: Kind | undefined,
+  args: unknown,
+): boolean {
   // Agent tools spawn independent sub-agents with no shared state.
-  if (canonicalToolName(call.request.name) === ToolNames.AGENT) return true;
+  if (canonicalToolName(name) === ToolNames.AGENT) return true;
   // Shell commands: check if the command is read-only (e.g., git log, cat).
   // Uses the synchronous regex+shell-quote checker (not the async AST-based
   // one) because partitioning runs synchronously. The sync checker covers
   // the same command whitelist and is fail-closed — unknown commands remain
   // sequential. The AST version is used separately for permission decisions.
-  if (call.tool.kind === Kind.Execute) {
-    const command = (call.request.args as { command?: string }).command;
+  if (kind === Kind.Execute) {
+    const command = (args as { command?: string } | undefined)?.command;
     if (typeof command !== 'string') return false;
     try {
       return isShellCommandReadOnly(stripShellWrapper(command));
@@ -1185,7 +1196,20 @@ function isConcurrencySafe(call: ScheduledToolCall): boolean {
       return false; // fail-closed
     }
   }
-  return CONCURRENCY_SAFE_KINDS.has(call.tool.kind);
+  if (kind === undefined) return false;
+  return CONCURRENCY_SAFE_KINDS.has(kind);
+}
+
+/**
+ * Returns true if a scheduled tool call can safely execute concurrently
+ * with other safe tools (no side effects, no shared mutable state).
+ */
+function isConcurrencySafe(call: ScheduledToolCall): boolean {
+  return isToolCallConcurrencySafe(
+    call.request.name,
+    call.tool.kind,
+    call.request.args,
+  );
 }
 
 /**

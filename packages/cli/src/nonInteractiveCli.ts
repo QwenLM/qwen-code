@@ -10,6 +10,7 @@ import type {
   CronJob,
   CronScheduler,
   ToolCallRequestInfo,
+  ToolCallResponseInfo,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
 import { isInlineModelOverrideAllowed } from './utils/acpModelUtils.js';
@@ -40,6 +41,8 @@ import {
   isSystemReminderContent,
   markDuplicateProviderToolCallResponseSent,
   findRepeatedDuplicateProviderToolCall,
+  isToolCallConcurrencySafe,
+  parsePositiveIntegerEnv,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -297,6 +300,41 @@ export interface RunNonInteractiveOptions {
    * cleanly the run emits a no-op result and exits 0.
    */
   continueInterrupted?: boolean;
+}
+
+interface HeadlessToolBatch {
+  /** When true, the calls in this batch may execute concurrently. */
+  concurrent: boolean;
+  calls: ToolCallRequestInfo[];
+}
+
+/**
+ * Partition headless tool-call requests into consecutive batches by
+ * concurrency safety, mirroring the interactive scheduler's
+ * `partitionToolCalls` (CoreToolScheduler). Consecutive concurrency-safe
+ * calls (independent sub-agents, read-only shells, pure reads) merge into a
+ * single parallel batch; every unsafe call (edits, writes, mutating shells)
+ * forms its own sequential batch. Request order is preserved.
+ *
+ * Kinds are resolved from the tool registry; an unregistered tool resolves to
+ * `undefined`, which {@link isToolCallConcurrencySafe} treats as unsafe.
+ */
+function partitionHeadlessToolCalls(
+  requests: ToolCallRequestInfo[],
+  config: Config,
+): HeadlessToolBatch[] {
+  const registry = config.getToolRegistry();
+  return requests.reduce<HeadlessToolBatch[]>((batches, request) => {
+    const kind = registry.getTool(request.name)?.kind;
+    const safe = isToolCallConcurrencySafe(request.name, kind, request.args);
+    const last = batches[batches.length - 1];
+    if (safe && last?.concurrent) {
+      last.calls.push(request);
+    } else {
+      batches.push({ concurrent: safe, calls: [request] });
+    }
+    return batches;
+  }, []);
 }
 
 /**
@@ -1128,9 +1166,59 @@ export async function runNonInteractive(
           respondedRequests,
         );
 
-        for (const requestInfo of requestsToExecute) {
-          executedRequests.add(requestInfo);
+        // Partition this batch by concurrency safety, then run each
+        // partition. Tools that are safe to run concurrently (agent
+        // sub-agents, read-only shell, pure reads) run in parallel;
+        // everything with side effects (edits, writes, mutating shell)
+        // runs sequentially in original order. This mirrors the
+        // interactive CoreToolScheduler (partitionToolCalls /
+        // runConcurrently) via the shared isToolCallConcurrencySafe rule,
+        // so `qwen -p` and the TUI agree on which tools parallelise — a
+        // model turn that emits N parallel agent calls no longer executes
+        // them one-at-a-time. Regardless of execution order, results are
+        // finalised (emitted, recorded, appended to `toolResponseParts`)
+        // strictly in original request order, so the model and the event
+        // log always see a deterministic sequence.
+        const toolBatches = partitionHeadlessToolCalls(
+          requestsToExecute,
+          config,
+        );
 
+        // Tick BEFORE the call so that --max-tool-calls=N caps the run
+        // at exactly N executions: the (N+1)th tick aborts before the
+        // tool runs. Ticking after would let the (N+1)th tool execute
+        // and only then abort. See issue #4103. In a parallel batch the
+        // tick still runs serially and in order before each launch, so
+        // the cap fires on the same call it would serially.
+        //
+        // Exempt `structured_output` ONLY when `--json-schema` is
+        // active: under --json-schema this is the terminal "I'm done"
+        // contract tool, not real work, and counting it would abort
+        // an otherwise-valid completion at the budget edge (budget=3,
+        // model used 3 tools then emits structured_output as call #4
+        // → exit 55 instead of success). Guarding on
+        // `getJsonSchema()` keeps the exemption tied to the feature
+        // that owns the tool name — an MCP server that registers an
+        // unrelated tool literally named `structured_output` would
+        // otherwise inherit a free pass.
+        //
+        // Caveat: failed structured_output calls (Ajv validation
+        // failure) also skip the tick, so a model stuck in a
+        // validation-retry loop is not bounded by --max-tool-calls.
+        // Documented in docs/users/features/headless.md → "Scope".
+        // Combine with --max-session-turns or --max-wall-time.
+        const isBudgetExempt = (requestInfo: ToolCallRequestInfo): boolean =>
+          requestInfo.name === ToolNames.STRUCTURED_OUTPUT &&
+          config.getJsonSchema?.() !== undefined;
+
+        // Build the progress/permission callbacks and START a tool call,
+        // returning the in-flight promise. Budget ticking and abort
+        // checks are the caller's responsibility (sequenced before the
+        // launch) so --max-tool-calls stays exact even in a parallel
+        // batch.
+        const launchToolCall = (
+          requestInfo: ToolCallRequestInfo,
+        ): Promise<ToolCallResponseInfo> => {
           const inputFormat =
             typeof config.getInputFormat === 'function'
               ? config.getInputFormat()
@@ -1153,46 +1241,21 @@ export async function runNonInteractive(
               )
             : createToolProgressHandler(requestInfo, adapter);
 
-          // Tick BEFORE the call so that --max-tool-calls=N caps the run
-          // at exactly N executions: the (N+1)th tick aborts before the
-          // tool runs. Ticking after would let the (N+1)th tool execute
-          // and only then abort. See issue #4103.
-          //
-          // Exempt `structured_output` ONLY when `--json-schema` is
-          // active: under --json-schema this is the terminal "I'm done"
-          // contract tool, not real work, and counting it would abort
-          // an otherwise-valid completion at the budget edge (budget=3,
-          // model used 3 tools then emits structured_output as call #4
-          // → exit 55 instead of success). Guarding on
-          // `getJsonSchema()` keeps the exemption tied to the feature
-          // that owns the tool name — an MCP server that registers an
-          // unrelated tool literally named `structured_output` would
-          // otherwise inherit a free pass.
-          //
-          // Caveat: failed structured_output calls (Ajv validation
-          // failure) also skip the tick, so a model stuck in a
-          // validation-retry loop is not bounded by --max-tool-calls.
-          // Documented in docs/users/features/headless.md → "Scope".
-          // Combine with --max-session-turns or --max-wall-time.
-          const isStructuredOutputExempt =
-            requestInfo.name === ToolNames.STRUCTURED_OUTPUT &&
-            config.getJsonSchema?.() !== undefined;
-          if (!isStructuredOutputExempt) {
-            budgetEnforcer.tickToolCall();
-          }
-          if (abortController.signal.aborted) await routeAbort();
-          const toolResponse = await executeToolCall(
-            config,
-            requestInfo,
-            abortController.signal,
-            {
-              outputUpdateHandler,
-              ...(toolCallUpdateCallback && {
-                onToolCallsUpdate: toolCallUpdateCallback,
-              }),
-            },
-          );
+          return executeToolCall(config, requestInfo, abortController.signal, {
+            outputUpdateHandler,
+            ...(toolCallUpdateCallback && {
+              onToolCallsUpdate: toolCallUpdateCallback,
+            }),
+          });
+        };
 
+        // Emit + record a completed tool call in the caller's order.
+        // Returns true when this was the terminal structured_output
+        // success (the "first valid call ends the session" contract).
+        const finalizeToolCall = (
+          requestInfo: ToolCallRequestInfo,
+          toolResponse: ToolCallResponseInfo,
+        ): boolean => {
           if (toolResponse.error) {
             // In JSON/STREAM_JSON mode, tool errors are tolerated and
             // formatted as tool_result blocks. handleToolError detects
@@ -1235,12 +1298,103 @@ export async function runNonInteractive(
             !toolResponse.error
           ) {
             // Honour the "first valid call ends the session" contract.
-            // The break is after the responseParts/modelOverride capture
+            // Captured after the responseParts/modelOverride handling
             // above so future changes to SyntheticOutputTool can't
             // silently drop those signals. structuredSubmission is the
             // session-scoped binding from the enclosing scope.
             structuredSubmission = requestInfo.args;
-            break;
+            return true;
+          }
+          return false;
+        };
+
+        const maxToolConcurrency = parsePositiveIntegerEnv(
+          process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'],
+          10,
+        );
+
+        let sessionEnded = false;
+        for (const batch of toolBatches) {
+          if (sessionEnded) break;
+
+          if (batch.concurrent && batch.calls.length > 1) {
+            // Parallel batch. Tick the budget for each call serially and
+            // in order (so --max-tool-calls caps at exactly N and the
+            // abort fires on the same call it would serially), launch only
+            // the calls that fit the budget — capped at
+            // QWEN_CODE_MAX_TOOL_CONCURRENCY in flight — then finalise in
+            // request order once all launched calls have settled.
+            const launched: Array<{
+              requestInfo: ToolCallRequestInfo;
+              promise: Promise<ToolCallResponseInfo>;
+            }> = [];
+            const inFlight = new Set<Promise<void>>();
+            for (const requestInfo of batch.calls) {
+              executedRequests.add(requestInfo);
+              if (!isBudgetExempt(requestInfo)) {
+                budgetEnforcer.tickToolCall();
+              }
+              // A tick that trips the budget (or an external SIGINT) aborts
+              // here; stop launching and route the abort after the
+              // already-launched calls settle.
+              if (abortController.signal.aborted) break;
+              const promise = launchToolCall(requestInfo);
+              launched.push({ requestInfo, promise });
+              // Track a never-rejecting settle marker for the in-flight
+              // cap so Promise.race can't throw mid-launch and abandon
+              // siblings. The real outcome is read from `promise` below.
+              const marker = promise
+                .then(
+                  () => {},
+                  () => {},
+                )
+                .finally(() => {
+                  inFlight.delete(marker);
+                });
+              inFlight.add(marker);
+              if (inFlight.size >= maxToolConcurrency) {
+                await Promise.race(inFlight);
+              }
+            }
+
+            const settled = await Promise.allSettled(
+              launched.map((l) => l.promise),
+            );
+            for (let i = 0; i < launched.length; i++) {
+              const outcome = settled[i];
+              if (outcome.status === 'rejected') {
+                // Preserve the serial contract: an unexpected rejection
+                // (a scheduling failure, not a tool-level error, which
+                // surfaces as toolResponse.error) aborts the turn.
+                throw outcome.reason;
+              }
+              if (finalizeToolCall(launched[i].requestInfo, outcome.value)) {
+                sessionEnded = true;
+                break;
+              }
+            }
+
+            if (!sessionEnded && abortController.signal.aborted) {
+              // Finalised the in-budget calls above; now unwind exactly as
+              // the serial path's per-iteration abort check would (budget
+              // overrun → exit 55, SIGINT → exit 130; routeAbort discerns).
+              await routeAbort();
+            }
+          } else {
+            // Sequential batch (a single tool, or a side-effecting tool):
+            // identical to the pre-parallelisation behaviour.
+            for (const requestInfo of batch.calls) {
+              executedRequests.add(requestInfo);
+              if (!isBudgetExempt(requestInfo)) {
+                budgetEnforcer.tickToolCall();
+              }
+              if (abortController.signal.aborted) await routeAbort();
+              const toolResponse = await launchToolCall(requestInfo);
+              if (finalizeToolCall(requestInfo, toolResponse)) {
+                sessionEnded = true;
+                break;
+              }
+            }
           }
         }
 
