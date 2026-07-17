@@ -413,9 +413,19 @@ async function synthesizeUntrackedHunk(
   gitRoot: string,
   filePath: string,
 ): Promise<GitDiffFileHunks | null> {
+  const absPath = path.join(gitRoot, filePath);
+  // lstat before open: `ls-files --others` can list FIFOs whose open() blocks
+  // forever waiting on a writer. Gate on regular files (as countUntrackedLines
+  // does) so expanding an untracked FIFO can't hang the daemon's event loop.
+  try {
+    const lst = await lstat(absPath);
+    if (!lst.isFile()) return null;
+  } catch {
+    return null;
+  }
   let fh;
   try {
-    fh = await open(path.join(gitRoot, filePath), getUntrackedOpenFlags());
+    fh = await open(absPath, getUntrackedOpenFlags());
   } catch {
     return null;
   }

@@ -576,6 +576,21 @@ describe('fetchGitDiffHunksForFile', () => {
     expect(await fetchGitDiffHunksForFile(repo, 'blob.bin')).toBeNull();
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'returns null for an untracked FIFO without hanging',
+    async () => {
+      // `ls-files --others` can list a FIFO; open() on it blocks forever
+      // waiting on a writer. synthesizeUntrackedHunk must lstat-gate so
+      // expanding it in the diff dialog can't hang the daemon's event loop.
+      await fs.writeFile(path.join(repo, 'a.txt'), 'a\n');
+      await git(repo, 'add', '.');
+      await git(repo, 'commit', '-q', '-m', 'init');
+      await execFileAsync('mkfifo', [path.join(repo, 'pipe')]);
+
+      expect(await fetchGitDiffHunksForFile(repo, 'pipe')).toBeNull();
+    },
+  );
+
   it('returns null for an ignored file', async () => {
     await fs.writeFile(path.join(repo, 'a.txt'), 'a\n');
     await fs.writeFile(path.join(repo, '.gitignore'), 'ignored.log\n');
