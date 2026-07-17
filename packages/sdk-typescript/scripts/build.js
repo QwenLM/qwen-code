@@ -53,8 +53,8 @@ const rootDir = join(__dirname, '..');
 // Bumped from 151KB to 154KB for extension management v2 catalog, activation,
 // mutation, and operation-polling APIs (~2.3KB).
 // Bumped from 154KB to 155KB after merging workspace skill-toggle APIs.
-// Bumped from 155KB to 160KB to accommodate recent daemon API growth, then to
-// 164KB for the ChatRecord transcript projection added to the default UI API.
+// Bumped from 155KB to 160KB to accommodate recent growth and reduce churn,
+// then to 164KB for the ChatRecord transcript projection in the default UI API.
 const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 164 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so

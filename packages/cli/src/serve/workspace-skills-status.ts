@@ -38,9 +38,10 @@ import { loadSettings } from '../config/settings.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { mapSkillConfigToStatus } from './workspace-skills-mapping.js';
 
-export type WorkspaceSkillsStatusProvider = (
-  workspaceCwd: string,
-) => Promise<ServeWorkspaceSkillsStatus>;
+export interface WorkspaceSkillsStatusProvider {
+  (workspaceCwd: string): Promise<ServeWorkspaceSkillsStatus>;
+  invalidate?(workspaceCwd: string): void;
+}
 
 /**
  * The `Config` surface `SkillManager.listSkills()` actually reads. Declaring it
@@ -64,7 +65,13 @@ export function createWorkspaceSkillsStatusProvider(): WorkspaceSkillsStatusProv
   // picked up until the daemon restarts — is acceptable: the live child
   // re-lists authoritatively once a session exists.
   const managers = new Map<string, SkillManager>();
-  return (workspaceCwd) => buildWorkspaceSkillsStatus(workspaceCwd, managers);
+  const provider = ((workspaceCwd: string) =>
+    buildWorkspaceSkillsStatus(
+      workspaceCwd,
+      managers,
+    )) as WorkspaceSkillsStatusProvider;
+  provider.invalidate = (workspaceCwd) => managers.delete(workspaceCwd);
+  return provider;
 }
 
 async function buildWorkspaceSkillsStatus(

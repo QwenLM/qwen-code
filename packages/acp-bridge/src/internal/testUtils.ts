@@ -77,8 +77,8 @@ export const WS_B = path.resolve(path.sep, 'work', 'b');
 export const SESS_A = `sess:${WS_A}`;
 
 /**
- * Convenience wrapper: `createAcpSessionBridge` requires `boundWorkspace`
- * (per #3803 §02 — 1 daemon = 1 workspace). Tests that only ever talk
+ * Convenience wrapper: `createAcpSessionBridge` requires the workspace owned
+ * by this bridge. Tests that only ever talk
  * to `WS_A` would otherwise repeat `boundWorkspace: WS_A` everywhere;
  * this helper defaults it. Tests that need a different bind path (e.g.
  * the mismatch test) pass `boundWorkspace` explicitly.

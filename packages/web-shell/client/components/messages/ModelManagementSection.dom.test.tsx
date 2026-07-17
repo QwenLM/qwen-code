@@ -270,9 +270,7 @@ describe('ModelManagementSection', () => {
     expect(setButtons).toHaveLength(1);
   });
 
-  it('marks only one row current for a bare current id shared by variants', () => {
-    // A bare current id matches several variants' base id; only the first wins,
-    // so the list never shows multiple "Current" badges.
+  it('does not guess a current row for a bare id shared by variants', () => {
     const dupProviders: DaemonWorkspaceProviderStatus[] = [
       {
         kind: 'model_provider',
@@ -306,7 +304,7 @@ describe('ModelManagementSection', () => {
     const currentBadges = Array.from(
       container.querySelectorAll<HTMLSpanElement>('span'),
     ).filter((s) => s.textContent?.trim() === 'Current');
-    expect(currentBadges).toHaveLength(1);
+    expect(currentBadges).toHaveLength(0);
   });
 
   it('labels each row action with the model identity for screen readers', () => {
