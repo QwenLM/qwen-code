@@ -112,6 +112,9 @@ import { InvalidStreamError } from './invalid-stream-error.js';
 export { InvalidStreamError };
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
+// Gemini can emit this filler after tool results; filtering and validation
+// must stay in sync.
+const GEMINI_EMPTY_CONTENT_PLACEHOLDER = '(empty content)';
 
 function isToolCallPreparationOnly(response: GenerateContentResponse): boolean {
   if (getToolCallPreparations(response).length === 0) return false;
@@ -2239,6 +2242,8 @@ export class GeminiChat {
           (cgConfig?.samplingParams?.max_tokens !== undefined &&
             cgConfig?.samplingParams?.max_tokens !== null) ||
           parsedEnvMaxTokens !== undefined;
+        // params.config.maxOutputTokens is set by the first-send clamp; the
+        // outputCeiling fallback is defensive and should not fire in practice.
         const effectiveInitialMaxOutputTokens =
           params.config?.maxOutputTokens ?? outputCeiling;
         const escalatedLimit = clampOutputTokensToWindow(
@@ -2679,9 +2684,6 @@ export class GeminiChat {
             }
           }
         };
-        // params.config.maxOutputTokens is always set by the first-send clamp
-        // above; the `?? outputCeiling` is a defensive fallback that never
-        // fires in practice.
         if (
           lastError === null &&
           lastFinishReason === FinishReason.MAX_TOKENS &&
@@ -3656,7 +3658,7 @@ export class GeminiChat {
               if (
                 isToolResultContinuation &&
                 !part.thought &&
-                part.text?.trim() === '(empty content)'
+                part.text?.trim() === GEMINI_EMPTY_CONTENT_PLACEHOLDER
               ) {
                 return [];
               }
@@ -3841,7 +3843,7 @@ export class GeminiChat {
     const hasAnyContent = contentText || thoughtText;
     const lacksVisibleToolResultProgress =
       isToolResultContinuation &&
-      (!contentText || contentText === '(empty content)');
+      (!contentText || contentText === GEMINI_EMPTY_CONTENT_PLACEHOLDER);
     if (
       streamError === null &&
       !hasToolCall &&
