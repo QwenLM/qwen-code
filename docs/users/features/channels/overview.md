@@ -92,14 +92,14 @@ Controls how conversation sessions are managed:
 Channel memory stores durable context for one chat or thread. Entries have stable
 IDs, so a list response can be used for deterministic follow-up operations.
 
-- `记住：默认使用 staging 环境` saves a new entry for the current chat or
-  thread.
-- One explicit remember request can save several separate facts. For example,
-  `记住：默认使用 staging 环境；发布前运行测试；优先中文回复` creates entries
+- `记住：默认使用 staging 环境` is the deterministic form and saves exactly one
+  scalar entry for the current chat or thread.
+- To save several separate facts in one request, use a natural phrase routed
+  through the classifier. For example:
+  `请记住这三条约定：使用 staging；发布前测试；优先中文回复` creates entries
   that you can manage independently. Exact duplicate facts are skipped and
   reported without creating another entry. Requests containing credential-like
-  text are rejected; remove secrets and save the non-sensitive facts
-  separately.
+  text are rejected; remove secrets and save the non-sensitive facts separately.
 - `查看记忆` lists entries and their stable IDs. Use `查看第 2 页记忆` to view
   a later page, `查看记忆 <id>` to view one entry, or a natural filtered
   request such as `只看中文偏好` to list the matching entries.
