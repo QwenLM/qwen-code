@@ -177,7 +177,16 @@ export function createDaemonSessionFactory({
     }
     return await DaemonSessionClient.createOrAttach(
       client,
-      { ...daemonReq, sourceType: 'channel' },
+      {
+        ...daemonReq,
+        sourceType: 'channel',
+        // sourceId = channel instance name (e.g. feishu-main): distinguishes
+        // channel instances on the daemon data plane; the channel kind
+        // (dingtalk/feishu) is derivable from the name via the channel config.
+        // The load branch above deliberately omits it: loading never re-stamps
+        // creation attribution.
+        ...(req.sourceId ? { sourceId: req.sourceId } : {}),
+      },
       clientId,
     );
   };

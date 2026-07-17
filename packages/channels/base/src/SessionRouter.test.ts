@@ -136,7 +136,19 @@ describe('SessionRouter', () => {
 
       expect(bridge.newSession).toHaveBeenCalledWith(
         '/tmp',
-        { approvalMode: 'yolo' },
+        { approvalMode: 'yolo', sourceId: 'ch' },
+        expect.any(Object),
+      );
+    });
+
+    it('stamps channel name as sourceId when creating sessions', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+
+      await router.resolve('dingtalk-main', 'alice', 'chat1');
+
+      expect(bridge.newSession).toHaveBeenCalledWith(
+        '/tmp',
+        { sourceId: 'dingtalk-main' },
         expect.any(Object),
       );
     });
@@ -270,7 +282,7 @@ describe('SessionRouter', () => {
       await router.resolve('ch', 'alice', 'chat1', undefined, '/custom');
       expect(bridge.newSession).toHaveBeenCalledWith(
         '/custom',
-        undefined,
+        { sourceId: 'ch' },
         expect.any(Object),
       );
     });
@@ -280,7 +292,7 @@ describe('SessionRouter', () => {
       await router.resolve('ch', 'alice', 'chat1');
       expect(bridge.newSession).toHaveBeenCalledWith(
         '/default',
-        undefined,
+        { sourceId: 'ch' },
         expect.any(Object),
       );
     });
@@ -290,7 +302,7 @@ describe('SessionRouter', () => {
       await router.resolve('ch', 'alice', 'chat1', undefined, '');
       expect(bridge.newSession).toHaveBeenCalledWith(
         '/default',
-        undefined,
+        { sourceId: 'ch' },
         expect.any(Object),
       );
     });
