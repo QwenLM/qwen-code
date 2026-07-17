@@ -103,6 +103,7 @@ function diffPayload(
   overrides: Partial<{
     available: boolean;
     files: Array<Record<string, unknown>>;
+    hiddenCount: number;
   }> = {},
 ) {
   const files = overrides.files ?? [
@@ -124,7 +125,7 @@ function diffPayload(
     linesAdded: 2,
     linesRemoved: 1,
     files,
-    hiddenCount: 0,
+    hiddenCount: overrides.hiddenCount ?? 0,
   };
 }
 
@@ -138,6 +139,14 @@ describe('GitDiffDialog', () => {
     expect(document.body.textContent).toContain('src/a.ts');
     expect(document.body.textContent).toContain('+2');
     expect(document.body.textContent).toContain('-1');
+  });
+
+  it('shows a truncation note when more files are hidden', async () => {
+    workspaceGitDiff.mockResolvedValue(diffPayload({ hiddenCount: 3 }));
+    mount();
+    await flush();
+
+    expect(document.body.textContent).toContain('3 more file(s) not shown');
   });
 
   it('loads and renders a file diff when expanded', async () => {

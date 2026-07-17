@@ -77,7 +77,6 @@ function renderSection(
           workspace={overrides.workspace ?? trustedWorkspace}
           client={makeClient()}
           reloadToken={0}
-          primaryLabel="Primary"
           untrustedLabel="Untrusted"
           readOnlyLabel="Read-only"
           trustToOpenLabel="Trust to open"

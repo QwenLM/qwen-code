@@ -11,7 +11,8 @@
 > Web Shell 只做展示与受控操作。
 >
 > **Tech Stack:** TypeScript、React、Node `child_process`（git/gh）、Vitest、
-> Shiki（diff 高亮）、`virtual-viewport`（大 diff 虚拟化）。
+> Shiki（diff 高亮）。大 diff 靠 core 端上限 + 单文件懒加载控制，本期不引入
+> 虚拟滚动（见设计文档"本期不引入虚拟滚动"）。
 
 第一层、第二层的接口与组件细节见设计文档
 `docs/design/2026-07-16-webshell-git-status-diff.md`；本文档是全阶段路线图与
@@ -83,8 +84,9 @@ branch chip 从“分支名”升级为“实时状态条”。
   `GET /workspace/git/diff/file?path=`（单文件 hunk）。
 - SDK：`DaemonWorkspaceGitDiff` / `DaemonWorkspaceGitDiffHunks` 类型 +
   `workspaceGitDiff()` / `workspaceGitDiffFile(path)`。
-- Web Shell：`GitDiffDialog`（文件列表 → 点开按需加载行级 diff，Shiki 高亮，
-  大 diff 虚拟滚动）；`/diff` 本地化打开该弹窗；dirty chip 点击联动。
+- Web Shell：`GitDiffDialog`（文件列表 → 点开按需加载行级 diff，Shiki 高亮；
+  大 diff 靠 core 上限 + 单文件懒加载控制，本期不引入虚拟滚动）；`/diff`
+  本地化打开该弹窗；dirty chip 点击联动。
 
 详见设计文档第二层。
 
@@ -174,8 +176,9 @@ daemon 封装 `gh` CLI（需 workspace 内 `gh` 已认证），暴露 REST：
   调用（in-flight coalescing）。
 - **diff 缓存**：diff 只在文件变化时变 → 缓存 + 在 `git_branch_changed` /
   focus / index 变化时失效。
-- **大 diff 虚拟化**：复用 `docs/design/virtual-viewport` 的虚拟滚动；单文件
-  按需加载（Phase 2 已设计）；hunk 分页。
+- **大 diff 控制**：本期靠 core 端文件数/行数上限 + 单文件按需加载（Phase 2
+  已落地）+ hunk 分页；虚拟滚动（`virtual-viewport`）已明确不在本期范围，留待
+  后续。
 - **离屏解析**：diff 解析 / Shiki 高亮可放 web worker，避免阻塞主线程。
 - **请求取消 / 背压**：切走 workspace / 关闭弹窗时 abort 在途 git/gh 子进程；
   高频刷新（focus、连续 SSE）做 debounce + 丢弃过期响应（last-write-wins，按
@@ -252,7 +255,8 @@ Phase 7 远程同步
 - Phase 3 依赖 Phase 2 的 diff 查看器 UI（复用同一弹窗，加视图切换）。
 - Phase 4/5 的写操作依赖 Phase 1-3 的只读基础与确认弹窗模式。
 - Phase 6 相对独立（依赖 `gh` 认证），可在 Phase 3 之后并行推进。
-- 横切优化按需在对应阶段落地（如虚拟滚动随 Phase 2、index watch 随 Phase 1）。
+- 横切优化按需在对应阶段落地（如 index watch 随 Phase 1；虚拟滚动已降级为
+  后续项，不随 Phase 2）。
 - **信任门控是写操作的安全网**：Phase 4（commit/丢弃）、Phase 6（gh，可能泄露
   仓库信息）、Phase 7（push）落地时必须接入 workspace 信任级别（复用
   `requireTrustedWorkspaceRuntime`）；读操作（status/diff）可放开。这应在对应

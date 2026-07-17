@@ -107,6 +107,42 @@ describe('workspace Git diff routes', () => {
     expect(fetchGitDiffMock).toHaveBeenCalledWith('/work/main');
   });
 
+  it('carries the pre-rename oldPath through the file list', async () => {
+    fetchGitDiffMock.mockResolvedValue({
+      stats: { filesCount: 1, linesAdded: 2, linesRemoved: 1 },
+      perFileStats: new Map([
+        [
+          'src/new.ts',
+          { added: 2, removed: 1, isBinary: false, oldPath: 'src/old.ts' },
+        ],
+      ]),
+    });
+    const app = express();
+    registerWorkspaceGitDiffRoutes(app, {
+      boundWorkspace: '/work/main',
+      sendBridgeError,
+    });
+
+    const response = await request(app).get('/workspace/git/diff');
+
+    expect(response.status).toBe(200);
+    // The rename must survive serialization keyed by the new path with the old
+    // path carried alongside, so both the Web Shell dialog and CLI can render
+    // `old → new`.
+    expect(response.body.files).toEqual([
+      {
+        path: 'src/new.ts',
+        oldPath: 'src/old.ts',
+        added: 2,
+        removed: 1,
+        isBinary: false,
+        isUntracked: false,
+        isDeleted: false,
+        truncated: false,
+      },
+    ]);
+  });
+
   it('reports available=false when the bound workspace is not a repo', async () => {
     fetchGitDiffMock.mockResolvedValue(null);
     const app = express();

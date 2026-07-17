@@ -377,7 +377,14 @@ export async function fetchGitDiffHunksForFile(
   // that drives the diff file list. A tracked-but-unchanged or ignored file
   // yields nothing here and returns null.
   const untrackedOut = await runGit(
-    ['ls-files', '--others', '--exclude-standard', '--', relPath],
+    [
+      '--no-optional-locks',
+      'ls-files',
+      '--others',
+      '--exclude-standard',
+      '--',
+      relPath,
+    ],
     gitRoot,
   );
   if (untrackedOut && untrackedOut.trim().length > 0) {
