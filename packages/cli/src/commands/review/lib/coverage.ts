@@ -239,7 +239,6 @@ function merge(ranges: Array<[number, number]>): Array<[number, number]> {
 
 const UNCOVERABLE_RE = /^\s*Uncoverable:\s*chunk\s+(\d+)\b/im;
 
-/** A required agent, named the way a reader has to act on it. */
 /** The exact rebuild flags for one required agent — operator-facing (stderr). */
 function selectorOf(req: RequiredAgent): string {
   if (req.role === 'chunk') return `--chunk ${req.chunk}`;
@@ -248,6 +247,7 @@ function selectorOf(req: RequiredAgent): string {
     : `--role ${req.role}`;
 }
 
+/** A required agent, named the way a reader has to act on it. */
 function roleLabel(req: RequiredAgent): string {
   if (req.role === 'chunk') return `chunk ${req.chunk}`;
   const base = BRIEFS[req.role].label;
