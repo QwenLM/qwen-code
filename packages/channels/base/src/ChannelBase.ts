@@ -3147,16 +3147,19 @@ export abstract class ChannelBase {
       );
       if (hasMemory === hasMemories) return null;
 
-      const texts = hasMemory
-        ? typeof memory === 'string'
-          ? [memory.trim()]
-          : []
-        : Array.isArray(memories) &&
-            Array.from(memories).every(
-              (memory): memory is string => typeof memory === 'string',
-            )
-          ? memories.map((memory) => memory.trim())
-          : [];
+      let texts: string[] = [];
+      if (hasMemory) {
+        texts = typeof memory === 'string' ? [memory.trim()] : [];
+      } else if (Array.isArray(memories)) {
+        const snapshot = Array.from(memories);
+        if (
+          snapshot.every(
+            (memory): memory is string => typeof memory === 'string',
+          )
+        ) {
+          texts = snapshot.map((memory) => memory.trim());
+        }
+      }
       return texts.length >= 1 &&
         texts.length <= 10 &&
         texts.every((text) => text.length > 0)

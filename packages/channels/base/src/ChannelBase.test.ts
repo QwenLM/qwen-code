@@ -2034,6 +2034,88 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
+    it('dispatches the first indexed value when a classifier memory changes on a second read', async () => {
+      const channelMemory = createChannelMemory();
+      const memories = ['Use staging.', 'Run tests first.'];
+      let secondFactReads = 0;
+      Object.defineProperty(memories, '1', {
+        configurable: true,
+        enumerable: true,
+        get() {
+          secondFactReads += 1;
+          return secondFactReads === 1 ? 'Run tests first.' : 'Deploy now.';
+        },
+      });
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'remember',
+          memories,
+          confidence: 0.91,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+
+      await ch.handleInbound(
+        envelope({ text: '请记住这些偏好', senderId: 'alice' }),
+      );
+
+      expect(channelMemory.addChannelMemoryEntries).toHaveBeenCalledWith(
+        {
+          channelName: 'test-chan',
+          chatId: 'chat1',
+          threadId: undefined,
+        },
+        ['Use staging.', 'Run tests first.'],
+        'alice',
+      );
+      expect(secondFactReads).toBe(1);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('dispatches the first indexed value when a classifier memory becomes non-string on a second read', async () => {
+      const channelMemory = createChannelMemory();
+      const memories = ['Use staging.', 'Run tests first.'];
+      let secondFactReads = 0;
+      Object.defineProperty(memories, '1', {
+        configurable: true,
+        enumerable: true,
+        get() {
+          secondFactReads += 1;
+          return secondFactReads === 1 ? 'Run tests first.' : 42;
+        },
+      });
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'remember',
+          memories,
+          confidence: 0.91,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+
+      await ch.handleInbound(
+        envelope({ text: '请记住这些偏好', senderId: 'alice' }),
+      );
+
+      expect(channelMemory.addChannelMemoryEntries).toHaveBeenCalledWith(
+        {
+          channelName: 'test-chan',
+          chatId: 'chat1',
+          threadId: undefined,
+        },
+        ['Use staging.', 'Run tests first.'],
+        'alice',
+      );
+      expect(secondFactReads).toBe(1);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
     it.each([
       ['an empty array', []],
       [
