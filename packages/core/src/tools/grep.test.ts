@@ -12,6 +12,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import type { Config } from '../config/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
+import { tildeifyPath } from '../utils/paths.js';
 import { ToolErrorType } from './tool-error.js';
 import * as glob from 'glob';
 import { FileReadCache } from '../services/fileReadCache.js';
@@ -859,7 +860,7 @@ describe('GrepTool', () => {
     it('should generate correct description with pattern only', () => {
       const params: GrepToolParams = { pattern: 'testPattern' };
       const invocation = grepTool.build(params);
-      expect(invocation.getDescription()).toBe("'testPattern' in path './'");
+      expect(invocation.getDescription()).toBe("'testPattern' in .");
     });
 
     it('should generate correct description with pattern and glob', () => {
@@ -869,7 +870,7 @@ describe('GrepTool', () => {
       };
       const invocation = grepTool.build(params);
       expect(invocation.getDescription()).toBe(
-        "'testPattern' in path './' (filter: '*.ts')",
+        "'testPattern' in . (filter: '*.ts')",
       );
     });
 
@@ -881,16 +882,15 @@ describe('GrepTool', () => {
         path: path.join('src', 'app'),
       };
       const invocation = grepTool.build(params);
-      expect(invocation.getDescription()).toContain(
-        "'testPattern' in path 'src",
+      expect(invocation.getDescription()).toBe(
+        `'testPattern' in ${path.join('src', 'app')}`,
       );
-      expect(invocation.getDescription()).toContain("app'");
     });
 
     it('should indicate searching workspace directory when no path specified', () => {
       const params: GrepToolParams = { pattern: 'testPattern' };
       const invocation = grepTool.build(params);
-      expect(invocation.getDescription()).toBe("'testPattern' in path './'");
+      expect(invocation.getDescription()).toBe("'testPattern' in .");
     });
 
     it('should generate correct description with pattern, glob, and path', async () => {
@@ -902,16 +902,23 @@ describe('GrepTool', () => {
         path: path.join('src', 'app'),
       };
       const invocation = grepTool.build(params);
-      expect(invocation.getDescription()).toContain(
-        "'testPattern' in path 'src",
+      expect(invocation.getDescription()).toBe(
+        `'testPattern' in ${path.join('src', 'app')} (filter: '*.ts')`,
       );
-      expect(invocation.getDescription()).toContain("(filter: '*.ts')");
     });
 
-    it('should use ./ for root path in description', () => {
+    it('should use . for root path in description', () => {
       const params: GrepToolParams = { pattern: 'testPattern', path: '.' };
       const invocation = grepTool.build(params);
-      expect(invocation.getDescription()).toBe("'testPattern' in path '.'");
+      expect(invocation.getDescription()).toBe("'testPattern' in .");
+    });
+
+    it('should keep paths outside the project absolute (never project-relative)', () => {
+      const outside = path.resolve(os.tmpdir());
+      const params: GrepToolParams = { pattern: 'testPattern', path: outside };
+      const invocation = grepTool.build(params);
+      const description = invocation.getDescription();
+      expect(description).toBe(`'testPattern' in ${tildeifyPath(outside)}`);
     });
   });
 
