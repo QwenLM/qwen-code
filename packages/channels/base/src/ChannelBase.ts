@@ -3123,6 +3123,9 @@ export abstract class ChannelBase {
       memories?: unknown;
       targetIds?: unknown;
     };
+    const intent = result.intent;
+    const memory = result.memory;
+    const memories = result.memories;
     const targetIds = result.targetIds;
     const entryById = new Map(entries.map((entry) => [entry.id, entry]));
     const resolvedEntries =
@@ -3136,7 +3139,7 @@ export abstract class ChannelBase {
           ? this.entriesForChannelMemoryIds(entries, targetIds)
           : null;
 
-    if (result.intent === 'remember') {
+    if (intent === 'remember') {
       const hasMemory = Object.prototype.hasOwnProperty.call(result, 'memory');
       const hasMemories = Object.prototype.hasOwnProperty.call(
         result,
@@ -3145,14 +3148,14 @@ export abstract class ChannelBase {
       if (hasMemory === hasMemories) return null;
 
       const texts = hasMemory
-        ? typeof result.memory === 'string'
-          ? [result.memory.trim()]
+        ? typeof memory === 'string'
+          ? [memory.trim()]
           : []
-        : Array.isArray(result.memories) &&
-            Array.from(result.memories).every(
+        : Array.isArray(memories) &&
+            Array.from(memories).every(
               (memory): memory is string => typeof memory === 'string',
             )
-          ? result.memories.map((memory) => memory.trim())
+          ? memories.map((memory) => memory.trim())
           : [];
       return texts.length >= 1 &&
         texts.length <= 10 &&
@@ -3160,7 +3163,7 @@ export abstract class ChannelBase {
         ? { kind: 'remember', texts }
         : null;
     }
-    if (result.intent === 'list') {
+    if (intent === 'list') {
       if (resolvedEntries === undefined) return { kind: 'list', page: 1 };
       if (resolvedEntries === null) return null;
       return resolvedEntries.length === 0
@@ -3170,15 +3173,11 @@ export abstract class ChannelBase {
             ids: resolvedEntries.map((entry) => entry.id),
           };
     }
-    if (result.intent === 'clear_all') {
+    if (intent === 'clear_all') {
       return { kind: 'clear_request' };
     }
 
-    if (
-      result.intent !== 'inspect' &&
-      result.intent !== 'update' &&
-      result.intent !== 'remove'
-    ) {
+    if (intent !== 'inspect' && intent !== 'update' && intent !== 'remove') {
       return null;
     }
     if (resolvedEntries === null || resolvedEntries === undefined) return null;
@@ -3191,15 +3190,15 @@ export abstract class ChannelBase {
     }
 
     const entry = resolvedEntries[0]!;
-    if (result.intent === 'inspect') return { kind: 'inspect', id: entry.id };
-    if (result.intent === 'remove') {
+    if (intent === 'inspect') return { kind: 'inspect', id: entry.id };
+    if (intent === 'remove') {
       return {
         kind: 'natural_remove',
         id: entry.id,
         expectedText: entry.text,
       };
     }
-    const text = typeof result.memory === 'string' ? result.memory.trim() : '';
+    const text = typeof memory === 'string' ? memory.trim() : '';
     if (text) {
       return {
         kind: 'natural_update',

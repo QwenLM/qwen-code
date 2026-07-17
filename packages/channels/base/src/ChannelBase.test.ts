@@ -1996,6 +1996,44 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
+    it('dispatches the validated snapshot when classifier memories getter mutates', async () => {
+      const channelMemory = createChannelMemory();
+      const memories = ['Use staging.', 'Run tests first.'];
+      let memoriesReads = 0;
+      const classification = {
+        intent: 'remember',
+        confidence: 0.91,
+        get memories() {
+          memoriesReads += 1;
+          if (memoriesReads === 3) delete memories[1];
+          return memories;
+        },
+      };
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue(classification),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+
+      await ch.handleInbound(
+        envelope({ text: '请记住这些偏好', senderId: 'alice' }),
+      );
+
+      expect(channelMemory.addChannelMemoryEntries).toHaveBeenCalledWith(
+        {
+          channelName: 'test-chan',
+          chatId: 'chat1',
+          threadId: undefined,
+        },
+        ['Use staging.', 'Run tests first.'],
+        'alice',
+      );
+      expect(memoriesReads).toBe(1);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
     it.each([
       ['an empty array', []],
       [
