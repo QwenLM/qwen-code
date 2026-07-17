@@ -588,8 +588,11 @@ export function coverageFromTranscripts(
     // serialized args): a bare substring would credit `${brief}.bak` for the brief,
     // the same trap `parseTranscript` avoids for the diff path.
     // The ASSIGNED transcript must have opened this requirement's brief. The
-    // matching preferred brief-opening edges, so an unopened assignment means no
-    // valid opened assignment existed.
+    // matching SEEDS on brief-opening edges, but maximizing satisfied
+    // requirements can displace an opened match onto an unopened edge — so an
+    // unread flag here describes this assignment, not an impossibility. That is
+    // the right trade: missing-role claims stay provable, and an unread brief
+    // still caps.
     const opened = pick.successfulCallArgs.some((a) =>
       a.includes(JSON.stringify(brief)),
     );
