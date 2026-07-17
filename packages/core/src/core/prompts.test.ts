@@ -64,7 +64,57 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).toContain(
       'genuinely safer alternative that does not accomplish the denied action',
     );
-    expect(prompt).toContain('stop and ask the user for explicit approval');
+    expect(prompt).toContain(
+      'request explicit approval only when the current interaction mode can receive it',
+    );
+  });
+
+  it.each([
+    [
+      'interactive',
+      'an interactive CLI agent',
+      "Use 'ask_user_question' when you need clarification",
+    ],
+    [
+      'headless',
+      'a non-interactive CLI agent',
+      'Never ask the user a question',
+    ],
+    [
+      'acp',
+      'a CLI agent operating through an ACP host',
+      'The ACP host can relay the question and response',
+    ],
+  ] as const)(
+    'aligns the system prompt with %s mode',
+    (mode, role, questionGuidance) => {
+      vi.stubEnv('SANDBOX', undefined);
+      const prompt = getCoreSystemPrompt(undefined, undefined, undefined, mode);
+
+      expect(prompt).toContain(`You are Qwen Code, ${role}`);
+      expect(prompt).toContain(questionGuidance);
+    },
+  );
+
+  it('does not tell headless runs to wait for user input', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    vi.mocked(isGitRepository).mockReturnValue(true);
+    const prompt = getCoreSystemPrompt(
+      undefined,
+      undefined,
+      undefined,
+      'headless',
+    );
+
+    expect(prompt).not.toContain('stop and ask the user for explicit approval');
+    expect(prompt).not.toContain('ask clarifying questions');
+    expect(prompt).not.toContain('If unsure, ask the user');
+    expect(prompt).not.toContain(
+      'ask for clarification or confirmation where needed',
+    );
+    expect(
+      prompt.lastIndexOf('This is a non-interactive, single-turn run'),
+    ).toBeGreaterThan(prompt.lastIndexOf('# Examples'));
   });
 
   it('does not tell the model to enter plan mode without user opt-in', () => {

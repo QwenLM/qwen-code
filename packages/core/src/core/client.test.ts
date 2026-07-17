@@ -542,6 +542,8 @@ describe('Gemini Client (client.ts)', () => {
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(true),
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getSdkMode: vi.fn().mockReturnValue(false),
+      getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
+      isInteractive: vi.fn().mockReturnValue(false),
       getIdeModeFeature: vi.fn().mockReturnValue(false),
       getIdeMode: vi.fn().mockReturnValue(true),
       getDebugMode: vi.fn().mockReturnValue(false),
@@ -8551,8 +8553,40 @@ Other open files:
         '',
         'test-model',
         'Be extra concise.',
+        'headless',
       );
     });
+
+    it.each([
+      ['interactive', true, false],
+      ['acp', false, true],
+    ] as const)(
+      'should pass %s mode to the core system prompt',
+      async (mode, interactive, acp) => {
+        const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+        const abortSignal = new AbortController().signal;
+
+        vi.mocked(getCoreSystemPrompt).mockClear();
+        vi.mocked(client['config'].isInteractive).mockReturnValue(interactive);
+        vi.mocked(
+          client['config'].getExperimentalZedIntegration,
+        ).mockReturnValue(acp);
+
+        await client.generateContent(
+          contents,
+          {},
+          abortSignal,
+          DEFAULT_QWEN_FLASH_MODEL,
+        );
+
+        expect(getCoreSystemPrompt).toHaveBeenCalledWith(
+          '',
+          'test-model',
+          undefined,
+          mode,
+        );
+      },
+    );
 
     it('should append config appendSystemPrompt after a config system prompt override', async () => {
       const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];

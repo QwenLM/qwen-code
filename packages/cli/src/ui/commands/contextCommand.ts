@@ -123,7 +123,16 @@ export async function collectContextData(
   // refines the messages-vs-cache split, not the headline total or tier.
   const apiCachedTokens = uiTelemetryService.getLastCachedContentTokenCount();
 
-  const systemPromptText = getCoreSystemPrompt(undefined, modelName);
+  const systemPromptText = getCoreSystemPrompt(
+    undefined,
+    modelName,
+    undefined,
+    config.getExperimentalZedIntegration()
+      ? 'acp'
+      : config.isInteractive()
+        ? 'interactive'
+        : 'headless',
+  );
   const systemPromptTokens = estimateTokens(systemPromptText);
 
   const toolRegistry = config.getToolRegistry();

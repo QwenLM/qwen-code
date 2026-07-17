@@ -798,6 +798,11 @@ export class GeminiClient {
       userMemory,
       this.config.getModel(),
       appendSystemPrompt,
+      this.config.getExperimentalZedIntegration()
+        ? 'acp'
+        : this.config.isInteractive()
+          ? 'interactive'
+          : 'headless',
     );
     return gitStatus ? base + '\n\n' + gitStatus : base;
   }
