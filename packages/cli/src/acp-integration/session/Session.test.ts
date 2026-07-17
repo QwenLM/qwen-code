@@ -17451,6 +17451,69 @@ describe('Session', () => {
       internals.notificationProcessing = false;
     });
 
+    it('preserves queued related notifications when the queue is full', async () => {
+      const relatedAgents = Array.from({ length: 21 }, (_value, index) => ({
+        id: `related-agent-${index}`,
+        isBackgrounded: true,
+        status: 'running',
+        notified: false,
+      }));
+      mockBackgroundTaskRegistry.getAll.mockReturnValue([]);
+      rebuildSessionWithGuard();
+      const execute = installPendingTodoTool();
+      execute.mockImplementation(async () => {
+        mockBackgroundTaskRegistry.getAll.mockReturnValue(relatedAgents);
+        return {
+          llmContent: JSON.stringify(pendingTodos),
+          returnDisplay: {
+            type: 'todo_list',
+            todos: pendingTodos,
+            changes: {},
+          },
+        };
+      });
+      queuePendingTodoThenNaturalStops();
+
+      await runGuardPrompt();
+
+      const internals = session as unknown as {
+        notificationProcessing: boolean;
+        notificationQueue: Array<{ taskId: string }>;
+      };
+      internals.notificationProcessing = true;
+      const callback =
+        mockBackgroundTaskRegistry.setNotificationCallback.mock.calls.at(
+          -1,
+        )?.[0] as (
+          displayText: string,
+          modelText: string,
+          meta: { agentId: string; status: string },
+        ) => void;
+      for (let index = 0; index < 20; index++) {
+        callback('related result', '<related-result />', {
+          agentId: `related-agent-${index}`,
+          status: 'completed',
+        });
+      }
+      debugLoggerWarnSpy.mockClear();
+      callback('overflow result', '<overflow-result />', {
+        agentId: 'related-agent-20',
+        status: 'completed',
+      });
+
+      expect(internals.notificationQueue).toHaveLength(20);
+      expect(internals.notificationQueue[0]?.taskId).toBe('related-agent-0');
+      expect(
+        internals.notificationQueue.some(
+          (item) => item.taskId === 'related-agent-20',
+        ),
+      ).toBe(false);
+      expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+        'Notification queue overflow: dropping related task=related-agent-20 kind=agent because all queued items are related',
+      );
+      internals.notificationProcessing = false;
+    });
+
     it('protects a related notification while FIFO priority outlives guard trust', () => {
       const oldAgents = Array.from({ length: 20 }, (_value, index) => ({
         id: `fifo-old-agent-${index}`,

@@ -4636,7 +4636,12 @@ export class Session implements SessionContext {
           );
           return;
         }
-        if (evictedIndex < 0) evictedIndex = 0;
+        if (evictedIndex < 0) {
+          debugLogger.warn(
+            `Notification queue overflow: dropping related task=${item.taskId} kind=${item.kind} because all queued items are related`,
+          );
+          return;
+        }
       }
       const [evicted] = this.notificationQueue.splice(evictedIndex, 1);
       debugLogger.warn(
