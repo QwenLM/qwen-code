@@ -1,0 +1,30 @@
+{
+  "release-smoke-v1": {
+    "n_concurrent_trials": 1,
+    "datasets": [
+      {
+        "name": "swe-bench/swe-bench-verified",
+        "ref": "sha256:b934b0cc3dc800fe945eaf9f1623329db97ee3133c706d20644524c7759fb341",
+        "task_names": ["swe-bench/psf__requests-6028"]
+      },
+      {
+        "name": "terminal-bench/terminal-bench-2-1",
+        "ref": "sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a",
+        "task_names": ["terminal-bench/write-compressor"]
+      }
+    ]
+  },
+  "release-full-v1": {
+    "n_concurrent_trials": 1,
+    "datasets": [
+      {
+        "name": "swe-bench/swe-bench-verified",
+        "ref": "sha256:b934b0cc3dc800fe945eaf9f1623329db97ee3133c706d20644524c7759fb341"
+      },
+      {
+        "name": "terminal-bench/terminal-bench-2-1",
+        "ref": "sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a"
+      }
+    ]
+  }
+}

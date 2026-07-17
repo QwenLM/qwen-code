@@ -1,0 +1,12 @@
+eval.121-41-14-199.nip.io {
+	request_body {
+		max_size 1MB
+	}
+	reverse_proxy 127.0.0.1:8000
+}
+
+harbor.121-41-14-199.nip.io {
+	@write method POST PUT PATCH DELETE
+	respond @write 405
+	reverse_proxy 127.0.0.1:8080
+}

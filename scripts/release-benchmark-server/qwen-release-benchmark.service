@@ -1,0 +1,21 @@
+[Unit]
+Description=Qwen release benchmark service
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ecs-user
+Group=ecs-user
+WorkingDirectory=/home/ecs-user/qwen-benchmark
+EnvironmentFile=/home/ecs-user/qwen-benchmark/.env
+ExecStart=/home/ecs-user/qwen-benchmark/.venv/bin/uvicorn app:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
