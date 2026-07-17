@@ -113,6 +113,7 @@ import {
   type WebShellSidebarFooterOptions,
   type WebShellSidebarLockedWorkspace,
 } from './components/sidebar/WebShellSidebar';
+import { isSidebarToggleShortcut } from './components/sidebar/sidebarToggleShortcut';
 import {
   getLocalCommands,
   localizeBuiltinDescriptions,
@@ -1146,6 +1147,33 @@ export function App({
     setSidebarCollapsed(collapsed);
     writeSidebarCollapsed(collapsed);
   }, []);
+
+  // #5074: Cmd+B / Ctrl+B toggles the session sidebar, matching the editor
+  // convention (VS Code et al.). It works while any element is focused —
+  // the composer has no bold formatting, so nothing competes for the
+  // binding. Phone-width layouts render the sidebar as a drawer, so the
+  // shortcut toggles that instead of the collapsed rail.
+  useEffect(() => {
+    if (!sidebarOptions.enabled) return undefined;
+    const onKey = (e: KeyboardEvent) => {
+      if (!isSidebarToggleShortcut(e)) return;
+      e.preventDefault();
+      if (window.matchMedia('(max-width: 760px)').matches) {
+        setMobileDrawerOpen((open) => {
+          if (open) setForceMobileDrawer(false);
+          return !open;
+        });
+        return;
+      }
+      setSidebarCollapsed((collapsed) => {
+        const next = !collapsed;
+        writeSidebarCollapsed(next);
+        return next;
+      });
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [sidebarOptions.enabled]);
   const customization = useMemo(
     () => ({
       composerTagIcons,
