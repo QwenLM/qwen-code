@@ -62,9 +62,9 @@ The labels in this document are normative:
 
 | Layer or surface                                                                                | Impact                               | Required work                                                                                                                                                                            |
 | ----------------------------------------------------------------------------------------------- | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/channels/base/src/ChannelBase.ts`                                                     | Change required — shared Channel     | Add run identity, exact-run cancellation, semantic question normalization, presentation settlement, and command gating for a card-presented question.                                    |
+| `packages/channels/base/src/ChannelBase.ts`                                                     | Change required — shared Channel     | Add run identity, exact-run cancellation, semantic question normalization, presentation settlement, and structured-question command handling.                                            |
 | `packages/channels/base/src/types.ts` and exports                                               | Change required — shared Channel     | Add the semantic-input types and an optional public lifecycle `runId`; events emitted by `ChannelBase` always populate it.                                                               |
-| `packages/channels/dingtalk`                                                                    | DingTalk-only change                 | Add card configuration, Card OpenAPI access, callback parsing, owner checks, two registries, serialized projections, degradation, and tests.                                             |
+| `packages/channels/dingtalk`                                                                    | DingTalk-only change                 | Add card configuration, Card OpenAPI access, callback parsing, owner checks, two registries, bounded coalesced projections, degradation, and tests.                                      |
 | This design document                                                                            | Change required — documentation only | Record the final payload, ownership, change-impact, lifecycle, degradation, and acceptance contracts.                                                                                    |
 | Existing architecture assets                                                                    | No change                            | They already show the shared seam, DingTalk-local paths, and unaffected-client boundary; the written contract supplies the field-level detail.                                           |
 | `packages/core`, `ask_user_question`, and `ToolConfirmationPayload`                             | No change                            | Continue producing semantic questions and consuming `answers`.                                                                                                                           |
@@ -87,9 +87,8 @@ type UserInputPresentationResult =
 
 type UserInputSettlementReason =
   | 'resolved_outside_card'
-  | 'request_cancelled'
-  | 'run_cancelled'
-  | 'expired';
+  | 'cancelled'
+  | 'run_cancelled';
 
 type ChannelUserInputResponse = RequestPermissionResponse & {
   answers?: Record<string, string>;
@@ -111,7 +110,6 @@ interface ChannelUserInputRequestContext {
   sessionId: string;
   runId: string;
   target: SessionTarget;
-  ownerId: string;
   questions: ChannelUserQuestion[];
   submitOptionId: string;
   settlementSignal: AbortSignal;
@@ -123,7 +121,7 @@ protected presentUserInputRequest(
 ): Promise<UserInputPresentationResult>;
 ```
 
-`settlementSignal.reason` contains a `UserInputSettlementReason`. The context contains no template ID, action ID, DingTalk callback payload, or mutable bridge object. `submitOptionId` is the original permission option advertised as `allow_once`; the adapter never hard-codes `proceed_once`.
+`settlementSignal.reason` contains a `UserInputSettlementReason`. `ChannelBase` is the only writer and routes every abort through a private helper whose reason parameter is typed as that union; adapters receive only the read-only signal and do not cast or call `AbortController.abort()` themselves. The context contains no template ID, action ID, DingTalk callback payload, owner-domain type, or mutable bridge object. `submitOptionId` is the original permission option advertised as `allow_once`; for compatibility with current producers, an option whose ID is `proceed_once` and whose `kind` is absent is treated the same way. The adapter never invents an option ID.
 
 ### Semantic request recognition
 
@@ -139,9 +137,9 @@ The hook is inserted after the pending permission and its settlement controller 
 
 ```text
 store PendingPermission + settlement controller
-active = current Channel-owned ActivePrompt for event.sessionId
-normalize semantic question + advertised allow_once option
-if valid question and active has runId + ownerId + submitOptionId:
+active = current attended Channel-owned ActivePrompt for event.sessionId
+normalize semantic question + compatible allow_once option
+if valid question and active has runId + submitOptionId:
   construct context from active and normalized questions
   result = presentUserInputRequest(context)
   presented   -> mark structured input as presented, keep pending, and return
@@ -152,9 +150,9 @@ format and send the existing permission message
 
 The `respond` closure is the only adapter-visible settlement operation. It binds the request ID, forwards the complete response through the existing bridge, and performs the same pending cleanup on `true`, `false`, and throw paths. `handled` is valid only after the adapter has invoked that closure, normally to cancel a question after presenting a readable fallback. It is not a second way to leave a request pending.
 
-Every path that removes a pending permission settles the controller exactly once. This includes permission commands, the context responder, daemon `permissionResolved`, the effective question timeout, session cleanup, task cancellation, and bridge replacement. `ChannelBase` classifies an independent `permissionResolved` from its `outcome` before removing the pending request: `cancelled`, or a selected option whose original permission option is `reject_once`, becomes `request_cancelled`; any other or missing outcome becomes the neutral `resolved_outside_card`. This classification does not guess which client responded.
+Every path that removes a pending permission settles the controller exactly once. This includes permission commands, the context responder, daemon `permissionResolved`, session cleanup, task cancellation, and bridge replacement. A locally known run cancellation settles with `run_cancelled` before a later collapsed bridge outcome can overwrite it. An independent `permissionResolved` with a cancelled outcome, or with the original reject option, becomes the neutral `cancelled`; another or missing outcome becomes `resolved_outside_card`. The bridge does not preserve enough cause information to infer timeout versus denial versus cleanup, so this classification never labels an unknown cancellation as `expired` and never guesses which client responded. The DingTalk-local question timer owns the distinct `expired` projection before it calls the responder.
 
-The hook is only eligible for the current Channel-owned `ActivePrompt`. When no such prompt, `runId`, or owner exists, `ChannelBase` does not construct the context or invoke the hook; it treats presentation as `unsupported` and continues the existing permission path. A run started by CLI, Web, IDE, SDK, or another client therefore creates neither DingTalk card. The initial design does not add cross-client run ownership or identity federation.
+The hook is only eligible for the current attended Channel-owned `ActivePrompt`. `loopPrompt === true` is ineligible; that excludes both scheduled loop jobs and webhook producers, whose message IDs and senders are synthetic rather than human DingTalk input. When no eligible active prompt or `runId` exists, `ChannelBase` does not construct the context or invoke the hook; it treats presentation as `unsupported` and continues the existing permission path. The adapter independently requires a real DingTalk inbound-message ownership record for the run. A run started by CLI, Web, IDE, SDK, another client, a loop, or a webhook therefore creates neither card-bound interaction. The initial design does not add cross-client run ownership, public owner lifecycle fields, or identity federation.
 
 The default hook returns `unsupported`. Other IM adapters therefore retain their current permission formatting and commands.
 
@@ -180,7 +178,7 @@ The claim is an adapter-local in-flight lock, not a lifecycle state. An asynchro
 
 Card-action authorization is stricter than shared-session message authorization. Stop, submit, and cancel are always owner-only regardless of `sessionScope`.
 
-At inbound-message time, DingTalk already prefers `senderStaffId` and falls back to `senderId` for the envelope sender. Card creation stores a typed owner key in the same identity domain. The callback router normalizes the callback's `userId`, `senderStaffId`, or `senderId` into a comparable typed key and requires an exact match. If no comparable identity is available, the action fails closed.
+At inbound-message time, DingTalk already prefers `senderStaffId` and falls back to `senderId` for the envelope sender. Before handing a real inbound turn to `ChannelBase`, the adapter records `messageId -> DingTalkOwnerKey`. The map follows the existing inbound-message cap of 1,000 entries. A matching `started` lifecycle event consumes and removes that mapping, creates a DingTalk-local run/status record, and binds the same Channel-generated `runId` to the typed owner. Loop and webhook message IDs never enter the map. Terminal run cleanup removes the run/status record after finalizing its questions. The callback router normalizes the callback's `userId`, `senderStaffId`, or `senderId` into the same typed domain and requires an exact match. If no comparable identity is available, the action fails closed.
 
 A foreign-user callback is acknowledged and logged but cannot mutate a run, permission request, or card.
 
@@ -188,14 +186,15 @@ A foreign-user callback is acknowledged and logged but cannot mutate a run, perm
 
 Only the DingTalk adapter reads `interactiveCards` and registers the card callback topic. It owns:
 
-- A shared authenticated Card OpenAPI client.
-- A status-card registry keyed by `runId` and `outTrackId`.
+- A shared authenticated Card OpenAPI client that applies the fixed 10-second request timeout to both card types.
+- A bounded real-inbound owner map.
+- A run/status registry keyed by `runId`, with an optional status-card `outTrackId`.
 - A question-card registry keyed by `requestId` and `outTrackId`.
 - An owner-validating callback router.
-- Per-card serialized update queues, transient in-flight claims, and terminal tombstones.
+- Per-card coalesced writers, transient in-flight claims, and bounded terminal tombstones.
 - DingTalk-local fallback and structured error reporting.
 
-The status registry also keeps `pendingQuestionRequestIds: Set<string>` for each run. The question registry does not supersede an older request merely because a newer request exists in the same session.
+The run/status record keeps `pendingQuestionRequestIds: Set<string>` independently of whether a status card is enabled or created. The question registry does not supersede an older request merely because a newer request exists in the same session. Every terminal question path goes through one `finalizeQuestion` operation: it removes the live question record, clears its timer and settlement subscription, removes the request ID from the run set, re-derives `waiting_input` when a non-terminal status card exists, and replaces the live record with a compact tombstone. Submit, cancel, responder `false`, responder throw, independent settlement, local timeout, and request/run destruction all use this operation. A terminal status card ignores later set mutations.
 
 ## Streaming status-card lifecycle — DingTalk-only change
 
@@ -205,8 +204,10 @@ Creation and streaming follow DingTalk's streaming-card protocol:
 
 1. Call `createAndDeliver` with a unique `outTrackId` and initial `flowStatus=2`.
 2. Open streaming with an empty full update using `isFull=true`, `isFinalize=false`, and `isError=false`.
-3. Send high-frequency model output through `/card/streaming`.
+3. Accumulate model output locally and send coalesced full snapshots through `/card/streaming`.
 4. Send low-frequency template variables such as status text through `/card/instances` with `updateCardDataByKey=true`.
+
+Raw chunks never become one network request each. Each status record allows at most one Card OpenAPI write in flight and one replaceable pending full snapshot. A fixed 500 ms minimum flush interval coalesces newer chunks into that pending snapshot. Visible content is capped at 20,000 characters; overflow drops the oldest content and inserts a truncation marker rather than growing memory. Every Card OpenAPI call has a 10-second timeout. An intermediate timeout or failure records a structured error, stops further streaming writes for that card, and retains the latest bounded text for the awaited final delivery path.
 
 `running` and `waiting_input` are Qwen Code presentation states; both keep DingTalk `flowStatus=2` and streaming open. The transition rules are:
 
@@ -224,13 +225,17 @@ running | waiting_input -> cancelled
 
 The core lifecycle remains `cancelled`; no `stopped` event is introduced. A cancellation with reason `cancel_command` may be presented as “Stopped” in DingTalk, while other cancellation reasons may be presented as “Cancelled”.
 
-Terminal updates follow one serialized order:
+For `blockStreaming !== 'on'`, DingTalk overrides the existing awaited `onResponseComplete()` seam. That method consumes the latest accumulated text, cancels a pending flush timer, waits for the single in-flight write within its timeout, performs the completed final instance update, and falls back to the existing Markdown sender if card creation or finalization did not succeed. `ChannelBase` therefore emits `completed` only after one awaited delivery path finishes. No new shared terminal-delivery hook is added.
 
-1. Stop accepting new streaming chunks and drain already accepted mutations.
+When `blockStreaming === 'on'`, DingTalk does not create a status card and does not consume raw lifecycle chunks for card delivery; the existing `BlockStreamer` remains the only response-delivery path. Question cards remain independently eligible. `onTaskLifecycle` records terminal causes and may make best-effort failed/cancelled projections, but it is not treated as an awaited delivery guarantee.
+
+Terminal status-card updates follow one bounded order:
+
+1. Stop accepting new streaming chunks, cancel the flush timer, and fold the single pending snapshot into the final bounded content instead of replaying each original chunk.
 2. If streaming was opened, close it with `isFinalize=true`.
 3. Commit the final content, copyable content, status text, and `flowStatus=3` with one `/card/instances` update.
 
-Completed, failed, and cancelled all project to DingTalk `flowStatus=3`; the final content and status text distinguish them. Once terminal, the per-`outTrackId` queue rejects late streaming updates.
+Completed, failed, and cancelled all project to DingTalk `flowStatus=3`; the final content and status text distinguish them. Once terminal, the per-`outTrackId` writer rejects late streaming updates.
 
 ## Form callback-card lifecycle — DingTalk-only change
 
@@ -244,7 +249,7 @@ Each pending record contains:
 - The typed owner identity.
 - The original one-shot responder.
 - Timeout and settlement subscriptions.
-- The local state and a terminal tombstone.
+- The local state; terminalization replaces the record with a compact tombstone.
 
 The callback order is authoritative:
 
@@ -252,9 +257,9 @@ The callback order is authoritative:
 2. Parse the submit or cancel payload without changing the record.
 3. Validate the action owner.
 4. Synchronously claim the current live record before the first asynchronous operation.
-5. Call the original responder.
-6. If the same record is still current and non-terminal, update the card from the responder result.
-7. Acknowledge the callback.
+5. Acknowledge the callback immediately. Invalid, duplicate, stale, and foreign-owner callbacks are also acknowledged exactly once after their synchronous checks.
+6. Call the original responder.
+7. If the same record is still current and non-terminal, finalize and project the card from the responder result.
 
 Submit encodes the form using the existing cross-client contract:
 
@@ -282,7 +287,7 @@ The card never displays submission success before the responder accepts the answ
 | `respond(...) === false`           | `cancelled`             | Non-interactive `card_status=cancelled`, “Permission no longer pending” |
 | `respond(...)` throws              | `cancelled`             | Non-interactive failure projection, disabled, and not retryable         |
 | Independent non-cancel settlement  | `resolved_outside_card` | Non-interactive `card_status=cancelled`, “Resolved outside this card”   |
-| Independent cancel/deny settlement | `cancelled`             | Non-interactive `card_status=cancelled`, “Cancelled outside this card”  |
+| Independent collapsed cancellation | `cancelled`             | Non-interactive `card_status=cancelled`, neutral “Cancelled”            |
 | Timeout                            | `expired`               | Expired and disabled                                                    |
 | Request or run destroyed           | `cancelled`             | Cancelled or Stopped and disabled                                       |
 | Duplicate or late callback         | Existing terminal state | Acknowledge and ignore                                                  |
@@ -292,7 +297,7 @@ The `resolved_outside_card` local state is entered only from an independent non-
 
 The existing daemon bridge consumes the request-to-session mapping when `respondToPermission()` throws, and `ChannelBase` removes the pending request on the same path. A later daemon `permissionResolved` is no longer a reliable cleanup signal because the bridge may reject it as an unknown request. DingTalk therefore logs the failure, removes its pending record, retains the terminal tombstone, and immediately makes a best-effort non-success projection. It does not release the claim or promise callback retry.
 
-`AcpBridge` emits `permissionResolved` synchronously before a successful `respondToPermission()` returns. While the DingTalk responder claim is in flight, the adapter therefore defers the matching settlement projection until the responder result and callback action are known. An accepted submit becomes `submitted`; an accepted cancel becomes `cancelled`; `false` and throws use the terminal rows above. A settlement received without a local responder claim follows the outcome-aware rows above. The daemon bridge emits its successful settlement later, after it has retained a responded-request mapping; if the card is already terminal, the tombstone ignores that event. Timeout, request/run cancellation, and task terminal events are not deferred and still take precedence. This arbitration reuses the transient claim and adds no public processing state, retry queue, or error taxonomy.
+`AcpBridge` emits `permissionResolved` synchronously before a successful `respondToPermission()` returns. While the DingTalk responder claim is in flight, the adapter therefore defers the matching settlement projection until the responder result and callback action are known. An accepted submit becomes `submitted`; an accepted cancel becomes `cancelled`; `false` and throws use the terminal rows above. A settlement received without a local responder claim follows the outcome-aware rows above. The daemon bridge emits its successful settlement later, after it has retained a responded-request mapping; if the card is already terminal, the tombstone ignores that event. The DingTalk-local timer first finalizes the live card as `expired` and then calls the responder, so the bridge's collapsed cancellation cannot relabel it. A locally known run cancellation similarly finalizes as `run_cancelled` before bridge cleanup. Unknown collapsed cancellations remain the neutral `cancelled`. This arbitration reuses the transient claim and adds no public processing state, retry queue, or error taxonomy.
 
 An instance update is a UI projection, not the permission transaction. If the responder succeeds but the subsequent card update fails, the permission remains resolved, the local record remains terminal, duplicate callbacks remain rejected, and the adapter logs the failed UI projection.
 
@@ -319,12 +324,12 @@ The capability configuration is local to DingTalk. It is parsed by the DingTalk 
 
 The effective question lifetime is the smaller of the configured timeout and the host permission lifetime.
 
-Template IDs are built-in DingTalk Channel assets, not user configuration:
+Template IDs are built-in DingTalk Channel assets, not user configuration. The reference plugin uses these IDs with the installing bot's own DingTalk credentials; they are not treated as resources owned by the reference repository's AppKey:
 
 - Status card: `675cde2f-f526-40cb-b828-f5b2b57b8b77.schema`
 - Question card: `c2a6355b-9724-4f7e-9653-d33fcb3311bb.schema`
 
-The design does not add user-supplied template configuration or a startup health check. A first-use OpenAPI rejection is reported with the template ID and enters the documented degradation path.
+The design does not add user-supplied template configuration or a startup health check. A first-use OpenAPI rejection is a loud structured error containing the template ID and DingTalk error code, and then enters the documented degradation path.
 
 Evidence for the built-in asset contract and callback flow:
 
@@ -337,21 +342,22 @@ These PRs provide Card OpenAPI and template evidence. Qwen Code does not copy th
 
 The initial design does not add a background retry queue and does not retain a persistent `presentation_failed` state.
 
-| Situation                                     | Behavior                                                                                                                                                                      |
-| --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Status card disabled or creation/update fails | Continue the same turn with existing Markdown delivery and record a structured card error.                                                                                    |
-| Question card created                         | Return `presented`; keep the original permission pending.                                                                                                                     |
-| Question card disabled or creation fails      | Send readable semantic Markdown, state that the question was cancelled and can be retried, cancel the original request, return `handled`, and log the template-aware failure. |
-| No current Channel-owned active run           | Treat presentation as `unsupported`; skip both DingTalk cards and preserve the existing permission path.                                                                      |
-| Exact-run cancellation returns `false`        | Release the transient claim only if the same record remains current and non-terminal; keep the status card active so Stop can be retried.                                     |
-| Question responder returns `false`            | Finish with the existing cancelled projection and a neutral “Permission no longer pending” message.                                                                           |
-| Question responder throws                     | Remove the pending record, finish the claimed record as cancelled, retain a tombstone, project non-success immediately, and do not advertise callback retry.                  |
-| Another path resolves first                   | When no local responder claim is in flight, classify the settlement outcome as cancelled/denied or `resolved_outside_card` and use a neutral projection.                      |
-| Request/run is destroyed                      | Settle as request/run cancellation; project the card as cancelled or Stopped.                                                                                                 |
-| Another IM adapter owns the session           | Return `unsupported` and preserve its existing permission message and commands.                                                                                               |
-| Ordinary permission                           | Keep `/approve`, `/approve-always`, and `/deny` unchanged; it does not affect the question-only `waiting_input` presentation state.                                           |
+| Situation                                           | Behavior                                                                                                                                                                                          |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Status card disabled or creation/final update fails | Use the existing awaited Markdown response delivery and record a structured card error. Intermediate update failure stops further streaming writes and preserves bounded text for final delivery. |
+| `blockStreaming === 'on'`                           | Skip the status card; retain the existing `BlockStreamer` delivery path. Question cards remain independently eligible.                                                                            |
+| Question card created                               | Return `presented`; keep the original permission pending.                                                                                                                                         |
+| Question card disabled or creation fails            | Send readable semantic Markdown, state that the question was cancelled and can be retried, cancel the original request, return `handled`, and log the template-aware failure.                     |
+| No current Channel-owned active run                 | Treat presentation as `unsupported`; skip both DingTalk cards and preserve the existing permission path.                                                                                          |
+| Exact-run cancellation returns `false`              | Release the transient claim only if the same record remains current and non-terminal; keep the status card active so Stop can be retried.                                                         |
+| Question responder returns `false`                  | Finish with the existing cancelled projection and a neutral “Permission no longer pending” message.                                                                                               |
+| Question responder throws                           | Remove the pending record, finish the claimed record as cancelled, retain a tombstone, project non-success immediately, and do not advertise callback retry.                                      |
+| Another path resolves first                         | When no local responder claim is in flight, classify a collapsed cancellation as neutral `cancelled`; use `resolved_outside_card` only for a non-cancel outcome.                                  |
+| Request/run is destroyed                            | Settle as request/run cancellation; project the card as cancelled or Stopped.                                                                                                                     |
+| Another IM adapter owns the session                 | Return `unsupported` and preserve its existing permission message and commands.                                                                                                                   |
+| Ordinary permission                                 | Keep `/approve`, `/approve-always`, and `/deny` unchanged; it does not affect the question-only `waiting_input` presentation state.                                                               |
 
-For a card-presented question, `/approve`, `/approve-always`, and `/deny` remain recognized commands but do not call the responder; they instruct the user to submit or cancel through the card. The card is the only DingTalk-local settlement surface for that presented request. This is required because the existing permission commands supply only an option ID or cancellation outcome, while a question submission consumes a separate `answers` object. Other permissions and adapters keep their current command behavior. The initial design does not promise automatic callback retry.
+For a card-presented question, `/approve` and `/approve-always` remain recognized but do not call the responder; they instruct the user to submit through the card because approval cannot supply the required `answers` object. `/deny [requestId]` remains an escape hatch because denial is already complete without answers. `ChannelBase` requires the command sender to match the originating prompt sender, then routes the denial through the same one-shot context responder so card settlement, registry cleanup, and first-responder-wins semantics remain intact. Ambiguous requests retain the existing explicit-request-ID prompt. Other permissions and adapters keep their current command behavior. The initial design does not promise automatic callback retry.
 
 ## Client impact — existing clients remain unchanged
 
@@ -379,18 +385,24 @@ The implementation is complete only when the following behavior is covered. Thes
 - Exact-run cancellation succeeds only for the current ID. Missing, stale, and mismatched IDs return `false` and never fall back to session-only cancellation.
 - The semantic normalizer accepts canonical `_meta.qwenInteractionKind` plus `_meta.qwenQuestions`, assigns ordered string answer keys, and normalizes missing `multiSelect` to `false`.
 - The compatibility path accepts `rawInput.questions` only for an identified AskUserQuestion tool and does not misclassify another tool with a `questions` argument.
+- Submit-option normalization accepts `kind: allow_once` and the current legacy `proceed_once` option with no `kind`, and never invents an option ID.
 - `presented`, `handled`, and `unsupported` each follow their declared pending-ownership behavior.
-- A card-presented question cannot be resolved by `/approve`, `/approve-always`, or `/deny` without structured answers; ordinary permissions retain those commands.
+- Loop and webhook prompts are ineligible for semantic-card presentation even though they emit ordinary lifecycle events.
+- A card-presented question cannot be approved by `/approve` or `/approve-always`; owner-only `/deny [requestId]` uses the same one-shot responder, while ordinary permissions retain all commands.
+- Settlement aborts are written only through the typed `UserInputSettlementReason` helper; locally known run cancellation wins over a later collapsed bridge cancellation.
 - Direct response, external `permissionResolved`, timeout, cancellation, session death, bridge replacement, and send failure settle and remove the pending record exactly once.
 
 ### DingTalk adapter tests — DingTalk-only change
 
-- A Channel-owned `started` event creates one status card, chunks preserve order, and each terminal lifecycle closes streaming before the final instance update.
+- A real human DingTalk `started` event binds one eligible run from its inbound message and owner; synthetic, unknown, loop, and webhook message IDs create no eligible run or card.
+- With block streaming off, one status card coalesces chunks with at most one write in flight and one bounded pending snapshot; completed delivery awaits finalization and falls back to Markdown. With block streaming on, no status card is created and existing block delivery remains authoritative.
 - Stop validates owner and card identity, claims once, cancels only the matching `runId`, rejects duplicates, and remains retryable only after a non-terminal `false` result.
 - One permission request creates one question card containing all questions and their ordered answer keys; multiple requests in the same run remain independent.
 - Submit selects the original advertised `allow_once` option, encodes single, multi-select, and custom answers as `Record<string, string>`, and directly resolves the original request.
-- Cancel, timeout, run cancellation, request destruction, external resolution, duplicate callback, responder `false`, responder throw, and card projection failure follow the lifecycle table without reopening a terminal record.
+- Callback transport is acknowledged exactly once after synchronous parse, correlation, authorization, and claim, and before any responder or Card OpenAPI await.
+- Submit, cancel, timeout, run cancellation, request destruction, external resolution, duplicate callback, responder `false`, responder throw, and card projection failure all use `finalizeQuestion`, clear the run-level pending set, and never reopen a terminal record.
 - A foreign or unidentifiable callback user fails closed and cannot mutate either registry.
+- Streaming content, Card OpenAPI duration, and terminal tombstones obey their fixed size/time bounds; terminal records contain no responder, answers, questions, timers, subscriptions, or queued content.
 - Disabling cards or rejecting a template follows the documented status or question degradation path without exposing raw request JSON.
 
 ### End-to-end reviewer verification — changed DingTalk behavior
@@ -419,6 +431,6 @@ Each adapter should opt in through a separate change so its platform-specific ca
 
 ## Risks and scope boundaries
 
-The first implementation is intentionally daemon-local. Pending-card registries and tombstones are tied to the process lifetime; restart-safe recovery and non-sticky multi-instance callback routing require a separate persistence design.
+The first implementation is intentionally daemon-local. Live pending-card registries are tied to the process lifetime; restart-safe recovery and non-sticky multi-instance callback routing require a separate persistence design. A terminal record is compacted to only callback correlation, terminal state, and expiry metadata, retained for 10 minutes for callback redelivery, and stored in insertion-ordered maps capped at 1,000 entries per card type. Expiry and oldest-entry eviction reclaim it; no responder, question payload, answer payload, timer, subscription, or queued content survives terminalization.
 
 This proposal does not add cross-client run ownership or identity mapping, a cross-channel text-answer protocol, free-form reply parsing, synthetic message injection, a general cross-channel card framework, a callback retry system, or a new processing/error state machine. Runtime implementation and end-to-end verification follow only after this design is accepted.
