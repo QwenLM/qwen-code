@@ -451,7 +451,7 @@ export function SettingsMessage({
       themeGroup.items.splice(themeIndex + 1, 0, localItem);
     } else {
       groups.push({
-        id: formatSettingCategory('UI', t),
+        id: 'UI',
         label: formatSettingCategory('UI', t),
         items: [localItem],
       });
