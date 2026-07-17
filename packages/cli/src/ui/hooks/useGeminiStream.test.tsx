@@ -23,6 +23,7 @@ import type {
   EditorType,
   GeminiClient,
   AnyToolInvocation,
+  SteerInput,
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
@@ -131,9 +132,17 @@ vi.mock('./shellCommandProcessor.js', () => ({
 
 vi.mock('./atCommandProcessor.js');
 
-vi.mock('../utils/markdownUtilities.js', () => ({
-  findLastSafeSplitPoint: vi.fn((s: string) => s.length),
-}));
+vi.mock('../utils/markdownUtilities.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/markdownUtilities.js')>();
+  return {
+    ...actual,
+    // Only the split-point chooser is mocked so tests can drive commit
+    // boundaries per-case. The real splitFencedMarkdown / getEnclosingFenceInfo
+    // run, so fence detection and repair match production.
+    findLastSafeSplitPoint: vi.fn((s: string) => s.length),
+  };
+});
 
 vi.mock('./useLogger.js', () => ({
   useLogger: vi.fn().mockReturnValue({
@@ -1070,7 +1079,7 @@ describe('useGeminiStream', () => {
     );
   });
 
-  it('records mid-turn queued user messages before submitting tool results', async () => {
+  it('records mid-turn queued user messages after tool results accept them', async () => {
     const queuedPrompt = 'save the logs locally first';
     const recordMidTurnUserMessage = vi.fn();
     mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
@@ -1110,7 +1119,10 @@ describe('useGeminiStream', () => {
       } as TrackedCompletedToolCall,
     ];
     const midTurnDrainRef = {
-      current: vi.fn().mockReturnValue([queuedPrompt]),
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
     };
 
     let capturedOnComplete:
@@ -1157,9 +1169,7 @@ describe('useGeminiStream', () => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
     });
 
-    const expectedMidTurnMessage = {
-      text: `\n[User message received during tool execution]: ${queuedPrompt}`,
-    };
+    const expectedMidTurnMessage = { text: queuedPrompt };
     expect(recordMidTurnUserMessage).toHaveBeenCalledWith(
       [expectedMidTurnMessage],
       queuedPrompt,
@@ -1172,8 +1182,8 @@ describe('useGeminiStream', () => {
     expect(recordMidTurnUserMessage.mock.invocationCallOrder[0]).toBeLessThan(
       mockAddItem.mock.invocationCallOrder[queuedPromptAddItemIndex],
     );
-    expect(recordMidTurnUserMessage.mock.invocationCallOrder[0]).toBeLessThan(
-      mockSendMessageStream.mock.invocationCallOrder[0],
+    expect(mockSendMessageStream.mock.invocationCallOrder[0]).toBeLessThan(
+      recordMidTurnUserMessage.mock.invocationCallOrder[0],
     );
     expect(mockAddItem).toHaveBeenCalledWith(
       { type: MessageType.NOTIFICATION, text: queuedPrompt },
@@ -1183,7 +1193,149 @@ describe('useGeminiStream', () => {
       [...toolCallResponseParts, expectedMidTurnMessage],
       expect.any(AbortSignal),
       'prompt-id-midturn',
-      { type: SendMessageType.ToolResult },
+      expect.objectContaining({
+        type: SendMessageType.ToolResult,
+        steerInput: expect.objectContaining({
+          parts: [expectedMidTurnMessage],
+          accept: expect.any(Function),
+          restore: expect.any(Function),
+        }),
+      }),
+    );
+  });
+
+  it('provides queued steer input to core at the next sampling boundary', async () => {
+    const steeredPrompt = 'focus on the error handling';
+    const recordMidTurnUserMessage = vi.fn();
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordMidTurnUserMessage,
+    });
+    mockSendMessageStream.mockImplementation(() => (async function* () {})());
+    const drainSteer = vi
+      .fn<() => string[]>()
+      .mockReturnValueOnce([steeredPrompt])
+      .mockReturnValue([]);
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        { current: drainSteer },
+      ),
+    );
+
+    await act(async () => {
+      await result.current.submitQuery(
+        'start the analysis',
+        SendMessageType.UserQuery,
+        'prompt-id-steer',
+      );
+    });
+
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    const sendOptions = mockSendMessageStream.mock.calls[0][3] as {
+      getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
+    };
+    expect(sendOptions.getSteerInput).toEqual(expect.any(Function));
+    let steerInput: SteerInput | undefined;
+    await act(async () => {
+      steerInput = await sendOptions.getSteerInput!(
+        new AbortController().signal,
+      );
+    });
+    expect(steerInput?.parts).toEqual([{ text: steeredPrompt }]);
+    expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
+    expect(mockAddItem).not.toHaveBeenCalledWith(
+      { type: MessageType.NOTIFICATION, text: steeredPrompt },
+      expect.any(Number),
+    );
+    steerInput?.accept();
+    expect(recordMidTurnUserMessage).toHaveBeenCalledWith(
+      [{ text: steeredPrompt }],
+      steeredPrompt,
+    );
+    expect(mockAddItem).toHaveBeenCalledWith(
+      { type: MessageType.NOTIFICATION, text: steeredPrompt },
+      expect.any(Number),
+    );
+  });
+
+  it('restores drained steer input when attachment resolution is cancelled', async () => {
+    const steeredPrompt = 'inspect @/tmp/slow.png';
+    const restoreSteer = vi.fn();
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockImplementation(
+      () => new Promise(() => {}),
+    );
+    const drainSteer = vi
+      .fn<() => string[]>()
+      .mockReturnValueOnce([steeredPrompt])
+      .mockReturnValue([]);
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        { current: drainSteer },
+        undefined,
+        undefined,
+        undefined,
+        { current: restoreSteer },
+      ),
+    );
+
+    await act(async () => {
+      await result.current.submitQuery('start the analysis');
+    });
+    const sendOptions = mockSendMessageStream.mock.calls[0][3] as {
+      getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
+    };
+    const abort = new AbortController();
+    let steerInput: SteerInput | undefined;
+    await act(async () => {
+      const pending = sendOptions.getSteerInput!(abort.signal);
+      abort.abort();
+      steerInput = await pending;
+    });
+
+    expect(steerInput).toBeUndefined();
+    expect(restoreSteer).toHaveBeenCalledWith([steeredPrompt]);
+    expect(mockAddItem).not.toHaveBeenCalledWith(
+      { type: MessageType.NOTIFICATION, text: steeredPrompt },
+      expect.any(Number),
     );
   });
 
@@ -1263,7 +1415,10 @@ describe('useGeminiStream', () => {
       } as TrackedCompletedToolCall,
     ];
     const midTurnDrainRef = {
-      current: vi.fn().mockReturnValue([queuedPrompt]),
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
     };
 
     let capturedOnComplete:
@@ -1310,11 +1465,7 @@ describe('useGeminiStream', () => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
     });
 
-    const expectedMidTurnParts: Part[] = [
-      {
-        text: `\n[User message received during tool execution]: ${transcriptPart.text}`,
-      },
-    ];
+    const expectedMidTurnParts: Part[] = [transcriptPart];
     expect(mockRunVisionBridge).toHaveBeenCalledWith({
       config: mockConfig,
       parts: [resolvedTextPart, resolvedImagePart],
@@ -1361,7 +1512,7 @@ describe('useGeminiStream', () => {
       [...toolCallResponseParts, ...expectedMidTurnParts],
       expect.any(AbortSignal),
       'prompt-id-midturn-image',
-      { type: SendMessageType.ToolResult },
+      expect.objectContaining({ type: SendMessageType.ToolResult }),
     );
   });
 
@@ -1436,7 +1587,10 @@ describe('useGeminiStream', () => {
       } as TrackedCompletedToolCall,
     ];
     const midTurnDrainRef = {
-      current: vi.fn().mockReturnValue([queuedPrompt]),
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
     };
 
     let capturedOnComplete:
@@ -1484,11 +1638,7 @@ describe('useGeminiStream', () => {
     expect(sent).toContain('inspect @/tmp/screenshot.png and summarize');
     expect(sent).not.toContain('inlineData');
     expect(recordMidTurnUserMessage).toHaveBeenCalledWith(
-      [
-        {
-          text: `\n[User message received during tool execution]: ${resolvedTextPart.text}`,
-        },
-      ],
+      [resolvedTextPart],
       queuedPrompt,
     );
   });
@@ -1557,7 +1707,10 @@ describe('useGeminiStream', () => {
       } as TrackedCompletedToolCall,
     ];
     const midTurnDrainRef = {
-      current: vi.fn().mockReturnValue([queuedPrompt]),
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
     };
 
     let capturedOnComplete:
@@ -1630,7 +1783,7 @@ describe('useGeminiStream', () => {
       toolCallResponseParts,
       expect.any(AbortSignal),
       'prompt-id-midturn-at-error',
-      { type: SendMessageType.ToolResult },
+      expect.objectContaining({ type: SendMessageType.ToolResult }),
     );
   });
 
@@ -1677,7 +1830,10 @@ describe('useGeminiStream', () => {
       } as TrackedCompletedToolCall,
     ];
     const midTurnDrainRef = {
-      current: vi.fn().mockReturnValue([queuedPrompt]),
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
     };
 
     let capturedOnComplete:
@@ -1736,7 +1892,7 @@ describe('useGeminiStream', () => {
       toolCallResponseParts,
       expect.any(AbortSignal),
       'prompt-id-midturn-at-throw',
-      { type: SendMessageType.ToolResult },
+      expect.objectContaining({ type: SendMessageType.ToolResult }),
     );
   });
 
@@ -1802,7 +1958,10 @@ describe('useGeminiStream', () => {
       } as TrackedCompletedToolCall,
     ];
     const midTurnDrainRef = {
-      current: vi.fn().mockReturnValue([queuedPrompt]),
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
     };
 
     let capturedOnComplete:
@@ -1912,7 +2071,10 @@ describe('useGeminiStream', () => {
       } as TrackedCompletedToolCall,
     ];
     const midTurnDrainRef = {
-      current: vi.fn().mockReturnValue([queuedPrompt]),
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
     };
 
     let capturedOnComplete:
@@ -2019,7 +2181,10 @@ describe('useGeminiStream', () => {
       } as TrackedCompletedToolCall,
     ];
     const midTurnDrainRef = {
-      current: vi.fn().mockReturnValue([queuedPrompt]),
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
     };
 
     let capturedOnComplete:
@@ -2123,7 +2288,10 @@ describe('useGeminiStream', () => {
       } as TrackedCompletedToolCall,
     ];
     const midTurnDrainRef = {
-      current: vi.fn().mockReturnValue([queuedPrompt]),
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
     };
 
     let capturedOnComplete:
@@ -2175,15 +2343,10 @@ describe('useGeminiStream', () => {
       expect.any(Number),
     );
     expect(mockSendMessageStream).toHaveBeenCalledWith(
-      [
-        ...toolCallResponseParts,
-        {
-          text: `\n[User message received during tool execution]: ${queuedPrompt}`,
-        },
-      ],
+      [...toolCallResponseParts, { text: queuedPrompt }],
       expect.any(AbortSignal),
       'prompt-id-midturn',
-      { type: SendMessageType.ToolResult },
+      expect.objectContaining({ type: SendMessageType.ToolResult }),
     );
   });
 
@@ -4385,6 +4548,76 @@ describe('useGeminiStream', () => {
       });
     });
 
+    it('repairs the fence when an oversized thought is split inside a code block', async () => {
+      vi.useFakeTimers();
+
+      const splitLimit = 16_384;
+      vi.mocked(findLastSafeSplitPoint).mockImplementation(
+        (s: string, max?: number) =>
+          max !== undefined && s.length > max ? max : s.length,
+      );
+
+      // A reasoning stream whose fenced code block spans the char-cap boundary.
+      const codeBody = Array.from(
+        { length: 2000 },
+        (_, i) => `const x${i} = ${i};`,
+      ).join('\n');
+      const longThought = '```ts\n' + codeBody;
+      expect(longThought.length).toBeGreaterThan(splitLimit);
+
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      const mockStream = (async function* () {
+        yield {
+          type: ServerGeminiEventType.Thought,
+          value: { description: longThought },
+        };
+        await holdStream;
+      })();
+      mockSendMessageStream.mockReturnValue(mockStream);
+
+      const { result } = renderTestHook();
+      act(() => {
+        void result.current.submitQuery('test query');
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(60);
+      });
+
+      const thoughtItems = mockAddItem.mock.calls
+        .map(([item]) => item as HistoryItem)
+        .filter(
+          (item) =>
+            item.type === 'gemini_thought' ||
+            item.type === 'gemini_thought_content',
+        );
+      // The committed head is a self-contained fenced block (opening fence +
+      // synthetic closing fence), not an unterminated one.
+      expect(thoughtItems.length).toBeGreaterThanOrEqual(1);
+      const head = thoughtItems[0]!;
+      expect(head.text.startsWith('```ts')).toBe(true);
+      expect(head.text.trimEnd().endsWith('```')).toBe(true);
+      // The pending tail re-opens the fence (with a continued gutter directive)
+      // instead of leaking code as prose.
+      const pendingText = result.current.pendingHistoryItems[0]?.text ?? '';
+      expect(pendingText.startsWith('```ts')).toBe(true);
+      expect(pendingText).toContain('qwen-code:start-line=');
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+      await act(async () => {
+        releaseStream();
+      });
+    });
+
     it('splits oversized streamed content by rendered height so the pending item stays bounded', async () => {
       vi.useFakeTimers();
 
@@ -4668,6 +4901,102 @@ describe('useGeminiStream', () => {
       const pendingLines =
         pendingText.length === 0 ? 0 : pendingText.split('\n').length;
       expect(pendingLines).toBeLessThanOrEqual(12);
+
+      act(() => result.current.cancelOngoingRequest());
+      await act(async () => {
+        releaseStream();
+      });
+    });
+
+    it('commits a code block taller than the viewport incrementally (no stall-then-dump)', async () => {
+      vi.useFakeTimers();
+      vi.mocked(findLastSafeSplitPoint).mockImplementation(
+        (s: string, cap?: number) =>
+          cap === undefined ? s.length : Math.min(cap, s.length),
+      );
+
+      // Intro + blank, then a fenced code block far taller than the budget
+      // (terminalHeight 24 → budget 7) whose lines carry NO blank-line boundary,
+      // then a trailing paragraph. Before the fence-aware mid-block commit, the
+      // whole block had no safe split point and stayed pending — frozen on its
+      // head — until finalize dumped it at once. It must now commit in chunks.
+      const codeLines = Array.from(
+        { length: 40 },
+        (_, i) => `int v${i} = ${i};`,
+      );
+      const content = [
+        'Here is some C++:',
+        '',
+        '```cpp',
+        ...codeLines,
+        '```',
+        '',
+        'And a normal paragraph after the code.',
+      ].join('\n');
+
+      const { result } = renderTestHook();
+      const releaseStream = await streamContent(result, content);
+
+      // Committed BEFORE finalize (streamContent holds the stream open): early
+      // code lines already landed in <Static> rather than waiting to dump.
+      const committed = geminiContentItems();
+      expect(committed.length).toBeGreaterThanOrEqual(2);
+      expect(committed.some((item) => item.text.includes('int v0 = 0;'))).toBe(
+        true,
+      );
+      // Every committed chunk that carries code lines is a self-contained fenced
+      // block (the split closed/re-opened the fence — no orphaned prose tail).
+      for (const item of committed) {
+        if (item.text.includes('int v')) {
+          expect(item.text).toContain('```');
+        }
+      }
+      // The live pending frame is bounded, not the whole 40+ line block.
+      const pendingText = result.current.pendingHistoryItems[0]?.text ?? '';
+      const pendingLines =
+        pendingText.length === 0 ? 0 : pendingText.split('\n').length;
+      expect(pendingLines).toBeLessThanOrEqual(12);
+
+      act(() => result.current.cancelOngoingRequest());
+      await act(async () => {
+        releaseStream();
+      });
+    });
+
+    it('keeps a tall mermaid block whole (never splits it mid-diagram)', async () => {
+      vi.useFakeTimers();
+      vi.mocked(findLastSafeSplitPoint).mockImplementation(
+        (s: string, cap?: number) =>
+          cap === undefined ? s.length : Math.min(cap, s.length),
+      );
+
+      // A mermaid block far taller than the budget with no blank lines. Unlike a
+      // plain code block, mermaid needs its whole source to render a diagram, so
+      // it must NOT be hard-split — it stays pending until it completes.
+      const nodes = Array.from(
+        { length: 40 },
+        (_, i) => `  A${i} --> A${i + 1}`,
+      );
+      const content = [
+        'Here is a diagram:',
+        '',
+        '```mermaid',
+        'graph TD',
+        ...nodes,
+      ].join('\n');
+
+      const { result } = renderTestHook();
+      const releaseStream = await streamContent(result, content);
+
+      // Nothing containing mermaid edges was committed mid-block: no committed
+      // chunk carries a partial diagram.
+      for (const item of geminiContentItems()) {
+        expect(item.text.includes('-->')).toBe(false);
+      }
+      // The whole diagram source sits in the (bounded-by-render) pending item.
+      const pendingText = result.current.pendingHistoryItems[0]?.text ?? '';
+      expect(pendingText).toContain('```mermaid');
+      expect(pendingText).toContain('graph TD');
 
       act(() => result.current.cancelOngoingRequest());
       await act(async () => {

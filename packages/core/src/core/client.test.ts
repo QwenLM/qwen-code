@@ -22,7 +22,7 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Content, GenerateContentResponse, Part } from '@google/genai';
-import { GeminiClient, SendMessageType } from './client.js';
+import { GeminiClient, SendMessageType, type SteerInput } from './client.js';
 import { MESSAGE_DISPLAY_DEBOUNCE_MS } from './message-display-buffer.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
@@ -570,6 +570,9 @@ describe('Gemini Client (client.ts)', () => {
       // Mimics the resolved Config getter: always a number (Infinity keeps
       // the cap out of the way of unrelated streaming tests).
       getMaxToolCallsPerTurn: vi.fn().mockReturnValue(Number.POSITIVE_INFINITY),
+      // Explicit values are hard caps; the cap tests below set a finite value
+      // and rely on hard-cap behavior.
+      isMaxToolCallsPerTurnExplicit: vi.fn().mockReturnValue(true),
       getChatRecordingService: vi.fn().mockReturnValue(undefined),
       getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
@@ -8071,7 +8074,9 @@ Other open files:
           (event: string) => event === 'Stop',
         );
         // Cap of 4: each turn's 3 tool calls fit, but 6 accumulated across
-        // the continuation boundary would not.
+        // the continuation boundary would not. The value is explicit, so it is
+        // a hard cap (no adaptive extension) and this stays a genuine guard on
+        // the reset.
         vi.mocked(mockConfig.getMaxToolCallsPerTurn).mockReturnValue(4);
 
         client['chat'] = {
@@ -8212,6 +8217,316 @@ Other open files:
 
         // messageBus.request SHOULD be called for UserPromptSubmit
         expect(mockMessageBus.request).toHaveBeenCalled();
+      });
+
+      it('does not run UserPromptSubmit hooks for same-turn steer input', async () => {
+        const mockMessageBus = {
+          request: vi.fn().mockResolvedValue({ modifiedPrompt: undefined }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'UserPromptSubmit',
+        );
+
+        const stream = client.sendMessageStream(
+          [{ text: 'focus on error handling' }],
+          new AbortController().signal,
+          'prompt-steer',
+          { type: SendMessageType.Steer },
+        );
+        for await (const _ of stream) {
+          // consume stream
+        }
+
+        expect(mockMessageBus.request).not.toHaveBeenCalled();
+      });
+
+      it('consumes steer input before running Stop hooks', async () => {
+        const mockMessageBus = {
+          request: vi.fn().mockResolvedValue({ output: undefined }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'Stop',
+        );
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'response' };
+          })(),
+        );
+        const getSteerInput = vi
+          .fn<() => Promise<SteerInput | undefined>>()
+          .mockResolvedValueOnce({
+            parts: [{ text: 'focus on error handling' }],
+            accept: vi.fn(),
+            restore: vi.fn(),
+          })
+          .mockResolvedValue(undefined);
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'start the analysis' }],
+            new AbortController().signal,
+            'prompt-steer-before-stop',
+            { type: SendMessageType.UserQuery, getSteerInput },
+          ),
+        );
+
+        expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+        expect(getLastTurnRequestText()).toContain('focus on error handling');
+        expect(getSteerInput.mock.invocationCallOrder[0]).toBeLessThan(
+          mockMessageBus.request.mock.invocationCallOrder[0],
+        );
+      });
+
+      it('consumes input queued during a blocking Stop hook before its continuation', async () => {
+        const mockMessageBus = {
+          request: vi
+            .fn()
+            .mockResolvedValueOnce({
+              output: { decision: 'block', reason: 'Keep working' },
+              stopHookCount: 1,
+            })
+            .mockResolvedValue({ output: undefined }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'Stop',
+        );
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'response' };
+          })(),
+        );
+        const getSteerInput = vi
+          .fn<() => Promise<SteerInput | undefined>>()
+          .mockResolvedValueOnce(undefined)
+          .mockResolvedValueOnce({
+            parts: [{ text: 'also check the tests' }],
+            accept: vi.fn(),
+            restore: vi.fn(),
+          })
+          .mockResolvedValue(undefined);
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'start the analysis' }],
+            new AbortController().signal,
+            'prompt-steer-during-stop',
+            { type: SendMessageType.UserQuery, getSteerInput },
+          ),
+        );
+
+        expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+        expect(getLastTurnRequestText()).toContain('Keep working');
+        expect(getLastTurnRequestText()).toContain('also check the tests');
+      });
+
+      it('uses input queued during next-speaker classification for the continuation', async () => {
+        const { checkNextSpeaker } = await import(
+          '../utils/nextSpeakerChecker.js'
+        );
+        vi.mocked(checkNextSpeaker)
+          .mockResolvedValueOnce({
+            next_speaker: 'model',
+            reasoning: 'continue',
+          })
+          .mockResolvedValue(null);
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'response' };
+          })(),
+        );
+        const getSteerInput = vi
+          .fn<() => Promise<SteerInput | undefined>>()
+          .mockResolvedValueOnce(undefined)
+          .mockResolvedValueOnce({
+            parts: [{ text: 'focus on the failing test' }],
+            accept: vi.fn(),
+            restore: vi.fn(),
+          })
+          .mockResolvedValue(undefined);
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'start the analysis' }],
+            new AbortController().signal,
+            'prompt-steer-during-next-speaker',
+            { type: SendMessageType.UserQuery, getSteerInput },
+          ),
+        );
+
+        expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+        expect(getLastTurnRequestText()).toContain('focus on the failing test');
+        expect(getLastTurnRequestText()).not.toContain('Please continue.');
+      });
+
+      it('does not drain steer input without another model-turn budget', async () => {
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'response' };
+          })(),
+        );
+        const getSteerInput = vi.fn<() => Promise<SteerInput | undefined>>();
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'start the analysis' }],
+            new AbortController().signal,
+            'prompt-steer-no-budget',
+            { type: SendMessageType.UserQuery, getSteerInput },
+            1,
+          ),
+        );
+
+        expect(getSteerInput).not.toHaveBeenCalled();
+      });
+
+      it('restores steer input when the continuation fails before history accepts it', async () => {
+        client.getChat().getUserContentPushCount = vi.fn().mockReturnValue(0);
+        mockTurnRunFn
+          .mockImplementationOnce(() =>
+            (async function* () {
+              yield { type: GeminiEventType.Content, value: 'response' };
+            })(),
+          )
+          .mockImplementationOnce(() => {
+            throw new Error('setup failed before history push');
+          });
+        const restore = vi.fn();
+        const getSteerInput = vi
+          .fn<() => Promise<SteerInput | undefined>>()
+          .mockResolvedValueOnce({
+            parts: [{ text: 'do not lose this' }],
+            accept: vi.fn(),
+            restore,
+          });
+
+        await expect(
+          fromAsync(
+            client.sendMessageStream(
+              [{ text: 'start the analysis' }],
+              new AbortController().signal,
+              'prompt-steer-restore',
+              { type: SendMessageType.UserQuery, getSteerInput },
+            ),
+          ),
+        ).rejects.toThrow('setup failed before history push');
+
+        expect(restore).toHaveBeenCalledOnce();
+      });
+
+      it('settles an attached ToolResult steer only after history accepts it', async () => {
+        let pushCount = 0;
+        client.getChat().getUserContentPushCount = vi.fn(() => pushCount);
+        mockTurnRunFn.mockImplementation(() => {
+          pushCount = 1;
+          return (async function* () {
+            yield { type: GeminiEventType.Content, value: 'response' };
+          })();
+        });
+        const accept = vi.fn();
+        const restore = vi.fn();
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'tool result plus steer' }],
+            new AbortController().signal,
+            'prompt-attached-steer-accept',
+            {
+              type: SendMessageType.ToolResult,
+              steerInput: {
+                parts: [{ text: 'steer' }],
+                accept,
+                restore,
+              },
+            },
+          ),
+        );
+
+        expect(accept).toHaveBeenCalledOnce();
+        expect(restore).not.toHaveBeenCalled();
+      });
+
+      it('restores an attached ToolResult steer when history never accepts it', async () => {
+        client.getChat().getUserContentPushCount = vi.fn().mockReturnValue(0);
+        mockTurnRunFn.mockImplementationOnce(() => {
+          throw new Error('setup failed before history push');
+        });
+        const accept = vi.fn();
+        const restore = vi.fn();
+
+        await expect(
+          fromAsync(
+            client.sendMessageStream(
+              [{ text: 'tool result plus steer' }],
+              new AbortController().signal,
+              'prompt-attached-steer-restore',
+              {
+                type: SendMessageType.ToolResult,
+                steerInput: {
+                  parts: [{ text: 'steer' }],
+                  accept,
+                  restore,
+                },
+              },
+            ),
+          ),
+        ).rejects.toThrow('setup failed before history push');
+
+        expect(accept).not.toHaveBeenCalled();
+        expect(restore).toHaveBeenCalledOnce();
+      });
+
+      it('restores an attached ToolResult steer when UserPromptSubmit blocks it', async () => {
+        client.getChat().getUserContentPushCount = vi.fn().mockReturnValue(0);
+        const mockMessageBus = {
+          request: vi.fn().mockResolvedValue({
+            output: { decision: 'block', reason: 'blocked by hook' },
+          }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'UserPromptSubmit',
+        );
+        const accept = vi.fn();
+        const restore = vi.fn();
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'tool result plus steer' }],
+            new AbortController().signal,
+            'prompt-attached-steer-blocked',
+            {
+              type: SendMessageType.ToolResult,
+              steerInput: {
+                parts: [{ text: 'steer' }],
+                accept,
+                restore,
+              },
+            },
+          ),
+        );
+
+        expect(mockTurnRunFn).not.toHaveBeenCalled();
+        expect(accept).not.toHaveBeenCalled();
+        expect(restore).toHaveBeenCalledOnce();
       });
     });
 

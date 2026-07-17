@@ -111,6 +111,12 @@ describe('DashScopeOpenAICompatibleProvider', () => {
     });
   });
 
+  it('enables content-only thinking-tag leak detection', () => {
+    expect(provider.getResponseParsingOptions()).toEqual({
+      contentOnlyThinkingTagLeaks: true,
+    });
+  });
+
   describe('isDashScopeProvider', () => {
     it('should return true for QWEN_OAUTH auth type', () => {
       const config = {

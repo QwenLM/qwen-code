@@ -1767,7 +1767,7 @@ export class Config {
    * (the setting declares `requiresRestart`); `Infinity` = no expiry. */
   private readonly cronRecurringMaxAgeDays: number;
   private readonly agentTeamEnabled: boolean = false;
-  private readonly artifactEnabled: boolean = false;
+  private readonly artifactEnabled: boolean = true;
   private readonly artifactAutoOpen: boolean = true;
   private readonly artifactPublisher: 'local' | 'host' | 'oss' = 'local';
   private readonly artifactHost?: ArtifactHostConfig;
@@ -1805,6 +1805,7 @@ export class Config {
   private readonly worktreeSettings: WorktreeSettings;
   private readonly skipLoopDetection: boolean;
   private readonly maxToolCallsPerTurn: number;
+  private readonly maxToolCallsPerTurnExplicit: boolean;
   private readonly skipStartupContext: boolean;
   private readonly bareMode: boolean;
   private readonly safeMode: boolean;
@@ -2018,7 +2019,7 @@ export class Config {
       params.cronRecurringMaxAgeDays,
     );
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
-    this.artifactEnabled = params.artifactEnabled ?? false;
+    this.artifactEnabled = params.artifactEnabled ?? true;
     this.artifactAutoOpen = params.artifactAutoOpen ?? true;
     this.artifactPublisher = params.artifactPublisher ?? 'local';
     this.artifactHost = params.artifactHost;
@@ -2052,6 +2053,9 @@ export class Config {
     this.maxToolCallsPerTurn = validateMaxToolCallsPerTurn(
       params.maxToolCallsPerTurn,
     );
+    // Whether the user explicitly set the cap (vs. the resolved default). An
+    // explicit value is honored as a hard cap; the default is adaptive.
+    this.maxToolCallsPerTurnExplicit = params.maxToolCallsPerTurn !== undefined;
     this.skipStartupContext = params.skipStartupContext ?? false;
     this.bareMode = params.bareMode ?? false;
     this.safeMode = params.safeMode ?? isSafeModeEnv();
@@ -5398,12 +5402,10 @@ export class Config {
   }
 
   isArtifactEnabled(): boolean {
-    // Artifacts are experimental and opt-in. Publishing writes outside the
-    // project and opens a browser, so it is limited to interactive, non-SDK
-    // sessions. QWEN_CODE_DISABLE_ARTIFACT hard-disables both artifact tools;
-    // QWEN_CODE_ENABLE_ARTIFACT force-enables interactive artifact tooling
-    // here. isRecordArtifactEnabled() also treats it as an opt-in for the
-    // metadata-only daemon record_artifact tool.
+    // Publishing writes outside the project and opens a browser, so it is
+    // limited to interactive, non-SDK sessions. QWEN_CODE_DISABLE_ARTIFACT
+    // hard-disables both artifact tools; QWEN_CODE_ENABLE_ARTIFACT remains as
+    // a compatibility override for old configs that explicitly disabled them.
     if (process.env['QWEN_CODE_DISABLE_ARTIFACT'] === '1') return false;
     if (this.sdkMode) return false;
     if (!this.interactive) return false;
@@ -6037,6 +6039,16 @@ export class Config {
       return Number.POSITIVE_INFINITY;
     }
     return this.maxToolCallsPerTurn;
+  }
+
+  /**
+   * Whether maxToolCallsPerTurn was explicitly configured (vs. the resolved
+   * default). An explicit value is treated as a hard cap (the released
+   * contract); the default is treated adaptively (see
+   * LoopDetectionService.checkTurnToolCallCap).
+   */
+  isMaxToolCallsPerTurnExplicit(): boolean {
+    return this.maxToolCallsPerTurnExplicit;
   }
 
   getSkipStartupContext(): boolean {

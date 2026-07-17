@@ -3,6 +3,7 @@ import {
   createInputAnnotationsFromComposerTags,
   getComposerTagIconUrl,
   getComposerTagViewModel,
+  isBuiltinComposerTagIconUrl,
   splitComposerTagContentByAnnotations,
 } from './composerTag';
 
@@ -40,6 +41,20 @@ describe('composer tag icon URLs', () => {
 
   it('falls back to built-in tag icons', () => {
     expect(getComposerTagIconUrl('file')).toBeTruthy();
+  });
+
+  it('recognizes only exact built-in tag icon URLs', () => {
+    for (const kind of ['extension', 'file', 'mcp', 'skill'] as const) {
+      const iconUrl = getComposerTagIconUrl(kind);
+      expect(iconUrl).toMatch(/^data:image\/svg\+xml/);
+      expect(isBuiltinComposerTagIconUrl(iconUrl)).toBe(true);
+    }
+    expect(
+      isBuiltinComposerTagIconUrl(
+        'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" />',
+      ),
+    ).toBe(false);
+    expect(isBuiltinComposerTagIconUrl('javascript:alert(1)')).toBe(false);
   });
 
   it('ignores inherited object properties', () => {

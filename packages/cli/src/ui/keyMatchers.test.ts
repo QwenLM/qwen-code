@@ -48,6 +48,8 @@ describe('keyMatchers', () => {
     [Command.ESCAPE]: (key: Key) => key.name === 'escape',
     [Command.SUBMIT]: (key: Key) =>
       key.name === 'return' && !key.ctrl && !key.meta && !key.paste,
+    [Command.QUEUE_MESSAGE]: (key: Key) =>
+      key.name === 'q' && key.ctrl && !key.meta && !key.shift && !key.paste,
     [Command.NEWLINE]: (key: Key) =>
       key.name === 'return' && (key.ctrl || key.meta || key.paste),
     [Command.VOICE_PUSH_TO_TALK]: (key: Key) =>
@@ -235,6 +237,17 @@ describe('keyMatchers', () => {
         createKey('return', { ctrl: true }),
         createKey('return', { meta: true }),
         createKey('return', { paste: true }),
+      ],
+    },
+    {
+      command: Command.QUEUE_MESSAGE,
+      positive: [createKey('q', { ctrl: true })],
+      negative: [
+        createKey('q'),
+        createKey('q', { ctrl: true, meta: true }),
+        createKey('q', { ctrl: true, shift: true }),
+        createKey('q', { ctrl: true, paste: true }),
+        createKey('return', { ctrl: true }),
       ],
     },
     {

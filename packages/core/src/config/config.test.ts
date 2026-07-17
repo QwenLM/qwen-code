@@ -2618,7 +2618,7 @@ describe('Server Config (config.ts)', () => {
     });
 
     it('does not register artifact tools when artifacts are disabled', async () => {
-      const config = new Config({ ...baseParams });
+      const config = new Config({ ...baseParams, artifactEnabled: false });
       await config.initialize();
 
       const registeredNames = (
@@ -2628,10 +2628,9 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).not.toContain(ToolNames.RECORD_ARTIFACT);
     });
 
-    it('registers both artifact tools when artifacts are enabled', async () => {
+    it('registers both artifact tools by default for interactive sessions', async () => {
       const config = new Config({
         ...baseParams,
-        artifactEnabled: true,
         interactive: true,
         sdkMode: false,
       });
@@ -2644,10 +2643,9 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).toContain(ToolNames.RECORD_ARTIFACT);
     });
 
-    it('registers only record_artifact for daemon artifact metadata', async () => {
+    it('registers only record_artifact by default for daemon artifact metadata', async () => {
       const config = new Config({
         ...baseParams,
-        artifactEnabled: true,
         interactive: false,
         sdkMode: false,
       });
@@ -2682,19 +2680,30 @@ describe('Server Config (config.ts)', () => {
         }
       });
 
-      it('is disabled by default', () => {
+      it('enables metadata recording by default without publishing from daemon sessions', () => {
         const config = new Config(baseParams);
         expect(config.isArtifactEnabled()).toBe(false);
+        expect(config.isRecordArtifactEnabled()).toBe(true);
       });
 
-      it('honors settings when interactive and not in SDK mode', () => {
+      it('is enabled by default when interactive and not in SDK mode', () => {
         const config = new Config({
           ...baseParams,
-          artifactEnabled: true,
           interactive: true,
           sdkMode: false,
         });
         expect(config.isArtifactEnabled()).toBe(true);
+      });
+
+      it('honors settings that disable artifacts', () => {
+        const config = new Config({
+          ...baseParams,
+          artifactEnabled: false,
+          interactive: true,
+          sdkMode: false,
+        });
+        expect(config.isArtifactEnabled()).toBe(false);
+        expect(config.isRecordArtifactEnabled()).toBe(false);
       });
 
       it('lets QWEN_CODE_DISABLE_ARTIFACT override settings and env enablement', () => {
@@ -2736,10 +2745,9 @@ describe('Server Config (config.ts)', () => {
         expect(config.isRecordArtifactEnabled()).toBe(true);
       });
 
-      it('lets daemon sessions record metadata from settings without publishing', () => {
+      it('lets daemon sessions record metadata by default without publishing', () => {
         const config = new Config({
           ...baseParams,
-          artifactEnabled: true,
           interactive: false,
           sdkMode: false,
         });
@@ -5429,6 +5437,18 @@ describe('Server Config (config.ts)', () => {
     it('should use a custom maxToolCallsPerTurn if provided', () => {
       const config = new Config({ ...baseParams, maxToolCallsPerTurn: 42 });
       expect(config.getMaxToolCallsPerTurn()).toBe(42);
+    });
+
+    it('tracks whether maxToolCallsPerTurn was explicitly set', () => {
+      expect(
+        new Config({ ...baseParams }).isMaxToolCallsPerTurnExplicit(),
+      ).toBe(false);
+      expect(
+        new Config({
+          ...baseParams,
+          maxToolCallsPerTurn: 42,
+        }).isMaxToolCallsPerTurnExplicit(),
+      ).toBe(true);
     });
 
     it.each([0, -1])(

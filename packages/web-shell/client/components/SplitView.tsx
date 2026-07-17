@@ -22,6 +22,7 @@ import type {
 import {
   SESSION_LIST_PAGE_SIZE,
   SESSION_ORGANIZATION_FEATURE,
+  WEB_SHELL_HISTORY_PAGE_SIZE,
   WEB_SHELL_MAX_TRANSCRIPT_BLOCKS,
 } from '../constants/sessions';
 import { useOtherWorkspaceSessions } from '../hooks/useOtherWorkspaceSessions';
@@ -66,6 +67,8 @@ export interface SplitViewProps {
   includeOtherWorkspaces?: boolean;
   /** Limit session discovery and pane attachment to this workspace. */
   workspaceCwd?: string;
+  /** Restart each pane's SSE event stream after an accepted prompt. */
+  restartSseOnPrompt?: boolean;
 }
 
 /**
@@ -86,6 +89,7 @@ export function SplitView({
   sessionListReloadToken,
   includeOtherWorkspaces = true,
   workspaceCwd,
+  restartSseOnPrompt,
 }: SplitViewProps) {
   const { t } = useI18n();
   const connection = useConnection();
@@ -468,8 +472,10 @@ export function SplitView({
                     // tab's panes) for the same session, so the attachments don't
                     // collide on one client identity.
                     clientId={`split-pane:${instanceId}:${sessionId}`}
-                    suppressOwnUserEcho
+                    historyPageSize={WEB_SHELL_HISTORY_PAGE_SIZE}
                     maxBlocks={WEB_SHELL_MAX_TRANSCRIPT_BLOCKS}
+                    suppressOwnUserEcho
+                    restartEventStreamOnPrompt={restartSseOnPrompt}
                   >
                     <ChatPane
                       title={titleById.get(sessionId)}
@@ -485,6 +491,7 @@ export function SplitView({
                       onRightPanelOpen={onRightPanelOpen}
                       onPaneArtifactsChange={onPaneArtifactsChange}
                       messageTurnOutputs={messageTurnOutputs}
+                      restartSseOnPrompt={restartSseOnPrompt}
                     />
                   </DaemonSessionProvider>
                 </ErrorBoundary>

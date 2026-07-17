@@ -128,9 +128,8 @@ export interface AgentMeta {
    */
   depth?: number;
   /**
-   * Concrete model ID the agent runs with, resolved at launch time.
-   * Recovered on background-agent resume so per-model concurrency caps
-   * (agents.maxParallelAgentsByModel) survive process restart.
+   * Concrete model ID this agent runs with. Persisted so a process-restart
+   * recovery can enforce per-model concurrency caps on the revive path.
    */
   model?: string;
   /** Last terminal error, if any. */

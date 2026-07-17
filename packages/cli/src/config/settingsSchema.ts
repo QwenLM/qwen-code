@@ -1474,7 +1474,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: DEFAULT_MAX_TOOL_CALLS_PER_TURN,
         description:
-          'Hard cap on tool calls within a single turn (one model turn plus its tool-result continuations; blocking Stop-hook continuations such as /goal iterations start a fresh budget). An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.',
+          'Per-turn tool-call cap (one model turn plus its tool-result continuations; blocking Stop-hook continuations such as /goal iterations start a fresh budget). When set explicitly, this value is a hard cap: the turn halts on the next tool call after it is reached (the released behavior). When left unset (default 100), the cap is adaptive: once the turn exceeds 100 it halts only when the model keeps repeating the same call (a stuck loop); a productive turn (diverse calls) continues up to a hard backstop of 1000, which always halts. The adaptive default applies to both the interactive TUI and non-interactive (-p / JSON / stream-JSON) core-client runs; the daemon/ACP path always treats the value as a hard cap. An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.',
         showInDialog: false,
       },
       skipStartupContext: {
@@ -3202,9 +3202,9 @@ const SETTINGS_SCHEMA = {
         label: 'Enable Artifacts',
         category: 'Experimental',
         requiresRestart: true,
-        default: false,
+        default: true,
         description:
-          'Enable the Artifact tool (experimental). When enabled, the model can publish a self-contained HTML page as an interactive Artifact and open it in the browser. Interactive, non-SDK sessions only. QWEN_CODE_ENABLE_ARTIFACT=1 enables the metadata-only record_artifact tool for non-SDK daemon sessions, and also enables the Artifact tool in interactive sessions. QWEN_CODE_DISABLE_ARTIFACT=1 hard-disables both.',
+          'Enable artifact tools. Enabled by default. In interactive, non-SDK sessions, the model can publish a self-contained HTML page as an interactive Artifact and open it in the browser. Non-SDK daemon sessions can use the metadata-only record_artifact tool. Set this to false or use QWEN_CODE_DISABLE_ARTIFACT=1 to disable both.',
         showInDialog: true,
       },
       emitToolUseSummaries: {
@@ -3227,7 +3227,7 @@ const SETTINGS_SCHEMA = {
     requiresRestart: true,
     default: {},
     description:
-      'Configuration for the experimental Artifact tool (enable it via experimental.artifact). Selects the publish backend and, for the host backend, the upload command and shareable URL template.',
+      'Configuration for artifact publishing. Selects the publish backend and, for the host backend, the upload command and shareable URL template.',
     showInDialog: false,
     properties: {
       autoOpen: {

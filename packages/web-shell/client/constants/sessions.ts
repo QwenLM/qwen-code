@@ -5,13 +5,13 @@
  */
 
 /**
- * Shared session-list configuration used by every surface that lists daemon
- * sessions (the sidebar, the Session Overview, and the split-view picker), so
- * the page size and the organization feature-flag name can't drift between them.
+ * Shared session configuration used by Web Shell surfaces so pagination and
+ * retention limits cannot drift between the main and split views.
  */
 export const SESSION_LIST_PAGE_SIZE = 1000;
 export const SESSION_ORGANIZATION_FEATURE = 'session_organization';
 export const WEB_SHELL_SESSION_SOURCE_TYPE = 'default';
+export const WEB_SHELL_HISTORY_PAGE_SIZE = 100;
 
 /**
  * Upper bound on transcript blocks retained in memory per Web Shell session
