@@ -4092,6 +4092,44 @@ describe('AgentTool', () => {
       expect(mockRegistry.register).toHaveBeenCalled();
     });
 
+    it('keeps a named-teammate launch in the foreground when no team is active and the flag is omitted', async () => {
+      // A `name` passed without an active team manager falls through to a
+      // regular one-shot agent (agent.ts logs and continues), and
+      // backgroundRequested excludes `name` (`this.params.name === undefined`).
+      // Guard the core dispatch directly so a future refactor that drops the
+      // `name` exclusion is caught here, not only in the UI classifiers (both
+      // of which treat named calls as foreground).
+      vi.mocked(config.getTeamManager).mockReturnValue(null);
+      const defaultSubagent: SubagentConfig = {
+        ...bgSubagent,
+        name: 'file-search',
+        background: undefined,
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+        defaultSubagent,
+      );
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Review the diff',
+        prompt: 'Review the diff',
+        subagent_type: 'file-search',
+        name: 'reviewer',
+        // run_in_background intentionally omitted.
+      });
+      const result = await invocation.execute();
+
+      // Foreground: an omitted flag on a named launch must NOT route through
+      // the background registry path.
+      expect(partToString(result.llmContent)).not.toContain(
+        'Background agent launched',
+      );
+      expect(mockRegistry.register).toHaveBeenCalledWith(
+        expect.objectContaining({ isBackgrounded: false }),
+      );
+    });
+
     it('runs in the foreground when run_in_background is false', async () => {
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
