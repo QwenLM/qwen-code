@@ -332,7 +332,8 @@ describe('runVisionBridge', () => {
       'openai:qwen3-vl-plus\0https://dashscope.aliyuncs.com/compatible-mode/v1',
     );
     expect(result.modelId).toBe('openai:qwen3-vl-plus');
-    expect(textOf(result.parts)).toContain('by openai:qwen3-vl-plus');
+    expect(textOf(result.parts)).toContain('by qwen3-vl-plus');
+    expect(textOf(result.parts)).not.toContain('by openai:qwen3-vl-plus');
     expect(textOf(result.parts)).not.toContain('\0');
   });
 
@@ -792,6 +793,28 @@ describe('formatVisionBridgeNotice', () => {
         egressOccurred: true,
       }),
     ).toContain('qwen3-vl-plus (dashscope.aliyuncs.com)');
+  });
+
+  it('hides auth-qualified routing prefixes from user-facing notices', () => {
+    expect(
+      formatVisionBridgeNotice({
+        applied: true,
+        status: 'ok',
+        convertedCount: 1,
+        omittedCount: 0,
+        modelId: 'openai:qwen3-vl-plus',
+        modelEndpoint: 'dashscope.aliyuncs.com',
+        egressOccurred: true,
+      }),
+    ).toContain('via qwen3-vl-plus (dashscope.aliyuncs.com)');
+
+    expect(
+      formatFullTurnVisionNotice({
+        id: 'openai:qwen3-vl-plus',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        agentCapable: true,
+      }),
+    ).toContain('to qwen3-vl-plus (dashscope.aliyuncs.com)');
   });
 
   it('does not claim egress for a success result without egress', () => {

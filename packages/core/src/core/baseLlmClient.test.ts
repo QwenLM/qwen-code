@@ -1194,6 +1194,20 @@ describe('BaseLlmClient', () => {
       expect(mockCreateContentGenerator).toHaveBeenCalledTimes(1);
     });
 
+    it('shares a successful per-model generator across failClosed modes', async () => {
+      getResolvedModel.mockReturnValue({
+        authType: AuthType.USE_ANTHROPIC,
+        envKey: 'ANTHROPIC_API_KEY',
+      });
+
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      await c.resolveForModel(fastModel, { failClosed: true });
+      await c.resolveForModel(fastModel);
+
+      expect(mockCreateContentGenerator).toHaveBeenCalledTimes(1);
+    });
+
     it('clearPerModelGeneratorCache forces a rebuild on the next call', async () => {
       getResolvedModel.mockReturnValue({
         authType: AuthType.USE_ANTHROPIC,

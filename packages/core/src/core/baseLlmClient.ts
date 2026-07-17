@@ -648,9 +648,28 @@ export class BaseLlmClient {
         ? `${selector.authType ?? ''}:${selector.modelId}`
         : `${selector.authType ?? ''}:${selector.modelId}\0${modelBaseUrl}`
       : model;
-    const cacheKey = `${routeKey}:${failClosed ? 'closed' : 'open'}`;
+    const cacheKey = routeKey;
     const cached = this.perModelGeneratorCache.get(cacheKey);
-    if (cached) return cached;
+    const normalizeGeneratorError = (err: unknown) =>
+      err instanceof Error
+        ? err
+        : new Error(
+            `Failed to create content generator for model "${model}": ${String(err)}`,
+          );
+    const fallbackAfterGeneratorError = (
+      err: unknown,
+    ): RuntimeContentGeneratorView => {
+      if (failClosed) throw normalizeGeneratorError(err);
+      debugLogger.warn(
+        `Failed to create content generator for model "${model}", falling back to main generator.`,
+        err instanceof Error ? err.message : String(err),
+      );
+      return {
+        contentGenerator: this.getCurrentContentGenerator(),
+        contentGeneratorConfig: this.config.getContentGeneratorConfig(),
+      };
+    };
+    if (cached) return cached.catch(fallbackAfterGeneratorError);
 
     const resolvedModel = this.resolveModelAcrossAuthTypes(
       model,
@@ -711,28 +730,12 @@ export class BaseLlmClient {
         };
       } catch (err: unknown) {
         this.perModelGeneratorCache.delete(cacheKey);
-        if (failClosed) {
-          // Surface the creation failure rather than routing image payloads at
-          // the main (text-only) generator. The caller fails the conversion.
-          throw err instanceof Error
-            ? err
-            : new Error(
-                `Failed to create content generator for model "${model}": ${String(err)}`,
-              );
-        }
-        debugLogger.warn(
-          `Failed to create content generator for model "${model}", falling back to main generator.`,
-          err instanceof Error ? err.message : String(err),
-        );
-        return {
-          contentGenerator: this.getCurrentContentGenerator(),
-          contentGeneratorConfig: this.config.getContentGeneratorConfig(),
-        };
+        throw normalizeGeneratorError(err);
       }
     })();
 
     this.perModelGeneratorCache.set(cacheKey, generatorPromise);
-    return generatorPromise;
+    return generatorPromise.catch(fallbackAfterGeneratorError);
   }
 
   private resolveModelSelector(model: string): ResolvedModelId | undefined {

@@ -3067,7 +3067,11 @@ export const useGeminiStream = (
             debugLogger.debug(
               `skill-tool model override (${String(
                 toolCall.response.modelOverride,
-              )}) blocked: turn model override active`,
+              )}) blocked: ${
+                inlineModelOverrideActiveRef.current
+                  ? 'inline override active'
+                  : 'full-turn override active'
+              }`,
             );
           } else {
             applyModelOverride(
