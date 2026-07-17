@@ -191,6 +191,11 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // command that repairs it, to the orchestrator. #7012's public body was fourteen
   // lines of the second register posted to the first reader.
   const remediation: string[] = [];
+  // FIX lines are commands. `<plan>` was a placeholder a reader had to notice
+  // and fill; pasted literally it parses as a shell redirection. The run KNOWS
+  // its plan path — substitute it, and leave only the selectors (`<id>`, `<r>`)
+  // that genuinely vary per agent, resolvable from the labels alongside.
+  const planRef = input.planPath ?? '<plan>';
 
   // Coverage is shown, not asserted. Whatever the caller listed by hand, the
   // report's own gaps are added to it — a run cannot approve past a chunk nobody
@@ -262,7 +267,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       if (cov.blindAgents.length > 0) {
         remediation.push(
           'blind agents: rebuild each prompt with `"${QWEN_CODE_CLI:-qwen}" ' +
-            'review agent-prompt --plan <plan> --chunk <id>` (or `--role <r>`) ' +
+            `review agent-prompt --plan ${planRef} --chunk <id>\` (or \`--role <r>\`) ` +
             '`[--rules <rules file>]` and launch an agent with it verbatim — ' +
             'do not relaunch the old prompt; a second blind agent reads no ' +
             'more than the first',
@@ -297,7 +302,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       if (cov.rewrittenPrompts.length > 0) {
         remediation.push(
           'rewritten launches: re-run `"${QWEN_CODE_CLI:-qwen}" review ' +
-            'agent-prompt --plan <plan> --chunk <id>` (or `--role <r>`, with ' +
+            `agent-prompt --plan ${planRef} --chunk <id>\` (or \`--role <r>\`, with ` +
             '`--file <path>` for an invariant agent) `[--rules <rules file>]` ' +
             'for each named agent and pass its output unedited — copy it, do ' +
             'not retype it. Pass --rules whenever the review loaded any, or ' +
@@ -313,7 +318,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       if (cov.missingRoles.length > 0) {
         remediation.push(
           'missing briefs: build every required prompt in one call — ' +
-            '`"${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan <plan> ' +
+            `\`"\${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan ${planRef} ` +
             '--roster [--rules <rules file>]` — and launch one agent per block ' +
             'it prints, verbatim; `--role <n>` or `--chunk <id>` rebuilds a ' +
             'single one. Pass --rules whenever the review loaded any',
@@ -459,7 +464,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     // to prevent.
     remediation.push(
       'chunks nobody read: build each with `"${QWEN_CODE_CLI:-qwen}" review ' +
-        'agent-prompt --plan <plan> --chunk <id> [--rules <rules file>]` — or ' +
+        `agent-prompt --plan ${planRef} --chunk <id> [--rules <rules file>]\` — or ` +
         'the whole fan-out with `--roster` — and launch one agent per block, ' +
         'verbatim',
     );
@@ -648,7 +653,15 @@ export const composeReviewCommand: CommandModule = {
     const parsed = JSON.parse(raw) as ComposeReviewInput;
     delete parsed.env;
     const result = composeReview(parsed);
-    const json = JSON.stringify(result, null, 2);
+    // The exact terminal verdict, persisted beside the fields it is computed
+    // from. `event` + `cappedBy` alone cannot reconstruct it — a presubmit
+    // downgrade also depends on `downgraded`/`downgradedFrom` — and Step 8's
+    // archived report copies this line rather than re-deriving a lossy one.
+    const json = JSON.stringify(
+      { ...result, verdictLine: verdictLine(result) },
+      null,
+      2,
+    );
     if (out) {
       mkdirSync(dirname(out), { recursive: true });
       writeFileSync(out, json, 'utf8');

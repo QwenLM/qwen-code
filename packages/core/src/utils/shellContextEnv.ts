@@ -23,7 +23,7 @@
  * capture the correct session/agent/prompt frame.
  */
 
-import { closeSync, openSync, readSync } from 'node:fs';
+import { accessSync, closeSync, constants, openSync, readSync } from 'node:fs';
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import { promptIdContext } from './promptIdContext.js';
 import { sessionIdContext, getSessionProjectDir } from './sessionIdContext.js';
@@ -34,31 +34,35 @@ import {
 } from '../telemetry/trace-context.js';
 
 /**
- * A `.js`/`.mjs`/`.cjs` file whose first bytes are not `#!` — the one shape a
- * POSIX shell cannot exec directly. Cached per path: this runs on every shell
- * spawn, and the answer for a given entry does not change within a process.
+ * A `.js`/`.mjs`/`.cjs` file a POSIX shell cannot exec directly: no `#!` in its
+ * first bytes, or no execute permission. Both shapes exist in the wild — the
+ * desktop tooling's vendored bundle has no shebang, and a shebang-bearing 0644
+ * script passes the header check and then dies on EACCES. Only script files are
+ * gated; a native binary needs neither. Cached per path: this runs on every
+ * shell spawn, and the answer for a given entry does not change in-process.
  */
-const shebangCache = new Map<string, boolean>();
-function isShebangLessScript(path: string): boolean {
+const unusableCache = new Map<string, boolean>();
+function isUnusableScriptEntry(path: string): boolean {
   if (!/\.(?:mjs|cjs|js)$/i.test(path)) return false;
-  const cached = shebangCache.get(path);
+  const cached = unusableCache.get(path);
   if (cached !== undefined) return cached;
-  let shebangless: boolean;
+  let unusable: boolean;
   try {
+    accessSync(path, constants.X_OK);
     const fd = openSync(path, 'r');
     try {
       const head = Buffer.alloc(2);
       const read = readSync(fd, head, 0, 2, 0);
-      shebangless = !(read === 2 && head.toString('utf8') === '#!');
+      unusable = !(read === 2 && head.toString('utf8') === '#!');
     } finally {
       closeSync(fd);
     }
   } catch {
-    // Unreadable is unusable either way; let it drop to the `qwen` fallback.
-    shebangless = true;
+    // Unreadable or non-executable is unusable either way; fall back to `qwen`.
+    unusable = true;
   }
-  shebangCache.set(path, shebangless);
-  return shebangless;
+  unusableCache.set(path, unusable);
+  return unusable;
 }
 
 export function getShellContextEnvVars(): Record<string, string> {
@@ -120,7 +124,7 @@ export function getShellContextEnvVars(): Record<string, string> {
   // unset AND on empty.
   const cliEntry = process.env['QWEN_CODE_CLI'];
   if (cliEntry) {
-    env['QWEN_CODE_CLI'] = isShebangLessScript(cliEntry) ? '' : cliEntry;
+    env['QWEN_CODE_CLI'] = isUnusableScriptEntry(cliEntry) ? '' : cliEntry;
   }
 
   // For agent/prompt IDs: explicitly set empty string when no ALS context

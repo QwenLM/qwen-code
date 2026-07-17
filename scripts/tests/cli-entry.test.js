@@ -76,6 +76,11 @@ describe('scripts/cli-entry.js production entry', () => {
     try {
       await import('../cli-entry.js?stamps-shim');
       expect(process.env.QWEN_CODE_CLI).toBe('/opt/qwen-standalone/bin/qwen');
+      // And the hint is CONSUMED, not leaked: the serve/mcp fast path never
+      // reaches the spawn branch that used to delete it, and a child qwen from
+      // a different checkout would read the leftover shim and republish it as
+      // its own entry — the wrong build, wearing this one's stamp.
+      expect('QWEN_CODE_LAUNCHER_PATH' in process.env).toBe(false);
     } finally {
       if (inheritedCli === undefined) delete process.env.QWEN_CODE_CLI;
       else process.env.QWEN_CODE_CLI = inheritedCli;

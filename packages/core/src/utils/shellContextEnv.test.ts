@@ -77,7 +77,9 @@ describe('getShellContextEnvVars', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cli-entry-'));
     try {
       const entry = join(dir, 'cli-entry.js');
-      writeFileSync(entry, '#!/usr/bin/env node\nconsole.log("hi");\n');
+      writeFileSync(entry, '#!/usr/bin/env node\nconsole.log("hi");\n', {
+        mode: 0o755,
+      });
       process.env['QWEN_CODE_CLI'] = entry;
       expect(getShellContextEnvVars()['QWEN_CODE_CLI']).toBe(entry);
     } finally {
@@ -119,11 +121,31 @@ describe('getShellContextEnvVars', () => {
     expect(childEnv['QWEN_CODE_CLI']).toBe('');
   });
 
+  it('a shebang-bearing script with no execute bit is filtered too — EACCES is not an entry', () => {
+    // The header check alone passes a 0644 script, and the shell then dies on
+    // EACCES instead of falling back. Execute permission is part of "the shell
+    // can exec this".
+    const dir = mkdtempSync(join(tmpdir(), 'cli-noexec-'));
+    try {
+      const entry = join(dir, 'entry.js');
+      writeFileSync(entry, '#!/usr/bin/env node\nconsole.log("hi");\n', {
+        mode: 0o644,
+      });
+      process.env['QWEN_CODE_CLI'] = entry;
+      const childEnv = { ...process.env, ...getShellContextEnvVars() };
+      expect(childEnv['QWEN_CODE_CLI']).toBe('');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('a shebang-bearing entry still passes through the spread intact', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cli-sb-'));
     try {
       const entry = join(dir, 'entry.js');
-      writeFileSync(entry, '#!/usr/bin/env node\nconsole.log("hi");\n');
+      writeFileSync(entry, '#!/usr/bin/env node\nconsole.log("hi");\n', {
+        mode: 0o755,
+      });
       process.env['QWEN_CODE_CLI'] = entry;
       const childEnv = { ...process.env, ...getShellContextEnvVars() };
       expect(childEnv['QWEN_CODE_CLI']).toBe(entry);

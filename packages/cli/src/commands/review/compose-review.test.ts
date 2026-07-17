@@ -969,10 +969,12 @@ describe('coverage is recomputed, never accepted', () => {
       modelId: MODEL,
     });
     expect(r.event).not.toBe('APPROVE');
-    expect(r.body).toContain('brief never reached an agent');
+    expect(r.body).toContain('no record shows its brief reaching an agent');
     expect(r.body).not.toMatch(/agent-prompt|--roster|--role/);
+    // The FIX names the run's REAL plan path — a `<plan>` placeholder pasted
+    // literally parses as a shell redirection.
     expect(r.remediation.join(' ')).toContain(
-      '"${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan <plan> --roster',
+      `"\${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan ${p} --roster`,
     );
   });
 
@@ -1063,6 +1065,16 @@ describe('coverage is recomputed, never accepted', () => {
         .join('\n');
       expect(() => JSON.parse(stdout)).not.toThrow();
       expect(stdout).not.toContain('FIX: ');
+      // The composed JSON persists the EXACT verdict line, so Step 8's archived
+      // report copies it instead of re-deriving a lossy one from event+cappedBy
+      // (a presubmit downgrade depends on fields that pair does not carry).
+      const parsedOut = JSON.parse(stdout) as { verdictLine?: string };
+      expect(parsedOut.verdictLine).toMatch(/^Verdict: /);
+      const printedVerdict = vi
+        .mocked(writeStderrLine)
+        .mock.calls.map((c) => String(c[0]))
+        .find((l) => l.startsWith('Verdict:'));
+      expect(parsedOut.verdictLine).toBe(printedVerdict);
     } finally {
       if (prevDir === undefined) delete process.env['QWEN_CODE_PROJECT_DIR'];
       else process.env['QWEN_CODE_PROJECT_DIR'] = prevDir;

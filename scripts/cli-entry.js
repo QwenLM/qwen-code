@@ -91,7 +91,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // that reaches this build" is the shim: stamping this file instead would hand
 // subprocesses a `#!/usr/bin/env node` script on a machine where that resolves to
 // nothing. Read before the spawn path deletes the variable below.
+// Captured AND deleted here, not just read: the serve/mcp fast path below never
+// reaches the spawn branch that used to delete it, so the hint leaked into every
+// child of a standalone daemon — and a child qwen from a DIFFERENT checkout
+// would read the outer shim and republish it as its own entry: the wrong build,
+// wearing this one's stamp.
 const standaloneShim = process.env['QWEN_CODE_LAUNCHER_PATH'];
+delete process.env['QWEN_CODE_LAUNCHER_PATH'];
 process.env['QWEN_CODE_CLI'] =
   standaloneShim && existsSync(standaloneShim)
     ? standaloneShim
@@ -135,8 +141,7 @@ if (isInProcessFastPath()) {
     process.platform === 'win32' ? ['qwen.cmd', 'qwen.exe', 'qwen'] : ['qwen'];
   const entryPath = resolve(process.argv[1]);
   const entryRootLength = parse(entryPath).root.length;
-  const launcherFromEnv = process.env['QWEN_CODE_LAUNCHER_PATH'];
-  delete process.env['QWEN_CODE_LAUNCHER_PATH'];
+  const launcherFromEnv = standaloneShim;
   delete process.env['QWEN_CODE_LAUNCHER_PID'];
   const launcherCandidates = process.env['PATH']
     ?.split(delimiter)

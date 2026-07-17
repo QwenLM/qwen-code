@@ -224,7 +224,10 @@ export function buildChunkAgentPrompt(
       (f): f is DiffChunk['files'][number] =>
         !!f && typeof f.path === 'string' && f.path.length > 0,
     )
-    .map((f) => `- ${f.path} (new-side lines ${f.newStart}-${f.newEnd})`)
+    .map(
+      (f) =>
+        `- ${inertPath(f.path)} (new-side lines ${f.newStart}-${f.newEnd})`,
+    )
     .join('\n');
 
   // The uncoverable case: a single line longer than one read returns. Paging
@@ -571,6 +574,18 @@ function tail(
  * increment is exactly the class of defect this checklist hunts, and it is
  * invisible in the file's text. The `-` lines are the only evidence it existed.
  */
+/**
+ * A PR-controlled path, flattened for display inside a brief or prompt. The
+ * brief is the file the agent is told is the whole of its instructions — a git
+ * path can legally contain newlines, and a newline inside an interpolated path
+ * would let PR content open its own Markdown line there. Functional arguments
+ * (the `read_file` path) are JSON-quoted instead, which both survives the
+ * newline and remains the parseable single-line form the transcripts checks read.
+ */
+function inertPath(p: string): string {
+  return p.replace(/[\r\n\u2500]+/g, ' ');
+}
+
 function invariantFileBlock(
   report: PlanReport,
   diffPath: string,
@@ -603,14 +618,14 @@ function invariantFileBlock(
     .map((r) => `${r.start}-${r.end}`)
     .join(', ');
   const parts = [
-    `## The file: \`${file}\``,
+    `## The file: \`${inertPath(file)}\``,
     '',
     '**Read the whole post-change file**, from the worktree, paging with `offset` until ' +
       '`isTruncated` is false. A 2 500-line file needs several reads. You read it whole ' +
       'because an invariant has two ends and they can sit two thousand lines apart.',
     '',
     '```',
-    `read_file(file_path="${file}")`,
+    `read_file(file_path=${JSON.stringify(file)})`,
     '```',
     '',
     added
@@ -869,7 +884,11 @@ export function buildRoleBrief(
     if (pathRules) parts.push('', pathRules);
   }
 
-  parts.push(...tail(opts.rules, brief.output));
+  // SKILL.md is explicit: "Do NOT inject review rules into Agent 7 (Build &
+  // Test) — it runs deterministic commands, not code review." The roster path
+  // hands the same --rules to every role, so the exclusion lives here, where
+  // both the single-role and roster builds pass through.
+  parts.push(...tail(role === '7' ? undefined : opts.rules, brief.output));
   return parts.join('\n');
 }
 
@@ -1160,7 +1179,8 @@ function runRoster(report: PlanReport, planPath: string, rules?: string): void {
         `${roster.length}\` and the output ends with an end-of-roster line — if ` +
         `either is missing, this output was truncated in transit: every prompt ` +
         `is also recorded on disk, so rebuild just the missing blocks with ` +
-        `--chunk <id> / --role <r>.`,
+        `--chunk <id>, or --role <r> (--file <path> for an invariant agent), ` +
+        `plus the same --rules this call was given.`,
       ...blocks,
       `───── end of roster — ${roster.length} agents ─────`,
     ].join('\n\n'),
@@ -1359,6 +1379,18 @@ function runAgentPrompt(args: AgentPromptArgs): void {
           `required for this role, so omitting it only fails one guard earlier. ` +
           `An early reverse-audit round with nothing confirmed passes an empty ` +
           `file (create it first).`,
+      );
+    }
+    // An empty list is a legitimate early reverse-audit round. For the verifier
+    // it is a vacuous pass: the agent opens its brief, clears the delivery
+    // floor, and the review posts findings certified by a verifier that saw
+    // none. Refuse it here, where the content is first known.
+    if (role === 'verify' && content.trim() === '') {
+      throw new Error(
+        'agent-prompt: --findings for --role verify is empty. A verifier that ' +
+          'sees no findings verifies nothing, and the review would post ' +
+          "findings on the strength of that nothing. Pass the shard's " +
+          'findings; only an early reverse-audit round passes an empty file.',
       );
     }
     printed = `${findingsSection(role, content)}\n\n${prompt}`;

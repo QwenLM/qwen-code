@@ -294,8 +294,57 @@ export function coverageFromTranscripts(
   // built" once per chunk transcript would put N more copies of the same fact
   // into the posted body, right next to the line that already states it.
   const rosterForRun = requiredAgents(plan as unknown as RosterPlan);
+  // ONE predicate for "was this prompt built", everywhere. A partial write can
+  // leave a zero-byte record, and the Step 4/5 classifier already reads that as
+  // not-built — a `Map.has()` here would read the same file as built, so an
+  // all-empty record dir would dodge the single collapsed diagnosis and surface
+  // as a pile of false built-but-not-launched failures instead.
+  const builtOf = (key: string): string | undefined => {
+    const b = built.get(key);
+    return b !== undefined && b.trim() !== '' ? b : undefined;
+  };
   const nothingBuiltAtAll =
-    rosterForRun.length > 1 && rosterForRun.every((r) => !built.has(r.key));
+    rosterForRun.length > 1 && rosterForRun.every((r) => !builtOf(r.key));
+
+  // A failed attempt superseded by a compliant one must stop counting, or the
+  // report can never converge: the relaunch its own FIX line prescribes adds a
+  // SECOND transcript, the first stays in idle/blind/unopened/rewritten, `ok`
+  // stays false, and the same FIX prints forever. A record's failure flags are
+  // suppressed when ANOTHER record satisfies the same target — same chunk served
+  // by a verbatim launch that opened the diff, or same built prompt delivered
+  // verbatim to an agent that opened its brief.
+  const chunkSatisfied = (c: number, self: AgentRecord): boolean => {
+    const b = builtOf(`chunk-${c}`);
+    if (b === undefined) return false;
+    return records.some(
+      (r) =>
+        r !== self &&
+        assignedChunk(r) === c &&
+        wasDeliveredVerbatim(r.launchPrompt, b) &&
+        r.diffToolCalls > 0,
+    );
+  };
+  const keySatisfied = (rec: AgentRecord): boolean => {
+    for (const key of built.keys()) {
+      const b = builtOf(key);
+      if (b === undefined) continue;
+      if (!wasDeliveredVerbatim(rec.launchPrompt, b)) continue;
+      const needle = JSON.stringify(briefPath(planPath, key));
+      if (
+        records.some(
+          (r) =>
+            r !== rec &&
+            wasDeliveredVerbatim(r.launchPrompt, b) &&
+            r.successfulCallArgs.some((a) => a.includes(needle)),
+        )
+      ) {
+        return true;
+      }
+    }
+    return false;
+  };
+  const superseded = (rec: AgentRecord, chunk: number | null): boolean =>
+    chunk !== null ? chunkSatisfied(chunk, rec) : keySatisfied(rec);
 
   for (const rec of records) {
     const chunk = assignedChunk(rec);
@@ -307,7 +356,7 @@ export function coverageFromTranscripts(
     // handed it.
     const given = wasGivenTheDiff(rec, plan.diffPathAbsolute);
     if (chunk !== null && !given) {
-      blindAgents.push(name);
+      if (!superseded(rec, chunk)) blindAgents.push(name);
       continue; // Its silence proves nothing about the diff; the prompt failed.
     }
 
@@ -318,7 +367,7 @@ export function coverageFromTranscripts(
     // is too long. A zero-tool-call agent that merely copied the template must not
     // be credited with a disclosed gap — that is the whiff wearing a costume.
     if (rec.successfulToolCalls === 0) {
-      idleAgents.push(name);
+      if (!superseded(rec, chunk)) idleAgents.push(name);
       continue;
     }
 
@@ -334,7 +383,7 @@ export function coverageFromTranscripts(
     // difference: a paraphrase keeps the diff path, so every other check passes.
     let rewrittenThisRecord = false;
     if (chunk !== null) {
-      const b = built.get(`chunk-${chunk}`);
+      const b = builtOf(`chunk-${chunk}`);
       if (b === undefined) {
         // No internal command in this label: `compose-review` pushes it into the
         // posted body as-is, and the PR author cannot run `agent-prompt`. The
@@ -342,7 +391,7 @@ export function coverageFromTranscripts(
         // Suppressed when nothing was built at all — the collapsed roster line
         // already says so once, for the whole run.
         rewrittenThisRecord = true;
-        if (!nothingBuiltAtAll) {
+        if (!nothingBuiltAtAll && !superseded(rec, chunk)) {
           rewrittenPrompts.push(
             `${name} — ran on a prompt the run wrote itself (none was built for ` +
               `this chunk), so the brief with its method and rules never reached it`,
@@ -350,9 +399,11 @@ export function coverageFromTranscripts(
         }
       } else if (!wasDeliveredVerbatim(rec.launchPrompt, b)) {
         rewrittenThisRecord = true;
-        rewrittenPrompts.push(
-          `${name} — launched with a prompt that is not the one the CLI built`,
-        );
+        if (!superseded(rec, chunk)) {
+          rewrittenPrompts.push(
+            `${name} — launched with a prompt that is not the one the CLI built`,
+          );
+        }
       }
     }
 
@@ -364,7 +415,9 @@ export function coverageFromTranscripts(
     // relaunch the same one), the rebuild subsumes the relaunch, and an operator
     // handed both for one agent follows whichever came last.
     if (told.length > 0 && rec.diffToolCalls === 0) {
-      if (!rewrittenThisRecord) unopenedAgents.push(name);
+      if (!rewrittenThisRecord && !superseded(rec, chunk)) {
+        unopenedAgents.push(name);
+      }
       continue;
     }
 
@@ -418,7 +471,7 @@ export function coverageFromTranscripts(
   // review that posted two Criticals with line numbers. Both readings are bad; they
   // are not the same bad, and they are not fixed the same way, so the text may not
   // pick the one it cannot prove.
-  const briefless = roster.filter((r) => !built.has(r.key));
+  const briefless = roster.filter((r) => !builtOf(r.key));
 
   // Every role briefless is one failure — the run did not use the prompt builder —
   // not N. Said once per dimension it becomes N lines that bury the single fact
@@ -431,20 +484,29 @@ export function coverageFromTranscripts(
     // Phrased to read under the `Not reviewed: ` prefix `compose-review` renders it
     // with, which is where a PR author meets it.
     missingRoles.push(
-      `every dimension — none of the ${roster.length} required agents was launched ` +
-        `with a prompt this skill built, so this diff was reviewed, if at all, from ` +
-        `prompts the run wrote for itself: the severity bar, the finding format and ` +
-        `this project's own rules never reached an agent`,
+      `every dimension — none of the ${roster.length} required agents is on ` +
+        `record as launched with a prompt this skill built, so this diff was ` +
+        `reviewed, if at all, from prompts the run wrote for itself: no record ` +
+        `shows the severity bar, the finding format or this project's own rules ` +
+        `reaching an agent`,
     );
   }
 
+  // Injective: one transcript may satisfy ONE roster requirement. Without this,
+  // pasting the whole roster output to a single agent yields one transcript that
+  // verbatim-contains every block, matches every requirement independently, and
+  // certifies an N-agent fan-out with one reader. Attempts for the SAME
+  // requirement still supersede each other; what a transcript cannot do is be
+  // credited twice.
+  const claimed = new Set<AgentRecord>();
   for (const req of roster) {
-    const b = built.get(req.key);
+    const b = builtOf(req.key);
     if (b === undefined) {
       if (!nobodyBuiltAnything) {
         missingRoles.push(
-          `${roleLabel(req)} — its brief never reached an agent, so this dimension ` +
-            `was reviewed, if at all, from a prompt the run wrote for itself`,
+          `${roleLabel(req)} — no record shows its brief reaching an agent, so ` +
+            `this dimension was reviewed, if at all, from a prompt the run ` +
+            `wrote for itself`,
         );
       }
       missingRoleSelectors.push(selectorOf(req));
@@ -454,12 +516,20 @@ export function coverageFromTranscripts(
     // report's own remediation prescribes, and judging only the earliest match
     // would let an old launch that never opened its brief mask the compliant one
     // that followed — flagging the exact behaviour the fix asked for.
-    const agents = records.filter((r) =>
-      wasDeliveredVerbatim(r.launchPrompt, b),
+    const agents = records.filter(
+      (r) => !claimed.has(r) && wasDeliveredVerbatim(r.launchPrompt, b),
     );
     if (agents.length === 0) {
+      const anyMatch = records.some((r) =>
+        wasDeliveredVerbatim(r.launchPrompt, b),
+      );
       missingRoles.push(
-        `${roleLabel(req)} — its prompt was built, but no agent was launched with it`,
+        anyMatch
+          ? `${roleLabel(req)} — its prompt reached only an agent already ` +
+              `credited with another block; one agent was given several blocks, ` +
+              `and one transcript cannot certify two dimensions`
+          : `${roleLabel(req)} — its prompt was built, but no agent on record ` +
+              `was launched with it`,
       );
       missingRoleSelectors.push(selectorOf(req));
       continue;
@@ -478,9 +548,13 @@ export function coverageFromTranscripts(
     // The brief as a whole JSON string value (`successfulCallArgs` are already
     // serialized args): a bare substring would credit `${brief}.bak` for the brief,
     // the same trap `parseTranscript` avoids for the diff path.
-    const opened = agents.some((agent) =>
-      agent.successfulCallArgs.some((a) => a.includes(JSON.stringify(brief))),
-    );
+    const openedOf = (agent: AgentRecord) =>
+      agent.successfulCallArgs.some((a) => a.includes(JSON.stringify(brief)));
+    // Claim the satisfying transcript (prefer one that opened the brief), so no
+    // later requirement can be credited with the same reader.
+    const pick = agents.find(openedOf) ?? agents[0];
+    claimed.add(pick);
+    const opened = openedOf(pick);
     if (!opened) {
       unreadBriefs.push(
         `${roleLabel(req)} — never opened its brief (${brief}), so it reviewed ` +
@@ -604,11 +678,15 @@ const REVERSE_AUDIT_GAP: GapText = {
       'the method its brief carries, and cannot be certified',
     fix: rebuildFix('reverse-audit', 'round'),
   },
+  // `rewritten` is reached only after a successful call OPENED the brief — so
+  // this text may not claim the method never arrived; the brief carries it, and
+  // it demonstrably did. What is missing is the launch the CLI built: the folded
+  // findings, the exact ranges, the guarantee the skill certifies against.
   rewritten: {
     gap:
-      'an auditor ran, but **not with the prompt this skill builds** — the ' +
-      'launch was written by hand, so the gaps-only method and the finding ' +
-      'rules never reached it, and its pass cannot be certified',
+      'an auditor ran and opened its brief, but no agent was launched with the ' +
+      'prompt the CLI built — the launch was written by hand, and what the ' +
+      'agent was actually asked is not what this skill certifies',
     fix: rebuildFix('reverse-audit', 'round'),
   },
   'brief-unread': {
@@ -640,9 +718,9 @@ const VERIFY_GAP: GapText = {
   },
   rewritten: {
     gap:
-      'a verifier ran, but **not with the prompt this skill builds** — the ' +
-      'launch was written by hand, so the verdict bar it was meant to apply ' +
-      'never reached it, and the posted findings cannot be counted as verified',
+      'a verifier ran and opened its brief, but no agent was launched with the ' +
+      'prompt the CLI built — the launch was written by hand, and the posted ' +
+      'findings cannot be counted as verified against it',
     fix: rebuildFix('verify', 'shard'),
   },
   'brief-unread': {

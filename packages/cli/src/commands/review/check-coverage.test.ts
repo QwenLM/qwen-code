@@ -786,7 +786,7 @@ describe('the roster — who should have been here', () => {
 
     const [gap] = coverageFromTranscripts(p, ENV).missingRoles;
     expect(gap).not.toMatch(/never (ran|launched)/i);
-    expect(gap).toContain('brief never reached an agent');
+    expect(gap).toContain('no record shows its brief reaching an agent');
     // And it says what the reader loses, rather than leaving them to guess.
     expect(gap).toContain('if at all');
   });
@@ -888,11 +888,15 @@ describe('the roster — who should have been here', () => {
       expect(roleError).toBeDefined();
       // The per-role shape, not the collapse: it names the one missing agent.
       expect(roleError).toContain('Cross-file tracer');
-      expect(roleError).toContain('its brief never reached an agent');
-      expect(roleError).not.toContain('every dimension');
-      // The rebuild hints and the record dir survive the formatting.
       expect(roleError).toContain(
-        '"${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan <plan> --roster',
+        'no record shows its brief reaching an agent',
+      );
+      expect(roleError).not.toContain('every dimension');
+      // The rebuild hints and the record dir survive the formatting — with the
+      // run's REAL plan path substituted, not a `<plan>` placeholder a literal
+      // paste would parse as a shell redirection.
+      expect(roleError).toContain(
+        `"\${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan ${p} --roster`,
       );
       expect(roleError).toContain(`Looked for them in: ${promptRecordDir(p)}`);
     } finally {
@@ -975,6 +979,67 @@ describe('the roster — who should have been here', () => {
     expect(r.missingRoleSelectors).toEqual(['--role 1c']);
   });
 
+  it('a compliant relaunch clears the failed attempt — the report converges', () => {
+    // The FIX its own report prints says "relaunch". Without supersession the
+    // relaunch ADDS a transcript while the failed one keeps its flag, `ok` stays
+    // false, and the same FIX prints forever — a repair loop that cannot close.
+    const p = plan();
+    // Attempt 1: blind (prompt never names the diff). Attempt 2: the rebuild,
+    // verbatim and diff-opening. Same chunk.
+    transcript('a-blind', 'The changes are in chunk 1 of 2.', { calls: 0 });
+    transcript('b-rebuilt', good(1), { calls: 3 });
+    transcript('c2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.blindAgents).toEqual([]);
+    expect(r.idleAgents).toEqual([]);
+    expect(r.ok).toBe(true);
+  });
+
+  it('one transcript cannot certify two dimensions — pasting the whole roster to one agent fails', () => {
+    // The roster output makes this a one-keystroke mistake: a single agent
+    // handed every block yields ONE transcript that verbatim-contains every
+    // prompt and opens every brief. Independent matching would credit it with
+    // the entire fan-out; the claim set does not.
+    const p = plan();
+    const d = promptRecordDir(p);
+    const allBlocks = readdirSync(d)
+      .filter((f) => f.endsWith('.txt'))
+      .map((f) => readFileSync(join(d, f), 'utf8'))
+      .join('\n\n');
+    // Un-launch the compliant roster fixtures; ONE agent gets everything.
+    for (const f of readdirSync(join(dir, 'subagents', 'S1'))) {
+      rmSync(join(dir, 'subagents', 'S1', f), { force: true });
+    }
+    const briefs = readdirSync(d)
+      .filter((f) => f.endsWith('.brief.md'))
+      .map((f) => join(d, f));
+    transcript('mega', allBlocks, { calls: 8, opens: briefs });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.ok).toBe(false);
+    expect(r.missingRoles.join(' ')).toContain(
+      'one transcript cannot certify two dimensions',
+    );
+  });
+
+  it('a zero-byte prompt record is not "built" — an all-empty dir still collapses', () => {
+    // A partial write can leave empty records. `Map.has()` would read them as
+    // built and surface N false built-but-not-launched failures instead of the
+    // one collapsed diagnosis the all-briefless run deserves.
+    const p = plan(2, { roster: false });
+    const d = promptRecordDir(p);
+    for (const f of readdirSync(d)) {
+      if (f.endsWith('.txt')) writeFileSync(join(d, f), '');
+    }
+    transcript('a1', good(1), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.ok).toBe(false);
+    expect(r.missingRoles).toHaveLength(1);
+    expect(r.missingRoles[0]).toMatch(/^every dimension — /);
+  });
+
   it('catches a prompt that was built and then never used', () => {
     // Half of the failure: the command was called, so the record exists — but the
     // agent was launched with something else, or not launched at all.
@@ -984,7 +1049,8 @@ describe('the roster — who should have been here', () => {
 
     const r = coverageFromTranscripts(p, ENV);
     expect(r.missingRoles).toEqual([
-      'Agent 2: Security — its prompt was built, but no agent was launched with it',
+      'Agent 2: Security — its prompt was built, but no agent on record was ' +
+        'launched with it',
     ]);
     expect(r.ok).toBe(false);
   });
@@ -1251,10 +1317,12 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     const r = verificationGaps(p, { postsFindings: false }, ENV);
     expect(r.ok).toBe(false);
     const gap = r.gaps.join(' ');
-    // It says what happened: an auditor ran …
-    expect(gap).toMatch(/an auditor ran/);
+    // It says what happened — the auditor ran AND opened its brief (that is how
+    // this shape is even detected, and a text denying it publishes a false
+    // mechanism) …
+    expect(gap).toMatch(/an auditor ran and opened its brief/);
     // … and what was actually wrong.
-    expect(gap).toMatch(/not with the prompt this skill builds/);
+    expect(gap).toMatch(/no agent was launched with the prompt the CLI built/);
     expect(gap).toMatch(/written by hand/);
     // And it must NOT claim the agent never ran or never read its brief.
     expect(gap).not.toMatch(/no auditor ran/);
@@ -1278,8 +1346,8 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     step45(p, 'verify', { rewritten: true });
     const r = verificationGaps(p, { postsFindings: true }, ENV);
     const gap = r.gaps.join(' ');
-    expect(gap).toMatch(/a verifier ran/);
-    expect(gap).toMatch(/not with the prompt this skill builds/);
+    expect(gap).toMatch(/a verifier ran and opened its brief/);
+    expect(gap).toMatch(/no agent was launched with the prompt the CLI built/);
     expect(gap).not.toMatch(/no verifier ran/);
     expect(gap).not.toMatch(/agent-prompt|--findings|--role/);
     expect(r.remediation.join(' ')).toContain('--role verify');
