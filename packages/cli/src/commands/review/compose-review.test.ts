@@ -920,6 +920,12 @@ describe('coverage is recomputed, never accepted', () => {
     });
     expect(r.event).not.toBe('APPROVE');
     expect(r.body).toContain('read nothing');
+    // The repair rides the remediation channel — a body disclosure whose FIX
+    // silently vanished is the exact state that channel exists to prevent, and
+    // without this line, deleting the idle push would fail no test.
+    expect(r.remediation.join(' ')).toMatch(
+      /idle agents: relaunch each with the same printed prompt/,
+    );
   });
 
   it('names a blind launch as itself, not as a whiff', () => {
@@ -942,6 +948,13 @@ describe('coverage is recomputed, never accepted', () => {
       '"${QWEN_CODE_CLI:-qwen}" review agent-prompt',
     );
     expect(r.remediation.join(' ')).toMatch(/do not relaunch the old prompt/);
+    // Blind agents read nothing, so the chunks they owned are also chunks
+    // nobody read — that disclosure's repair must ride along too. Deleting the
+    // missingReceipts push used to fail no test: no fixture reached it.
+    expect(r.body).toContain('no agent reported covering');
+    expect(r.remediation.join(' ')).toMatch(
+      /chunks nobody read: build each with/,
+    );
   });
 
   it('a missing-roles gap has a FIX on the remediation channel', () => {
