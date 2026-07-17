@@ -396,6 +396,44 @@ describe('createDaemonSessionFactory', () => {
       'qwen-channel-worker',
     );
   });
+
+  it('stamps channel sourceId on created sessions only', async () => {
+    const sdk = createSdk();
+    const factory = createDaemonSessionFactory({
+      client: sdk.client,
+      DaemonSessionClient: sdk.DaemonSessionClient,
+      clientId: 'qwen-channel-worker',
+    });
+
+    await factory({ workspaceCwd: '/workspace', sourceId: 'dingtalk-main' });
+    await factory({
+      workspaceCwd: '/workspace',
+      sessionId: 'existing-session',
+      sourceId: 'dingtalk-main',
+    });
+
+    expect(sdk.DaemonSessionClient.createOrAttach).toHaveBeenCalledWith(
+      sdk.client,
+      {
+        workspaceCwd: '/workspace',
+        sessionScope: 'thread',
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      },
+      'qwen-channel-worker',
+    );
+    // The load branch never re-stamps creation attribution: no sourceId in the
+    // load request even when the factory request carried one.
+    expect(sdk.DaemonSessionClient.load).toHaveBeenCalledWith(
+      sdk.client,
+      'existing-session',
+      {
+        workspaceCwd: '/workspace',
+        sessionScope: 'thread',
+      },
+      'qwen-channel-worker',
+    );
+  });
 });
 
 describe('createDaemonChannelBridgeFacade', () => {
