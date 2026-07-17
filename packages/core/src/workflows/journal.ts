@@ -127,7 +127,9 @@ export class Journal {
       rec.optsHash === optsHash
     ) {
       // Re-journal the replayed record so the resumed run stays self-contained.
-      void this.append(rec);
+      // Fire-and-forget: a write failure here (ENOSPC/permissions) must not
+      // surface as an unhandled promise rejection and crash the process.
+      void this.append(rec).catch(() => {});
       return rec;
     }
     this.diverged = true;
