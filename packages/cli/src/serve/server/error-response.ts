@@ -37,6 +37,7 @@ import {
   SessionBusyError,
   SessionConflictError,
   SessionLimitExceededError,
+  SessionNotArchivedError,
   SessionNotFoundError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
@@ -326,6 +327,14 @@ export function sendBridgeError(
     });
     return;
   }
+  if (err instanceof SessionNotArchivedError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'session_not_archived',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
   if (err instanceof SessionConflictError) {
     res.status(409).json({
       error: err.message,
@@ -378,17 +387,17 @@ export function sendBridgeError(
     return;
   }
   if (err instanceof WorkspaceMismatchError) {
-    // Single-workspace mode: the daemon binds to one workspace at
-    // boot; cross-workspace POSTs are rejected here.
-    // 400 (not 404 — the daemon is "fine", the client just picked
-    // the wrong daemon for their workspace). Body includes both
-    // paths so orchestrator-aware clients can route to the right
-    // daemon / spawn a new one.
+    // Each bridge binds to one workspace runtime; a cross-workspace POST that
+    // reaches the selected bridge is rejected here.
+    // 400 (not 404 — the daemon is "fine", but the client selected an
+    // unregistered runtime or reached a mismatched bridge). Body includes both
+    // paths so clients can refresh the registry, register the workspace, or
+    // select the right runtime.
     //
     // Operator log line: unlike SessionNotFoundError (per-session
     // 404 with rich URL context), workspace_mismatch indicates an
-    // orchestration / deployment drift (operator booted with the
-    // wrong workspace, or client is routing to the wrong daemon).
+    // orchestration / deployment drift (the workspace was not registered, or
+    // runtime selection and bridge dispatch disagree).
     // Without a breadcrumb the daemon's log looks healthy while
     // every client request silently 400s. Limited to authenticated
     // requests by the upstream bearer-token gate, so probing-DoS
@@ -408,7 +417,7 @@ export function sendBridgeError(
     // readability.
     writeStderrLine(
       `qwen serve: workspace_mismatch (POST /session): ` +
-        `daemon bound to ${JSON.stringify(err.bound)}, ` +
+        `runtime bound to ${JSON.stringify(err.bound)}, ` +
         `rejected ${JSON.stringify(err.requested)}`,
     );
     res.status(400).json({

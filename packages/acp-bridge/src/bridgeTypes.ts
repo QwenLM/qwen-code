@@ -89,6 +89,10 @@ export interface BridgeSpawnRequest {
    * top-level session that no other session spawned.
    */
   parentSessionId?: string;
+  /** Immutable attribution supplied by the creator of a fresh session. */
+  sourceType?: string;
+  /** Optional source-specific identifier. Valid only with `sourceType`. */
+  sourceId?: string;
   approvalMode?: ApprovalMode;
 }
 
@@ -116,6 +120,12 @@ export interface BridgeSession {
    * treating every spawn as an equally successful link.
    */
   parentSessionPersisted?: boolean;
+  /** Immutable creator attribution for this session, when supplied. */
+  sourceType?: string;
+  /** Optional source-specific identifier paired with `sourceType`. */
+  sourceId?: string;
+  /** True iff the source metadata was durably written to the transcript. */
+  sourcePersisted?: boolean;
 }
 
 export interface BridgeRestoreSessionRequest {
@@ -136,6 +146,10 @@ export interface BridgeRestoreSessionRequest {
    * for a top-level session.
    */
   parentSessionId?: string;
+  /** Persisted creator attribution recovered from the transcript. */
+  sourceType?: string;
+  /** Optional persisted identifier paired with `sourceType`. */
+  sourceId?: string;
 }
 
 export const LOAD_REPLAY_MODE_META_KEY = 'qwen.session.loadReplayMode';
@@ -319,6 +333,10 @@ export interface BridgeSessionSummary {
    * absent for a top-level session. Lets a UI link a sub-session back to its
    * parent. Immutable — set when the session is created. */
   parentSessionId?: string;
+  /** Immutable creator attribution, absent on legacy/unattributed sessions. */
+  sourceType?: string;
+  /** Optional source-specific identifier paired with `sourceType`. */
+  sourceId?: string;
   clientCount: number;
   hasActivePrompt: boolean;
   /** True while a non-question permission request awaits a response. */
@@ -560,6 +578,39 @@ export interface BridgeExtensionsChangedData {
   version?: string;
   error?: string;
 }
+
+export type BridgeGenerationModelSource = 'fast' | 'main';
+
+export type BridgeGenerationStreamEvent =
+  | {
+      type: 'started';
+      requestId: string;
+      model: string;
+      modelSource: BridgeGenerationModelSource;
+    }
+  | {
+      type: 'thinking';
+      requestId: string;
+    }
+  | {
+      type: 'delta';
+      requestId: string;
+      seq: number;
+      text: string;
+    }
+  | {
+      type: 'done';
+      requestId: string;
+      model: string;
+      modelSource: BridgeGenerationModelSource;
+      inputTokens?: number;
+      outputTokens?: number;
+    };
+
+export type BridgeGenerationNotificationEvent = Exclude<
+  BridgeGenerationStreamEvent,
+  { type: 'done' }
+>;
 
 export interface AcpSessionBridge {
   /** Read-only daemon diagnostics for status endpoints. */
@@ -854,6 +905,16 @@ export interface AcpSessionBridge {
   isWorkspaceMemoryRememberAvailable(): Promise<boolean>;
 
   /**
+   * Start workspace-scoped MCP discovery without creating an ACP session.
+   * The result only confirms the background task was accepted; callers read
+   * progress from the normal workspace MCP status endpoint.
+   */
+  initializeWorkspaceMcp(): Promise<{ accepted: boolean }>;
+
+  /** Reload persisted MCP settings into workspace and active session configs. */
+  reloadWorkspaceMcp(): Promise<{ accepted: boolean }>;
+
+  /**
    * Read discovered MCP tools for one server from the live ACP registry.
    * (New in upstream — kept in bridge pending workspace service migration.)
    */
@@ -1037,6 +1098,18 @@ export interface AcpSessionBridge {
   ): Promise<{ sessionId: string; recap: string | null }>;
 
   /**
+   * Run a stateless, tool-free text generation request in the ACP child and
+   * stream model deltas back only to this caller. The child prefers the
+   * configured fast model and falls back to the session's main model.
+   */
+  generateSessionContent?(
+    sessionId: string,
+    prompt: string,
+    signal: AbortSignal,
+    context?: BridgeClientRequestContext,
+  ): AsyncIterable<BridgeGenerationStreamEvent>;
+
+  /**
    * Run a side question (/btw) against the session's conversation context.
    * Uses runForkedAgent (cache path) for a single-turn, tool-free LLM call.
    * Returns `answer: null` on empty/failed generation.
@@ -1127,7 +1200,7 @@ export interface AcpSessionBridge {
   addRuntimeMcpServer(
     name: string,
     config: Record<string, unknown>,
-    originatorClientId: string,
+    originatorClientId?: string,
   ): Promise<
     | {
         name: string;
@@ -1154,7 +1227,7 @@ export interface AcpSessionBridge {
    */
   removeRuntimeMcpServer(
     name: string,
-    originatorClientId: string,
+    originatorClientId?: string,
   ): Promise<
     | {
         name: string;
@@ -1167,15 +1240,16 @@ export interface AcpSessionBridge {
 
   manageMcpServer(
     serverName: string,
-    action: 'enable' | 'disable' | 'authenticate' | 'clear-auth',
+    action: 'approve' | 'enable' | 'disable' | 'authenticate' | 'clear-auth',
     originatorClientId: string | undefined,
   ): Promise<{
     serverName: string;
-    action: 'enable' | 'disable' | 'authenticate' | 'clear-auth';
+    action: 'approve' | 'enable' | 'disable' | 'authenticate' | 'clear-auth';
     ok: true;
     changed?: boolean;
     messages?: string[];
     authUrl?: string;
+    pending?: boolean;
   }>;
 
   generateWorkspaceAgent(
@@ -1194,11 +1268,13 @@ export interface AcpSessionBridge {
    * `requireZeroAttaches: true` makes the call a no-op when at
    * least one other client has called `spawnOrAttach` for this
    * entry and got `attached: true`.
+   *
+   * Returns true only when this call removed the live session.
    */
   killSession(
     sessionId: string,
     opts?: { requireZeroAttaches?: boolean },
-  ): Promise<void>;
+  ): Promise<boolean>;
 
   /**
    * Roll back a prior attach: decrement `attachCount` and reap if the

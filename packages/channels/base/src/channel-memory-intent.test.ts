@@ -75,6 +75,17 @@ describe('parseChannelMemoryIntent', () => {
       kind: 'remove',
       id: 'm-a31f0d82c7e4',
     });
+    for (const text of [
+      '删除 m-a31f0d82c7e4',
+      '删掉 m-a31f0d82c7e4',
+      'delete m-a31f0d82c7e4',
+      'remove m-a31f0d82c7e4',
+    ]) {
+      expect(parseChannelMemoryIntent(text)).toEqual({
+        kind: 'remove',
+        id: 'm-a31f0d82c7e4',
+      });
+    }
     expect(
       parseChannelMemoryIntent('把 m-a31f0d82c7e4 改成默认使用 production'),
     ).toEqual({
@@ -84,6 +95,20 @@ describe('parseChannelMemoryIntent', () => {
     });
     expect(
       parseChannelMemoryIntent('update m-a31f0d82c7e4 to use production'),
+    ).toEqual({
+      kind: 'update',
+      id: 'm-a31f0d82c7e4',
+      text: 'use production',
+    });
+    expect(
+      parseChannelMemoryIntent('更新 m-a31f0d82c7e4 为默认使用 production'),
+    ).toEqual({
+      kind: 'update',
+      id: 'm-a31f0d82c7e4',
+      text: '默认使用 production',
+    });
+    expect(
+      parseChannelMemoryIntent('change m-a31f0d82c7e4 to use production'),
     ).toEqual({
       kind: 'update',
       id: 'm-a31f0d82c7e4',

@@ -27,9 +27,13 @@ export function useDaemonMcp(options: DaemonResourceOptions = {}) {
   return {
     ...result,
     status: result.data,
+    initialize: workspaceActions.initializeMcp,
+    reloadConfig: workspaceActions.reloadMcp,
     loadTools: workspaceActions.loadMcpTools,
     loadResources: workspaceActions.loadMcpResources,
     restartServer: workspaceActions.restartMcpServer,
     manageServer: workspaceActions.manageMcpServer,
+    addServer: workspaceActions.addRuntimeMcpServer,
+    removeServer: workspaceActions.removeRuntimeMcpServer,
   };
 }

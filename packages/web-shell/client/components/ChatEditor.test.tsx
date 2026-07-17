@@ -232,7 +232,12 @@ describe('ChatEditor workspace toolbar integration', () => {
     });
     const chip = container.querySelector('[aria-label="Workspace: api"]');
     expect(chip).not.toBeNull();
-    expect(chip?.getAttribute('title')).toBe('/work/api');
+    // The full cwd is surfaced via the hover tooltip (mirroring the git branch
+    // chip), not a native `title` attribute.
+    expect(chip?.getAttribute('data-web-shell-workspace-title')).toBe(
+      '/work/api',
+    );
+    expect(chip?.getAttribute('title')).toBeNull();
     expect(
       container.querySelector('[data-web-shell-workspace]'),
     ).not.toBeNull();
@@ -247,7 +252,7 @@ describe('ChatEditor workspace toolbar integration', () => {
     expect(
       container
         .querySelector('[data-web-shell-workspace]')
-        ?.getAttribute('title'),
+        ?.getAttribute('data-web-shell-workspace-title'),
     ).toBe('api');
   });
 
@@ -542,6 +547,21 @@ describe('ChatEditor toolbar popovers', () => {
     act(() => options[0]?.click());
 
     expect(onSelectModel).toHaveBeenCalledWith('qwen-max');
+  });
+
+  it('displays the model label instead of an opaque route id', () => {
+    const routeId = 'qwen-route:v1:abcdefghijklmnop';
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: routeId,
+      availableModels: [{ id: routeId, label: 'Provider One' }],
+    });
+
+    const button = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-model-button]',
+    );
+    expect(button?.textContent).toContain('Provider One');
+    expect(button?.textContent).not.toContain(routeId);
   });
 
   it('switches between sibling toolbar popovers without dismissing the target', async () => {

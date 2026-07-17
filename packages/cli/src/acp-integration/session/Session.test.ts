@@ -44,6 +44,7 @@ import type { LoadedSettings } from '../../config/settings.js';
 import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
 import { CommandKind } from '../../ui/commands/types.js';
 import { MessageType } from '../../ui/types.js';
+import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
 
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
 const debugLoggerDebugSpy = vi.hoisted(() => vi.fn());
@@ -495,6 +496,7 @@ describe('Session', () => {
       getTargetDir: vi.fn().mockReturnValue(process.cwd()),
       getDebugMode: vi.fn().mockReturnValue(false),
       getAuthType: vi.fn().mockImplementation(() => currentAuthType),
+      getAllConfiguredModels: vi.fn().mockReturnValue([]),
       isCronEnabled: vi.fn().mockReturnValue(false),
       getSessionTokenLimit: vi.fn().mockReturnValue(0),
       getStopHookBlockingCap: vi.fn().mockReturnValue(8),
@@ -1145,6 +1147,14 @@ describe('Session', () => {
   describe('setModel', () => {
     it('sets model via config and returns current model', async () => {
       const requested = `qwen3-coder-plus(${AuthType.USE_OPENAI})`;
+      vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue([
+        {
+          id: 'qwen3-coder-plus',
+          label: 'Qwen3 Coder Plus',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://default.example/v1',
+        },
+      ]);
       await session.setModel({
         sessionId: 'test-session-id',
         modelId: `  ${requested}  `,
@@ -1184,9 +1194,135 @@ describe('Session', () => {
         expect.objectContaining({
           v: 1,
           sessionId: 'test-session-id',
-          currentModelId: 'qwen3-coder-plus',
+          currentModelId: `qwen3-coder-plus(${AuthType.USE_OPENAI})`,
         }),
       );
+    });
+
+    it('resolves an opaque ACP route and persists the canonical model identity', async () => {
+      const models = [
+        {
+          id: 'shared-model',
+          label: 'Provider One',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://one.example/v1',
+          registryBaseUrl: 'https://one.example/v1',
+        },
+        {
+          id: 'shared-model',
+          label: 'Provider Two',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://two.example/v1',
+          registryBaseUrl: 'https://two.example/v1',
+        },
+      ];
+      let activeBaseUrl = 'https://one.example/v1';
+      vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue(models);
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockImplementation(
+        () =>
+          ({
+            authType: currentAuthType,
+            model: currentModel,
+            baseUrl: activeBaseUrl,
+          }) as ReturnType<Config['getContentGeneratorConfig']>,
+      );
+      switchModelSpy.mockImplementation(
+        async (
+          authType: AuthType,
+          modelId: string,
+          options?: { baseUrl?: string },
+        ) => {
+          currentAuthType = authType;
+          currentModel = modelId;
+          activeBaseUrl = options?.baseUrl ?? activeBaseUrl;
+        },
+      );
+      const routeId = buildAcpModelOptions(models)[1]!.modelId;
+
+      const response = await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: routeId,
+      });
+
+      expect(mockConfig.switchModel).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        'shared-model',
+        { baseUrl: 'https://two.example/v1' },
+      );
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.name',
+        'shared-model',
+      );
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.baseUrl',
+        'https://two.example/v1',
+      );
+      expect(mockClient.extNotification).toHaveBeenCalledWith(
+        'qwen/notify/session/model-update',
+        expect.objectContaining({ currentModelId: routeId }),
+      );
+      expect(response).toMatchObject({
+        _meta: {
+          qwenModelSwitch: {
+            modelId: 'shared-model',
+            baseUrl: 'https://two.example/v1',
+          },
+        },
+      });
+    });
+
+    it('switches an implicit route without using its resolved default as a registry key', async () => {
+      const models = [
+        {
+          id: 'shared-model',
+          label: 'Implicit Default',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://default.example/v1',
+        },
+        {
+          id: 'shared-model',
+          label: 'Explicit Route',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://default.example/v1',
+          registryBaseUrl: 'https://default.example/v1',
+        },
+      ];
+      vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue(models);
+      const routeId = buildAcpModelOptions(models)[0]!.modelId;
+
+      const response = await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: routeId,
+      });
+
+      expect(mockConfig.switchModel).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        'shared-model',
+        undefined,
+      );
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.name',
+        'shared-model',
+      );
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.baseUrl',
+        '',
+      );
+      expect(mockClient.extNotification).toHaveBeenCalledWith(
+        'qwen/notify/session/model-update',
+        expect.objectContaining({ currentModelId: routeId }),
+      );
+      expect(response).toMatchObject({
+        _meta: {
+          qwenModelSwitch: {
+            modelId: 'shared-model',
+          },
+        },
+      });
     });
 
     it('does NOT emit the model-update notification when the switch fails (A1)', async () => {
@@ -1210,6 +1346,18 @@ describe('Session', () => {
           modelId: '   ',
         }),
       ).rejects.toThrow('Invalid params');
+
+      expect(mockConfig.switchModel).not.toHaveBeenCalled();
+      expect(mockSettings.setValue).not.toHaveBeenCalled();
+    });
+
+    it('rejects an opaque route that is no longer advertised', async () => {
+      await expect(
+        session.setModel({
+          sessionId: 'test-session-id',
+          modelId: 'qwen-route:v1:abcdefghijklmnop',
+        }),
+      ).rejects.toThrow('Unknown or stale model route');
 
       expect(mockConfig.switchModel).not.toHaveBeenCalled();
       expect(mockSettings.setValue).not.toHaveBeenCalled();

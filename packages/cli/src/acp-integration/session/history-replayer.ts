@@ -103,7 +103,10 @@ export class HistoryReplayer {
     PendingReplayToolCall
   >();
 
-  constructor(ctx: SessionEmitterContext, options: HistoryReplayerOptions = {}) {
+  constructor(
+    ctx: SessionEmitterContext,
+    options: HistoryReplayerOptions = {},
+  ) {
     this.ctx = ctx;
     this.options = options;
     this.messageEmitter = new MessageEmitter(ctx);
@@ -372,7 +375,10 @@ export class HistoryReplayer {
     await this.toolCallEmitter.emitResult({
       toolName,
       callId,
-      success: !result?.error,
+      success:
+        result?.status === undefined
+          ? !result?.error
+          : result.status === 'success' && !result.error,
       message: record.message.parts,
       resultDisplay: result?.resultDisplay,
       artifacts: result?.artifacts,

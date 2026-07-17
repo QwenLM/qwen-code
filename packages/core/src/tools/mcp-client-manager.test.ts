@@ -67,6 +67,29 @@ describe('McpClientManager', () => {
     vi.restoreAllMocks();
   });
 
+  it('reports status from its own client instance', async () => {
+    const { MCPServerStatus } = await import('./mcp-client.js');
+    const manager = mkManager();
+    const clients = (
+      manager as unknown as {
+        clients: Map<
+          string,
+          {
+            getStatus(): (typeof MCPServerStatus)[keyof typeof MCPServerStatus];
+          }
+        >;
+      }
+    ).clients;
+    clients.set('docs', {
+      getStatus: () => MCPServerStatus.CONNECTED,
+    });
+
+    expect(manager.getServerStatus('docs')).toBe(MCPServerStatus.CONNECTED);
+    expect(manager.getServerStatus('missing')).toBe(
+      MCPServerStatus.DISCONNECTED,
+    );
+  });
+
   it('routes discovery through the pool when one is injected (F2 commit 4)', async () => {
     // F2 contract: when a McpTransportPool is wired into the manager
     // ctor, `discoverAllMcpTools` MUST go through `pool.acquire`

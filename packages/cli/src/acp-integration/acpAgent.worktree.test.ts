@@ -246,10 +246,6 @@ vi.mock('../config/config.js', () => ({
   buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
 }));
 vi.mock('./session/Session.js', () => ({ Session: vi.fn() }));
-vi.mock('../utils/acpModelUtils.js', () => ({
-  formatAcpModelId: vi.fn(),
-}));
-
 // ---------------------------------------------------------------------------
 // Imports
 // ---------------------------------------------------------------------------

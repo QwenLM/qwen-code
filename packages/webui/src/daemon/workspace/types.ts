@@ -32,6 +32,9 @@ import type {
   DaemonMcpRestartResult,
   DaemonMcpManageAction,
   DaemonMcpManageResult,
+  DaemonRuntimeMcpAddRequest,
+  DaemonRuntimeMcpAddResult,
+  DaemonRuntimeMcpRemoveResult,
   DaemonUpdateAgentRequest,
   DaemonWorkspaceAgentDetail,
   DaemonWorkspaceAgentsStatus,
@@ -44,6 +47,7 @@ import type {
   DaemonWorkspaceFileWriteRequest,
   DaemonWorkspaceFileWriteResult,
   DaemonWorkspaceMcpStatus,
+  DaemonWorkspaceMcpInitializeResult,
   DaemonWorkspaceMcpToolsStatus,
   DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMemoryStatus,
@@ -326,6 +330,8 @@ export interface DaemonWorkspaceActions {
 
   // MCP
   loadMcpStatus(): Promise<DaemonWorkspaceMcpStatus>;
+  initializeMcp(): Promise<DaemonWorkspaceMcpInitializeResult>;
+  reloadMcp(): Promise<DaemonWorkspaceMcpInitializeResult>;
   loadMcpTools(serverName: string): Promise<DaemonWorkspaceMcpToolsStatus>;
   loadMcpResources(
     serverName: string,
@@ -335,6 +341,10 @@ export interface DaemonWorkspaceActions {
     serverName: string,
     action: DaemonMcpManageAction,
   ): Promise<DaemonMcpManageResult>;
+  addRuntimeMcpServer(
+    request: DaemonRuntimeMcpAddRequest,
+  ): Promise<DaemonRuntimeMcpAddResult>;
+  removeRuntimeMcpServer(name: string): Promise<DaemonRuntimeMcpRemoveResult>;
 
   // Daemon status (read-only)
   loadDaemonStatus(
@@ -363,6 +373,9 @@ export interface DaemonWorkspaceActions {
     scope: 'workspace' | 'user',
     key: string,
     value: unknown,
+    options?: {
+      mcpServerMutation?: { operation: 'set' | 'remove'; name: string };
+    },
   ): Promise<DaemonSettingUpdateResult>;
 
   // Memory

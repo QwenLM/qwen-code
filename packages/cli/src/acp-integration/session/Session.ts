@@ -194,7 +194,13 @@ import {
   goalTerminalEventToHistoryItem,
   recordGoalStatusItem,
 } from '../../ui/utils/restoreGoal.js';
-import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
+import {
+  ACP_ROUTE_ID_PREFIX,
+  buildAcpModelOptions,
+  getCurrentAcpModelId,
+  parseAcpModelOption,
+  resolveAcpModelOption,
+} from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -4087,7 +4093,17 @@ export class Session implements SessionContext {
       throw RequestError.invalidParams(undefined, 'modelId cannot be empty');
     }
 
-    const parsed = parseAcpModelOption(rawModelId);
+    const resolvedRoute = resolveAcpModelOption(
+      rawModelId,
+      this.config.getAllConfiguredModels(),
+    );
+    if (!resolvedRoute && rawModelId.startsWith(ACP_ROUTE_ID_PREFIX)) {
+      throw RequestError.invalidParams(
+        undefined,
+        `Unknown or stale model route: "${rawModelId}"`,
+      );
+    }
+    const parsed = resolvedRoute ?? parseAcpModelOption(rawModelId);
     const previousAuthType = this.config.getAuthType?.();
     const selectedAuthType = parsed.authType ?? previousAuthType;
 
@@ -4098,18 +4114,40 @@ export class Session implements SessionContext {
       );
     }
 
+    const requireCachedCredentials =
+      selectedAuthType !== previousAuthType &&
+      selectedAuthType === AuthType.QWEN_OAUTH;
+    const switchOptions =
+      resolvedRoute?.baseUrl !== undefined || requireCachedCredentials
+        ? {
+            ...(resolvedRoute?.baseUrl !== undefined
+              ? { baseUrl: resolvedRoute.baseUrl }
+              : {}),
+            ...(requireCachedCredentials
+              ? { requireCachedCredentials: true }
+              : {}),
+          }
+        : undefined;
     await this.config.switchModel(
       selectedAuthType,
       parsed.modelId,
-      selectedAuthType !== previousAuthType &&
-        selectedAuthType === AuthType.QWEN_OAUTH
-        ? { requireCachedCredentials: true }
-        : undefined,
+      switchOptions,
     );
 
     const after = this.config.getContentGeneratorConfig?.();
     const effectiveAuthType = after?.authType ?? selectedAuthType;
     const effectiveModelId = after?.model ?? parsed.modelId;
+    const activeRuntimeSnapshot = this.config.getActiveRuntimeModelSnapshot?.();
+    const currentAcpModelId = getCurrentAcpModelId(
+      buildAcpModelOptions(this.config.getAllConfiguredModels()),
+      activeRuntimeSnapshot?.id ?? effectiveModelId,
+      activeRuntimeSnapshot?.authType ?? effectiveAuthType,
+      activeRuntimeSnapshot
+        ? undefined
+        : resolvedRoute
+          ? resolvedRoute.registryBaseUrl
+          : this.config.getCurrentModelRegistryBaseUrl?.(),
+    );
 
     // Notify attached clients of an in-session model switch so a
     // `/model` slash command or plan-mode change reaches the bus (today only
@@ -4125,7 +4163,7 @@ export class Session implements SessionContext {
       .extNotification('qwen/notify/session/model-update', {
         v: 1,
         sessionId: this.sessionId,
-        currentModelId: effectiveModelId,
+        currentModelId: currentAcpModelId,
       })
       .catch((error) => {
         // Advisory only; a failed notification must not fail the model switch.
@@ -4134,17 +4172,22 @@ export class Session implements SessionContext {
 
     if (options.persistDefault ?? true) {
       const persistScope = getPersistScopeForModelSelection(this.settings);
-      this.settings.setValue(persistScope, 'model.name', parsed.modelId);
-      // Id-only switch: clear any baseUrl disambiguator left by a previous
-      // model-picker selection so the next launch resolves to this provider,
-      // not a stale one sharing the same model id. Empty-string tombstone so
-      // the clear overrides a lower-scope value on merge (undefined is dropped
-      // from JSON and would not override).
-      this.settings.setValue(persistScope, 'model.baseUrl', '');
+      this.settings.setValue(
+        persistScope,
+        'model.name',
+        resolvedRoute?.isRuntime ? resolvedRoute.modelId : effectiveModelId,
+      );
+      this.settings.setValue(
+        persistScope,
+        'model.baseUrl',
+        resolvedRoute && !resolvedRoute.isRuntime
+          ? (resolvedRoute.baseUrl ?? '')
+          : '',
+      );
       this.settings.setValue(
         persistScope,
         'security.auth.selectedType',
-        selectedAuthType,
+        effectiveAuthType,
       );
     }
 
@@ -4155,7 +4198,8 @@ export class Session implements SessionContext {
           modelId: effectiveModelId,
           baseUrl: after?.baseUrl ?? '(default)',
           apiKey: maskApiKeyForDisplay(after?.apiKey),
-          isRuntime: rawModelId.startsWith('$runtime|'),
+          isRuntime:
+            resolvedRoute?.isRuntime ?? rawModelId.startsWith('$runtime|'),
         },
       },
     };

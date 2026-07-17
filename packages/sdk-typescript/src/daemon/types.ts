@@ -168,7 +168,7 @@ export function requireWorkspaceCwd(caps: DaemonCapabilities): string {
       'workspaceCwd',
       caps.workspaceCwd === ''
         ? 'daemon returned an empty workspaceCwd (newer daemon with a bug)'
-        : 'daemon predates workspaceCwd support (1 daemon = 1 workspace); upgrade it',
+        : 'daemon predates workspaceCwd support; upgrade it',
     );
   }
   return caps.workspaceCwd;
@@ -456,6 +456,12 @@ export interface DaemonSession {
   createdAt?: string;
   /** True while the live session has an in-flight prompt. */
   hasActivePrompt?: boolean;
+  /** Immutable creator attribution, absent on legacy/unattributed sessions. */
+  sourceType?: string;
+  /** Optional source-specific identifier paired with `sourceType`. */
+  sourceId?: string;
+  /** True iff supplied source metadata was durably written to the transcript. */
+  sourcePersisted?: boolean;
 }
 
 /**
@@ -573,6 +579,10 @@ export interface DaemonSessionSummary {
    * absent for a top-level session. Lets a UI link a sub-session back to its
    * parent. */
   parentSessionId?: string;
+  /** Immutable creator attribution, absent on legacy/unattributed sessions. */
+  sourceType?: string;
+  /** Optional source-specific identifier paired with `sourceType`. */
+  sourceId?: string;
   clientCount?: number;
   hasActivePrompt?: boolean;
   isWaitingForPermission?: boolean;
@@ -701,6 +711,10 @@ export interface DaemonSessionListPageOptions {
    * opaque and activity-based.
    */
   parentSessionId?: string;
+  /** Restrict the page to sessions attributed to this source type. */
+  sourceType?: string;
+  /** Restrict the page to this source identifier. Requires `sourceType`. */
+  sourceId?: string;
 }
 
 export interface DaemonSessionListPage {
@@ -955,7 +969,19 @@ export interface DaemonWorkspaceMcpServerStatus extends DaemonStatusCell {
   transport: DaemonMcpTransport;
   disabled: boolean;
   hasOAuthTokens?: boolean;
+  requiresAuth?: boolean;
+  approvalState?: 'pending' | 'rejected';
+  authenticationState?: 'pending' | 'succeeded' | 'failed';
+  authenticationError?: string;
   source?: 'user' | 'project' | 'extension';
+  configOrigin?:
+    | 'user_settings'
+    | 'workspace_settings'
+    | 'project_mcp_json'
+    | 'system_settings'
+    | 'extension'
+    | 'runtime';
+  removable?: boolean;
   config?: {
     command?: string;
     args?: string[];
@@ -995,20 +1021,17 @@ export interface DaemonWorkspaceMcpServerStatus extends DaemonStatusCell {
 export type DaemonMcpBudgetMode = 'enforce' | 'warn' | 'off';
 
 /**
- * MCP client budget status cell. Currently emits one entry with
- * `scope: 'session'` (per-session enforcement; see the `scope` field
- * doc for why). A future shared pool may add `scope: 'workspace'`.
- * Consumers MUST tolerate unrecognized scope
- * values — drop, don't fail.
+ * MCP client budget status cell. Daemons advertising
+ * `mcp_workspace_pool` emit workspace-scoped accounting; the legacy
+ * no-pool fallback emits session-scoped accounting. Consumers MUST
+ * tolerate unrecognized scope values — drop, don't fail.
  */
 export interface DaemonMcpBudgetStatusCell extends DaemonStatusCell {
   kind: 'mcp_budget';
   /**
-   * **Currently emits `'session'`** -- the budget caps live MCP
-   * clients per ACP session, not per-workspace. Each session has its
-   * own `McpClientManager` (created via `acpAgent.newSessionConfig`).
-   * A future shared MCP pool may introduce a workspace-scoped manager
-   * and emit `'workspace'` (or `'pool'`) cells.
+   * `'workspace'` means sessions inside the selected runtime share an
+   * MCP pool and budget. `'session'` is the legacy per-session manager
+   * used when `mcp_workspace_pool` is absent.
    *
    * The `string & {}` widening keeps IDE autocomplete + literal
    * narrowing for known scopes while allowing unknown scopes through
@@ -1042,6 +1065,12 @@ export interface DaemonWorkspaceMcpStatus {
    * Older daemons omit the field.
    */
   budgets?: DaemonMcpBudgetStatusCell[];
+}
+
+/** Response of `POST /workspace/mcp/initialize`. */
+export interface DaemonWorkspaceMcpInitializeResult {
+  /** True only when this request started a new background discovery task. */
+  accepted: boolean;
 }
 
 export interface DaemonWorkspaceMcpToolStatus {
@@ -2227,6 +2256,27 @@ export interface DaemonSessionRecapResult {
   recap: string | null;
 }
 
+export type DaemonSessionGenerationEvent =
+  | {
+      v: 1;
+      type: 'started';
+      requestId: string;
+      model: string;
+      modelSource: 'fast' | 'main';
+    }
+  | { v: 1; type: 'thinking'; requestId: string }
+  | { v: 1; type: 'delta'; requestId: string; seq: number; text: string }
+  | {
+      v: 1;
+      type: 'done';
+      requestId: string;
+      model: string;
+      modelSource: 'fast' | 'main';
+      inputTokens?: number;
+      outputTokens?: number;
+    }
+  | { v: 1; type: 'error'; code: string; message: string };
+
 export interface DaemonSessionBtwResult {
   sessionId: string;
   answer: string | null;
@@ -2296,6 +2346,20 @@ export interface DaemonReloadResponse {
   childError?: string;
 }
 
+/** A bounded, credential-redacted adapter startup diagnostic. */
+export interface DaemonChannelStartupFailure {
+  channel: string;
+  /** The daemon currently emits only `connect`; this is widened for evolution. */
+  phase: string;
+  code?: string;
+  message: string;
+}
+
+export interface DaemonChannelStartupAttemptFailure
+  extends DaemonChannelStartupFailure {
+  workspaceCwd: string;
+}
+
 /**
  * Mirrors the daemon's ChannelWorkerSnapshot. `state` and `signal` are
  * widened to string to avoid coupling the wire type to the daemon's unions.
@@ -2316,6 +2380,8 @@ export interface DaemonChannelWorkerSnapshot {
   nextRestartAt?: string;
   lastHeartbeatAt?: string;
   staleHeartbeatAt?: string;
+  startupFailures?: DaemonChannelStartupFailure[];
+  startupFailuresTruncated?: boolean;
 }
 
 export type DaemonChannelSelection =
@@ -2357,6 +2423,16 @@ export interface DaemonChannelStopResult {
   state: DaemonChannelControlState;
 }
 
+export interface DaemonChannelWorkerStartErrorResponse {
+  error: string;
+  code: 'channel_worker_start_failed';
+  rolledBack?: boolean;
+  rollbackError?: string;
+  state: DaemonChannelControlState;
+  startupFailures?: DaemonChannelStartupAttemptFailure[];
+  startupFailuresTruncated?: boolean;
+}
+
 /**
  * Result of `POST /workspace/channel/reload`: the daemon restarted its channel
  * worker group (which re-reads settings.json). `worker` is the compatible
@@ -2378,7 +2454,11 @@ export type DaemonMcpRestartResult =
       serverName: string;
       restarted: false;
       skipped: true;
-      reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+      reason:
+        | 'in_flight'
+        | 'disabled'
+        | 'budget_would_exceed'
+        | 'authentication_required';
     }
   | {
       serverName: string;
@@ -2391,6 +2471,7 @@ export type DaemonMcpRestartResult =
     };
 
 export type DaemonMcpManageAction =
+  | 'approve'
   | 'enable'
   | 'disable'
   | 'authenticate'
@@ -2403,6 +2484,7 @@ export interface DaemonMcpManageResult {
   changed?: boolean;
   messages?: string[];
   authUrl?: string;
+  pending?: boolean;
 }
 
 /**

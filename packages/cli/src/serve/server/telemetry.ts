@@ -15,6 +15,7 @@ import type { NextFunction, Request, Response } from 'express';
 import {
   CLIENT_ID_HEADER,
   CLIENT_ID_RE,
+  getDeferredRuntimeRequestTiming,
   MAX_CLIENT_ID_LENGTH,
 } from './request-helpers.js';
 
@@ -150,6 +151,15 @@ export function resolveDaemonTelemetryRoute(
       sessionId: workspaceExport[1],
     };
   }
+  const workspaceArchivedExport = path.match(
+    /^\/workspaces\/[^/]+\/session\/([^/]+)\/archive\/export$/,
+  );
+  if (workspaceArchivedExport?.[1] && req.method === 'GET') {
+    return {
+      route: 'GET /workspaces/:workspace/session/:id/archive/export',
+      sessionId: workspaceArchivedExport[1],
+    };
+  }
   const pluralWorkspacePrefix = /^\/workspaces\/[^/]+/;
   if (pluralWorkspacePrefix.test(path)) {
     const suffix = path.replace(pluralWorkspacePrefix, '/workspace');
@@ -219,7 +229,7 @@ export function resolveDaemonTelemetryRoute(
         return { route: 'POST /workspace/agents/:agentType' };
       }
       if (
-        /^\/workspace\/mcp\/[^/]+\/(enable|disable|authenticate|clear-auth)$/.test(
+        /^\/workspace\/mcp\/[^/]+\/(approve|enable|disable|authenticate|clear-auth)$/.test(
           suffix,
         )
       ) {
@@ -359,7 +369,8 @@ export function daemonTelemetryMiddleware(
       CLIENT_ID_RE.test(rawClientId)
         ? rawClientId
         : undefined;
-    const startMs = Date.now();
+    const deferredRuntime = getDeferredRuntimeRequestTiming(req);
+    const startMs = deferredRuntime?.startedAt.getTime() ?? Date.now();
     void withDaemonRequestSpan(
       {
         method: req.method,
@@ -370,6 +381,13 @@ export function daemonTelemetryMiddleware(
           ? { permissionRequestId: route.permissionRequestId }
           : {}),
         ...(clientId ? { clientId } : {}),
+        ...(deferredRuntime?.waitMs !== undefined
+          ? {
+              startTime: deferredRuntime.startedAt,
+              deferredRuntimeWaitMs: deferredRuntime.waitMs,
+              deferredRuntimePath: deferredRuntime.path,
+            }
+          : {}),
       },
       async (span) =>
         await new Promise<void>((resolve, reject) => {
@@ -379,7 +397,12 @@ export function daemonTelemetryMiddleware(
             done = true;
             recordDaemonHttpResponse(span, res.statusCode);
             const durationMs = Date.now() - startMs;
-            recordDaemonHttpRequest(durationMs, route.route, res.statusCode);
+            recordDaemonHttpRequest(
+              durationMs,
+              route.route,
+              res.statusCode,
+              deferredRuntime?.path,
+            );
             // Exclude the dashboard's own status poll from the metrics-ring
             // request rate/latency, or the Requests chart shows a baseline of
             // ≥1/window with no external traffic (the dashboard counting itself)

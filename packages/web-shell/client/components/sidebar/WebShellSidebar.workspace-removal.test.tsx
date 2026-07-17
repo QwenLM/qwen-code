@@ -15,9 +15,11 @@ const {
   workspaceActions,
   active,
   archived,
+  useSessions,
   listWorkspaceSessions,
   archiveSessionsData,
   unarchiveSessionsData,
+  exportArchivedSession,
 } = vi.hoisted(() => {
   const makeSessions = () => ({
     sessions: [] as DaemonSessionSummary[],
@@ -42,6 +44,12 @@ const {
     notFound: [],
     errors: [],
   });
+  const active = makeSessions();
+  const archived = makeSessions();
+  const useSessions = vi.fn((options?: { archiveState?: string }) =>
+    options?.archiveState === 'archived' ? archived : active,
+  );
+  const exportArchivedSession = vi.fn();
   return {
     connection: {
       status: 'connected',
@@ -69,6 +77,7 @@ const {
           listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
           archiveSessionsData,
           unarchiveSessionsData,
+          exportArchivedSession,
         })),
       },
       refreshCapabilities: vi.fn(),
@@ -78,11 +87,13 @@ const {
       removeWorkspace: vi.fn(),
       listSessionGroups: vi.fn(),
     },
-    active: makeSessions(),
-    archived: makeSessions(),
+    active,
+    archived,
+    useSessions,
     listWorkspaceSessions,
     archiveSessionsData,
     unarchiveSessionsData,
+    exportArchivedSession,
   };
 });
 
@@ -91,8 +102,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useActions: () => ({ renameSession: vi.fn() }),
   useWorkspace: () => workspace,
   useWorkspaceActions: () => workspaceActions,
-  useSessions: (options?: { archiveState?: string }) =>
-    options?.archiveState === 'archived' ? archived : active,
+  useSessions,
 }));
 
 const { I18nProvider } = await import('../../i18n');
@@ -242,6 +252,38 @@ async function expandArchived(): Promise<void> {
   });
 }
 
+function sessionAction(label: string): HTMLButtonElement | undefined {
+  return Array.from(
+    container.querySelectorAll<HTMLButtonElement>(
+      'button[aria-label="More actions"]',
+    ),
+  ).find((button) =>
+    button
+      .closest<HTMLElement>('[class*="sessionRow"]')
+      ?.textContent?.includes(label),
+  );
+}
+
+async function selectSessionMenuItem(
+  label: string,
+  itemLabel: string,
+): Promise<void> {
+  const trigger = sessionAction(label);
+  expect(trigger).toBeDefined();
+  await act(async () => {
+    click(trigger!);
+    await Promise.resolve();
+  });
+  const item = Array.from(
+    document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+  ).find((candidate) => candidate.textContent?.includes(itemLabel));
+  expect(item).toBeDefined();
+  await act(async () => {
+    click(item!);
+    await Promise.resolve();
+  });
+}
+
 function useWorkspaceSessionCatalog(
   resolve: (
     cwd: string,
@@ -259,6 +301,7 @@ function useWorkspaceSessionCatalog(
     listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
     archiveSessionsData,
     unarchiveSessionsData,
+    exportArchivedSession,
   }));
 }
 
@@ -308,11 +351,13 @@ beforeEach(() => {
     notFound: [],
     errors: [],
   });
+  exportArchivedSession.mockReset();
   workspace.client.workspaceByCwd.mockImplementation(() => ({
     listWorkspaceSessions,
     listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
     archiveSessionsData,
     unarchiveSessionsData,
+    exportArchivedSession,
   }));
   workspaceActions.removeWorkspace.mockReset();
   workspaceActions.removeWorkspace.mockResolvedValue({ removed: true });
@@ -320,6 +365,7 @@ beforeEach(() => {
   active.reload.mockResolvedValue(undefined);
   archived.reload.mockReset();
   archived.reload.mockResolvedValue(undefined);
+  useSessions.mockClear();
   active.sessions.length = 0;
   archived.sessions.length = 0;
 });
@@ -328,6 +374,7 @@ afterEach(() => {
   act(() => root.unmount());
   container.remove();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe('WebShellSidebar workspace removal', () => {
@@ -372,6 +419,9 @@ describe('WebShellSidebar workspace removal', () => {
     workspace.client.workspaceByCwd.mockImplementation(() => ({
       listWorkspaceSessions: listSecondarySessions,
       listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      archiveSessionsData,
+      unarchiveSessionsData,
+      exportArchivedSession,
     }));
 
     renderSidebar({ lockedWorkspaceCwd: '/tmp/other' });
@@ -403,6 +453,16 @@ describe('WebShellSidebar workspace removal', () => {
 
     expect(container.textContent).toContain('Secondary archived');
     expect(container.textContent).not.toContain('Primary archived');
+    expect(
+      useSessions.mock.calls.every(
+        ([options]) => !Object.hasOwn(options ?? {}, 'sourceType'),
+      ),
+    ).toBe(true);
+    expect(
+      listSecondarySessions.mock.calls.every(
+        ([options]) => !Object.hasOwn(options ?? {}, 'sourceType'),
+      ),
+    ).toBe(true);
   });
 
   it('shows only the locked workspace without registration controls', () => {
@@ -919,5 +979,175 @@ describe('WebShellSidebar goals entry', () => {
     expect(button).not.toBeNull();
     click(button!);
     expect(onOpenGoals).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('WebShellSidebar primary workspace header', () => {
+  it('does not tag the primary workspace with a redundant "Primary" badge', () => {
+    // Multi-workspace sidebar: the primary section used to append a "Primary"
+    // badge to its header. The workspace selector's checkmark already conveys
+    // the default target, so the badge was dropped. Assert it is gone while the
+    // primary workspace ('/tmp/project') still renders by its folder name — so
+    // a regression re-adding the badge would flip this red.
+    renderSidebar();
+    const primaryBadges = Array.from(container.querySelectorAll('span')).filter(
+      (el) => el.textContent === 'Primary',
+    );
+    expect(primaryBadges).toHaveLength(0);
+    expect(container.textContent).toContain('project');
+  });
+});
+
+describe('WebShellSidebar archived session export', () => {
+  const exportResult = {
+    content: '<p>exported</p>',
+    filename: 'session.html',
+    mimeType: 'text/html',
+    format: 'html' as const,
+  };
+
+  beforeEach(() => {
+    vi.stubGlobal('URL', {
+      ...URL,
+      createObjectURL: vi.fn(() => 'blob:session-export'),
+      revokeObjectURL: vi.fn(),
+    });
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    exportArchivedSession.mockResolvedValue(exportResult);
+  });
+
+  it('hides export without the archived export capability', async () => {
+    archived.sessions.push({
+      sessionId: 'archived-primary',
+      displayName: 'Archived primary',
+      workspaceCwd: '/tmp/project',
+      isArchived: true,
+    });
+    renderSidebar();
+    await expandArchived();
+
+    const trigger = sessionAction('Archived primary');
+    expect(trigger).toBeDefined();
+    await act(async () => {
+      click(trigger!);
+      await Promise.resolve();
+    });
+
+    expect(
+      Array.from(
+        document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+      ).some((item) => item.textContent?.includes('Export')),
+    ).toBe(false);
+  });
+
+  it('hides export for an untrusted archived workspace', async () => {
+    connection.capabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'workspace_archived_session_export'],
+    };
+    archived.sessions.push({
+      sessionId: 'archived-untrusted',
+      displayName: 'Archived untrusted',
+      workspaceCwd: '/tmp/danger',
+      isArchived: true,
+    });
+    renderSidebar();
+    await expandArchived();
+
+    const trigger = sessionAction('Archived untrusted');
+    expect(trigger).toBeDefined();
+    await act(async () => {
+      click(trigger!);
+      await Promise.resolve();
+    });
+
+    expect(
+      Array.from(
+        document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+      ).some((item) => item.textContent?.includes('Export')),
+    ).toBe(false);
+  });
+
+  it('exports equal-id archived rows through their owning workspaces', async () => {
+    connection.capabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'workspace_archived_session_export'],
+    };
+    archived.sessions.push({
+      sessionId: 'same-session',
+      displayName: 'Primary archive',
+      isArchived: true,
+    });
+    let releasePrimary!: (value: typeof exportResult) => void;
+    const primaryExport = vi.fn(
+      () =>
+        new Promise<typeof exportResult>((resolve) => {
+          releasePrimary = resolve;
+        }),
+    );
+    const secondaryExport = vi.fn().mockResolvedValue(exportResult);
+    workspace.client.workspaceByCwd.mockImplementation((cwd: string) => ({
+      listWorkspaceSessions: async (options?: { archiveState?: string }) =>
+        cwd === '/tmp/other' && options?.archiveState === 'archived'
+          ? [
+              {
+                sessionId: 'same-session',
+                displayName: 'Secondary archive',
+                workspaceCwd: cwd,
+                isArchived: true,
+              },
+            ]
+          : [],
+      listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      archiveSessionsData,
+      unarchiveSessionsData,
+      exportArchivedSession:
+        cwd === '/tmp/project' ? primaryExport : secondaryExport,
+    }));
+    renderSidebar();
+    await expandArchived();
+
+    expect(sessionAction('Primary archive')).toBeDefined();
+    expect(sessionAction('Secondary archive')).toBeDefined();
+    try {
+      await selectSessionMenuItem('Primary archive', 'Export');
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      const secondaryTrigger = sessionAction('Secondary archive');
+      expect(secondaryTrigger).toBeDefined();
+      await act(async () => {
+        click(secondaryTrigger!);
+        await Promise.resolve();
+      });
+      const secondaryItem = Array.from(
+        document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+      ).find((item) => item.textContent?.includes('Export'));
+      expect(secondaryItem?.getAttribute('data-disabled')).toBeNull();
+      await act(async () => {
+        click(secondaryItem!);
+        await Promise.resolve();
+      });
+
+      expect(secondaryExport).toHaveBeenCalledWith('same-session', {
+        format: 'html',
+      });
+      await act(async () => {
+        releasePrimary(exportResult);
+        await Promise.resolve();
+      });
+    } finally {
+      await act(async () => {
+        releasePrimary?.(exportResult);
+        await Promise.resolve();
+      });
+    }
+
+    expect(primaryExport).toHaveBeenCalledWith('same-session', {
+      format: 'html',
+    });
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(2);
+    expect(URL.revokeObjectURL).toHaveBeenCalledTimes(2);
   });
 });
