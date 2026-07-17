@@ -70,6 +70,8 @@ export interface DaemonSessionClientOptions {
   lastEventId?: number;
   /** Compacted replay snapshot from daemon load response. */
   replaySnapshot?: DaemonReplaySnapshot;
+  /** True when older persisted records precede the replay snapshot. */
+  historyHasMore?: boolean;
   /**
    * Local per-session prompt cap. The counter is shared with the parent
    * `DaemonClient`; other session clients using the same parent instance
@@ -105,6 +107,7 @@ export class DaemonSessionClient {
   readonly state: DaemonSessionState;
   readonly replaySnapshot: DaemonReplaySnapshot;
   readonly hasActivePrompt: boolean;
+  readonly historyHasMore: boolean;
   private lastSeenEventId: number | undefined;
   private subscriptionActive = false;
   /** In-flight `reattach()` so concurrent prompts re-register only once. */
@@ -123,6 +126,7 @@ export class DaemonSessionClient {
     this.session = { ...opts.session };
     this.state = { ...(opts.state ?? {}) };
     this.hasActivePrompt = opts.hasActivePrompt ?? false;
+    this.historyHasMore = opts.historyHasMore ?? false;
     this.replaySnapshot = opts.replaySnapshot ?? {
       compactedReplay: [],
       liveJournal: [],
@@ -198,6 +202,7 @@ export class DaemonSessionClient {
       hasActivePrompt,
       compactedReplay,
       liveJournal,
+      historyHasMore,
       lastEventId: serverLastEventId,
       ...session
     } = await client.loadSession(sessionId, req, clientId);
@@ -211,6 +216,7 @@ export class DaemonSessionClient {
         compactedReplay: compactedReplay ?? [],
         liveJournal: liveJournal ?? [],
       },
+      historyHasMore,
     });
   }
 

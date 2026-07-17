@@ -248,7 +248,7 @@ describe('classifier configuration', () => {
     );
   });
 
-  it('uses temperature 0 and max_output_tokens=32 with thinking disabled for stage 1', async () => {
+  it('uses temperature 0 and max_output_tokens=256 with thinking disabled for stage 1', async () => {
     runSideQueryMock.mockResolvedValueOnce({ shouldBlock: false });
     await classifyAction(makeInput());
     const opts = runSideQueryMock.mock.calls[0]?.[1] as {
@@ -259,7 +259,7 @@ describe('classifier configuration', () => {
       };
     };
     expect(opts.config?.temperature).toBe(0);
-    expect(opts.config?.maxOutputTokens).toBe(32);
+    expect(opts.config?.maxOutputTokens).toBe(256);
     expect(opts.config?.thinkingConfig?.includeThoughts).toBe(false);
   });
 

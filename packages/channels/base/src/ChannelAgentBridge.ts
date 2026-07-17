@@ -80,6 +80,13 @@ export interface BridgeSessionInfo {
 
 export interface ChannelAgentBridgeSessionOptions {
   approvalMode?: string;
+  /**
+   * Channel instance name (e.g. `feishu-main`) stamped as the daemon `sourceId`
+   * on **new** sessions — creation-time attribution paired with
+   * `sourceType: 'channel'`. Ignored by `loadSession`: loading an existing
+   * session never re-stamps its creation attribution.
+   */
+  sourceId?: string;
 }
 
 export interface ChannelAgentBridge {
