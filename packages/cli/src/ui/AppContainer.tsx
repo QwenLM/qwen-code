@@ -3771,15 +3771,24 @@ export const AppContainer = (props: AppContainerProps) => {
 
       // 'e': toggle plan confirmation expand/collapse. Placed before
       // the re-entry block so it takes priority and returns early.
-      // Only active during WaitingForConfirmation so bare 'e' doesn't
-      // interfere with typing during Idle. See #7001.
+      // Only active during a plan-type WaitingForConfirmation so bare
+      // 'e' doesn't interfere with typing during Idle or cause
+      // unexplained layout changes during non-plan confirmations
+      // (edit, exec, info, etc.). See #7001.
+      const isPlanConfirmation = pendingToolCalls.some(
+        (tc) =>
+          tc.status === 'awaiting_approval' &&
+          (tc as { confirmationDetails?: { type?: string } })
+            .confirmationDetails?.type === 'plan',
+      );
       if (
         key.sequence === 'e' &&
         !key.ctrl &&
         !key.meta &&
         !key.shift &&
         buffer.text.length === 0 &&
-        streamingState === StreamingState.WaitingForConfirmation
+        streamingState === StreamingState.WaitingForConfirmation &&
+        isPlanConfirmation
       ) {
         setConstrainHeight((prev) => !prev);
         return;
@@ -3925,6 +3934,7 @@ export const AppContainer = (props: AppContainerProps) => {
       setThoughtExpanded,
       openTranscript,
       closeTranscript,
+      pendingToolCalls,
     ],
   );
 
