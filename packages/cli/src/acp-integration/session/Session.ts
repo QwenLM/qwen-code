@@ -5,6 +5,7 @@
  */
 
 import { Buffer } from 'node:buffer';
+import { existsSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type {
@@ -190,6 +191,7 @@ import {
   MessageType,
   type HistoryItemGoalStatus,
 } from '../../ui/types.js';
+import { extractAtPathCommands } from '../../ui/hooks/atCommandProcessor.js';
 import {
   ACP_ROUTE_ID_PREFIX,
   buildAcpModelOptions,
@@ -5949,6 +5951,7 @@ export class Session implements SessionContext {
     const embeddedContext: EmbeddedResourceResource[] = [];
     const extensionMentions = new Map<string, string>();
     const mcpServerMentions = new Map<string, string>();
+    const textPathSpecsToRead = new Set<string>();
     const preserveUnsupportedImageForBridge = shouldRunVisionBridge(
       this.config,
     );
@@ -5958,6 +5961,13 @@ export class Session implements SessionContext {
         case 'text':
           collectExtensionMentionRefs(part.text, extensionMentions);
           collectMcpServerMentionRefs(part.text, mcpServerMentions);
+          for (const pathSpec of extractAtPathCommands(part.text)) {
+            if (
+              existsSync(path.resolve(this.config.getProjectRoot(), pathSpec))
+            ) {
+              textPathSpecsToRead.add(pathSpec);
+            }
+          }
           return { text: part.text };
         case 'image':
           if (preserveUnsupportedImageForBridge) {
@@ -6006,6 +6016,12 @@ export class Session implements SessionContext {
     });
 
     const atPathCommandParts = parts.filter((part) => 'fileData' in part);
+    const pathSpecsToRead = [
+      ...new Set([
+        ...textPathSpecsToRead,
+        ...atPathCommandParts.map((part) => part.fileData!.fileUri!),
+      ]),
+    ];
     const extensionParts = await this.#resolveExtensionMentionParts(
       extensionMentions,
       abortSignal,
@@ -6014,7 +6030,7 @@ export class Session implements SessionContext {
       this.#resolveMcpServerMentionParts(mcpServerMentions);
 
     if (
-      atPathCommandParts.length === 0 &&
+      pathSpecsToRead.length === 0 &&
       embeddedContext.length === 0 &&
       extensionParts.length === 0 &&
       mcpServerParts.length === 0
@@ -6022,18 +6038,12 @@ export class Session implements SessionContext {
       return this.#applyBridgeConversionsIfNeeded(parts, abortSignal);
     }
 
-    if (atPathCommandParts.length === 0 && embeddedContext.length === 0) {
+    if (pathSpecsToRead.length === 0 && embeddedContext.length === 0) {
       return this.#applyBridgeConversionsIfNeeded(
         [...parts, ...extensionParts, ...mcpServerParts],
         abortSignal,
       );
     }
-
-    // Extract paths from @ commands - pass directly to readManyFiles without filtering
-    // since this is user-triggered behavior, not LLM-triggered
-    const pathSpecsToRead: string[] = atPathCommandParts.map(
-      (part) => part.fileData!.fileUri!,
-    );
 
     // Construct the initial part of the query for the LLM
     let initialQueryText = '';
