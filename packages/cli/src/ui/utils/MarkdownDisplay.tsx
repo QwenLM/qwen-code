@@ -808,7 +808,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         color={theme.text.secondary}
         wrap="truncate-end"
       >
-        {`... ${droppedSourceLines} more line${droppedSourceLines === 1 ? '' : 's'} not shown (viewport too small) ...`}
+        {`... ${droppedSourceLines} more line${droppedSourceLines === 1 ? '' : 's'} not shown (press 'e' to expand) ...`}
       </Text>,
     );
   }

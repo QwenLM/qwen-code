@@ -353,6 +353,7 @@ export const ToolConfirmationMessage: React.FC<
           COMPACT_BODY_MAX_LINES,
         )
       : availableBodyContentHeight();
+    const isPlanExpanded = planHeight === undefined && !compactMode;
     bodyContent = (
       <Box flexDirection="column" paddingX={1} marginLeft={1}>
         <MarkdownDisplay
@@ -368,6 +369,9 @@ export const ToolConfirmationMessage: React.FC<
           // See #6867.
           enforceHeightBudget
         />
+        {isPlanExpanded && (
+          <Text color={theme.text.secondary}>{"Press 'e' to collapse"}</Text>
+        )}
       </Box>
     );
   } else if (confirmationDetails.type === 'info') {
@@ -542,6 +546,15 @@ export const ToolConfirmationMessage: React.FC<
   const sectionMargin = compactMode ? 0 : 1;
   const outerWidth = compactMode ? undefined : contentWidth;
 
+  // When the plan body is expanded (constrainHeight off → availableTerminalHeight
+  // undefined → planHeight undefined), disable option focus so Up/Down/Enter
+  // don't accidentally select or navigate options the user can't see. The user
+  // presses 'e' to collapse and restore focus. See #7001.
+  const isPlanExpanded =
+    confirmationDetails.type === 'plan' &&
+    availableTerminalHeight === undefined &&
+    !compactMode;
+
   return (
     <Box flexDirection="column" padding={outerPadding} width={outerWidth}>
       <Box
@@ -563,7 +576,7 @@ export const ToolConfirmationMessage: React.FC<
         <RadioButtonSelect
           items={renderedOptions}
           onSelect={handleSelect}
-          isFocused={isFocused}
+          isFocused={isFocused && !isPlanExpanded}
         />
       </Box>
     </Box>

@@ -202,9 +202,9 @@ describe('<MarkdownDisplay />', () => {
         />,
       );
       const output = lastFrame() ?? '';
-      // Cue names the count of dropped source lines and the reason.
+      // Cue names the count of dropped source lines and the expand key.
       expect(output).toMatch(/\d+ more lines? not shown/);
-      expect(output).toContain('viewport too small');
+      expect(output).toContain("press 'e' to expand");
     });
 
     it('does not show a truncation cue when streaming (isPending=true)', () => {

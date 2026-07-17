@@ -3769,8 +3769,31 @@ export const AppContainer = (props: AppContainerProps) => {
       // Note: Ctrl+C/D btw cancellation is handled inside handleExit
       // (step 3), not here, because Command.QUIT/EXIT match first.
 
+      // 'e': toggle plan confirmation expand/collapse. Placed before
+      // the re-entry block so it takes priority and returns early.
+      // Only active during WaitingForConfirmation so bare 'e' doesn't
+      // interfere with typing during Idle. See #7001.
+      if (
+        key.sequence === 'e' &&
+        !key.ctrl &&
+        !key.meta &&
+        !key.shift &&
+        buffer.text.length === 0 &&
+        streamingState === StreamingState.WaitingForConfirmation
+      ) {
+        setConstrainHeight((prev) => !prev);
+        return;
+      }
+
+      // Re-entry block: when constrainHeight is off, any key re-enables
+      // it — EXCEPT during WaitingForConfirmation, where only 'e'
+      // toggles (handled above). This prevents accidental collapse
+      // while the user scrolls the expanded plan. See #7001.
       let enteringConstrainHeightMode = false;
-      if (!constrainHeight) {
+      if (
+        !constrainHeight &&
+        streamingState !== StreamingState.WaitingForConfirmation
+      ) {
         enteringConstrainHeightMode = true;
         setConstrainHeight(true);
       }
