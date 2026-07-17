@@ -8577,6 +8577,7 @@ Other open files:
     it.each([
       ['interactive', true, false],
       ['acp', false, true],
+      ['headless', false, false],
     ] as const)(
       'should pass %s mode to the core system prompt',
       async (mode, interactive, acp) => {
