@@ -245,7 +245,10 @@ async function downloadGitHubDirectory(
   githubToken?: string,
   relativeRoot = '',
   depth = 0,
-  files: SkillPackageFile[] = [],
+  state: { files: SkillPackageFile[]; totalBytes: number } = {
+    files: [],
+    totalBytes: 0,
+  },
 ): Promise<SkillPackageFile[]> {
   if (depth > MAX_PATH_DEPTH)
     skillError('invalid_skill_package', 'GitHub Skill is nested too deeply');
@@ -290,7 +293,7 @@ async function downloadGitHubDirectory(
         githubToken,
         relativePath,
         depth + 1,
-        files,
+        state,
       );
     } else if (itemType === 'file') {
       const downloadUrl = record['download_url'];
@@ -306,16 +309,12 @@ async function downloadGitHubDirectory(
           502,
         );
       }
-      files.push({
-        relativePath,
-        content: await fetchBytes(downloadUrl, githubToken),
-      });
-      if (files.length > MAX_FILES)
+      const content = await fetchBytes(downloadUrl, githubToken);
+      state.files.push({ relativePath, content });
+      state.totalBytes += content.length;
+      if (state.files.length > MAX_FILES)
         skillError('invalid_skill_package', 'Skill package has too many files');
-      if (
-        files.reduce((total, file) => total + file.content.length, 0) >
-        MAX_TOTAL_BYTES
-      ) {
+      if (state.totalBytes > MAX_TOTAL_BYTES) {
         skillError(
           'skill_package_too_large',
           'Skill package exceeds the allowed size',
@@ -324,7 +323,7 @@ async function downloadGitHubDirectory(
       }
     }
   }
-  return files;
+  return state.files;
 }
 
 async function downloadGitHubDirectoryWithGit(
@@ -424,6 +423,7 @@ async function downloadGitHubSkill(
     !repo ||
     !ref ||
     ref.startsWith('-') ||
+    !/^[A-Za-z0-9._/+-]+$/.test(ref) ||
     !/^[A-Za-z0-9._-]+$/.test(owner) ||
     !/^[A-Za-z0-9._-]+$/.test(repo)
   ) {
@@ -693,24 +693,37 @@ function skillBaseDir(workspace: string, scope: WorkspaceSkillScope): string {
     : path.join(Storage.getGlobalQwenDir(), 'skills');
 }
 
-async function removeLegacyInstallArtifacts(
+async function removeInstallArtifacts(
   baseDir: string,
   skillName: string,
 ): Promise<void> {
-  const prefixes = [`.${skillName}.installing-`, `.${skillName}.backup-`];
-  const entries = await fs.readdir(baseDir, { withFileTypes: true });
-  await Promise.all(
-    entries
-      .filter((entry) =>
-        prefixes.some((prefix) => entry.name.startsWith(prefix)),
-      )
-      .map((entry) =>
-        fs.rm(path.join(baseDir, entry.name), {
-          recursive: true,
-          force: true,
-        }),
-      ),
-  );
+  const workDir = path.dirname(baseDir);
+  const workPrefix = `.${path.basename(baseDir)}-${skillName}`;
+  const locations = [
+    {
+      directory: baseDir,
+      prefixes: [`.${skillName}.installing-`, `.${skillName}.backup-`],
+    },
+    {
+      directory: workDir,
+      prefixes: [`${workPrefix}.installing-`, `${workPrefix}.backup-`],
+    },
+  ];
+  for (const { directory, prefixes } of locations) {
+    const entries = await fs.readdir(directory, { withFileTypes: true });
+    await Promise.all(
+      entries
+        .filter((entry) =>
+          prefixes.some((prefix) => entry.name.startsWith(prefix)),
+        )
+        .map((entry) =>
+          fs.rm(path.join(directory, entry.name), {
+            recursive: true,
+            force: true,
+          }),
+        ),
+    );
+  }
 }
 
 async function ensureDirectoryWithoutSymlinks(
@@ -745,7 +758,7 @@ export async function installWorkspaceSkill(
   const files = await filesFromSource(request.source, githubToken);
   const baseDir = skillBaseDir(workspace, request.scope);
   await ensureDirectoryWithoutSymlinks(baseDir);
-  await removeLegacyInstallArtifacts(baseDir, skillName);
+  await removeInstallArtifacts(baseDir, skillName);
   const destination = path.join(baseDir, skillName);
   const existing = await fs.lstat(destination).catch(() => undefined);
   if (existing?.isSymbolicLink() || (existing && !existing.isDirectory())) {

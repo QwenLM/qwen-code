@@ -325,23 +325,26 @@ describe('workspace Skill management', () => {
     ).rejects.toMatchObject({ code: 'invalid_skill_source' });
   });
 
-  it('rejects unsafe GitHub refs before making a request', async () => {
-    const workspace = await temporaryDirectory('qwen-skill-workspace-');
-    const fetchMock = vi.fn();
-    vi.stubGlobal('fetch', fetchMock);
+  it.each(['--upload-pack', 'main%20--upload-pack'])(
+    'rejects unsafe GitHub ref %s before making a request',
+    async (ref) => {
+      const workspace = await temporaryDirectory('qwen-skill-workspace-');
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
 
-    await expect(
-      installWorkspaceSkill(workspace, {
-        name: 'invalid-ref',
-        scope: 'workspace',
-        source: {
-          type: 'github',
-          url: 'https://github.com/owner/repo/blob/--upload-pack/SKILL.md',
-        },
-      }),
-    ).rejects.toMatchObject({ code: 'invalid_skill_source' });
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
+      await expect(
+        installWorkspaceSkill(workspace, {
+          name: 'invalid-ref',
+          scope: 'workspace',
+          source: {
+            type: 'github',
+            url: `https://github.com/owner/repo/blob/${ref}/SKILL.md`,
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'invalid_skill_source' });
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
 
   it('rejects traversal in a GitHub Skill path before making a request', async () => {
     const workspace = await temporaryDirectory('qwen-skill-workspace-');
@@ -557,7 +560,12 @@ describe('workspace Skill management', () => {
     const source = await temporaryDirectory('qwen-skill-source-');
     const baseDir = path.join(workspace, '.qwen', 'skills');
     const legacyBackup = path.join(baseDir, '.stable-skill.backup-legacy');
+    const staleBackup = path.join(
+      path.dirname(baseDir),
+      '.skills-stable-skill.backup-stale',
+    );
     await fs.mkdir(legacyBackup, { recursive: true });
+    await fs.mkdir(staleBackup, { recursive: true });
     await fs.writeFile(
       path.join(legacyBackup, 'SKILL.md'),
       skillMarkdown('stable-skill'),
@@ -574,6 +582,7 @@ describe('workspace Skill management', () => {
     });
 
     await expect(fs.access(legacyBackup)).rejects.toThrow();
+    await expect(fs.access(staleBackup)).rejects.toThrow();
   });
 
   it('restores the existing Skill when committing a replacement fails', async () => {

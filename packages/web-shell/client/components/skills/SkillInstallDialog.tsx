@@ -207,11 +207,15 @@ export function SkillInstallDialog({
             onValueChange={(value) => setSource(value as InstallSource)}
           >
             <TabsList className="grid w-full grid-cols-3">
-              <TabsTrigger value="github">GitHub</TabsTrigger>
-              <TabsTrigger value="folder">
+              <TabsTrigger value="github" disabled={installing}>
+                GitHub
+              </TabsTrigger>
+              <TabsTrigger value="folder" disabled={installing}>
                 {t('skills.install.folder')}
               </TabsTrigger>
-              <TabsTrigger value="zip">ZIP</TabsTrigger>
+              <TabsTrigger value="zip" disabled={installing}>
+                ZIP
+              </TabsTrigger>
             </TabsList>
             <TabsContent value="github" className="pt-3">
               <label className="grid gap-2 text-sm font-medium">
