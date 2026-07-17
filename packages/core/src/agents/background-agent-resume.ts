@@ -444,6 +444,7 @@ export class BackgroundAgentResumeService {
           // UI falls back to its generic orphan annotation.
           parentAgentId: meta.parentAgentId,
           depth: meta.depth,
+          model: meta.model,
         };
         const entry = registry.register(registration);
         recovered.push(entry);

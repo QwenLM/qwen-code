@@ -2353,12 +2353,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         );
       }
 
-      if (!isFork && shouldRunInBackground) {
-        // Resolve the concrete model the sub-agent will run with so the
+      if (shouldRunInBackground) {
+        // Resolve the concrete model the sub-agent (or fork) will run with so the
         // registry can apply a per-model cap. `subagentConfig.model` is a
         // selector (omitted/"inherit"/"fast"/modelId/authType:modelId);
         // resolveModelId maps it to the actual model ID, falling back to the
-        // parent's current model when the sub-agent inherits.
+        // parent's current model when the sub-agent inherits (forks always
+        // inherit, since FORK_AGENT has no model selector).
         subagentModelId = resolveModelId(
           subagentConfig.model,
           buildModelIdContext(this.config),
@@ -2931,6 +2932,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           // Persisted so resume restores the original nesting level; see
           // childLaunchDepth() for the rationale.
           depth: childLaunchDepth(),
+          model: subagentModelId,
         });
 
         // Subscribe to the subagent's tool-call event stream so the
