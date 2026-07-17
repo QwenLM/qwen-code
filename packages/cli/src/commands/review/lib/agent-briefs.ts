@@ -107,8 +107,8 @@ export interface Brief {
    * is authoritative — so the delivery check failed even though the agent opened
    * its brief. With this flag the command folds the findings in and prints one
    * block to paste, and there is no assembly step left to drift. The findings are
-   * NOT recorded (see runAgentPrompt): the record stays the findings-free launch
-   * block, so the per-shard/round key still matches by the add-only delivery rule.
+   * part of the recorded prompt (see runAgentPrompt), keyed per findings digest,
+   * so a launch that drops or rewrites them matches no record.
    */
   acceptsFindings?: boolean;
   /** The agent-facing text. */
