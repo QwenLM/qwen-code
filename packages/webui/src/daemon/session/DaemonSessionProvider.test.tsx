@@ -8824,6 +8824,105 @@ describe('DaemonSessionProvider', () => {
     expect(history?.hasMore).toBe(false);
   });
 
+  it('skips malformed older-page events and advances the cursor', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    const replayEvent = (id: number, text: string): DaemonEvent => ({
+      id,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text },
+          _meta: { 'qwen.session.recordId': `record-${id}` },
+        },
+      },
+    });
+    const malformedEvent = {
+      id: 1,
+      v: 1,
+      type: 'session_update',
+    } as DaemonEvent;
+    Object.defineProperty(malformedEvent, 'data', {
+      get() {
+        throw new Error('malformed history event');
+      },
+    });
+    const session = createMockSession({
+      sessionId: 'session-malformed-history-page',
+      historyHasMore: true,
+      replaySnapshot: {
+        compactedReplay: [replayEvent(3, 'recent prompt')],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    sdkMocks.getSessionTranscriptPage
+      .mockResolvedValueOnce({
+        v: 1,
+        sessionId: session.sessionId,
+        events: [malformedEvent, replayEvent(2, 'older prompt')],
+        nextCursor: 'next-page',
+        hasMore: true,
+      })
+      .mockResolvedValueOnce({
+        v: 1,
+        sessionId: session.sessionId,
+        events: [replayEvent(1, 'oldest prompt')],
+        hasMore: false,
+      });
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    let notices: readonly DaemonSessionNotice[] = [];
+
+    function Harness() {
+      history = useDaemonTranscriptHistory();
+      blocks = useDaemonTranscriptBlocks();
+      notices = useDaemonSessionNotices().notices;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      historyPageSize: 25,
+    });
+    await act(async () => {
+      await history?.loadMore();
+      await flushPromises();
+    });
+
+    expect(history?.hasMore).toBe(true);
+    await act(async () => {
+      await history?.loadMore();
+      await flushPromises();
+    });
+
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledTimes(2);
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenNthCalledWith(
+      2,
+      session.sessionId,
+      {
+        cursor: 'next-page',
+        limit: 25,
+        clientId: session.clientId,
+      },
+    );
+    expect(
+      blocks.map((block) => ('text' in block ? block.text : undefined)),
+    ).toEqual(['oldest prompt', 'older prompt', 'recent prompt']);
+    expect(history?.hasMore).toBe(false);
+    expect(notices).toContainEqual(
+      expect.objectContaining({
+        code: 'daemon.replay_event_malformed',
+        message: 'Skipped malformed history event',
+        debugMessage: 'malformed history event',
+      }),
+    );
+  });
+
   it('reports a partial older page without changing the transcript', async () => {
     sdkMocks.capabilities.mockResolvedValue({
       workspaceCwd: '/mock-workspace',

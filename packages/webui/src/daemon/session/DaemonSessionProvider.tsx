@@ -2157,20 +2157,38 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       };
       const uiEvents: DaemonUiEvent[] = [];
       for (const replayEvent of page.events) {
-        uiEvents.push(
-          ...filterDaemonUiEventsForTranscript(
-            replayEvent,
-            normalizeAndFilterEvent(
+        try {
+          uiEvents.push(
+            ...filterDaemonUiEventsForTranscript(
               replayEvent,
-              activeSession.clientId,
-              replayOpts,
-              setConnection,
-              { updateConnection: false },
+              normalizeAndFilterEvent(
+                replayEvent,
+                activeSession.clientId,
+                replayOpts,
+                setConnection,
+                { updateConnection: false },
+              ),
+              addNotice,
+              dismissNotice,
             ),
-            addNotice,
-            dismissNotice,
-          ),
-        );
+          );
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          addNotice({
+            severity: 'warning',
+            category: 'protocol',
+            operation: 'normalize_event',
+            code: 'daemon.replay_event_malformed',
+            message: 'Skipped malformed history event',
+            debugMessage: message,
+            recoverable: true,
+          });
+          console.warn(
+            '[DaemonSessionProvider] skipped malformed history event:',
+            error,
+          );
+        }
       }
       if (
         uiEvents.length > 0 &&
