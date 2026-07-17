@@ -1568,11 +1568,18 @@ describe('GeminiChat', async () => {
             // consume stream
           }
         })();
-        const resultPromise = expect(collecting).rejects.toMatchObject({
-          message:
-            'Model stream ended after a tool result without visible progress.',
-          type: 'NO_TOOL_RESULT_PROGRESS',
-        });
+        const resultPromise = collecting.then(
+          () => {
+            throw new Error('Expected stream to reject');
+          },
+          (error: unknown) => {
+            expect(error).toMatchObject({
+              message:
+                'Model stream ended after a tool result without visible progress.',
+              type: 'NO_TOOL_RESULT_PROGRESS',
+            });
+          },
+        );
         await vi.advanceTimersByTimeAsync(0);
         await vi.advanceTimersByTimeAsync(35_000);
         await resultPromise;
