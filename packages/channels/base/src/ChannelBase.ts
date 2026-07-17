@@ -3103,114 +3103,128 @@ export abstract class ChannelBase {
       return null;
     }
 
-    const confidence =
-      classified && typeof classified === 'object'
-        ? (classified as { confidence?: unknown }).confidence
-        : undefined;
-    if (
-      typeof confidence !== 'number' ||
-      !Number.isFinite(confidence) ||
-      confidence < 0 ||
-      confidence > 1 ||
-      confidence < CHANNEL_MEMORY_CLASSIFIER_MIN_CONFIDENCE
-    ) {
-      return null;
-    }
-
-    const result = classified as {
-      intent?: unknown;
-      memory?: unknown;
-      memories?: unknown;
-      targetIds?: unknown;
-    };
-    const intent = result.intent;
-    const memory = result.memory;
-    const memories = result.memories;
-    const targetIds = result.targetIds;
-    const entryById = new Map(entries.map((entry) => [entry.id, entry]));
-    const resolvedEntries =
-      targetIds === undefined
-        ? undefined
-        : Array.isArray(targetIds) &&
-            targetIds.every(
-              (id): id is string => typeof id === 'string' && entryById.has(id),
-            ) &&
-            new Set(targetIds).size === targetIds.length
-          ? this.entriesForChannelMemoryIds(entries, targetIds)
-          : null;
-
-    if (intent === 'remember') {
-      const hasMemory = Object.prototype.hasOwnProperty.call(result, 'memory');
-      const hasMemories = Object.prototype.hasOwnProperty.call(
-        result,
-        'memories',
-      );
-      if (hasMemory === hasMemories) return null;
-
-      let texts: string[] = [];
-      if (hasMemory) {
-        texts = typeof memory === 'string' ? [memory.trim()] : [];
-      } else if (Array.isArray(memories)) {
-        const snapshot = Array.from(memories);
-        if (
-          snapshot.every(
-            (memory): memory is string => typeof memory === 'string',
-          )
-        ) {
-          texts = snapshot.map((memory) => memory.trim());
-        }
+    try {
+      if (typeof classified !== 'object' || classified === null) return null;
+      const result = classified as {
+        intent?: unknown;
+        memory?: unknown;
+        memories?: unknown;
+        targetIds?: unknown;
+        confidence?: unknown;
+      };
+      const confidence = result.confidence;
+      if (
+        typeof confidence !== 'number' ||
+        !Number.isFinite(confidence) ||
+        confidence < 0 ||
+        confidence > 1 ||
+        confidence < CHANNEL_MEMORY_CLASSIFIER_MIN_CONFIDENCE
+      ) {
+        return null;
       }
-      return texts.length >= 1 &&
-        texts.length <= 10 &&
-        texts.every((text) => text.length > 0)
-        ? { kind: 'remember', texts }
-        : null;
-    }
-    if (intent === 'list') {
-      if (resolvedEntries === undefined) return { kind: 'list', page: 1 };
-      if (resolvedEntries === null) return null;
-      return resolvedEntries.length === 0
-        ? { kind: 'no_match' }
-        : {
-            kind: 'list_matches',
-            ids: resolvedEntries.map((entry) => entry.id),
-          };
-    }
-    if (intent === 'clear_all') {
-      return { kind: 'clear_request' };
-    }
 
-    if (intent !== 'inspect' && intent !== 'update' && intent !== 'remove') {
+      const intent = result.intent;
+      if (intent === 'remember') {
+        const hasMemory = Object.prototype.hasOwnProperty.call(
+          result,
+          'memory',
+        );
+        const hasMemories = Object.prototype.hasOwnProperty.call(
+          result,
+          'memories',
+        );
+        if (hasMemory === hasMemories) return null;
+
+        let texts: string[] = [];
+        if (hasMemory) {
+          const memory = result.memory;
+          texts = typeof memory === 'string' ? [memory.trim()] : [];
+        } else {
+          const memories = result.memories;
+          if (Array.isArray(memories)) {
+            const snapshot = Array.from(memories);
+            if (
+              snapshot.every(
+                (memory): memory is string => typeof memory === 'string',
+              )
+            ) {
+              texts = snapshot.map((memory) => memory.trim());
+            }
+          }
+        }
+        return texts.length >= 1 &&
+          texts.length <= 10 &&
+          texts.every((text) => text.length > 0)
+          ? { kind: 'remember', texts }
+          : null;
+      }
+      if (intent === 'clear_all') return { kind: 'clear_request' };
+      if (
+        intent !== 'list' &&
+        intent !== 'inspect' &&
+        intent !== 'update' &&
+        intent !== 'remove'
+      ) {
+        return null;
+      }
+
+      const targetIds = result.targetIds;
+      if (intent === 'list' && targetIds === undefined) {
+        return { kind: 'list', page: 1 };
+      }
+      if (!Array.isArray(targetIds)) return null;
+      const targetIdSnapshot = Array.from(targetIds);
+      const entryById = new Map(entries.map((entry) => [entry.id, entry]));
+      if (
+        !targetIdSnapshot.every(
+          (id): id is string => typeof id === 'string' && entryById.has(id),
+        ) ||
+        new Set(targetIdSnapshot).size !== targetIdSnapshot.length
+      ) {
+        return null;
+      }
+      const resolvedEntries = this.entriesForChannelMemoryIds(
+        entries,
+        targetIdSnapshot,
+      );
+      if (intent === 'list') {
+        return resolvedEntries.length === 0
+          ? { kind: 'no_match' }
+          : {
+              kind: 'list_matches',
+              ids: resolvedEntries.map((entry) => entry.id),
+            };
+      }
+      if (resolvedEntries.length === 0) return { kind: 'no_match' };
+      if (resolvedEntries.length > 1) {
+        return {
+          kind: 'ambiguous',
+          ids: resolvedEntries.map((entry) => entry.id),
+        };
+      }
+
+      const entry = resolvedEntries[0]!;
+      if (intent === 'inspect') return { kind: 'inspect', id: entry.id };
+      if (intent === 'remove') {
+        return {
+          kind: 'natural_remove',
+          id: entry.id,
+          expectedText: entry.text,
+        };
+      }
+      const memory = result.memory;
+      const text = typeof memory === 'string' ? memory.trim() : '';
+      return text
+        ? {
+            kind: 'natural_update',
+            id: entry.id,
+            text,
+            expectedText: entry.text,
+          }
+        : null;
+    } catch {
       return null;
     }
-    if (resolvedEntries === null || resolvedEntries === undefined) return null;
-    if (resolvedEntries.length === 0) return { kind: 'no_match' };
-    if (resolvedEntries.length > 1) {
-      return {
-        kind: 'ambiguous',
-        ids: resolvedEntries.map((entry) => entry.id),
-      };
-    }
-
-    const entry = resolvedEntries[0]!;
-    if (intent === 'inspect') return { kind: 'inspect', id: entry.id };
-    if (intent === 'remove') {
-      return {
-        kind: 'natural_remove',
-        id: entry.id,
-        expectedText: entry.text,
-      };
-    }
-    const text = typeof memory === 'string' ? memory.trim() : '';
-    if (text) {
-      return {
-        kind: 'natural_update',
-        id: entry.id,
-        text,
-        expectedText: entry.text,
-      };
-    }
-    return null;
   }
 
   private channelMemoryErrorMessage(error: unknown): string {

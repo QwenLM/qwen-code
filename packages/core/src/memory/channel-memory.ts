@@ -349,10 +349,11 @@ export async function addChannelMemoryEntries(
   texts: readonly string[],
   createdBy?: string,
 ): Promise<AddChannelMemoryResult> {
-  if (texts.length > MAX_CHANNEL_MEMORY_ENTRIES_PER_REQUEST) {
+  const textSnapshot = Array.from(texts);
+  if (textSnapshot.length > MAX_CHANNEL_MEMORY_ENTRIES_PER_REQUEST) {
     throw new Error('Channel memory accepts at most 10 entries per request');
   }
-  assertNoChannelMemorySecrets(texts);
+  assertNoChannelMemorySecrets(textSnapshot);
 
   const filePath = getChannelMemoryFilePath(target);
   return mutateChannelMemory<AddChannelMemoryResult>(target, (document) => {
@@ -366,7 +367,7 @@ export async function addChannelMemoryEntries(
     const added: ChannelMemoryEntry[] = [];
     const duplicateIds: string[] = [];
 
-    for (const text of texts) {
+    for (const text of textSnapshot) {
       const normalizedText = normalizeChannelMemoryText(text);
       if (!normalizedText) {
         continue;
@@ -409,27 +410,25 @@ export async function updateChannelMemoryEntry(
   target: ChannelMemoryTarget,
   mutation: { id: string; text: string; expectedText?: string },
 ): Promise<UpdateChannelMemoryResult> {
-  assertNoChannelMemorySecrets(mutation.text);
+  const id = mutation.id;
+  const text = mutation.text;
+  const expectedText = mutation.expectedText;
+  assertNoChannelMemorySecrets(text);
   const filePath = getChannelMemoryFilePath(target);
   return mutateChannelMemory<UpdateChannelMemoryResult>(target, (document) => {
-    const entry = document.entries.find(
-      (candidate) => candidate.id === mutation.id,
-    );
+    const entry = document.entries.find((candidate) => candidate.id === id);
     if (entry === undefined) {
-      if (mutation.expectedText !== undefined) {
+      if (expectedText !== undefined) {
         throw new Error('Channel memory entry changed');
       }
       return { changed: false, result: { changed: false, filePath } };
     }
-    if (
-      mutation.expectedText !== undefined &&
-      entry.text !== mutation.expectedText
-    ) {
+    if (expectedText !== undefined && entry.text !== expectedText) {
       throw new Error('Channel memory entry changed');
     }
 
     const replacement = createChannelMemoryEntry({
-      text: mutation.text,
+      text,
       now: new Date().toISOString(),
       randomHex: '000000000000',
     });

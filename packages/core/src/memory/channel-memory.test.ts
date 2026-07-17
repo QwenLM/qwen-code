@@ -416,6 +416,28 @@ describe('channel memory', () => {
     expect(fs.readFileSync(filePath)).toEqual(before);
   });
 
+  it('persists the scanned add snapshot when an input getter changes', async () => {
+    const credentialText = `ghp_${'e'.repeat(36)}`;
+    const texts = ['Use staging', 'Run tests'];
+    let secondTextReads = 0;
+    Object.defineProperty(texts, '1', {
+      configurable: true,
+      enumerable: true,
+      get() {
+        secondTextReads += 1;
+        return secondTextReads === 1 ? 'Run tests' : credentialText;
+      },
+    });
+
+    await addChannelMemoryEntries(target, texts);
+
+    await expect(listChannelMemoryEntries(target)).resolves.toMatchObject([
+      { text: 'Use staging' },
+      { text: 'Run tests' },
+    ]);
+    expect(secondTextReads).toBe(1);
+  });
+
   it('keeps append as a compatibility wrapper', async () => {
     await expect(appendChannelMemory(target, 'Use staging')).resolves.toEqual({
       changed: true,
@@ -473,6 +495,34 @@ describe('channel memory', () => {
 
     expect(fs.readFileSync(filePath)).toEqual(before);
     await expect(listChannelMemoryEntries(target)).resolves.toEqual([entry]);
+  });
+
+  it('persists one scanned update snapshot when mutation getters change', async () => {
+    const [entry] = (await addChannelMemoryEntries(target, ['Use staging']))
+      .added;
+    const credentialText = `ghp_${'f'.repeat(36)}`;
+    const reads = { id: 0, text: 0, expectedText: 0 };
+    const mutation = {
+      get id() {
+        reads.id += 1;
+        return entry.id;
+      },
+      get text() {
+        reads.text += 1;
+        return reads.text === 1 ? 'Use production' : credentialText;
+      },
+      get expectedText() {
+        reads.expectedText += 1;
+        return 'Use staging';
+      },
+    };
+
+    await updateChannelMemoryEntry(target, mutation);
+
+    await expect(listChannelMemoryEntries(target)).resolves.toMatchObject([
+      { id: entry.id, text: 'Use production' },
+    ]);
+    expect(reads).toEqual({ id: 1, text: 1, expectedText: 1 });
   });
 
   it('allows manually seeded credential entries to be removed and cleared', async () => {

@@ -102,12 +102,7 @@ function extractJsonObject(text: string): unknown {
   const fenced = trimmed.match(/^```(?:json)?\s*\n([\s\S]*?)\n```$/iu);
   const json = (fenced?.[1] ?? trimmed).trim();
   if (!json.startsWith('{')) {
-    throw new Error(
-      `Classifier response did not contain a JSON object. Got: ${sanitizeLogText(
-        text,
-        200,
-      )}`,
-    );
+    throw new Error('Classifier response did not contain a JSON object');
   }
   return JSON.parse(json) as unknown;
 }
