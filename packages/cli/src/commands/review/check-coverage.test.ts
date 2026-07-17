@@ -1051,6 +1051,31 @@ describe('the roster — who should have been here', () => {
     );
   });
 
+  it('finds the valid assignment a greedy claim order would miss', () => {
+    // The round-11 injectivity used first-come claiming: with T1 containing
+    // blocks A+B (opens both briefs) and T2 containing only A (opens A), greedy
+    // claimed T1 for A and reported B missing — a compliant repair permanently
+    // capped by transcript filename order. Maximum matching assigns T2→A, T1→B.
+    const p = plan();
+    const d = promptRecordDir(p);
+    const promptA = readFileSync(join(d, 'chunk-1.txt'), 'utf8');
+    const promptB = readFileSync(join(d, 'chunk-2.txt'), 'utf8');
+    // 'a-' sorts first: the greedy order that used to break this.
+    transcript('a-both', `${promptA}\n\n${promptB}`, {
+      calls: 4,
+      opens: [briefPath(p, 'chunk-1'), briefPath(p, 'chunk-2')],
+    });
+    transcript('b-solo', promptA, {
+      calls: 2,
+      opens: [briefPath(p, 'chunk-1')],
+    });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.missingRoles).toEqual([]);
+    expect(r.unreadBriefs).toEqual([]);
+    expect(r.ok).toBe(true);
+  });
+
   it('a zero-byte prompt record is not "built" — an all-empty dir still collapses', () => {
     // A partial write can leave empty records. `Map.has()` would read them as
     // built and surface N false built-but-not-launched failures instead of the
@@ -1315,6 +1340,34 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     const p = plan();
     step45(p, 'reverse-audit');
     step45(p, 'verify');
+    expect(verificationGaps(p, { postsFindings: true }, ENV).ok).toBe(true);
+  });
+
+  it('a verifier launched without its findings prefix no longer clears the gate', () => {
+    // The record now IS the printed prompt — findings folded, digest-keyed. The
+    // old findings-free record was a receipt a partial delivery could satisfy:
+    // launch the agent with only the recorded tail, let it open the brief, and
+    // verification read as ok while no verifier ever saw a finding.
+    const p = plan();
+    step45(p, 'reverse-audit'); // Step 5 compliant; verification is the subject
+    const d = promptRecordDir(p);
+    const brief = briefPath(p, 'verify--abc123def456');
+    writeFileSync(brief, 'The verify brief.');
+    const tail =
+      'You are review agent `verify`.\n' +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}")`;
+    const full = `## The findings you are ruling on\n\n- x.ts:1 — y\n\n${tail}`;
+    writeFileSync(join(d, 'verify--abc123def456.txt'), full);
+    // The attack: the agent gets ONLY the tail, and dutifully opens the brief.
+    transcript('v-tail', tail, { calls: 2, opens: [brief] });
+
+    const r = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(r.ok).toBe(false);
+    expect(r.gaps.join(' ')).toMatch(/verification — /);
+
+    // The compliant launch — the full printed prompt — clears it.
+    transcript('v-full', full, { calls: 2, opens: [brief] });
     expect(verificationGaps(p, { postsFindings: true }, ENV).ok).toBe(true);
   });
 

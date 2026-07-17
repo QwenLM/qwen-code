@@ -38,6 +38,7 @@
 // remember.
 
 import type { CommandModule } from 'yargs';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
@@ -1082,15 +1083,17 @@ export function findingsSection(role: RoleId, content: string): string {
 function buildLaunch(
   report: PlanReport,
   planPath: string,
-  spec: { role?: RoleId; chunk?: number; file?: string },
+  spec: { role?: RoleId; chunk?: number; file?: string; key?: string },
   rules?: string,
 ): { key: string; prompt: string } {
   if (spec.role) {
-    const key = spec.file
-      ? `${spec.role}--${spec.file}`
-      : typeof spec.chunk === 'number'
-        ? `${spec.role}--chunk-${spec.chunk}`
-        : spec.role;
+    const key =
+      spec.key ??
+      (spec.file
+        ? `${spec.role}--${spec.file}`
+        : typeof spec.chunk === 'number'
+          ? `${spec.role}--chunk-${spec.chunk}`
+          : spec.role);
     const briefFile = writeBrief(
       planPath,
       key,
@@ -1340,43 +1343,19 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     return;
   }
 
-  let prompt: string;
-  let key: string;
-  if (args.wholeDiff) {
-    prompt = buildWholeDiffBlock(report, rules);
-    key = 'whole-diff';
-  } else {
-    // The record key must be unique per launch. An invariant agent is keyed by its
-    // file; a Step 3B reverse-audit agent by its chunk (its brief is identical
-    // across chunks, but its launch prompt reads a different range, and the delivery
-    // check compares launch prompts). Everything else is one per review.
-    // Two artifacts, both written in `buildLaunch`. The brief is what the agent
-    // reads; the launch prompt is the short thing the orchestrator carries, and the
-    // only thing it has to get right.
-    ({ key, prompt } = buildLaunch(
-      report,
-      args.plan,
-      args.role
-        ? { role: args.role as RoleId, chunk: args.chunk, file: args.file }
-        : { chunk: args.chunk },
-      rules,
-    ));
-  }
-
-  // Record the findings-FREE launch prompt, and print the one the caller pastes.
-  // For a verifier / reverse auditor given `--findings`, those differ: the printed
-  // prompt folds the findings in so there is no hand-assembly step to drift, but the
-  // record stays the launch block alone. The delivery check is add-only — the built
-  // block must appear in order in what the agent got — so a printed prompt that is
-  // `<findings>\n\n<block>` still matches the recorded `<block>`, and the per-shard
-  // (verify) / per-round (reverse-audit) key keeps working without baking a
-  // different findings list into each one's record.
-  let printed = prompt;
+  // Findings are read BEFORE the build: they are part of what gets recorded.
+  // The first design recorded the findings-free launch block so one key could
+  // serve every shard — and that receipt could be satisfied by delivering ONLY
+  // the recorded tail: build with a real findings file, launch the agent with
+  // the block alone, let it open the brief, and the delivery check matched while
+  // no verifier ever saw a finding. The record is now the exact printed prompt,
+  // keyed per findings-content digest, so a launch that dropped the findings
+  // matches nothing.
+  let findingsContent: string | undefined;
   if (hasFindings && args.role) {
     const role = args.role as RoleId;
-    let content: string;
     try {
-      content = readFileSync(args.findings as string, 'utf8');
+      findingsContent = readFileSync(args.findings as string, 'utf8');
     } catch (err) {
       throw new Error(
         `agent-prompt: cannot read the findings ${args.findings}: ` +
@@ -1390,7 +1369,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     // it is a vacuous pass: the agent opens its brief, clears the delivery
     // floor, and the review posts findings certified by a verifier that saw
     // none. Refuse it here, where the content is first known.
-    if (role === 'verify' && content.trim() === '') {
+    if (role === 'verify' && findingsContent.trim() === '') {
       throw new Error(
         'agent-prompt: --findings for --role verify is empty. A verifier that ' +
           'sees no findings verifies nothing, and the review would post ' +
@@ -1398,9 +1377,59 @@ function runAgentPrompt(args: AgentPromptArgs): void {
           'findings; only an early reverse-audit round passes an empty file.',
       );
     }
-    printed = `${findingsSection(role, content)}\n\n${prompt}`;
   }
-  recordPrompt(args.plan, key, prompt);
+
+  let prompt: string;
+  let key: string;
+  if (args.wholeDiff) {
+    prompt = buildWholeDiffBlock(report, rules);
+    key = 'whole-diff';
+  } else {
+    // The record key must be unique per launch. An invariant agent is keyed by its
+    // file; a Step 3B reverse-audit agent by its chunk (its brief is identical
+    // across chunks, but its launch prompt reads a different range, and the delivery
+    // check compares launch prompts). Everything else is one per review.
+    // Two artifacts, both written in `buildLaunch`. The brief is what the agent
+    // reads; the launch prompt is the short thing the orchestrator carries, and the
+    // only thing it has to get right.
+    // A findings-taking role is keyed per findings digest: each shard/round is
+    // its own record, its own brief, its own receipt. The delivery side collects
+    // the whole family (`verify`, `verify--*`; `reverse-audit`, `reverse-audit--*`)
+    // and keeps the documented floor of one.
+    let keyOverride: string | undefined;
+    if (findingsContent !== undefined && args.role) {
+      const digest = createHash('sha256')
+        .update(findingsContent)
+        .digest('hex')
+        .slice(0, 12);
+      const base =
+        typeof args.chunk === 'number'
+          ? `${args.role}--chunk-${args.chunk}`
+          : args.role;
+      keyOverride = `${base}--${digest}`;
+    }
+    ({ key, prompt } = buildLaunch(
+      report,
+      args.plan,
+      args.role
+        ? {
+            role: args.role as RoleId,
+            chunk: args.chunk,
+            file: args.file,
+            key: keyOverride,
+          }
+        : { chunk: args.chunk },
+      rules,
+    ));
+  }
+
+  // The record IS the printed prompt. Anything less is a receipt a partial
+  // delivery can satisfy — the findings-free record was exactly that.
+  const printed =
+    findingsContent !== undefined && args.role
+      ? `${findingsSection(args.role as RoleId, findingsContent)}\n\n${prompt}`
+      : prompt;
+  recordPrompt(args.plan, key, printed);
   writeStdoutLine(printed);
 }
 

@@ -375,11 +375,12 @@ describe('agent-prompt (command boundary)', () => {
         }),
       ).not.toThrow();
       const recorded = readRecordedPrompts(plan);
-      expect([...recorded.keys()]).toEqual(['reverse-audit--chunk-14']);
-      const briefText = readFileSync(
-        briefPath(plan, 'reverse-audit--chunk-14'),
-        'utf8',
-      );
+      const keys = [...recorded.keys()];
+      expect(keys).toHaveLength(1);
+      // The chunk in the key (the delivery check finds the record by it), plus
+      // the findings digest — each round is its own record now.
+      expect(keys[0]).toMatch(/^reverse-audit--chunk-14--[0-9a-f]{12}$/);
+      const briefText = readFileSync(briefPath(plan, keys[0]), 'utf8');
       expect(briefText).toContain('offset=4024, limit=176'); // chunk 14 only
       expect(briefText).not.toContain('offset=3807'); // not chunk 13
     } finally {
@@ -405,8 +406,10 @@ describe('agent-prompt (command boundary)', () => {
         }),
       ).not.toThrow();
       const recorded = readRecordedPrompts(plan);
-      expect([...recorded.keys()]).toEqual(['verify']);
-      const briefText = readFileSync(briefPath(plan, 'verify'), 'utf8');
+      const keys = [...recorded.keys()];
+      expect(keys).toHaveLength(1);
+      expect(keys[0]).toMatch(/^verify--[0-9a-f]{12}$/);
+      const briefText = readFileSync(briefPath(plan, keys[0]), 'utf8');
       // The verdict branch: Exclusion Criteria yes, finding format no.
       expect(briefText).toContain('What is NOT a finding');
       expect(briefText).not.toContain('**Anchor:**');
@@ -678,6 +681,33 @@ describe('--roster — every prompt the plan requires, in one call', () => {
     expect(brief).toContain(`read_file(file_path=${JSON.stringify(evil)})`);
   });
 
+  it('refuses to rebuild a rules-bearing brief without --rules', () => {
+    // The launch prompt only POINTS at the brief, so a rules-free rebuild leaves
+    // the recorded launch byte-identical: every delivery check keeps passing
+    // while the project rules silently vanish from the file the agent treats as
+    // authoritative. Reproduced in review; refused at the brief-writing choke
+    // point both the single and roster builds pass through.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-rules-dg-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN));
+      const rules = join(dir, 'rules.md');
+      writeFileSync(rules, 'No `any` in new code.\n');
+      const build = (withRules: boolean) =>
+        (agentPromptCommand.handler as (a: unknown) => void)({
+          plan,
+          role: '2',
+          ...(withRules ? { rules } : {}),
+        });
+      build(true);
+      expect(() => build(false)).toThrow(/without --rules would overwrite/);
+      // Same rules again: not a downgrade, allowed.
+      expect(() => build(true)).not.toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('refuses company: the roster IS the selection', () => {
     const dir = mkdtempSync(join(tmpdir(), 'ap-roster-x-'));
     try {
@@ -708,7 +738,7 @@ describe('--roster — every prompt the plan requires, in one call', () => {
 // findings list. `--findings` removes that assembly step: the command folds the list
 // in and prints one block. The record stays findings-free, so the shared key still
 // matches by the add-only delivery rule.
-describe('--findings — fold the list in, print one block, record the block alone', () => {
+describe('--findings — fold the list in, print one block, record EXACTLY that block', () => {
   // Every temp dir this block makes, cleaned up after each test — the rest of the
   // file uses try/finally; a helper-based block tracks and sweeps instead.
   let dirs: string[] = [];
@@ -724,6 +754,14 @@ describe('--findings — fold the list in, print one block, record the block alo
   afterEach(() => {
     for (const d of dirs) rmSync(d, { recursive: true, force: true });
   });
+
+  /** The one record whose key starts with `prefix` — findings keys carry a digest. */
+  function recordByPrefix(plan: string, prefix: string): string {
+    const all = readRecordedPrompts(plan);
+    const keys = [...all.keys()].filter((k) => k.startsWith(prefix));
+    expect(keys).toHaveLength(1);
+    return all.get(keys[0])!;
+  }
 
   function run(args: Record<string, unknown>): {
     printed: string;
@@ -748,7 +786,7 @@ describe('--findings — fold the list in, print one block, record the block alo
     return { printed, plan };
   }
 
-  it('a verifier gets the findings folded above, and the record is findings-free', () => {
+  it('a verifier gets the findings folded above, and the record IS the printed prompt', () => {
     const { printed, plan } = run({ role: 'verify' });
     // Printed: the findings section AND the findings themselves — and NOT the
     // reverse auditor's framing (a branch swap in findingsSection would pass both
@@ -758,13 +796,20 @@ describe('--findings — fold the list in, print one block, record the block alo
     expect(printed).toContain('foo.ts:10 — the collision drops arguments');
     // and the line the orchestrator used to truncate away.
     expect(printed).toContain('does not replace the brief; read it first');
-    // Recorded: the launch block ALONE — no findings baked in.
-    const recorded = readRecordedPrompts(plan).get('verify')!;
-    expect(recorded).not.toContain('foo.ts:10');
-    expect(recorded.startsWith('You are review agent `verify`')).toBe(true);
-    // The whole point: the delivery check still passes on the folded prompt, because
-    // the recorded block appears in order within it (findings are an add-only prefix).
-    expect(wasDeliveredVerbatim(printed, recorded)).toBe(true);
+    // Recorded: EXACTLY what was printed, findings included, under a digest key.
+    // The findings-free record was a receipt a partial delivery could satisfy:
+    // launch the agent with only the recorded tail, let it open the brief, and
+    // the delivery check passed while no verifier ever saw a finding.
+    const recorded = recordByPrefix(plan, 'verify--');
+    expect(recorded).toBe(printed);
+    // The attack shape from the review: delivering the tail alone (the old
+    // findings-free block) no longer matches the record.
+    const tail = printed.slice(printed.indexOf('You are review agent'));
+    expect(wasDeliveredVerbatim(tail, recorded)).toBe(false);
+    // The compliant launch (possibly wrapped) still does.
+    expect(wasDeliveredVerbatim(`Context.\n${printed}\nGo.`, recorded)).toBe(
+      true,
+    );
   });
 
   it('a reverse auditor gets the do-not-re-report framing', () => {
@@ -773,9 +818,8 @@ describe('--findings — fold the list in, print one block, record the block alo
     // and NOT the verifier's framing — the mirror of the assertion above.
     expect(printed).not.toContain('The findings you are ruling on');
     expect(printed).toContain('foo.ts:10 — the collision drops arguments');
-    const recorded = readRecordedPrompts(plan).get('reverse-audit')!;
-    expect(recorded).not.toContain('foo.ts:10');
-    expect(wasDeliveredVerbatim(printed, recorded)).toBe(true);
+    const recorded = recordByPrefix(plan, 'reverse-audit--');
+    expect(recorded).toBe(printed);
   });
 
   it('a Step 3B per-chunk reverse auditor takes --chunk and --findings together', () => {
@@ -789,10 +833,9 @@ describe('--findings — fold the list in, print one block, record the block alo
     expect(printed).toContain('foo.ts:10 — the collision drops arguments');
     expect(printed).toContain('offset=4024, limit=176'); // this chunk's range only
     expect(printed).not.toContain('offset=3807'); // not chunk 13's
-    const recorded = readRecordedPrompts(plan).get('reverse-audit--chunk-14')!;
-    expect(recorded).not.toContain('foo.ts:10');
+    const recorded = recordByPrefix(plan, 'reverse-audit--chunk-14--');
+    expect(recorded).toBe(printed);
     expect(recorded).toContain('offset=4024, limit=176');
-    expect(wasDeliveredVerbatim(printed, recorded)).toBe(true);
   });
 
   it('throws for a role it has no framing for, rather than falling through', () => {
@@ -850,12 +893,12 @@ describe('--findings — fold the list in, print one block, record the block alo
     ).not.toThrow();
   });
 
-  it('two shards with different findings record the same launch block', () => {
-    // The property the shared per-shard/round key rests on: the findings are printed,
-    // never recorded, so shard 2's record does not overwrite shard 1's with a
-    // different block — both shards' launches match the one record by the add-only
-    // delivery rule. Same plan both times (the record embeds the plan-derived brief
-    // path); only the folded-in list differs.
+  it('two shards with different findings each get their OWN record, and neither clobbers the other', () => {
+    // The old shape shared one findings-free record across shards — a receipt a
+    // tail-only delivery could satisfy. Now each shard's record is its exact
+    // printed prompt under a findings-digest key: shard 2 does not overwrite
+    // shard 1, each launch is verified against its own list, and a launch
+    // carrying the wrong shard's list matches nothing.
     const dir = tmp('ap-shards-');
     const plan = join(dir, 'plan.json');
     writeFileSync(plan, JSON.stringify(PLAN));
@@ -869,27 +912,28 @@ describe('--findings — fold the list in, print one block, record the block alo
       role: 'verify',
       findings: shard1,
     });
-    const recAfter1 = readRecordedPrompts(plan).get('verify')!;
     const printed1 = (writeStdoutLine as unknown as Mock).mock
       .calls[0][0] as string;
-
     (agentPromptCommand.handler as (a: unknown) => void)({
       plan,
       role: 'verify',
       findings: shard2,
     });
-    const recAfter2 = readRecordedPrompts(plan).get('verify')!;
     const printed2 = (writeStdoutLine as unknown as Mock).mock
       .calls[1][0] as string;
 
-    expect(recAfter1).toBe(recAfter2); // the record never carried either list
-    expect(recAfter2).not.toContain('first shard');
-    expect(recAfter2).not.toContain('second shard');
-    // Each shard got its OWN list, and both still match the one record.
-    expect(printed1).toContain('first shard');
-    expect(printed2).toContain('second shard');
-    expect(wasDeliveredVerbatim(printed1, recAfter2)).toBe(true);
-    expect(wasDeliveredVerbatim(printed2, recAfter2)).toBe(true);
+    const recorded = readRecordedPrompts(plan);
+    const verifyKeys = [...recorded.keys()].filter((k) =>
+      k.startsWith('verify--'),
+    );
+    expect(verifyKeys).toHaveLength(2); // one per shard, no clobbering
+    const records = verifyKeys.map((k) => recorded.get(k)!);
+    expect(records).toContain(printed1);
+    expect(records).toContain(printed2);
+    // Cross-delivery fails: shard 1's launch does not satisfy shard 2's record.
+    const rec2 = records.find((r) => r.includes('second shard'))!;
+    expect(wasDeliveredVerbatim(printed1, rec2)).toBe(false);
+    expect(wasDeliveredVerbatim(printed2, rec2)).toBe(true);
   });
 
   it('refuses a findings-taking role launched without --findings', () => {

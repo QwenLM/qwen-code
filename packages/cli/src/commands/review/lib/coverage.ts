@@ -495,10 +495,54 @@ export function coverageFromTranscripts(
   // Injective: one transcript may satisfy ONE roster requirement. Without this,
   // pasting the whole roster output to a single agent yields one transcript that
   // verbatim-contains every block, matches every requirement independently, and
-  // certifies an N-agent fan-out with one reader. Attempts for the SAME
-  // requirement still supersede each other; what a transcript cannot do is be
-  // credited twice.
-  const claimed = new Set<AgentRecord>();
+  // certifies an N-agent fan-out with one reader. And injective by MAXIMUM
+  // matching, not greedy claim order: with T1 containing blocks A+B and T2
+  // containing only A, a greedy pass claims T1 for A and reports B missing while
+  // the valid assignment (T2→A, T1→B) exists — a compliant repair permanently
+  // capped by transcript order. Kuhn's augmenting paths, seeded on the edges
+  // where the transcript also opened the requirement's brief, then extended over
+  // all verbatim edges.
+  const buildable = roster.filter((r) => builtOf(r.key) !== undefined);
+  const openedBrief = (rec: AgentRecord, key: string): boolean => {
+    const needle = JSON.stringify(briefPath(planPath, key));
+    return rec.successfulCallArgs.some((a) => a.includes(needle));
+  };
+  const candidatesOf = buildable.map((req) => {
+    const b = builtOf(req.key) as string;
+    return records.filter((r) => wasDeliveredVerbatim(r.launchPrompt, b));
+  });
+  const openedOfReq = buildable.map((req, i) =>
+    candidatesOf[i].filter((r) => openedBrief(r, req.key)),
+  );
+  const matchedRec = new Map<AgentRecord, number>();
+  const augment = (
+    i: number,
+    edges: AgentRecord[][],
+    seen: Set<AgentRecord>,
+  ): boolean => {
+    for (const rec of edges[i]) {
+      if (seen.has(rec)) continue;
+      seen.add(rec);
+      const j = matchedRec.get(rec);
+      if (j === undefined || augment(j, edges, seen)) {
+        matchedRec.set(rec, i);
+        return true;
+      }
+    }
+    return false;
+  };
+  for (let i = 0; i < buildable.length; i++) {
+    augment(i, openedOfReq, new Set());
+  }
+  for (let i = 0; i < buildable.length; i++) {
+    if (![...matchedRec.values()].includes(i)) {
+      augment(i, candidatesOf, new Set());
+    }
+  }
+  const assignment = new Map<number, AgentRecord>();
+  for (const [rec, i] of matchedRec) assignment.set(i, rec);
+
+  let buildableIdx = -1;
   for (const req of roster) {
     const b = builtOf(req.key);
     if (b === undefined) {
@@ -512,17 +556,12 @@ export function coverageFromTranscripts(
       missingRoleSelectors.push(selectorOf(req));
       continue;
     }
-    // ALL matching launches, not the first: a relaunch is the repair this
-    // report's own remediation prescribes, and judging only the earliest match
-    // would let an old launch that never opened its brief mask the compliant one
-    // that followed — flagging the exact behaviour the fix asked for.
-    const agents = records.filter(
-      (r) => !claimed.has(r) && wasDeliveredVerbatim(r.launchPrompt, b),
-    );
-    if (agents.length === 0) {
-      const anyMatch = records.some((r) =>
-        wasDeliveredVerbatim(r.launchPrompt, b),
-      );
+    buildableIdx += 1;
+    const pick = assignment.get(buildableIdx);
+    if (pick === undefined) {
+      // Not assignable even under a MAXIMUM matching — so this is provably a
+      // shortage of transcripts, not an artifact of claim order.
+      const anyMatch = candidatesOf[buildableIdx].length > 0;
       missingRoles.push(
         anyMatch
           ? `${roleLabel(req)} — its prompt reached only an agent already ` +
@@ -548,13 +587,12 @@ export function coverageFromTranscripts(
     // The brief as a whole JSON string value (`successfulCallArgs` are already
     // serialized args): a bare substring would credit `${brief}.bak` for the brief,
     // the same trap `parseTranscript` avoids for the diff path.
-    const openedOf = (agent: AgentRecord) =>
-      agent.successfulCallArgs.some((a) => a.includes(JSON.stringify(brief)));
-    // Claim the satisfying transcript (prefer one that opened the brief), so no
-    // later requirement can be credited with the same reader.
-    const pick = agents.find(openedOf) ?? agents[0];
-    claimed.add(pick);
-    const opened = openedOf(pick);
+    // The ASSIGNED transcript must have opened this requirement's brief. The
+    // matching preferred brief-opening edges, so an unopened assignment means no
+    // valid opened assignment existed.
+    const opened = pick.successfulCallArgs.some((a) =>
+      a.includes(JSON.stringify(brief)),
+    );
     if (!opened) {
       unreadBriefs.push(
         `${roleLabel(req)} — never opened its brief (${brief}), so it reviewed ` +
@@ -867,7 +905,13 @@ export function verificationGaps(
   // findings, which are pre-confirmed and skip verification by design. A review that
   // confirmed nothing has nothing to verify.
   if (opts.postsFindings) {
-    const verify = deliveryOf('verify');
+    // The whole key family: `verify--<digest>` per shard (the record now folds
+    // the findings in, so a launch that dropped them matches nothing), plus the
+    // bare legacy key. Floor of one, as documented.
+    const verifyKeys = [...built.keys()].filter(
+      (k) => k === 'verify' || k.startsWith('verify--'),
+    );
+    const verify = bestDelivery(verifyKeys);
     if (verify !== 'ok') {
       gaps.push(`verification — ${VERIFY_GAP[verify].gap}`);
       remediation.push(
