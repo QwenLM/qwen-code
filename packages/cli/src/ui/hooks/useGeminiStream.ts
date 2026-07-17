@@ -86,7 +86,11 @@ import {
   handleAtCommand,
   resolveAtCommandQuery,
 } from './atCommandProcessor.js';
-import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
+import {
+  findLastSafeSplitPoint,
+  splitFencedMarkdown,
+  getEnclosingFenceInfo,
+} from '../utils/markdownUtilities.js';
 import { fitPendingSlice } from '../utils/pending-rendered-height.js';
 import { useStateAndRef } from './useStateAndRef.js';
 import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
@@ -1225,8 +1229,12 @@ export const useGeminiStream = (
         // multiple times per-second (as streaming occurs). Prior to this change you'd
         // see heavy flickering of the terminal. This ensures that larger messages get
         // broken up so that there are more "statically" rendered.
-        const beforeText = newGeminiMessageBuffer.substring(0, safeSplitPoint);
-        const afterText = newGeminiMessageBuffer.substring(safeSplitPoint);
+        // Repair fences when the split lands inside a code block so the tail
+        // does not render as prose (see splitFencedMarkdown).
+        const { before: beforeText, after: afterText } = splitFencedMarkdown(
+          newGeminiMessageBuffer,
+          safeSplitPoint,
+        );
         commitItem(
           {
             type: nextPendingType,
@@ -1297,12 +1305,37 @@ export const useGeminiStream = (
             break;
           }
         }
-        if (boundaryLine < 0) break; // no block boundary yet → keep pending
-        const target = charIndexAfterLine(
-          newGeminiMessageBuffer,
-          boundaryLine + 1,
-        );
-        if (target <= 0) break;
+        let target: number;
+        if (boundaryLine < 0) {
+          // No blank-line boundary at/before the kept prefix. A fenced code
+          // block taller than the viewport never provides one mid-block, so the
+          // whole block would stay pending — frozen on its head — and only land
+          // in scrollback when it finally closes (the "stall then dump" seen on
+          // a 100-line code block). Hard-splitting inside a fence is now safe
+          // (splitFencedMarkdown closes/re-opens the fence and continues the
+          // gutter), so commit the budget-fit prefix and keep streaming. Restrict
+          // this to code blocks: other tall blocks (tables/lists) must stay whole
+          // and are still kept pending.
+          const capIndex = charIndexAfterLine(
+            newGeminiMessageBuffer,
+            keptLines,
+          );
+          const fenceInfo =
+            capIndex > 0
+              ? getEnclosingFenceInfo(newGeminiMessageBuffer, capIndex)
+              : null;
+          // Only hard-split a real code block. Other tall blocks (tables/lists)
+          // must stay whole, and mermaid needs its whole source to render a
+          // diagram — splitting it mid-block would break the render — so both
+          // stay pending until they complete.
+          if (!fenceInfo || fenceInfo.lang?.toLowerCase() === 'mermaid') {
+            break; // no safe boundary yet → keep pending
+          }
+          target = capIndex;
+        } else {
+          target = charIndexAfterLine(newGeminiMessageBuffer, boundaryLine + 1);
+          if (target <= 0) break;
+        }
         const splitPoint = findLastSafeSplitPoint(
           newGeminiMessageBuffer,
           target,
@@ -1310,8 +1343,12 @@ export const useGeminiStream = (
         if (splitPoint <= 0 || splitPoint >= newGeminiMessageBuffer.length) {
           break;
         }
-        const beforeText = newGeminiMessageBuffer.substring(0, splitPoint);
-        const afterText = newGeminiMessageBuffer.substring(splitPoint);
+        // Repair fences when the split lands inside a code block so the tail
+        // does not render as prose (see splitFencedMarkdown).
+        const { before: beforeText, after: afterText } = splitFencedMarkdown(
+          newGeminiMessageBuffer,
+          splitPoint,
+        );
         commitItem(
           {
             type: nextPendingType,
@@ -1459,8 +1496,12 @@ export const useGeminiStream = (
           splitPoint > 0 && splitPoint < newThoughtBuffer.length
             ? splitPoint
             : STREAM_PENDING_ITEM_MAX_CHARS;
-        const beforeText = newThoughtBuffer.substring(0, safeSplitPoint);
-        const afterText = newThoughtBuffer.substring(safeSplitPoint);
+        // Repair fences when the split lands inside a code block so the tail
+        // does not render as prose (see splitFencedMarkdown).
+        const { before: beforeText, after: afterText } = splitFencedMarkdown(
+          newThoughtBuffer,
+          safeSplitPoint,
+        );
         addItem(
           buildThoughtItem(pendingThoughtType, beforeText),
           userMessageTimestamp,
