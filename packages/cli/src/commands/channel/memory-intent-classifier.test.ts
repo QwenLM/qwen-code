@@ -49,7 +49,7 @@ describe('BridgeChannelMemoryIntentClassifier', () => {
       classifier.classifyChannelMemoryIntent('你记一下以后回复前说 1122'),
     ).resolves.toEqual({
       intent: 'remember',
-      memory: '回复前说 1122',
+      memories: ['回复前说 1122'],
       confidence: 0.93,
     });
     expect(bridge.newSession).toHaveBeenCalledWith('/tmp');
@@ -59,6 +59,55 @@ describe('BridgeChannelMemoryIntentClassifier', () => {
       {},
     );
     expect(bridge.cancelSession).toHaveBeenCalledWith('classifier-session');
+  });
+
+  it('canonicalizes plural facts and asks the model to split independent durable facts', async () => {
+    const { bridge, classifier } = classifierFor(
+      '{"intent":"remember","memories":["默认使用 staging","回复使用中文"],"confidence":0.93}',
+    );
+
+    await expect(
+      classifier.classifyChannelMemoryIntent(
+        '记住默认使用 staging，以后回复使用中文',
+      ),
+    ).resolves.toEqual({
+      intent: 'remember',
+      memories: ['默认使用 staging', '回复使用中文'],
+      confidence: 0.93,
+    });
+
+    const prompt = vi.mocked(bridge.prompt).mock.calls[0]?.[1] ?? '';
+    expect(prompt).toContain('"memories"');
+    expect(prompt).toContain('Split independent durable facts');
+    expect(prompt).toContain('without splitting one fact into fragments');
+  });
+
+  it('accepts exactly ten plural facts', async () => {
+    const memories = Array.from(
+      { length: 10 },
+      (_, index) => `事实 ${index + 1}`,
+    );
+    const { classifier } = classifierFor(
+      JSON.stringify({ intent: 'remember', memories, confidence: 0.93 }),
+    );
+
+    await expect(
+      classifier.classifyChannelMemoryIntent('记住十件事'),
+    ).resolves.toEqual({ intent: 'remember', memories, confidence: 0.93 });
+  });
+
+  it('canonicalizes a legacy scalar fact to a plural result', async () => {
+    const { classifier } = classifierFor(
+      '{"intent":"remember","memory":"回复使用中文","confidence":0.93}',
+    );
+
+    await expect(
+      classifier.classifyChannelMemoryIntent('记住回复使用中文'),
+    ).resolves.toEqual({
+      intent: 'remember',
+      memories: ['回复使用中文'],
+      confidence: 0.93,
+    });
   });
 
   it('plans a targeted remove against the supplied entries', async () => {
@@ -163,7 +212,11 @@ describe('BridgeChannelMemoryIntentClassifier', () => {
       [
         'remember',
         '{"intent":"remember","memory":"回复前说 1122","confidence":0.9}',
-        { intent: 'remember', memory: '回复前说 1122', confidence: 0.9 },
+        {
+          intent: 'remember',
+          memories: ['回复前说 1122'],
+          confidence: 0.9,
+        },
       ],
       [
         'clear_all',
@@ -213,6 +266,41 @@ describe('BridgeChannelMemoryIntentClassifier', () => {
 
     await expect(
       classifier.classifyChannelMemoryIntent('请求', entries),
+    ).resolves.toEqual({ intent: 'none', confidence: 0 });
+  });
+
+  it.each([
+    ['an empty array', '{"intent":"remember","memories":[],"confidence":0.9}'],
+    [
+      'eleven facts',
+      JSON.stringify({
+        intent: 'remember',
+        memories: Array.from({ length: 11 }, (_, index) => `事实 ${index + 1}`),
+        confidence: 0.9,
+      }),
+    ],
+    [
+      'a non-string member',
+      '{"intent":"remember","memories":["有效",1],"confidence":0.9}',
+    ],
+    [
+      'a blank member',
+      '{"intent":"remember","memories":["   "],"confidence":0.9}',
+    ],
+    [
+      'both scalar and plural fields',
+      '{"intent":"remember","memory":"旧值","memories":["新值"],"confidence":0.9}',
+    ],
+    ['missing both fields', '{"intent":"remember","confidence":0.9}'],
+    [
+      'an extra field',
+      '{"intent":"remember","memories":["有效"],"extra":true,"confidence":0.9}',
+    ],
+  ])('normalizes remember output with %s to none', async (_, response) => {
+    const { classifier } = classifierFor(response);
+
+    await expect(
+      classifier.classifyChannelMemoryIntent('请求'),
     ).resolves.toEqual({ intent: 'none', confidence: 0 });
   });
 
@@ -310,7 +398,7 @@ describe('BridgeChannelMemoryIntentClassifier', () => {
       classifier.classifyChannelMemoryIntent('你记一下以后回复前说 1122'),
     ).resolves.toEqual({
       intent: 'remember',
-      memory: '回复前说 1122',
+      memories: ['回复前说 1122'],
       confidence: 0.93,
     });
     expect(stderrSpy).toHaveBeenCalledWith(
