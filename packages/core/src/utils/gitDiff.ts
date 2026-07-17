@@ -1344,11 +1344,18 @@ async function detectGitOperation(
 async function countStashEntries(gitRoot: string): Promise<number> {
   const gitDir = await resolveGitDirFromRoot(gitRoot);
   if (!gitDir) return 0;
+  const stashLog = path.join(gitDir, 'logs', 'refs', 'stash');
+  // lstat before read: a symlink-to-FIFO would block readFile forever (the
+  // same hazard the untracked-file readers guard against). Only count a
+  // regular file.
   try {
-    const content = await readFile(
-      path.join(gitDir, 'logs', 'refs', 'stash'),
-      'utf8',
-    );
+    const st = await lstat(stashLog);
+    if (!st.isFile()) return 0;
+  } catch {
+    return 0;
+  }
+  try {
+    const content = await readFile(stashLog, 'utf8');
     return content.split('\n').filter((line) => line.trim().length > 0).length;
   } catch {
     return 0;

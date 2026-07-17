@@ -533,6 +533,20 @@ describe('fetchGitDiffHunksForFile', () => {
     expect(await fetchGitDiffHunksForFile(repo, 'a.txt')).toBeNull();
   });
 
+  it('returns null during a transient merge state', async () => {
+    await fs.writeFile(path.join(repo, 'a.txt'), 'one\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'init');
+    await fs.writeFile(path.join(repo, 'a.txt'), 'TWO\n');
+    // Fake a merge in progress; the single-file endpoint must decline just
+    // like fetchGitDiff/fetchGitDiffHunks do.
+    await fs.writeFile(
+      path.join(repo, '.git', 'MERGE_HEAD'),
+      '0000000000000000000000000000000000000000\n',
+    );
+    expect(await fetchGitDiffHunksForFile(repo, 'a.txt')).toBeNull();
+  });
+
   it('synthesizes an all-added hunk for an untracked file', async () => {
     await fs.writeFile(path.join(repo, 'a.txt'), 'a\n');
     await git(repo, 'add', '.');

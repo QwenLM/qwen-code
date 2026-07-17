@@ -133,8 +133,11 @@ async function handleDiffFile(
     return;
   }
   try {
-    const result = await fetchGitDiffHunksForFile(workspaceCwd, queryPath);
+    // Apply the read headers before the await (as handleDiffList does) so the
+    // no-store/nosniff headers are also present on the error response if the
+    // fetch throws.
     applyReadHeaders(res);
+    const result = await fetchGitDiffHunksForFile(workspaceCwd, queryPath);
     res.status(200).json(buildFileHunks(workspaceCwd, queryPath, result));
   } catch (err) {
     sendBridgeError(res, err, { route });
