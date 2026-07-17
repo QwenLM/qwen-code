@@ -69,6 +69,7 @@ export function AskUserQuestion({
   const selectedIdxRef = useRef<number | null>(selectedIdx);
   selectedIdxRef.current = selectedIdx;
   const questionTextId = useId();
+  const headingId = useId();
 
   useEffect(() => {
     const firstQuestion = questions[0];
@@ -354,7 +355,11 @@ export function AskUserQuestion({
       data-web-shell-ask-panel
       role="alertdialog"
       aria-label={localizeToolDisplayName('ask_user_question', t)}
-      aria-labelledby={collapsed ? undefined : questionTextId}
+      // aria-labelledby wins over aria-label, so when expanded name the dialog
+      // with BOTH the tool name and the question (otherwise the tool-name
+      // context is dropped). The tool-name span is display:none but accname
+      // still uses a directly-referenced hidden element's text.
+      aria-labelledby={collapsed ? undefined : `${headingId} ${questionTextId}`}
       onKeyDown={handleKeyDown}
     >
       {/* Header line like CLI */}
@@ -362,7 +367,7 @@ export function AskUserQuestion({
         <span className={styles.icon} aria-hidden="true">
           ?
         </span>
-        <span className={styles.toolName}>
+        <span className={styles.toolName} id={headingId}>
           {localizeToolDisplayName('ask_user_question', t)}
         </span>
         <span className={styles.toolDesc}>
@@ -429,12 +434,15 @@ export function AskUserQuestion({
               </p>
               <p className={styles.description}>{t('askUser.selectAnswer')}</p>
 
-              {/* Options list — a roving-tabindex group of toggle buttons; the
-                  "Other" row is a trigger that reveals a text input (kept out of
-                  the button so interactive content isn't nested in a button). */}
+              {/* Options list — roving tabindex. Single-select uses radio
+                  semantics (radiogroup/radio + aria-checked) so screen readers
+                  convey mutual exclusivity; multi-select uses toggle buttons
+                  (aria-pressed). The "Other" row is a trigger that reveals a
+                  text input (kept out of the button so interactive content isn't
+                  nested in a button). */}
               <div
                 className={styles.options}
-                role="group"
+                role={isMulti ? 'group' : 'radiogroup'}
                 aria-labelledby={questionTextId}
               >
                 {current.options.map((opt, i) => {
@@ -455,7 +463,9 @@ export function AskUserQuestion({
                       } ${isSelected ? styles.optionSelected : ''}`}
                       data-web-shell-ask-option
                       tabIndex={isActive ? 0 : -1}
-                      aria-pressed={isSelected}
+                      role={isMulti ? undefined : 'radio'}
+                      aria-checked={isMulti ? undefined : isSelected}
+                      aria-pressed={isMulti ? isSelected : undefined}
                       aria-keyshortcuts={String(i + 1)}
                       onClick={() => chooseOption(i)}
                       onFocus={() => setSelectedIdx(i)}
@@ -530,7 +540,9 @@ export function AskUserQuestion({
                           }`}
                           data-web-shell-ask-option
                           tabIndex={isCustomActive ? 0 : -1}
-                          aria-pressed={hasCustomValue}
+                          role={isMulti ? undefined : 'radio'}
+                          aria-checked={isMulti ? undefined : hasCustomValue}
+                          aria-pressed={isMulti ? hasCustomValue : undefined}
                           aria-keyshortcuts={String(current.options.length + 1)}
                           onClick={() => chooseOption(current.options.length)}
                           onFocus={() => setSelectedIdx(current.options.length)}

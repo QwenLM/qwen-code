@@ -356,7 +356,10 @@ export function ToolApproval({
         {questionText}
       </div>
 
-      <div className={styles.options} role="group" aria-labelledby={questionId}>
+      {/* No role/label here: the alertdialog already exposes the question via
+          aria-describedby, so labelling the option container with the same text
+          would make screen readers speak the question twice. */}
+      <div className={styles.options}>
         {displayOptions.map((option, i) => {
           const isSelected = i === selected;
           const i18nKey = getOptionI18nKey(option);

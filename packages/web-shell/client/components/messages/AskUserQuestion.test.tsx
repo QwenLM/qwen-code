@@ -106,6 +106,37 @@ describe('AskUserQuestion accessibility', () => {
     expect(document.activeElement).toBe(opts[0]);
   });
 
+  it('exposes single-select options as radios in a radiogroup', () => {
+    render(undefined);
+    const panel = container!.querySelector('[data-web-shell-ask-panel]')!;
+    expect(panel.querySelector('[role="radiogroup"]')).not.toBeNull();
+
+    const opts = optionButtons();
+    // Radios (not toggle buttons) convey mutual exclusivity; the default first
+    // option is checked.
+    expect(opts[0]!.getAttribute('role')).toBe('radio');
+    expect(opts[0]!.getAttribute('aria-checked')).toBe('true');
+    expect(opts[1]!.getAttribute('aria-checked')).toBe('false');
+    expect(opts[0]!.hasAttribute('aria-pressed')).toBe(false);
+  });
+
+  it('names the expanded dialog with both the tool name and the question', () => {
+    render(undefined);
+    const panel = container!.querySelector('[data-web-shell-ask-panel]')!;
+    const labelledby = panel.getAttribute('aria-labelledby');
+    expect(labelledby).toBeTruthy();
+    // aria-labelledby must reference two existing elements (tool name + question)
+    // so the tool-name context isn't dropped when the dialog is expanded.
+    const referenced = labelledby!
+      .split(' ')
+      .map((id) => document.getElementById(id));
+    expect(referenced).toHaveLength(2);
+    expect(referenced.every((el) => el !== null)).toBe(true);
+    expect(
+      referenced.some((el) => el!.textContent!.includes('Pick a color')),
+    ).toBe(true);
+  });
+
   it('does not steal focus when keyboardActive is false (split-view panes)', () => {
     render(false);
     expect(optionButtons().some((o) => o === document.activeElement)).toBe(
