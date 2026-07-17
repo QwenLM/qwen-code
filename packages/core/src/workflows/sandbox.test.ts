@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   runInSandbox,
+  SOURCE_MAX_BYTES,
   WorkflowScriptError,
   type SandboxBridges,
 } from './sandbox.js';
@@ -170,6 +171,28 @@ describe('sandbox determinism guards', () => {
     );
     expect(r).toEqual({ viaCtor: 'threw', reassign: 'frozen' });
   });
+
+  // REGRESSION (Opus review): the ECMA-402 `Intl` intrinsic is a realm global
+  // that reads %Date.now% directly, bypassing GuardedDate.
+  // `new Intl.DateTimeFormat(...).format()` returns live wall-clock and
+  // `.resolvedOptions().timeZone` leaks the host timezone — both defeat
+  // journaled-replay determinism. It is deleted from the context entirely.
+  it('Intl is removed so wall-clock/timezone cannot leak past the Date guard', async () => {
+    const r = await runInSandbox(
+      `const out = { present: typeof Intl };
+       try {
+         new Intl.DateTimeFormat('en-US', { dateStyle: 'full', timeStyle: 'long' }).format();
+         out.format = 'no-throw';
+       } catch (e) { out.format = 'threw'; }
+       try {
+         const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+         out.tz = 'leaked:' + tz;
+       } catch (e) { out.tz = 'threw'; }
+       return out;`,
+      okBridges(),
+    );
+    expect(r).toEqual({ present: 'undefined', format: 'threw', tz: 'threw' });
+  });
 });
 
 describe('sandbox primitives + result marshalling', () => {
@@ -198,5 +221,14 @@ describe('sandbox primitives + result marshalling', () => {
     await expect(
       runInSandbox(`throw new Error('kaboom'); `, okBridges()),
     ).rejects.toBeInstanceOf(WorkflowScriptError);
+  });
+
+  it('a script body over SOURCE_MAX_BYTES is rejected before compilation', async () => {
+    // The size check is the first line of runInSandbox, before any compile, so
+    // the body need not be valid JS. One byte over the 512 KB cap must reject.
+    const oversized = 'x'.repeat(SOURCE_MAX_BYTES + 1);
+    await expect(runInSandbox(oversized, okBridges())).rejects.toBeInstanceOf(
+      WorkflowScriptError,
+    );
   });
 });

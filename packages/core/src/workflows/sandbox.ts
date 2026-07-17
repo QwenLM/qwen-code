@@ -79,6 +79,15 @@ const BOOTSTRAP_SRC = String.raw`
 'use strict';
 const g = globalThis;
 
+// DETERMINISM: delete the ECMA-402 Intl intrinsic. Unlike process/Buffer it is
+// a realm global present even with an Object.create(null) context object, and it
+// reads %Date.now% directly — new Intl.DateTimeFormat().format() returns live
+// wall-clock and .resolvedOptions().timeZone leaks the host timezone, both
+// bypassing the GuardedDate guards and defeating journaled-replay determinism.
+// Workflow scripts have no legitimate need for locale formatting, so remove it
+// entirely. (Its property is spec-configurable; delete succeeds.)
+delete g.Intl;
+
 function determinismMessage(api) {
   return api + ' is disabled: workflow scripts must be deterministic so a ' +
     'journaled run can be replayed on resume. Derive values from agent ' +
@@ -260,10 +269,22 @@ export async function runInSandbox(
     }) as Promise<string>;
     resultJson = await resultPromise;
   } catch (err) {
-    // Synchronous-CPU timeout, or a throw in the synchronous prologue.
-    throw new WorkflowScriptError(
-      err instanceof Error ? err.message : String(err),
-    );
+    // Synchronous-CPU timeout, or a throw in the synchronous prologue. `err` may
+    // be a CONTEXT-realm value (not a host Error, so `instanceof Error` is
+    // false) carrying an adversarial Symbol.toPrimitive/toString — coercing it
+    // could throw a host TypeError that escapes as a non-WorkflowScriptError, or
+    // yield a non-string that `new Error(msg)` would then re-coerce and throw
+    // on. Marshal to a guaranteed string BEFORE the constructor so any failure
+    // still surfaces as a WorkflowScriptError (no host object reaches the caller).
+    let message: string;
+    try {
+      message = err instanceof Error ? err.message : String(err);
+    } catch {
+      message = 'workflow script execution failed';
+    }
+    if (typeof message !== 'string')
+      message = 'workflow script execution failed';
+    throw new WorkflowScriptError(message);
   }
 
   const parsed = JSON.parse(resultJson) as
