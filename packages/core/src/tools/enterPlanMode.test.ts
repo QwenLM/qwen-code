@@ -98,7 +98,6 @@ describe('EnterPlanModeTool', () => {
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
         ApprovalMode.PLAN,
-        { enteredByModel: true },
       );
       expect(approvalMode).toBe(ApprovalMode.PLAN);
       expect(savedPrePlanMode).toBe(ApprovalMode.DEFAULT);
@@ -112,7 +111,6 @@ describe('EnterPlanModeTool', () => {
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
         ApprovalMode.PLAN,
-        { enteredByModel: true },
       );
       expect(savedPrePlanMode).toBe(ApprovalMode.AUTO_EDIT);
     });
@@ -124,7 +122,6 @@ describe('EnterPlanModeTool', () => {
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
         ApprovalMode.PLAN,
-        { enteredByModel: true },
       );
       expect(savedPrePlanMode).toBe(ApprovalMode.AUTO);
     });
@@ -168,7 +165,6 @@ describe('EnterPlanModeTool', () => {
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
         ApprovalMode.PLAN,
-        { enteredByModel: true },
       );
       expect(approvalMode).toBe(ApprovalMode.PLAN);
       expect(savedPrePlanMode).toBe(ApprovalMode.DEFAULT);
@@ -184,11 +180,9 @@ describe('EnterPlanModeTool', () => {
       const invocation = tool.build({ userRequested: true });
       const result = await invocation.execute(new AbortController().signal);
 
-      // Still flagged as model-initiated so exit_plan_mode runs the Plan
-      // Approval Gate for the YOLO session (#5574).
+      // Preserve the YOLO mode so an approved plan exit can restore it.
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
         ApprovalMode.PLAN,
-        { enteredByModel: true },
       );
       expect(approvalMode).toBe(ApprovalMode.PLAN);
       expect(savedPrePlanMode).toBe(ApprovalMode.YOLO);
@@ -210,7 +204,6 @@ describe('EnterPlanModeTool', () => {
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
         ApprovalMode.PLAN,
-        { enteredByModel: true },
       );
       expect(approvalMode).toBe(ApprovalMode.PLAN);
       expect(result.llmContent).not.toContain('non-interactive');

@@ -101,7 +101,6 @@ import {
   createDenialState,
   resetDenialState,
 } from '../permissions/denialTracking.js';
-import { type PlanGateState, createPlanGateState } from '../plan-gate/state.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
@@ -1704,8 +1703,7 @@ export class Config {
   private readonly contextRuleExcludes: string[];
   private approvalMode: ApprovalMode;
   private prePlanMode?: ApprovalMode;
-  private planGateState?: PlanGateState;
-  private planGateEntryCounter = 0;
+  private approvalModeRevision = 0;
   private autoModeDenialState: AutoModeDenialState = createDenialState();
   private readonly accessibility: AccessibilitySettings;
   private readonly showResponseTokensPerSecond: boolean;
@@ -5032,19 +5030,16 @@ export class Config {
     return this.prePlanMode ?? ApprovalMode.DEFAULT;
   }
 
-  /**
-   * Returns the Plan Approval Gate state for the current Plan Mode Entry, or
-   * undefined when not in plan mode. The returned object is mutable; callers
-   * may update its fields directly (e.g. review count, gate mode).
-   */
-  getPlanGateState(): PlanGateState | undefined {
-    return this.planGateState;
+  getApprovalModeRevision(): number {
+    return this.approvalModeRevision;
   }
 
   setApprovalMode(
     mode: ApprovalMode,
+    /** @deprecated Model origin no longer changes plan-exit approval. */
     options?: { enteredByModel?: boolean },
   ): void {
+    void options;
     if (
       !this.isTrustedFolder() &&
       mode !== ApprovalMode.DEFAULT &&
@@ -5053,26 +5048,6 @@ export class Config {
       throw new TrustGateError(
         'Cannot enable privileged approval modes in an untrusted folder.',
       );
-    }
-    // Track the mode before entering plan mode so it can be restored later
-    if (mode === ApprovalMode.PLAN && this.approvalMode !== ApprovalMode.PLAN) {
-      this.prePlanMode = this.approvalMode;
-      // Begin a fresh Plan Mode Entry for the Plan Approval Gate. Only the
-      // model's enter_plan_mode tool marks the entry as model-initiated; every
-      // user-driven entry (Shift+Tab, /plan, dialog) defaults to false so the
-      // user always gets the confirmation dialog on exit (issue #5574).
-      this.planGateState = createPlanGateState(
-        ++this.planGateEntryCounter,
-        options?.enteredByModel ?? false,
-      );
-    } else if (
-      mode !== ApprovalMode.PLAN &&
-      this.approvalMode === ApprovalMode.PLAN
-    ) {
-      this.prePlanMode = undefined;
-      // Successfully leaving PLAN clears all gate state (including any
-      // user_takeover marker, which only lives for the duration of PLAN).
-      this.planGateState = undefined;
     }
     // Strip over-broad allow rules (Bash interpreter wildcards, any Agent /
     // Skill allow) on AUTO entry; restore them on AUTO exit. Settings on
@@ -5089,11 +5064,21 @@ export class Config {
         this.permissionManager.restoreDangerousRules();
       }
     }
+    // Update all mode bookkeeping only after fallible transition work has
+    // succeeded, so callers never observe a partially applied mode change.
+    if (mode === ApprovalMode.PLAN && fromMode !== ApprovalMode.PLAN) {
+      this.prePlanMode = fromMode;
+    } else if (mode !== ApprovalMode.PLAN && fromMode === ApprovalMode.PLAN) {
+      this.prePlanMode = undefined;
+    }
     // Any deliberate mode change invalidates the AUTO denialTracking signal.
     if (fromMode !== mode) {
       this.autoModeDenialState = resetDenialState();
     }
     this.approvalMode = mode;
+    if (fromMode !== mode) {
+      this.approvalModeRevision++;
+    }
   }
 
   /**

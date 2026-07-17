@@ -49,6 +49,26 @@ export interface ListWorkspaceSessionsResult {
   truncated?: boolean;
 }
 
+/**
+ * Aggregate session counts for `GET .../session-info`.
+ *
+ * `expensive` is always true: the persisted totals require a disk scan of
+ * local JSONL files and must not be polled in a tight loop.
+ */
+export interface WorkspaceSessionInfoResult {
+  active: number;
+  archived: number;
+  total: number;
+  live?: number;
+  expensive: true;
+  /**
+   * Stable machine-readable hint that this response came from a full disk
+   * scan. Clients should refresh infrequently / on demand only.
+   */
+  cost: 'disk_scan';
+  truncated?: boolean;
+}
+
 export interface ListWorkspaceSessionsReadOptions {
   /** Merge live bridge state into persisted summaries. */
   mergeLive?: boolean;
@@ -808,6 +828,32 @@ export function listLiveWorkspaceSessionsForResponse(
   return {
     sessions: page,
     ...(nextCursor !== undefined ? { nextCursor } : {}),
+  };
+}
+
+/**
+ * Scans local persisted session JSONL files for aggregate counts and merges
+ * the current in-memory live count from the bridge.
+ *
+ * This is an O(n) disk walk. Callers (and HTTP clients) must treat it as an
+ * infrequent / on-demand operator endpoint, not a polling source.
+ */
+export async function getWorkspaceSessionInfoForResponse(
+  bridge: AcpSessionBridge,
+  workspaceCwd: string,
+  options: { includeLive?: boolean } = {},
+): Promise<WorkspaceSessionInfoResult> {
+  const counts = await new SessionService(workspaceCwd).getSessionInfoCounts();
+  return {
+    active: counts.active,
+    archived: counts.archived,
+    total: counts.total,
+    ...(options.includeLive === false
+      ? {}
+      : { live: bridge.listWorkspaceSessions(workspaceCwd).length }),
+    expensive: true,
+    cost: 'disk_scan',
+    ...(counts.truncated ? { truncated: true } : {}),
   };
 }
 
