@@ -452,7 +452,7 @@ M]`）和 porcelain 行（统计 staged / unstaged / untracked）。解析逻辑
   1. 用户打开 status popover 或 `GitDiffDialog` 时（按需，权威）。
   2. 收到 `git_branch_changed`（commit / reset / 切分支都会同时改变这些值）。
   3. 标签页 `visibilitychange` 重新可见时。
-  4. 仅对**当前选中 / 可见的 workspace**做一次低速轮询（如 15s，可配置），
+  4. 仅对**当前选中 / 可见的 workspace**做一次低速轮询（如 30s，可配置），
      保证 dirty 点在编辑后“足够新”。**不**对所有 workspace 轮询。
 - 明确取舍：不对工作区文件树建立 watcher，dirty 不会逐键实时刷新。这是为了
   避免昂贵的全树监听；对“编辑后立刻想看 dirty”的场景，focus / 轮询 / 打开弹窗
@@ -604,7 +604,7 @@ computedAt`），`v: 1 | 2`；新增 `DaemonGitOperation` 类型并从
 - 重字段（dirty/ahead/behind/stash/operation/conflicted）在以下时机重拉
   `workspaceGit()`：① 打开 status popover / diff 弹窗；② 收到
   `git_branch_changed`；③ 标签页 `visibilitychange` 重新可见；④ 仅对**当前活跃
-  workspace** 低速轮询（如 15s，可配置）。
+  workspace** 低速轮询（如 30s，可配置）。
 - 不对工作区文件树建 watcher，dirty 不逐键实时（成本取舍）。
 
 ### Task 5 · 验证 ✅ 已完成

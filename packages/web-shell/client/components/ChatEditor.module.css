@@ -964,6 +964,11 @@
   background: var(--subtle-bg);
 }
 
+.gitBranchChipButton:focus-visible {
+  outline: 2px solid var(--chat-editor-accent-color);
+  outline-offset: -2px;
+}
+
 .gitBranchIcon {
   display: inline-flex;
   width: 16px;
