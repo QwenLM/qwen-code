@@ -99,9 +99,35 @@ Math.random = function random() {
 };
 
 const RealDate = Date;
+
+// DETERMINISM: a string argument is parsed by the engine, and tz-less datetime
+// strings (plus legacy/locale strings) are interpreted in HOST-LOCAL time — so
+// the resulting instant, and every downstream getTime()/toISOString() read,
+// varies by host timezone even though no live clock is involved. Multi-arg
+// new Date(y, m, d, ...) is likewise LOCAL-time construction. Both silently
+// break journaled replay across hosts. Accept ONLY host-independent inputs:
+//   * a numeric epoch (or a Date clone / other non-string coercions)
+//   * a date-only string  YYYY | YYYY-MM | YYYY-MM-DD   (spec: parsed as UTC)
+//   * a date-time string carrying an explicit Z or +/-HH:MM offset
+// Everything else throws (fail-loud, matching Date.now()/argless-new-Date), so a
+// nondeterministic instant can never be constructed silently.
+const DETERMINISTIC_DATE_STRING =
+  /^[0-9]{4}(-[0-9]{2}(-[0-9]{2}(T[0-9]{2}:[0-9]{2}(:[0-9]{2}(\.[0-9]{1,3})?)?(Z|[+-][0-9]{2}:[0-9]{2}))?)?)?$/;
 function GuardedDate(...a) {
   if (a.length === 0) {
     throw new Error(determinismMessage('new Date() with no arguments'));
+  }
+  if (a.length > 1) {
+    throw new Error(
+      determinismMessage('new Date(year, month, ...) local-time construction'),
+    );
+  }
+  if (typeof a[0] === 'string' && !DETERMINISTIC_DATE_STRING.test(a[0])) {
+    throw new Error(
+      determinismMessage(
+        'new Date(string) without an explicit Z/offset (host-local parsing)',
+      ),
+    );
   }
   return Reflect.construct(RealDate, a, new.target || GuardedDate);
 }
@@ -114,10 +140,72 @@ Object.defineProperty(GuardedDate.prototype, 'constructor', {
   enumerable: false,
   configurable: false,
 });
+
+// DETERMINISM: even from a FIXED instant, the LOCAL Date accessors leak the host
+// timezone/locale — new Date(0).getHours()/.getDay()/.getTimezoneOffset()/
+// .toString()/.toLocaleString() all differ by host with no live clock involved,
+// breaking journaled replay across hosts in different zones. Neutralize the
+// entire host-local surface: every host-TZ/locale-dependent getter, setter
+// (setters interpret their args in LOCAL time, so an un-guarded setter would
+// poison the retained getTime()/toISOString() path), and formatter throws;
+// getTimezoneOffset returns 0 (the realm behaves as UTC). Overwriting drops the
+// only reference to each native method — there is no recovery path. The
+// UTC/epoch surface (getTime, valueOf, getUTC*, setTime, setUTC*, toISOString,
+// toUTCString, toJSON) stays native so deterministic time math still works.
+const dateProto = GuardedDate.prototype;
+function throwsLocaleOrTz(api) {
+  return function () {
+    throw new Error(determinismMessage(api));
+  };
+}
+for (const m of [
+  'getFullYear', 'getMonth', 'getDate', 'getDay', 'getHours', 'getMinutes',
+  'getSeconds', 'getMilliseconds', 'getYear',
+  'setFullYear', 'setMonth', 'setDate', 'setHours', 'setMinutes', 'setSeconds',
+  'setMilliseconds', 'setYear',
+  'toString', 'toDateString', 'toTimeString',
+  'toLocaleString', 'toLocaleDateString', 'toLocaleTimeString',
+]) {
+  dateProto[m] = throwsLocaleOrTz('Date.prototype.' + m + '()');
+}
+dateProto.getTimezoneOffset = function getTimezoneOffset() {
+  return 0;
+};
+
+// DETERMINISM: these remain ICU/host-locale-backed even after Intl is deleted,
+// so their output varies by host locale (grouping separators, collation, locale
+// case-folding). Override to throw. Array.prototype.toLocaleString delegates to
+// each element's toLocaleString, so it inherits the guard for numbers/dates.
+Number.prototype.toLocaleString = throwsLocaleOrTz(
+  'Number.prototype.toLocaleString()',
+);
+BigInt.prototype.toLocaleString = throwsLocaleOrTz(
+  'BigInt.prototype.toLocaleString()',
+);
+String.prototype.localeCompare = throwsLocaleOrTz(
+  'String.prototype.localeCompare()',
+);
+String.prototype.toLocaleLowerCase = throwsLocaleOrTz(
+  'String.prototype.toLocaleLowerCase()',
+);
+String.prototype.toLocaleUpperCase = throwsLocaleOrTz(
+  'String.prototype.toLocaleUpperCase()',
+);
+
 GuardedDate.now = function now() {
   throw new Error(determinismMessage('Date.now()'));
 };
-GuardedDate.parse = RealDate.parse;
+GuardedDate.parse = function parse(s) {
+  const str = String(s);
+  if (!DETERMINISTIC_DATE_STRING.test(str)) {
+    throw new Error(
+      determinismMessage(
+        'Date.parse(string) without an explicit Z/offset (host-local parsing)',
+      ),
+    );
+  }
+  return RealDate.parse(str);
+};
 GuardedDate.UTC = RealDate.UTC;
 // Freeze so Date.now cannot be silently reassigned to defeat the guard.
 Object.freeze(GuardedDate);

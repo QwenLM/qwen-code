@@ -193,6 +193,123 @@ describe('sandbox determinism guards', () => {
     );
     expect(r).toEqual({ present: 'undefined', format: 'threw', tz: 'threw' });
   });
+
+  // REGRESSION (Opus re-review): even with Intl deleted and the live clock
+  // blocked, a FIXED epoch still leaked the host timezone/locale through the
+  // LOCAL Date accessors — new Date(0).getTimezoneOffset()/.getHours()/
+  // .getDay()/.toString()/.toLocaleString() all vary by host TZ with no live
+  // clock, and Number.prototype.toLocaleString varies by host locale. All of
+  // that breaks journaled replay across hosts in different zones. The whole
+  // host-local surface now throws the determinism error; getTimezoneOffset
+  // returns 0; and the UTC/epoch surface stays intact.
+  it('fixed-epoch host-local Date/locale reads throw; UTC surface stays intact', async () => {
+    const r = await runInSandbox(
+      `const d = new Date(0);
+       const probe = (fn) => {
+         try { const v = fn(); return 'no-throw:' + v; }
+         catch (e) { return e.message.includes('deterministic') ? 'threw' : 'wrong-msg'; }
+       };
+       return {
+         // getTimezoneOffset is the one host-local reader that returns (0), not throws.
+         tzOffset: new Date(0).getTimezoneOffset(),
+         // Local getters must all throw (getMilliseconds included: sub-minute
+         // historical offsets, e.g. Kolkata's pre-1906 +05:53:28, make it leak).
+         getHours: probe(() => d.getHours()),
+         getDay: probe(() => d.getDay()),
+         getFullYear: probe(() => d.getFullYear()),
+         getMinutes: probe(() => d.getMinutes()),
+         getSeconds: probe(() => d.getSeconds()),
+         getMilliseconds: probe(() => d.getMilliseconds()),
+         // Local setters poison the retained getTime()/toISOString() path.
+         setHours: probe(() => { const x = new Date(0); x.setHours(5); return x.getTime(); }),
+         setFullYear: probe(() => { const x = new Date(0); x.setFullYear(2000); return x.getTime(); }),
+         // String/locale formatters.
+         toString: probe(() => d.toString()),
+         toDateString: probe(() => d.toDateString()),
+         toTimeString: probe(() => d.toTimeString()),
+         toLocaleString: probe(() => d.toLocaleString()),
+         toLocaleDateString: probe(() => d.toLocaleDateString()),
+         toLocaleTimeString: probe(() => d.toLocaleTimeString()),
+         numLocale: probe(() => (1234.5).toLocaleString()),
+         bigintLocale: probe(() => (1234n).toLocaleString()),
+         strCompare: probe(() => 'a'.localeCompare('b')),
+         strLower: probe(() => 'A'.toLocaleLowerCase()),
+         // UTC/epoch surface must still work and be host-independent.
+         getTime: new Date(0).getTime(),
+         iso: new Date(0).toISOString(),
+         utc: new Date(0).toUTCString(),
+         utcHours: new Date(0).getUTCHours(),
+         utcDay: new Date(0).getUTCDay(),
+         json: JSON.stringify(new Date(0)),
+       };`,
+      okBridges(),
+    );
+    expect(r).toEqual({
+      tzOffset: 0,
+      getHours: 'threw',
+      getDay: 'threw',
+      getFullYear: 'threw',
+      getMinutes: 'threw',
+      getSeconds: 'threw',
+      getMilliseconds: 'threw',
+      setHours: 'threw',
+      setFullYear: 'threw',
+      toString: 'threw',
+      toDateString: 'threw',
+      toTimeString: 'threw',
+      toLocaleString: 'threw',
+      toLocaleDateString: 'threw',
+      toLocaleTimeString: 'threw',
+      numLocale: 'threw',
+      bigintLocale: 'threw',
+      strCompare: 'threw',
+      strLower: 'threw',
+      getTime: 0,
+      iso: '1970-01-01T00:00:00.000Z',
+      utc: 'Thu, 01 Jan 1970 00:00:00 GMT',
+      utcHours: 0,
+      utcDay: 4,
+      json: '"1970-01-01T00:00:00.000Z"',
+    });
+  });
+
+  // REGRESSION (Opus re-review): host-local INSTANT construction. A tz-less
+  // datetime string and multi-arg `new Date(y, m, d, ...)` are interpreted in
+  // host-local time, so getTime()/toISOString() diverge across hosts before any
+  // accessor runs. These now throw; host-independent inputs (numeric epoch,
+  // date-only, and Z/offset strings) are still accepted and exact.
+  it('host-local Date construction throws; host-independent inputs are exact', async () => {
+    const r = await runInSandbox(
+      `const probe = (fn) => {
+         try { return 'ok:' + fn(); }
+         catch (e) { return e.message.includes('deterministic') ? 'threw' : 'wrong-msg'; }
+       };
+       return {
+         tzlessString: probe(() => new Date('2020-06-01T12:00:00').getTime()),
+         legacyString: probe(() => new Date('June 1, 2020 12:00:00').getTime()),
+         multiArg: probe(() => new Date(2020, 0, 1).getTime()),
+         parseTzless: probe(() => Date.parse('2020-06-01T12:00:00')),
+         // Host-independent inputs stay usable and exact.
+         epoch: new Date(1591012800000).getTime(),
+         withZ: new Date('2020-06-01T12:00:00Z').getTime(),
+         withOffset: new Date('2020-06-01T12:00:00+00:00').getTime(),
+         dateOnly: new Date('2020-06-01').getTime(),
+         parseZ: Date.parse('2020-06-01T12:00:00Z'),
+       };`,
+      okBridges(),
+    );
+    expect(r).toEqual({
+      tzlessString: 'threw',
+      legacyString: 'threw',
+      multiArg: 'threw',
+      parseTzless: 'threw',
+      epoch: 1591012800000,
+      withZ: 1591012800000,
+      withOffset: 1591012800000,
+      dateOnly: 1590969600000,
+      parseZ: 1591012800000,
+    });
+  });
 });
 
 describe('sandbox primitives + result marshalling', () => {
