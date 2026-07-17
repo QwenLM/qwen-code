@@ -1523,73 +1523,69 @@ describe('GeminiChat', async () => {
     });
 
     it('should not retry tool result continuations that make another tool call', async () => {
-      vi.useFakeTimers();
-      try {
-        chat.setHistory([
-          { role: 'user', parts: [{ text: 'inspect the project' }] },
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call_read_file',
-                  name: 'read_file',
-                  args: { path: '/tmp/example' },
-                },
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'inspect the project' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_read_file',
+                name: 'read_file',
+                args: { path: '/tmp/example' },
               },
-            ],
-          },
-        ]);
+            },
+          ],
+        },
+      ]);
 
-        vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-          streamResponse(
-            stopResponse([
-              {
-                functionCall: {
-                  id: 'call_list_files',
-                  name: 'list_files',
-                  args: { path: '/tmp' },
-                },
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamResponse(
+          stopResponse([
+            {
+              functionCall: {
+                id: 'call_list_files',
+                name: 'list_files',
+                args: { path: '/tmp' },
               },
-            ]),
-          ),
-        );
+            },
+          ]),
+        ),
+      );
 
-        const stream = await chat.sendMessageStream(
-          'test-model',
-          {
-            message: [
-              {
-                functionResponse: {
-                  id: 'call_read_file',
-                  name: 'read_file',
-                  response: { output: 'file contents' },
-                },
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        {
+          message: [
+            {
+              functionResponse: {
+                id: 'call_read_file',
+                name: 'read_file',
+                response: { output: 'file contents' },
               },
-            ],
-          },
-          'prompt-id-tool-result-next-tool-call',
-        );
-        const events = await collectStreamWithFakeTimers(stream);
+            },
+          ],
+        },
+        'prompt-id-tool-result-next-tool-call',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) events.push(event);
 
-        expect(
-          mockContentGenerator.generateContentStream,
-        ).toHaveBeenCalledTimes(1);
-        expect(
-          events.some((event) => event.type === StreamEventType.RETRY),
-        ).toBe(false);
-        expect(
-          events.some(
-            (event) =>
-              event.type === StreamEventType.CHUNK &&
-              event.value.candidates?.[0]?.content?.parts?.some(
-                (part) => part.functionCall?.id === 'call_list_files',
-              ),
-          ),
-        ).toBe(true);
-      } finally {
-        vi.useRealTimers();
-      }
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+        false,
+      );
+      expect(
+        events.some(
+          (event) =>
+            event.type === StreamEventType.CHUNK &&
+            event.value.candidates?.[0]?.content?.parts?.some(
+              (part) => part.functionCall?.id === 'call_list_files',
+            ),
+        ),
+      ).toBe(true);
     });
 
     it('should escalate thought-only MAX_TOKENS responses after a tool result', async () => {
@@ -1665,15 +1661,14 @@ describe('GeminiChat', async () => {
       });
     });
 
-    it('should succeed when there is finish reason and response text', async () => {
-      // Setup: Stream with both finish reason and text content
+    it('should preserve (empty content) outside tool result continuations', async () => {
       const validStream = (async function* () {
         yield {
           candidates: [
             {
               content: {
                 role: 'model',
-                parts: [{ text: 'valid response' }],
+                parts: [{ text: '(empty content)' }],
               },
               finishReason: 'STOP',
             },
@@ -1699,6 +1694,10 @@ describe('GeminiChat', async () => {
           }
         })(),
       ).resolves.not.toThrow();
+      expect(chat.getHistory().at(-1)).toEqual({
+        role: 'model',
+        parts: [{ text: '(empty content)' }],
+      });
     });
 
     it('should not lose finish reason when last chunk only has usage metadata', async () => {
