@@ -116,6 +116,12 @@ class TestChannel extends ChannelBase {
     this.proactiveTargets.push(target);
   }
 
+  async processAfterAdapterPreflight(envelope: Envelope): Promise<void> {
+    if (await this.preflightInbound(envelope)) {
+      await this.processInbound(envelope);
+    }
+  }
+
   enableCancelCommand(): void {
     this.registerCancelCommand();
   }
@@ -649,6 +655,123 @@ describe('ChannelBase', () => {
       });
       await ch.handleInbound(envelope());
       expect(bridge.prompt).toHaveBeenCalled();
+    });
+
+    it('observes a user after inbound gates pass', async () => {
+      const observe = vi.fn();
+      const ch = createChannel({}, { observedContacts: { observe } });
+
+      await ch.handleInbound(envelope());
+
+      expect(observe).toHaveBeenCalledWith('test-chan', {
+        user: { id: 'user1', label: 'User 1' },
+      });
+      expect(bridge.prompt).toHaveBeenCalled();
+    });
+
+    it('falls back to the complete sender ID for an unusable label', async () => {
+      const observe = vi.fn();
+      const ch = createChannel({}, { observedContacts: { observe } });
+
+      await ch.handleInbound(envelope({ senderName: '\u0000\n' }));
+
+      expect(observe).toHaveBeenCalledWith('test-chan', {
+        user: { id: 'user1', label: 'user1' },
+      });
+    });
+
+    it('observes a group, topic, and user relationship after adapter preflight', async () => {
+      const observe = vi.fn();
+      const ch = createChannel(
+        { groupPolicy: 'open' },
+        { observedContacts: { observe } },
+      );
+
+      await ch.processAfterAdapterPreflight(
+        envelope({
+          chatId: 'group-1',
+          threadId: 'topic-1',
+          isGroup: true,
+          isMentioned: true,
+        }),
+      );
+
+      expect(observe).toHaveBeenCalledWith('test-chan', {
+        user: { id: 'user1', label: 'User 1' },
+        group: { id: 'group-1', label: 'group-1' },
+        topic: { id: 'topic-1', label: 'topic-1' },
+      });
+    });
+
+    it('records the same inbound envelope only once', async () => {
+      const observe = vi.fn();
+      const ch = createChannel({}, { observedContacts: { observe } });
+      const message = envelope();
+
+      await ch.processAfterAdapterPreflight(message);
+      await ch.processAfterAdapterPreflight(message);
+
+      expect(observe).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      {
+        name: 'group policy',
+        config: {},
+        message: { isGroup: true },
+      },
+      {
+        name: 'DM policy',
+        config: { dmPolicy: 'disabled' as const },
+        message: {},
+      },
+      {
+        name: 'sender policy',
+        config: {
+          senderPolicy: 'allowlist' as const,
+          allowedUsers: ['other'],
+        },
+        message: {},
+      },
+    ])(
+      'does not observe contacts rejected by $name',
+      async ({ config, message }) => {
+        const observe = vi.fn();
+        const ch = createChannel(config, { observedContacts: { observe } });
+
+        await ch.handleInbound(envelope(message));
+
+        expect(observe).not.toHaveBeenCalled();
+      },
+    );
+
+    it('does not observe senders waiting for pairing approval', async () => {
+      const observe = vi.fn();
+      const ch = createChannel(
+        { senderPolicy: 'pairing', allowedUsers: [] },
+        { observedContacts: { observe } },
+      );
+
+      await ch.handleInbound(envelope({ senderId: 'stranger' }));
+
+      expect(observe).not.toHaveBeenCalled();
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('continues inbound processing when contact observation fails', async () => {
+      const observe = vi.fn().mockRejectedValue(new Error('private-id leaked'));
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = createChannel({}, { observedContacts: { observe } });
+
+      await expect(ch.handleInbound(envelope())).resolves.toBeUndefined();
+
+      expect(bridge.prompt).toHaveBeenCalled();
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      stderr.mockRestore();
+      expect(logged).toContain('observed contact persistence failed');
+      expect(logged).not.toContain('private-id');
     });
   });
 

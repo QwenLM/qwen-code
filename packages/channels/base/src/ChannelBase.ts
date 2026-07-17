@@ -12,6 +12,7 @@ import type {
   ChannelTaskLifecycleEvent,
   DispatchMode,
   Envelope,
+  ObservedChannelContactObservation,
   SanitizedToolCallEvent,
   SessionTarget,
 } from './types.js';
@@ -130,6 +131,12 @@ export interface ChannelBaseOptions {
   registerBridgeEvents?: boolean;
   groupHistoryPath?: string;
   loopController?: ChannelLoopController;
+  observedContacts?: {
+    observe(
+      channelName: string,
+      observation: ObservedChannelContactObservation,
+    ): void | Promise<void>;
+  };
 }
 
 export interface ChannelLoopController {
@@ -259,6 +266,8 @@ export abstract class ChannelBase {
   private readonly memoryIntentClassifier?: ChannelMemoryIntentClassifier;
   private groupHistory: GroupHistoryStore;
   private readonly loopController?: ChannelLoopController;
+  private readonly observedContacts?: ChannelBaseOptions['observedContacts'];
+  private readonly observedContactEnvelopes = new WeakSet<Envelope>();
   private instructedSessions: Set<string> = new Set();
   private commands: Map<string, CommandHandler> = new Map();
   /** Per-session promise chain to serialize prompt + send (followup mode). */
@@ -445,6 +454,7 @@ export abstract class ChannelBase {
         ),
     );
     this.loopController = options?.loopController;
+    this.observedContacts = options?.observedContacts;
 
     this.groupGate = new GroupGate(config.groupPolicy, config.groups);
     this.dmGate = new DmGate(config.dmPolicy);
@@ -3631,6 +3641,40 @@ export abstract class ChannelBase {
     await this.processInbound(envelope);
   }
 
+  private async recordObservedContact(envelope: Envelope): Promise<void> {
+    if (!this.observedContacts) return;
+    const sanitizedSenderName = envelope.senderName
+      ? sanitizeSenderName(envelope.senderName)
+      : '';
+    const userLabel =
+      sanitizedSenderName === 'unknown'
+        ? envelope.senderId
+        : sanitizedSenderName || envelope.senderId;
+    const observation: ObservedChannelContactObservation = {
+      user: { id: envelope.senderId, label: userLabel },
+      ...(envelope.isGroup
+        ? {
+            group: { id: envelope.chatId, label: envelope.chatId },
+            ...(envelope.threadId
+              ? {
+                  topic: {
+                    id: envelope.threadId,
+                    label: envelope.threadId,
+                  },
+                }
+              : {}),
+          }
+        : {}),
+    };
+    try {
+      await this.observedContacts.observe(this.name, observation);
+    } catch {
+      process.stderr.write(
+        `[Channel:${sanitizeLogText(this.name, 80)}] observed contact persistence failed.\n`,
+      );
+    }
+  }
+
   protected markPreflighted(envelope: Envelope): void {
     this.preflightedEnvelopes.add(envelope);
   }
@@ -3647,6 +3691,10 @@ export abstract class ChannelBase {
       throw new Error(
         'processInbound called without a successful preflightInbound check.',
       );
+    }
+    if (this.observedContacts && !this.observedContactEnvelopes.has(envelope)) {
+      this.observedContactEnvelopes.add(envelope);
+      await this.recordObservedContact(envelope);
     }
 
     let memoryIntent: ResolvedChannelMemoryIntent | null =

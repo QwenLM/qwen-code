@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  daemonObservedContactsPath,
   daemonSessionRoutesPath,
   parseConfiguredChannels,
   registerPermissionRelay,
@@ -40,6 +41,16 @@ it('isolates daemon route stores by workspace hash', () => {
     '/tmp/qwen/channels/daemon/other-hash/routes.json',
   );
   expect(daemonSessionRoutesPath('/workspace')).not.toBe(sessionsPath());
+});
+
+it('isolates observed contact stores beside daemon routes', () => {
+  expect(daemonObservedContactsPath('/workspace')).toBe(
+    '/tmp/qwen/channels/daemon/workspace-hash/observed-contacts.json',
+  );
+  expect(daemonObservedContactsPath('/other')).toBe(
+    '/tmp/qwen/channels/daemon/other-hash/observed-contacts.json',
+  );
+  expect(daemonObservedContactsPath('/workspace')).not.toBe(sessionsPath());
 });
 
 describe('parseConfiguredChannels', () => {
