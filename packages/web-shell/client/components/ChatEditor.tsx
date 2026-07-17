@@ -38,7 +38,10 @@ import {
 } from '../hooks/useComposerCore';
 import { AtMentionPanel } from './AtMentionPanel';
 import { cssUrlVar } from '../utils/cssUrlVar';
-import { getComposerTagIconUrl } from '../utils/composerTag';
+import {
+  getComposerTagIconUrl,
+  isBuiltinComposerTagIconUrl,
+} from '../utils/composerTag';
 import { isSafeImageSrc } from './messages/Markdown';
 import { ModeIcon } from './ModeIcon';
 import { planSlashSectionRows } from '../utils/slashSectionPlan';
@@ -1556,7 +1559,10 @@ export const ChatEditor = memo(
       const iconUrl =
         tag.icon ?? getComposerTagIconUrl(tag.kind, composerTagIcons);
       const safeIconUrl =
-        iconUrl && isSafeImageSrc(iconUrl) ? iconUrl : undefined;
+        iconUrl &&
+        (isBuiltinComposerTagIconUrl(iconUrl) || isSafeImageSrc(iconUrl))
+          ? iconUrl
+          : undefined;
       if (!tagLabel && !tagValue) {
         return <span className={styles.tagLabel}>{tag.id}</span>;
       }
