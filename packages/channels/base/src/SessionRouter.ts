@@ -238,6 +238,7 @@ export class SessionRouter {
         key,
         this.sessionOptions(input.channelName),
         operation,
+        input.channelName,
       );
       try {
         this.assertOperationCurrent(operation);
@@ -321,6 +322,7 @@ export class SessionRouter {
             key,
             this.sessionOptions(input.channelName),
             operation,
+            input.channelName,
           );
           try {
             this.assertOperationCurrent(operation);
@@ -798,11 +800,16 @@ export class SessionRouter {
     routingKey: string,
     options: { approvalMode?: string } | undefined,
     operation: SessionOperation,
+    sourceId: string,
   ): Promise<string> {
     const maxAttempts = 2;
     let lastDeadSessionId: string | undefined;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const sessionId = await this.bridge.newSession(cwd, options, operation);
+      const sessionId = await this.bridge.newSession(
+        cwd,
+        { ...options, sourceId },
+        operation,
+      );
       try {
         this.assertOperationCurrent(operation);
       } catch (error) {

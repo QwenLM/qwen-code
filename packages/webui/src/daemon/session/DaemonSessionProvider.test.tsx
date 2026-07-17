@@ -1668,34 +1668,89 @@ describe('DaemonSessionProvider', () => {
     ).rejects.toThrow('Session changed before pending prompts refresh');
   });
 
+  it('does not restart the event stream after prompt acceptance by default', async () => {
+    const turnComplete = createDeferred<void>();
+    const eventSignals: AbortSignal[] = [];
+    const events = vi.fn(async function* defaultPromptEvents(
+      opts: { signal?: AbortSignal } = {},
+    ) {
+      if (opts.signal) eventSignals.push(opts.signal);
+      await Promise.race([
+        turnComplete.promise,
+        new Promise<void>((resolve) =>
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          }),
+        ),
+      ]);
+      if (opts.signal?.aborted) return;
+      yield {
+        v: 1,
+        id: 1,
+        type: 'turn_complete',
+        data: { promptId: 'prompt-1', stopReason: 'end_turn' },
+      } satisfies DaemonEvent;
+    });
+    const session = createMockSession({ events });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonUiSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    let prompt: Promise<unknown> | undefined;
+    await act(async () => {
+      prompt = requireActions(actions).sendPrompt('hello');
+      await flushPromises();
+    });
+
+    expect(events).toHaveBeenCalledTimes(1);
+    expect(eventSignals[0]?.aborted).toBe(false);
+
+    turnComplete.resolve();
+    const pendingPrompt = prompt;
+    if (!pendingPrompt) throw new Error('prompt was not started');
+    await act(async () => {
+      await expect(pendingPrompt).resolves.toEqual({
+        stopReason: 'end_turn',
+      });
+    });
+  });
+
   it('keeps prompt loading active after non-blocking prompt acceptance', async () => {
     const turnComplete = createDeferred<void>();
+    const secondSubscriptionStarted = createDeferred<void>();
+    const eventSignals: AbortSignal[] = [];
+    const events = vi.fn(async function* acceptedPromptEvents(
+      opts: { signal?: AbortSignal } = {},
+    ) {
+      if (opts.signal) eventSignals.push(opts.signal);
+      if (events.mock.calls.length === 2) secondSubscriptionStarted.resolve();
+      await Promise.race([
+        turnComplete.promise,
+        new Promise<void>((resolve) =>
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          }),
+        ),
+      ]);
+      if (opts.signal?.aborted) return;
+      yield {
+        v: 1,
+        id: 11,
+        type: 'turn_complete',
+        data: { promptId: 'prompt-1', stopReason: 'end_turn' },
+      } satisfies DaemonEvent;
+    });
     const session = createMockSession({
       submitPrompt: vi.fn(async () => ({
         promptId: 'prompt-1',
         lastEventId: 10,
       })),
-      events: async function* acceptedPromptEvents(
-        opts: { signal?: AbortSignal } = {},
-      ) {
-        await Promise.race([
-          turnComplete.promise,
-          new Promise<void>((resolve) =>
-            opts.signal?.addEventListener('abort', () => resolve(), {
-              once: true,
-            }),
-          ),
-        ]);
-        if (opts.signal?.aborted) return;
-        yield {
-          v: 1,
-          id: 11,
-          type: 'turn_complete',
-          timestamp: '2025-01-01T00:00:00.000Z',
-          sessionId: 'session-1',
-          data: { promptId: 'prompt-1', stopReason: 'end_turn' },
-        };
-      },
+      events,
     });
     sdkMocks.sessions.push(session);
     let actions: DaemonUiSessionActions | undefined;
@@ -1709,15 +1764,33 @@ describe('DaemonSessionProvider', () => {
       return null;
     }
 
-    await renderWithProvider(<Harness />, { autoConnect: true });
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      restartEventStreamOnPrompt: true,
+    });
     const providerActions = requireActions(actions);
+    const providersCalls = sdkMocks.workspaceProviders.mock.calls.length;
+    const gitCalls = sdkMocks.workspaceGit.mock.calls.length;
+    const supportedCommandsCalls = vi.mocked(session.supportedCommands).mock
+      .calls.length;
+    const contextCalls = vi.mocked(session.context).mock.calls.length;
 
     let promptResult: Promise<unknown> | undefined;
     await act(async () => {
       promptResult = providerActions.sendPrompt('hello');
-      await flushPromises();
+      await secondSubscriptionStarted.promise;
     });
-    expect(streamingState).toBe('waiting');
+    expect(events).toHaveBeenCalledTimes(2);
+    expect(eventSignals[0]?.aborted).toBe(true);
+    expect(eventSignals[1]?.aborted).toBe(false);
+    expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(1);
+    expect(sdkMocks.workspaceProviders).toHaveBeenCalledTimes(providersCalls);
+    expect(sdkMocks.workspaceGit).toHaveBeenCalledTimes(gitCalls);
+    expect(session.supportedCommands).toHaveBeenCalledTimes(
+      supportedCommandsCalls,
+    );
+    expect(session.context).toHaveBeenCalledTimes(contextCalls);
+    expect(streamingState).not.toBe('idle');
 
     turnComplete.resolve();
     const pendingPrompt = promptResult;
@@ -1738,6 +1811,87 @@ describe('DaemonSessionProvider', () => {
           block.text.includes('turn_complete (unrecognized daemon event)'),
       ),
     ).toBe(false);
+  });
+
+  it('restarts the event stream when aborting the subscription throws', async () => {
+    const turnComplete = createDeferred<void>();
+    const secondSubscriptionStarted = createDeferred<void>();
+    const eventSignals: AbortSignal[] = [];
+    const events = vi.fn(async function* throwingAbortEvents(
+      opts: { signal?: AbortSignal } = {},
+    ) {
+      if (opts.signal) eventSignals.push(opts.signal);
+      const subscription = events.mock.calls.length;
+      if (subscription === 2) secondSubscriptionStarted.resolve();
+      await Promise.race([
+        turnComplete.promise,
+        new Promise<void>((resolve) =>
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          }),
+        ),
+      ]);
+      if (opts.signal?.aborted) {
+        if (subscription === 1) throw createAbortError();
+        return;
+      }
+      yield {
+        v: 1,
+        id: 11,
+        type: 'turn_complete',
+        data: { promptId: 'prompt-1', stopReason: 'end_turn' },
+      } satisfies DaemonEvent;
+    });
+    const session = createMockSession({
+      submitPrompt: vi.fn(async () => ({
+        promptId: 'prompt-1',
+        lastEventId: 10,
+      })),
+      events,
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonUiSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      restartEventStreamOnPrompt: true,
+    });
+    const providerActions = requireActions(actions);
+    const providersCalls = sdkMocks.workspaceProviders.mock.calls.length;
+    const gitCalls = sdkMocks.workspaceGit.mock.calls.length;
+    const supportedCommandsCalls = vi.mocked(session.supportedCommands).mock
+      .calls.length;
+    const contextCalls = vi.mocked(session.context).mock.calls.length;
+
+    let promptResult: Promise<unknown> | undefined;
+    await act(async () => {
+      promptResult = providerActions.sendPrompt('hello');
+      await secondSubscriptionStarted.promise;
+    });
+
+    expect(events).toHaveBeenCalledTimes(2);
+    expect(eventSignals[0]?.aborted).toBe(true);
+    expect(eventSignals[1]?.aborted).toBe(false);
+    expect(sdkMocks.workspaceProviders).toHaveBeenCalledTimes(providersCalls);
+    expect(sdkMocks.workspaceGit).toHaveBeenCalledTimes(gitCalls);
+    expect(session.supportedCommands).toHaveBeenCalledTimes(
+      supportedCommandsCalls,
+    );
+    expect(session.context).toHaveBeenCalledTimes(contextCalls);
+
+    turnComplete.resolve();
+    const pendingPrompt = promptResult;
+    if (!pendingPrompt) throw new Error('prompt was not started');
+    await act(async () => {
+      await expect(pendingPrompt).resolves.toEqual({
+        stopReason: 'end_turn',
+      });
+    });
   });
 
   it('shows waiting state when a queued prompt starts before assistant output', async () => {

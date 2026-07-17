@@ -33,6 +33,7 @@ import { useQueuedPrompts } from '../hooks/useQueuedPrompts';
 import { isAskUserPermission } from '../utils/askUserPermission';
 import { isDaemonApprovalMode } from '../utils/sessionPreparation';
 import { isVisibleComposerModel } from '../utils/composerModels';
+import { shouldBlockComposerSubmit } from '../utils/composerInputState';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { hasMultipleWorkspaces, workspaceBasename } from '../utils/workspace';
 import { workspaceAccentColor } from '../utils/workspaceColor';
@@ -97,6 +98,8 @@ export interface ChatPaneProps {
     workspaceActions: DaemonWorkspaceActions,
   ) => void;
   messageTurnOutputs?: readonly TurnOutputKind[];
+  /** Allow prompt admission to recover a disconnected SSE stream. */
+  restartSseOnPrompt?: boolean;
 }
 
 /**
@@ -116,6 +119,7 @@ export function ChatPane({
   onRightPanelOpen,
   onPaneArtifactsChange,
   messageTurnOutputs,
+  restartSseOnPrompt = false,
 }: ChatPaneProps) {
   const { t } = useI18n();
   const connection = useConnection();
@@ -249,7 +253,15 @@ export function ChatPane({
     ): boolean => {
       const trimmed = text.trim();
       if (!trimmed) return false;
-      if (connection.status !== 'connected') return false;
+      if (
+        shouldBlockComposerSubmit({
+          connectionStatus: connection.status,
+          hasSession: Boolean(connection.sessionId),
+          restartSseOnPrompt,
+        })
+      ) {
+        return false;
+      }
       const inputAnnotations = metadata?.inputAnnotations;
       if (streamingStateRef.current === 'idle') {
         actions
@@ -270,7 +282,15 @@ export function ChatPane({
         ? enqueuePrompt(trimmed, images, undefined, inputAnnotations)
         : enqueuePrompt(trimmed, images);
     },
-    [actions, clearFollowup, connection.status, enqueuePrompt, reportError],
+    [
+      actions,
+      clearFollowup,
+      connection.sessionId,
+      connection.status,
+      enqueuePrompt,
+      reportError,
+      restartSseOnPrompt,
+    ],
   );
 
   const handleConfirm = useCallback(
