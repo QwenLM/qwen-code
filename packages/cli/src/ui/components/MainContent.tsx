@@ -21,7 +21,12 @@ import {
   type MarkdownSourceCopyIndexOffsets,
 } from '../utils/MarkdownDisplay.js';
 import { buildThoughtHeadIdMap } from '../utils/historyUtils.js';
-import { ScrollableList, SCROLL_TO_ITEM_END } from './shared/ScrollableList.js';
+import {
+  ScrollableList,
+  SCROLL_TO_ITEM_END,
+  type ScrollableListRef,
+} from './shared/ScrollableList.js';
+import { TextSelectionController } from '../selection/use-text-selection.js';
 
 // Limit Gemini messages to a very high number of lines to mitigate performance
 // issues in the worst case if we somehow get an enormous response from Gemini.
@@ -130,6 +135,7 @@ export const MainContent = () => {
   // state still computes because it lives at the top of the component, but
   // useMemo keeps it cheap when nothing changes.
   const useVirtualScroll = uiState.useTerminalBuffer;
+  const scrollRef = useRef<ScrollableListRef<VpItem>>(null);
 
   const { historyItemsWithSourceCopyOffsets, pendingStartSourceCopyOffsets } =
     useMemo(() => {
@@ -409,6 +415,7 @@ export const MainContent = () => {
     return (
       <OverflowProvider>
         <ScrollableList
+          ref={scrollRef}
           hasFocus={!uiState.dialogsVisible}
           data={allVirtualItems}
           renderItem={renderVirtualItem}
@@ -420,6 +427,20 @@ export const MainContent = () => {
           isStaticItem={virtualIsStaticItem}
           containerHeight={scrollContainerHeight}
           showScrollbar={showScrollbar}
+        />
+        <TextSelectionController
+          isActive={!uiState.dialogsVisible}
+          getViewportRect={() => scrollRef.current?.getViewportRect() ?? null}
+          getScrollState={() =>
+            scrollRef.current?.getScrollState() ?? {
+              scrollTop: 0,
+              scrollHeight: 0,
+              innerHeight: 0,
+            }
+          }
+          hitTestScrollbar={(location) =>
+            scrollRef.current?.hitTestScrollbar(location) ?? false
+          }
         />
         <ShowMoreLines constrainHeight={uiState.constrainHeight} />
       </OverflowProvider>
