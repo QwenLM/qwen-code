@@ -1001,9 +1001,8 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       ) {
         return 'Parameter "subagent_type" must be a non-empty string.';
       }
-      // Validate that the subagent exists (case-insensitive). `fork` is an
-      // explicit pseudo-type resolved by the dispatch logic (not a loadable
-      // subagent), so accept it regardless of the registered list; when
+      // `fork` is an explicit pseudo-type resolved by the dispatch logic (not
+      // a loadable subagent), so it never appears in the registered list; when
       // forking is unavailable, dispatch falls back to general-purpose.
       const lowerType = params.subagent_type.toLowerCase();
       if (lowerType !== FORK_SUBAGENT_TYPE) {
@@ -1012,8 +1011,13 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
         );
 
         if (!subagentExists) {
-          const availableNames = this.availableSubagents.map((s) => s.name);
-          return `Subagent "${params.subagent_type}" not found. Available subagents: ${availableNames.join(', ')}`;
+          // Not in the cached list — the agent file may have been created
+          // after this tool was initialized. Don't reject here: execution
+          // resolves the type via loadSubagent(), which reads from disk and
+          // fails with a clear "not found" error if the agent truly doesn't
+          // exist. Kick a refresh (validation must stay synchronous) so the
+          // cache and schema catch up for subsequent calls.
+          void this.refreshSubagents();
         }
       }
     }
@@ -2285,15 +2289,29 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           effectiveSubagentType!,
         );
         if (!loadedConfig) {
+          // loadSubagent() reads from disk, so reaching this point means the
+          // agent genuinely doesn't exist (validation no longer rejects on a
+          // stale cache miss). List what is available to help correct typos.
+          let notFoundMessage = `Subagent "${effectiveSubagentType}" not found`;
+          try {
+            const available = await this.subagentManager.listSubagents();
+            if (available.length > 0) {
+              notFoundMessage += `. Available subagents: ${available
+                .map((s) => s.name)
+                .join(', ')}`;
+            }
+          } catch {
+            // Listing is best-effort; the bare message is still actionable.
+          }
           return {
-            llmContent: `Subagent "${effectiveSubagentType}" not found`,
+            llmContent: notFoundMessage,
             returnDisplay: {
               type: 'task_execution' as const,
               subagentName: effectiveSubagentType!,
               taskDescription: this.params.description,
               taskPrompt: this.params.prompt,
               status: 'failed' as const,
-              terminateReason: `Subagent "${effectiveSubagentType}" not found`,
+              terminateReason: notFoundMessage,
             },
           };
         }
