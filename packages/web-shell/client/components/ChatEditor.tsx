@@ -106,6 +106,7 @@ interface ChatEditorProps {
     commitAccepted?: import('../hooks/useComposerCore').ComposerSubmitCommit,
     metadata?: ComposerSubmitMetadata,
   ) => boolean | void;
+  onInputTextChange?: (text: string) => void;
   onCycleMode?: () => void;
   onToggleShortcuts?: () => void;
   onCancel?: () => void;
@@ -1117,6 +1118,7 @@ export const ChatEditor = memo(
   forwardRef<EditorHandle, ChatEditorProps>(function ChatEditor(props, ref) {
     const {
       onSubmit,
+      onInputTextChange,
       onCycleMode,
       onToggleShortcuts,
       onCancel,
@@ -1173,6 +1175,7 @@ export const ChatEditor = memo(
 
     const core = useComposerCore({
       onSubmit,
+      onInputTextChange,
       onCycleMode,
       onToggleShortcuts,
       disabled,
