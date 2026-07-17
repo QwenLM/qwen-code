@@ -1803,6 +1803,87 @@ describe('DaemonSessionProvider', () => {
     ).toBe(false);
   });
 
+  it('restarts the event stream when aborting the subscription throws', async () => {
+    const turnComplete = createDeferred<void>();
+    const secondSubscriptionStarted = createDeferred<void>();
+    const eventSignals: AbortSignal[] = [];
+    const events = vi.fn(async function* throwingAbortEvents(
+      opts: { signal?: AbortSignal } = {},
+    ) {
+      if (opts.signal) eventSignals.push(opts.signal);
+      const subscription = events.mock.calls.length;
+      if (subscription === 2) secondSubscriptionStarted.resolve();
+      await Promise.race([
+        turnComplete.promise,
+        new Promise<void>((resolve) =>
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          }),
+        ),
+      ]);
+      if (opts.signal?.aborted) {
+        if (subscription === 1) throw createAbortError();
+        return;
+      }
+      yield {
+        v: 1,
+        id: 11,
+        type: 'turn_complete',
+        data: { promptId: 'prompt-1', stopReason: 'end_turn' },
+      } satisfies DaemonEvent;
+    });
+    const session = createMockSession({
+      submitPrompt: vi.fn(async () => ({
+        promptId: 'prompt-1',
+        lastEventId: 10,
+      })),
+      events,
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonUiSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      restartEventStreamOnPrompt: true,
+    });
+    const providerActions = requireActions(actions);
+    const providersCalls = sdkMocks.workspaceProviders.mock.calls.length;
+    const gitCalls = sdkMocks.workspaceGit.mock.calls.length;
+    const supportedCommandsCalls = vi.mocked(session.supportedCommands).mock
+      .calls.length;
+    const contextCalls = vi.mocked(session.context).mock.calls.length;
+
+    let promptResult: Promise<unknown> | undefined;
+    await act(async () => {
+      promptResult = providerActions.sendPrompt('hello');
+      await secondSubscriptionStarted.promise;
+    });
+
+    expect(events).toHaveBeenCalledTimes(2);
+    expect(eventSignals[0]?.aborted).toBe(true);
+    expect(eventSignals[1]?.aborted).toBe(false);
+    expect(sdkMocks.workspaceProviders).toHaveBeenCalledTimes(providersCalls);
+    expect(sdkMocks.workspaceGit).toHaveBeenCalledTimes(gitCalls);
+    expect(session.supportedCommands).toHaveBeenCalledTimes(
+      supportedCommandsCalls,
+    );
+    expect(session.context).toHaveBeenCalledTimes(contextCalls);
+
+    turnComplete.resolve();
+    const pendingPrompt = promptResult;
+    if (!pendingPrompt) throw new Error('prompt was not started');
+    await act(async () => {
+      await expect(pendingPrompt).resolves.toEqual({
+        stopReason: 'end_turn',
+      });
+    });
+  });
+
   it('shows waiting state when a queued prompt starts before assistant output', async () => {
     const turnComplete = createDeferred<void>();
     const session = createMockSession({
