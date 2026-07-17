@@ -6,7 +6,7 @@
 
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import type { Config } from '../../config/config.js';
 import type { ToolInvocation, ToolResult } from '../tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
@@ -29,21 +29,71 @@ interface WorkflowConfigSeam {
   __workflowRunsDir?: string;
 }
 
+/**
+ * A named workflow must be a bare identifier so it resolves strictly from
+ * within `.qwen/workflows`. This is a security boundary: the resolved file is
+ * executed in the VM sandbox, so a `name` that traverses out of the workflows
+ * directory (e.g. `../../../../etc/whatever`) would load and run arbitrary JS.
+ * We allow only a conservative charset and reject any path separators, `..`
+ * segments, leading dots, or NUL. The charset alone already excludes `/`, `\`,
+ * and NUL; the explicit `..`/leading-dot checks cover the traversal shapes the
+ * charset does not (e.g. a bare `..` or `.hidden`).
+ */
+const WORKFLOW_NAME_RE = /^[A-Za-z0-9._-]+$/;
+
+function assertSafeWorkflowName(name: string): void {
+  if (
+    name.length === 0 ||
+    name.includes('\0') ||
+    name.includes('/') ||
+    name.includes('\\') ||
+    name.includes('..') ||
+    name.startsWith('.') ||
+    !WORKFLOW_NAME_RE.test(name)
+  ) {
+    throw new WorkflowScriptError(
+      `invalid workflow name "${name}": named workflows must be a bare ` +
+        `identifier (letters, digits, '.', '_', '-') resolved from ` +
+        `.qwen/workflows — path separators, '..', and leading dots are not allowed`,
+    );
+  }
+}
+
 async function resolveSource(
   params: WorkflowToolParams,
   workingDir: string,
 ): Promise<string> {
   if (typeof params.script === 'string') return params.script;
-  if (typeof params.scriptPath === 'string')
+  if (typeof params.scriptPath === 'string') {
+    // `scriptPath` is an explicit, operator-supplied path: it is *meant* to
+    // point anywhere the operator chooses, so it is deliberately NOT sandboxed
+    // to .qwen/workflows. We only reject obviously malformed values. Only
+    // `name` (below) is constrained to the workflows directory.
+    if (params.scriptPath.length === 0 || params.scriptPath.includes('\0')) {
+      throw new WorkflowScriptError('invalid scriptPath: empty or malformed');
+    }
     return readFile(params.scriptPath, 'utf8');
+  }
   if (typeof params.name === 'string') {
-    const candidates = [
-      join(workingDir, '.qwen', 'workflows', `${params.name}.js`),
-      join(homedir(), '.qwen', 'workflows', `${params.name}.js`),
+    assertSafeWorkflowName(params.name);
+    const dirs = [
+      join(workingDir, '.qwen', 'workflows'),
+      join(homedir(), '.qwen', 'workflows'),
     ];
-    for (const path of candidates) {
+    for (const dir of dirs) {
+      const candidate = join(dir, `${params.name}.js`);
+      // Defense in depth: even with a validated name, confirm the resolved
+      // candidate still lives inside the intended workflows directory before
+      // reading it. If it escapes, refuse rather than read/execute it.
+      const resolvedDir = resolve(dir);
+      const resolvedCandidate = resolve(candidate);
+      if (!resolvedCandidate.startsWith(resolvedDir + sep)) {
+        throw new WorkflowScriptError(
+          `refusing to resolve workflow "${params.name}" outside .qwen/workflows`,
+        );
+      }
       try {
-        return await readFile(path, 'utf8');
+        return await readFile(resolvedCandidate, 'utf8');
       } catch {
         // try next
       }
@@ -115,54 +165,64 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       prompt: this.params.name ?? this.params.scriptPath ?? 'inline',
     } as never);
 
+    // Outer finally guarantees the foreground registry entry is removed on
+    // every termination shape (success, failure, unexpected throw) — matching
+    // the agent tool-call pattern (see agents/agent.ts). The inner try/catch
+    // still performs the terminal complete()/fail() transition first, and
+    // because `return` runs the finally before returning, unregisterForeground
+    // always fires *after* the terminal status transition.
     try {
-      const result = await engine.run(source, {
-        runId,
-        args: this.params.args,
-        resumeFromRunId: this.params.resumeFromRunId,
-        signal,
-        onPhase: (title, index) =>
-          registry.appendActivity(runId, {
-            name: 'phase',
-            description: `Phase ${index}: ${title}`,
-            at: Date.now(),
-          }),
-        onAgentCount: (counted) =>
-          registry.appendActivity(runId, {
-            name: 'agents',
-            description: `${counted} agent(s) spawned`,
-            at: Date.now(),
-          }),
-      });
-      registry.complete(
-        runId,
-        JSON.stringify({ runId, tokensSpent: result.tokensSpent }),
-        {
-          totalTokens: result.tokensSpent,
-          toolUses: 0,
-          durationMs: 0,
-        },
-      );
-      const payload = JSON.stringify({
-        runId: result.runId,
-        result: result.result,
-      });
-      return {
-        llmContent: payload,
-        returnDisplay: `Workflow ${result.status} (run ${result.runId}).`,
-      };
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      registry.fail(runId, message);
-      const type =
-        e instanceof WorkflowScriptError
-          ? ToolErrorType.INVALID_TOOL_PARAMS
-          : ToolErrorType.EXECUTION_FAILED;
-      return {
-        llmContent: `Workflow failed: ${message}`,
-        returnDisplay: `Error: ${message}`,
-        error: { message, type },
-      };
+      try {
+        const result = await engine.run(source, {
+          runId,
+          args: this.params.args,
+          resumeFromRunId: this.params.resumeFromRunId,
+          signal,
+          onPhase: (title, index) =>
+            registry.appendActivity(runId, {
+              name: 'phase',
+              description: `Phase ${index}: ${title}`,
+              at: Date.now(),
+            }),
+          onAgentCount: (counted) =>
+            registry.appendActivity(runId, {
+              name: 'agents',
+              description: `${counted} agent(s) spawned`,
+              at: Date.now(),
+            }),
+        });
+        registry.complete(
+          runId,
+          JSON.stringify({ runId, tokensSpent: result.tokensSpent }),
+          {
+            totalTokens: result.tokensSpent,
+            toolUses: 0,
+            durationMs: 0,
+          },
+        );
+        const payload = JSON.stringify({
+          runId: result.runId,
+          result: result.result,
+        });
+        return {
+          llmContent: payload,
+          returnDisplay: `Workflow ${result.status} (run ${result.runId}).`,
+        };
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        registry.fail(runId, message);
+        const type =
+          e instanceof WorkflowScriptError
+            ? ToolErrorType.INVALID_TOOL_PARAMS
+            : ToolErrorType.EXECUTION_FAILED;
+        return {
+          llmContent: `Workflow failed: ${message}`,
+          returnDisplay: `Error: ${message}`,
+          error: { message, type },
+        };
+      }
+    } finally {
+      registry.unregisterForeground(runId);
     }
   }
 }
