@@ -157,6 +157,15 @@ describe('evaluateShellCommandReadOnly', () => {
       );
     });
 
+    it('rejects gawk indirect function calls', () => {
+      for (const command of [
+        'awk \'BEGIN { fn = "system"; @fn("touch /tmp/pwned") }\'',
+        'awk \'BEGIN { fn = "system"; @ fn("touch /tmp/pwned") }\'',
+      ]) {
+        expect(isShellCommandReadOnly(command)).toBe(false);
+      }
+    });
+
     it('rejects awk with file output redirection', () => {
       expect(
         isShellCommandReadOnly('awk \'{print > "output.txt"}\' input.txt'),

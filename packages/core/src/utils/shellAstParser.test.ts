@@ -201,6 +201,15 @@ describe('isShellCommandReadOnlyAST', () => {
       ).toBe(false);
     });
 
+    it('rejects gawk indirect function calls', async () => {
+      for (const command of [
+        'awk \'BEGIN { fn = "system"; @fn("touch /tmp/pwned") }\'',
+        'awk \'BEGIN { fn = "system"; @ fn("touch /tmp/pwned") }\'',
+      ]) {
+        expect(await isShellCommandReadOnlyAST(command)).toBe(false);
+      }
+    });
+
     it('rejects awk with file output redirection', async () => {
       expect(
         await isShellCommandReadOnlyAST(
@@ -438,6 +447,7 @@ describe('classifyShellCommandSafety', () => {
     "awk '{ print*2 }' file",
     "awk -- '{ print }' input",
     "awk -F : '{ print $1 }' input",
+    'awk \'BEGIN { print "user@example.com" }\'',
     "printf '%s' value",
   ])('classifies %j as read-only', async (command) => {
     expect(await classifyShellCommandSafety(command)).toBe('read-only');
@@ -725,6 +735,9 @@ describe('classifyShellCommandSafety', () => {
     'awk -Wexec=script.awk file',
     'awk "$PROGRAM" file',
     'awk \'@include "library.awk"\' file',
+    'awk \'@namespace "safe"\' file',
+    'awk \'BEGIN { fn = "system"; @fn("touch /tmp/pwned") }\'',
+    'awk \'BEGIN { fn = "system"; @ fn("touch /tmp/pwned") }\'',
     "awk -e '{ print }' file",
     "awk --load extension '{ print }' file",
     "awk --profile=report '{ print }' file",

@@ -20,8 +20,7 @@ const SED_VALUE_OPTIONS = '-f --file -e --expression -l --line-length'.split(
 );
 const AWK_STATIC_WRITE =
   /^\s*(?:print|printf)\b(?!\s*\()(?:(?:"(?:\\[\s\S]|[^"\\])*")|[^">|])*>>?\s*"[^"]*"\s*$/;
-const AWK_UNKNOWN_OPERATION =
-  /(?:system|close)\s*\(|getline\b|@(?:include|load)\b/;
+const AWK_UNKNOWN_OPERATION = /(?:system|close)\s*\(|getline\b/;
 const AWK_PRINT = /\b(?:print|printf)\b/;
 
 function scanDelimitedSection(
@@ -213,9 +212,11 @@ export function classifySedCommandSafety(args: string[]): SedScriptSafety {
 function splitAwkStatements(script: string): {
   statements: string[];
   ambiguousSlash: boolean;
+  unsupportedAt: boolean;
 } {
   const statements: string[] = [];
   let ambiguousSlash = false;
+  let unsupportedAt = false;
   let start = 0;
   let escaped = false;
   let inString = false;
@@ -252,10 +253,11 @@ function splitAwkStatements(script: string): {
       continue;
     }
     if (char === '/') ambiguousSlash = true;
+    if (char === '@') unsupportedAt = true;
     if (char === '#') {
       statements.push(script.slice(start, i));
       const newline = script.indexOf('\n', i + 1);
-      if (newline < 0) return { statements, ambiguousSlash };
+      if (newline < 0) return { statements, ambiguousSlash, unsupportedAt };
       start = newline + 1;
       i = newline;
       previousSignificant = '\n';
@@ -270,17 +272,18 @@ function splitAwkStatements(script: string): {
     if (!/\s/.test(char)) previousSignificant = char;
   }
   statements.push(script.slice(start));
-  return { statements, ambiguousSlash };
+  return { statements, ambiguousSlash, unsupportedAt };
 }
 
 export function classifyAwkScriptSafety(script: string): AwkScriptSafety {
-  const { statements, ambiguousSlash } = splitAwkStatements(script);
+  const { statements, ambiguousSlash, unsupportedAt } =
+    splitAwkStatements(script);
   if (
     !ambiguousSlash &&
     statements.some((statement) => AWK_STATIC_WRITE.test(statement))
   )
     return 'write';
-  if (AWK_UNKNOWN_OPERATION.test(script)) return 'unknown';
+  if (unsupportedAt || AWK_UNKNOWN_OPERATION.test(script)) return 'unknown';
   return AWK_PRINT.test(script) && /[>|]/.test(script)
     ? 'unknown'
     : 'read-only';
