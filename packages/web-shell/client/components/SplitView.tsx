@@ -22,6 +22,7 @@ import type {
 import {
   SESSION_LIST_PAGE_SIZE,
   SESSION_ORGANIZATION_FEATURE,
+  WEB_SHELL_MAX_TRANSCRIPT_BLOCKS,
 } from '../constants/sessions';
 import { useOtherWorkspaceSessions } from '../hooks/useOtherWorkspaceSessions';
 import { useScopedSessions } from '../hooks/useScopedSessions';
@@ -468,6 +469,7 @@ export function SplitView({
                     // collide on one client identity.
                     clientId={`split-pane:${instanceId}:${sessionId}`}
                     suppressOwnUserEcho
+                    maxBlocks={WEB_SHELL_MAX_TRANSCRIPT_BLOCKS}
                   >
                     <ChatPane
                       title={titleById.get(sessionId)}
