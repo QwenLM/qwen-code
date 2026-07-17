@@ -212,6 +212,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     includeRawEvent = false,
     autoConnect = true,
     autoReconnect = true,
+    restartEventStreamOnPrompt = false,
     reconnectDelayMs = 1_000,
     maxReconnectDelayMs = 10_000,
     heartbeatIntervalMs = 30_000,
@@ -249,6 +250,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     [maxBlocks],
   );
   const sessionRef = useRef<DaemonSessionClient | undefined>(undefined);
+  const eventStreamRef = useRef<
+    | {
+        sessionId: string;
+        controller: AbortController;
+        restartRequested: boolean;
+      }
+    | undefined
+  >(undefined);
   const lastSessionIdRef = useRef<string | undefined>(undefined);
   const activePromptsRef = useRef<Map<string, ActivePrompt>>(new Map());
   const settledPromptsRef = useRef<Map<string, SettledPrompt>>(new Map());
@@ -438,6 +447,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       let reconnectSessionId = restoreSessionId;
       let shouldCreateFreshSession = !restoreSessionId && newSessionNonce > 0;
       let reconnectAttempt = 0;
+      let skipMetadataRefresh = false;
       let hasCurrentSessionActivePrompt = () => false;
       // Set when the user explicitly deletes the session (server
       // publishes session_closed with reason 'client_close').
@@ -447,7 +457,24 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       let userDeletedSession = false;
 
       while (!disposed && !abort.signal.aborted) {
+        const skipMetadataRefreshThisIteration = skipMetadataRefresh;
+        skipMetadataRefresh = false;
         let loadingRequestedSession = false;
+        let eventStream:
+          | {
+              sessionId: string;
+              controller: AbortController;
+              restartRequested: boolean;
+            }
+          | undefined;
+        let removeProviderAbortListener: (() => void) | undefined;
+        const clearEventStream = () => {
+          removeProviderAbortListener?.();
+          removeProviderAbortListener = undefined;
+          if (eventStreamRef.current === eventStream) {
+            eventStreamRef.current = undefined;
+          }
+        };
         try {
           // ── SSE Reconnection Strategy ────────────────────────────────
           //
@@ -940,14 +967,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           }
 
           const canReuseSessionMetadata =
-            attachedExistingSession &&
-            connectionRef.current.commands !== undefined &&
-            connectionRef.current.skills !== undefined &&
-            connectionRef.current.supportedCommands !== undefined &&
-            connectionRef.current.context !== undefined;
-          const gitPromise = activeSession.workspaceCwd
-            ? client.workspaceByCwd(activeSession.workspaceCwd).workspaceGit()
-            : client.workspaceGit();
+            skipMetadataRefreshThisIteration ||
+            (attachedExistingSession &&
+              connectionRef.current.commands !== undefined &&
+              connectionRef.current.skills !== undefined &&
+              connectionRef.current.supportedCommands !== undefined &&
+              connectionRef.current.context !== undefined);
+          const gitPromise = skipMetadataRefreshThisIteration
+            ? Promise.resolve({ branch: connectionRef.current.gitBranch })
+            : activeSession.workspaceCwd
+              ? client.workspaceByCwd(activeSession.workspaceCwd).workspaceGit()
+              : client.workspaceGit();
           const [providerResult, commandResult, contextResult, gitResult] =
             await Promise.allSettled([
               canReuseSessionMetadata
@@ -1103,8 +1133,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ),
             }));
           };
+          const eventStreamController = new AbortController();
+          eventStream = {
+            sessionId: activeSession.sessionId,
+            controller: eventStreamController,
+            restartRequested: false,
+          };
+          eventStreamRef.current = eventStream;
+          const abortEventStream = () =>
+            eventStreamController.abort(abort.signal.reason);
+          abort.signal.addEventListener('abort', abortEventStream, {
+            once: true,
+          });
+          removeProviderAbortListener = () =>
+            abort.signal.removeEventListener('abort', abortEventStream);
           for await (const event of activeSession.events({
-            signal: abort.signal,
+            signal: eventStreamController.signal,
             maxQueued,
           })) {
             if (sessionRef.current?.sessionId !== activeSession.sessionId) {
@@ -1406,6 +1450,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // so post-loop handling (and consumers reading the snapshot) see a
           // complete transcript without waiting for the scheduled flush.
           flushTranscriptSync();
+          const restartRequested = eventStream.restartRequested;
+          clearEventStream();
+          if (restartRequested) {
+            reconnectAttempt = 0;
+            skipMetadataRefresh = true;
+            continue;
+          }
           if (userDeletedSession) {
             // Session was explicitly closed (user deleted it). Do NOT
             // reconnect — doing so would auto-create a new session.
@@ -1465,6 +1516,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             }));
           }
         } catch (error) {
+          const restartRequested = eventStream?.restartRequested === true;
+          clearEventStream();
+          if (restartRequested && !disposed && !abort.signal.aborted) {
+            flushTranscriptSync();
+            reconnectAttempt = 0;
+            skipMetadataRefresh = true;
+            continue;
+          }
           if (disposed || abort.signal.aborted) return;
           // The loop threw, so the in-try post-loop flush was skipped. Apply
           // buffered transcript events now: leaving them with a scheduled timer
@@ -1845,6 +1904,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         resetCurrentSessionActivePrompt: () => {
           hasCurrentSessionActivePromptRef.current = () => false;
         },
+        restartEventStream: (sessionId: string) => {
+          if (!restartEventStreamOnPrompt) return;
+          const eventStream = eventStreamRef.current;
+          if (eventStream?.sessionId !== sessionId) return;
+          eventStream.restartRequested = true;
+          eventStream.controller.abort();
+        },
         getCreateSessionRequest: () => ({
           ...createSessionRequestRef.current,
           sessionScope: 'thread',
@@ -1895,7 +1961,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         setAttachSessionNonce,
         setNewSessionNonce,
       }),
-    [addNotice, clientId, resolvedBaseUrl, resolvedToken, store],
+    [
+      addNotice,
+      clientId,
+      resolvedBaseUrl,
+      resolvedToken,
+      restartEventStreamOnPrompt,
+      store,
+    ],
   );
   const lastHandledSessionIdRef = useRef<
     string | undefined | typeof UNHANDLED_SESSION

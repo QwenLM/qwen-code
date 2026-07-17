@@ -605,6 +605,7 @@ export interface WebShellProps {
 interface AppProps extends WebShellProps {
   lockedWorkspaceCwd?: string;
   lockedWorkspaceCapability?: DaemonWorkspaceCapability;
+  restartSseOnPrompt?: boolean;
 }
 
 type SessionActionsWithCreate = {
@@ -1042,6 +1043,7 @@ export function App({
   composerInputVersion,
   onSessionChange,
   onSubmitBefore,
+  restartSseOnPrompt,
   lockedWorkspaceCwd,
   lockedWorkspaceCapability,
 }: AppProps = {}) {
@@ -6412,6 +6414,7 @@ export function App({
                         onRightPanelOpen={handleTurnOutputOpen}
                         onPaneArtifactsChange={handlePaneArtifactsChange}
                         messageTurnOutputs={messageTurnOutputs}
+                        restartSseOnPrompt={restartSseOnPrompt}
                       />
                     </CompactModeContext.Provider>
                   </WebShellCustomizationProvider>

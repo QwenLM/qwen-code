@@ -35,6 +35,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
       data-session={props.sessionId}
       data-clientid={props.clientId}
       data-workspace={props.workspaceCwd}
+      data-restart-sse={props.restartEventStreamOnPrompt ? 'true' : 'false'}
     >
       {props.children}
     </div>
@@ -185,6 +186,15 @@ describe('SplitView', () => {
     const s2ClientId = providers[1].getAttribute('data-clientid') ?? '';
     const nonce = clientId.slice('split-pane:'.length, -':s1'.length);
     expect(s2ClientId).toBe(`split-pane:${nonce}:s2`);
+  });
+
+  it('passes the prompt SSE restart option to pane providers', () => {
+    render({ sessionIds: ['s1'], restartSseOnPrompt: true });
+    expect(
+      container!
+        .querySelector('[data-session="s1"]')
+        ?.getAttribute('data-restart-sse'),
+    ).toBe('true');
   });
 
   it('seeds with the current session when no session ids are given', () => {

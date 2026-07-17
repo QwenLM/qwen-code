@@ -121,6 +121,8 @@ export interface DaemonSessionProviderProps {
   autoConnect?: boolean;
   /** Reconnect automatically after recoverable daemon/session failures. */
   autoReconnect?: boolean;
+  /** Restart the SSE event stream after each accepted prompt. */
+  restartEventStreamOnPrompt?: boolean;
   /** Initial reconnect delay in milliseconds. */
   reconnectDelayMs?: number;
   /** Maximum reconnect delay in milliseconds after backoff. */
