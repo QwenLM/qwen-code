@@ -79,6 +79,7 @@ import {
   createRateTableReloader,
 } from './cost/rateTable.js';
 import { UsageIngester, UsageTickCoalescer } from './cost/ingester.js';
+import { resolveNamedWorkflow } from '@qwen-code/qwen-code-core';
 import { SessionAttributionMap } from './cost/sessionAttribution.js';
 import { UsageTickBroadcaster } from './cost/usageTickBroadcaster.js';
 import { formatUsageCsv, type UsageResponseRow } from './cost/usageQuery.js';
@@ -504,6 +505,15 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       },
       workflows: {
         runsDir: join(homedir(), '.qwen', 'workflows', 'runs'),
+        // Gateway { name } resolution reuses the CLI tool's EXACT guarded
+        // resolver (core resolveNamedWorkflow): project `.qwen/workflows` then
+        // user `~/.qwen/workflows`, with the same traversal guard. The gateway
+        // is deliberately NOT given an unguarded name resolver.
+        resolveNamed: (name: string) =>
+          resolveNamedWorkflow(name, {
+            workingDir: process.cwd(),
+            homeDir: homedir(),
+          }),
       },
       hookIngest: { ingestToken: hookIngestToken },
     });

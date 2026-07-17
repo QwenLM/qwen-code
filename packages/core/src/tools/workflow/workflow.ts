@@ -6,14 +6,18 @@
 
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join, resolve, sep } from 'node:path';
+import { join } from 'node:path';
 import type { Config } from '../../config/config.js';
 import type { ToolInvocation, ToolResult } from '../tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolDisplayNames, ToolNames } from '../tool-names.js';
 import { ToolErrorType } from '../tool-error.js';
 import { HeadlessSpawner } from '../../workflows/spawner.js';
-import { WorkflowEngine, WorkflowScriptError } from '../../workflows/index.js';
+import {
+  WorkflowEngine,
+  WorkflowScriptError,
+  resolveNamedWorkflow,
+} from '../../workflows/index.js';
 
 export interface WorkflowToolParams {
   script?: string;
@@ -27,36 +31,6 @@ export interface WorkflowToolParams {
 interface WorkflowConfigSeam {
   __workflowSpawner?: { spawn: HeadlessSpawner['spawn'] };
   __workflowRunsDir?: string;
-}
-
-/**
- * A named workflow must be a bare identifier so it resolves strictly from
- * within `.qwen/workflows`. This is a security boundary: the resolved file is
- * executed in the VM sandbox, so a `name` that traverses out of the workflows
- * directory (e.g. `../../../../etc/whatever`) would load and run arbitrary JS.
- * We allow only a conservative charset and reject any path separators, `..`
- * segments, leading dots, or NUL. The charset alone already excludes `/`, `\`,
- * and NUL; the explicit `..`/leading-dot checks cover the traversal shapes the
- * charset does not (e.g. a bare `..` or `.hidden`).
- */
-const WORKFLOW_NAME_RE = /^[A-Za-z0-9._-]+$/;
-
-function assertSafeWorkflowName(name: string): void {
-  if (
-    name.length === 0 ||
-    name.includes('\0') ||
-    name.includes('/') ||
-    name.includes('\\') ||
-    name.includes('..') ||
-    name.startsWith('.') ||
-    !WORKFLOW_NAME_RE.test(name)
-  ) {
-    throw new WorkflowScriptError(
-      `invalid workflow name "${name}": named workflows must be a bare ` +
-        `identifier (letters, digits, '.', '_', '-') resolved from ` +
-        `.qwen/workflows — path separators, '..', and leading dots are not allowed`,
-    );
-  }
 }
 
 async function resolveSource(
@@ -75,32 +49,12 @@ async function resolveSource(
     return readFile(params.scriptPath, 'utf8');
   }
   if (typeof params.name === 'string') {
-    assertSafeWorkflowName(params.name);
-    const dirs = [
-      join(workingDir, '.qwen', 'workflows'),
-      join(homedir(), '.qwen', 'workflows'),
-    ];
-    for (const dir of dirs) {
-      const candidate = join(dir, `${params.name}.js`);
-      // Defense in depth: even with a validated name, confirm the resolved
-      // candidate still lives inside the intended workflows directory before
-      // reading it. If it escapes, refuse rather than read/execute it.
-      const resolvedDir = resolve(dir);
-      const resolvedCandidate = resolve(candidate);
-      if (!resolvedCandidate.startsWith(resolvedDir + sep)) {
-        throw new WorkflowScriptError(
-          `refusing to resolve workflow "${params.name}" outside .qwen/workflows`,
-        );
-      }
-      try {
-        return await readFile(resolvedCandidate, 'utf8');
-      } catch {
-        // try next
-      }
-    }
-    throw new WorkflowScriptError(
-      `workflow "${params.name}" not found in .qwen/workflows`,
-    );
+    // Single guarded name resolution shared with the gateway route (see
+    // workflows/resolveNamed.ts) — one traversal defense, not two copies.
+    return resolveNamedWorkflow(params.name, {
+      workingDir,
+      homeDir: homedir(),
+    });
   }
   throw new WorkflowScriptError(
     'Workflow requires one of: script, scriptPath, name',

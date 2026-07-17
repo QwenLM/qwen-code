@@ -9,4 +9,5 @@ export * from './scheduler.js';
 export * from './journal.js';
 export * from './spawner.js';
 export * from './worktree.js';
+export * from './resolveNamed.js';
 export * from './scriptRunner.js';

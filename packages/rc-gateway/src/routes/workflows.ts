@@ -11,6 +11,7 @@ import {
   WorkflowEngine,
   parseWorkflowScript,
   WorkflowScriptError,
+  assertSafeResumeRunId,
 } from '@qwen-code/qwen-code-core';
 import type { AgentRegistry } from '../agents/agentRegistry.js';
 import type { OwnerEventBus, WorkflowEventPayload } from '../ownerEvents.js';
@@ -57,11 +58,41 @@ export function createStartWorkflowRoute(
       resumeFromRunId?: unknown;
     };
 
-    // Resolve source: inline script or named workflow.
+    // SECURITY: `resumeFromRunId` is joined into the runs directory by the
+    // engine. Guard it synchronously here (same bare-identifier rule as a
+    // named workflow) so a traversal id gets a clean 400 instead of a
+    // 202-then-background-failure. The engine re-guards at the join as
+    // defense-in-depth.
+    if (typeof body.resumeFromRunId === 'string') {
+      try {
+        assertSafeResumeRunId(body.resumeFromRunId);
+      } catch (e) {
+        const message =
+          e instanceof WorkflowScriptError ? e.message : String(e);
+        res
+          .status(400)
+          .json({ error: message, code: 'invalid_workflow_script' });
+        return;
+      }
+    }
+
+    // Resolve source: inline script or named workflow. The named path goes
+    // through the SAME guarded resolver the CLI tool uses (deps.resolveNamed →
+    // core resolveNamedWorkflow), so a traversal `name` is refused before any
+    // file is read — surfaced here as a 400.
     let source: string | undefined;
     if (typeof body.script === 'string') source = body.script;
     else if (typeof body.name === 'string' && deps.resolveNamed) {
-      source = await deps.resolveNamed(body.name);
+      try {
+        source = await deps.resolveNamed(body.name);
+      } catch (e) {
+        const message =
+          e instanceof WorkflowScriptError ? e.message : String(e);
+        res
+          .status(400)
+          .json({ error: message, code: 'invalid_workflow_script' });
+        return;
+      }
     }
     if (source === undefined) {
       res.status(400).json({

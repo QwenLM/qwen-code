@@ -8,10 +8,11 @@ import { describe, it, expect, afterEach } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DaemonClient } from '@qwen-code/sdk';
+import { resolveNamedWorkflow } from '@qwen-code/qwen-code-core';
 import { startStubDaemon, type StubDaemon } from '../testing/stubDaemon.js';
 import { AgentRegistry } from '../agents/agentRegistry.js';
 import { OwnerEventBus, type OwnerEvent } from '../ownerEvents.js';
@@ -39,7 +40,7 @@ function fakeAudit(): AuditRecorder & { calls: AuditEntry[] } {
   return { calls, record: async (e: AuditEntry) => void calls.push(e) };
 }
 
-async function setup(promptDelayMs = 50) {
+async function setup(promptDelayMs = 50, extra?: Partial<WorkflowRoutesDeps>) {
   stub = await startStubDaemon({ promptDelayMs });
   const dir = await mkdtemp(join(tmpdir(), 'wf-routes-'));
   const agentRegistry = await AgentRegistry.open(join(dir, 'agents.json'));
@@ -55,6 +56,7 @@ async function setup(promptDelayMs = 50) {
     ownerEvents,
     audit,
     runsDir: join(dir, 'runs'),
+    ...extra,
   };
   const app = express();
   app.use(express.json());
@@ -124,6 +126,110 @@ describe('POST /rc/workflows', () => {
     expect(((await res.json()) as { code: string }).code).toBe(
       'invalid_workflow_script',
     );
+  });
+});
+
+describe('POST /rc/workflows { name } — guarded named resolution', () => {
+  async function wireNamed() {
+    const projDir = await mkdtemp(join(tmpdir(), 'wf-proj-'));
+    const homeDir = await mkdtemp(join(tmpdir(), 'wf-home-'));
+    await mkdir(join(projDir, '.qwen', 'workflows'), { recursive: true });
+    await mkdir(join(homeDir, '.qwen', 'workflows'), { recursive: true });
+    const resolveNamed = (name: string) =>
+      resolveNamedWorkflow(name, { workingDir: projDir, homeDir });
+    return { projDir, homeDir, resolveNamed };
+  }
+
+  it('resolves a named workflow with project-then-user precedence', async () => {
+    const { projDir, homeDir, resolveNamed } = await wireNamed();
+    // Same name in BOTH dirs, different meta.name — project MUST win.
+    await writeFile(
+      join(projDir, '.qwen', 'workflows', 'dup.js'),
+      `export const meta = { name: 'proj-wins', description: 'd' };\nreturn 1;`,
+    );
+    await writeFile(
+      join(homeDir, '.qwen', 'workflows', 'dup.js'),
+      `export const meta = { name: 'user-loses', description: 'd' };\nreturn 1;`,
+    );
+    // A name ONLY in the user dir must still resolve (user fallback).
+    await writeFile(
+      join(homeDir, '.qwen', 'workflows', 'useronly.js'),
+      `export const meta = { name: 'from-user', description: 'd' };\nreturn 1;`,
+    );
+    const { url, seen } = await setup(50, { resolveNamed });
+
+    const dup = await fetch(`${url}/rc/workflows`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'dup' }),
+    });
+    expect(dup.status).toBe(202);
+    await waitFor(() =>
+      seen.some(
+        (e) => e.type === 'workflow_started' && e.workflow.name === 'proj-wins',
+      ),
+    );
+    const projStart = seen.find((e) => e.type === 'workflow_started');
+    expect(projStart && projStart.type === 'workflow_started').toBe(true);
+    if (projStart?.type === 'workflow_started') {
+      expect(projStart.workflow.name).toBe('proj-wins');
+    }
+
+    const user = await fetch(`${url}/rc/workflows`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'useronly' }),
+    });
+    expect(user.status).toBe(202);
+    await waitFor(() =>
+      seen.some(
+        (e) => e.type === 'workflow_started' && e.workflow.name === 'from-user',
+      ),
+    );
+    expect(
+      seen.some(
+        (e) => e.type === 'workflow_started' && e.workflow.name === 'from-user',
+      ),
+    ).toBe(true);
+  });
+
+  it('rejects a traversal `name` with 400 (same guard as the CLI tool)', async () => {
+    const { resolveNamed } = await wireNamed();
+    const { url } = await setup(50, { resolveNamed });
+    for (const name of [
+      '../../../../etc/passwd',
+      '/etc/passwd',
+      'a/b',
+      '..',
+      '.hidden',
+      'foo\\bar',
+    ]) {
+      const res = await fetch(`${url}/rc/workflows`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { code: string; error: string };
+      expect(body.code).toBe('invalid_workflow_script');
+      expect(body.error).toContain('invalid workflow name');
+    }
+  });
+
+  it('rejects a traversal resumeFromRunId with 400', async () => {
+    const { url } = await setup();
+    const res = await fetch(`${url}/rc/workflows`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        script: SCRIPT,
+        resumeFromRunId: '../../../../etc',
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string; error: string };
+    expect(body.code).toBe('invalid_workflow_script');
+    expect(body.error).toContain('invalid resumeFromRunId');
   });
 });
 

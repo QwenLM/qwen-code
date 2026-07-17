@@ -17,6 +17,7 @@ import {
 } from './sandbox.js';
 import { Scheduler } from './scheduler.js';
 import { canonicalHash, Journal } from './journal.js';
+import { assertSafeResumeRunId } from './resolveNamed.js';
 import type { AgentSpawner } from './spawner.js';
 import type { WorktreeProvider } from './worktree.js';
 
@@ -275,6 +276,15 @@ export class WorkflowEngine {
     const parsed = parseWorkflowScript(source);
     const runId = runOpts.runId ?? randomUUID();
     const runsDir = this.opts.runsDir ?? defaultRunsDir();
+    // SECURITY: `resumeFromRunId` is caller-supplied (tool params AND gateway
+    // request body) and is about to be joined into `runsDir`. Guard it here —
+    // the single path-join chokepoint both surfaces feed — with the same
+    // bare-identifier rule used for named workflows, so a traversal id can
+    // never read/replay a journal outside the runs directory. (`runId` above
+    // is always internally generated, so it needs no guard.)
+    if (runOpts.resumeFromRunId !== undefined) {
+      assertSafeResumeRunId(runOpts.resumeFromRunId);
+    }
     const journal = await Journal.open(join(runsDir, runId), {
       meta: parsed.meta,
       scriptHash: parsed.scriptHash,
@@ -349,7 +359,21 @@ export class WorkflowEngine {
           const release = await scheduler.acquire();
           let cwd: string | undefined;
           try {
-            if (opts.isolation === 'worktree' && this.opts.worktree) {
+            if (opts.isolation === 'worktree') {
+              // Fail loud, NEVER silently downgrade to the shared tree. If a
+              // script asks for worktree isolation but no provider is wired,
+              // error this agent (the catch below maps it to the design's null
+              // envelope) rather than running it in the shared working tree.
+              // NOTE: full GitWorktreeProvider wiring into the CLI tool and the
+              // gateway route is a deliberate follow-up; only the silent-
+              // downgrade hole is closed here.
+              if (!this.opts.worktree) {
+                throw new Error(
+                  "workflow: isolation 'worktree' requested but no worktree " +
+                    'provider is wired for this run — refusing to fall back to ' +
+                    'the shared working tree',
+                );
+              }
               cwd = await this.opts.worktree.acquire(runId, seq);
             }
             const out = await this.spawner.spawn({
@@ -381,15 +405,22 @@ export class WorkflowEngine {
           } catch (e) {
             // Spawn/exec/schema/worktree failure → agent() resolves null (design).
             const env = { kind: 'null' as const };
-            await journal.append({
-              seq,
-              kind: 'agent',
-              promptHash,
-              optsHash,
-              result: env,
-              tokens: 0,
-              error: String((e as Error)?.message ?? e),
-            });
+            // HARDENING: a SECOND failure here (e.g. journal.append ENOSPC) must
+            // NOT escape this IIFE as an unhandled rejection and leave the agent
+            // unsettled — that would hang agent() until the wall-clock deadline.
+            // Swallow the append failure and ALWAYS resolve a null envelope so
+            // the agent settles.
+            await journal
+              .append({
+                seq,
+                kind: 'agent',
+                promptHash,
+                optsHash,
+                result: env,
+                tokens: 0,
+                error: String((e as Error)?.message ?? e),
+              })
+              .catch(() => {});
             resolve(JSON.stringify(env));
           } finally {
             release();
