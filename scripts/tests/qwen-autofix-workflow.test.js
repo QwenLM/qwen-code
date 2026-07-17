@@ -200,7 +200,7 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain('.[0:10] | map(. + {autofixTier: 1})');
   });
 
-  it('runs scheduled autofix as a 10-minute single-target worker', () => {
+  it('runs scheduled autofix as a 10-minute multi-target fan-out worker', () => {
     expect(workflow).toContain("cron: '*/10 * * * *'");
     expect(workflow).not.toContain("cron: '0 0,12 * * *'");
     expect(workflow).not.toContain("cron: '0 4,8,16,20 * * *'");
@@ -215,7 +215,13 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain('isCrossRepository');
     expect(reviewScanJob).toContain('not an open in-repo main-targeting PR');
     expect(reviewScanJob).toContain('.isCrossRepository != true');
-    expect(reviewScanJob).toContain('break # one PR per scheduled scan');
+    // Fan-out: one scan emits EVERY eligible PR (no single-target break). The
+    // address matrix's max-parallel bounds simultaneity and per-PR concurrency
+    // groups prevent duplicate same-PR runs; a single-target break starved
+    // older PRs for hours whenever cron ticks were sparse.
+    expect(reviewScanJob).not.toContain('break # one PR per scheduled scan');
+    expect(reviewScanJob).toContain('Fan out: emit EVERY eligible PR');
+    expect(workflow).toContain("max-parallel: 3");
     expect(reviewScanJob).toContain('statusCheckRollup');
     expect(reviewScanJob).toContain('HAS_PENDING_CHECKS');
     expect(reviewScanJob).toContain('N_FAILED_CHECKS');
@@ -303,8 +309,17 @@ describe('qwen-autofix workflow', () => {
       "ASSIGNEE_LOGIN: '${{ github.event.assignee.login }}'",
     );
     expect(workflow).toContain("permissions:\n      contents: 'read'");
-    expect(routeJob).toContain("group: 'qwen-autofix-route'");
-    expect(routeJob).toContain('cancel-in-progress: true');
+    // Route concurrency: cron ticks share one group and supersede each other,
+    // but dispatches and review/issue events get unique per-run groups — a
+    // shared cancel-in-progress group let any newer event kill pending full
+    // scans while route jobs sat queued behind runner backlog.
+    expect(routeJob).toContain(
+      "group: \"${{ github.event_name == 'schedule' && 'qwen-autofix-route-cron' || format('qwen-autofix-route-{0}', github.run_id) }}\"",
+    );
+    expect(routeJob).toContain(
+      "cancel-in-progress: |-\n        ${{ github.event_name == 'schedule' }}",
+    );
+    expect(routeJob).not.toContain("group: 'qwen-autofix-route'");
     expect(workflow).toContain(
       'gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission"',
     );

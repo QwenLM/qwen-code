@@ -90,8 +90,15 @@ jobs:
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     concurrency:
-      group: 'qwen-autofix-route'
-      cancel-in-progress: true
+      # Cron ticks dedupe among themselves (a newer tick supersedes a queued
+      # one). Dispatches and review/issue events each route independently:
+      # under runner backlog a route job can sit QUEUED for minutes, and the
+      # old shared cancel-in-progress group let any newer event kill pending
+      # full scans — observed as hours of scan starvation during review-event
+      # storms. Route is a seconds-long job, so unique groups cost nothing.
+      group: "${{ github.event_name == 'schedule' && 'qwen-autofix-route-cron' || format('qwen-autofix-route-{0}', github.run_id) }}"
+      cancel-in-progress: |-
+        ${{ github.event_name == 'schedule' }}
     permissions:
       contents: 'read'
     outputs:
@@ -1152,7 +1159,11 @@ jobs:
               --arg round "${ROUND}" --arg wm "${EFF_WM}" \
               '. + [{pr: $pr, branch: $branch, issue: $issue, round: $round, watermark: $wm}]' \
               <<< "${TARGETS}")"
-            break # one PR per scheduled scan
+            # Fan out: emit EVERY eligible PR. The address matrix bounds
+            # simultaneity (max-parallel) and the per-PR concurrency groups
+            # prevent duplicate same-PR runs, so one scan drains the whole
+            # backlog instead of serving a single newest-first target per tick
+            # (which starved older PRs for hours when cron ticks were sparse).
           done
 
           COUNT="$(jq 'length' <<< "${TARGETS}")"
