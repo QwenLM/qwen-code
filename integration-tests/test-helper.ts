@@ -556,8 +556,10 @@ export class TestRig {
         if (result) {
           return true;
         }
-      } catch {
-        // Predicate threw (e.g. file not yet available); treat as false and retry
+      } catch (err) {
+        if (env['VERBOSE'] === 'true') {
+          console.log(`Poll attempt ${attempts}: predicate threw: ${err}`);
+        }
       }
       await new Promise((resolve) => setTimeout(resolve, interval));
     }
