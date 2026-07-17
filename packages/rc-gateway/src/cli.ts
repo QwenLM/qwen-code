@@ -502,6 +502,9 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
           ? (sid) => usageStore.sessionTotals(sid).costMicrocentsSesTotal
           : undefined,
       },
+      workflows: {
+        runsDir: join(homedir(), '.qwen', 'workflows', 'runs'),
+      },
       hookIngest: { ingestToken: hookIngestToken },
     });
 

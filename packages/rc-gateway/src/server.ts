@@ -111,6 +111,13 @@ import { createShareRouter, createShareWhoamiHandler } from './routes/share.js';
 import { createAuditQueryRoute } from './routes/audit.js';
 import { createOwnerEventsRoute } from './routes/ownerEvents.js';
 import { createHookIngestRoute } from './routes/hookIngest.js';
+import { WorkflowRunRegistry } from './workflows/workflowRegistry.js';
+import {
+  createStartWorkflowRoute,
+  createListWorkflowsRoute,
+  createGetWorkflowRoute,
+  createCancelWorkflowRoute,
+} from './routes/workflows.js';
 import { OwnerEventBus } from './ownerEvents.js';
 import { createPushRouter } from './routes/push.js';
 import { createRoutingRouter } from './routes/routing.js';
@@ -281,6 +288,11 @@ export interface GatewayDeps {
     bucketCapacity?: number;
     bucketRefillPerSec?: number;
   };
+  /** Workflow orchestration (add-workflow-orchestration). Routes mount only when set. */
+  workflows?: {
+    runsDir?: string;
+    resolveNamed?: (name: string) => Promise<string | undefined>;
+  };
 }
 
 export interface GatewayApp {
@@ -313,6 +325,8 @@ export interface GatewayApp {
   promptEvents: PromptEventBroadcaster;
   /** Present only when deps.agents is supplied. */
   agentLifecycle?: AgentLifecycle;
+  /** Present only when both deps.workflows AND deps.agents are supplied. */
+  workflowRuns?: WorkflowRunRegistry;
 }
 
 export function createGatewayApp(deps: GatewayDeps): GatewayApp {
@@ -1049,6 +1063,45 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     );
   }
 
+  // Workflow orchestration control plane (add-workflow-orchestration). Requires
+  // the agent registry (each workflow agent is a real session).
+  let workflowRuns: WorkflowRunRegistry | undefined;
+  if (deps.workflows && deps.agents) {
+    workflowRuns = new WorkflowRunRegistry();
+    const workflowDeps = {
+      daemon: deps.daemon,
+      agentRegistry: deps.agents.registry,
+      runRegistry: workflowRuns,
+      ownerEvents,
+      audit,
+      notifier,
+      runsDir: deps.workflows.runsDir,
+      resolveNamed: deps.workflows.resolveNamed,
+    };
+    app.post(
+      '/rc/workflows',
+      requireScope(WRITE, audit),
+      recordActivity(workingDevice),
+      createStartWorkflowRoute(workflowDeps),
+    );
+    app.get(
+      '/rc/workflows',
+      requireScope(SESSION_READ, audit),
+      createListWorkflowsRoute(workflowDeps),
+    );
+    app.get(
+      '/rc/workflows/:runId',
+      requireScope(SESSION_READ, audit),
+      createGetWorkflowRoute(workflowDeps),
+    );
+    app.post(
+      '/rc/workflows/:runId/cancel',
+      requireScope(WRITE, audit),
+      recordActivity(workingDevice),
+      createCancelWorkflowRoute(workflowDeps),
+    );
+  }
+
   return {
     app,
     notifier,
@@ -1058,5 +1111,6 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     bridgeRegistry,
     promptEvents: promptEventBroadcaster,
     agentLifecycle,
+    workflowRuns,
   };
 }
