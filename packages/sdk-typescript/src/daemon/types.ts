@@ -2045,6 +2045,26 @@ export interface DaemonSkillToggleResult {
   sessionsFailed: number;
 }
 
+export type DaemonSkillScope = 'workspace' | 'global';
+
+export type DaemonSkillInstallSource =
+  | { type: 'github'; url: string }
+  | { type: 'folder'; path: string }
+  | { type: 'zip'; contentBase64: string };
+
+export interface DaemonSkillInstallRequest {
+  name: string;
+  scope: DaemonSkillScope;
+  source: DaemonSkillInstallSource;
+}
+
+export interface DaemonSkillMutationResult {
+  skillName: string;
+  scope: DaemonSkillScope;
+  installedPath?: string;
+  deleted?: boolean;
+}
+
 export interface DaemonSettingDescriptor {
   key: string;
   type: string;

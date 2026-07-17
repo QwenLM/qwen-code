@@ -295,6 +295,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_approval_mode_control',
   'workspace_tool_toggle',
   'workspace_skill_toggle',
+  'workspace_skill_manage',
   'workspace_permissions',
   'workspace_trust',
   'workspace_init',
@@ -14269,6 +14270,34 @@ describe('createServeApp', () => {
       expect(res.body).toMatchObject({
         code: 'skill_not_toggleable',
         reason: 'not_user_invocable',
+      });
+      expect(persistDisabledSkills).not.toHaveBeenCalled();
+    });
+
+    it('returns a dedicated code for an inactive extension skill', async () => {
+      const persistDisabledSkills = vi.fn();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge({
+          workspaceSkillsImpl: async () => ({
+            v: 1,
+            workspaceCwd: WS_BOUND,
+            initialized: true,
+            skills: [
+              { ...reviewSkill, level: 'extension', status: 'disabled' },
+            ],
+          }),
+        }),
+        persistDisabledSkills,
+        primaryWorkspaceTrusted: true,
+      });
+      const res = await auth(
+        request(app).post('/workspace/skills/review/enable'),
+      ).send({ enabled: true });
+
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({
+        code: 'skill_inactive_extension',
+        reason: 'inactive_extension',
       });
       expect(persistDisabledSkills).not.toHaveBeenCalled();
     });

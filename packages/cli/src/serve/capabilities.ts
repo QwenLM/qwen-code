@@ -152,6 +152,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // (`tools.disabled` is consulted at `Config` construction time).
   workspace_tool_toggle: { since: 'v1' },
   workspace_skill_toggle: { since: 'v1' },
+  workspace_skill_manage: { since: 'v1' },
   workspace_settings: { since: 'v1' },
   // `GET /workspace/permissions` is always available when this tag is
   // advertised. `POST /workspace/permissions` updates the active ACP
