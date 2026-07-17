@@ -67,7 +67,11 @@ export function initializeWebviewLogger(): void {
     const original = globalThis.console[level].bind(globalThis.console);
     globalThis.console[level] = (...args: unknown[]) => {
       original(...args);
-      postLog(level, args);
+      try {
+        postLog(level, args);
+      } catch {
+        // Logging must not crash the webview caller.
+      }
     };
   }
 }

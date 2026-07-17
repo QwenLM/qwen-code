@@ -584,7 +584,7 @@ describe('WebViewProvider.attachToView', () => {
     const { messageHandler } = await setupAttachedProvider({
       captureMessageHandler: true,
     });
-    const message = `render failed\n${'x'.repeat(9_000)}`;
+    const message = `render failed\n${'x'.repeat(10_000)}`;
 
     await messageHandler?.({
       type: 'log',
@@ -593,7 +593,7 @@ describe('WebViewProvider.attachToView', () => {
 
     expect(error).toHaveBeenCalledWith(
       '[Webview]',
-      message.replace('\n', '\\n'),
+      `${message.slice(0, 10_000)}...[truncated]`.replace('\n', '\\n'),
     );
   });
 

@@ -90,10 +90,11 @@ export function createLogger(
 ): void {
   sink = (level, args) => {
     const label = level === 'log' ? 'INFO' : level.toUpperCase();
+    const line = sanitize(`[${label}] ${formatLogArgs(args)}`);
     try {
-      outputChannel.appendLine(sanitize(`[${label}] ${formatLogArgs(args)}`));
+      outputChannel.appendLine(line);
     } catch {
-      globalThis.console[level](...args);
+      globalThis.console[level](line);
     }
   };
 }

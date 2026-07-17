@@ -45,6 +45,7 @@ import { isLogLevel, logger } from '../../utils/logger.js';
 
 /** Threshold (ms) before a completed task triggers a notification. */
 const LONG_TASK_THRESHOLD_MS = 20_000;
+const MAX_WEBVIEW_LOG_LENGTH = 10_000;
 
 /** Possible tab-dot colours. */
 const DotColor = {
@@ -1844,10 +1845,11 @@ export class WebViewProvider {
         | { level?: unknown; message?: unknown }
         | undefined;
       if (isLogLevel(data?.level) && typeof data.message === 'string') {
-        logger[data.level](
-          '[Webview]',
-          data.message.replace(/\r\n|\r|\n/g, '\\n'),
-        );
+        const message =
+          data.message.length > MAX_WEBVIEW_LOG_LENGTH
+            ? `${data.message.slice(0, MAX_WEBVIEW_LOG_LENGTH)}...[truncated]`
+            : data.message;
+        logger[data.level]('[Webview]', message.replace(/\r\n|\r|\n/g, '\\n'));
       }
       return true;
     }

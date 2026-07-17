@@ -41,4 +41,29 @@ describe('initializeWebviewLogger', () => {
       },
     });
   });
+
+  it('keeps console calls alive when log forwarding fails', async () => {
+    const postMessage = vi.fn(() => {
+      throw new Error('disposed');
+    });
+    vi.stubGlobal('console', {
+      debug: vi.fn(),
+      error: vi.fn(),
+      info: vi.fn(),
+      log: vi.fn(),
+      warn: vi.fn(),
+    });
+    const warn = vi.mocked(console.warn);
+    vi.stubGlobal('acquireVsCodeApi', () => ({
+      postMessage,
+      getState: vi.fn(),
+      setState: vi.fn(),
+    }));
+    const { initializeWebviewLogger } = await import('./useVSCode.js');
+
+    initializeWebviewLogger();
+
+    expect(() => console.warn('late warning')).not.toThrow();
+    expect(warn).toHaveBeenCalledWith('late warning');
+  });
 });

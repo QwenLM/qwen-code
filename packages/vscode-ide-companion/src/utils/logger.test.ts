@@ -72,7 +72,7 @@ describe('logger', () => {
     expect(isLogLevel(undefined)).toBe(false);
   });
 
-  it('falls back to console when the output channel write fails', () => {
+  it('falls back to sanitized console output when the channel write fails', () => {
     const outputChannel = {
       appendLine: vi.fn(() => {
         throw new Error('disposed');
@@ -81,10 +81,18 @@ describe('logger', () => {
     const error = vi
       .spyOn(console, 'error')
       .mockImplementation(() => undefined);
-    createLogger(outputChannel);
+    createLogger(outputChannel, redactLogCredentials);
 
-    logger.error('late failure');
+    logger.error('late failure', {
+      apiKey: 'secret',
+      error: new Error('Authorization: Bearer live-token-1234567890'),
+    });
 
-    expect(error).toHaveBeenCalledWith('late failure');
+    const line = vi.mocked(error).mock.calls[0][0] as string;
+    expect(line).toContain('[ERROR] late failure');
+    expect(line).toContain('"apiKey":"<redacted>"');
+    expect(line).toContain('Authorization: <redacted>');
+    expect(line).not.toContain('secret');
+    expect(line).not.toContain('live-token-1234567890');
   });
 });
