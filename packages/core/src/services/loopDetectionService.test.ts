@@ -208,6 +208,25 @@ describe('LoopDetectionService', () => {
       );
     });
 
+    it('treats reordered argument fields as identical for the consecutive guard', () => {
+      // canonicalizeForHash makes the consecutive-identical guard see the same
+      // call with fields in different insertion orders as identical, so a stuck
+      // model cannot evade it by reordering keys. Pins the canonicalization
+      // contract for this always-on detector (not just the adaptive cap).
+      let fired = false;
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD; i++) {
+        const args = i % 2 === 0 ? { a: 1, b: 2 } : { b: 2, a: 1 };
+        fired = service.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('stuck_tool', args),
+        );
+        if (fired) break;
+      }
+      expect(fired).toBe(true);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+      );
+    });
+
     it('always-on consecutive guard honors an in-session disable', () => {
       service.disableForSession();
       const event = createToolCallRequestEvent('stuck_tool', { p: 'same' });
@@ -1485,20 +1504,21 @@ describe('LoopDetectionService', () => {
     });
 
     it('treats reordered argument fields as one call for the stuck signal', () => {
-      // getToolCallKey canonicalizes object keys, so the same semantic call
-      // with fields in different insertion orders hashes to the same key and
-      // accumulates as repeats. Without canonicalization each permutation
-      // would be a distinct key and the stuck signal would never build. The
-      // variants are interleaved with distinct fillers so the
-      // consecutive-identical guard does not fire first.
+      // getToolCallKey canonicalizes object keys recursively, so the same
+      // semantic call with fields in different insertion orders — at the top
+      // level AND inside nested objects — hashes to the same key and
+      // accumulates as repeats. Without canonicalization (or if the recursion
+      // broke) each permutation would be a distinct key and the stuck signal
+      // would never build. The variants are interleaved with distinct fillers
+      // so the consecutive-identical guard does not fire first.
       service.reset('');
       const variants = [
-        { a: 1, b: 2, c: 3 },
-        { b: 2, c: 3, a: 1 },
-        { c: 3, a: 1, b: 2 },
-        { a: 1, c: 3, b: 2 },
-        { b: 2, a: 1, c: 3 },
-        { c: 3, b: 2, a: 1 },
+        { a: 1, b: 2, c: 3, nested: { x: 10, y: 20 } },
+        { nested: { y: 20, x: 10 }, c: 3, b: 2, a: 1 },
+        { b: 2, a: 1, nested: { x: 10, y: 20 }, c: 3 },
+        { c: 3, nested: { y: 20, x: 10 }, a: 1, b: 2 },
+        { nested: { x: 10, y: 20 }, a: 1, c: 3, b: 2 },
+        { b: 2, c: 3, a: 1, nested: { y: 20, x: 10 } },
       ];
       let fired = false;
       for (let i = 0; i < SOFT_CAP + variants.length && !fired; i++) {
