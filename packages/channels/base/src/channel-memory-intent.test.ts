@@ -5,24 +5,24 @@ describe('parseChannelMemoryIntent', () => {
   it('parses Chinese remember prefixes', () => {
     expect(parseChannelMemoryIntent('记住：默认使用 staging 环境')).toEqual({
       kind: 'remember',
-      text: '默认使用 staging 环境',
+      texts: ['默认使用 staging 环境'],
     });
     expect(
       parseChannelMemoryIntent('帮我记一下，发布前跑 npm run build'),
     ).toEqual({
       kind: 'remember',
-      text: '发布前跑 npm run build',
+      texts: ['发布前跑 npm run build'],
     });
     expect(parseChannelMemoryIntent('以后记住要先看 CI')).toEqual({
       kind: 'remember',
-      text: '要先看 CI',
+      texts: ['要先看 CI'],
     });
   });
 
   it('parses English remember prefixes', () => {
     expect(parseChannelMemoryIntent('remember: use staging')).toEqual({
       kind: 'remember',
-      text: 'use staging',
+      texts: ['use staging'],
     });
   });
 

@@ -2847,7 +2847,7 @@ export abstract class ChannelBase {
       try {
         result = await channelMemory.addChannelMemoryEntries(
           this.channelMemoryTarget(envelope),
-          [intent.text],
+          intent.texts,
           envelope.senderId,
         );
       } catch (error) {
@@ -2866,9 +2866,11 @@ export abstract class ChannelBase {
         const ids = result.added.map((entry) => entry.id);
         await this.sendMessage(
           envelope.chatId,
-          ids.length === 1
-            ? `Channel memory ${ids[0]} saved.`
-            : `Channel memory saved: ${ids.join(', ')}.`,
+          result.duplicateIds.length > 0
+            ? `Channel memory saved: ${ids.join(', ')}. Skipped duplicates: ${result.duplicateIds.join(', ')}.`
+            : ids.length === 1
+              ? `Channel memory ${ids[0]} saved.`
+              : `Channel memory saved: ${ids.join(', ')}.`,
         );
       } else if (result.duplicateIds.length > 0) {
         await this.sendMessage(
@@ -3118,6 +3120,7 @@ export abstract class ChannelBase {
     const result = classified as {
       intent?: unknown;
       memory?: unknown;
+      memories?: unknown;
       targetIds?: unknown;
     };
     const targetIds = result.targetIds;
@@ -3134,9 +3137,28 @@ export abstract class ChannelBase {
           : null;
 
     if (result.intent === 'remember') {
-      const memory =
-        typeof result.memory === 'string' ? result.memory.trim() : '';
-      return memory ? { kind: 'remember', text: memory } : null;
+      const hasMemory = Object.prototype.hasOwnProperty.call(result, 'memory');
+      const hasMemories = Object.prototype.hasOwnProperty.call(
+        result,
+        'memories',
+      );
+      if (hasMemory === hasMemories) return null;
+
+      const texts = hasMemory
+        ? typeof result.memory === 'string'
+          ? [result.memory.trim()]
+          : []
+        : Array.isArray(result.memories) &&
+            Array.from(result.memories).every(
+              (memory): memory is string => typeof memory === 'string',
+            )
+          ? result.memories.map((memory) => memory.trim())
+          : [];
+      return texts.length >= 1 &&
+        texts.length <= 10 &&
+        texts.every((text) => text.length > 0)
+        ? { kind: 'remember', texts }
+        : null;
     }
     if (result.intent === 'list') {
       if (resolvedEntries === undefined) return { kind: 'list', page: 1 };
