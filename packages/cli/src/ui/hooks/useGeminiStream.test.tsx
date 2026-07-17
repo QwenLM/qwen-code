@@ -5853,6 +5853,63 @@ describe('useGeminiStream', () => {
           expect.any(Number),
         );
       });
+
+      // Regression for #7114: a background task completion drains as a
+      // SendMessageType.Notification submission. Notifications are system
+      // events, not new user turns — they must not clear the active model
+      // override, or the notification turn (and everything after it) falls
+      // back to the default model, whose smaller context window can 400 on a
+      // long history.
+      it('does not clear an active model override when a background notification drains', async () => {
+        allowInlineModel();
+        mockHandleSlashCommand.mockResolvedValue({
+          type: 'submit_prompt',
+          content: 'do the thing',
+          modelOverride: 'inline-model',
+        });
+
+        const { result } = renderTestHook();
+
+        // Turn 1: the override is set and used.
+        await act(async () => {
+          await result.current.submitQuery('/model inline-model do the thing');
+        });
+        await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+        expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
+          modelOverride: 'inline-model',
+        });
+
+        mockSendMessageStream.mockClear();
+
+        // A background shell completes while the session sits on the override.
+        const callback = mockBackgroundShellRegistry.setNotificationCallback
+          .mock.calls[0][0] as (displayText: string, modelText: string) => void;
+        act(() => {
+          callback(
+            'Background shell "npm test" completed.',
+            '<task-notification>completed</task-notification>',
+          );
+        });
+
+        // The notification turn itself still runs on the overridden model.
+        await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+        expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
+          type: SendMessageType.Notification,
+          modelOverride: 'inline-model',
+        });
+
+        mockSendMessageStream.mockClear();
+        mockHandleSlashCommand.mockResolvedValue(false);
+
+        // A real user turn still clears the one-shot inline override.
+        await act(async () => {
+          await result.current.submitQuery('plain follow-up prompt');
+        });
+        await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+        expect(
+          mockSendMessageStream.mock.calls[0][3].modelOverride,
+        ).toBeUndefined();
+      });
     });
   });
 
