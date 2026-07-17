@@ -859,6 +859,51 @@ describe('the roster — who should have been here', () => {
     }
   });
 
+  it('formats the partial case on stderr: one role missing, the rest briefed', () => {
+    // The all-briefless collapse has a handler test; the partial shape reached
+    // stderr only through the pure function. A formatting regression here — a
+    // broken join, a lost `--roster` hint, a garbled `Looked for them in:` path —
+    // would ship unseen, and stderr is the interface the orchestrator acts on.
+    const p = planPr();
+    rmSync(join(promptRecordDir(p), '1c.txt'), { force: true });
+    rmSync(join(dir, 'subagents', 'S1', 'agent-r-1c.jsonl'), { force: true });
+    transcript('sec', wholeDiff(), { calls: 8 });
+
+    const prevDir = process.env['QWEN_CODE_PROJECT_DIR'];
+    const prevSession = process.env['QWEN_CODE_SESSION_ID'];
+    process.env['QWEN_CODE_PROJECT_DIR'] = ENV['QWEN_CODE_PROJECT_DIR'];
+    process.env['QWEN_CODE_SESSION_ID'] = ENV['QWEN_CODE_SESSION_ID'];
+    const prevExit = process.exitCode;
+    try {
+      vi.mocked(writeStderrLine).mockClear();
+      (checkCoverageCommand.handler as (a: Record<string, unknown>) => void)({
+        plan: p,
+        out: join(dir, 'cov.json'),
+      });
+
+      const roleError = vi
+        .mocked(writeStderrLine)
+        .mock.calls.map((c) => String(c[0]))
+        .find((l) => l.includes('required briefs never reached'));
+      expect(roleError).toBeDefined();
+      // The per-role shape, not the collapse: it names the one missing agent.
+      expect(roleError).toContain('Cross-file tracer');
+      expect(roleError).toContain('its brief never reached an agent');
+      expect(roleError).not.toContain('every dimension');
+      // The rebuild hints and the record dir survive the formatting.
+      expect(roleError).toContain(
+        '"${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan <plan> --roster',
+      );
+      expect(roleError).toContain(`Looked for them in: ${promptRecordDir(p)}`);
+    } finally {
+      process.exitCode = prevExit;
+      if (prevDir === undefined) delete process.env['QWEN_CODE_PROJECT_DIR'];
+      else process.env['QWEN_CODE_PROJECT_DIR'] = prevDir;
+      if (prevSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+      else process.env['QWEN_CODE_SESSION_ID'] = prevSession;
+    }
+  });
+
   it('catches a prompt that was built and then never used', () => {
     // Half of the failure: the command was called, so the record exists — but the
     // agent was launched with something else, or not launched at all.

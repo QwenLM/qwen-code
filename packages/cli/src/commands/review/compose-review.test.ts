@@ -943,12 +943,15 @@ describe('coverage is recomputed, never accepted', () => {
     expect(r.remediation.join(' ')).toMatch(/do not relaunch the old prompt/);
   });
 
-  it('every coverage gap the body discloses has a FIX on the remediation channel', () => {
+  it('a missing-roles gap has a FIX on the remediation channel', () => {
     // The blind agents got one; the sibling categories did not, and a body
     // disclosure with no repair command is how #7012's orchestrator ended at
     // "the agents clearly did their job". Here the test-matrix brief was never
     // built: the body says what cannot be certified, in the author's register,
     // and the remediation names the roster call, in the operator's.
+    // (Blind agents are pinned in the test above; the remaining three
+    // categories in the test below — between them, every category that
+    // discloses is asserted to repair.)
     const p = plan({ step45: false });
     transcript('a1', goodPrompt(1), { toolCalls: 3 });
     transcript('a2', goodPrompt(2), { toolCalls: 2 });
@@ -970,6 +973,46 @@ describe('coverage is recomputed, never accepted', () => {
     expect(r.remediation.join(' ')).toContain(
       '"${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan <plan> --roster',
     );
+  });
+
+  it('rewritten, unread-brief and never-opened gaps each carry their FIX too', () => {
+    // The categories the missing-roles test above does not reach — without this,
+    // dropping any one of their `remediation.push` calls would fail no test, which
+    // is precisely the disclosure-without-repair state the channel exists to
+    // prevent. One plan, three defects: chunk 1's agent ran on a hand-written
+    // prompt (rewritten), chunk 2's got the built prompt and never opened its
+    // brief (unread), and a third agent got chunk 1's built prompt and never
+    // opened the diff (unopened).
+    const p = plan();
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p); // roster satisfied: these three categories, nothing else
+    transcript(
+      'a1',
+      `You are reviewing chunk 1 of 2.\n` +
+        `read_file(file_path="${DIFF}", offset=0, limit=100)`,
+      { toolCalls: 3 },
+    );
+    transcript('a2', goodPrompt(2), { toolCalls: 3, opens: [] });
+    transcript('a3', goodPrompt(1), {
+      toolCalls: 0,
+      opens: [briefPath(p, 'chunk-1')],
+    });
+
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).not.toBe('APPROVE');
+    const fixes = r.remediation.join(' ');
+    expect(fixes).toMatch(/rewritten launches: re-run/);
+    expect(fixes).toMatch(/unread briefs: relaunch/);
+    expect(fixes).toMatch(/agents that never opened the diff: relaunch/);
+    // And none of the three disclosures drags a command into the body.
+    expect(r.body).not.toMatch(/agent-prompt|--roster|--chunk/);
   });
 
   it('caps when the transcripts cannot be read at all — and says so', () => {
