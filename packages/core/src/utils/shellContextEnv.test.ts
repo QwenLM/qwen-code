@@ -121,6 +121,27 @@ describe('getShellContextEnvVars', () => {
     expect(childEnv['QWEN_CODE_CLI']).toBe('');
   });
 
+  it('an EXECUTABLE shebang-less .js is filtered by the header check itself', () => {
+    // The other shebang-less test writes a 0644 file, which the X_OK check
+    // rejects before the header is ever read — leaving the shebang-reading
+    // branch untested for its primary real-world target: a desktop vendored
+    // dist/cli.js that IS executable and still has no shebang. A regression in
+    // the header read (wrong byte count, offset, or comparison) would have
+    // passed every test.
+    const dir = mkdtempSync(join(tmpdir(), 'cli-exec-nosb-'));
+    try {
+      const bundle = join(dir, 'cli.js');
+      writeFileSync(bundle, '"use strict";\nconsole.log("bundle");\n', {
+        mode: 0o755,
+      });
+      process.env['QWEN_CODE_CLI'] = bundle;
+      const childEnv = { ...process.env, ...getShellContextEnvVars() };
+      expect(childEnv['QWEN_CODE_CLI']).toBe('');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('a shebang-bearing script with no execute bit is filtered too — EACCES is not an entry', () => {
     // The header check alone passes a 0644 script, and the shell then dies on
     // EACCES instead of falling back. Execute permission is part of "the shell

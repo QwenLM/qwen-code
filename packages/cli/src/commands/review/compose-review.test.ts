@@ -987,7 +987,7 @@ describe('coverage is recomputed, never accepted', () => {
     // The FIX names the run's REAL plan path — a `<plan>` placeholder pasted
     // literally parses as a shell redirection.
     expect(r.remediation.join(' ')).toContain(
-      `"\${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan ${p} --roster`,
+      `"\${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan '${p}' --roster`,
     );
   });
 

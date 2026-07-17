@@ -896,7 +896,7 @@ describe('the roster — who should have been here', () => {
       // run's REAL plan path substituted, not a `<plan>` placeholder a literal
       // paste would parse as a shell redirection.
       expect(roleError).toContain(
-        `"\${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan ${p} --roster`,
+        `"\${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan '${p}' --roster`,
       );
       expect(roleError).toContain(`Looked for them in: ${promptRecordDir(p)}`);
     } finally {
@@ -1419,7 +1419,7 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     // skill prescribes could never run.
     expect(fix).toContain(
       `"\${QWEN_CODE_CLI:-qwen}" review agent-prompt ` +
-        `--plan ${p} --role reverse-audit --findings <file>`,
+        `--plan '${p}' --role reverse-audit --findings <file>`,
     );
     expect(fix).not.toContain('<plan>');
     expect(fix).toMatch(/no round number/);

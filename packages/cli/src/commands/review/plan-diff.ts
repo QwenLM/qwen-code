@@ -41,10 +41,15 @@ interface PlanDiffArgs {
   repo?: string;
 }
 
-/** A plan for a diff nobody fetched: no worktree, no PR metadata. */
+/** A plan for a diff nobody fetched: no worktree — and PR identity only when
+ *  the caller resolved one (--pr/--repo, lightweight cross-repo mode). Declared
+ *  here so a refactor away from the conditional spread cannot silently drop the
+ *  fields the roster's Agent-0 requirement reads. */
 type PlanDiffResult = PlanReport & {
   diffPath: string;
   diffPathAbsolute: string;
+  prNumber?: string;
+  ownerRepo?: string;
 };
 
 function runPlanDiff(args: PlanDiffArgs): void {
