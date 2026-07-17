@@ -41,6 +41,8 @@ export interface PermissionFlowResult {
   denyMessage?: string;
   /** Permission check context (needed for injectPermissionRulesIfMissing) */
   pmCtx: ReturnType<typeof buildPermissionCheckContext>;
+  /** Whether automatic approval paths must be bypassed for this invocation. */
+  requiresUserInteraction: boolean;
 }
 
 /**
@@ -77,13 +79,20 @@ export async function evaluatePermissionFlow(
     defaultPermission,
     pmCtx,
   );
+  const requiresUserInteraction =
+    invocation.requiresUserInteraction?.() === true;
+  const effectivePermission =
+    requiresUserInteraction && finalPermission !== 'deny'
+      ? 'ask'
+      : finalPermission;
 
   // Build result
   const result: PermissionFlowResult = {
     defaultPermission,
-    finalPermission: finalPermission as PermissionFlowPermission,
+    finalPermission: effectivePermission as PermissionFlowPermission,
     pmForcedAsk,
     pmCtx,
+    requiresUserInteraction,
   };
 
   // Add deny message if denied
@@ -116,7 +125,14 @@ export function needsConfirmation(
   finalPermission: PermissionFlowPermission,
   approvalMode: ApprovalMode,
   toolName: string,
+  requiresUserInteraction = false,
 ): boolean {
+  if (finalPermission === 'deny') {
+    return false;
+  }
+  if (requiresUserInteraction) {
+    return true;
+  }
   const isAskUserQuestionTool = toolName === ToolNames.ASK_USER_QUESTION;
 
   // YOLO mode auto-approves everything except ask_user_question

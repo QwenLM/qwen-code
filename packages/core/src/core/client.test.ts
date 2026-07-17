@@ -961,6 +961,10 @@ describe('Gemini Client (client.ts)', () => {
         SessionStartSource.Resume,
         SessionStartSource.Clear,
       ]);
+      for (const [, options] of sessionStartProfilerMocks
+        .createSessionStartProfiler.mock.calls) {
+        expect(options).toEqual({ sessionId: 'test-session-id' });
+      }
       expect(
         sessionStartProfilerMocks.profilers[1].finish,
       ).toHaveBeenCalledWith(

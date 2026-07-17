@@ -53,6 +53,13 @@ export interface ToolInvocation<
   getDefaultPermission(): Promise<PermissionDecision>;
 
   /**
+   * Whether this invocation must be approved through an explicit host/user
+   * interaction. Permission rules and automatic approval modes cannot satisfy
+   * this requirement.
+   */
+  requiresUserInteraction?(): boolean;
+
+  /**
    * Constructs the confirmation dialog details for this invocation.
    * Only called when the final permission decision is `'ask'` and the user
    * needs to be prompted interactively.
@@ -99,6 +106,10 @@ export abstract class BaseToolInvocation<
    */
   getDefaultPermission(): Promise<PermissionDecision> {
     return Promise.resolve('allow');
+  }
+
+  requiresUserInteraction(): boolean {
+    return false;
   }
 
   /**
@@ -779,8 +790,8 @@ export interface ToolEditConfirmationDetails {
   ) => Promise<void>;
   /**
    * When true, the UI should not show "Always allow" options (ProceedAlwaysProject/User).
-   * Set by coreToolScheduler when PM has an explicit 'ask' rule that would override
-   * any 'allow' rule the user might add.
+   * Set when an explicit interaction or PM 'ask' rule cannot be replaced by
+   * a persisted allow rule.
    */
   hideAlwaysAllow?: boolean;
   fileName: string;

@@ -1271,7 +1271,9 @@ export class GeminiClient {
     clearCacheSafeParams();
 
     let effectiveExtraHistory = extraHistory;
-    const profiler = createSessionStartProfiler(sessionStartSource);
+    const profiler = createSessionStartProfiler(sessionStartSource, {
+      sessionId: this.config.getSessionId(),
+    });
     let history: Content[] = [];
     let snapshotEntries: AvailableSkillEntry[] = [];
     let deferredReminderCount = 0;

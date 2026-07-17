@@ -7,9 +7,9 @@
 There are two current host modes:
 
 - `qwen channel start [name]` is the standalone ACP-backed channel service. It passes adapters an `AcpBridge` implementation of `ChannelAgentBridge`.
-- `qwen serve --channel <name>` and `qwen serve --channel all` are experimental daemon-managed modes. `qwen serve` starts one out-of-process channel worker, the worker connects to the daemon through the SDK, and adapters receive a `DaemonChannelBridge`-backed `ChannelAgentBridge` facade.
+- `qwen serve --channel <name>` and `qwen serve --channel all` are experimental daemon-managed modes. Named selections are grouped by owning workspace and `qwen serve` starts one out-of-process worker per owning runtime; each worker connects to the daemon through the SDK and adapters receive a `DaemonChannelBridge`-backed `ChannelAgentBridge` facade. `--channel all` remains a primary-only selection.
 
-In daemon-managed mode, each channel maps inbound chat traffic to daemon sessions under a configurable `SessionScope` (`user`, `thread`, or `single`). The adapter delegates to `DaemonChannelBridge`, which delegates to the SDK's `DaemonSessionClient` (see [`13-sdk-daemon-client.md`](./13-sdk-daemon-client.md)). Channel workers remain primary-workspace only in Phase 2a, so every selected channel's `cwd` must resolve to the daemon primary workspace.
+In daemon-managed mode, each channel maps inbound chat traffic to daemon sessions under a configurable `SessionScope` (`user`, `thread`, or `single`). The adapter delegates to `DaemonChannelBridge`, which delegates to the SDK's `DaemonSessionClient` (see [`13-sdk-daemon-client.md`](./13-sdk-daemon-client.md)). Every named channel must resolve to one registered, trusted workspace. The worker uses that runtime's canonical cwd, `QWEN_DAEMON_WORKSPACE`, and environment overlay; ownership resolution never falls back to primary.
 
 ### Webhook-triggered channel tasks
 

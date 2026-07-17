@@ -471,6 +471,7 @@ export interface ServeAppDeps {
   workspaceRuntimeRemoval?: WorkspaceRuntimeRemovalController;
   primaryWorkspaceTrusted?: boolean;
   primaryRuntimeEnv?: WorkspaceRuntimeEnvMetadata;
+  daemonEnv?: Readonly<NodeJS.ProcessEnv>;
   voiceTranscriber?: WorkspaceVoiceRouteDeps['transcribe'];
   voiceCoordinator?: WorkspaceVoiceCoordinator;
 }
@@ -890,6 +891,9 @@ export function createServeApp(
   (app.locals as { workspaceRegistry?: WorkspaceRegistry }).workspaceRegistry =
     workspaceRegistry;
   const primaryRuntime = workspaceRegistry.primary;
+  const daemonEnv = deps.daemonEnv ?? process.env;
+  const primaryRuntimeEffectiveEnv =
+    getRuntimeEffectiveEnv(primaryRuntime.env) ?? daemonEnv;
   const voiceCoordinator =
     deps.voiceCoordinator ?? new WorkspaceVoiceCoordinator();
   const primaryBoundWorkspace = primaryRuntime.workspaceCwd;
@@ -1248,6 +1252,7 @@ export function createServeApp(
   registerWorkspaceSetupGithubRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
+    env: primaryRuntimeEffectiveEnv,
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
@@ -1676,6 +1681,7 @@ export function createServeApp(
   // route through the JSON error contract below.
   acpHandleRef.current = mountAcpHttp(app, primaryBridge, {
     boundWorkspace: primaryBoundWorkspace,
+    daemonEnv,
     // Phase 4 (issue #6378): pass the registry so `/workspaces/:workspace/acp`
     // mounts a per-runtime ACP dispatcher for each registered workspace.
     workspaceRegistry,
