@@ -809,6 +809,42 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('agents.maxParallelAgentsByModel', () => {
+    it('configures a per-model background task concurrency cap', () => {
+      const config = new Config({
+        ...baseParams,
+        agents: {
+          maxParallelAgentsByModel: { 'weak-model': 1 },
+        },
+      });
+      const registry = config.getBackgroundTaskRegistry();
+
+      registry.register({
+        agentId: 'bg-1',
+        description: 'one',
+        model: 'weak-model',
+        isBackgrounded: true,
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        outputFile: '/tmp/bg-1.jsonl',
+      });
+
+      expect(() =>
+        registry.register({
+          agentId: 'bg-2',
+          description: 'two',
+          model: 'weak-model',
+          isBackgrounded: true,
+          status: 'running',
+          startTime: Date.now(),
+          abortController: new AbortController(),
+          outputFile: '/tmp/bg-2.jsonl',
+        }),
+      ).toThrow('for model "weak-model" (1) reached');
+    });
+  });
+
   describe('getTeamMemoryEnabled', () => {
     const prevEnv = process.env['QWEN_CODE_MEMORY_TEAM'];
     afterEach(() => {

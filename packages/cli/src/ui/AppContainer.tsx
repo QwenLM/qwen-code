@@ -2978,7 +2978,7 @@ export const AppContainer = (props: AppContainerProps) => {
     stickyTodos !== null &&
     !dialogsVisible &&
     !isFeedbackDialogOpen &&
-    streamingState !== StreamingState.WaitingForConfirmation;
+    streamingState === StreamingState.Responding;
   const stickyTodoWidth = Math.min(mainAreaWidth, 64);
   const stickyTodoMaxVisibleItems =
     getStickyTodoMaxVisibleItems(terminalHeight);
