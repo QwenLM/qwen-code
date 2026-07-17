@@ -2344,6 +2344,22 @@ export const MessageList = memo(
     const pendingOverflowFrame = useRef<number | undefined>(undefined);
     catchingUpRef.current = catchingUp;
     const containerRef = useRef<HTMLDivElement>(null);
+    const [olderHistoryAnchor, setOlderHistoryAnchor] = useState<{
+      scrollHeight: number;
+      scrollTop: number;
+    } | null>(null);
+
+    useLayoutEffect(() => {
+      if (!olderHistoryAnchor) return;
+      const current = containerRef.current;
+      if (current) {
+        current.scrollTop =
+          olderHistoryAnchor.scrollTop +
+          Math.max(0, current.scrollHeight - olderHistoryAnchor.scrollHeight);
+      }
+      olderHistoryLoadInFlight.current = false;
+      setOlderHistoryAnchor(null);
+    }, [olderHistoryAnchor]);
 
     const reportCanScrollToBottom = useCallback(() => {
       const el = containerRef.current;
@@ -2934,14 +2950,13 @@ export const MessageList = memo(
       followPausedByUserRef.current = true;
       try {
         await onLoadOlderHistory();
-        window.requestAnimationFrame(() => {
-          const current = containerRef.current;
-          if (!current) return;
-          current.scrollTop =
-            previousTop + Math.max(0, current.scrollHeight - previousHeight);
+        setOlderHistoryAnchor({
+          scrollHeight: previousHeight,
+          scrollTop: previousTop,
         });
-      } finally {
+      } catch (error) {
         olderHistoryLoadInFlight.current = false;
+        throw error;
       }
     }, [loadingOlderHistory, onLoadOlderHistory]);
 

@@ -652,6 +652,23 @@ export function sendBridgeError(
         });
         return;
       }
+      if (kind === 'transcript_page_too_large') {
+        const d = data as {
+          sessionId?: string;
+          pageBytes?: number;
+          maxBytes?: number;
+        };
+        res.status(413).json({
+          error: errorMessage(err),
+          code: 'transcript_page_too_large',
+          ...(d.sessionId ? { sessionId: d.sessionId } : {}),
+          ...(typeof d.pageBytes === 'number'
+            ? { pageBytes: d.pageBytes }
+            : {}),
+          ...(typeof d.maxBytes === 'number' ? { maxBytes: d.maxBytes } : {}),
+        });
+        return;
+      }
     }
   }
   // 5xx is the kind of error operators need to see in their daemon log

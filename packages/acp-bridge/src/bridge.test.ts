@@ -2923,12 +2923,12 @@ describe('createAcpSessionBridge', () => {
                 {
                   sessionUpdate: 'user_message_chunk',
                   content: { type: 'text', text: `old-${'x'.repeat(600)}` },
-                  _meta: { recordId: 'record-1' },
+                  _meta: { 'qwen.session.recordId': 'record-1' },
                 },
                 {
                   sessionUpdate: 'agent_message_chunk',
                   content: { type: 'text', text: `new-${'y'.repeat(600)}` },
-                  _meta: { recordId: 'record-2' },
+                  _meta: { 'qwen.session.recordId': 'record-2' },
                 },
               ],
             },

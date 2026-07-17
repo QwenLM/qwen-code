@@ -78,7 +78,7 @@ function replayRecordId(event: BridgeEvent): string | undefined {
   if (!meta || typeof meta !== 'object' || Array.isArray(meta)) {
     return undefined;
   }
-  const recordId = (meta as Record<string, unknown>)['recordId'];
+  const recordId = (meta as Record<string, unknown>)['qwen.session.recordId'];
   return typeof recordId === 'string' ? recordId : undefined;
 }
 

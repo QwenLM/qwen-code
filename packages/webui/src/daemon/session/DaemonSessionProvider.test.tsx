@@ -8496,7 +8496,7 @@ describe('DaemonSessionProvider', () => {
               update: {
                 sessionUpdate: 'user_message_chunk',
                 content: { type: 'text', text: 'complete history' },
-                _meta: { recordId: 'record-1' },
+                _meta: { 'qwen.session.recordId': 'record-1' },
               },
             },
           },
@@ -8545,7 +8545,7 @@ describe('DaemonSessionProvider', () => {
         update: {
           sessionUpdate: 'user_message_chunk',
           content: { type: 'text', text },
-          ...(recordId ? { _meta: { recordId } } : {}),
+          ...(recordId ? { _meta: { 'qwen.session.recordId': recordId } } : {}),
         },
       },
     });
@@ -8620,7 +8620,7 @@ describe('DaemonSessionProvider', () => {
         update: {
           sessionUpdate: 'user_message_chunk',
           content: { type: 'text', text },
-          ...(recordId ? { _meta: { recordId } } : {}),
+          ...(recordId ? { _meta: { 'qwen.session.recordId': recordId } } : {}),
         },
       },
     });
@@ -8690,7 +8690,7 @@ describe('DaemonSessionProvider', () => {
         update: {
           sessionUpdate: kind,
           content: { type: 'text', text },
-          _meta: { recordId },
+          _meta: { 'qwen.session.recordId': recordId },
         },
       },
     });
@@ -8750,7 +8750,7 @@ describe('DaemonSessionProvider', () => {
         update: {
           sessionUpdate: 'user_message_chunk',
           content: { type: 'text', text },
-          ...(recordId ? { _meta: { recordId } } : {}),
+          ...(recordId ? { _meta: { 'qwen.session.recordId': recordId } } : {}),
         },
       },
     });

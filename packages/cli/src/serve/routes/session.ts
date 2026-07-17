@@ -13,6 +13,7 @@ import {
   SessionService,
   SessionOrganizationError,
   SESSION_TRANSCRIPT_MAX_LIMIT,
+  SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
   SessionTranscriptPageTooLargeError,
   SessionTranscriptCursorCodec,
   SessionTranscriptReader,
@@ -99,7 +100,6 @@ interface RegisterSessionRoutesDeps {
   languageCodes: string[];
 }
 
-const WORKSPACE_TRANSCRIPT_PAGE_SOURCE_MAX_BYTES = 4 * 1024 * 1024;
 const WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
 const WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES = 64 * 1024;
 const TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR =
@@ -1661,7 +1661,7 @@ export function registerSessionRoutes(
               ...(limit !== undefined ? { limit } : {}),
               ...(cursor !== undefined ? { cursor } : {}),
               ...(beforeRecordId !== undefined ? { beforeRecordId } : {}),
-              maxBytes: WORKSPACE_TRANSCRIPT_PAGE_SOURCE_MAX_BYTES,
+              maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
             });
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {

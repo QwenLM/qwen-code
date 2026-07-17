@@ -58,7 +58,9 @@ import {
   MCPOAuthTokenStorage,
   InvalidSessionTranscriptCursorError,
   SESSION_TRANSCRIPT_MAX_LIMIT,
+  SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
   SessionTranscriptReader,
+  SessionTranscriptPageTooLargeError,
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
   encodeSessionTranscriptCursor,
@@ -6308,6 +6310,7 @@ class QwenAgent implements Agent {
                 ? { beforeRecordId: rawBeforeRecordId }
                 : {}),
               ...(typeof rawLimit === 'number' ? { limit: rawLimit } : {}),
+              maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
             });
             const config = await this.getTranscriptReplayConfig(cwd, settings);
             const replay = await replayTranscriptRecordPage({
@@ -6364,6 +6367,14 @@ class QwenAgent implements Agent {
               errorKind: 'transcript_too_large',
               sessionId,
               snapshotSize: error.snapshotSize,
+              maxBytes: error.maxBytes,
+            });
+          }
+          if (error instanceof SessionTranscriptPageTooLargeError) {
+            throw new RequestError(-32012, error.message, {
+              errorKind: 'transcript_page_too_large',
+              sessionId,
+              pageBytes: error.pageBytes,
               maxBytes: error.maxBytes,
             });
           }

@@ -19,6 +19,7 @@ export const SESSION_TRANSCRIPT_DEFAULT_LIMIT = 100;
 export const SESSION_TRANSCRIPT_MAX_LIMIT = 500;
 export const SESSION_TRANSCRIPT_CURSOR_VERSION = 1 as const;
 export const SESSION_TRANSCRIPT_MAX_INDEX_BYTES = 256 * 1024 * 1024;
+export const SESSION_TRANSCRIPT_MAX_PAGE_BYTES = 4 * 1024 * 1024;
 
 export class InvalidSessionTranscriptCursorError extends Error {
   constructor(message = 'Invalid transcript cursor') {
@@ -1090,13 +1091,6 @@ export class SessionTranscriptReader {
       if (position < 0) {
         throw new InvalidSessionTranscriptCursorError();
       }
-    }
-    if (
-      !cursor &&
-      direction === 'backward' &&
-      options.beforeRecordId === undefined
-    ) {
-      position = index.activeUuids.length;
     }
     if (position > index.activeUuids.length) {
       debugLogger.debug(

@@ -145,7 +145,9 @@ function getPersistedReplayRecordId(event: DaemonEvent): string | undefined {
     if (!isRecord(event.data)) return undefined;
     const update = event.data['update'];
     const meta = isRecord(update) ? update['_meta'] : event.data['_meta'];
-    return isRecord(meta) ? getString(meta, 'recordId') : undefined;
+    return isRecord(meta)
+      ? getString(meta, 'qwen.session.recordId')
+      : undefined;
   } catch {
     return undefined;
   }
