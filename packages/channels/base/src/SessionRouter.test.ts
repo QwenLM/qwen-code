@@ -1768,6 +1768,12 @@ describe('SessionRouter', () => {
       await expect(router.resolve('ch', 'alice', 'chat1')).resolves.toBe(
         'replacement-session',
       );
+      // Load-failure replacement also stamps the channel name as sourceId.
+      expect(lazyBridge.newSession).toHaveBeenCalledWith(
+        '/tmp',
+        { sourceId: 'ch' },
+        expect.any(Object),
+      );
       expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({
         'ch:alice:chat1': expect.objectContaining({
           sessionId: 'replacement-session',

@@ -95,6 +95,7 @@ interface DaemonSessionClientStaticLike {
       sessionScope: 'thread';
       approvalMode?: string;
       sourceType?: string;
+      sourceId?: string;
     },
     clientId?: string,
   ): Promise<DaemonChannelSessionClient>;
