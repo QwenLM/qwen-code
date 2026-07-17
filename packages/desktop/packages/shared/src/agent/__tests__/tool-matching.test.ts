@@ -718,6 +718,30 @@ describe('extractToolResults', () => {
     })
   })
 
+  it('does NOT emit task_backgrounded for a named teammate Agent', () => {
+    // Mirrors core dispatch: a top-level Agent with `name` set routes to a
+    // named teammate and stays foreground (the classifier excludes
+    // `name !== undefined`), so no background event even with an agentId in the
+    // result. Parallels the web-shell classifier's named-teammate coverage.
+    toolIndex.register('toolu_named_agent', 'Agent', {
+      _intent: 'Review the PR',
+      prompt: 'Review the PR',
+      name: 'reviewer',
+    })
+
+    const blocks: ContentBlock[] = [
+      makeToolResultBlock('toolu_named_agent', 'Done.\nagentId: named_agent_xyz'),
+    ]
+
+    const events = extractToolResults(blocks, null, undefined, toolIndex)
+
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({
+      type: 'tool_result',
+      toolUseId: 'toolu_named_agent',
+    })
+  })
+
   it.each([undefined, true])(
     'does NOT emit task_backgrounded for a nested Agent when the flag is %s',
     (runInBackground) => {
