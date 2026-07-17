@@ -724,6 +724,16 @@ export interface DaemonSessionListPage {
   truncated?: boolean;
 }
 
+export interface DaemonWorkspaceSessionInfo {
+  active: number;
+  archived: number;
+  total: number;
+  live?: number;
+  expensive: true;
+  cost: 'disk_scan';
+  truncated?: boolean;
+}
+
 export interface DaemonArchiveSessionsResult {
   archived: string[];
   alreadyArchived: string[];
@@ -2033,6 +2043,26 @@ export interface DaemonSkillToggleResult {
   activation: DaemonSkillToggleActivation;
   sessionsRefreshed: number;
   sessionsFailed: number;
+}
+
+export type DaemonSkillScope = 'workspace' | 'global';
+
+export type DaemonSkillInstallSource =
+  | { type: 'github'; url: string }
+  | { type: 'folder'; path: string }
+  | { type: 'zip'; contentBase64: string };
+
+export interface DaemonSkillInstallRequest {
+  name: string;
+  scope: DaemonSkillScope;
+  source: DaemonSkillInstallSource;
+}
+
+export interface DaemonSkillMutationResult {
+  skillName: string;
+  scope: DaemonSkillScope;
+  installedPath?: string;
+  deleted?: boolean;
 }
 
 export interface DaemonSettingDescriptor {

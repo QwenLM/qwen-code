@@ -22,12 +22,12 @@ import type {
 import {
   SESSION_LIST_PAGE_SIZE,
   SESSION_ORGANIZATION_FEATURE,
+  WEB_SHELL_MAX_TRANSCRIPT_BLOCKS,
 } from '../constants/sessions';
 import { useOtherWorkspaceSessions } from '../hooks/useOtherWorkspaceSessions';
 import { useScopedSessions } from '../hooks/useScopedSessions';
 import {
   hasMultipleWorkspaces,
-  isNonPrimaryWorkspaceSession,
   mergeSessionsById,
   workspaceBasename,
 } from '../utils/workspace';
@@ -115,10 +115,6 @@ export function SplitView({
     includeOtherWorkspaces &&
     hasMultipleWorkspaces(connection.capabilities);
   const scopePanesByWorkspace = Boolean(workspaceCwd) || multiWorkspace;
-  // The primary workspace cwd, for labeling picker items the same way the
-  // Session Overview labels its cards (primary → the localized tag, others →
-  // the workspace basename).
-  const primaryCwd = connection.capabilities?.workspaceCwd;
   const sessionIdsControlled = sessionIds !== undefined;
   const normalizedSessionIds = useMemo(
     () =>
@@ -397,12 +393,7 @@ export function SplitView({
                         className={styles.pickerItemWorkspace}
                         title={session.workspaceCwd}
                       >
-                        {isNonPrimaryWorkspaceSession(
-                          session.workspaceCwd,
-                          primaryCwd,
-                        )
-                          ? workspaceBasename(session.workspaceCwd)
-                          : t('sidebar.workspacePrimary')}
+                        {workspaceBasename(session.workspaceCwd)}
                       </span>
                     )}
                   </button>
@@ -478,6 +469,7 @@ export function SplitView({
                     // collide on one client identity.
                     clientId={`split-pane:${instanceId}:${sessionId}`}
                     suppressOwnUserEcho
+                    maxBlocks={WEB_SHELL_MAX_TRANSCRIPT_BLOCKS}
                   >
                     <ChatPane
                       title={titleById.get(sessionId)}

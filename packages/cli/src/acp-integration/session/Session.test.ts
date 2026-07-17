@@ -843,16 +843,15 @@ describe('Session', () => {
     // bridge demux from emitting a second, duplicate legacy frame. Unlike
     // `setMode` (which omits the flag), a regression dropping it here would
     // double-publish to the IDE companion. (A2)
-    it('marks the extNotification legacyFrameSent so the demux skips its dual-emit', async () => {
+    it('reports the actual mode and marks a successful legacy frame', async () => {
+      mockConfig.getApprovalMode = vi
+        .fn()
+        .mockReturnValue(ApprovalMode.AUTO_EDIT);
       await (
         session as unknown as {
-          sendCurrentModeUpdateNotification: (
-            outcome: core.ToolConfirmationOutcome,
-          ) => Promise<void>;
+          sendCurrentModeUpdateNotification: () => Promise<void>;
         }
-      ).sendCurrentModeUpdateNotification(
-        core.ToolConfirmationOutcome.ProceedAlways,
-      );
+      ).sendCurrentModeUpdateNotification();
 
       expect(mockClient.extNotification).toHaveBeenCalledWith(
         'qwen/notify/session/mode-update',
@@ -861,6 +860,26 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           currentModeId: 'auto-edit',
           legacyFrameSent: true,
+        }),
+      );
+    });
+
+    it('still sends the side-channel when the legacy notification fails', async () => {
+      vi.mocked(mockClient.sessionUpdate).mockRejectedValueOnce(
+        new Error('legacy unavailable'),
+      );
+
+      await (
+        session as unknown as {
+          sendCurrentModeUpdateNotification: () => Promise<void>;
+        }
+      ).sendCurrentModeUpdateNotification();
+
+      expect(mockClient.extNotification).toHaveBeenCalledWith(
+        'qwen/notify/session/mode-update',
+        expect.objectContaining({
+          currentModeId: ApprovalMode.DEFAULT,
+          legacyFrameSent: false,
         }),
       );
     });
@@ -9750,6 +9769,122 @@ describe('Session', () => {
       expect(executeSpy).toHaveBeenCalled();
     });
 
+    it('keeps exit_plan_mode in PLAN until ACP approval executes and then notifies once', async () => {
+      let mode = ApprovalMode.PLAN;
+      const hookSpy = vi
+        .spyOn(core, 'firePermissionRequestHook')
+        .mockResolvedValue({
+          hasDecision: true,
+          shouldAllow: true,
+          updatedInput: { plan: 'Hook-replaced plan' },
+          denyMessage: undefined,
+        });
+      const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+      const executeSpy = vi.fn().mockImplementation(async () => {
+        const updatesBeforeExecute = vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.filter(
+            ([params]) => params.update.sessionUpdate === 'current_mode_update',
+          );
+        expect(mode).toBe(ApprovalMode.PLAN);
+        expect(updatesBeforeExecute).toHaveLength(0);
+        mode = ApprovalMode.DEFAULT;
+        return { llmContent: 'approved', returnDisplay: 'approved' };
+      });
+      const invocation = {
+        params: { plan: 'Original plan' },
+        requiresUserInteraction: vi.fn().mockReturnValue(true),
+        getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'plan',
+          title: 'Approve plan',
+          plan: 'Original plan',
+          hideAlwaysAllow: true,
+          onConfirm: onConfirmSpy,
+        }),
+        getDescription: vi.fn().mockReturnValue('Plan:'),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: executeSpy,
+      };
+      const tool = {
+        name: core.ToolNames.EXIT_PLAN_MODE,
+        kind: core.Kind.Think,
+        build: vi.fn().mockReturnValue(invocation),
+      };
+
+      mockToolRegistry.getTool.mockReturnValue(tool);
+      mockConfig.getApprovalMode = vi.fn(() => mode);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-exit-plan',
+                  name: core.ToolNames.EXIT_PLAN_MODE,
+                  args: { plan: 'Original plan' },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'approve the plan' }],
+        });
+      } finally {
+        hookSpy.mockRestore();
+      }
+
+      expect(mockClient.requestPermission).toHaveBeenCalledWith(
+        expect.objectContaining({
+          options: [
+            expect.objectContaining({
+              kind: 'allow_once',
+              optionId: core.ToolConfirmationOutcome.RestorePrevious,
+            }),
+            expect.objectContaining({
+              kind: 'allow_always',
+              optionId: core.ToolConfirmationOutcome.ProceedAlways,
+            }),
+            expect.objectContaining({
+              kind: 'allow_once',
+              optionId: core.ToolConfirmationOutcome.ProceedOnce,
+            }),
+            expect.objectContaining({
+              kind: 'reject_once',
+              optionId: core.ToolConfirmationOutcome.Cancel,
+            }),
+          ],
+          toolCall: expect.objectContaining({
+            kind: 'switch_mode',
+            rawInput: { plan: 'Original plan' },
+          }),
+        }),
+      );
+      expect(onConfirmSpy).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.ProceedOnce,
+        { answers: undefined },
+      );
+      expect(invocation.params).toEqual({ plan: 'Original plan' });
+      const modeUpdates = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.filter(
+          ([params]) => params.update.sessionUpdate === 'current_mode_update',
+        );
+      expect(modeUpdates).toHaveLength(1);
+      expect(modeUpdates[0]?.[0].update).toMatchObject({
+        currentModeId: ApprovalMode.DEFAULT,
+      });
+    });
+
     it('routes ACP protected L4 allow writes through AUTO review', async () => {
       const cwd = '/repo';
       let denialState = {
@@ -12526,6 +12661,58 @@ describe('Session', () => {
       });
       expect(failedPermissionExecute).not.toHaveBeenCalled();
       expect(laterExecute).not.toHaveBeenCalled();
+    });
+
+    it('keeps plan mode and gives manual guidance when switch_mode approval is unavailable', async () => {
+      const execute = vi.fn();
+      const onConfirm = vi.fn().mockResolvedValue(undefined);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.EXIT_PLAN_MODE,
+        kind: core.Kind.Think,
+        build: vi.fn().mockReturnValue({
+          params: { plan: 'Plan' },
+          requiresUserInteraction: vi.fn().mockReturnValue(true),
+          getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+          getConfirmationDetails: vi.fn().mockResolvedValue({
+            type: 'plan',
+            title: 'Approve plan',
+            plan: 'Plan',
+            onConfirm,
+          }),
+          getDescription: vi.fn().mockReturnValue('Plan:'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute,
+        }),
+      });
+      vi.mocked(mockClient.requestPermission).mockRejectedValueOnce(
+        new Error('switch_mode unsupported'),
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-plan-failed', [
+        {
+          id: 'exit_plan_call',
+          name: core.ToolNames.EXIT_PLAN_MODE,
+          args: { plan: 'Plan' },
+        },
+      ]);
+
+      expect(result.parts[0]?.functionResponse?.response).toEqual({
+        error: expect.stringMatching(/mode selector.*\/plan exit/),
+      });
+      expect(onConfirm).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.Cancel,
+      );
+      expect(execute).not.toHaveBeenCalled();
+      expect(
+        vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.some(
+            ([params]) => params.update.sessionUpdate === 'current_mode_update',
+          ),
+      ).toBe(false);
     });
 
     it('cleans up Agent sub-agent listeners when permission request fails before execution', async () => {

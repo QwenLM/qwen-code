@@ -541,6 +541,12 @@ export class PermissionController extends BaseController {
   private async handleOutgoingPermissionRequest(
     toolCall: WaitingToolCall,
   ): Promise<void> {
+    const requiresUserInteraction =
+      toolCall.invocation?.requiresUserInteraction?.() === true;
+    const interactionUnavailableMessage =
+      toolCall.request.name === ToolNames.EXIT_PLAN_MODE
+        ? 'The host could not present plan-exit approval. Use the host mode selector or /plan exit to leave plan mode.'
+        : `The host could not present the required approval for "${toolCall.request.name}".`;
     try {
       // Check if already aborted
       if (this.context.abortSignal?.aborted) {
@@ -552,8 +558,16 @@ export class PermissionController extends BaseController {
 
       const inputFormat = this.context.config.getInputFormat?.();
       const isStreamJsonMode = inputFormat === InputFormat.STREAM_JSON;
-
       if (!isStreamJsonMode) {
+        if (requiresUserInteraction) {
+          await toolCall.confirmationDetails.onConfirm(
+            ToolConfirmationOutcome.Cancel,
+            {
+              cancelMessage: interactionUnavailableMessage,
+            },
+          );
+          return;
+        }
         // No SDK available - use local permission check
         const modeCheck = this.checkPermissionMode();
         const outcome = modeCheck.allowed
@@ -585,6 +599,11 @@ export class PermissionController extends BaseController {
       if (response.subtype !== 'success') {
         await toolCall.confirmationDetails.onConfirm(
           ToolConfirmationOutcome.Cancel,
+          requiresUserInteraction
+            ? {
+                cancelMessage: interactionUnavailableMessage,
+              }
+            : undefined,
         );
         return;
       }
@@ -593,6 +612,12 @@ export class PermissionController extends BaseController {
       const behavior = String(payload['behavior'] || '').toLowerCase();
 
       if (behavior === 'allow') {
+        if (requiresUserInteraction) {
+          await toolCall.confirmationDetails.onConfirm(
+            ToolConfirmationOutcome.ProceedOnce,
+          );
+          return;
+        }
         // Handle updated input if provided. The SDK's `can_use_tool`
         // callback returns `updatedInput` — the (possibly sanitised)
         // tool args the host wants executed. For most tools this simply
@@ -644,7 +669,14 @@ export class PermissionController extends BaseController {
       // On error, pass error message as cancel message
       // Only pass payload for exec and mcp types that support it
       const confirmationType = toolCall.confirmationDetails.type;
-      if (['edit', 'exec', 'mcp'].includes(confirmationType)) {
+      if (requiresUserInteraction) {
+        await toolCall.confirmationDetails.onConfirm(
+          ToolConfirmationOutcome.Cancel,
+          {
+            cancelMessage: interactionUnavailableMessage,
+          },
+        );
+      } else if (['edit', 'exec', 'mcp'].includes(confirmationType)) {
         const execOrMcpDetails = toolCall.confirmationDetails as
           | ToolExecuteConfirmationDetails
           | ToolMcpConfirmationDetails;

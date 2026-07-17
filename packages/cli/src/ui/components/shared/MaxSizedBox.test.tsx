@@ -422,4 +422,50 @@ Line 3 direct child`);
 
     expect(lastFrame()).equals(expected);
   });
+
+  // Regression for #6809: when MaxSizedBox renders all its rows (maxHeight
+  // undefined — the "show more lines" mode) while a pending-region ancestor
+  // clamps the column height, Ink's default flexShrink=1 compresses the rows
+  // and stacks several at the same Y, leaving only every Nth line visible.
+  // The ancestor chain mirrors the live confirmation dialog: a maxHeight
+  // backstop wrapping a padded content box with a flexGrow/overflow body.
+  it('keeps rows sequential when an ancestor clamps the column height (#6809)', () => {
+    const rows = Array.from({ length: 60 }, (_, i) => (
+      <Box key={i}>
+        <Text>{`line ${i + 1}`}</Text>
+      </Box>
+    ));
+
+    const { lastFrame } = render(
+      <OverflowProvider>
+        <Box
+          flexDirection="column"
+          flexShrink={0}
+          maxHeight={24}
+          overflow="hidden"
+        >
+          <Box flexDirection="column" padding={1} width={80}>
+            <Box flexGrow={1} flexShrink={1} overflow="hidden" marginBottom={1}>
+              <MaxSizedBox maxWidth={80} maxHeight={undefined}>
+                {rows}
+              </MaxSizedBox>
+            </Box>
+          </Box>
+        </Box>
+      </OverflowProvider>,
+    );
+
+    const frame = lastFrame()!;
+    const gutters: number[] = [];
+    for (const line of frame.split('\n')) {
+      const match = line.match(/^\s*line (\d+)/);
+      if (match) gutters.push(Number(match[1]));
+    }
+    // Without the flexShrink={0} pin, the gutters are sparse (e.g. 1, 4, 7…)
+    // because the rows are compressed onto shared lines. With the pin they
+    // remain a contiguous prefix.
+    expect(gutters).toEqual(
+      Array.from({ length: gutters.length }, (_, i) => i + 1),
+    );
+  });
 });

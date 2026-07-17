@@ -5731,25 +5731,21 @@ describe('setApprovalMode with folder trust', () => {
       expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
     });
 
-    // Regression for #5574: the gate state records whether the model or the
-    // user entered plan mode, so exit_plan_mode can decide whether to gate.
-    it('marks the plan gate entry as user-initiated by default', () => {
+    it('increments the approval mode revision only for actual changes', () => {
       const config = new Config(baseParams);
       vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
 
+      const initialRevision = config.getApprovalModeRevision();
       config.setApprovalMode(ApprovalMode.PLAN);
-      expect(config.getPlanGateState()?.enteredByModel).toBe(false);
-    });
-
-    it('marks the plan gate entry as model-initiated when enter_plan_mode requests it', () => {
-      const config = new Config(baseParams);
-      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
-
+      expect(config.getApprovalModeRevision()).toBe(initialRevision + 1);
+      config.setApprovalMode(ApprovalMode.PLAN);
       config.setApprovalMode(ApprovalMode.PLAN, { enteredByModel: true });
-      expect(config.getPlanGateState()?.enteredByModel).toBe(true);
+      expect(config.getApprovalModeRevision()).toBe(initialRevision + 1);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      expect(config.getApprovalModeRevision()).toBe(initialRevision + 2);
     });
 
-    it('records prePlanMode=yolo and enteredByModel=false for a Shift+Tab cycle into plan mode (#5574)', () => {
+    it('records prePlanMode=yolo for a Shift+Tab cycle into plan mode', () => {
       const config = new Config(baseParams);
       vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
 
@@ -5760,10 +5756,35 @@ describe('setApprovalMode with folder trust', () => {
       config.setApprovalMode(ApprovalMode.YOLO);
       config.setApprovalMode(ApprovalMode.PLAN);
 
-      // prePlanMode is yolo purely because it precedes plan in the cycle —
-      // it does NOT mean the user wants autonomous execution.
       expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
-      expect(config.getPlanGateState()?.enteredByModel).toBe(false);
+    });
+
+    it('does not partially apply plan exit bookkeeping when transition work fails', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      config.setApprovalMode(ApprovalMode.AUTO);
+      config.setApprovalMode(ApprovalMode.PLAN);
+      const revision = config.getApprovalModeRevision();
+      (
+        config as unknown as {
+          permissionManager: {
+            stripDangerousRulesForAutoMode: () => void;
+            restoreDangerousRules: () => void;
+          };
+        }
+      ).permissionManager = {
+        stripDangerousRulesForAutoMode: () => {
+          throw new Error('strip failed');
+        },
+        restoreDangerousRules: vi.fn(),
+      };
+
+      expect(() => config.setApprovalMode(ApprovalMode.AUTO)).toThrow(
+        'strip failed',
+      );
+      expect(config.getApprovalMode()).toBe(ApprovalMode.PLAN);
+      expect(config.getPrePlanMode()).toBe(ApprovalMode.AUTO);
+      expect(config.getApprovalModeRevision()).toBe(revision);
     });
   });
 
