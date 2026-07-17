@@ -142,14 +142,15 @@ export function App() {
 
 包含 `WebShell` 的所有 Props，加上 Provider 配置：
 
-| 属性               | 类型     | 说明                                                                                 |
-| ------------------ | -------- | ------------------------------------------------------------------------------------ |
-| `baseUrl`          | `string` | daemon API 地址，未传时使用 `window.location.origin`                                 |
-| `token`            | `string` | daemon API Bearer token                                                              |
-| `sessionId`        | `string` | 要连接的 session id；未传或 `undefined` 时保持空页面                                 |
-| `workspaceId`      | `string` | 已注册工作区 id，主要用于定位已有 session；不会注册或锁定工作区                      |
-| `workspaceCwd`     | `string` | 已注册工作区路径，语义同 `workspaceId`；不会注册或锁定工作区，且优先于 `workspaceId` |
-| `lockWorkspaceCwd` | `string` | 锁定到指定工作区路径；未注册时自动持久注册，并隐藏其他工作区及添加、移除和选择入口   |
+| 属性                 | 类型      | 说明                                                                                 |
+| -------------------- | --------- | ------------------------------------------------------------------------------------ |
+| `baseUrl`            | `string`  | daemon API 地址，未传时使用 `window.location.origin`                                 |
+| `token`              | `string`  | daemon API Bearer token                                                              |
+| `sessionId`          | `string`  | 要连接的 session id；未传或 `undefined` 时保持空页面                                 |
+| `workspaceId`        | `string`  | 已注册工作区 id，主要用于定位已有 session；不会注册或锁定工作区                      |
+| `workspaceCwd`       | `string`  | 已注册工作区路径，语义同 `workspaceId`；不会注册或锁定工作区，且优先于 `workspaceId` |
+| `lockWorkspaceCwd`   | `string`  | 锁定到指定工作区路径；未注册时自动持久注册，并隐藏其他工作区及添加、移除和选择入口   |
+| `restartSseOnPrompt` | `boolean` | 每次 prompt 被 daemon 接收后重建 SSE；默认关闭                                       |
 
 ### WebShell
 

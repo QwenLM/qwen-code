@@ -82,6 +82,40 @@ describe('Core System Prompt (prompts.ts)', () => {
     );
   });
 
+  it('uses todos selectively and keeps plans outcome-oriented', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt();
+
+    expect(prompt).toContain('complex, ambiguous, or multi-phase tasks');
+    expect(prompt).toContain('Do not use it for simple or single-step queries');
+    expect(prompt).toContain('unless the user explicitly asks for a plan');
+    expect(prompt).toContain('Keep it short and outcome-oriented');
+    expect(prompt).toContain(
+      'rather than one item per error, file, command, or minor edit',
+    );
+    expect(prompt).not.toContain('VERY frequently');
+    expect(prompt).not.toContain('EXTREMELY helpful');
+    expect(prompt).not.toContain('write 10 items to the todo list');
+  });
+
+  it('adapts final response detail to the request', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt();
+
+    expect(prompt).toContain(
+      'Final responses should be concise by default, but their shape and depth must match the request',
+    );
+    expect(prompt).toContain(
+      'For code reviews, explanations, investigations, or substantial changes',
+    );
+    expect(prompt).toContain(
+      'complex findings may require several paragraphs or sections',
+    );
+    expect(prompt).not.toContain('End-of-turn summary: one or two sentences');
+    expect(prompt).not.toContain('Nothing else.');
+    expect(prompt).not.toContain('fewer than 3 lines');
+  });
+
   it('should return the base prompt when userMemory is empty string', () => {
     vi.stubEnv('SANDBOX', undefined);
     const prompt = getCoreSystemPrompt('');
