@@ -3467,6 +3467,57 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('workspace Skill management', () => {
+    it('uploads a Skill package', async () => {
+      const response = {
+        skillName: 'demo-skill',
+        scope: 'workspace',
+        installedPath: '/workspace/.qwen/skills/demo-skill/SKILL.md',
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, response),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const request = {
+        name: 'demo-skill',
+        scope: 'workspace' as const,
+        source: {
+          type: 'folder' as const,
+          path: '/Users/example/skills/demo-skill',
+        },
+      };
+
+      await expect(client.installWorkspaceSkill(request)).resolves.toEqual(
+        response,
+      );
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/workspace/skills/install',
+        method: 'POST',
+        body: JSON.stringify(request),
+      });
+    });
+
+    it('deletes a global Skill', async () => {
+      const response = {
+        skillName: 'demo-skill',
+        scope: 'global',
+        deleted: true,
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, response),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.deleteWorkspaceSkill('demo-skill', 'global'),
+      ).resolves.toEqual(response);
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/workspace/skills/demo-skill?scope=global',
+        method: 'DELETE',
+      });
+    });
+  });
+
   describe('initWorkspace (#4175 Wave 4 PR 17)', () => {
     it('POSTs an empty body when force is omitted', async () => {
       const { fetch, calls } = recordingFetch(() =>
