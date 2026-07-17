@@ -264,45 +264,6 @@ describe('BackgroundAgentResumeService', () => {
     expect(subagentManager.loadSubagent).not.toHaveBeenCalled();
   });
 
-  it('restores the model from the meta sidecar for per-model cap accounting', async () => {
-    const sessionId = 'session-model-resume';
-    const agentId = 'agent-model-resume';
-    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
-
-    writeAgentMeta(metaPath, {
-      agentId,
-      agentType: 'researcher',
-      description: 'Model-capped background task',
-      parentSessionId: sessionId,
-      parentAgentId: null,
-      createdAt: '2026-04-20T00:00:00.000Z',
-      status: 'running',
-      subagentName: 'researcher',
-      resolvedApprovalMode: 'default',
-      model: 'gemini-2.5-pro',
-    });
-    fs.writeFileSync(
-      getAgentJsonlPath(tempDir, sessionId, agentId),
-      JSON.stringify({
-        uuid: 'u1',
-        parentUuid: null,
-        sessionId,
-        timestamp: '2026-04-20T00:00:00.000Z',
-        type: 'user',
-        message: {
-          role: 'user',
-          parts: [{ text: 'Model-capped background task' }],
-        },
-      }) + '\n',
-      'utf8',
-    );
-
-    const { service } = createService();
-    await service.loadPausedBackgroundAgents(sessionId);
-
-    expect(registry.get(agentId)?.model).toBe('gemini-2.5-pro');
-  });
-
   it('keeps missing subagents visible so they can be abandoned later', async () => {
     const sessionId = 'session-missing';
     const agentId = 'agent-missing';

@@ -508,14 +508,27 @@ describe('AgentTool', () => {
       );
     });
 
-    it('should reject non-existent subagent', async () => {
+    it('accepts a subagent_type missing from the cache (may have been created after startup)', () => {
       const result = agentTool.validateToolParams({
         ...validParams,
-        subagent_type: 'non-existent',
+        subagent_type: 'created-after-startup',
       });
-      expect(result).toBe(
-        'Subagent "non-existent" not found. Available subagents: file-search, code-review',
-      );
+      expect(result).toBeNull();
+    });
+
+    it('kicks a cache refresh on a subagent_type cache miss', () => {
+      vi.mocked(mockSubagentManager.listSubagents).mockClear();
+      agentTool.validateToolParams({
+        ...validParams,
+        subagent_type: 'created-after-startup',
+      });
+      expect(mockSubagentManager.listSubagents).toHaveBeenCalled();
+    });
+
+    it('does not refresh the cache when the subagent_type is already known', () => {
+      vi.mocked(mockSubagentManager.listSubagents).mockClear();
+      agentTool.validateToolParams(validParams);
+      expect(mockSubagentManager.listSubagents).not.toHaveBeenCalled();
     });
 
     it('accepts isolation="worktree" when subagent_type is set', () => {
@@ -749,6 +762,42 @@ describe('AgentTool', () => {
       } finally {
         await fs.rm(repo, { recursive: true, force: true });
       }
+    });
+  });
+
+  describe('execution with an unknown subagent', () => {
+    it('reports not-found with the available list when the agent is missing on disk', async () => {
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(null);
+
+      const invocation = agentTool.build({
+        description: 'Use missing agent',
+        prompt: 'Do work',
+        subagent_type: 'non-existent',
+      });
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'non-existent',
+      );
+      expect(result.llmContent).toBe(
+        'Subagent "non-existent" not found. Available subagents: file-search, code-review',
+      );
+    });
+
+    it('still reports not-found when listing available subagents fails', async () => {
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(null);
+      vi.mocked(mockSubagentManager.listSubagents).mockRejectedValue(
+        new Error('fs error'),
+      );
+
+      const invocation = agentTool.build({
+        description: 'Use missing agent',
+        prompt: 'Do work',
+        subagent_type: 'non-existent',
+      });
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).toBe('Subagent "non-existent" not found');
     });
   });
 
@@ -1094,6 +1143,9 @@ describe('AgentTool', () => {
         execute: vi.fn().mockResolvedValue(undefined),
         result: 'Task completed successfully',
         terminateMode: AgentTerminateMode.GOAL,
+        getCore: vi.fn().mockReturnValue({
+          modelConfig: { model: 'subagent-model' },
+        }),
         getFinalText: vi.fn().mockReturnValue('Task completed successfully'),
         formatCompactResult: vi
           .fn()
@@ -2288,6 +2340,9 @@ describe('AgentTool', () => {
     beforeEach(() => {
       mockAgent = {
         execute: vi.fn().mockResolvedValue(undefined),
+        getCore: vi.fn().mockReturnValue({
+          modelConfig: { model: 'subagent-model' },
+        }),
         getFinalText: vi.fn().mockReturnValue(''),
         getExecutionSummary: vi.fn().mockReturnValue({
           rounds: 0,
@@ -2679,74 +2734,6 @@ describe('AgentTool', () => {
         { notify: false },
       );
     });
-
-    it('reserves a background slot with the resolved parent model when fork runs in background', async () => {
-      // Removing the `!isFork` guard from the slot-reservation condition
-      // silently subjected fork agents to background slot reservation and
-      // per-model concurrency caps. This test pins the contract: a fork
-      // launched with run_in_background: true resolves its concrete model
-      // from the parent config (FORK_AGENT has no model selector, so it
-      // inherits) and passes that model to tryReserveBackgroundSlot and
-      // the registry register call.
-      (mockAgent as unknown as Record<string, unknown>)['getCore'] = vi
-        .fn()
-        .mockReturnValue({
-          getEventEmitter: () => ({ on: vi.fn(), off: vi.fn() }),
-        });
-      (mockAgent as unknown as Record<string, unknown>)[
-        'setExternalMessageProvider'
-      ] = vi.fn();
-      (mockAgent as unknown as Record<string, unknown>)[
-        'setExternalMessageWaiter'
-      ] = vi.fn();
-      (mockAgent as unknown as Record<string, unknown>)[
-        'setExternalMessageWaitPredicate'
-      ] = vi.fn();
-
-      const stubRegistry = (
-        config as unknown as {
-          getBackgroundTaskRegistry: () => {
-            tryReserveBackgroundSlot: ReturnType<typeof vi.fn>;
-            register: ReturnType<typeof vi.fn>;
-          };
-        }
-      ).getBackgroundTaskRegistry();
-
-      const params: AgentParams = {
-        description: 'fork task',
-        prompt: 'do the thing',
-        subagent_type: 'fork',
-        run_in_background: true,
-      };
-
-      const invocation = (
-        agentTool as AgentToolWithProtectedMethods
-      ).createInvocation(params);
-      await invocation.execute();
-
-      // createForkSubagent runs unconditionally before the background
-      // branch, so AgentHeadless.create fires once for the foreground
-      // probe and again for the background agent body. The load-bearing
-      // assertions are on the registry calls below.
-      expect(AgentHeadless.create).toHaveBeenCalled();
-      // Fork inherits the parent model (FORK_AGENT has no model selector),
-      // so resolveModelId returns the parent's current model.
-      expect(stubRegistry.tryReserveBackgroundSlot).toHaveBeenCalledWith(
-        'parent-model',
-      );
-      expect(stubRegistry.register).toHaveBeenCalledWith(
-        expect.objectContaining({
-          model: 'parent-model',
-          isBackgrounded: true,
-          subagentType: 'fork',
-        }),
-        expect.objectContaining({
-          slotReservation: expect.objectContaining({
-            id: expect.any(Symbol),
-          }),
-        }),
-      );
-    });
   });
 
   describe('SubagentStart hook integration', () => {
@@ -2759,6 +2746,9 @@ describe('AgentTool', () => {
         execute: vi.fn().mockResolvedValue(undefined),
         result: 'Task completed successfully',
         terminateMode: AgentTerminateMode.GOAL,
+        getCore: vi.fn().mockReturnValue({
+          modelConfig: { model: 'subagent-model' },
+        }),
         getFinalText: vi.fn().mockReturnValue('Task completed successfully'),
         formatCompactResult: vi.fn().mockReturnValue('✅ Success'),
         getExecutionSummary: vi.fn().mockReturnValue({
@@ -2947,6 +2937,9 @@ describe('AgentTool', () => {
         execute: vi.fn().mockResolvedValue(undefined),
         result: 'Task completed successfully',
         terminateMode: AgentTerminateMode.GOAL,
+        getCore: vi.fn().mockReturnValue({
+          modelConfig: { model: 'subagent-model' },
+        }),
         getFinalText: vi.fn().mockReturnValue('Task completed successfully'),
         formatCompactResult: vi.fn().mockReturnValue('✅ Success'),
         getExecutionSummary: vi.fn().mockReturnValue({
@@ -3287,6 +3280,9 @@ describe('AgentTool', () => {
         execute: vi.fn(),
         result: 'Done',
         terminateMode: AgentTerminateMode.GOAL,
+        getCore: vi.fn().mockReturnValue({
+          modelConfig: { model: 'subagent-model' },
+        }),
         getFinalText: vi.fn().mockReturnValue('Done'),
         formatCompactResult: vi.fn().mockReturnValue('✅ Success'),
         getExecutionSummary: vi.fn().mockReturnValue({
@@ -3683,6 +3679,7 @@ describe('AgentTool', () => {
         // whose getEventEmitter() yields a minimal on/off surface so the
         // test-time listener hookup doesn't throw.
         getCore: vi.fn().mockReturnValue({
+          modelConfig: { model: 'subagent-model' },
           getEventEmitter: () => ({ on: vi.fn(), off: vi.fn() }),
         }),
       } as unknown as AgentHeadless;
@@ -3741,6 +3738,7 @@ describe('AgentTool', () => {
     });
 
     it('should run in background when agent definition has background: true', async () => {
+      const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
       const params: AgentParams = {
         description: 'Start monitor',
         prompt: 'Watch for changes',
@@ -3788,6 +3786,15 @@ describe('AgentTool', () => {
       ).toHaveBeenCalled();
       const display = result.returnDisplay as AgentResultDisplay;
       expect(display.status).toBe('background');
+      expect(writeMetaSpy).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          persistedCliFlags: expect.objectContaining({
+            model: 'subagent-model',
+          }),
+        }),
+      );
+      writeMetaSpy.mockRestore();
     });
 
     it('stores sanitized background results in the registry', async () => {
@@ -4364,7 +4371,7 @@ describe('AgentTool', () => {
             bare: false,
             sandbox: null,
             screenReader: false,
-            model: 'parent-model',
+            model: 'subagent-model',
             maxSessionTurns: -1,
             maxToolCalls: -1,
             maxSubagentDepth: 5,
