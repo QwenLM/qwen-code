@@ -549,6 +549,7 @@ export class TestRig {
       attempts++;
       try {
         const result = predicate();
+        lastError = undefined;
         if (env['VERBOSE'] === 'true' && attempts % 5 === 0) {
           console.log(
             `Poll attempt ${attempts}: ${result ? 'success' : 'waiting...'}`,
