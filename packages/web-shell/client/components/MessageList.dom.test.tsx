@@ -1240,6 +1240,67 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
   });
 
+  it('does not auto-load again when an underfill page adds no content', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 300,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const onLoadOlderHistory = vi.fn().mockResolvedValue(undefined);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const render = (loadingOlderHistory: boolean) => {
+      root.render(
+        <I18nProvider language="en">
+          <MessageList
+            messages={[userMsg('u1')]}
+            pendingApproval={null}
+            hasOlderHistory
+            loadingOlderHistory={loadingOlderHistory}
+            onLoadOlderHistory={onLoadOlderHistory}
+          />
+        </I18nProvider>,
+      );
+    };
+
+    await act(async () => {
+      render(false);
+      await Promise.resolve();
+    });
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      render(true);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      render(false);
+      await Promise.resolve();
+    });
+
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+
+    const list = container.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+    await act(async () => {
+      list.dispatchEvent(new WheelEvent('wheel', { deltaY: -1 }));
+      await Promise.resolve();
+    });
+
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(2);
+  });
+
   it('waits for another upward scroll intent before retrying a failed underfill load', async () => {
     Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
       configurable: true,

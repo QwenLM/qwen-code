@@ -342,8 +342,7 @@ for (const theme of THEMES) {
     });
 
     test(`workspace sidebar`, async ({ page }, testInfo) => {
-      // Two workspaces make the sidebar group sessions per workspace, so this
-      // scenario captures both the primary and secondary workspace headings.
+      // Two workspaces make the sidebar group sessions per workspace.
       //
       // Pin the primary workspace cwd and its loaded session name explicitly,
       // rather than leaning on createWebShellDaemonScenario's defaults: the
@@ -378,9 +377,7 @@ for (const theme of THEMES) {
         resolveBaseURL(testInfo),
       );
       await gotoSession(page, scenario, daemon, theme);
-      // Each workspace renders a section headed by its basename. Assert both
-      // workspace names so a regression in the grouping fails an assertion,
-      // not only the visually-reviewed screenshot.
+      // Each workspace renders a section headed by its basename.
       const sidebar = page.getByRole('complementary');
       await expect(
         sidebar.getByText('qwen-web-shell-e2e', { exact: true }),

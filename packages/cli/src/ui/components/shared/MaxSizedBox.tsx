@@ -174,8 +174,13 @@ export const MaxSizedBox: React.FC<MaxSizedBoxProps> = ({
         : laidOutStyledText.slice(0, visibleContentHeight)
       : laidOutStyledText;
 
+  // Pin each rendered row to its natural height. Ink's default flexShrink is
+  // 1, so when an ancestor clamps this column's height (e.g. the pending-
+  // region maxHeight backstop) Yoga compresses the rows and stacks several at
+  // the same Y, leaving only every Nth line visible (#6809). flexShrink={0}
+  // keeps rows full-height and sequential under a clamped ancestor.
   const visibleLines = visibleStyledText.map((line, index) => (
-    <Box key={index}>
+    <Box key={index} flexShrink={0}>
       {line.length > 0 ? (
         line.map((segment, segIndex) => (
           <Text key={segIndex} {...segment.props}>

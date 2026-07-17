@@ -2345,6 +2345,10 @@ export const MessageList = memo(
     catchingUpRef.current = catchingUp;
     const containerRef = useRef<HTMLDivElement>(null);
     const olderHistoryRetryBlocked = useRef(false);
+    const lastUnderfillAutoLoad = useRef<{
+      loader: typeof onLoadOlderHistory;
+      totalVirtualSize: number;
+    } | null>(null);
     const [olderHistoryAnchor, setOlderHistoryAnchor] = useState<{
       scrollHeight: number;
       scrollTop: number;
@@ -2363,7 +2367,10 @@ export const MessageList = memo(
     }, [olderHistoryAnchor]);
 
     useEffect(() => {
-      if (!hasOlderHistory) olderHistoryRetryBlocked.current = false;
+      if (!hasOlderHistory) {
+        olderHistoryRetryBlocked.current = false;
+        lastUnderfillAutoLoad.current = null;
+      }
     }, [hasOlderHistory]);
 
     const reportCanScrollToBottom = useCallback(() => {
@@ -3041,6 +3048,19 @@ export const MessageList = memo(
       }
       const el = getScrollElement();
       if (!el || el.scrollHeight > el.clientHeight + 1) return;
+      const previousLoad = lastUnderfillAutoLoad.current;
+      if (
+        previousLoad !== null &&
+        previousLoad.loader === onLoadOlderHistory &&
+        previousLoad.totalVirtualSize === totalVirtualSize
+      ) {
+        olderHistoryRetryBlocked.current = true;
+        return;
+      }
+      lastUnderfillAutoLoad.current = {
+        loader: onLoadOlderHistory,
+        totalVirtualSize,
+      };
       void loadOlderHistory();
     }, [
       catchingUp,
@@ -3048,7 +3068,9 @@ export const MessageList = memo(
       hasOlderHistory,
       loadOlderHistory,
       loadingOlderHistory,
+      onLoadOlderHistory,
       showLoadingSkeleton,
+      totalVirtualSize,
     ]);
 
     useEffect(() => {
