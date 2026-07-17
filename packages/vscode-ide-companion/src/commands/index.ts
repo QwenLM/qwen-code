@@ -131,7 +131,7 @@ export function registerNewCommands(
         outputChannel.show(true);
       } else {
         vscode.window.showWarningMessage(
-          'Qwen Code Companion log channel is not available.',
+          'Champion log channel is not available.',
         );
       }
     }),

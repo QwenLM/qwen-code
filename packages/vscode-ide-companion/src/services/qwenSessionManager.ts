@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { logger } from '../utils/logger.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
@@ -59,17 +60,17 @@ export class QwenSessionManager {
       const filePath = path.join(sessionDir, filename);
 
       if (!fs.existsSync(filePath)) {
-        console.log(`[QwenSessionManager] Session file not found: ${filePath}`);
+        logger.log(`[QwenSessionManager] Session file not found: ${filePath}`);
         return null;
       }
 
       const content = fs.readFileSync(filePath, 'utf-8');
       const session = JSON.parse(content) as QwenSession;
 
-      console.log(`[QwenSessionManager] Session loaded: ${filePath}`);
+      logger.log(`[QwenSessionManager] Session loaded: ${filePath}`);
       return session;
     } catch (error) {
-      console.error('[QwenSessionManager] Failed to load session:', error);
+      logger.error('[QwenSessionManager] Failed to load session:', error);
       return null;
     }
   }
@@ -102,7 +103,7 @@ export class QwenSessionManager {
           const session = JSON.parse(content) as QwenSession;
           sessions.push(session);
         } catch (error) {
-          console.error(
+          logger.error(
             `[QwenSessionManager] Failed to read session file ${file}:`,
             error,
           );
@@ -117,7 +118,7 @@ export class QwenSessionManager {
 
       return sessions;
     } catch (error) {
-      console.error('[QwenSessionManager] Failed to list sessions:', error);
+      logger.error('[QwenSessionManager] Failed to list sessions:', error);
       return [];
     }
   }
@@ -137,13 +138,13 @@ export class QwenSessionManager {
 
       if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
-        console.log(`[QwenSessionManager] Session deleted: ${filePath}`);
+        logger.log(`[QwenSessionManager] Session deleted: ${filePath}`);
         return true;
       }
 
       return false;
     } catch (error) {
-      console.error('[QwenSessionManager] Failed to delete session:', error);
+      logger.error('[QwenSessionManager] Failed to delete session:', error);
       return false;
     }
   }

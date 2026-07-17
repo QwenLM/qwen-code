@@ -355,6 +355,7 @@ import {
   truncatePanelTitle,
   MAX_PANEL_TITLE_LENGTH,
 } from '../utils/panelTitleUtils.js';
+import { logger } from '../../utils/logger.js';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
@@ -576,6 +577,24 @@ describe('WebViewProvider.attachToView', () => {
       type: 'copyToClipboardResult',
       data: { requestId: 'copy-1', success: true },
     });
+  });
+
+  it('writes webview log messages through the extension host logger', async () => {
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const { messageHandler } = await setupAttachedProvider({
+      captureMessageHandler: true,
+    });
+    const message = `render failed\n${'x'.repeat(9_000)}`;
+
+    await messageHandler?.({
+      type: 'log',
+      data: { level: 'error', message },
+    });
+
+    expect(error).toHaveBeenCalledWith(
+      '[Webview]',
+      message.replace('\n', '\\n'),
+    );
   });
 
   it('reports clipboard copy failures back to the requesting webview', async () => {

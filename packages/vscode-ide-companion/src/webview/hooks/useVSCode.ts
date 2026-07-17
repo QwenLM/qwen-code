@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { formatLogArgs, type LogLevel } from '../../utils/logger.js';
+
 export interface VSCodeAPI {
   postMessage: (message: unknown) => void;
   getState: () => unknown;
@@ -43,6 +45,24 @@ function getVSCodeAPI(): VSCodeAPI {
     },
   };
   return vscodeApiInstance;
+}
+
+export function initializeWebviewLogger(): void {
+  if (typeof acquireVsCodeApi === 'undefined') {
+    return;
+  }
+
+  const vscode = getVSCodeAPI();
+  const postLog = (level: LogLevel, args: unknown[]) => {
+    vscode.postMessage({
+      type: 'log',
+      data: { level, message: formatLogArgs(args) },
+    });
+  };
+  const levels: LogLevel[] = ['debug', 'error', 'info', 'log', 'warn'];
+  for (const level of levels) {
+    globalThis.console[level] = (...args: unknown[]) => postLog(level, args);
+  }
 }
 
 /**

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { logger } from '../../utils/logger.js';
 import * as fs from 'fs';
 import * as fsp from 'fs/promises';
 import * as path from 'path';
@@ -105,7 +106,7 @@ export async function saveImageToFile(
     await pruneClipboardImages();
     return filePath;
   } catch (error) {
-    console.error('[ImageHandler] Failed to save image:', error);
+    logger.error('[ImageHandler] Failed to save image:', error);
     return null;
   }
 }
@@ -133,7 +134,7 @@ export async function processImageAttachments(
         maxBytes: Math.min(MAX_IMAGE_SIZE, remainingBytes),
       });
       if (!normalizedAttachment) {
-        console.warn(
+        logger.warn(
           '[ImageHandler] Rejected invalid image attachment:',
           attachment.name,
         );
@@ -154,7 +155,7 @@ export async function processImageAttachments(
         remainingBytes -= normalizedAttachment.size;
         savedImageCount += 1;
       } else {
-        console.warn('[ImageHandler] Failed to save image:', attachment.name);
+        logger.warn('[ImageHandler] Failed to save image:', attachment.name);
       }
     }
 

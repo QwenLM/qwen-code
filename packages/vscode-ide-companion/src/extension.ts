@@ -8,12 +8,13 @@ import * as vscode from 'vscode';
 import { IDEServer } from './ide-server.js';
 import semver from 'semver';
 import { DiffContentProvider, DiffManager } from './diff-manager.js';
-import { createLogger } from './utils/logger.js';
+import { createLogger, logger, resetLoggerSink } from './utils/logger.js';
 import {
   detectIdeFromEnv,
   IDE_DEFINITIONS,
   type IdeInfo,
 } from '@qwen-code/qwen-code-core';
+import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
 import { WebViewProvider } from './webview/providers/WebViewProvider.js';
 import { ChatProviderRegistry } from './webview/providers/ChatProviderRegistry.js';
 import { registerChatViewProviders } from './webview/providers/chatViewRegistration.js';
@@ -41,7 +42,7 @@ const HIDE_INSTALLATION_GREETING_IDES: ReadonlySet<IdeInfo['name']> = new Set([
 ]);
 
 let ideServer: IDEServer;
-let logger: vscode.OutputChannel;
+let outputChannel: vscode.OutputChannel;
 let chatProviderRegistry: ChatProviderRegistry<WebViewProvider> | null = null;
 
 let log: (message: string) => void = () => {};
@@ -113,8 +114,8 @@ async function checkForUpdates(
 }
 
 export async function activate(context: vscode.ExtensionContext) {
-  logger = vscode.window.createOutputChannel('Qwen Code Companion');
-  log = createLogger(context, logger);
+  outputChannel = vscode.window.createOutputChannel('Champion');
+  log = createLogger(outputChannel, redactLogCredentials);
   log('Extension activated');
 
   checkForUpdates(context, log);
@@ -177,18 +178,18 @@ export async function activate(context: vscode.ExtensionContext) {
         webviewPanel: vscode.WebviewPanel,
         state: unknown,
       ) {
-        console.log(
+        logger.log(
           '[Extension] Deserializing WebView panel with state:',
           state,
         );
 
         // Create a new provider for the restored panel
         const provider = createWebViewProvider();
-        console.log('[Extension] Provider created for deserialization');
+        logger.log('[Extension] Provider created for deserialization');
 
         // Restore state if available BEFORE restoring the panel
         if (state && typeof state === 'object') {
-          console.log('[Extension] Restoring state:', state);
+          logger.log('[Extension] Restoring state:', state);
           provider.restoreState(
             state as {
               conversationId: string | null;
@@ -196,11 +197,11 @@ export async function activate(context: vscode.ExtensionContext) {
             },
           );
         } else {
-          console.log('[Extension] No state to restore or invalid state');
+          logger.log('[Extension] No state to restore or invalid state');
         }
 
         await provider.restorePanel(webviewPanel);
-        console.log('[Extension] Panel restore completed');
+        logger.log('[Extension] Panel restore completed');
 
         log('WebView panel restored from serialization');
       },
@@ -214,7 +215,7 @@ export async function activate(context: vscode.ExtensionContext) {
     diffManager,
     () => chatProviderRegistry?.getEditorProviders() ?? [],
     createWebViewProvider,
-    logger,
+    outputChannel,
   );
 
   // Register copy commands for webview context menu
@@ -263,9 +264,9 @@ export async function activate(context: vscode.ExtensionContext) {
           }
         }
       } catch (err) {
-        console.warn('[Extension] Auto-allow on diff.accept failed:', err);
+        logger.warn('[Extension] Auto-allow on diff.accept failed:', err);
       }
-      console.log('[Extension] Diff accepted');
+      logger.log('[Extension] Diff accepted');
     }),
     vscode.commands.registerCommand('qwen.diff.cancel', (uri?: vscode.Uri) => {
       const docUri = uri ?? vscode.window.activeTextEditor?.document.uri;
@@ -281,22 +282,22 @@ export async function activate(context: vscode.ExtensionContext) {
           }
         }
       } catch (err) {
-        console.warn('[Extension] Auto-reject on diff.cancel failed:', err);
+        logger.warn('[Extension] Auto-reject on diff.cancel failed:', err);
       }
-      console.log('[Extension] Diff cancelled');
+      logger.log('[Extension] Diff cancelled');
     })),
     vscode.commands.registerCommand('qwen.diff.closeAll', async () => {
       try {
         await diffManager.closeAll();
       } catch (err) {
-        console.warn('[Extension] qwen.diff.closeAll failed:', err);
+        logger.warn('[Extension] qwen.diff.closeAll failed:', err);
       }
     }),
     vscode.commands.registerCommand('qwen.diff.suppressBriefly', async () => {
       try {
         diffManager.suppressFor(1200);
       } catch (err) {
-        console.warn('[Extension] qwen.diff.suppressBriefly failed:', err);
+        logger.warn('[Extension] qwen.diff.suppressBriefly failed:', err);
       }
     }),
   );
@@ -420,8 +421,9 @@ export async function deactivate(): Promise<void> {
     const message = err instanceof Error ? err.message : String(err);
     log(`Failed to stop IDE server during deactivation: ${message}`);
   } finally {
-    if (logger) {
-      logger.dispose();
+    if (outputChannel) {
+      resetLoggerSink();
+      outputChannel.dispose();
     }
   }
 }
