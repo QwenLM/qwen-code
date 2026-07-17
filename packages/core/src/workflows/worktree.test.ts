@@ -58,19 +58,31 @@ describe('GitWorktreeProvider', () => {
     expect(await pathExists(cwd0)).toBe(true);
     expect(await pathExists(cwd1)).toBe(true);
 
-    // Simulate a third agent's acquire failing (same technique as the
-    // existing "throws when acquisition fails" test: point a fresh
-    // provider — sharing the same runId — at a non-git-repo source so
-    // setupWorktrees hits the "not a git repository" error path and its
-    // internal cleanupSession(sessionId) fires for THAT agent's own
-    // session only).
-    const notRepo = await mkdtemp(join(tmpdir(), 'wf-not-repo-'));
-    const failingProvider = new GitWorktreeProvider(notRepo, base);
-    await expect(failingProvider.acquire(runId, 2)).rejects.toThrow();
+    // Force a THIRD agent's acquire to fail via a REAL name/path
+    // collision against the real temp repo (not the "not a git repo"
+    // short-circuit, which returns before GitWorktreeService.
+    // setupWorktrees ever reaches its create-loop / cleanupSession
+    // call). Re-acquiring the same `seq` reuses the exact same
+    // sessionId as the first successful call for that agent, so the
+    // second `createWorktree` for "agent-2" collides with the
+    // directory the first call already created ("Worktree already
+    // exists"). That failure is what makes setupWorktrees call
+    // `cleanupSession(sessionId)` — the branch this test needs to
+    // exercise.
+    //
+    // Pre-fix, every agent's sessionId was the shared `runId`, so
+    // agent 0, 1, and 2 all lived under the SAME GitWorktreeService
+    // session directory. Agent 2's collision-triggered
+    // cleanupSession(runId) would then force-remove every worktree
+    // registered under that shared session — including agent 0 and
+    // agent 1's, even though they're still mid-execution. The fixed
+    // code scopes each agent to its own `${runId}-agent${seq}`
+    // session, confining the blast radius to agent 2 alone.
+    await provider.acquire(runId, 2);
+    await expect(provider.acquire(runId, 2)).rejects.toThrow();
 
-    // Agents 0 and 1's worktrees must still be intact — the failure in
-    // agent 2's own session must not have cascaded to siblings sharing
-    // the same runId.
+    // Agents 0 and 1's worktrees must still be intact — agent 2's own
+    // collision/cleanup must not have cascaded to siblings.
     expect(await pathExists(cwd0)).toBe(true);
     expect(await pathExists(cwd1)).toBe(true);
 
