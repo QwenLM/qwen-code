@@ -150,6 +150,24 @@ describe('parseChannelMemoryIntent', () => {
     });
   });
 
+  it('parses action-specific update and removal confirmations', () => {
+    expect(parseChannelMemoryIntent('确认更新记忆')).toEqual({
+      kind: 'update_confirm',
+    });
+    expect(parseChannelMemoryIntent('confirm memory update')).toEqual({
+      kind: 'update_confirm',
+    });
+    expect(parseChannelMemoryIntent('确认删除记忆')).toEqual({
+      kind: 'remove_confirm',
+    });
+    expect(parseChannelMemoryIntent('confirm memory removal')).toEqual({
+      kind: 'remove_confirm',
+    });
+    for (const text of ['确认', 'confirm', '可以', '好的']) {
+      expect(parseChannelMemoryIntent(text)).toBeNull();
+    }
+  });
+
   it('leaves ambiguous prose alone', () => {
     expect(parseChannelMemoryIntent('保存配置到本地')).toBeNull();
     expect(parseChannelMemoryIntent('我想讨论一下记忆模块')).toBeNull();

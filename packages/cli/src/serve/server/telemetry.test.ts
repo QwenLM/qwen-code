@@ -183,6 +183,46 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     );
   });
 
+  it('attributes workspace session-info reads to the shared session-info route', () => {
+    const mw = daemonTelemetryMiddleware(() => '/ws');
+    const res = mockRes(200);
+
+    mw(
+      mockReq('GET', '/workspace/%2Fwork%2Fa/session-info'),
+      res,
+      vi.fn() as unknown as NextFunction,
+    );
+    res.emit('finish');
+
+    expect(coreMocks.withDaemonRequestSpan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: 'GET',
+        route: 'GET /workspace/:id/session-info',
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('attributes plural workspace session-info reads to the shared session-info route', () => {
+    const mw = daemonTelemetryMiddleware(() => '/workspace/secondary');
+    const res = mockRes(200);
+
+    mw(
+      mockReq('GET', '/workspaces/ws-secondary/session-info'),
+      res,
+      vi.fn() as unknown as NextFunction,
+    );
+    res.emit('finish');
+
+    expect(coreMocks.withDaemonRequestSpan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: 'GET',
+        route: 'GET /workspace/:id/session-info',
+      }),
+      expect.any(Function),
+    );
+  });
+
   it('attributes workspace exports to the target workspace and session', () => {
     const mw = daemonTelemetryMiddleware(() => '/workspace/secondary');
     const res = mockRes(200);
