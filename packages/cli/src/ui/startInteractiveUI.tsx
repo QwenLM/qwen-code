@@ -185,6 +185,13 @@ export async function startInteractiveUI(
   };
 
   const useVP = settings.merged.ui?.useTerminalBuffer ?? false;
+  const stdoutMaxListeners = process.stdout.getMaxListeners();
+  if (useVP) {
+    // Visible VP rows each subscribe to resize through Ink's useBoxMetrics.
+    // Node's default warning writes into the alternate screen and shifts mouse
+    // coordinates even though these listeners are owned and cleaned up.
+    process.stdout.setMaxListeners(0);
+  }
   const instance = render(
     process.env['DEBUG'] ? (
       <React.StrictMode>
@@ -249,6 +256,9 @@ export async function startInteractiveUI(
     // operational, preventing garbled terminal output after the app exits.
     disableKittyProtocol();
     instance.unmount();
+    if (useVP) {
+      process.stdout.setMaxListeners(stdoutMaxListeners);
+    }
     restoreSynchronizedOutput();
     restoreTerminalRedrawOptimizer();
   });
