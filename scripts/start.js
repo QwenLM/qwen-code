@@ -86,6 +86,17 @@ const child = spawn('node', nodeArgs, {
   cwd: workingDir,
 });
 
-child.on('close', (code) => {
-  process.exit(code);
+child.on('close', (code, signal) => {
+  // Same contract as scripts/dev.js: this launcher is a QWEN_CODE_CLI entry, and
+  // a signal-killed child (`code === null`) must not exit 0 — `process.exit(null)`
+  // coerces to success. Re-raise the signal; fall back to a non-zero exit.
+  if (signal) {
+    try {
+      process.kill(process.pid, signal);
+      return;
+    } catch {
+      process.exit(1);
+    }
+  }
+  process.exit(code ?? 1);
 });

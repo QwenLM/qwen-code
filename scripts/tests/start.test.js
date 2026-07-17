@@ -35,6 +35,27 @@ describe('scripts/start.js launcher', () => {
     process.argv = originalArgv;
   });
 
+  it('re-raises a child signal instead of exiting 0 — close(null, SIGKILL) is not success', async () => {
+    // The old handler was `process.exit(code)`; a signal-killed child passes
+    // `code === null` and `process.exit(null)` coerces to a green exit — a
+    // killed review gate command mistaken for success.
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined);
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    try {
+      await import('../start.js?signal-close');
+      const child = spawnMock.mock.results[0].value;
+      const close = child.on.mock.calls.find(([ev]) => ev === 'close')[1];
+      close(null, 'SIGKILL');
+      expect(killSpy).toHaveBeenCalledWith(process.pid, 'SIGKILL');
+      expect(exitSpy).not.toHaveBeenCalledWith(0);
+    } finally {
+      exitSpy.mockRestore();
+      killSpy.mockRestore();
+    }
+  });
+
   it('stamps QWEN_CODE_CLI with its own path, overriding an inherited one', async () => {
     // Same property dev.test.js pins for scripts/dev.js, on the entry with no
     // other coverage of its env block: `npm start` runs `node packages/cli`

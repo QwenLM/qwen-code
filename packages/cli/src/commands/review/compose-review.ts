@@ -239,6 +239,13 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
           `${label} — the agent made no tool call: it read nothing`,
         );
       }
+      if (cov.idleAgents.length > 0) {
+        remediation.push(
+          'idle agents: relaunch each with the same printed prompt — it already ' +
+            'names the brief and the diff reads; an agent that makes no tool ' +
+            'call has reviewed nothing, whatever its return says',
+        );
+      }
       // The defect that actually happened, named as itself. A blind agent was
       // launched with a prompt that never mentioned the diff, so it could not
       // have read it — and relaunching it would produce another agent that
@@ -256,8 +263,9 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
         remediation.push(
           'blind agents: rebuild each prompt with `"${QWEN_CODE_CLI:-qwen}" ' +
             'review agent-prompt --plan <plan> --chunk <id>` (or `--role <r>`) ' +
-            'and launch an agent with it verbatim — do not relaunch the old ' +
-            'prompt; a second blind agent reads no more than the first',
+            '`[--rules <rules file>]` and launch an agent with it verbatim — ' +
+            'do not relaunch the old prompt; a second blind agent reads no ' +
+            'more than the first',
         );
       }
       // Worked, but not on the diff. Not idle and not blind — it had the path and
@@ -289,8 +297,11 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       if (cov.rewrittenPrompts.length > 0) {
         remediation.push(
           'rewritten launches: re-run `"${QWEN_CODE_CLI:-qwen}" review ' +
-            'agent-prompt` for each and pass its output unedited — copy it, ' +
-            'do not retype it',
+            'agent-prompt --plan <plan> --chunk <id>` (or `--role <r>`, with ' +
+            '`--file <path>` for an invariant agent) `[--rules <rules file>]` ' +
+            'for each named agent and pass its output unedited — copy it, do ' +
+            'not retype it. Pass --rules whenever the review loaded any, or ' +
+            'the rebuilt brief silently drops the project rules',
         );
       }
       // A dimension nobody reviewed. This is exactly what `unreviewedDimensions`
@@ -303,8 +314,9 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
         remediation.push(
           'missing briefs: build every required prompt in one call — ' +
             '`"${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan <plan> ' +
-            '--roster` — and launch one agent per block it prints, verbatim; ' +
-            '`--role <n>` or `--chunk <id>` rebuilds a single one',
+            '--roster [--rules <rules file>]` — and launch one agent per block ' +
+            'it prints, verbatim; `--role <n>` or `--chunk <id>` rebuilds a ' +
+            'single one. Pass --rules whenever the review loaded any',
         );
       }
       // Launched, but never read the brief it was pointed at: it reviewed with no
@@ -441,6 +453,14 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // Criticals) on REQUEST_CHANGES: the blocker must not squeeze out the
   // disclosure of what was never read.
   const notReviewedParts: string[] = [];
+  if (missingReceipts.length > 0) {
+    remediation.push(
+      'chunks nobody read: build each with `"${QWEN_CODE_CLI:-qwen}" review ' +
+        'agent-prompt --plan <plan> --chunk <id> [--rules <rules file>]` — or ' +
+        'the whole fan-out with `--roster` — and launch one agent per block, ' +
+        'verbatim',
+    );
+  }
   if (missingReceipts.length > 0) {
     // Its own sentence, because its own cause. The clause below explains a gap
     // as a line too long to read, which is true of an *uncoverable* chunk and a

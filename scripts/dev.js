@@ -158,12 +158,25 @@ child.on('error', (err) => {
   process.exit(1);
 });
 
-child.on('close', (code) => {
+child.on('close', (code, signal) => {
   // Cleanup temp directory
   try {
     rmSync(tmpDir, { recursive: true, force: true });
   } catch {
     // Ignore cleanup errors
   }
-  process.exit(code ?? 0);
+  // A signal-killed child reports `code === null`, and `code ?? 0` read that as
+  // success. This launcher is a QWEN_CODE_CLI entry now: a review gate command
+  // OOM-killed mid-run must not come back green. Re-raise the signal the way
+  // cli-entry.js does, so the caller sees the same death; fall back to a
+  // non-zero exit if the signal cannot be re-raised.
+  if (signal) {
+    try {
+      process.kill(process.pid, signal);
+      return;
+    } catch {
+      process.exit(1);
+    }
+  }
+  process.exit(code ?? 1);
 });

@@ -23,6 +23,7 @@
  * capture the correct session/agent/prompt frame.
  */
 
+import { closeSync, openSync, readSync } from 'node:fs';
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import { promptIdContext } from './promptIdContext.js';
 import { sessionIdContext, getSessionProjectDir } from './sessionIdContext.js';
@@ -31,6 +32,34 @@ import {
   getTraceContext,
   formatTraceparent,
 } from '../telemetry/trace-context.js';
+
+/**
+ * A `.js`/`.mjs`/`.cjs` file whose first bytes are not `#!` — the one shape a
+ * POSIX shell cannot exec directly. Cached per path: this runs on every shell
+ * spawn, and the answer for a given entry does not change within a process.
+ */
+const shebangCache = new Map<string, boolean>();
+function isShebangLessScript(path: string): boolean {
+  if (!/\.(?:mjs|cjs|js)$/i.test(path)) return false;
+  const cached = shebangCache.get(path);
+  if (cached !== undefined) return cached;
+  let shebangless: boolean;
+  try {
+    const fd = openSync(path, 'r');
+    try {
+      const head = Buffer.alloc(2);
+      const read = readSync(fd, head, 0, 2, 0);
+      shebangless = !(read === 2 && head.toString('utf8') === '#!');
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    // Unreadable is unusable either way; let it drop to the `qwen` fallback.
+    shebangless = true;
+  }
+  shebangCache.set(path, shebangless);
+  return shebangless;
+}
 
 export function getShellContextEnvVars(): Record<string, string> {
   const env: Record<string, string> = {};
@@ -73,8 +102,17 @@ export function getShellContextEnvVars(): Record<string, string> {
   // So the entry is passed down instead of rediscovered. The bin wrapper sets it
   // (it is the executable entry, and knows its own path); a subprocess prefers it
   // and falls back to `qwen` when it is absent, which is exactly the old behaviour.
+  //
+  // Passed down only when a shell could actually exec it. The variable predates
+  // this mechanism with a SECOND meaning: the desktop app's tooling sets it to a
+  // vendored `dist/cli.js` — a module path for `node <path>`, with no shebang —
+  // and a shell handed that would run the bundle as a shell script. A
+  // shebang-less script cannot be the exec'd entry under the POSIX shell the
+  // consumer requires anyway, so filtering it just restores the bare-`qwen`
+  // fallback for those hosts. Only script files are gated: a native binary needs
+  // no shebang, and this must not filter one.
   const cliEntry = process.env['QWEN_CODE_CLI'];
-  if (cliEntry) {
+  if (cliEntry && !isShebangLessScript(cliEntry)) {
     env['QWEN_CODE_CLI'] = cliEntry;
   }
 

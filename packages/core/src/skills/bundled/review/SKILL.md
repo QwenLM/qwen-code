@@ -251,8 +251,11 @@ Launch **12 agents** for same-repo **PR** reviews (Agent 1 has three procedural 
 
 ```bash
 "${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan <the plan report from Step 1> --roster \
-  [--rules <the rules file from Step 2, if the project has any>]
+  [--rules <the rules file from Step 2, if the project has any>] \
+  > .qwen/tmp/qwen-review-{target}-roster.txt
 ```
+
+**Redirected to a file, then `read_file` it, paging until `isTruncated` is false** — the same rule as every other large output in this skill: shell output truncates at 30 000 characters, and a large plan's roster exceeds that, which would silently swallow the middle blocks. The output is self-checking: blocks are numbered `agent k of N` and the file ends with an `end of roster` line — if any `k` is missing or the end line is absent, rebuild just those blocks with `--chunk <id>` / `--role <r>` (every prompt is also recorded on disk regardless).
 
 It prints one labelled block per required agent — which roles this review owes is read out of the plan, so the paragraph above is the _why_ and the roster is the _list_ — and **each block goes to its agent verbatim**, all launched in one response. To rebuild a single agent's prompt (a relaunch after Step 3D): `--role <role>` in place of `--roster`; the roles are `0`, `1a`, `1b`, `1c`, `2`, `3`, `4`, `5`, `6a`, `6b`, `6c`, `7`.
 
@@ -270,10 +273,11 @@ Eleven agents all reading the same diff (every 3A agent except Build & Test walk
 
 ```bash
 "${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan <the plan report from Step 1> --roster \
-  [--rules <the rules file from Step 2, if the project has any>]
+  [--rules <the rules file from Step 2, if the project has any>] \
+  > .qwen/tmp/qwen-review-{target}-roster.txt
 ```
 
-One labelled block per agent; each goes to its agent **verbatim**. (To rebuild a single chunk agent's prompt for a relaunch: `--chunk <id>` in place of `--roster`.) **Pass `--rules` whenever Step 2 found any** — this command builds the whole prompt, so there is no later step in which you would staple them on, and a review that silently enforces no project rule is one of the things this skill exists to prevent.
+Redirect and `read_file` it paged, exactly as in Step 3A — a 3B roster is the large case, and shell output truncates at 30 000 characters. Check every `agent k of N` block is present (the file ends with an `end of roster` line); rebuild any missing one with `--chunk <id>` / `--role <r>`. One labelled block per agent; each goes to its agent **verbatim**. (To rebuild a single chunk agent's prompt for a relaunch: `--chunk <id>` in place of `--roster`.) **Pass `--rules` whenever Step 2 found any** — this command builds the whole prompt, so there is no later step in which you would staple them on, and a review that silently enforces no project rule is one of the things this skill exists to prevent.
 
 **What it prints is short — a few hundred characters.** It names the chunk, points at the **brief file** the command just wrote, and gives the one `read_file` that defines the territory. The brief — the territory's files, the paging rule, the uncoverable rule, what to review, the finding format, the severity definitions, the project rules and the receipt — is on disk, and the agent reads it, exactly as it reads the diff. A chunk agent's brief runs to about five kilobytes with the project rules in it, and a Step 3B review of a real pull request has **seventeen** of them: eighty-seven kilobytes, in one response, pasted without an edit. That is not a thing that happens. At a twelfth of that load, a real run cut nineteen hundred characters out of a single prompt and then talked its way past the check that caught it.
 
@@ -635,6 +639,8 @@ The rules it applies — so you can read the line it gives you, not so you can a
 
 **And you may not overrule the line it gives you.** The failure came back in a subtler shape, on a later dogfood: the run _did_ call `compose-review`, _did_ read `Verdict: Comment — an Approve was NOT available: a dimension nobody reviewed`, and then wrote — in its next thought — _"the compose-review flagged reverse audit as unreviewed (transcript visibility issue — the reverse audit did run substantively)"_, and reported **Approve** to the user and into the saved report. It was wrong: the auditors had run, but the orchestrator had hand-written their launch prompts, so they never got the prompt the CLI built — which is precisely what the gap said, and precisely the run's own doing. **A cap you can explain is still a cap.** If you believe a gap is wrong, the answer is to make the step verifiable — relaunch it with the prompt `agent-prompt` printed, verbatim — and run `compose-review` again. It is never to keep the verdict you preferred and narrate the gap away. The verdict you print, and the verdict in the report you save, are the one this command computed; when they differ from it, the review is lying to the person who trusted it.
 
+**The `FIX:` lines on stderr are that repair, spelled out.** For every repairable gap it capped on, `compose-review` prints one `FIX:` line naming the exact command — rebuild these prompts, relaunch those agents. Execute them — **one repair round, then `compose-review` again**. If the same gap survives the round, stop: the cap stands, post with it, and disclose the gap. Do not loop repairs hoping for a different verdict, and do not skip the round and post a capped verdict the FIX lines could have lifted — both are the same failure, choosing the verdict over the evidence, in opposite directions.
+
 Append a follow-up tip after the verdict (high effort only — a quick pass emits no verdict and uses Step 3C's tip instead; its "post comments" follow-up is declined per Step 3C). Choose based on remaining state:
 
 - **Local review with unfixed findings**: "Tip: type `fix these issues` to apply fixes interactively."
@@ -870,11 +876,7 @@ Report content should include:
 - All findings with verification status
 - Verdict (high effort only — a quick pass claims none)
 
-**The report's verdict is not yours to type.** Interpolate it from the file Step 6 already wrote, so the archived record cannot disagree with the computed one:
-
-```bash
-- **Verdict:** $(jq -r '.event' .qwen/tmp/qwen-review-{target}-composed.json)$(jq -r 'if (.cappedBy | length) > 0 then " (capped by " + (.cappedBy | join(", ")) + ")" else "" end' .qwen/tmp/qwen-review-{target}-composed.json)
-```
+**The report's verdict is not yours to type.** `compose-review` printed the exact `Verdict:` line in Step 6 — copy that line into the report verbatim, and if you no longer have it, re-read `event` and `cappedBy` from `.qwen/tmp/qwen-review-{target}-composed.json` with `read_file` and transcribe them without rewording. (Not `$(jq …)`: a `jq` binary is not guaranteed on the host, and a substitution that fails leaves the archived verdict blank or literal — worse than absent, because it looks written.)
 
 A run that had read `Verdict: Comment — an Approve was NOT available` wrote `**Verdict:** Approve` into its saved report minutes later. The terminal is prose and the archive is forever; this line is the one place the archive can be made to tell the truth for free. If the composed event is not the one you expected, fix the run — not the report.
 

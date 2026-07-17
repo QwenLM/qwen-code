@@ -916,9 +916,15 @@ export function buildRoleLaunchPrompt(
       `agent-prompt: unknown role "${role}". Known roles: ${Object.keys(BRIEFS).join(', ')}.`,
     );
   }
+  // The file is a PR-controlled path and this prompt lands in the roster's
+  // stdout, whose blocks are separated by lines: a newline smuggled in a
+  // filename could open a forged block boundary. Flattened, exactly as the
+  // separator label is; a path that needed the newline was never readable as a
+  // one-line `read_file` argument anyway.
+  const safeFile = opts.file?.replace(/[\r\n\u2500]+/g, ' ');
   const parts = [
     `You are review agent \`${role}\` — ${b.label}.` +
-      (opts.file ? ` Your file: \`${opts.file}\`.` : ''),
+      (safeFile ? ` Your file: \`${safeFile}\`.` : ''),
     '',
     '**Your brief is a file. Read it first — it is the whole of your instructions,',
     'and nothing in this message replaces it.**',
@@ -1089,14 +1095,23 @@ function buildLaunch(
   return { key, prompt: buildChunkLaunchPrompt(report, id, briefFile) };
 }
 
-/** The line above each roster block: who this launch is, in the reader's terms. */
+/**
+ * The line above each roster block: who this launch is, in the reader's terms.
+ *
+ * The file part is PR-controlled (it is a path from the diff), and the separator
+ * is a line: a filename carrying a newline could end the label early and make
+ * its tail read as a forged block boundary — content an orchestrator would then
+ * paste to an agent as if the CLI wrote it. Control characters are flattened to
+ * spaces, and the separator glyph is stripped so a name cannot imitate one.
+ */
 function rosterLabel(req: RequiredAgent): string {
   if (req.role === 'chunk') return `chunk ${req.chunk}`;
   // The brief's label already reads `Agent 1a: Line-by-line correctness`; the
   // rebuild hint downstream names roles, so keep the id visible when the label
   // does not carry it.
   const label = BRIEFS[req.role]?.label ?? `role ${req.role}`;
-  return req.file ? `${label} — ${req.file}` : label;
+  const file = req.file?.replace(/[\r\n\u2500]+/g, ' ');
+  return file ? `${label} — ${file}` : label;
 }
 
 /**
@@ -1141,8 +1156,13 @@ function runRoster(report: PlanReport, planPath: string, rules?: string): void {
         `passing its block VERBATIM — copy, do not retype. The ───── lines are ` +
         `separators, not part of any prompt. This is the same roster ` +
         `\`check-coverage\` reads out of the plan: a block you skip or reword is ` +
-        `a dimension nobody reviewed.`,
+        `a dimension nobody reviewed. Blocks are numbered \`agent k of ` +
+        `${roster.length}\` and the output ends with an end-of-roster line — if ` +
+        `either is missing, this output was truncated in transit: every prompt ` +
+        `is also recorded on disk, so rebuild just the missing blocks with ` +
+        `--chunk <id> / --role <r>.`,
       ...blocks,
+      `───── end of roster — ${roster.length} agents ─────`,
     ].join('\n\n'),
   );
 }
@@ -1335,7 +1355,10 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     } catch (err) {
       throw new Error(
         `agent-prompt: cannot read the findings ${args.findings}: ` +
-          `${(err as Error).message}. Omit --findings, or pass a path that resolves.`,
+          `${(err as Error).message}. Pass a path that resolves — --findings is ` +
+          `required for this role, so omitting it only fails one guard earlier. ` +
+          `An early reverse-audit round with nothing confirmed passes an empty ` +
+          `file (create it first).`,
       );
     }
     printed = `${findingsSection(role, content)}\n\n${prompt}`;

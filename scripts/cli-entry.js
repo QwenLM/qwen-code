@@ -84,7 +84,18 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // build. Nothing downstream overwrites this: the spawn below runs dist/cli.js,
 // which never re-executes this wrapper, and the post-update relaunch re-enters
 // through the launcher's own wrapper — which stamps the updated entry, as it must.
-process.env['QWEN_CODE_CLI'] = fileURLToPath(import.meta.url);
+//
+// One exception, and it points the SAME way: the standalone package launches this
+// file through a shim (`bin/qwen`) that selects the BUNDLED Node — the host may
+// have none — and announces itself via QWEN_CODE_LAUNCHER_PATH. There, "the entry
+// that reaches this build" is the shim: stamping this file instead would hand
+// subprocesses a `#!/usr/bin/env node` script on a machine where that resolves to
+// nothing. Read before the spawn path deletes the variable below.
+const standaloneShim = process.env['QWEN_CODE_LAUNCHER_PATH'];
+process.env['QWEN_CODE_CLI'] =
+  standaloneShim && existsSync(standaloneShim)
+    ? standaloneShim
+    : fileURLToPath(import.meta.url);
 
 const cliPathCandidates = [
   join(__dirname, 'cli.js'),

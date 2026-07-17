@@ -150,7 +150,15 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         // all, the report collapses to one line that names none of them.
         `— and launch one agent per block it prints, verbatim. To rebuild a ` +
         `single one: \`--role <n>\` (a per-file role takes \`--file <path>\`), ` +
-        `or \`--chunk <id>\` for a chunk agent.\n` +
+        `or \`--chunk <id>\` for a chunk agent. Pass \`--rules <rules file>\` ` +
+        `whenever Step 2 found any — a rebuild without it writes a rules-free ` +
+        `brief.\n` +
+        // The label is for humans; the selector is for the rebuild command. A
+        // label like `Test coverage matrix (whole-diff)` does not say
+        // `--role test-matrix`, and a wrong guess costs a full-roster rerun.
+        (report.missingRoleSelectors.length > 0
+          ? `Exact selectors: ${report.missingRoleSelectors.join('; ')}\n`
+          : '') +
         // Where it looked, because "the builder never ran" and "the builder ran
         // against a different --plan" are indistinguishable from a missing file and
         // are fixed differently. The record dir hangs off the plan path as given, so

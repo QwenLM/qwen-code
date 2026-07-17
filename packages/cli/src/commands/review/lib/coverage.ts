@@ -117,6 +117,12 @@ export interface CoverageFromTranscripts {
    */
   missingRoles: string[];
   /**
+   * The exact `agent-prompt` selector that rebuilds each missing brief, in the
+   * same order as its `missingRoles` entries would list them per-role. For
+   * stderr, never for the body: a human-facing label does not name its role id.
+   */
+  missingRoleSelectors: string[];
+  /**
    * Required agents that never opened the brief they were pointed at.
    *
    * The launch prompt names the brief rather than containing it — a 4 652-character
@@ -234,6 +240,14 @@ function merge(ranges: Array<[number, number]>): Array<[number, number]> {
 const UNCOVERABLE_RE = /^\s*Uncoverable:\s*chunk\s+(\d+)\b/im;
 
 /** A required agent, named the way a reader has to act on it. */
+/** The exact rebuild flags for one required agent — operator-facing (stderr). */
+function selectorOf(req: RequiredAgent): string {
+  if (req.role === 'chunk') return `--chunk ${req.chunk}`;
+  return req.file
+    ? `--role ${req.role} --file ${req.file}`
+    : `--role ${req.role}`;
+}
+
 function roleLabel(req: RequiredAgent): string {
   if (req.role === 'chunk') return `chunk ${req.chunk}`;
   const base = BRIEFS[req.role].label;
@@ -275,6 +289,14 @@ export function coverageFromTranscripts(
   const covered = new Set<number>();
   const uncoverable = new Set<number>();
 
+  // Hoisted from the roster section below: when NO role was briefed at all, the
+  // roster collapses to one line covering the whole run, and repeating "none was
+  // built" once per chunk transcript would put N more copies of the same fact
+  // into the posted body, right next to the line that already states it.
+  const rosterForRun = requiredAgents(plan as unknown as RosterPlan);
+  const nothingBuiltAtAll =
+    rosterForRun.length > 1 && rosterForRun.every((r) => !built.has(r.key));
+
   for (const rec of records) {
     const chunk = assignedChunk(rec);
     const name = label(rec, chunk);
@@ -310,17 +332,24 @@ export function coverageFromTranscripts(
     // The prompt the CLI built for this chunk, against the prompt the harness
     // recorded the agent being launched with. Nothing else in the run can see the
     // difference: a paraphrase keeps the diff path, so every other check passes.
+    let rewrittenThisRecord = false;
     if (chunk !== null) {
       const b = built.get(`chunk-${chunk}`);
       if (b === undefined) {
         // No internal command in this label: `compose-review` pushes it into the
         // posted body as-is, and the PR author cannot run `agent-prompt`. The
         // rebuild command rides the rewritten-launches remediation line, on stderr.
-        rewrittenPrompts.push(
-          `${name} — ran on a prompt the run wrote itself (none was built for ` +
-            `this chunk), so the brief with its method and rules never reached it`,
-        );
+        // Suppressed when nothing was built at all — the collapsed roster line
+        // already says so once, for the whole run.
+        rewrittenThisRecord = true;
+        if (!nothingBuiltAtAll) {
+          rewrittenPrompts.push(
+            `${name} — ran on a prompt the run wrote itself (none was built for ` +
+              `this chunk), so the brief with its method and rules never reached it`,
+          );
+        }
       } else if (!wasDeliveredVerbatim(rec.launchPrompt, b)) {
+        rewrittenThisRecord = true;
         rewrittenPrompts.push(
           `${name} — launched with a prompt that is not the one the CLI built`,
         );
@@ -330,9 +359,12 @@ export function coverageFromTranscripts(
     const told = pointedAt(rec.launchPrompt, plan);
 
     // Pointed at lines, and never opened the file they live in. It did work, so it
-    // is not idle. It just did not do *this* work.
+    // is not idle. It just did not do *this* work. Not reported for an agent
+    // already flagged rewritten: the repairs contradict (rebuild the prompt vs.
+    // relaunch the same one), the rebuild subsumes the relaunch, and an operator
+    // handed both for one agent follows whichever came last.
     if (told.length > 0 && rec.diffToolCalls === 0) {
-      unopenedAgents.push(name);
+      if (!rewrittenThisRecord) unopenedAgents.push(name);
       continue;
     }
 
@@ -371,8 +403,12 @@ export function coverageFromTranscripts(
   // caller does not write, and matched against the prompts the CLI recorded itself
   // emitting.
   const missingRoles: string[] = [];
+  // The exact rebuild selector for each missing brief, for stderr: a label like
+  // `Test coverage matrix (whole-diff)` does not tell the operator to pass
+  // `--role test-matrix`, and guessing wrong means a full-roster rerun.
+  const missingRoleSelectors: string[] = [];
   const unreadBriefs: string[] = [];
-  const roster = requiredAgents(plan as unknown as RosterPlan);
+  const roster = rosterForRun;
 
   // A role with no recorded prompt says one thing only: the brief never reached an
   // agent. It does *not* say nobody reviewed the dimension — an orchestrator that
@@ -411,13 +447,21 @@ export function coverageFromTranscripts(
             `was reviewed, if at all, from a prompt the run wrote for itself`,
         );
       }
+      missingRoleSelectors.push(selectorOf(req));
       continue;
     }
-    const agent = records.find((r) => wasDeliveredVerbatim(r.launchPrompt, b));
-    if (!agent) {
+    // ALL matching launches, not the first: a relaunch is the repair this
+    // report's own remediation prescribes, and judging only the earliest match
+    // would let an old launch that never opened its brief mask the compliant one
+    // that followed — flagging the exact behaviour the fix asked for.
+    const agents = records.filter((r) =>
+      wasDeliveredVerbatim(r.launchPrompt, b),
+    );
+    if (agents.length === 0) {
       missingRoles.push(
         `${roleLabel(req)} — its prompt was built, but no agent was launched with it`,
       );
+      missingRoleSelectors.push(selectorOf(req));
       continue;
     }
     // The launch prompt points at the brief rather than containing it, because a
@@ -434,8 +478,8 @@ export function coverageFromTranscripts(
     // The brief as a whole JSON string value (`successfulCallArgs` are already
     // serialized args): a bare substring would credit `${brief}.bak` for the brief,
     // the same trap `parseTranscript` avoids for the diff path.
-    const opened = agent.successfulCallArgs.some((a) =>
-      a.includes(JSON.stringify(brief)),
+    const opened = agents.some((agent) =>
+      agent.successfulCallArgs.some((a) => a.includes(JSON.stringify(brief))),
     );
     if (!opened) {
       unreadBriefs.push(
@@ -469,6 +513,7 @@ export function coverageFromTranscripts(
     unopenedAgents,
     rewrittenPrompts,
     missingRoles,
+    missingRoleSelectors,
     unreadBriefs,
     missingChunks,
     uncoverableChunks: [...uncoverable].sort((a, b) => a - b),
@@ -516,12 +561,25 @@ interface GapEntry {
 }
 type GapText = Record<Exclude<Delivery, 'ok'>, GapEntry>;
 
-/** The one rebuild command, spelled once. `role` differs; nothing else does. */
+/**
+ * The one rebuild command, spelled once. Role-aware where the roles genuinely
+ * differ: an empty findings file is a legitimate early reverse-audit round and a
+ * vacuous verification — a verifier that saw no findings clears the delivery
+ * floor while verifying nothing, so the verify advice must not invite it. And
+ * `--rules` rides along in both: `agent-prompt` rewrites the brief on every
+ * build, so a rebuild without the rules file silently ships a rules-free brief
+ * that every delivery check still passes.
+ */
 const rebuildFix = (role: 'verify' | 'reverse-audit', noun: string): string =>
   `build the prompt with \`"\${QWEN_CODE_CLI:-qwen}" review agent-prompt ` +
-  `--plan <plan> --role ${role} --findings <file>\` (an early round with ` +
-  `nothing confirmed passes an empty file) and launch an agent with EXACTLY ` +
-  `what it prints — no ${noun} number, no summary of your own, no rewording`;
+  `--plan <plan> --role ${role} --findings <file> [--rules <rules file>]\` ` +
+  (role === 'reverse-audit'
+    ? `(an early round with nothing confirmed passes an empty file; `
+    : `(pass the shard's findings, never an empty file — a verifier that sees ` +
+      `no findings verifies nothing; `) +
+  `pass --rules whenever the review loaded any, or the rebuilt brief silently ` +
+  `drops the project rules) and launch an agent with EXACTLY what it prints — ` +
+  `no ${noun} number, no summary of your own, no rewording`;
 
 const REVERSE_AUDIT_GAP: GapText = {
   // Not "no auditor ran": a run that skipped the builder and hand-wrote the
@@ -536,10 +594,14 @@ const REVERSE_AUDIT_GAP: GapText = {
       'the method its brief carries',
     fix: rebuildFix('reverse-audit', 'round'),
   },
+  // Same reach limit as `not-built`: a hand-written auditor that never opened
+  // the brief lands here too (`rewritten` requires the brief-open), so this text
+  // may not claim the pass did not run — only that it cannot be certified.
   'not-launched': {
     gap:
       'its prompt was built, but no agent was launched with it — the pass ' +
-      'that hunts what the rest of the review missed did not run',
+      'that hunts what the rest of the review missed ran, if at all, without ' +
+      'the method its brief carries, and cannot be certified',
     fix: rebuildFix('reverse-audit', 'round'),
   },
   rewritten: {
@@ -573,7 +635,7 @@ const VERIFY_GAP: GapText = {
   'not-launched': {
     gap:
       'its prompt was built, but no agent was launched with it, so the posted ' +
-      'findings were not verified',
+      'findings cannot be counted as verified',
     fix: rebuildFix('verify', 'shard'),
   },
   rewritten: {

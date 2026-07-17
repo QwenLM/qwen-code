@@ -96,6 +96,27 @@ describe('scripts/dev.js launcher', () => {
     expect(options).toEqual(expect.objectContaining({ shell: true }));
   });
 
+  it('re-raises a child signal instead of exiting 0 — close(null, SIGKILL) is not success', async () => {
+    // `code ?? 0` read a signal-killed child as green. This launcher is a
+    // QWEN_CODE_CLI entry now: an OOM-killed review gate command must not come
+    // back as a passing exit.
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined);
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    try {
+      await import('../dev.js?signal-close');
+      const child = spawnMock.mock.results[0].value;
+      const close = child.on.mock.calls.find(([ev]) => ev === 'close')[1];
+      close(null, 'SIGKILL');
+      expect(killSpy).toHaveBeenCalledWith(process.pid, 'SIGKILL');
+      expect(exitSpy).not.toHaveBeenCalledWith(0);
+    } finally {
+      exitSpy.mockRestore();
+      killSpy.mockRestore();
+    }
+  });
+
   it('stamps QWEN_CODE_CLI with its own path, overriding an inherited one', async () => {
     // A dev CLI started from inside another qwen session's shell inherits that
     // session's QWEN_CODE_CLI. Honouring it points every `qwen …` subprocess of

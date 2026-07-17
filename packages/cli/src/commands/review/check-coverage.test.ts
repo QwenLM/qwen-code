@@ -904,6 +904,77 @@ describe('the roster — who should have been here', () => {
     }
   });
 
+  it('a compliant relaunch is not masked by the failed attempt before it', () => {
+    // The remediation for an unread brief says: relaunch with the same printed
+    // prompt. Judging only the FIRST transcript that matches the built prompt
+    // would keep flagging the role after the operator did exactly that — an
+    // older launch that never opened its brief masking the compliant one.
+    const p = plan();
+    const built = readFileSync(
+      join(promptRecordDir(p), 'test-matrix.txt'),
+      'utf8',
+    );
+    rmSync(join(dir, 'subagents', 'S1', 'agent-r-test_matrix.jsonl'), {
+      force: true,
+    });
+    // Attempt 1: right prompt, never opened the brief. Attempt 2: the relaunch,
+    // which did. (`a-` sorts before `b-`, so the failed attempt is read first.)
+    transcript('a-first-try', built, { calls: 2, opens: [] });
+    transcript('b-relaunch', built, {
+      calls: 2,
+      opens: [briefPath(p, 'test-matrix')],
+    });
+    // The rest of the roster, compliant, so the only defect is the one above.
+    transcript('c1', good(1), { calls: 2 });
+    transcript('c2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.unreadBriefs).toEqual([]);
+    expect(r.missingRoles).toEqual([]);
+  });
+
+  it('an agent flagged rewritten is not also flagged unopened — one repair, not two', () => {
+    // A hand-written chunk prompt whose agent also never opened the diff used to
+    // land in both lists, handing the operator contradictory repairs: rebuild
+    // the prompt AND relaunch the same one. The rebuild subsumes the relaunch.
+    const p = plan(2, { record: false });
+    transcript('a1', good(1), { calls: 0, opens: ['/some/other/file'] });
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.rewrittenPrompts.join(' ')).toContain('chunk 1');
+    expect(r.unopenedAgents).toEqual([]);
+  });
+
+  it('all-briefless does not also repeat "none was built" once per chunk transcript', () => {
+    // On a 3B replay of the #7012 shape, every chunk transcript would add its
+    // own "ran on a prompt the run wrote itself" line beside the collapsed
+    // roster line — N+1 public sentences for one fact. The collapse already
+    // states it once, for the whole run.
+    const p = plan(2, { record: false, roster: false });
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.missingRoles).toHaveLength(1);
+    expect(r.missingRoles[0]).toMatch(/^every dimension — /);
+    expect(r.rewrittenPrompts).toEqual([]);
+    expect(r.ok).toBe(false); // suppressing the text never suppresses the cap
+  });
+
+  it('hands the operator exact selectors beside the human labels', () => {
+    // `Test coverage matrix (whole-diff)` does not say `--role test-matrix`, and
+    // a wrong guess costs a full-roster rerun. The selectors ride the report for
+    // stderr; the body still gets only the labels.
+    const p = planPr();
+    rmSync(join(promptRecordDir(p), '1c.txt'), { force: true });
+    rmSync(join(dir, 'subagents', 'S1', 'agent-r-1c.jsonl'), { force: true });
+    transcript('sec', wholeDiff(), { calls: 8 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.missingRoleSelectors).toEqual(['--role 1c']);
+  });
+
   it('catches a prompt that was built and then never used', () => {
     // Half of the failure: the command was called, so the record exists — but the
     // agent was launched with something else, or not launched at all.

@@ -5,6 +5,9 @@
  */
 
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { getShellContextEnvVars } from './shellContextEnv.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { promptIdContext } from './promptIdContext.js';
@@ -71,10 +74,33 @@ describe('getShellContextEnvVars', () => {
     // has installed. Dogfooded: a dev-daemon session ran `qwen review agent-prompt
     // --role 0`, PATH found a v0.19.10 whose agent-prompt predates --role, and the
     // review died on "Missing required argument: chunk".
-    process.env['QWEN_CODE_CLI'] = '/repo/scripts/cli-entry.js';
-    expect(getShellContextEnvVars()['QWEN_CODE_CLI']).toBe(
-      '/repo/scripts/cli-entry.js',
-    );
+    const dir = mkdtempSync(join(tmpdir(), 'cli-entry-'));
+    try {
+      const entry = join(dir, 'cli-entry.js');
+      writeFileSync(entry, '#!/usr/bin/env node\nconsole.log("hi");\n');
+      process.env['QWEN_CODE_CLI'] = entry;
+      expect(getShellContextEnvVars()['QWEN_CODE_CLI']).toBe(entry);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('drops a shebang-less .js — the desktop tooling sets one, and a shell cannot exec it', () => {
+    // The variable predates this mechanism with a second meaning: the desktop
+    // app's scripts set it to a vendored `dist/cli.js` — a module path meant for
+    // `node <path>`, with no shebang. `"${QWEN_CODE_CLI:-qwen}"` executing that
+    // runs a JS bundle as a shell script. Filtering it restores the pre-existing
+    // bare-`qwen` fallback for those hosts; every real entry (the bin wrapper,
+    // dev.js, start.js, the standalone shim) carries a shebang and passes.
+    const dir = mkdtempSync(join(tmpdir(), 'cli-nosb-'));
+    try {
+      const bundle = join(dir, 'cli.js');
+      writeFileSync(bundle, '"use strict";\nconsole.log("bundle");\n');
+      process.env['QWEN_CODE_CLI'] = bundle;
+      expect('QWEN_CODE_CLI' in getShellContextEnvVars()).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('omits QWEN_CODE_CLI when the host does not export one', () => {

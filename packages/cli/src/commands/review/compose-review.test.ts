@@ -28,6 +28,7 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
   writeStderrLine: vi.fn(),
 }));
+import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 
 const MODEL = 'test-model';
 
@@ -1013,6 +1014,61 @@ describe('coverage is recomputed, never accepted', () => {
     expect(fixes).toMatch(/agents that never opened the diff: relaunch/);
     // And none of the three disclosures drags a command into the body.
     expect(r.body).not.toMatch(/agent-prompt|--roster|--chunk/);
+  });
+
+  it('the handler prints every FIX to stderr, before the verdict, never to stdout', () => {
+    // The array on the result is data; the command boundary is the interface the
+    // orchestrator actually reads. Without this, rerouting FIX lines to stdout
+    // (corrupting the JSON callers parse) or printing them after `Verdict:` (so
+    // a reader that stops at the verdict never sees them) would stay green.
+    const p = plan({ step45: false });
+    transcript('a1', goodPrompt(1), { toolCalls: 3 });
+    transcript('a2', goodPrompt(2), { toolCalls: 2 });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordStep45(p); // roster misses the test matrix → one repairable gap
+    const input = join(dir, 'input.json');
+    writeFileSync(
+      input,
+      JSON.stringify({
+        criticalsInline: 0,
+        suggestionsInline: 0,
+        planPath: p,
+        modelId: MODEL,
+      }),
+    );
+
+    const prevDir = process.env['QWEN_CODE_PROJECT_DIR'];
+    const prevSession = process.env['QWEN_CODE_SESSION_ID'];
+    process.env['QWEN_CODE_PROJECT_DIR'] = ENV['QWEN_CODE_PROJECT_DIR'];
+    process.env['QWEN_CODE_SESSION_ID'] = ENV['QWEN_CODE_SESSION_ID'];
+    try {
+      vi.mocked(writeStderrLine).mockClear();
+      vi.mocked(writeStdoutLine).mockClear();
+      (composeReviewCommand.handler as (a: Record<string, unknown>) => void)({
+        input,
+      });
+
+      const stderr = vi
+        .mocked(writeStderrLine)
+        .mock.calls.map((c) => String(c[0]));
+      const fixIdx = stderr.findIndex((l) => l.startsWith('FIX: '));
+      const verdictIdx = stderr.findIndex((l) => l.startsWith('Verdict:'));
+      expect(fixIdx).toBeGreaterThanOrEqual(0);
+      expect(verdictIdx).toBeGreaterThan(fixIdx);
+      // And stdout stays parseable JSON — no FIX line in it.
+      const stdout = vi
+        .mocked(writeStdoutLine)
+        .mock.calls.map((c) => String(c[0]))
+        .join('\n');
+      expect(() => JSON.parse(stdout)).not.toThrow();
+      expect(stdout).not.toContain('FIX: ');
+    } finally {
+      if (prevDir === undefined) delete process.env['QWEN_CODE_PROJECT_DIR'];
+      else process.env['QWEN_CODE_PROJECT_DIR'] = prevDir;
+      if (prevSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+      else process.env['QWEN_CODE_SESSION_ID'] = prevSession;
+    }
   });
 
   it('caps when the transcripts cannot be read at all — and says so', () => {
