@@ -1410,7 +1410,7 @@ export class WebViewProvider {
       try {
         this.agentManager.disconnect();
       } catch (e) {
-        logger.log('[WebViewProvider] Error disconnecting after rollback:', e);
+        logger.warn('[WebViewProvider] Error disconnecting after rollback:', e);
       }
       this.agentInitialized = false;
     };
@@ -1425,7 +1425,7 @@ export class WebViewProvider {
         try {
           this.agentManager.disconnect();
         } catch (e) {
-          logger.log('[WebViewProvider] Error disconnecting:', e);
+          logger.warn('[WebViewProvider] Error disconnecting:', e);
         }
         this.agentInitialized = false;
       }
@@ -1845,11 +1845,14 @@ export class WebViewProvider {
         | { level?: unknown; message?: unknown }
         | undefined;
       if (isLogLevel(data?.level) && typeof data.message === 'string') {
-        const message =
+        const logMessage =
           data.message.length > MAX_WEBVIEW_LOG_LENGTH
             ? `${data.message.slice(0, MAX_WEBVIEW_LOG_LENGTH)}...[truncated]`
             : data.message;
-        logger[data.level]('[Webview]', message.replace(/\r\n|\r|\n/g, '\\n'));
+        logger[data.level](
+          '[Webview]',
+          logMessage.replace(/\r\n|\r|\n/g, '\\n'),
+        );
       }
       return true;
     }

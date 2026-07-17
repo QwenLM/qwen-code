@@ -595,6 +595,7 @@ describe('WebViewProvider.attachToView', () => {
       '[Webview]',
       `${message.slice(0, 10_000)}...[truncated]`.replace('\n', '\\n'),
     );
+    error.mockRestore();
   });
 
   it('reports clipboard copy failures back to the requesting webview', async () => {
