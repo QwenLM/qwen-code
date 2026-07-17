@@ -413,13 +413,6 @@ describe('gemini.tsx main function', () => {
   it.each([
     ['before the ACP relaunch', { acp: true }, {}, undefined, '1'],
     [
-      'before the experimental ACP relaunch',
-      { experimentalAcp: true },
-      {},
-      undefined,
-      '1',
-    ],
-    [
       'in the relaunched ACP process',
       { acp: true },
       { QWEN_CODE_NO_RELAUNCH: 'true' },
