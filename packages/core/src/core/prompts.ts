@@ -12,6 +12,7 @@ import process from 'node:process';
 import { isGitRepository } from '../utils/gitUtils.js';
 import { QWEN_DIR } from '../config/storage.js';
 import type { GenerateContentConfig } from '@google/genai';
+import { InputFormat } from '../output/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('PROMPTS');
@@ -38,7 +39,7 @@ export function resolveInteractionMode(config: {
   // allows 'ask_user_question'.
   if (
     config.getExperimentalZedIntegration() ||
-    config.getInputFormat?.() === 'stream-json'
+    config.getInputFormat?.() === InputFormat.STREAM_JSON
   ) {
     return 'acp';
   }

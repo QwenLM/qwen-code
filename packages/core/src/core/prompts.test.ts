@@ -11,7 +11,9 @@ import {
   getPlanModeSystemReminder,
   resolvePathFromEnv,
   getCompressionPrompt,
+  resolveInteractionMode,
 } from './prompts.js';
+import { InputFormat } from '../output/types.js';
 import { isGitRepository } from '../utils/gitUtils.js';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -772,5 +774,72 @@ describe('getCompressionPrompt', () => {
     expect(prompt).not.toMatch(
       /resume.*directly|continue the conversation from where it left off/i,
     );
+  });
+});
+
+describe('resolveInteractionMode', () => {
+  const makeConfig = (opts: {
+    zed?: boolean;
+    inputFormat?: string;
+    interactive?: boolean;
+  }) => ({
+    getExperimentalZedIntegration: () => opts.zed ?? false,
+    getInputFormat: () => opts.inputFormat ?? InputFormat.TEXT,
+    isInteractive: () => opts.interactive ?? false,
+  });
+
+  it("resolves the Zed integration to 'acp'", () => {
+    expect(resolveInteractionMode(makeConfig({ zed: true }))).toBe('acp');
+  });
+
+  it("resolves a stream-json session to 'acp' so the model may still ask questions", () => {
+    // Must match the runtime question/permission sites, which treat a
+    // stream-json session as ACP-capable (the host relays the question).
+    expect(
+      resolveInteractionMode(
+        makeConfig({ inputFormat: InputFormat.STREAM_JSON }),
+      ),
+    ).toBe('acp');
+  });
+
+  it("resolves an interactive text session to 'interactive'", () => {
+    expect(
+      resolveInteractionMode(
+        makeConfig({ inputFormat: InputFormat.TEXT, interactive: true }),
+      ),
+    ).toBe('interactive');
+  });
+
+  it("resolves a non-interactive text session to 'headless'", () => {
+    expect(
+      resolveInteractionMode(
+        makeConfig({ inputFormat: InputFormat.TEXT, interactive: false }),
+      ),
+    ).toBe('headless');
+  });
+
+  it("prefers 'acp' over 'interactive' for a stream-json session (ACP precedence)", () => {
+    expect(
+      resolveInteractionMode(
+        makeConfig({ inputFormat: InputFormat.STREAM_JSON, interactive: true }),
+      ),
+    ).toBe('acp');
+  });
+
+  it('treats a missing getInputFormat as a text session', () => {
+    // getInputFormat is optional on the structural type; its absence must not
+    // throw and must not resolve to 'acp'.
+    expect(
+      resolveInteractionMode({
+        getExperimentalZedIntegration: () => false,
+        isInteractive: () => true,
+      }),
+    ).toBe('interactive');
+    expect(
+      resolveInteractionMode({
+        getExperimentalZedIntegration: () => false,
+        isInteractive: () => false,
+      }),
+    ).toBe('headless');
   });
 });
