@@ -132,12 +132,23 @@ async function handleDiffFile(
     });
     return;
   }
+  // Optional pre-rename path: when present the diff is computed old→new with
+  // rename detection so a renamed file shows its actual edit, not all-added.
+  const queryOldPath = req.query['oldPath'];
+  const oldPath =
+    typeof queryOldPath === 'string' && queryOldPath.length > 0
+      ? queryOldPath
+      : undefined;
   try {
     // Apply the read headers before the await (as handleDiffList does) so the
     // no-store/nosniff headers are also present on the error response if the
     // fetch throws.
     applyReadHeaders(res);
-    const result = await fetchGitDiffHunksForFile(workspaceCwd, queryPath);
+    const result = await fetchGitDiffHunksForFile(
+      workspaceCwd,
+      queryPath,
+      oldPath,
+    );
     res.status(200).json(buildFileHunks(workspaceCwd, queryPath, result));
   } catch (err) {
     sendBridgeError(res, err, { route });

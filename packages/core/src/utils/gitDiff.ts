@@ -343,6 +343,7 @@ export async function fetchGitDiffHunks(
 export async function fetchGitDiffHunksForFile(
   cwd: string,
   filePath: string,
+  oldPath?: string,
 ): Promise<GitDiffFileHunks | null> {
   const gitRoot = findGitRoot(cwd);
   if (!gitRoot) return null;
@@ -350,18 +351,22 @@ export async function fetchGitDiffHunksForFile(
   if (relPath === null) return null;
   if (await isInTransientGitState(gitRoot)) return null;
 
-  const diffOut = await runGit(
-    [
-      '--no-optional-locks',
-      'diff',
-      '--no-ext-diff',
-      '--no-textconv',
-      'HEAD',
-      '--',
-      relPath,
-    ],
-    gitRoot,
-  );
+  // For a rename, include the pre-rename path with rename detection so git
+  // diffs old→new content instead of reporting the new path as fully added
+  // (a single-path pathspec defeats rename detection).
+  const oldRelPath =
+    oldPath != null ? toRepoRelativePath(gitRoot, oldPath) : null;
+  const diffArgs = [
+    '--no-optional-locks',
+    'diff',
+    '--no-ext-diff',
+    '--no-textconv',
+  ];
+  if (oldRelPath != null) diffArgs.push('-M');
+  diffArgs.push('HEAD', '--');
+  if (oldRelPath != null) diffArgs.push(oldRelPath);
+  diffArgs.push(relPath);
+  const diffOut = await runGit(diffArgs, gitRoot);
   if (diffOut == null) return null;
   const truncatedPaths = new Set<string>();
   const parsed = parseGitDiff(diffOut, truncatedPaths);

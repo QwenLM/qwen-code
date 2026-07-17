@@ -1015,9 +1015,13 @@ export class DaemonClient {
 
   async workspaceGitDiffFile(
     path: string,
+    oldPath?: string,
   ): Promise<DaemonWorkspaceGitDiffHunks> {
+    const query =
+      `/workspace/git/diff/file?path=${urlEncode(path)}` +
+      (oldPath != null ? `&oldPath=${urlEncode(oldPath)}` : '');
     return await this.jsonRequest<DaemonWorkspaceGitDiffHunks>(
-      `/workspace/git/diff/file?path=${urlEncode(path)}`,
+      query,
       'GET /workspace/git/diff/file',
       { mode: 'rest' },
     );
@@ -4180,10 +4184,16 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  workspaceGitDiffFile(path: string): Promise<DaemonWorkspaceGitDiffHunks> {
+  workspaceGitDiffFile(
+    path: string,
+    oldPath?: string,
+  ): Promise<DaemonWorkspaceGitDiffHunks> {
+    const query =
+      `/git/diff/file?path=${urlEncode(path)}` +
+      (oldPath != null ? `&oldPath=${urlEncode(oldPath)}` : '');
     return this.client.workspaceJsonRequest<DaemonWorkspaceGitDiffHunks>(
       this.workspaceSelector,
-      `/git/diff/file?path=${urlEncode(path)}`,
+      query,
       'GET /workspaces/:workspace/git/diff/file',
       { mode: 'rest' },
     );

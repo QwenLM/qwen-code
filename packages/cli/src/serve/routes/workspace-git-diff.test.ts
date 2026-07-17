@@ -200,6 +200,7 @@ describe('workspace Git diff routes', () => {
     expect(fetchGitDiffHunksForFileMock).toHaveBeenCalledWith(
       '/work/main',
       'src/a.ts',
+      undefined,
     );
   });
 
@@ -281,6 +282,7 @@ describe('workspace Git diff routes', () => {
     expect(fetchGitDiffHunksForFileMock).toHaveBeenCalledWith(
       '/work/secondary',
       'b.ts',
+      undefined,
     );
   });
 

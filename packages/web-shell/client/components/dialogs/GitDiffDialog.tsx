@@ -252,7 +252,9 @@ function DiffFileRow({
       setError(false);
       client
         .workspaceByCwd(workspaceCwd)
-        .workspaceGitDiffFile(file.path)
+        // Pass the pre-rename path so a renamed file diffs old→new (rename
+        // detection) instead of showing the new path as fully added.
+        .workspaceGitDiffFile(file.path, file.oldPath)
         .then((result) => {
           setHunks(result.hunks);
           setTruncated(result.truncated === true);

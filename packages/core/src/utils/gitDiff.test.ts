@@ -547,6 +547,26 @@ describe('fetchGitDiffHunksForFile', () => {
     expect(await fetchGitDiffHunksForFile(repo, 'a.txt')).toBeNull();
   });
 
+  it('diffs a renamed file old→new when oldPath is provided', async () => {
+    await fs.writeFile(path.join(repo, 'old.txt'), 'one\ntwo\nthree\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'init');
+    // Rename old.txt → new.txt and edit one line.
+    await fs.rm(path.join(repo, 'old.txt'));
+    await fs.writeFile(path.join(repo, 'new.txt'), 'one\nTWO\nthree\n');
+    await git(repo, 'add', '-A');
+
+    // With the pre-rename path, rename detection yields the actual edit
+    // (-two/+TWO with one/three as context) instead of new.txt as fully added.
+    const result = await fetchGitDiffHunksForFile(repo, 'new.txt', 'old.txt');
+    expect(result).not.toBeNull();
+    const lines = result!.hunks.flatMap((h) => h.lines);
+    expect(lines).toContain('-two');
+    expect(lines).toContain('+TWO');
+    expect(lines).toContain(' one');
+    expect(lines).not.toContain('+one');
+  });
+
   it('synthesizes an all-added hunk for an untracked file', async () => {
     await fs.writeFile(path.join(repo, 'a.txt'), 'a\n');
     await git(repo, 'add', '.');
