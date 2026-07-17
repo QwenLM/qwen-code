@@ -127,6 +127,12 @@ export interface AgentMeta {
    * via {@link normalizeResumedAgentDepth} — never trust the raw value.
    */
   depth?: number;
+  /**
+   * Concrete model ID the agent runs with, resolved at launch time.
+   * Recovered on background-agent resume so per-model concurrency caps
+   * (agents.maxParallelAgentsByModel) survive process restart.
+   */
+  model?: string;
   /** Last terminal error, if any. */
   lastError?: string;
 }

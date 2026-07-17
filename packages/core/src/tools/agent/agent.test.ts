@@ -4014,6 +4014,14 @@ describe('AgentTool', () => {
       await Promise.resolve();
 
       expect(mockRegistry.waitForBackgroundSlot).toHaveBeenCalled();
+      // Per-model cap: resolved model ID must flow through to the registry.
+      expect(mockRegistry.tryReserveBackgroundSlot).toHaveBeenCalledWith(
+        'parent-model',
+      );
+      expect(mockRegistry.waitForBackgroundSlot).toHaveBeenCalledWith(
+        undefined,
+        'parent-model',
+      );
       expect(mockHookSystem.fireSubagentStartEvent).not.toHaveBeenCalled();
       expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
       expect(mockRegistry.register).not.toHaveBeenCalled();

@@ -2931,6 +2931,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           // Persisted so resume restores the original nesting level; see
           // childLaunchDepth() for the rationale.
           depth: childLaunchDepth(),
+          model: subagentModelId,
         });
 
         // Subscribe to the subagent's tool-call event stream so the
