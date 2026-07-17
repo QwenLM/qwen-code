@@ -12,6 +12,7 @@ import {
 import {
   getComposerTagIconUrl,
   getComposerTagViewModel,
+  isBuiltinComposerTagIconUrl,
   splitComposerTagContentByAnnotations,
 } from '../../utils/composerTag';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
@@ -289,7 +290,10 @@ function UserMessageTag({
     tag.icon ??
     viewModel?.iconUrl ??
     getComposerTagIconUrl(tag.kind, composerTagIcons);
-  const safeIconUrl = iconUrl && isSafeImageSrc(iconUrl) ? iconUrl : undefined;
+  const safeIconUrl =
+    iconUrl && (isBuiltinComposerTagIconUrl(iconUrl) || isSafeImageSrc(iconUrl))
+      ? iconUrl
+      : undefined;
   return (
     <span
       className={`${styles.messageTag}${

@@ -7,7 +7,7 @@
 import { Box, Static } from 'ink';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
-import { isHistoryItemVisibleAfterRestore } from '../types.js';
+import { isHistoryItemVisibleAfterRestore, StreamingState } from '../types.js';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { ShowMoreLines } from './ShowMoreLines.js';
 import { Notifications } from './Notifications.js';
@@ -112,6 +112,7 @@ const virtualIsStaticItem = (item: VpItem) =>
 export const MainContent = () => {
   const { version } = useAppContext();
   const uiState = useUIState();
+  const streamingState = uiState.streamingState;
   const showScrollbar = uiState.showScrollbar ?? true;
   const {
     pendingHistoryItems,
@@ -497,11 +498,26 @@ export const MainContent = () => {
             so the clamp is a no-op there and only engages on residual overflow.
             ShowMoreLines stays OUTSIDE the clamp; it only renders while
             constrained (so the clamp is inert) and must not be clipped.
+
+            The clamp engages while constrained OR while the model is actively
+            streaming (Responding) — i.e. the case that trips the scroll-to-top
+            lock. It is deliberately dropped in "show more lines" mode
+            (constrainHeight off) once streaming has settled to a static
+            confirmation (WaitingForConfirmation): a tall edit/write_file diff
+            preview must render every row so the user can scroll the terminal
+            scrollback and review the full change before approving (#6809). A
+            static confirmation is a single render, so it does not trip Ink's
+            from-top full-redraw path the way a streaming table does.
           */}
           <Box
             flexDirection="column"
             flexShrink={0}
-            maxHeight={availableTerminalHeight || undefined}
+            maxHeight={
+              uiState.constrainHeight ||
+              streamingState === StreamingState.Responding
+                ? availableTerminalHeight || undefined
+                : undefined
+            }
             overflow="hidden"
           >
             {pendingHistoryItemsWithSourceCopyOffsets.map(
