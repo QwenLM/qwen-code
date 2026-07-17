@@ -1,90 +1,71 @@
-# WebShell 只读 Daemon Transcript 渲染设计
+# Design for Read-only Daemon Transcript Rendering in WebShell
 
-## 文档状态
+## Document Status
 
-- 状态：Implemented
-- 日期：2026-07-14
-- 范围：`packages/web-shell`
-- 目标输入：`readonly DaemonTranscriptBlock[]`
-- 目标输出：继承 WebShell `MessageList` 展示能力的只读 transcript 视图
+- Status: Implemented
+- Date: 2026-07-14
+- Scope: `packages/web-shell`
+- Input: `readonly DaemonTranscriptBlock[]`
+- Output: a read-only transcript view that inherits WebShell `MessageList` presentation capabilities
 
-## 1. 背景
+## 1. Background
 
-WebShell 已经具备完整的 daemon transcript 渲染链路，但目前这条链路只能通过
-`App` 或 split view 中的 `ChatPane` 间接使用：组件先从
-`DaemonSessionProvider` 读取 transcript blocks，再把 blocks 转换为 WebShell
-内部消息，最后交给 `MessageList` 渲染。
+WebShell already has a complete daemon transcript rendering path, but it can currently be used only indirectly through `App` or `ChatPane` in split view. The component first reads transcript blocks from `DaemonSessionProvider`, converts those blocks to WebShell's internal messages, and finally passes them to `MessageList` for rendering.
 
-新的使用场景已经直接持有 `DaemonTranscriptBlock[]`，只需要使用 WebShell 的消息
-样式和渲染能力展示历史内容，不需要建立 daemon session 连接，也不允许执行会话写
-操作。典型的非目标交互包括工具审批、`AskUserQuestion`、重试、分支、提交 prompt
-和打开会修改会话状态的面板。
+The new use case already holds a `DaemonTranscriptBlock[]` directly and needs only WebShell's message styling and rendering capabilities to display historical content. It does not need to establish a daemon session connection and must not perform session mutations. Interactions explicitly outside the target include tool approval, `AskUserQuestion`, retry, branch, prompt submission, and opening panels that modify session state.
 
-如果宿主自行复制 `transcriptBlocksToDaemonMessages` 的结果并拼装内部组件，会暴露
-WebShell 私有的 `DaemonMessage` 模型、上下文和 CSS 约束，也会在 MessageList 新增
-能力时发生渲染漂移。因此需要由 `@qwen-code/web-shell` 提供一个稳定的公开入口。
+If the host directly consumes the result of `transcriptBlocksToDaemonMessages` and assembles internal components, it exposes WebShell's private `DaemonMessage` model, contexts, and CSS constraints. It would also drift from the supported rendering when `MessageList` gains features. `@qwen-code/web-shell` therefore needs to provide a stable public entry point.
 
-## 2. 目标
+## 2. Goals
 
-1. 新增一个公开 React 组件，直接接收
-   `readonly DaemonTranscriptBlock[]` 并渲染。
-2. 复用现有 `transcriptBlocksToDaemonMessages()` 和同一个 `MessageList`，保证用户、
-   assistant、thinking、tool、sub-agent、plan、status、Markdown、时间线、长会话虚拟
-   滚动等能力随 MessageList 演进自动继承。
-3. 组件可在没有 `DaemonWorkspaceProvider`、`DaemonSessionProvider` 和网络连接的情况
-   下独立渲染。
-4. 只读边界内不调用任何 daemon/session mutation，不显示 pending permission 或
-   `AskUserQuestion` 的作答 UI。
-5. 以新增导出为主，不改变现有 `WebShell`、`WebShellWithProviders`、`App` 和
-   `ChatPane` 的运行路径、默认值及 DOM 行为。
-6. 新增完整的组件单测，并通过现有 WebShell 测试集、构建、lint 和 typecheck。
+1. Add a public React component that directly accepts and renders `readonly DaemonTranscriptBlock[]`.
+2. Reuse the existing `transcriptBlocksToDaemonMessages()` and the same `MessageList`, so user, assistant, thinking, tool, sub-agent, plan, status, Markdown, timeline, and long-session virtual-scrolling capabilities automatically evolve with `MessageList`.
+3. Allow the component to render independently without `DaemonWorkspaceProvider`, `DaemonSessionProvider`, or a network connection.
+4. Do not invoke any daemon/session mutation within the read-only boundary or display response UI for pending permissions or `AskUserQuestion`.
+5. Primarily add exports without changing the runtime paths, defaults, or DOM behavior of the existing `WebShell`, `WebShellWithProviders`, `App`, or `ChatPane`.
+6. Add complete component unit tests and pass the existing WebShell test suite, build, lint, and typecheck.
 
-## 3. 非目标
+## 3. Non-goals
 
-- 不新增 transcript 获取、分页、缓存或 SSE 订阅能力；宿主负责提供 blocks。
-- 不把只读模式塞入现有 `WebShellProps`，也不为 `App` 增加条件化的
-  `readOnly`/`blocks` 双数据源。
-- 不导出内部 `MessageList`、`Message` 或 `DaemonMessage` 类型。
-- 不展示或处理尚未解决的工具审批和 `AskUserQuestion`。
-- 不提供 composer、queued prompt、streaming status、sidebar、split view、dialog、
-  artifact right panel 等 App 外壳能力；MessageList 自带的 session timeline 保留。
-- 不从 blocks 推断或加载独立的 session artifacts。文件变更、artifact 和 scheduled
-  task 的 App 级 turn-output 卡片不在本期范围内。
-- 不禁止复制、折叠/展开工具、展开 completed turn、表格筛选、时间线定位等只改变
-  本地展示状态的交互。
+- Adding transcript retrieval, pagination, caching, or SSE subscriptions; the host supplies blocks.
+- Inserting a read-only mode into the existing `WebShellProps`, or adding conditional `readOnly`/`blocks` dual data sources to `App`.
+- Exporting internal `MessageList`, `Message`, or `DaemonMessage` types.
+- Displaying or handling unresolved tool approvals or `AskUserQuestion`.
+- Providing the App shell's composer, queued prompts, streaming status, sidebar, split view, dialogs, artifact right panel, or similar capabilities. The session timeline built into `MessageList` remains.
+- Inferring or loading separate session artifacts from blocks. App-level turn-output cards for file changes, artifacts, and scheduled tasks are out of scope.
+- Preventing interactions that modify only local presentation state, such as copy, collapse/expand tool, expand completed turn, table filtering, or timeline navigation.
 
-## 4. 术语与只读边界
+## 4. Terminology and the Read-only Boundary
 
-本设计中的“只读”是指 **不读取或修改 daemon/session 运行状态**，而不是给整个 DOM
-设置 `pointer-events: none`。
+In this design, “read-only” means **not reading or modifying daemon/session runtime state**. It does not mean setting `pointer-events: none` on the entire DOM.
 
-| 类别                | 行为                                                              | 是否保留                     |
-| ------------------- | ----------------------------------------------------------------- | ---------------------------- |
-| 被动展示            | 文本、Markdown、图片、diff、shell output、tool/sub-agent 状态     | 是                           |
-| 本地查看            | 复制、折叠、展开、虚拟滚动、时间线定位、表格排序/筛选             | 是                           |
-| 宿主自定义展示      | Markdown/code block renderer、消息内容 renderer                   | 是；副作用由宿主负责         |
-| 普通外部链接        | 浏览器安全 URL transform 后的新窗口导航                           | 是                           |
-| WebShell 语义导航   | `qwen-session://` 触发的 `qwen:open-session` 全局事件             | 否；只读时显示为不可操作文本 |
-| Session mutation    | send prompt、cancel、retry、branch、rewind、切换模型/模式         | 否                           |
-| Permission mutation | tool approval、reject、`AskUserQuestion` submit/ignore            | 否                           |
-| 外部数据加载        | 组件自身发起的 session attach、transcript/artifact/task/MCP fetch | 否                           |
+| Category                     | Behavior                                                                 | Retained                            |
+| ---------------------------- | ------------------------------------------------------------------------ | ----------------------------------- |
+| Passive presentation         | Text, Markdown, images, diff, shell output, tool/sub-agent status        | Yes                                 |
+| Local viewing                | Copy, collapse, expand, virtual scroll, timeline, table sort/filter      | Yes                                 |
+| Host-customized presentation | Markdown/code-block renderer, message-content renderer                   | Yes; the host owns any side effects |
+| Ordinary external links      | New-window navigation after browser-safe URL transformation              | Yes                                 |
+| WebShell semantic navigation | `qwen-session://` dispatches the global `qwen:open-session` event        | No; render as non-interactive text  |
+| Session mutation             | Send prompt, cancel, retry, branch, rewind, switch model/mode            | No                                  |
+| Permission mutation          | Approve/reject tool, submit/ignore `AskUserQuestion`                     | No                                  |
+| External data loading        | Component-initiated session attach or transcript/artifact/task/MCP fetch | No                                  |
 
-这一边界既保留 MessageList 的阅读体验，也保证组件本身没有写 daemon 的能力。
+This boundary preserves the `MessageList` reading experience while ensuring that the component itself has no capability to write to the daemon.
 
-## 5. 现状与调用方地图
+## 5. Current State and Caller Map
 
-| 模块                                                         | 当前职责                                                   | 与本设计的关系                         |
-| ------------------------------------------------------------ | ---------------------------------------------------------- | -------------------------------------- |
-| `packages/sdk-typescript/src/daemon/ui/types.ts`             | 定义 `DaemonTranscriptBlock` union                         | 新组件的公开输入模型                   |
-| `packages/web-shell/client/adapters/transcriptToMessages.ts` | 将 blocks 归并为 WebShell `DaemonMessage[]`                | 直接复用，不新建转换器                 |
-| `packages/web-shell/client/hooks/useMessages.ts`             | 从 session hook 读取 blocks，并提供本地化转换参数          | 提取可接收外部 blocks 的共享纯转换入口 |
-| `packages/web-shell/client/components/MessageList.tsx`       | turn 折叠、tool/sub-agent 分组、时间线、虚拟滚动和逐条渲染 | 新组件与存量路径共用的唯一列表实现     |
-| `packages/web-shell/client/components/MessageItem.tsx`       | 按消息 role 分派具体 renderer                              | 无需修改                               |
-| `packages/web-shell/client/App.tsx`                          | 完整单会话 WebShell、审批、composer、side panels           | 存量路径保持不变                       |
-| `packages/web-shell/client/components/ChatPane.tsx`          | split view 中的完整交互会话                                | 存量路径保持不变                       |
-| `packages/web-shell/client/index.tsx` / `index.ts`           | package runtime/source 导出                                | 增加新组件及类型导出                   |
+| Module                                                       | Current responsibility                                                                       | Relationship to this design                                         |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `packages/sdk-typescript/src/daemon/ui/types.ts`             | Defines the `DaemonTranscriptBlock` union                                                    | Public input model for the new component                            |
+| `packages/web-shell/client/adapters/transcriptToMessages.ts` | Combines blocks into WebShell `DaemonMessage[]`                                              | Reuse directly; do not create a new converter                       |
+| `packages/web-shell/client/hooks/useMessages.ts`             | Reads blocks from a session hook and supplies localized conversion options                   | Extract a shared pure conversion entry that accepts external blocks |
+| `packages/web-shell/client/components/MessageList.tsx`       | Turn collapse, tool/sub-agent groups, timeline, virtual scrolling, and per-message rendering | The only list implementation shared by the new and existing paths   |
+| `packages/web-shell/client/components/MessageItem.tsx`       | Dispatches concrete renderers by message role                                                | No changes needed                                                   |
+| `packages/web-shell/client/App.tsx`                          | Full single-session WebShell, approvals, composer, side panels                               | Existing path remains unchanged                                     |
+| `packages/web-shell/client/components/ChatPane.tsx`          | Full interactive session in split view                                                       | Existing path remains unchanged                                     |
+| `packages/web-shell/client/index.tsx` / `index.ts`           | Package runtime/source exports                                                               | Export the new component and type                                   |
 
-当前主链路如下：
+The current primary path is:
 
 ```mermaid
 flowchart LR
@@ -96,23 +77,21 @@ flowchart LR
   F --> G["ToolApproval / AskUserQuestion"]
 ```
 
-新增只读链路绕开 session provider 和 permission 分支：
+The new read-only path bypasses the session provider and permission branch:
 
 ```mermaid
 flowchart LR
-  A["Host-owned readonly DaemonTranscriptBlock[]"] --> B["共享本地化转换入口"]
+  A["Host-owned readonly DaemonTranscriptBlock[]"] --> B["Shared localized conversion entry"]
   B --> D["MessageList pendingApproval=null"]
   E["readonly render-mode context"] --> D
   D --> F["MessageItem / ToolGroup / Markdown"]
 ```
 
-主 WebShell editor 中的 `/tasks` 和 `/mcp` 在 `App` 内被拦截，只更新 dialog React
-state，不调用 `sendPrompt()`，也不会写入 session JSONL。因此持久化 transcript 不包含
-这两个本地 panel 的 sentinel；新入口不增加相应的识别或过滤分支。
+In the main WebShell editor, `/tasks` and `/mcp` are intercepted inside `App`. They update only dialog React state, do not call `sendPrompt()`, and do not write to session JSONL. Persisted transcripts therefore contain no sentinel for these two local panels, and the new entry adds no corresponding recognition or filtering branch.
 
-## 6. 公共 API
+## 6. Public API
 
-新增组件名为 `WebShellTranscript`，从 `@qwen-code/web-shell` package root 导出。
+Add a component named `WebShellTranscript`, exported from the `@qwen-code/web-shell` package root.
 
 ```ts
 export interface WebShellTranscriptProps {
@@ -146,20 +125,16 @@ export function WebShellTranscript(
 ): React.ReactElement;
 ```
 
-说明：
+Notes:
 
-- `blocks` 必填且不复制、不修改；调用方应保持数组内 block 的 session 和顺序一致。
-- 视觉相关 prop 沿用 `WebShellProps` 的名称和类型，避免同一能力形成第二套配置语义。
-- 不暴露 `onComposerTagClick`、`onRetryClick`、`onBranchSession`、
-  `onTurnOutputOpen`、permission callback 或 composer callback。
-- `theme` 默认 `dark`；`language` 未传时沿用 WebShell 的 URL/browser language
-  解析规则；`chatMaxWidth` 默认 1000px。
-- `compactThinking` 默认 `false`，`collapseCompletedTurns` 默认 `true`，与现有
-  `WebShell` 一致。
-- 组件按静态/已回放 transcript 处理，向 `MessageList` 传入
-  `isResponding={false}`。实时流展示不在本期 API 范围内。
+- `blocks` is required and is neither copied nor modified. Callers should keep block sessions and ordering consistent within the array.
+- Visual props reuse the names and types from `WebShellProps`, avoiding a second set of configuration semantics for the same capabilities.
+- Do not expose `onComposerTagClick`, `onRetryClick`, `onBranchSession`, `onTurnOutputOpen`, permission callbacks, or composer callbacks.
+- `theme` defaults to `dark`. When `language` is omitted, use WebShell's URL/browser-language resolution rules. `chatMaxWidth` defaults to 1000px.
+- `compactThinking` defaults to `false` and `collapseCompletedTurns` defaults to `true`, matching the existing `WebShell`.
+- The component treats the transcript as static/already replayed and passes `isResponding={false}` to `MessageList`. Live streaming is outside the current API scope.
 
-使用示例：
+Example:
 
 ```tsx
 import { WebShellTranscript } from '@qwen-code/web-shell';
@@ -182,15 +157,13 @@ export function HistoryView({
 }
 ```
 
-宿主必须为组件提供可用高度；组件自身维持与 WebShell 相同的 `height: 100%`、内部
-滚动和 content width 行为。
+The host must give the component a usable height. The component itself preserves WebShell's `height: 100%`, internal scrolling, and content-width behavior.
 
-## 7. 详细设计
+## 7. Detailed Design
 
-### 7.1 共享本地化转换
+### 7.1 Shared Localized Conversion
 
-保留 `transcriptBlocksToDaemonMessages()` 作为唯一 block-to-message adapter。
-在 `useMessages.ts` 中提取一个内部纯函数，例如：
+Keep `transcriptBlocksToDaemonMessages()` as the only block-to-message adapter. Extract an internal pure function in `useMessages.ts`, for example:
 
 ```ts
 export function transcriptBlocksToLocalizedMessages(
@@ -199,29 +172,24 @@ export function transcriptBlocksToLocalizedMessages(
 ): Message[];
 ```
 
-该函数只作为 package 内部模块导出供新组件复用，不从 package root 公开。
+Export this function only from its internal package module for reuse by the new component; do not expose it from the package root.
 
-该函数只负责组装目前 `useMessages()` 已使用的本地化 labels，再调用现有 adapter。
-现有 `useMessages()` 和新组件都调用它，避免两条路径在 prompt cancelled、branch、
-mid-turn inserted 和 interrupted stream 文案上发生漂移。
+The function only assembles the localized labels currently used by `useMessages()` and then calls the existing adapter. Both the existing `useMessages()` and the new component call it, preventing drift in copy for prompt cancellation, branch, mid-turn insertion, and interrupted streams.
 
-这是存量渲染路径唯一需要的内部整理；函数输入输出和现有转换结果不变，不修改
-adapter 的 block 归并规则。
+This is the only internal restructuring needed in the existing rendering path. Function input, output, and existing conversion results stay unchanged, and the adapter's block-combination rules are not modified.
 
-### 7.2 `WebShellTranscript` 组件结构
+### 7.2 `WebShellTranscript` Component Structure
 
-新增 `packages/web-shell/client/components/WebShellTranscript.tsx`，内部顺序为：
+Add `packages/web-shell/client/components/WebShellTranscript.tsx` with this internal sequence:
 
-1. 解析 theme 和 language，创建 translator。
-2. 用 `useMemo` 将 `blocks` 转换为 `Message[]`。
-3. 创建与现有 App 相同的 message-layer customization value。
-4. 挂载 WebShell 的 theme、i18n、customization、compact-mode、只读 render-mode 和
-   portal contexts。
-5. 创建带 `data-web-shell-root`、`data-web-shell-shadcn` 的独立 root，复用 App 的
-   theme class、基础变量、字体、背景和 CSS 隔离规则。
-6. 渲染同一个 `MessageList`。
+1. Resolve theme and language and create a translator.
+2. Convert `blocks` to `Message[]` with `useMemo`.
+3. Create the same message-layer customization value as the existing App.
+4. Mount WebShell's theme, i18n, customization, compact-mode, read-only render-mode, and portal contexts.
+5. Create an independent root with `data-web-shell-root` and `data-web-shell-shadcn`, reusing the App's theme class, base variables, fonts, background, and CSS-isolation rules.
+6. Render the same `MessageList`.
 
-`MessageList` 的关键入参固定如下：
+The important fixed `MessageList` inputs are:
 
 ```tsx
 <MessageList
@@ -233,7 +201,7 @@ adapter 的 block 归并规则。
 />
 ```
 
-以下 action prop 一律不传：
+Never pass these action props:
 
 - `onShowContextDetail`
 - `onRetryClick`
@@ -243,162 +211,132 @@ adapter 的 block 归并规则。
 - `onOpenScheduledTask`
 - `onTurnOutputOpen`
 
-不传 loading/catch-up/tail/turn-output 数据，避免把 App 的连接状态和外部资源模型引入
-只读组件。
+Do not pass loading, catch-up, tail, or turn-output data, avoiding any dependency on the App's connection-state and external-resource models.
 
-### 7.3 交互式 renderer 隔离
+### 7.3 Isolation of Interactive Renderers
 
-仅给 `MessageList` 传 `pendingApproval=null` 还不足以保证只读。goal status、Markdown
-和 tool result 中的 session link 不通过 MessageList callback，而是向 `window` 派发
-全局语义事件，可能改变同页另一个 WebShell 的 footer 或 active session。
+Passing only `pendingApproval=null` to `MessageList` does not fully guarantee read-only behavior. Session links in goal status, Markdown, and tool results do not use `MessageList` callbacks; they dispatch global semantic events to `window`, potentially changing the footer or active session of another WebShell on the same page.
 
-设计在 `client/transcriptRenderMode.ts` 增加一个仅 package 内部使用的 transcript
-render-mode context，默认值为 `interactive`。现有 `App` 和 `ChatPane` 不需要新增
-provider，因而行为保持原样；`WebShellTranscript` 将其设为 `readonly`。readonly
-模式仅做以下限制：
+Add a package-internal transcript render-mode context in `client/transcriptRenderMode.ts` with a default value of `interactive`. Existing `App` and `ChatPane` need no new provider, so their behavior remains unchanged. `WebShellTranscript` sets the value to `readonly`. Read-only mode applies only these restrictions:
 
-- `qwen-session://` 链接保留文本和样式，但不派发 `qwen:open-session`；
-- `GoalStatusMessage` 不派发 `GOAL_STATUS_ACTIVE_EVENT`；
-- 不拦截普通 HTTPS 链接以及复制、折叠、排序等本地查看交互。
+- Preserve the text and style of `qwen-session://` links, but do not dispatch `qwen:open-session`.
+- `GoalStatusMessage` does not dispatch `GOAL_STATUS_ACTIVE_EVENT`.
+- Do not intercept ordinary HTTPS links or local viewing interactions such as copy, collapse, and sorting.
 
-该 context 只修改 `Markdown`、`ToolGroup` 和 `GoalStatusMessage` 的语义事件出口，且
-默认值锁定为 `interactive`，避免给 `MessageList` 增加贯穿所有 renderer 的
-`readOnly` prop。新增单测必须同时证明 interactive 默认行为不变和 readonly 行为被
-抑制。
+This context changes only semantic-event exits in `Markdown`, `ToolGroup`, and `GoalStatusMessage`, and its default is locked to `interactive`. This avoids adding a `readOnly` prop that must thread through every renderer from `MessageList`. New unit tests must prove both that the default interactive behavior is unchanged and that read-only behavior is suppressed.
 
-### 7.4 Theme、CSS 与 portal
+### 7.4 Theme, CSS, and Portals
 
-WebShell library build 会把组件 CSS 注入并限定在 `[data-web-shell-root]` 或
-`[data-web-shell-portal-root]` 下。新组件必须创建自己的 WebShell root，否则
-MessageList 虽然会生成 DOM，但 CSS module 规则不会命中。
+The WebShell library build injects and scopes component CSS under `[data-web-shell-root]` or `[data-web-shell-portal-root]`. The new component must create its own WebShell root; otherwise `MessageList` may produce DOM that CSS module rules do not match.
 
-时间线 tooltip 和 advanced Markdown table 会使用 portal。为了完整继承这些能力，
-新组件使用与 App 等价的 portal host 生命周期：
+Timeline tooltips and advanced Markdown tables use portals. To fully inherit those capabilities, the new component uses a portal-host lifecycle equivalent to the App's:
 
-- mount 时向 `document.body` 添加带 `data-web-shell-portal-root` 和
-  `data-web-shell-shadcn` 的节点；
-- 同步 root 的 theme class 和 CSS variables；
-- 通过 `WebShellPortalRootContext` 提供该节点；
-- unmount 时移除节点及 observer/listener。
+- On mount, append a node with `data-web-shell-portal-root` and `data-web-shell-shadcn` to `document.body`.
+- Synchronize the root's theme class and CSS variables.
+- Supply the node through `WebShellPortalRootContext`.
+- On unmount, remove the node and its observer/listener.
 
-这段生命周期放在新组件内部，不重构 App 现有 portal 代码，从而把存量回归面限制在
-新增入口。SSR 阶段不访问 `document`；客户端 mount 后再启用 portal。
+Keep this lifecycle inside the new component rather than refactoring the App's existing portal code, limiting the regression surface of existing behavior to the new entry. Do not access `document` during SSR; enable the portal only after client mount.
 
-### 7.5 Error isolation
+### 7.5 Error Isolation
 
-新入口分为外层 public boundary 和内层 content 组件。blocks 转换、provider/portal
-初始化和 MessageList 都发生在 boundary 的 child 内，确保这些阶段的异常也能进入
-与 WebShell public entry 相同的 `RootErrorFallback`。逐条消息仍由 `MessageItem`
-自身的 boundary 隔离，因此单个 Markdown、KaTeX、Mermaid 或 tool renderer 异常不会
-使整个 transcript 白屏。
+The new entry has an outer public boundary and an inner content component. Block conversion, provider/portal initialization, and `MessageList` all occur in a child of the boundary, ensuring that failures during any of these stages reach the same `RootErrorFallback` as the public WebShell entry. Each message remains isolated by `MessageItem`'s own boundary, so a failure in one Markdown, KaTeX, Mermaid, or tool renderer does not blank the entire transcript.
 
-### 7.6 Block 渲染策略
+### 7.6 Block Rendering Strategy
 
-所有策略沿用现有 adapter，不在新组件内增加第二个 switch。
+All strategies continue to use the existing adapter; do not add a second switch in the new component.
 
-| `DaemonTranscriptBlock.kind` | 只读结果                                                     |
-| ---------------------------- | ------------------------------------------------------------ |
-| `user`                       | 用户消息、图片和 input annotations                           |
-| `assistant`                  | assistant Markdown；连续块归并；sub-agent 内容按 parent 归属 |
-| `thought`                    | thinking 消息；连续块归并                                    |
-| `tool`                       | tool group、diff/read/shell/fetch/todo/sub-agent 等现有卡片  |
-| `shell`                      | 关联最近的执行工具，无法关联时使用现有 raw shell fallback    |
-| `user_shell`                 | 用户 shell command/output                                    |
-| `status` / `debug`           | plan 或 system/status 消息                                   |
-| `error`                      | error system message，不提供 retry action                    |
-| `prompt_cancelled`           | 本地化的取消状态                                             |
-| unresolved `permission`      | 不转换、不展示、不提供操作入口                               |
-| resolved `permission`        | 沿用 adapter 的历史 tool placeholder/结果规则                |
-| `AskUserQuestion` permission | 不展示问答表单；仅在后续真实 tool block 存在时展示其历史结果 |
+| `DaemonTranscriptBlock.kind` | Read-only result                                                                        |
+| ---------------------------- | --------------------------------------------------------------------------------------- |
+| `user`                       | User messages, images, and input annotations                                            |
+| `assistant`                  | Assistant Markdown; consecutive blocks merged; sub-agent content assigned by parent     |
+| `thought`                    | Thinking messages; consecutive blocks merged                                            |
+| `tool`                       | Existing cards for tool groups, diff/read/shell/fetch/todo/sub-agent                    |
+| `shell`                      | Associate with the nearest execution tool; existing raw-shell fallback when unavailable |
+| `user_shell`                 | User shell command/output                                                               |
+| `status` / `debug`           | Plan or system/status message                                                           |
+| `error`                      | Error system message with no retry action                                               |
+| `prompt_cancelled`           | Localized cancellation status                                                           |
+| unresolved `permission`      | Do not convert, display, or provide an action entry                                     |
+| resolved `permission`        | Existing historical tool placeholder/result rules from the adapter                      |
+| `AskUserQuestion` permission | Do not show the form; show historical results only when a later real tool block exists  |
 
-### 7.7 更新与性能
+### 7.7 Updates and Performance
 
-- 仅在 `blocks` identity 或 language 变化时重新执行 O(n) 转换。
-- MessageList 保留既有的 memo、turn grouping 和虚拟滚动阈值。
-- 不深拷贝 blocks，也不为每个 block 建立新的 React provider。
-- 调用方若频繁传入内容相同但 identity 全新的数组，会触发重新转换；这是与当前
-  `useTranscriptBlocks()` 更新模型一致的可接受行为。
-- 本期不新增增量 adapter。只有实测表明外部大 transcript 更新成为瓶颈时，再单独
-  设计增量转换。
+- Run the O(n) conversion again only when `blocks` identity or language changes.
+- `MessageList` retains its existing memoization, turn grouping, and virtual-scrolling threshold.
+- Do not deep-copy blocks or create a new React provider for every block.
+- A caller that frequently supplies identity-new arrays with identical content triggers conversion again. This is acceptable and matches the current `useTranscriptBlocks()` update model.
+- Do not add an incremental adapter in this release. Design incremental conversion separately only if measurements show updates to large external transcripts are a bottleneck.
 
-## 8. 兼容性与回归控制
+## 8. Compatibility and Regression Control
 
-### 8.1 存量路径不变
+### 8.1 Existing Paths Remain Unchanged
 
-- `WebShellProps` 不新增必填项，也不改变任何默认值。
-- `WebShell` 和 `WebShellWithProviders` 仍渲染 `App`。
-- `App`、`ChatPane` 仍从各自的 provider/hook 读取 session 状态。
-- approval overlay、composer、sidebar、split view、artifact panel 不经过新组件。
-- `MessageList` 不新增 `readOnly` prop 分支；只读由新调用方传入
-  `pendingApproval=null`、不传 action callbacks，并通过默认 interactive 的内部
-  render-mode context 隔离少数全局语义事件。
+- `WebShellProps` gains no required fields and changes no defaults.
+- `WebShell` and `WebShellWithProviders` continue to render `App`.
+- `App` and `ChatPane` continue to read session state from their respective providers/hooks.
+- The approval overlay, composer, sidebar, split view, and artifact panel do not pass through the new component.
+- `MessageList` gains no `readOnly` prop branch. The new caller establishes read-only behavior by passing `pendingApproval=null`, omitting action callbacks, and using an internal render-mode context whose default remains interactive to isolate the few global semantic events.
 
-### 8.2 Package 导出
+### 8.2 Package Exports
 
-同时更新 `client/index.tsx` 和 `client/index.ts`，导出：
+Update both `client/index.tsx` and `client/index.ts` to export:
 
 ```ts
 export { WebShellTranscript } from './components/WebShellTranscript';
 export type { WebShellTranscriptProps } from './components/WebShellTranscript';
 ```
 
-两个 barrel 都更新是为了避免当前 runtime entry 与 declaration/source entry 的双入口
-差异导致“运行时有导出、类型声明无导出”。不新增 package subpath export。
+Both barrels must change to avoid the current dual runtime-entry and declaration/source-entry paths producing “exported at runtime but missing from type declarations.” Do not add a package subpath export.
 
-### 8.3 安全
+### 8.3 Security
 
-- 新入口不引入 `useActions()`、`useTranscriptStore()`、`useConnection()` 或 fetch。
-- pending permission 内容不会进入 interactive renderer。
-- 不检查或改写 status message 内容；`/tasks`、`/mcp` 的 dialog state 本身不属于持久化
-  transcript。
-- readonly render-mode 不派发可能影响同页其他 WebShell 的 session/goal 全局事件。
-- Markdown URL 和 HTML 处理继续使用现有 WebShell sanitizer/transform，不新增
-  `dangerouslySetInnerHTML` 或其他旁路。
-- 自定义 renderer 是宿主代码；如果宿主在其中执行副作用，不属于组件可保证的只读
-  边界，README 必须明确这一点。
+- The new entry does not import `useActions()`, `useTranscriptStore()`, `useConnection()`, or `fetch`.
+- Pending permission content does not enter an interactive renderer.
+- Do not inspect or rewrite status-message content. Dialog state for `/tasks` and `/mcp` is inherently absent from persisted transcripts.
+- Read-only render mode does not dispatch session/goal global events that could affect another WebShell on the same page.
+- Markdown URL and HTML handling continue to use the existing WebShell sanitizer/transform; do not add `dangerouslySetInnerHTML` or another bypass.
+- Custom renderers are host code. Side effects executed by a host renderer are outside the component's guaranteed read-only boundary, and the README must state this explicitly.
 
-## 9. 测试设计
+## 9. Test Design
 
-### 9.1 新增组件 contract 单测
+### 9.1 New Component Contract Unit Tests
 
-新增 `WebShellTranscript.test.tsx`，mock `MessageList` 验证边界和 wiring：
+Add `WebShellTranscript.test.tsx`, mocking `MessageList` to verify the boundary and wiring:
 
-1. blocks 经共享本地化 adapter 转为 messages，顺序和内容正确。
-2. `pendingApproval` 永远为 `null`。
-3. session mutation、permission、retry、branch、turn-output callbacks 均未传入。
-4. 默认 `isResponding=false`，并正确转发 workspace 和 virtual-scroll 配置。
-5. theme、language、compact/collapse 和 message customization 正确进入 context。
-6. blocks 或 language 更新后重新生成消息，不重复旧内容。
-7. 空 blocks 渲染为空列表但不抛错。
+1. The shared localized adapter converts blocks to messages with the correct order and content.
+2. `pendingApproval` is always `null`.
+3. Session mutation, permission, retry, branch, and turn-output callbacks are all omitted.
+4. `isResponding` defaults to `false`, and workspace and virtual-scroll configuration are forwarded correctly.
+5. Theme, language, compact/collapse behavior, and message customization enter the correct contexts.
+6. Changes to blocks or language regenerate messages without duplicating old content.
+7. Empty blocks render an empty list without throwing.
 
-### 9.2 新增 DOM 集成单测
+### 9.2 New DOM Integration Unit Tests
 
-新增 `WebShellTranscript.dom.test.tsx`，使用真实 `MessageList`：
+Add `WebShellTranscript.dom.test.tsx` using the real `MessageList`:
 
-1. 在没有 daemon providers 的 React tree 中成功渲染。
-2. 代表性 user、assistant Markdown、thought、tool、sub-agent、plan、status、error 和
-   prompt-cancelled block 都进入对应 WebShell DOM。
-3. 本地折叠/展开、复制或时间线定位仍可工作，证明复用的是 MessageList 能力。
-4. unresolved 普通 permission 不出现 approval panel。
-5. unresolved `AskUserQuestion` 不出现 option、input、submit 或 ignore UI。
-6. resolved historical tool/AskUser result 按 adapter 现有规则展示。
-7. readonly session link 和 goal status 不派发全局语义事件；相应存量组件测试继续证明
-   默认 interactive 行为不变。
-8. dark/light class、language、本地化文本、chat max width 和 CSS root 标记正确。
-9. portal root mount/unmount 正确，portal 内容处于 scoped root 下。
-10. 单条自定义 renderer 抛错时使用内置 renderer fallback，消息其余内容仍存在。
+1. Render successfully in a React tree without daemon providers.
+2. Representative user, assistant Markdown, thought, tool, sub-agent, plan, status, error, and prompt-cancelled blocks enter the corresponding WebShell DOM.
+3. Local collapse/expand, copy, or timeline navigation still works, proving that `MessageList` capabilities are reused.
+4. An unresolved ordinary permission does not produce an approval panel.
+5. An unresolved `AskUserQuestion` does not produce option, input, submit, or ignore UI.
+6. Resolved historical tool/AskUser results follow the adapter's existing presentation rules.
+7. Read-only session links and goal statuses do not dispatch global semantic events; corresponding existing component tests continue to prove the default interactive behavior is unchanged.
+8. Dark/light classes, language, localized text, chat maximum width, and CSS root markers are correct.
+9. The portal root mounts and unmounts correctly, and portal content is under the scoped root.
+10. When an individual custom renderer throws, the built-in renderer fallback is used and the rest of the message remains.
 
-### 9.3 共享转换和导出测试
+### 9.3 Shared Conversion and Export Tests
 
-- 扩充 `useMessages`/adapter 相关测试，证明存量 hook 和外部 blocks 使用完全相同的
-  localized options。
-- 扩充 `index.test.tsx` 或 build artifact 测试，验证 runtime named export 存在。
-- 构建后检查 `dist/types/index.d.ts` 包含 `WebShellTranscript` 和 props 导出，防止
-  双入口声明漂移。
+- Extend `useMessages`/adapter tests to prove that the existing hook and external blocks use exactly the same localized options.
+- Extend `index.test.tsx` or build-artifact tests to verify that the runtime named export exists.
+- After building, verify that `dist/types/index.d.ts` contains exports for `WebShellTranscript` and its props, preventing drift between the two entry declarations.
 
-### 9.4 存量回归集
+### 9.4 Existing Regression Suite
 
-实现完成后的最小必过验证顺序：
+The minimum required verification sequence after implementation is:
 
 ```bash
 cd packages/web-shell
@@ -424,67 +362,58 @@ npm run build
 npm run typecheck
 ```
 
-`npm test` 是本次必须通过的已有 WebShell 完整测试集。当前变更没有新增独立页面，也不
-改变现有 Playwright smoke 的 App/daemon 协议，因此不新增浏览器 E2E；真实 DOM 行为由
-`WebShellTranscript.dom.test.tsx` 覆盖。
+`npm test` is the existing full WebShell suite and must pass for this change. The change adds no standalone page and does not alter the existing Playwright smoke test's App/daemon protocol, so no browser E2E test is added. `WebShellTranscript.dom.test.tsx` covers real DOM behavior.
 
-## 10. 实施步骤
+## 10. Implementation Steps
 
-1. 在 `useMessages.ts` 提取共享的 localized block conversion，并保持现有 hook 输出
-   不变。
-2. 新增内部 transcript render-mode context，并在 session link/goal event 出口读取；默认
-   保持 interactive。
-3. 新增 `WebShellTranscript` 及 props，实现 root/provider/portal/MessageList wiring。
-4. 在两个 public barrel 增加 runtime 和 type export。
-5. 更新 `packages/web-shell/README.md`，补充只读接入示例、宿主高度要求和只读边界。
-6. 新增 contract、DOM、interaction isolation、export/type declaration 测试。
-7. 执行目标测试、WebShell 完整测试集、build、lint、typecheck。
-8. 按仓库规范审阅完整 diff；任何修复都重新执行第 7 步。
+1. Extract the shared localized block conversion in `useMessages.ts`, preserving the current hook output.
+2. Add an internal transcript render-mode context and consume it at the session-link/goal-event exits; preserve `interactive` as the default.
+3. Add `WebShellTranscript` and its props, implementing root/provider/portal/`MessageList` wiring.
+4. Add runtime and type exports to both public barrels.
+5. Update `packages/web-shell/README.md` with a read-only integration example, the host-height requirement, and the read-only boundary.
+6. Add contract, DOM, interaction-isolation, and export/type-declaration tests.
+7. Run targeted tests, the full WebShell test suite, build, lint, and typecheck.
+8. Review the complete diff according to repository guidance; rerun step 7 after any fix.
 
-## 11. 备选方案
+## 11. Alternatives
 
-### 11.1 给现有 `WebShell` 增加 `blocks` 和 `readOnly`
+### 11.1 Add `blocks` and `readOnly` to the Existing `WebShell`
 
-不采用。`App` 目前无条件消费多个 daemon hooks，并管理审批、composer、session、
-sidebar 和 panels。双数据源会在整个 App 中引入条件分支，既需要 provider 又要防止
-mutation，回归面远大于本需求。
+Rejected. `App` currently consumes several daemon hooks unconditionally and manages approvals, the composer, session, sidebar, and panels. Dual data sources would add conditional branches throughout `App`, requiring providers while also guarding against mutation. Its regression surface is much larger than this requirement.
 
-### 11.2 公开导出 `MessageList`
+### 11.2 Publicly Export `MessageList`
 
-不采用。调用方仍需依赖私有 `Message[]`、多个 context、CSS root 和 portal 约定，
-而且会把内部模型变成长期公共 API。
+Rejected. Callers would still depend on private `Message[]`, multiple contexts, CSS-root conventions, and portal conventions, and the internal model would become a long-term public API.
 
-### 11.3 为只读场景复制一套 renderer
+### 11.3 Duplicate the Renderer for Read-only Use
 
-不采用。复制会立即分叉 Markdown、tool/sub-agent、turn collapse、timeline 和虚拟滚动
-行为，无法满足“继承 MessageList 渲染能力”。
+Rejected. Duplication would immediately fork Markdown, tool/sub-agent, turn-collapse, timeline, and virtual-scrolling behavior, failing the requirement to inherit `MessageList` rendering capabilities.
 
-### 11.4 在新组件中显示 disabled permission/AskUserQuestion
+### 11.4 Display Disabled Permission/AskUserQuestion in the New Component
 
-不采用。disabled 表单仍会形成可交互语义和额外状态分支，也会误导用户以为能在历史
-视图中作答。pending permission 本期直接不展示；历史结果由后续 tool block 承载。
+Rejected. Disabled forms still create interactive semantics and additional state branches, and they mislead users into thinking they can answer in a historical view. Pending permissions are hidden in this release; subsequent tool blocks carry historical results.
 
-## 12. 风险与缓解
+## 12. Risks and Mitigations
 
-| 风险                                   | 缓解                                                                   |
-| -------------------------------------- | ---------------------------------------------------------------------- |
-| 新入口与 App 的本地化转换漂移          | 两者调用同一个 localized conversion helper                             |
-| portal 未被 CSS scope 命中             | 创建独立 `data-web-shell-portal-root` 并同步变量；DOM 测试覆盖         |
-| 意外出现 daemon mutation               | 新组件不导入 action hooks、不暴露 mutation callback；contract 测试锁定 |
-| 把 App 本地 dialog 状态误当 transcript | 明确 `/tasks`、`/mcp` 不写 JSONL；新入口不复制 App dialog 状态         |
-| 全局语义事件污染同页 WebShell          | readonly render-mode 抑制 session/goal event；默认行为回归测试覆盖     |
-| 新 block kind 无展示                   | 继续由共享 adapter 统一支持；不在组件内复制 switch                     |
-| package runtime/type 导出不一致        | 两个 barrel 同步更新，并检查构建后的 declaration                       |
-| 大 transcript 重算开销                 | `useMemo` + 现有虚拟滚动；增量转换留待有数据支持的后续设计             |
-| 自定义 renderer 引入副作用             | 文档声明宿主责任；默认 renderer 保持只读                               |
+| Risk                                                       | Mitigation                                                                                                |
+| ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Localized conversion drifts between the new entry and App  | Both call the same localized conversion helper                                                            |
+| Portal misses the CSS scope                                | Create a separate `data-web-shell-portal-root`, synchronize variables, and cover with DOM tests           |
+| Accidental daemon mutation                                 | New component imports no action hooks and exposes no mutation callback; contract tests lock this down     |
+| App-local dialog state is mistaken for transcript data     | Explicitly document that `/tasks` and `/mcp` do not write JSONL; new entry does not copy App dialog state |
+| Global semantic events affect another WebShell on the page | Read-only render mode suppresses session/goal events; regression tests cover default behavior             |
+| A new block kind has no presentation                       | Continue supporting it through the shared adapter; do not duplicate a switch in the component             |
+| Package runtime and type exports diverge                   | Update both barrels and inspect the built declarations                                                    |
+| Large-transcript recomputation cost                        | `useMemo` plus existing virtual scrolling; defer incremental conversion until supported by measurements   |
+| Custom renderer introduces side effects                    | Document host responsibility; default renderers remain read-only                                          |
 
-## 13. 验收标准
+## 13. Acceptance Criteria
 
-- 宿主仅提供 blocks 即可在无 daemon provider 的环境中渲染 WebShell transcript。
-- 代表性 block 与同一数据在现有 WebShell `MessageList` 中的展示一致。
-- pending tool permission 和 `AskUserQuestion` 不产生交互 UI，也不存在提交路径。
-- session/goal 全局语义事件不从只读视图发出。
-- 新组件保留 MessageList 的本地阅读交互和长列表能力。
-- 现有 `WebShell`/`WebShellWithProviders` API、默认值、测试和运行行为不变。
-- `@qwen-code/web-shell` runtime 与 `.d.ts` 均导出新组件和 props。
-- 新增单测、现有 WebShell 完整测试集、root build/typecheck 全部通过。
+- A host can render a WebShell transcript in an environment without daemon providers by supplying only blocks.
+- Representative blocks render identically to the same data in the existing WebShell `MessageList`.
+- Pending tool permissions and `AskUserQuestion` produce no interactive UI or submission path.
+- The read-only view dispatches no global session/goal semantic events.
+- The new component retains `MessageList`'s local reading interactions and long-list capabilities.
+- Existing `WebShell`/`WebShellWithProviders` APIs, defaults, tests, and runtime behavior remain unchanged.
+- Both the runtime and `.d.ts` for `@qwen-code/web-shell` export the new component and props.
+- New unit tests, the existing complete WebShell suite, and root build/typecheck all pass.

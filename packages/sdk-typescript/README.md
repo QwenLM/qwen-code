@@ -196,17 +196,6 @@ guideline, project up to roughly 1,000 ordinary records on the main thread;
 move larger or unusually text-heavy inputs to a Web Worker and call the same
 entry there.
 
-Baseline measured on 2026-07-15 with Node.js 24 after five warm-up runs, using
-three persisted local transcripts and the minified browser bundle:
-
-| Parsed records | Output blocks | Median time | Median heap delta |
-| -------------- | ------------- | ----------- | ----------------- |
-| 2              | 0             | 0.07 ms     | 18 KiB            |
-| 66             | 39            | 1.04 ms     | 899 KiB           |
-| 641            | 77            | 4.13 ms     | 4.8 MiB           |
-
-These numbers are a regression baseline, not a cross-device latency guarantee.
-
 ### Message Types
 
 The SDK provides type guards to identify different message types:
