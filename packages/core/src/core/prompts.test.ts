@@ -112,6 +112,7 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).not.toContain(
       'ask for clarification or confirmation where needed',
     );
+    expect(prompt).not.toMatch(/Use 'ask_user_question' when you need/);
     expect(
       prompt.lastIndexOf('This is a non-interactive, single-turn run'),
     ).toBeGreaterThan(prompt.lastIndexOf('# Examples'));
