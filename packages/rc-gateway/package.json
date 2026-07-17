@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@noble/hashes": "^1.8.0",
+    "@qwen-code/qwen-code-core": "*",
     "@qwen-code/sdk": "*",
     "discord.js": "^14.16.3",
     "express": "^4.21.2",

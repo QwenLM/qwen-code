@@ -42,6 +42,7 @@ export interface AgentRecord {
   subActor?: string; // if spawned via a bridge
   spawnedAt: string;
   finishedAt: string | null;
+  workflowRunId?: string; // set when this agent backs a workflow run
 }
 
 interface PersistShape {
@@ -84,6 +85,7 @@ export class AgentRegistry {
     task: string;
     spawnedByTokenId: string;
     subActor?: string;
+    workflowRunId?: string;
   }): Promise<AgentRecord> {
     const rec: AgentRecord = {
       agentId: randomUUID(),
@@ -94,6 +96,9 @@ export class AgentRegistry {
       status: 'running',
       spawnedByTokenId: input.spawnedByTokenId,
       ...(input.subActor !== undefined ? { subActor: input.subActor } : {}),
+      ...(input.workflowRunId !== undefined
+        ? { workflowRunId: input.workflowRunId }
+        : {}),
       spawnedAt: new Date(this.nowFn()).toISOString(),
       finishedAt: null,
     };
@@ -119,12 +124,21 @@ export class AgentRegistry {
     return rec ? { ...rec } : undefined;
   }
 
-  list(filter: { status?: AgentStatus; parent?: string } = {}): AgentRecord[] {
+  list(
+    filter: {
+      status?: AgentStatus;
+      parent?: string;
+      workflowRunId?: string;
+    } = {},
+  ): AgentRecord[] {
     return this.records
       .filter(
         (r) =>
           (filter.status === undefined || r.status === filter.status) &&
-          (filter.parent === undefined || r.parentSessionId === filter.parent),
+          (filter.parent === undefined ||
+            r.parentSessionId === filter.parent) &&
+          (filter.workflowRunId === undefined ||
+            r.workflowRunId === filter.workflowRunId),
       )
       .map((r) => ({ ...r }));
   }
