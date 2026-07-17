@@ -122,15 +122,18 @@ describe('workspace Git diff routes', () => {
   });
 
   it('returns single-file hunks for the bound workspace', async () => {
-    fetchGitDiffHunksForFileMock.mockResolvedValue([
-      {
-        oldStart: 1,
-        oldLines: 2,
-        newStart: 1,
-        newLines: 2,
-        lines: ['-one', '+ONE', ' two'],
-      },
-    ]);
+    fetchGitDiffHunksForFileMock.mockResolvedValue({
+      hunks: [
+        {
+          oldStart: 1,
+          oldLines: 2,
+          newStart: 1,
+          newLines: 2,
+          lines: ['-one', '+ONE', ' two'],
+        },
+      ],
+      truncated: false,
+    });
     const app = express();
     registerWorkspaceGitDiffRoutes(app, {
       boundWorkspace: '/work/main',
@@ -142,6 +145,7 @@ describe('workspace Git diff routes', () => {
     );
 
     expect(response.status).toBe(200);
+    // `truncated` is intentionally ABSENT (not false) on an untruncated diff.
     expect(response.body).toEqual({
       v: 1,
       workspaceCwd: '/work/main',
@@ -161,6 +165,33 @@ describe('workspace Git diff routes', () => {
       '/work/main',
       'src/a.ts',
     );
+  });
+
+  it('surfaces the truncated flag when the diff was capped', async () => {
+    fetchGitDiffHunksForFileMock.mockResolvedValue({
+      hunks: [
+        {
+          oldStart: 0,
+          oldLines: 0,
+          newStart: 1,
+          newLines: 1,
+          lines: ['+head'],
+        },
+      ],
+      truncated: true,
+    });
+    const app = express();
+    registerWorkspaceGitDiffRoutes(app, {
+      boundWorkspace: '/work/main',
+      sendBridgeError,
+    });
+
+    const response = await request(app).get(
+      '/workspace/git/diff/file?path=big.txt',
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ available: true, truncated: true });
   });
 
   it('reports available=false when the file has no diff', async () => {
@@ -194,7 +225,10 @@ describe('workspace Git diff routes', () => {
   });
 
   it('uses the selected trusted workspace runtime for the file route', async () => {
-    fetchGitDiffHunksForFileMock.mockResolvedValue([]);
+    fetchGitDiffHunksForFileMock.mockResolvedValue({
+      hunks: [],
+      truncated: false,
+    });
     const app = express();
     const primary = runtime('primary', '/work/main', true);
     const secondary = runtime('secondary', '/work/secondary', true);

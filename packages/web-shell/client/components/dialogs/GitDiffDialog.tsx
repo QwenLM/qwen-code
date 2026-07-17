@@ -166,20 +166,37 @@ function renderContent(row: DiffRow): ReactNode {
 }
 
 function DiffHunks({ hunks, path }: { hunks: DaemonDiffHunk[]; path: string }) {
+  const { t } = useI18n();
   const theme = useTheme();
   const shikiTheme = shikiThemeFor(theme);
   const [rows, setRows] = useState<DiffRow[] | null>(null);
+  const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     setRows(null);
-    void buildRows(hunks, path, shikiTheme).then((built) => {
-      if (!cancelled) setRows(built);
-    });
+    setFailed(false);
+    buildRows(hunks, path, shikiTheme)
+      .then((built) => {
+        if (!cancelled) setRows(built);
+      })
+      // Highlighter failures degrade to plain text inside buildRows; this
+      // catches the unexpected (e.g. malformed hunk lines), which would
+      // otherwise be an unhandled rejection leaving `rows` stuck at null with
+      // no feedback.
+      .catch(() => {
+        if (!cancelled) setFailed(true);
+      });
     return () => {
       cancelled = true;
     };
   }, [hunks, path, shikiTheme]);
+
+  if (failed) {
+    return (
+      <div className={styles.filePlaceholder}>{t('gitDiff.fileError')}</div>
+    );
+  }
 
   return (
     <div className={styles.diffLines}>
@@ -217,6 +234,7 @@ function DiffFileRow({
   const { client } = useWorkspace();
   const [open, setOpen] = useState(false);
   const [hunks, setHunks] = useState<DaemonDiffHunk[] | null>(null);
+  const [truncated, setTruncated] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(false);
 
@@ -231,6 +249,7 @@ function DiffFileRow({
         .workspaceGitDiffFile(file.path)
         .then((result) => {
           setHunks(result.hunks);
+          setTruncated(result.truncated === true);
         })
         .catch(() => {
           setError(true);
@@ -285,7 +304,14 @@ function DiffFileRow({
               {t('gitDiff.fileError')}
             </div>
           ) : hunks && hunks.length > 0 ? (
-            <DiffHunks hunks={hunks} path={file.path} />
+            <>
+              <DiffHunks hunks={hunks} path={file.path} />
+              {truncated && (
+                <div className={styles.filePlaceholder} role="note">
+                  {t('gitDiff.truncated')}
+                </div>
+              )}
+            </>
           ) : (
             <div className={styles.filePlaceholder}>{t('gitDiff.noDiff')}</div>
           )}

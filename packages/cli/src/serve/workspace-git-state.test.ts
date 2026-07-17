@@ -73,6 +73,29 @@ describe('WorkspaceGitState', () => {
     await vi.waitFor(() => expect(dispose).toHaveBeenCalledOnce());
   });
 
+  it('degrades to the branch-only shape when the working-tree summary throws', async () => {
+    resolveBranchNameMock.mockResolvedValue('main');
+    watchRepoBranchMock.mockResolvedValue(() => {});
+    // Not a graceful `null` — an actual rejection (e.g. an unexpected
+    // child_process failure). The `.catch(() => null)` in getStatus must
+    // convert it into the branch-only v2 response instead of a thrown error
+    // that would 500 every `GET /workspace/git`.
+    getGitWorkingTreeStatusMock.mockRejectedValueOnce(
+      new Error('git exploded'),
+    );
+    const state = new WorkspaceGitState();
+
+    await expect(
+      state.getStatus('/workspace', {
+        publishWorkspaceEvent: vi.fn(),
+      } as unknown as AcpSessionBridge),
+    ).resolves.toEqual({
+      v: 2,
+      workspaceCwd: '/workspace',
+      branch: 'main',
+    });
+  });
+
   it('returns null and keeps the watcher shared for a non-git workspace', async () => {
     resolveBranchNameMock.mockResolvedValue(undefined);
     watchRepoBranchMock.mockResolvedValue(() => {});

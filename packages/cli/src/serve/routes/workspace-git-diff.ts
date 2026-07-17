@@ -8,7 +8,7 @@ import type { Application, Request, Response } from 'express';
 import {
   fetchGitDiff,
   fetchGitDiffHunksForFile,
-  type GitDiffHunk,
+  type GitDiffFileHunks,
   type GitDiffResult,
 } from '@qwen-code/qwen-code-core';
 import type { SendBridgeError } from '../server/error-response.js';
@@ -78,20 +78,23 @@ function buildDiffList(
 function buildFileHunks(
   workspaceCwd: string,
   queryPath: string,
-  hunks: GitDiffHunk[] | null,
+  result: GitDiffFileHunks | null,
 ): Record<string, unknown> {
   return {
     v: 1,
     workspaceCwd,
     path: queryPath,
-    available: hunks !== null && hunks.length > 0,
-    hunks: (hunks ?? []).map((h) => ({
+    available: result !== null && result.hunks.length > 0,
+    hunks: (result?.hunks ?? []).map((h) => ({
       oldStart: h.oldStart,
       oldLines: h.oldLines,
       newStart: h.newStart,
       newLines: h.newLines,
       lines: h.lines,
     })),
+    // Only present when the per-file caps actually cut content, so the client
+    // can label the diff incomplete; absent otherwise (additive to v=1).
+    ...(result?.truncated ? { truncated: true } : {}),
   };
 }
 
@@ -129,9 +132,9 @@ async function handleDiffFile(
     return;
   }
   try {
-    const hunks = await fetchGitDiffHunksForFile(workspaceCwd, queryPath);
+    const result = await fetchGitDiffHunksForFile(workspaceCwd, queryPath);
     applyReadHeaders(res);
-    res.status(200).json(buildFileHunks(workspaceCwd, queryPath, hunks));
+    res.status(200).json(buildFileHunks(workspaceCwd, queryPath, result));
   } catch (err) {
     sendBridgeError(res, err, { route });
   }

@@ -146,6 +146,12 @@ export interface DaemonWorkspaceGitDiffHunks {
   /** `false` when the file has no diff (unchanged / binary / untracked-empty). */
   available: boolean;
   hunks: DaemonDiffHunk[];
+  /**
+   * Present (and `true`) when the daemon's per-file caps cut content from
+   * `hunks`, so the viewer can label the diff incomplete. Absent from older
+   * daemons and untruncated responses (additive to v=1).
+   */
+  truncated?: boolean;
 }
 
 /** Capabilities envelope returned from `GET /capabilities`. */

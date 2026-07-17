@@ -12,25 +12,46 @@ if (!Element.prototype.scrollIntoView) {
 
 // A STABLE client object: the dialog's fetch effect depends on `client`, so a
 // fresh object per render (as a naive mock returns) would re-fire it in a loop.
-const { workspaceGitDiff, workspaceGitDiffFile, workspaceClient } = vi.hoisted(
-  () => {
+const { workspaceGitDiff, workspaceGitDiffFile, workspaceClient, shikiState } =
+  vi.hoisted(() => {
     const workspaceGitDiff = vi.fn();
     const workspaceGitDiffFile = vi.fn();
     const workspaceClient = {
       workspaceByCwd: () => ({ workspaceGitDiff, workspaceGitDiffFile }),
     };
-    return { workspaceGitDiff, workspaceGitDiffFile, workspaceClient };
-  },
-);
+    // Per-test switch for the highlighter path: `resolvedLang` steers whether
+    // buildRows even asks for a highlighter ('text' skips it), `highlighter`
+    // (when set) makes getCodeHighlighter resolve instead of reject.
+    const shikiState = {
+      resolvedLang: 'text',
+      highlighter: null as {
+        codeToTokens: (
+          code: string,
+          opts: { lang: string; theme: string },
+        ) => { tokens: Array<Array<{ content: string; color?: string }>> };
+      } | null,
+    };
+    return {
+      workspaceGitDiff,
+      workspaceGitDiffFile,
+      workspaceClient,
+      shikiState,
+    };
+  });
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useWorkspace: () => ({ client: workspaceClient }),
 }));
 
-// Shiki's WASM engine isn't available under jsdom; the dialog must degrade to
-// plain text. Stub the highlighter so buildRows takes the plain-text path.
+// Shiki's WASM engine isn't available under jsdom; by default the stub rejects
+// so buildRows takes the plain-text path. A test can install a fake
+// highlighter via `shikiState` to exercise the token-interleaving success path.
 vi.mock('../messages/codeHighlighter', () => ({
-  getCodeHighlighter: vi.fn().mockRejectedValue(new Error('no shiki in tests')),
+  getCodeHighlighter: vi.fn(() =>
+    shikiState.highlighter
+      ? Promise.resolve(shikiState.highlighter)
+      : Promise.reject(new Error('no shiki in tests')),
+  ),
   isTooLargeToHighlight: () => false,
 }));
 
@@ -38,7 +59,7 @@ vi.mock('../messages/Markdown', () => ({
   resolveFenceLanguage: (lang: string) => ({
     label: lang,
     lang,
-    resolvedLang: 'text',
+    resolvedLang: shikiState.resolvedLang,
   }),
 }));
 
@@ -74,6 +95,8 @@ afterEach(() => {
   act(() => root.unmount());
   container.remove();
   vi.clearAllMocks();
+  shikiState.resolvedLang = 'text';
+  shikiState.highlighter = null;
 });
 
 function diffPayload(
@@ -227,5 +250,116 @@ describe('GitDiffDialog', () => {
 
     expect(workspaceGitDiffFile).toHaveBeenCalledWith('src/a.ts');
     expect(document.body.textContent).toContain('Failed to load this diff');
+  });
+
+  it('labels a capped file diff as truncated', async () => {
+    workspaceGitDiff.mockResolvedValue(diffPayload());
+    workspaceGitDiffFile.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      path: 'src/a.ts',
+      available: true,
+      hunks: [
+        {
+          oldStart: 0,
+          oldLines: 0,
+          newStart: 1,
+          newLines: 1,
+          lines: ['+the visible head of a capped file'],
+        },
+      ],
+      truncated: true,
+    });
+    mount();
+    await flush();
+
+    const header = document.body.querySelector(
+      'button[aria-expanded="false"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      header.click();
+    });
+    await flush();
+
+    expect(document.body.textContent).toContain('Diff truncated');
+    // The visible window still renders above the note.
+    expect(document.body.textContent).toContain('visible head');
+  });
+
+  it('shows the per-file error when row building rejects on malformed hunks', async () => {
+    workspaceGitDiff.mockResolvedValue(diffPayload());
+    workspaceGitDiffFile.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      path: 'src/a.ts',
+      available: true,
+      // `lines: null` makes buildRows throw while iterating — the shape a
+      // buggy daemon could emit. Without the .catch this is an unhandled
+      // rejection and the diff area silently stays empty.
+      hunks: [
+        { oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: null },
+      ],
+    });
+    mount();
+    await flush();
+
+    const header = document.body.querySelector(
+      'button[aria-expanded="false"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      header.click();
+    });
+    await flush();
+
+    expect(document.body.textContent).toContain('Failed to load this diff');
+  });
+
+  it('renders Shiki tokens per side when highlighting succeeds', async () => {
+    // Steer buildRows onto the highlighter path with a fake tokenizer that
+    // emits one colored token per line, so the add row pulls from the new-side
+    // tokens and the del row from the old-side tokens.
+    shikiState.resolvedLang = 'ts';
+    shikiState.highlighter = {
+      codeToTokens: (code: string) => ({
+        tokens: code
+          .split('\n')
+          .map((line) => [{ content: line, color: '#ff0000' }]),
+      }),
+    };
+    workspaceGitDiff.mockResolvedValue(diffPayload());
+    workspaceGitDiffFile.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      path: 'src/a.ts',
+      available: true,
+      hunks: [
+        {
+          oldStart: 1,
+          oldLines: 1,
+          newStart: 1,
+          newLines: 1,
+          lines: ['-const a = 1', '+const a = 2'],
+        },
+      ],
+    });
+    mount();
+    await flush();
+
+    const header = document.body.querySelector(
+      'button[aria-expanded="false"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      header.click();
+    });
+    await flush();
+
+    const colored = Array.from(
+      document.body.querySelectorAll('span[style]'),
+    ).filter((el) => (el as HTMLElement).style.color !== '');
+    const texts = colored.map((el) => el.textContent);
+    // Both sides tokenized: the del row from the old side, the add row from
+    // the new side — not the plain-text fallback.
+    expect(texts).toContain('const a = 1');
+    expect(texts).toContain('const a = 2');
   });
 });

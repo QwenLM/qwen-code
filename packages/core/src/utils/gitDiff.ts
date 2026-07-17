@@ -22,6 +22,16 @@ import { findGitRoot } from './gitUtils.js';
 /** Re-export so consumers don't need to depend on `diff` directly. */
 export type GitDiffHunk = Hunk;
 
+/**
+ * A single file's diff hunks plus whether the per-file caps
+ * (`MAX_DIFF_SIZE_BYTES` / `MAX_LINES_PER_FILE`) actually cut content — so the
+ * viewer can label the diff as incomplete instead of silently under-reporting.
+ */
+export interface GitDiffFileHunks {
+  hunks: Hunk[];
+  truncated: boolean;
+}
+
 const execFileAsync = promisify(execFile);
 
 export interface GitDiffStats {
@@ -320,14 +330,16 @@ export async function fetchGitDiffHunks(
  *
  * Untracked files (which `git diff HEAD` omits) are synthesized as a single
  * all-added hunk by reading the file, so the viewer can show new files like any
- * other addition. Returns `null` for non-repos, transient states, paths outside
- * the repo, binary or unreadable untracked files, and tracked files with no
- * changes.
+ * other addition. `truncated` is set whenever the per-file caps cut content on
+ * either path (parser cap for tracked diffs, byte/line caps for synthesized
+ * untracked ones). Returns `null` for non-repos, transient states, paths
+ * outside the repo, binary or unreadable untracked files, and tracked files
+ * with no changes.
  */
 export async function fetchGitDiffHunksForFile(
   cwd: string,
   filePath: string,
-): Promise<Hunk[] | null> {
+): Promise<GitDiffFileHunks | null> {
   const gitRoot = findGitRoot(cwd);
   if (!gitRoot) return null;
   const relPath = toRepoRelativePath(gitRoot, filePath);
@@ -347,10 +359,14 @@ export async function fetchGitDiffHunksForFile(
     gitRoot,
   );
   if (diffOut == null) return null;
-  const parsed = parseGitDiff(diffOut);
+  const truncatedPaths = new Set<string>();
+  const parsed = parseGitDiff(diffOut, truncatedPaths);
   // A single-file diff yields at most one entry; return its hunks regardless of
   // the exact header key (which may carry rename / C-style-quote formatting).
-  if (parsed.size > 0) return parsed.values().next().value ?? [];
+  if (parsed.size > 0) {
+    const [key, hunks] = parsed.entries().next().value as [string, Hunk[]];
+    return { hunks: hunks ?? [], truncated: truncatedPaths.has(key) };
+  }
 
   // No tracked diff: synthesize an all-added hunk only for a genuinely
   // untracked (and not ignored) file, matching the `--exclude-standard` listing
@@ -388,13 +404,15 @@ function toRepoRelativePath(gitRoot: string, filePath: string): string | null {
 
 /**
  * Build a single all-added hunk from an untracked file's content, capped by
- * `MAX_DIFF_SIZE_BYTES` / `MAX_LINES_PER_FILE`. Binary or unreadable files
- * return `null` so the caller surfaces them without an inline diff.
+ * `MAX_DIFF_SIZE_BYTES` / `MAX_LINES_PER_FILE` — `truncated` reports when
+ * either cap actually cut content, so the caller can say so instead of
+ * presenting a silently incomplete file. Binary or unreadable files return
+ * `null` so the caller surfaces them without an inline diff.
  */
 async function synthesizeUntrackedHunk(
   gitRoot: string,
   filePath: string,
-): Promise<Hunk[] | null> {
+): Promise<GitDiffFileHunks | null> {
   let fh;
   try {
     fh = await open(path.join(gitRoot, filePath), getUntrackedOpenFlags());
@@ -421,16 +439,21 @@ async function synthesizeUntrackedHunk(
     // Drop the trailing empty element produced by a final newline.
     if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
     const capped = lines.slice(0, MAX_LINES_PER_FILE);
-    if (capped.length === 0) return [];
-    return [
-      {
-        oldStart: 0,
-        oldLines: 0,
-        newStart: 1,
-        newLines: capped.length,
-        lines: capped.map((line) => '+' + line),
-      },
-    ];
+    const truncated =
+      st.size > MAX_DIFF_SIZE_BYTES || lines.length > capped.length;
+    if (capped.length === 0) return { hunks: [], truncated };
+    return {
+      hunks: [
+        {
+          oldStart: 0,
+          oldLines: 0,
+          newStart: 1,
+          newLines: capped.length,
+          lines: capped.map((line) => '+' + line),
+        },
+      ],
+      truncated,
+    };
   } catch {
     return null;
   } finally {
@@ -541,9 +564,15 @@ export function parseGitNumstat(stdout: string): GitDiffResult {
  * Limits applied:
  * - Stop once `MAX_FILES` files have been collected.
  * - Skip files whose raw diff exceeds `MAX_DIFF_SIZE_BYTES`.
- * - Truncate per-file content at `MAX_LINES_PER_FILE` lines.
+ * - Truncate per-file content at `MAX_LINES_PER_FILE` lines; when
+ *   `truncatedPaths` is provided, every file that actually lost lines to that
+ *   cap is recorded there so callers can surface the truncation instead of
+ *   presenting a silently incomplete diff.
  */
-export function parseGitDiff(stdout: string): Map<string, Hunk[]> {
+export function parseGitDiff(
+  stdout: string,
+  truncatedPaths?: Set<string>,
+): Map<string, Hunk[]> {
   const result = new Map<string, Hunk[]>();
   if (!stdout.trim()) return result;
 
@@ -599,7 +628,12 @@ export function parseGitDiff(stdout: string): Map<string, Hunk[]> {
         line.startsWith('-') ||
         line.startsWith(' ')
       ) {
-        if (lineCount >= MAX_LINES_PER_FILE) break;
+        if (lineCount >= MAX_LINES_PER_FILE) {
+          // A content line exists beyond the cap, so this file's hunks are
+          // genuinely incomplete (an exactly-at-cap diff never reaches here).
+          truncatedPaths?.add(filePath);
+          break;
+        }
         // Force a flat string copy to break V8 sliced-string references so the
         // whole raw diff can be GC'd once parsing finishes.
         currentHunk.lines.push('' + line);

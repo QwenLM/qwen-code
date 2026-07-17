@@ -484,10 +484,11 @@ describe('fetchGitDiffHunksForFile', () => {
     await git(repo, 'commit', '-q', '-m', 'init');
     await fs.writeFile(path.join(repo, 'a.txt'), 'one\nTWO\nthree\n');
 
-    const hunks = await fetchGitDiffHunksForFile(repo, 'a.txt');
-    expect(hunks).not.toBeNull();
-    expect(hunks![0].lines.some((l) => l === '-two')).toBe(true);
-    expect(hunks![0].lines.some((l) => l === '+TWO')).toBe(true);
+    const result = await fetchGitDiffHunksForFile(repo, 'a.txt');
+    expect(result).not.toBeNull();
+    expect(result!.truncated).toBe(false);
+    expect(result!.hunks[0].lines.some((l) => l === '-two')).toBe(true);
+    expect(result!.hunks[0].lines.some((l) => l === '+TWO')).toBe(true);
   });
 
   it('scopes the diff to the requested file only', async () => {
@@ -498,10 +499,10 @@ describe('fetchGitDiffHunksForFile', () => {
     await fs.writeFile(path.join(repo, 'a.txt'), 'A\n');
     await fs.writeFile(path.join(repo, 'b.txt'), 'B\n');
 
-    const hunks = await fetchGitDiffHunksForFile(repo, 'a.txt');
-    expect(hunks![0].lines.some((l) => l === '+A')).toBe(true);
+    const result = await fetchGitDiffHunksForFile(repo, 'a.txt');
+    expect(result!.hunks[0].lines.some((l) => l === '+A')).toBe(true);
     // b.txt's change must not leak into a.txt's hunks.
-    expect(hunks![0].lines.some((l) => l === '+B')).toBe(false);
+    expect(result!.hunks[0].lines.some((l) => l === '+B')).toBe(false);
   });
 
   it('returns null for an unchanged tracked file', async () => {
@@ -518,16 +519,52 @@ describe('fetchGitDiffHunksForFile', () => {
     await git(repo, 'commit', '-q', '-m', 'init');
     await fs.writeFile(path.join(repo, 'new.txt'), 'x\ny\n');
 
-    const hunks = await fetchGitDiffHunksForFile(repo, 'new.txt');
-    expect(hunks).not.toBeNull();
-    expect(hunks).toHaveLength(1);
-    expect(hunks![0]).toMatchObject({
+    const result = await fetchGitDiffHunksForFile(repo, 'new.txt');
+    expect(result).not.toBeNull();
+    expect(result!.truncated).toBe(false);
+    expect(result!.hunks).toHaveLength(1);
+    expect(result!.hunks[0]).toMatchObject({
       oldStart: 0,
       oldLines: 0,
       newStart: 1,
       newLines: 2,
     });
-    expect(hunks![0].lines).toEqual(['+x', '+y']);
+    expect(result!.hunks[0].lines).toEqual(['+x', '+y']);
+  });
+
+  it('reports truncation for an untracked file past the line cap', async () => {
+    await fs.writeFile(path.join(repo, 'a.txt'), 'a\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'init');
+    const body = Array.from(
+      { length: MAX_LINES_PER_FILE + 5 },
+      (_, i) => `line-${i}`,
+    ).join('\n');
+    await fs.writeFile(path.join(repo, 'big.txt'), body + '\n');
+
+    const result = await fetchGitDiffHunksForFile(repo, 'big.txt');
+    expect(result).not.toBeNull();
+    expect(result!.truncated).toBe(true);
+    expect(result!.hunks[0].lines).toHaveLength(MAX_LINES_PER_FILE);
+    // The capped window is the file's head, all-added.
+    expect(result!.hunks[0].lines[0]).toBe('+line-0');
+  });
+
+  it('reports truncation for a tracked diff past the parser line cap', async () => {
+    await fs.writeFile(path.join(repo, 'a.txt'), 'seed\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'init');
+    const body = Array.from(
+      { length: MAX_LINES_PER_FILE + 5 },
+      (_, i) => `line-${i}`,
+    ).join('\n');
+    await fs.writeFile(path.join(repo, 'a.txt'), body + '\n');
+
+    const result = await fetchGitDiffHunksForFile(repo, 'a.txt');
+    expect(result).not.toBeNull();
+    expect(result!.truncated).toBe(true);
+    const total = result!.hunks.reduce((n, h) => n + h.lines.length, 0);
+    expect(total).toBe(MAX_LINES_PER_FILE);
   });
 
   it('returns null for a binary untracked file', async () => {
@@ -561,12 +598,12 @@ describe('fetchGitDiffHunksForFile', () => {
     await git(repo, 'commit', '-q', '-m', 'init');
     await fs.writeFile(path.join(repo, 'a.txt'), 'one\nTWO\n');
 
-    const hunks = await fetchGitDiffHunksForFile(
+    const result = await fetchGitDiffHunksForFile(
       repo,
       path.join(repo, 'a.txt'),
     );
-    expect(hunks).not.toBeNull();
-    expect(hunks![0].lines.some((l) => l === '+TWO')).toBe(true);
+    expect(result).not.toBeNull();
+    expect(result!.hunks[0].lines.some((l) => l === '+TWO')).toBe(true);
 
     // An absolute path outside the git root is rejected.
     const outside = path.join(os.tmpdir(), 'elsewhere.txt');
