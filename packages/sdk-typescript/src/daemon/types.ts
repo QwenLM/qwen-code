@@ -102,6 +102,9 @@ export interface DaemonWorkspaceGitStatus {
 export interface DaemonWorkspaceGitDiffFile {
   /** Repo-root-relative path (render after sanitizing — git allows odd bytes). */
   path: string;
+  /** Pre-rename path when this entry is a rename; absent otherwise. `path` is
+   *  the current (post-rename) path used to fetch the per-file diff. */
+  oldPath?: string;
   /** Lines added (`0` for binary files). */
   added?: number;
   /** Lines removed (`0` for binary files). */

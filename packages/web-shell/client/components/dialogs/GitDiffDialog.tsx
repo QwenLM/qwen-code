@@ -270,7 +270,9 @@ function DiffFileRow({
         onClick={toggle}
         aria-expanded={open}
         aria-label={t(open ? 'gitDiff.collapse' : 'gitDiff.expand', {
-          path: displayName,
+          path: file.oldPath
+            ? `${sanitizeControlChars(file.oldPath)} → ${displayName}`
+            : displayName,
         })}
       >
         <span className={styles.fileStats}>
@@ -284,6 +286,14 @@ function DiffFileRow({
           )}
         </span>
         <span className={styles.filePath} title={displayName}>
+          {file.oldPath ? (
+            <>
+              <span className={styles.fileOldPath}>
+                {sanitizeControlChars(file.oldPath)}
+              </span>
+              {' → '}
+            </>
+          ) : null}
           {displayName}
         </span>
         {file.isUntracked && (

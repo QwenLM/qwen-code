@@ -47,7 +47,7 @@ import { ModeIcon } from './ModeIcon';
 import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { VoiceButton } from '../voice/VoiceButton';
-import { GitBranchIndicator } from './GitBranchIndicator';
+import { GitBranchChipContent, GitBranchIndicator } from './GitBranchIndicator';
 import { WorkspaceIndicator } from './WorkspaceIndicator';
 import { ChevronDownIcon, FolderClosedIcon } from 'lucide-react';
 import {
@@ -2440,15 +2440,21 @@ export const ChatEditor = memo(
                     data-toolbar-measure="gitBranch:collapsed"
                     className={`${styles.gitBranchChip} ${styles.gitBranchChipCompact}`}
                   >
-                    <span className={styles.gitBranchIcon} />
-                    <span className={styles.gitBranchText}>{gitBranch}</span>
+                    <GitBranchChipContent
+                      branch={gitBranch}
+                      status={gitStatus}
+                      compact
+                    />
                   </span>
                   <span
                     data-toolbar-measure="gitBranch:expanded"
                     className={styles.gitBranchChip}
                   >
-                    <span className={styles.gitBranchIcon} />
-                    <span className={styles.gitBranchText}>{gitBranch}</span>
+                    <GitBranchChipContent
+                      branch={gitBranch}
+                      status={gitStatus}
+                      compact={false}
+                    />
                   </span>
                 </>
               )}

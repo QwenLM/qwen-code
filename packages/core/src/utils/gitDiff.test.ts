@@ -105,12 +105,15 @@ describe('parseGitNumstat', () => {
     });
   });
 
-  it('combines rename-pair tokens into a single entry', () => {
+  it('combines rename-pair tokens into a single entry keyed by the new path', () => {
     // `-z` rename format: `<a>\t<b>\t\0<old>\0<new>\0`.
     const out = '0\t0\t\0' + 'src/old.ts\0' + 'src/new.ts\0';
     const { stats, perFileStats } = parseGitNumstat(out);
     expect(stats.filesCount).toBe(1);
-    expect(perFileStats.has('src/old.ts => src/new.ts')).toBe(true);
+    // Keyed by the current (new) path so the single-file endpoint can address
+    // it; the old path is carried for display.
+    expect(perFileStats.has('src/new.ts')).toBe(true);
+    expect(perFileStats.get('src/new.ts')?.oldPath).toBe('src/old.ts');
   });
 });
 
@@ -212,6 +215,23 @@ index 0000000..3333333
 
     const bHunks = result.get('src/b.ts')!;
     expect(bHunks[0].lines).toEqual(['+hello', '+world']);
+  });
+
+  it('preserves the "\\ No newline at end of file" marker', () => {
+    const diff = `diff --git a/f.txt b/f.txt
+--- a/f.txt
++++ b/f.txt
+@@ -1 +1 @@
+-line
+\\ No newline at end of file
++line
+`;
+    const result = parseGitDiff(diff);
+    expect(result.get('f.txt')![0].lines).toEqual([
+      '-line',
+      '\\ No newline at end of file',
+      '+line',
+    ]);
   });
 
   it('returns empty map on empty input', () => {
@@ -960,7 +980,7 @@ describe('fetchGitDiff tracked-file filename robustness', () => {
     }
   });
 
-  it('combines a rename into a single "old => new" per-file entry', async () => {
+  it('keys a rename by its new path and carries the old path', async () => {
     const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-gitdiff-mv-'));
     try {
       await execFileAsync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
@@ -978,10 +998,10 @@ describe('fetchGitDiff tracked-file filename robustness', () => {
 
       const result = await fetchGitDiff(repo);
       expect(result).not.toBeNull();
-      // Rename detection is the git default with -M; we preserve that display
-      // shape rather than splitting into delete + add rows.
-      const keys = [...result!.perFileStats.keys()];
-      expect(keys.some((k) => k.includes('old.txt => new.txt'))).toBe(true);
+      // Keyed by the current path so the row can expand; the old path is
+      // carried for display instead of the synthetic `old => new` string
+      // (which git cannot address).
+      expect(result!.perFileStats.get('new.txt')?.oldPath).toBe('old.txt');
     } finally {
       await fs.rm(repo, { recursive: true, force: true });
     }
@@ -1324,10 +1344,9 @@ describe('fetchGitDiff deletion detection', () => {
 
     const result = await fetchGitDiff(repo);
     expect(result).not.toBeNull();
-    // The rename collapses to a single "old => new" entry; it must not
-    // be flagged as deleted.
-    const keys = [...result!.perFileStats.keys()];
-    expect(keys.some((k) => k.includes('=>'))).toBe(true);
+    // The rename collapses to a single entry keyed by the new path (old path
+    // carried for display); it must not be flagged as deleted.
+    expect(result!.perFileStats.get('new.txt')?.oldPath).toBe('old.txt');
     for (const s of result!.perFileStats.values()) {
       expect(s.isDeleted).toBeFalsy();
     }

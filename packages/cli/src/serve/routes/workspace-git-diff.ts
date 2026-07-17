@@ -53,6 +53,7 @@ function buildDiffList(
   }
   const files = [...result.perFileStats.entries()].map(([path, s]) => ({
     path,
+    oldPath: s.oldPath,
     added: s.added,
     removed: s.removed,
     isBinary: s.isBinary,

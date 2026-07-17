@@ -54,6 +54,10 @@ export interface PerFileStats {
   /** Only meaningful for untracked files: `true` when the file exceeded the
    *  line-counting read cap and `added` is therefore a lower bound. */
   truncated?: boolean;
+  /** For a rename detected by `git diff --numstat -z`, the pre-rename path.
+   *  The map key (and wire `path`) is the current post-rename path so the
+   *  single-file endpoint can address it; this carries the old path for display. */
+  oldPath?: string;
 }
 
 export interface GitDiffResult {
@@ -508,11 +512,16 @@ export function parseGitNumstat(stdout: string): GitDiffResult {
         renameOld = token;
         continue;
       }
+      // Key by the current (post-rename) path so the single-file endpoint can
+      // address it; carry the old path for display. Keying by the synthetic
+      // `old => new` string sent a nonexistent literal path to git, so renamed
+      // rows could never expand.
       commitEntry(
-        `${renameOld} => ${token}`,
+        token,
         pending.added,
         pending.removed,
         pending.isBinary,
+        renameOld,
       );
       pending = null;
       renameOld = null;
@@ -545,6 +554,7 @@ export function parseGitNumstat(stdout: string): GitDiffResult {
     fileAdded: number,
     fileRemoved: number,
     isBinary: boolean,
+    oldPath?: string,
   ): void {
     validFileCount++;
     added += fileAdded;
@@ -554,6 +564,7 @@ export function parseGitNumstat(stdout: string): GitDiffResult {
         added: fileAdded,
         removed: fileRemoved,
         isBinary,
+        ...(oldPath ? { oldPath } : {}),
       });
     }
   }
@@ -648,6 +659,11 @@ export function parseGitDiff(
         // whole raw diff can be GC'd once parsing finishes.
         currentHunk.lines.push('' + line);
         lineCount++;
+      } else if (line.startsWith('\\')) {
+        // "\ No newline at end of file" — metadata the viewer renders as a
+        // marker. Keep it so a trailing-newline-only edit isn't shown as
+        // identical removed/added lines. Not counted against the content cap.
+        currentHunk.lines.push('' + line);
       }
     }
 
