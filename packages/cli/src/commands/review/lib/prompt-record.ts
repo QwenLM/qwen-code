@@ -57,6 +57,8 @@ export function briefPath(planPath: string, key: string): string {
   return join(promptRecordDir(planPath), `${encodeURIComponent(key)}.brief.md`);
 }
 
+const RULES_MARKER = '## Project rules';
+
 /**
  * Write the brief this agent is told to read.
  *
@@ -72,8 +74,6 @@ export function briefPath(planPath: string, key: string): string {
  * actually carry — and whether the agent read it is then a fact in the harness's
  * transcript, not a hope.
  */
-const RULES_MARKER = '## Project rules';
-
 export function writeBrief(
   planPath: string,
   key: string,

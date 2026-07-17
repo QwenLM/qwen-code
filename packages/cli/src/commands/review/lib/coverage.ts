@@ -243,8 +243,10 @@ const UNCOVERABLE_RE = /^\s*Uncoverable:\s*chunk\s+(\d+)\b/im;
 /** The exact rebuild flags for one required agent — operator-facing (stderr). */
 function selectorOf(req: RequiredAgent): string {
   if (req.role === 'chunk') return `--chunk ${req.chunk}`;
+  // The file path is copy-pasted into a shell like the plan path is — a heavy
+  // file under a space-bearing directory would split the selector unquoted.
   return req.file
-    ? `--role ${req.role} --file ${req.file}`
+    ? `--role ${req.role} --file ${shellQuotePath(req.file)}`
     : `--role ${req.role}`;
 }
 

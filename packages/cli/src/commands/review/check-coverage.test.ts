@@ -992,6 +992,19 @@ describe('the roster — who should have been here', () => {
       chunks: [{ id: 1 }],
     } as RosterPlan);
     expect(without.map((r) => r.key)).not.toContain('0');
+
+    // HALF the identity is not the identity: the brief builder needs both
+    // halves, and every other fixture carries ownerRepo — without this case,
+    // dropping the ownerRepo guard would require an agent nobody can build and
+    // no test would notice.
+    const halfIdentity = requiredAgents({
+      srcDiffLines: 100,
+      diffLines: 100,
+      files: [{ path: 'a.ts', kind: 'source', removedLines: 0 }],
+      chunks: [{ id: 1 }],
+      prNumber: '6998',
+    } as RosterPlan);
+    expect(halfIdentity.map((r) => r.key)).not.toContain('0');
   });
 
   it('hands the operator exact selectors beside the human labels', () => {

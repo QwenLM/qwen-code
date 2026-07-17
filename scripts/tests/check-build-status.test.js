@@ -26,8 +26,12 @@ describe('scripts/check-build-status.js', () => {
         { cwd: root },
         (err, stdout, stderr) => {
           // The checker may exit non-zero on an unbuilt tree; the contract under
-          // test is the stream, not the verdict.
-          if (err && typeof stdout !== 'string') reject(err);
+          // test is the stream, not the verdict. But a SPAWN failure (ENOENT —
+          // the script renamed or moved) must reject: execFile still hands back
+          // an empty-string stdout there, so the old stdout-type guard resolved
+          // and the empty-stdout assertion passed green on a script that never
+          // ran. Spawn-level errors carry a string code; exit codes are numbers.
+          if (err && typeof err.code === 'string') reject(err);
           else resolve({ stdout, stderr });
         },
       );
