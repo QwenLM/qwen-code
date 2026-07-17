@@ -546,14 +546,18 @@ export class TestRig {
     let attempts = 0;
     while (Date.now() - startTime < timeout) {
       attempts++;
-      const result = predicate();
-      if (env['VERBOSE'] === 'true' && attempts % 5 === 0) {
-        console.log(
-          `Poll attempt ${attempts}: ${result ? 'success' : 'waiting...'}`,
-        );
-      }
-      if (result) {
-        return true;
+      try {
+        const result = predicate();
+        if (env['VERBOSE'] === 'true' && attempts % 5 === 0) {
+          console.log(
+            `Poll attempt ${attempts}: ${result ? 'success' : 'waiting...'}`,
+          );
+        }
+        if (result) {
+          return true;
+        }
+      } catch {
+        // Predicate threw (e.g. file not yet available); treat as false and retry
       }
       await new Promise((resolve) => setTimeout(resolve, interval));
     }
