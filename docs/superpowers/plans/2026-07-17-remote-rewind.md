@@ -40,7 +40,7 @@
   1. **`OwnerEvent` needs NO new variant.** The design doc doesn't specify this, but `session_rewound` is a plain `WalFrame` on the session's own WAL, so it reuses the EXISTING `{ type: 'session_event', sessionId, event: WalFrame }` `OwnerEvent` variant in `packages/rc-gateway/src/ownerEvents.ts` — the same one `session_forked`/`child_forked` already use. `ownerEvents.ts` is not modified by this plan.
   2. **WAL marker id.** Fork derives its marker's WAL id from the caller-supplied `fromEventId + 1` (a convention specific to forking, where the caller already names a slice point). Rewind has no equivalent caller-supplied WAL coordinate, so its marker uses the session's OWN `SessionWal.latestId()` — `(wal.latestId() ?? 0) + 1` — the actual next sequence number, which is more robust than re-deriving one from transcript-record counts.
   3. **`walDir` / owner-event `bus` wiring is currently a dark path in production.** `packages/rc-gateway/src/server.ts` mounts `GET /session/:id/events` with `walDir` hardcoded to `undefined` (line ~582: 5th arg to `createSessionEventsRoute`) and mounts `POST /session/:id/fork` with `{ audit }` only — no `bus`, no `walDir`. WAL persistence and owner-stream fan-out for both fork and rewind exist and are unit-tested at the route-factory level but are not switched on end-to-end in the shipped gateway. This plan does not fix that pre-existing gap for fork; it wires rewind's route with the SAME optional `walDir?`/`bus?` shape fork already has, and adds a new optional `GatewayDeps.walDir` field so the day this is turned on, rewind benefits automatically. Tests exercise the WAL/bus path directly (constructing the route with an explicit `walDir`), exactly as `fork.test.ts` already does.
-  4. **The daemon HTTP bridge does not yet expose `rewindSession` over HTTP.** `packages/cli/src/acp-integration/acpAgent.ts` (`case 'rewindSession'`, ~line 1698) and `Session.ts#rewindToTurn` (line 387) implement the ACP JSON-RPC method, but `packages/cli/src/serve/server.ts` (the daemon's HTTP↔ACP bridge, which DOES have `POST /session/:id/model` and `POST /session/:id/approval-mode` analogues) has NO `POST /session/:id/rewind` route, and `packages/cli/src/serve/httpAcpBridge.ts` has no `rewindSession` bridge method. **This plan does not add that daemon-side HTTP route** — it is out of scope for the SDK/rc-gateway packages this plan touches, and is a real prerequisite for `DaemonClient.rewindSession` to work against a live daemon. Task 5 builds the SDK method against the HTTP contract that route MUST expose (`POST /session/:id/rewind` `{ toTurn }` → `{ targetTurnIndex, apiTruncateIndex }`, mirroring `/model`/`/approval-mode`'s shape), and all rc-gateway tests exercise it against `stubDaemon`'s new fake route (Task 6), so nothing in this plan is blocked by the gap — but it MUST be flagged to whoever plans the `packages/cli` side as a follow-up. Record this explicitly in Task 4's `tasks.md` alignment prompt.
+  4. **The daemon HTTP bridge's `rewindSession` gap is now CLOSED by Task 13 (Part D).** `packages/cli/src/acp-integration/acpAgent.ts` (`case 'rewindSession'`, ~line 1698) and `Session.ts#rewindToTurn` (line 387) implement the ACP JSON-RPC method; as of Task 13, `packages/cli/src/serve/server.ts` also mounts `POST /session/:id/rewind` (alongside its `/model` and `/approval-mode` analogues) and `packages/cli/src/serve/httpAcpBridge.ts` gains a `rewindSession` bridge method. Tasks 1–12 were written and shipped against a STUB daemon (`stubDaemon`'s fake route, Task 6) without depending on this route existing, exactly per Task 5's SDK contract (`POST /session/:id/rewind` `{ toTurn }` → `{ targetTurnIndex, apiTruncateIndex }`, mirroring `/model`/`/approval-mode`'s shape) — Task 13 implements the real route against that SAME contract, so no rc-gateway/SDK code from Tasks 1–12 changes. Before Task 13, a production `DaemonClient.rewindSession` call 404'd; after it, end-to-end rewind against a live `qwen serve` daemon works. (Historical note: Task 1's `proposal.md`/`design.md` and Task 4's `tasks.md`, written when this gap was still open, describe it as an out-of-scope follow-up for "whoever plans the `packages/cli` side" — those OpenSpec documents live in the sibling `qwen-code-remote` repo and are intentionally left as-is here; Task 13 is that follow-up, delivered in THIS repo's `packages/cli`.)
   5. **ACP `targetTurnIndex` and `resolveTurn`'s turn counting are two different representations of "turn N".** The daemon's `#computeApiTruncationIndexForUserTurn` counts user turns in its LIVE in-memory `Content[]` history; the gateway's `resolveTurn` (Task 6) counts user turns in the PERSISTED JSONL transcript (`ForkRecord[]` from `readParentRecords`, the same source fork already reads). Both use "the Nth user message, 0-indexed" as the definition of turn N, so they agree in the normal case; a pathological divergence between the two representations (e.g. a daemon-side turn that never made it to the persisted transcript) is a known, accepted risk — the daemon's own `rewindToTurn` still validates against ITS history and is the final authority; the gateway's `truncatedEventId` is only used for the WAL marker's bookkeeping, never fed back into the daemon call.
   6. **The 409 `rewind_in_progress` guard reuses `PromptQueue.acquire` with a zero-wait, rather than adding a new "peek" method.** `packages/rc-gateway/src/routes/promptQueue.ts`'s `PromptQueue` has no non-blocking "is busy" query. `queue.acquire(sessionId, 0)` races the session's existing FIFO slot against an immediate (0ms) timeout: if the slot is already free the acquire resolves synchronously (microtask ordering beats the macrotask timer), handing the rewind route the slot itself — which it holds for the ENTIRE saga, so no prompt can start mid-rewind, then releases in a `finally`. If the slot is busy, the 0ms timer fires first, `QueueTimeoutError` is thrown, and the route responds `409 rewind_in_progress` without ever touching the daemon.
 
@@ -685,10 +685,7 @@ State machine and alignment pattern: see
 - [ ] **2.2 `routes/fork.ts` fromTurn**
   - **Status:** not-started
   - **Files:** `packages/rc-gateway/src/routes/fork.ts`
-  - **Prompt:**
-    > Accept `fromTurn`, resolve via the same `resolveTurn`, use
-    > `truncatedEventId` as the slice boundary; both-supplied 400
-    > mutually_exclusive. Acceptance: scenarios under `Requirement:
+  - **Prompt:** > Accept `fromTurn`, resolve via the same `resolveTurn`, use > `truncatedEventId` as the slice boundary; both-supplied 400 > mutually_exclusive. Acceptance: scenarios under `Requirement:
 Fork turn-addressing`.
 
 ## Phase 3 — Event vocabulary + wiring + integration
@@ -697,9 +694,7 @@ Fork turn-addressing`.
 
 - [ ] **3.0 Alignment**
   - **Status:** not-started
-  - **Prompt:**
-    > Verify Phase 2 `completed`. Confirm `KIND_SCOPE` and
-    > `SNOOZE_BYPASS_KINDS` in `packages/rc-gateway/src/webpush/
+  - **Prompt:** > Verify Phase 2 `completed`. Confirm `KIND_SCOPE` and > `SNOOZE_BYPASS_KINDS` in `packages/rc-gateway/src/webpush/
 notifier.ts` still have the shape this change edits.
 
 - [ ] **3.1 Audit action + notification kind**
@@ -2638,3 +2633,869 @@ git commit -m "test(rc-gateway): integration test for rewind marker + late-recon
 **Placeholder scan** — no "TBD"/"handle appropriately"/"similar to Task N" left in any step; every code block is complete, real code with real imports resolved from files actually read during planning (fork.ts, forkStore.ts, wal.ts, sessionEvents.ts, ownerEvents.ts, auditLog.ts, payload.ts, notifier.ts, scopes.ts, promptQueue.ts, stubDaemon.ts, DaemonClient.ts, types.ts).
 
 **Type consistency** — `ResolveTurnResult`/`resolveTurn` (Task 6) is used with identical field names (`ok`, `targetTurnIndex`, `truncatedEventId`, `error`) in Task 9's route and Task 10's fork modification. `RewindSessionRequest`/`DaemonRewindResult` (Task 5) field names (`toTurn`, `targetTurnIndex`, `apiTruncateIndex`) match what Task 9's route sends/expects. `AuditAction`'s new `'session_rewound'` member (Task 7) matches the literal string used in Task 9's `audit.record({ action: 'session_rewound', ... })` call.
+
+---
+
+## Part D — Daemon HTTP bridge (`/home/evan/projects/qwen-code`, `packages/cli` + `packages/acp-bridge`)
+
+### Task 13: `POST /session/:id/rewind` on the daemon's HTTP↔ACP bridge
+
+**Why this task exists:** Task 5 built `DaemonClient.rewindSession` against "the HTTP contract that route MUST expose" (see Global Constraints §4, historical note in Task 1/Task 4's OpenSpec text) because, at the time Tasks 1–12 were planned, `packages/cli/src/serve/server.ts` had no `POST /session/:id/rewind` route and `packages/cli/src/serve/httpAcpBridge.ts` had no `rewindSession` bridge method — only the underlying ACP JSON-RPC method (`acpAgent.ts` case `'rewindSession'`, `Session.ts#rewindToTurn`) existed. Tasks 1–12 do not depend on this route (they exercise `stubDaemon`'s fake route instead), so they ship correctly without it — but a production `DaemonClient.rewindSession` call against a REAL `qwen serve` daemon 404s until this task lands. This task delivers that route.
+
+**CONTRACT ALIGNMENT (read first, do not diverge):** Task 5's SDK method POSTs body `{ toTurn: number }` to `/session/:id/rewind` (see `packages/sdk-typescript/src/daemon/DaemonClient.ts`'s `rewindSession`, Task 5 Step 4: `body: JSON.stringify({ toTurn: req.toTurn })`) and expects a response whose JSON body deserializes to `{ targetTurnIndex: number; apiTruncateIndex: number }` on any 2xx status (Task 5's tests use `jsonResponse(200, { targetTurnIndex, apiTruncateIndex })` for success and assert `status` on non-2xx). This task's route MUST accept exactly that request body and return exactly that response shape at HTTP `200` — mirroring `POST /session/:id/model` and `POST /session/:id/approval-mode`, which both also respond `200` (not `202` — the `202` in Task 9 is the SEPARATE rc-gateway route's OWN response to ITS callers after it proxies through this daemon route; the daemon-to-SDK contract this task implements is a plain synchronous `200`). No mismatch was found: Task 5 was already written correctly against this shape; this task simply builds the route it names.
+
+**Design finding — the daemon route needs NO SSE event for the gateway's rewind flow to work.** The gateway's `session_rewound` WAL marker (Task 9, design.md's `routes/rewind.ts` saga) is synthesized by the GATEWAY itself directly on its own `OwnerEventBus`/`SessionWal` after `daemon.rewindSession()` returns — it does not read the event off the daemon's SSE stream. So this task's route does not NEED to publish anything for gateway correctness. However, for parity with `setSessionModel` (`model_switched`/`model_switch_failed`) and `setSessionApprovalMode` (`approval_mode_changed`) — both of which publish on `entry.events`, the daemon's OWN per-session SSE bus, so a client attached directly to the daemon (bypassing rc-gateway entirely, e.g. a local dev tool or the VSCode companion) also observes the mutation — this task's bridge method publishes a `session_rewound` event on `entry.events` too. This is additive: `BridgeEvent.type` is an untyped `string` (`packages/acp-bridge/src/eventBus.ts`), so no registry/union edit is needed, and the gateway's own SSE relay (`createSessionEventsRoute`) is free to ignore or pass through this frame — it does not conflict with the gateway's separately-synthesized WAL marker of the same type name on a DIFFERENT event bus.
+
+**Files:**
+
+- Modify: `packages/acp-bridge/src/bridgeErrors.ts`
+- Modify: `packages/acp-bridge/src/bridgeTypes.ts`
+- Modify: `packages/cli/src/serve/httpAcpBridge.ts`
+- Modify: `packages/cli/src/serve/httpAcpBridge.test.ts`
+- Modify: `packages/cli/src/serve/server.ts`
+- Modify: `packages/cli/src/serve/server.test.ts`
+
+**Interfaces:**
+
+- Consumes: `entry.connection.extMethod('rewindSession', { sessionId, targetTurnIndex })` (the SAME literal ext-method name `acpAgent.ts`'s `case 'rewindSession':` switches on, confirmed via `packages/cli/src/acp-integration/acpAgent.test.ts`'s `agent.extMethod('rewindSession', {...})` calls — NOT one of the namespaced `SERVE_CONTROL_EXT_METHODS` constants); `withTimeout`, `getTransportClosedReject`, `resolveTrustedClientId`, `initTimeoutMs`, `byId` (all existing private helpers/state already used by `setSessionModel`/`setSessionApprovalMode` in `httpAcpBridge.ts`); `mutate`, `safeBody`, `parseClientIdHeader`, `sendBridgeError` (existing route-layer helpers in `server.ts`).
+- Produces:
+  - `packages/acp-bridge/src/bridgeErrors.ts`: `RewindInProgressError`, `RewindNotApplicableError`, `InvalidRewindTurnError` (re-exported through `httpAcpBridge.ts` like the 11 existing error classes).
+  - `packages/acp-bridge/src/bridgeTypes.ts`: `interface RewindSessionRequest { toTurn: number }`, `interface RewindSessionResult { targetTurnIndex: number; apiTruncateIndex: number }`, and `HttpAcpBridge.rewindSession(sessionId: string, req: RewindSessionRequest, context?: BridgeClientRequestContext): Promise<RewindSessionResult>`.
+  - `packages/cli/src/serve/httpAcpBridge.ts`: the `rewindSession` implementation on the object `createHttpAcpBridge` returns, plus a private `mapRewindError` helper.
+  - `packages/cli/src/serve/server.ts`: `POST /session/:id/rewind` mounted with `mutate({ strict: true })`, and 3 new `sendBridgeError` branches.
+
+- [ ] **Step 1: Write the failing bridge-level tests**
+
+Append to `packages/cli/src/serve/httpAcpBridge.test.ts`'s import block from `./httpAcpBridge.js'` (the block at lines 39–56), adding the 3 new error classes alphabetically:
+
+```ts
+  InvalidClientIdError,
+  InvalidPermissionOptionError,
+  InvalidRewindTurnError,
+  InvalidSessionMetadataError,
+  InvalidSessionScopeError,
+  MAX_WORKSPACE_PATH_LENGTH,
+  RestoreInProgressError,
+  RewindInProgressError,
+  RewindNotApplicableError,
+  SessionNotFoundError,
+```
+
+(Every other name in that block stays as-is; only the 3 new names are inserted in their alphabetical slots.)
+
+Append a new `describe` block right after the `describe('setSessionApprovalMode ...)` block closes (search for its final `});` — it is the last `describe` in the file; add this one immediately after it, before the file's closing):
+
+```ts
+describe('rewindSession (add-remote-rewind Task 13)', () => {
+  /**
+   * Build a channel whose `extMethod` answers the literal `'rewindSession'`
+   * ext-method the daemon's ACP agent switches on (`acpAgent.ts` case
+   * `'rewindSession'`) — NOT a `SERVE_CONTROL_EXT_METHODS` constant, since
+   * this ext-method predates the Wave 4 PR 17 naming convention and is
+   * also invoked directly by the local `/rewind` TUI command.
+   */
+  function rewindFactory(
+    impl: (params: Record<string, unknown>) => Promise<Record<string, unknown>>,
+  ): {
+    factory: ChannelFactory;
+    getCalls: () => Array<{ method: string; params: Record<string, unknown> }>;
+  } {
+    const calls: Array<{ method: string; params: Record<string, unknown> }> =
+      [];
+    const factory: ChannelFactory = async () => {
+      const { clientStream, agentStream } = createInMemoryChannel();
+      const agent = new FakeAgent({
+        extMethodImpl: async (method, params) => {
+          calls.push({ method, params });
+          if (method === 'rewindSession') return impl(params);
+          return {};
+        },
+      });
+      new AgentSideConnection(() => agent as Agent, agentStream);
+      return {
+        stream: clientStream,
+        exited: new Promise<
+          | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+          | undefined
+        >(() => {}),
+        kill: async () => {},
+        killSync: () => {},
+      };
+    };
+    return { factory, getCalls: () => calls };
+  }
+
+  it('forwards toTurn as targetTurnIndex and strips historyBeforeRewind from the result', async () => {
+    const { factory, getCalls } = rewindFactory(async () => ({
+      success: true,
+      historyBeforeRewind: [
+        { role: 'user', parts: [{ text: 'secret transcript content' }] },
+      ],
+      targetTurnIndex: 2,
+      apiTruncateIndex: 5,
+    }));
+    const bridge = makeBridge({ channelFactory: factory });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const result = await bridge.rewindSession(session.sessionId, { toTurn: 2 });
+    expect(result).toEqual({ targetTurnIndex: 2, apiTruncateIndex: 5 });
+    expect('historyBeforeRewind' in result).toBe(false);
+    expect(getCalls()[0]).toEqual({
+      method: 'rewindSession',
+      params: { sessionId: session.sessionId, targetTurnIndex: 2 },
+    });
+    await bridge.shutdown();
+  });
+
+  it('publishes a session_rewound event on the session event bus', async () => {
+    const { factory } = rewindFactory(async () => ({
+      success: true,
+      historyBeforeRewind: [],
+      targetTurnIndex: 1,
+      apiTruncateIndex: 3,
+    }));
+    const bridge = makeBridge({ channelFactory: factory });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const abort = new AbortController();
+    const iter = bridge.subscribeEvents(session.sessionId, {
+      signal: abort.signal,
+    });
+    await bridge.rewindSession(session.sessionId, { toTurn: 1 });
+    const it = iter[Symbol.asyncIterator]();
+    const next = await it.next();
+    expect(next.value?.type).toBe('session_rewound');
+    expect(next.value?.data).toEqual({
+      sessionId: session.sessionId,
+      targetTurnIndex: 1,
+      apiTruncateIndex: 3,
+    });
+    abort.abort();
+    await bridge.shutdown();
+  });
+
+  it('stamps the event with the trusted originator client id', async () => {
+    const { factory } = rewindFactory(async () => ({
+      success: true,
+      historyBeforeRewind: [],
+      targetTurnIndex: 0,
+      apiTruncateIndex: 0,
+    }));
+    const bridge = makeBridge({ channelFactory: factory });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const abort = new AbortController();
+    const iter = bridge.subscribeEvents(session.sessionId, {
+      signal: abort.signal,
+    });
+    await bridge.rewindSession(
+      session.sessionId,
+      { toTurn: 0 },
+      { clientId: session.clientId },
+    );
+    const it = iter[Symbol.asyncIterator]();
+    const next = await it.next();
+    expect(next.value?.originatorClientId).toBe(session.clientId);
+    abort.abort();
+    await bridge.shutdown();
+  });
+
+  it('maps "prompt is running" ACP rejections to RewindInProgressError', async () => {
+    const { factory } = rewindFactory(async () => {
+      throw new RequestError(-32602, 'Cannot rewind while a prompt is running');
+    });
+    const bridge = makeBridge({ channelFactory: factory });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await expect(
+      bridge.rewindSession(session.sessionId, { toTurn: 0 }),
+    ).rejects.toBeInstanceOf(RewindInProgressError);
+    await bridge.shutdown();
+  });
+
+  it('maps "compressed or does not exist" ACP rejections to RewindNotApplicableError', async () => {
+    const { factory } = rewindFactory(async () => {
+      throw new RequestError(
+        -32602,
+        'Cannot rewind to the requested turn. It may have been compressed or does not exist.',
+      );
+    });
+    const bridge = makeBridge({ channelFactory: factory });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await expect(
+      bridge.rewindSession(session.sessionId, { toTurn: 99 }),
+    ).rejects.toBeInstanceOf(RewindNotApplicableError);
+    await bridge.shutdown();
+  });
+
+  it('maps "must be a non-negative integer" ACP rejections to InvalidRewindTurnError (defense in depth)', async () => {
+    const { factory } = rewindFactory(async () => {
+      throw new RequestError(
+        -32602,
+        'targetTurnIndex must be a non-negative integer',
+      );
+    });
+    const bridge = makeBridge({ channelFactory: factory });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await expect(
+      bridge.rewindSession(session.sessionId, { toTurn: -1 }),
+    ).rejects.toBeInstanceOf(InvalidRewindTurnError);
+    await bridge.shutdown();
+  });
+
+  it('throws SessionNotFoundError for unknown session ids', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        throw new Error('factory should not be called');
+      },
+    });
+    await expect(
+      bridge.rewindSession('unknown', { toTurn: 0 }),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
+  });
+
+  it('rejects unregistered client ids on session-scoped requests', async () => {
+    const { factory } = rewindFactory(async () => ({
+      success: true,
+      historyBeforeRewind: [],
+      targetTurnIndex: 0,
+      apiTruncateIndex: 0,
+    }));
+    const bridge = makeBridge({ channelFactory: factory });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await expect(
+      bridge.rewindSession(
+        session.sessionId,
+        { toTurn: 0 },
+        { clientId: 'client-not-issued' },
+      ),
+    ).rejects.toBeInstanceOf(InvalidClientIdError);
+    await bridge.shutdown();
+  });
+});
+```
+
+- [ ] **Step 2: Write the failing route-level tests**
+
+In `packages/cli/src/serve/server.test.ts`, add the 3 new error classes to the existing import from `'./httpAcpBridge.js'` (lines 33–53), alphabetically:
+
+```ts
+  InvalidClientIdError,
+  InvalidPermissionOptionError,
+  InvalidRewindTurnError,
+  InvalidSessionMetadataError,
+  MAX_WORKSPACE_PATH_LENGTH,
+  RestoreInProgressError,
+  RewindInProgressError,
+  RewindNotApplicableError,
+  SessionLimitExceededError,
+  SessionNotFoundError,
+```
+
+Add to `FakeBridgeOpts` (after `setApprovalModeImpl?: ...` and its closing `}>;`):
+
+```ts
+  rewindImpl?: (
+    sessionId: string,
+    req: { toTurn: number },
+    context?: BridgeClientRequestContext,
+  ) => Promise<{ targetTurnIndex: number; apiTruncateIndex: number }>;
+```
+
+Add to `FakeBridge` (after `setApprovalModeCalls: Array<...>;`):
+
+```ts
+rewindCalls: Array<{
+  sessionId: string;
+  req: { toTurn: number };
+  context?: BridgeClientRequestContext;
+}>;
+```
+
+Add to `fakeBridge()`'s body, right after `const setApprovalModeImpl = ...` block:
+
+```ts
+const rewindCalls: FakeBridge['rewindCalls'] = [];
+const rewindImpl =
+  opts.rewindImpl ??
+  (async (_sessionId: string, req: { toTurn: number }) => ({
+    targetTurnIndex: req.toTurn,
+    apiTruncateIndex: req.toTurn * 2,
+  }));
+```
+
+Add `rewindCalls,` to the returned object (after `setApprovalModeCalls,`), and add the method right after `setSessionApprovalMode`'s implementation:
+
+```ts
+    async rewindSession(sessionId, req, context) {
+      rewindCalls.push({ sessionId, req, ...(context ? { context } : {}) });
+      return rewindImpl(sessionId, req, context);
+    },
+```
+
+Append a new `describe` block right after the `describe('POST /session/:id/approval-mode ...)` block closes:
+
+```ts
+describe('POST /session/:id/rewind (add-remote-rewind Task 13)', () => {
+  it('200 with the typed result on success', async () => {
+    const bridge = fakeBridge({
+      rewindImpl: async () => ({ targetTurnIndex: 2, apiTruncateIndex: 5 }),
+    });
+    const app = createServeApp(baseOpts, undefined, { bridge });
+    const res = await request(app)
+      .post('/session/session-A/rewind')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ toTurn: 2 });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ targetTurnIndex: 2, apiTruncateIndex: 5 });
+    expect(bridge.rewindCalls).toHaveLength(1);
+    expect(bridge.rewindCalls[0]?.sessionId).toBe('session-A');
+    expect(bridge.rewindCalls[0]?.req).toEqual({ toTurn: 2 });
+  });
+
+  it('passes client identity context into bridge.rewindSession', async () => {
+    const bridge = fakeBridge();
+    const app = createServeApp(baseOpts, undefined, { bridge });
+    const res = await request(app)
+      .post('/session/session-A/rewind')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('X-Qwen-Client-Id', 'client-1')
+      .send({ toTurn: 0 });
+    expect(res.status).toBe(200);
+    expect(bridge.rewindCalls[0]?.context).toEqual({ clientId: 'client-1' });
+  });
+
+  it('400 invalid_turn when toTurn is missing', async () => {
+    const bridge = fakeBridge();
+    const app = createServeApp(baseOpts, undefined, { bridge });
+    const res = await request(app)
+      .post('/session/session-A/rewind')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({});
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_turn');
+    expect(bridge.rewindCalls).toHaveLength(0);
+  });
+
+  it('400 invalid_turn when toTurn is negative or non-integer', async () => {
+    const bridge = fakeBridge();
+    const app = createServeApp(baseOpts, undefined, { bridge });
+    const negative = await request(app)
+      .post('/session/session-A/rewind')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ toTurn: -1 });
+    expect(negative.status).toBe(400);
+    expect(negative.body.code).toBe('invalid_turn');
+    const nonInteger = await request(app)
+      .post('/session/session-A/rewind')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ toTurn: 1.5 });
+    expect(nonInteger.status).toBe(400);
+    expect(nonInteger.body.code).toBe('invalid_turn');
+    expect(bridge.rewindCalls).toHaveLength(0);
+  });
+
+  it('404 when bridge reports unknown session', async () => {
+    const bridge = fakeBridge({
+      rewindImpl: async (sessionId) => {
+        throw new SessionNotFoundError(sessionId);
+      },
+    });
+    const app = createServeApp(baseOpts, undefined, { bridge });
+    const res = await request(app)
+      .post('/session/missing/rewind')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ toTurn: 0 });
+    expect(res.status).toBe(404);
+    expect(res.body.sessionId).toBe('missing');
+  });
+
+  it('409 rewind_in_progress when the bridge reports a prompt in flight', async () => {
+    const bridge = fakeBridge({
+      rewindImpl: async () => {
+        throw new RewindInProgressError('session-A');
+      },
+    });
+    const app = createServeApp(baseOpts, undefined, { bridge });
+    const res = await request(app)
+      .post('/session/session-A/rewind')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ toTurn: 0 });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('rewind_in_progress');
+  });
+
+  it('409 rewind_not_applicable when the bridge reports an out-of-range/compressed turn', async () => {
+    const bridge = fakeBridge({
+      rewindImpl: async () => {
+        throw new RewindNotApplicableError('session-A', 99);
+      },
+    });
+    const app = createServeApp(baseOpts, undefined, { bridge });
+    const res = await request(app)
+      .post('/session/session-A/rewind')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ toTurn: 99 });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('rewind_not_applicable');
+  });
+
+  it('400 invalid_turn when the bridge reports InvalidRewindTurnError (defense in depth)', async () => {
+    const bridge = fakeBridge({
+      rewindImpl: async () => {
+        throw new InvalidRewindTurnError(-1);
+      },
+    });
+    const app = createServeApp(baseOpts, undefined, { bridge });
+    const res = await request(app)
+      .post('/session/session-A/rewind')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ toTurn: 0 });
+    // Route-level validation would normally catch this before the bridge
+    // is ever called; this test exercises the bridge-error mapping path
+    // directly via a bridge stub that throws regardless of the request.
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_turn');
+  });
+});
+```
+
+- [ ] **Step 3: Run the tests to verify they fail**
+
+```bash
+cd /home/evan/projects/qwen-code/packages/cli
+npx vitest run src/serve/httpAcpBridge.test.ts -t rewindSession
+npx vitest run src/serve/server.test.ts -t "POST /session/:id/rewind"
+```
+
+Expected: FAIL on both — `bridge.rewindSession is not a function` / import errors for `RewindInProgressError` etc. (they don't exist yet).
+
+- [ ] **Step 4: Add the 3 error classes to `bridgeErrors.ts`**
+
+Append to `packages/acp-bridge/src/bridgeErrors.ts`, after the `McpServerRestartFailedError` class (the file's last class):
+
+```ts
+/**
+ * add-remote-rewind Task 13. Thrown by `rewindSession` when the ACP
+ * child's `Session.rewindToTurn` rejects because a prompt is currently
+ * running (`this.pendingPrompt || this.cronProcessing ||
+ * this.cronAbortController` in `acp-integration/session/Session.ts`).
+ * Translated to HTTP 409 + `code: 'rewind_in_progress'` by the route —
+ * the same vocabulary rc-gateway's OWN `PromptQueue`-based 409 guard
+ * uses (`add-remote-rewind` design.md), even though this is a distinct,
+ * defense-in-depth check at the daemon layer: the daemon's ACP method
+ * re-validates independently of whatever the gateway already checked.
+ */
+export class RewindInProgressError extends Error {
+  readonly sessionId: string;
+  constructor(sessionId: string) {
+    super(
+      `Cannot rewind session "${sessionId}": a prompt is currently running`,
+    );
+    this.name = 'RewindInProgressError';
+    this.sessionId = sessionId;
+  }
+}
+
+/**
+ * add-remote-rewind Task 13. Thrown by `rewindSession` when the ACP
+ * child's `Session.rewindToTurn` rejects because the target turn was
+ * compressed away or does not exist
+ * (`#computeApiTruncationIndexForUserTurn` returning a negative index).
+ * Translated to HTTP 409 + `code: 'rewind_not_applicable'` — the same
+ * vocabulary rc-gateway's `resolveTurn` uses for an equivalent
+ * out-of-range/compressed rejection.
+ */
+export class RewindNotApplicableError extends Error {
+  readonly sessionId: string;
+  readonly targetTurnIndex: number;
+  constructor(sessionId: string, targetTurnIndex: number) {
+    super(
+      `Cannot rewind session "${sessionId}" to turn ${targetTurnIndex}: ` +
+        'it may have been compressed or does not exist',
+    );
+    this.name = 'RewindNotApplicableError';
+    this.sessionId = sessionId;
+    this.targetTurnIndex = targetTurnIndex;
+  }
+}
+
+/**
+ * add-remote-rewind Task 13. Thrown by `rewindSession` when the ACP
+ * child's `Session.rewindToTurn` rejects a malformed `targetTurnIndex`
+ * (non-integer / negative). In practice unreachable in production —
+ * the HTTP route validates `toTurn`'s shape before ever calling the
+ * bridge — but kept as a typed defense-in-depth mapping so a direct
+ * embedder that skips the route's validation still gets a structured
+ * 400 instead of a generic 500.
+ */
+export class InvalidRewindTurnError extends Error {
+  readonly targetTurnIndex: unknown;
+  constructor(targetTurnIndex: unknown) {
+    super(
+      `Invalid targetTurnIndex ${JSON.stringify(targetTurnIndex)}: must be a non-negative integer`,
+    );
+    this.name = 'InvalidRewindTurnError';
+    this.targetTurnIndex = targetTurnIndex;
+  }
+}
+```
+
+- [ ] **Step 5: Add the request/result types and interface method to `bridgeTypes.ts`**
+
+In `packages/acp-bridge/src/bridgeTypes.ts`, add right after the `setSessionApprovalMode` method's closing `}>;` (before `setWorkspaceToolEnabled`):
+
+```ts
+  /**
+   * Destructively rewind a live session's history to before the Nth user
+   * turn (`req.toTurn`, 0-indexed) — proxies the ACP child's `rewindSession`
+   * ext-method (`packages/cli/src/acp-integration/acpAgent.ts` case
+   * `'rewindSession'`, which delegates to `Session.rewindToTurn`). Throws
+   * `SessionNotFoundError` for unknown ids, `RewindInProgressError` when a
+   * prompt is currently running, `RewindNotApplicableError` when the target
+   * turn was compressed away or does not exist, `InvalidRewindTurnError` for
+   * a malformed `toTurn` (route-level validation should catch this first),
+   * and `InvalidClientIdError` for an untrusted `context.clientId`.
+   *
+   * The ACP method's response also carries `historyBeforeRewind` (full
+   * message content, captured for the LOCAL `/rewind` TUI undo path) —
+   * deliberately NOT part of `RewindSessionResult`; the bridge strips it
+   * before returning so full transcript content never crosses the HTTP
+   * boundary to a remote caller.
+   */
+  rewindSession(
+    sessionId: string,
+    req: RewindSessionRequest,
+    context?: BridgeClientRequestContext,
+  ): Promise<RewindSessionResult>;
+```
+
+Add the two supporting types near the top of the file, right after the `BridgeClientRequestContext` interface (after its closing `}`):
+
+```ts
+/**
+ * Body of `POST /session/:id/rewind` (add-remote-rewind Task 13). `toTurn`
+ * is a 0-indexed user-turn number, forwarded to the ACP child's
+ * `rewindSession` ext-method as `targetTurnIndex` — the SAME field name
+ * `packages/sdk-typescript/src/daemon/types.ts`'s `RewindSessionRequest`
+ * uses on the SDK side of this same HTTP contract (add-remote-rewind Task
+ * 5); the two types are deliberately structurally identical even though
+ * they live in different packages, since one is the wire body the other
+ * sends verbatim.
+ */
+export interface RewindSessionRequest {
+  toTurn: number;
+}
+
+/**
+ * Result of `POST /session/:id/rewind`. Mirrors
+ * `packages/sdk-typescript/src/daemon/types.ts`'s `DaemonRewindResult`
+ * field-for-field (`targetTurnIndex`, `apiTruncateIndex`) — the SDK type
+ * this bridge method's response is deserialized into on the client side.
+ */
+export interface RewindSessionResult {
+  targetTurnIndex: number;
+  apiTruncateIndex: number;
+}
+```
+
+- [ ] **Step 6: Re-export the error classes from `httpAcpBridge.ts`**
+
+In `packages/cli/src/serve/httpAcpBridge.ts`, add `RewindInProgressError`, `RewindNotApplicableError`, `InvalidRewindTurnError` to BOTH the `import { ... } from '@qwen-code/acp-bridge/bridgeErrors';` block and the `export { ... };` block right below it (the two 11-name lists at lines ~125–152), in alphabetical order alongside the existing names, e.g. the import block becomes:
+
+```ts
+import {
+  SessionNotFoundError,
+  RestoreInProgressError,
+  InvalidSessionScopeError,
+  SessionLimitExceededError,
+  WorkspaceMismatchError,
+  InvalidClientIdError,
+  InvalidPermissionOptionError,
+  InvalidSessionMetadataError,
+  WorkspaceInitConflictError,
+  McpServerNotFoundError,
+  McpServerRestartFailedError,
+  RewindInProgressError,
+  RewindNotApplicableError,
+  InvalidRewindTurnError,
+} from '@qwen-code/acp-bridge/bridgeErrors';
+export {
+  SessionNotFoundError,
+  RestoreInProgressError,
+  InvalidSessionScopeError,
+  SessionLimitExceededError,
+  WorkspaceMismatchError,
+  InvalidClientIdError,
+  InvalidPermissionOptionError,
+  InvalidSessionMetadataError,
+  WorkspaceInitConflictError,
+  McpServerNotFoundError,
+  McpServerRestartFailedError,
+  RewindInProgressError,
+  RewindNotApplicableError,
+  InvalidRewindTurnError,
+  MAX_WORKSPACE_PATH_LENGTH,
+};
+```
+
+- [ ] **Step 7: Implement `rewindSession` in `httpAcpBridge.ts`**
+
+Add a module-scope helper right after the `withTimeout` function (after its closing `}`, before the `defaultSpawnChannelFactory` comment):
+
+```ts
+/**
+ * `Session.rewindToTurn` (acp-integration/session/Session.ts) throws
+ * `RequestError.invalidParams(undefined, message)` for all 3 of its
+ * rejection cases — there is no structured `data.errorKind` to branch on
+ * (unlike `TrustGateError`'s `errorKind: 'trust_gate'` convention used by
+ * `setSessionApprovalMode`). The 3 messages are stable string literals in
+ * `Session.rewindToTurn`'s source; matching on them is the only signal
+ * available today. A future refactor of `rewindToTurn` to attach a
+ * structured `data.errorKind` (mirroring `TrustGateError`'s pattern) would
+ * let this become an `instanceof`/`data` check instead of substring
+ * matching — tracked as a Stage 2 cleanup, not blocking for Task 13.
+ */
+function mapRewindError(
+  err: unknown,
+  sessionId: string,
+  targetTurnIndex: number,
+): Error {
+  const message = err instanceof Error ? err.message : String(err);
+  if (message.includes('prompt is running')) {
+    return new RewindInProgressError(sessionId);
+  }
+  if (
+    message.includes('may have been compressed') ||
+    message.includes('does not exist')
+  ) {
+    return new RewindNotApplicableError(sessionId, targetTurnIndex);
+  }
+  if (message.includes('non-negative integer')) {
+    return new InvalidRewindTurnError(targetTurnIndex);
+  }
+  return err instanceof Error ? err : new Error(message);
+}
+```
+
+Add the bridge method right after `setSessionApprovalMode`'s closing brace (after its final `},` in the object `createHttpAcpBridge` returns — the same object `setSessionModel`/`setSessionApprovalMode` are properties of):
+
+```ts
+    async rewindSession(sessionId, req, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
+      const { toTurn } = req;
+      // No `modelChangeQueue`-style serialization is needed here: unlike
+      // `setSessionModel` (which races against `applyModelServiceId`, a
+      // SEPARATE async caller that can mutate the same model state),
+      // `Session.rewindToTurn`'s own prompt-in-flight guard
+      // (`this.pendingPrompt || this.cronProcessing ||
+      // this.cronAbortController`) is checked synchronously inside the
+      // SAME ACP request/response round trip this method awaits below —
+      // there is no async gap between the check and the truncation for a
+      // second concurrent rewind (or a prompt starting) to land in. Two
+      // concurrent rewind calls would both reach the ACP child, but the
+      // child processes ext-method calls one at a time on its single
+      // event loop, so the second call's guard check runs AFTER the
+      // first's truncation has already completed — it either succeeds
+      // against the new (already-rewound) history or fails cleanly, never
+      // observing torn state.
+      const transportClosed = getTransportClosedReject(entry);
+      let raw: Record<string, unknown>;
+      try {
+        raw = await Promise.race([
+          withTimeout(
+            entry.connection.extMethod('rewindSession', {
+              sessionId,
+              targetTurnIndex: toTurn,
+            }),
+            initTimeoutMs,
+            'rewindSession',
+          ),
+          transportClosed,
+        ]);
+      } catch (err) {
+        throw mapRewindError(err, sessionId, toTurn);
+      }
+      const targetTurnIndex = raw['targetTurnIndex'];
+      const apiTruncateIndex = raw['apiTruncateIndex'];
+      if (
+        typeof targetTurnIndex !== 'number' ||
+        typeof apiTruncateIndex !== 'number'
+      ) {
+        throw new Error(
+          'rewindSession: malformed ACP response (missing targetTurnIndex/apiTruncateIndex)',
+        );
+      }
+      // `raw` also carries `historyBeforeRewind` (full message content,
+      // captured by acpAgent.ts for the LOCAL `/rewind` TUI undo path) —
+      // deliberately dropped here; only the 2 typed fields cross the HTTP
+      // boundary to a remote SDK caller.
+      const result: RewindSessionResult = { targetTurnIndex, apiTruncateIndex };
+      try {
+        entry.events.publish({
+          type: 'session_rewound',
+          data: { sessionId: entry.sessionId, targetTurnIndex, apiTruncateIndex },
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+      } catch {
+        /* bus closed */
+      }
+      return result;
+    },
+```
+
+Add `RewindSessionRequest` and `RewindSessionResult` to the existing `import type { ... } from '@qwen-code/acp-bridge/bridgeTypes'` block (alongside `HttpAcpBridge` etc., lines ~92–104) and to the matching `export type { ... };` block right below it (lines ~105–117):
+
+```ts
+  RewindSessionRequest,
+  RewindSessionResult,
+```
+
+- [ ] **Step 8: Run the bridge-level tests to verify they pass**
+
+```bash
+cd /home/evan/projects/qwen-code/packages/cli
+npx vitest run src/serve/httpAcpBridge.test.ts -t rewindSession
+```
+
+Expected: PASS (8 tests).
+
+- [ ] **Step 9: Wire the HTTP route in `server.ts`**
+
+Add the 3 new error classes to the existing `import { ... } from './httpAcpBridge.js';` block (lines 33–49), in alphabetical order:
+
+```ts
+import {
+  canonicalizeWorkspace,
+  createHttpAcpBridge,
+  InvalidClientIdError,
+  InvalidPermissionOptionError,
+  InvalidRewindTurnError,
+  InvalidSessionMetadataError,
+  InvalidSessionScopeError,
+  MAX_WORKSPACE_PATH_LENGTH,
+  McpServerNotFoundError,
+  McpServerRestartFailedError,
+  RestoreInProgressError,
+  RewindInProgressError,
+  RewindNotApplicableError,
+  SessionLimitExceededError,
+  SessionNotFoundError,
+  WorkspaceInitConflictError,
+  WorkspaceMismatchError,
+  type HttpAcpBridge,
+} from './httpAcpBridge.js';
+```
+
+Add 3 new branches to `sendBridgeError` (in `packages/cli/src/serve/server.ts`), right after the existing `if (err instanceof TrustGateError) { ... }` block and before `if (err instanceof SessionNotFoundError)`:
+
+```ts
+if (err instanceof RewindInProgressError) {
+  // add-remote-rewind Task 13: the ACP child's own prompt-in-flight
+  // guard rejected the rewind (defense-in-depth — rc-gateway's
+  // PromptQueue-based 409 guard normally catches this first, but a
+  // direct daemon caller bypassing the gateway relies on this check).
+  res.status(409).json({
+    error: err.message,
+    code: 'rewind_in_progress',
+    sessionId: err.sessionId,
+  });
+  return;
+}
+if (err instanceof RewindNotApplicableError) {
+  res.status(409).json({
+    error: err.message,
+    code: 'rewind_not_applicable',
+    sessionId: err.sessionId,
+    targetTurnIndex: err.targetTurnIndex,
+  });
+  return;
+}
+if (err instanceof InvalidRewindTurnError) {
+  res.status(400).json({
+    error: err.message,
+    code: 'invalid_turn',
+  });
+  return;
+}
+```
+
+Mount the route immediately after the existing `POST /session/:id/approval-mode` block (after its closing `);`, before `POST /workspace/mcp/:server/restart`):
+
+```ts
+app.post('/session/:id/rewind', mutate({ strict: true }), async (req, res) => {
+  // add-remote-rewind Task 13: mirrors /model and /approval-mode's
+  // shape exactly (200 + typed result on success), per the contract
+  // Task 5's `DaemonClient.rewindSession` was built against. `strict:
+  // true` because rewind is destructive, matching /approval-mode and
+  // /workspace/mcp/:server/restart's Wave-4-style posture.
+  const sessionId = req.params['id'];
+  const body = safeBody(req);
+  const toTurn = body['toTurn'];
+  if (typeof toTurn !== 'number' || !Number.isInteger(toTurn) || toTurn < 0) {
+    res.status(400).json({
+      error: '`toTurn` is required and must be a non-negative integer',
+      code: 'invalid_turn',
+    });
+    return;
+  }
+  const clientId = parseClientIdHeader(req, res);
+  if (clientId === null) return;
+  try {
+    const response = await bridge.rewindSession(
+      sessionId,
+      { toTurn },
+      clientId !== undefined ? { clientId } : undefined,
+    );
+    res.status(200).json(response);
+  } catch (err) {
+    sendBridgeError(res, err, {
+      route: 'POST /session/:id/rewind',
+      sessionId,
+    });
+  }
+});
+```
+
+- [ ] **Step 10: Run the route-level tests to verify they pass**
+
+```bash
+cd /home/evan/projects/qwen-code/packages/cli
+npx vitest run src/serve/server.test.ts -t "POST /session/:id/rewind"
+```
+
+Expected: PASS (8 tests).
+
+- [ ] **Step 11: Run the full `packages/cli` suite to check for regressions**
+
+```bash
+cd /home/evan/projects/qwen-code/packages/cli
+npx vitest run
+```
+
+Expected: PASS, same failure count as before this task (none introduced).
+
+- [ ] **Step 12: Run the `packages/acp-bridge` suite to check for regressions**
+
+```bash
+cd /home/evan/projects/qwen-code/packages/acp-bridge
+npx vitest run
+```
+
+Expected: PASS, same failure count as before this task (the 3 new error classes and 2 new types are additive; no existing test imports or behavior changes).
+
+- [ ] **Step 13: Commit**
+
+```bash
+cd /home/evan/projects/qwen-code
+git add packages/acp-bridge/src/bridgeErrors.ts \
+        packages/acp-bridge/src/bridgeTypes.ts \
+        packages/cli/src/serve/httpAcpBridge.ts \
+        packages/cli/src/serve/httpAcpBridge.test.ts \
+        packages/cli/src/serve/server.ts \
+        packages/cli/src/serve/server.test.ts
+git commit -m "feat(cli): add POST /session/:id/rewind to the daemon HTTP bridge"
+```
+
+**Post-Task 13 spec coverage note:** this task closes the gap Global Constraints §4 and Task 1/Task 4's OpenSpec text (in the sibling `qwen-code-remote` repo) flagged as a follow-up for "whoever plans the `packages/cli` side" — that follow-up is this task, delivered here. No file from Tasks 1–12 changes as a result; the contract Task 5 was built against (`POST /session/:id/rewind` `{ toTurn }` → `200 { targetTurnIndex, apiTruncateIndex }`) is exactly what this task implements, confirmed against Task 5's own test fixtures (`jsonResponse(200, { targetTurnIndex, apiTruncateIndex })`) rather than assumed.
