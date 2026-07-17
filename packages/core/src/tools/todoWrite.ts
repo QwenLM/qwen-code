@@ -253,40 +253,45 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
 
       // 5. POST-WRITE PHASE: Execute hooks for side effects (logging, HTTP sync, etc.)
       // These hooks can now safely perform side effects knowing data is persisted
-      // We don't check for blocking here since validation already passed
+      // We don't check for blocking here since validation already passed.
+      //
+      // Dispatch sequentially in list order (NOT Promise.all). A single
+      // todo_write call can change several items' statuses at once (the model is
+      // encouraged to batch status updates that complete together), and these
+      // post-write hooks run real side effects — logging, external HTTP sync,
+      // stateful read-modify-write. Firing them concurrently for sibling items
+      // could interleave a shared stateful/external-sync hook, lose an update,
+      // or publish completions out of order. Serial, in-order dispatch keeps
+      // the observable side effects deterministic.
       let postWriteError: Error | undefined;
       try {
         if (hookSystem && changes.created.length > 0) {
-          await Promise.all(
-            changes.created.map((todo) =>
-              hookSystem.fireTodoCreatedEvent(
-                todo.id,
-                todo.content,
-                todo.status,
-                finalTodos,
-                HookPhase.PostWrite,
-                _signal,
-              ),
-            ),
-          );
+          for (const todo of changes.created) {
+            await hookSystem.fireTodoCreatedEvent(
+              todo.id,
+              todo.content,
+              todo.status,
+              finalTodos,
+              HookPhase.PostWrite,
+              _signal,
+            );
+          }
         }
 
         if (hookSystem && changes.completed.length > 0) {
-          await Promise.all(
-            changes.completed.map((todo) => {
-              const oldTodo = oldTodosMap.get(todo.id);
-              const previousStatus = oldTodo?.status ?? 'pending';
+          for (const todo of changes.completed) {
+            const oldTodo = oldTodosMap.get(todo.id);
+            const previousStatus = oldTodo?.status ?? 'pending';
 
-              return hookSystem.fireTodoCompletedEvent(
-                todo.id,
-                todo.content,
-                previousStatus as 'pending' | 'in_progress',
-                finalTodos,
-                HookPhase.PostWrite,
-                _signal,
-              );
-            }),
-          );
+            await hookSystem.fireTodoCompletedEvent(
+              todo.id,
+              todo.content,
+              previousStatus as 'pending' | 'in_progress',
+              finalTodos,
+              HookPhase.PostWrite,
+              _signal,
+            );
+          }
         }
       } catch (error) {
         postWriteError =
