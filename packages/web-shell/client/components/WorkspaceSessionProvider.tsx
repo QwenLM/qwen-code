@@ -8,6 +8,7 @@ import {
 import type { DaemonWorkspaceCapability } from '@qwen-code/sdk/daemon';
 import { App, type WebShellProps } from '../App';
 import { getTranslator, normalizeLanguage } from '../i18n';
+import { WEB_SHELL_MAX_TRANSCRIPT_BLOCKS } from '../constants/sessions';
 import { Spinner } from './ui/spinner';
 import { WorkspaceUnavailableState } from './WorkspaceUnavailableState';
 
@@ -231,6 +232,7 @@ export function WorkspaceSessionProvider({
         extensionPairingCredential ? { extensionPairingCredential } : undefined
       }
       suppressOwnUserEcho
+      maxBlocks={WEB_SHELL_MAX_TRANSCRIPT_BLOCKS}
     >
       <App
         {...webShellProps}

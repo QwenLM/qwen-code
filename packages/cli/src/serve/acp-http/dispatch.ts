@@ -668,6 +668,7 @@ export class AcpDispatcher {
   constructor(
     private readonly bridge: HttpAcpBridge,
     private readonly boundWorkspace: string,
+    private readonly env: Readonly<NodeJS.ProcessEnv>,
     private readonly workspace: DaemonWorkspaceService,
     private readonly workspaceRememberLane: WorkspaceRememberTaskLane,
     private readonly fsFactory?: WorkspaceFileSystemFactory,
@@ -2442,7 +2443,7 @@ export class AcpDispatcher {
             const result = await setupGithub({
               cwd: this.boundWorkspace,
               workspaceRoot: this.boundWorkspace,
-              proxy: resolveSetupGithubProxy(this.boundWorkspace),
+              proxy: resolveSetupGithubProxy(this.boundWorkspace, this.env),
               abortSignal: conn.abortSignal,
               fileOps: createSetupGithubFileOps(
                 this.fsFactory,

@@ -79,6 +79,8 @@ import {
   normalizeSnapshotPayload,
   startEventLoopLagMonitor,
   refreshMemoryInstruction,
+  extractDaemonTraceContext,
+  withDaemonSpan,
   type AgentParams,
   ApprovalMode,
   type Config,
@@ -100,6 +102,7 @@ import {
   type WorkspaceRememberContextMode,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import {
   AgentSideConnection,
@@ -204,7 +207,8 @@ import {
   replayTranscriptRecordPage,
 } from './session/history-replay-page.js';
 import {
-  formatAcpModelId,
+  buildAcpModelOptions,
+  getCurrentAcpModelId,
   parseAcpBaseModelId,
   sanitizeProviderBaseUrl,
 } from '../utils/acpModelUtils.js';
@@ -307,6 +311,76 @@ const BTW_CHILD_TIMEOUT_MS = 55_000;
 const MCP_OAUTH_START_TIMEOUT_MS = 30_000;
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
+
+type AcpSessionStartStage =
+  | 'settings_load'
+  | 'config_setup'
+  | 'auth'
+  | 'file_system_setup'
+  | 'session_register'
+  | 'response_build';
+
+interface AcpSessionStartSpan {
+  setAttribute(name: string, value: string | number | boolean): unknown;
+}
+
+function createAcpSessionStartProfiler(span: AcpSessionStartSpan | undefined) {
+  let failedStage: AcpSessionStartStage | undefined;
+  const setAttribute = (
+    name: string,
+    value: string | number | boolean,
+  ): void => {
+    try {
+      span?.setAttribute(name, value);
+    } catch {
+      // Telemetry must not affect session creation.
+    }
+  };
+  const recordStage = (stage: AcpSessionStartStage, start: number): void => {
+    const durationMs = Math.round((performance.now() - start) * 100) / 100;
+    if (Number.isFinite(durationMs) && durationMs >= 0) {
+      setAttribute(`qwen-code.daemon.session_start.${stage}_ms`, durationMs);
+    }
+  };
+  const recordFailure = (stage: AcpSessionStartStage): void => {
+    if (failedStage !== undefined) return;
+    failedStage = stage;
+    setAttribute('qwen-code.daemon.session_start.failed_stage', stage);
+  };
+
+  return {
+    async time<T>(
+      stage: AcpSessionStartStage,
+      fn: () => T | Promise<T>,
+    ): Promise<T> {
+      if (!span) return await fn();
+      const start = performance.now();
+      try {
+        return await fn();
+      } catch (error) {
+        recordFailure(stage);
+        throw error;
+      } finally {
+        recordStage(stage, start);
+      }
+    },
+    timeSync<T>(stage: AcpSessionStartStage, fn: () => T): T {
+      if (!span) return fn();
+      const start = performance.now();
+      try {
+        return fn();
+      } catch (error) {
+        recordFailure(stage);
+        throw error;
+      } finally {
+        recordStage(stage, start);
+      }
+    },
+    setSessionId(sessionId: string): void {
+      setAttribute('session.id', sessionId);
+    },
+  };
+}
 
 function workspaceMemoryErrorData(
   code: string,
@@ -3289,33 +3363,45 @@ class QwenAgent implements Agent {
     }
   }
 
-  async newSession({
-    cwd,
-    mcpServers,
-  }: NewSessionRequest): Promise<NewSessionResponse> {
-    // Per-request settings: session handlers run concurrently, and
-    // `this.settings` is only a "latest loaded" cache for agent-level
-    // readers. Threading the instance explicitly keeps a slow session
-    // creation from picking up whichever workspace loaded last — Session
-    // persists model changes through this instance, so a mix-up writes to
-    // another workspace's settings.json.
-    const settings = loadSettingsCached(cwd);
-    this.settings = settings;
-    const config = await this.newSessionConfig(cwd, mcpServers, settings);
-    await this.ensureAuthenticated(config);
-    this.setupFileSystem(config);
+  async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
+    const { cwd, mcpServers } = params;
+    const parentContext = extractDaemonTraceContext(params);
+    return await withDaemonSpan(
+      'qwen-code.daemon.session_start',
+      { 'qwen-code.daemon.operation': 'acp_session_new' },
+      async (span) => {
+        const profiler = createAcpSessionStartProfiler(span);
+        // Per-request settings: session handlers run concurrently, and
+        // `this.settings` is only a "latest loaded" cache for agent-level
+        // readers. Threading the instance explicitly keeps a slow session
+        // creation from picking up whichever workspace loaded last — Session
+        // persists model changes through this instance, so a mix-up writes to
+        // another workspace's settings.json.
+        const settings = profiler.timeSync('settings_load', () =>
+          loadSettingsCached(cwd),
+        );
+        this.settings = settings;
+        const config = await profiler.time('config_setup', () =>
+          this.newSessionConfig(cwd, mcpServers, settings),
+        );
+        await profiler.time('auth', () => this.ensureAuthenticated(config));
+        profiler.timeSync('file_system_setup', () =>
+          this.setupFileSystem(config),
+        );
 
-    const session = await this.createAndStoreSession(config, settings);
-    const availableModels = this.buildAvailableModels(config);
-    const modesData = this.buildModesData(config);
-    const configOptions = this.buildConfigOptions(config);
-
-    return {
-      sessionId: session.getId(),
-      models: availableModels,
-      modes: modesData,
-      configOptions,
-    };
+        const session = await profiler.time('session_register', () =>
+          this.createAndStoreSession(config, settings),
+        );
+        profiler.setSessionId(session.getId());
+        return profiler.timeSync('response_build', () => ({
+          sessionId: session.getId(),
+          models: this.buildAvailableModels(config),
+          modes: this.buildModesData(config),
+          configOptions: this.buildConfigOptions(config),
+        }));
+      },
+      parentContext ? { parentContext } : {},
+    );
   }
 
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
@@ -4626,15 +4712,23 @@ class QwenAgent implements Agent {
         : (config.getModel() || '').trim();
       const hasCurrentModel = currentModelId.length > 0;
       const currentAuth = activeRuntimeSnapshot?.authType ?? currentAuthType;
-      const currentAcpModelId =
-        hasCurrentModel && currentAuth
-          ? formatAcpModelId(currentModelId, currentAuth)
-          : currentModelId || undefined;
+      const modelOptions = buildAcpModelOptions(
+        config.getAllConfiguredModels(),
+      );
+      const currentAcpModelId = hasCurrentModel
+        ? getCurrentAcpModelId(
+            modelOptions,
+            currentModelId,
+            currentAuth,
+            activeRuntimeSnapshot
+              ? undefined
+              : config.getCurrentModelRegistryBaseUrl?.(),
+          )
+        : undefined;
       const providers = new Map<string, ServeWorkspaceProviderStatus>();
 
-      for (const model of config
-        .getAllConfiguredModels()
-        .filter(isMainSelectableModel)) {
+      for (const option of modelOptions) {
+        const { model, effectiveModelId, modelId } = option;
         const authType = String(model.authType);
         let provider = providers.get(authType);
         if (!provider) {
@@ -4648,17 +4742,8 @@ class QwenAgent implements Agent {
           providers.set(authType, provider);
         }
 
-        const effectiveModelId =
-          model.isRuntimeModel && model.runtimeSnapshotId
-            ? model.runtimeSnapshotId
-            : model.id;
-        const modelId = formatAcpModelId(effectiveModelId, model.authType);
         const isCurrent =
-          currentAuth === model.authType &&
-          hasCurrentModel &&
-          (currentModelId === effectiveModelId ||
-            currentModelId === model.id ||
-            currentAcpModelId === modelId);
+          currentAuth === model.authType && currentAcpModelId === modelId;
         const providerModel: ServeWorkspaceProviderModel = {
           modelId,
           baseModelId: parseAcpBaseModelId(effectiveModelId),
@@ -9356,33 +9441,26 @@ class QwenAgent implements Agent {
       ''
     ).trim();
     const currentAuthType = config.getAuthType();
-    const allConfiguredModels = config
-      .getAllConfiguredModels()
-      .filter(isMainSelectableModel);
+    const modelOptions = buildAcpModelOptions(config.getAllConfiguredModels());
 
     const activeRuntimeSnapshot = config.getActiveRuntimeModelSnapshot?.();
-    const currentModelId = activeRuntimeSnapshot
-      ? formatAcpModelId(
-          activeRuntimeSnapshot.id,
-          activeRuntimeSnapshot.authType,
-        )
-      : this.formatCurrentModelId(rawCurrentModelId, currentAuthType);
+    const currentModelId = getCurrentAcpModelId(
+      modelOptions,
+      activeRuntimeSnapshot?.id ?? rawCurrentModelId,
+      activeRuntimeSnapshot?.authType ?? currentAuthType,
+      activeRuntimeSnapshot
+        ? undefined
+        : config.getCurrentModelRegistryBaseUrl?.(),
+    );
 
-    const mappedAvailableModels = allConfiguredModels.map((model) => {
-      const effectiveModelId =
-        model.isRuntimeModel && model.runtimeSnapshotId
-          ? model.runtimeSnapshotId
-          : model.id;
-
-      return {
-        modelId: formatAcpModelId(effectiveModelId, model.authType),
-        name: model.label,
-        description: model.description ?? null,
-        _meta: {
-          contextLimit: model.contextWindowSize ?? tokenLimit(model.id),
-        },
-      };
-    });
+    const mappedAvailableModels = modelOptions.map(({ model, modelId }) => ({
+      modelId,
+      name: model.label,
+      description: model.description ?? null,
+      _meta: {
+        contextLimit: model.contextWindowSize ?? tokenLimit(model.id),
+      },
+    }));
 
     return {
       currentModelId,
@@ -9407,19 +9485,19 @@ class QwenAgent implements Agent {
 
   private buildConfigOptions(config: Config): SessionConfigOption[] {
     const currentApprovalMode = config.getApprovalMode();
-    const allConfiguredModels = config
-      .getAllConfiguredModels()
-      .filter(isMainSelectableModel);
+    const modelOptions = buildAcpModelOptions(config.getAllConfiguredModels());
     const rawCurrentModelId = (config.getModel() || '').trim();
     const currentAuthType = config.getAuthType?.();
 
     const activeRuntimeSnapshot = config.getActiveRuntimeModelSnapshot?.();
-    const currentModelId = activeRuntimeSnapshot
-      ? formatAcpModelId(
-          activeRuntimeSnapshot.id,
-          activeRuntimeSnapshot.authType,
-        )
-      : this.formatCurrentModelId(rawCurrentModelId, currentAuthType);
+    const currentModelId = getCurrentAcpModelId(
+      modelOptions,
+      activeRuntimeSnapshot?.id ?? rawCurrentModelId,
+      activeRuntimeSnapshot?.authType ?? currentAuthType,
+      activeRuntimeSnapshot
+        ? undefined
+        : config.getCurrentModelRegistryBaseUrl?.(),
+    );
 
     const modeOptions = APPROVAL_MODES.map((mode) => ({
       value: mode,
@@ -9437,17 +9515,11 @@ class QwenAgent implements Agent {
       options: modeOptions,
     };
 
-    const modelOptions = allConfiguredModels.map((model) => {
-      const effectiveModelId =
-        model.isRuntimeModel && model.runtimeSnapshotId
-          ? model.runtimeSnapshotId
-          : model.id;
-      return {
-        value: formatAcpModelId(effectiveModelId, model.authType),
-        name: model.label,
-        description: model.description ?? '',
-      };
-    });
+    const configModelOptions = modelOptions.map(({ model, modelId }) => ({
+      value: modelId,
+      name: model.label,
+      description: model.description ?? '',
+    }));
 
     const modelConfigOption: SessionConfigOption = {
       id: 'model',
@@ -9456,26 +9528,11 @@ class QwenAgent implements Agent {
       category: 'model',
       type: 'select' as const,
       currentValue: currentModelId,
-      options: modelOptions,
+      options: configModelOptions,
     };
 
     return [modeConfigOption, modelConfigOption];
   }
-
-  private formatCurrentModelId(
-    baseModelId: string,
-    authType?: AuthType,
-  ): string {
-    if (!baseModelId) return baseModelId;
-    return authType ? formatAcpModelId(baseModelId, authType) : baseModelId;
-  }
-}
-
-function isMainSelectableModel(model: {
-  fastOnly?: boolean;
-  voiceOnly?: boolean;
-}): boolean {
-  return model.fastOnly !== true && model.voiceOnly !== true;
 }
 
 function diffSettingsKeys(

@@ -191,6 +191,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function getCanonicalModelId(response: unknown, fallback: string): string {
+  if (!isRecord(response) || !isRecord(response['_meta'])) return fallback;
+  const modelSwitch = response['_meta']['qwenModelSwitch'];
+  if (!isRecord(modelSwitch)) return fallback;
+  const modelId = modelSwitch['modelId'];
+  return typeof modelId === 'string' ? modelId : fallback;
+}
+
 function isBulkReplayUpdate(value: unknown): value is SessionUpdate {
   if (!isRecord(value)) return false;
   const updateType = value['sessionUpdate'];
@@ -283,14 +291,17 @@ function extractLoadReplayResponse(state: BridgeSessionState): {
  * Stage 1 HTTP->ACP bridge factory + supporting helpers.
  *
  * Architecture:
- *   - **1 daemon = 1 workspace**: every bridge instance is bound to a
+ *   - **1 bridge = 1 workspace runtime**: every bridge instance is bound to a
  *     single canonical workspace path at construction
  *     (`BridgeOptions.boundWorkspace`). All `spawnOrAttach` calls must
  *     target that workspace; cross-workspace requests throw
- *     `WorkspaceMismatchError`. Multi-workspace deployments use multiple
- *     daemon processes (one per workspace, supervised externally).
- *   - One `qwen --acp` child total; multiple sessions multiplex onto it
- *     via `connection.newSession()`. Sessions share the child's process /
+ *     `WorkspaceMismatchError`. A multi-workspace daemon owns one bridge per
+ *     registered runtime and selects the bridge before dispatch.
+ *   - At most one `qwen --acp` child per bridge. Secondary daemon routing
+ *     admits only trusted runtime-backed work and starts the child on demand;
+ *     the primary may be preheated for legacy compatibility. Multiple sessions
+ *     multiplex onto the child via
+ *     `connection.newSession()`. Sessions share its process /
  *     OAuth state / `FileReadCache` / hierarchy-memory parse.
  *   - HTTP request bodies are forwarded as ACP NDJSON over the child's stdin.
  *   - Child stdout NDJSON notifications publish onto each session's
@@ -307,15 +318,15 @@ function extractLoadReplayResponse(state: BridgeSessionState): {
  */
 
 interface ChannelInfo {
+  id: string;
   channel: AcpChannel;
   connection: ClientSideConnection;
   /** Shared BridgeClient — its methods route ACP params by sessionId. */
   client: BridgeClient;
-  // Under "1 daemon = 1 workspace" the module-scope `boundWorkspace`
-  // is the single source of truth and every channel inherits it.
-  // Per-channel storage would suggest variance the model doesn't
-  // allow; keeping it out makes the single-workspace invariant visible
-  // at the type level.
+  // One bridge owns one workspace runtime, so module-scope `boundWorkspace` is
+  // the source of truth and every channel in this bridge inherits it.
+  // Per-channel storage would suggest variance the bridge doesn't allow;
+  // keeping it out makes the runtime boundary visible at the type level.
   /**
    * Live session ids multiplexed on this channel. Updated when
    * `doSpawn` registers a new session and when `killSession` /
@@ -1316,7 +1327,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   const persistApprovalMode = opts.persistApprovalMode;
   const telemetry = opts.telemetry ?? NOOP_BRIDGE_TELEMETRY;
 
-  // Single-workspace model: the bridge hosts AT MOST one
+  // Per-workspace bridge model: the bridge hosts AT MOST one
   // ATTACH-AVAILABLE channel and one default attach-target entry.
   // Multi-session multiplexing happens through `channelInfo.sessionIds`;
   // the `defaultEntry` slot is the FIRST session created (the one a
@@ -1825,11 +1836,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     if (inFlightChannelSpawn) return await inFlightChannelSpawn;
 
     const promise = (async () => {
+      const acpChannelId = randomUUID();
       const channel = await telemetry.withSpan(
         'channel.spawn',
         {
           'qwen-code.daemon.bridge.operation': 'channel.spawn',
           'qwen-code.daemon.channel.reused': false,
+          'qwen-code.daemon.acp_channel.id': acpChannelId,
         },
         async () => await channelFactory(boundWorkspace, childEnvOverrides),
       );
@@ -1933,6 +1946,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // initialize succeeds so callers don't attach to a still-
       // handshaking channel.
       const info: ChannelInfo = {
+        id: acpChannelId,
         channel,
         connection,
         client,
@@ -2083,6 +2097,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           'channel.initialize',
           {
             'qwen-code.daemon.bridge.operation': 'channel.initialize',
+            'qwen-code.daemon.acp_channel.id': acpChannelId,
           },
           async () =>
             await withTimeout(
@@ -2189,7 +2204,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // repeated failing creates would still find this channel via
     // `ensureChannel`, never spawning a fresh one. Tear down the
     // empty channel so the next attempt gets a clean spawn.
-    const ci = await ensureChannel();
+    const channelPath =
+      channelInfo && !channelInfo.isDying
+        ? 'reused'
+        : inFlightChannelSpawn
+          ? 'joined'
+          : 'spawned_on_request';
+    const ci = await telemetry.withSpan(
+      'channel.wait',
+      {
+        'qwen-code.daemon.bridge.operation': 'channel.wait',
+        'qwen-code.daemon.channel.path': channelPath,
+      },
+      ensureChannel,
+    );
     ci.sessionSpawnsInFlight++;
     let sessionRegistered = false;
     let sessionRemovedDuringInitialization = false;
@@ -2206,16 +2234,28 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           {
             'qwen-code.daemon.bridge.operation': 'session.new',
             'qwen-code.daemon.session_scope': effectiveScope,
+            'qwen-code.daemon.channel.path': channelPath,
+            'qwen-code.daemon.acp_channel.id': ci.id,
           },
-          async () =>
-            await withTimeout(
-              ci.connection.newSession({
-                cwd: boundWorkspace,
-                mcpServers: [],
-              }),
+          async () => {
+            // This legacy-named helper sanitizes and injects trace metadata
+            // for any ACP request, not only prompts.
+            const response = await withTimeout(
+              ci.connection.newSession(
+                telemetry.injectPromptContext({
+                  cwd: boundWorkspace,
+                  mcpServers: [],
+                }),
+              ),
               initTimeoutMs,
               'newSession',
-            ),
+            );
+            telemetry.event('session.new.completed', {
+              'session.id': response.sessionId,
+              'qwen-code.daemon.acp_channel.id': ci.id,
+            });
+            return response;
+          },
         );
       } catch (err) {
         // Only reap when this newSession was the channel's first/only
@@ -2508,7 +2548,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // model_switched right beside the model_switch_failed below.
       let succeeded = false;
       try {
-        await Promise.race([
+        const result = await Promise.race([
           withTimeout(
             conn.unstable_setSessionModel({
               sessionId: entry.sessionId,
@@ -2524,7 +2564,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           type: 'settings_changed',
           data: {
             key: 'model.name',
-            value: modelId,
+            value: getCanonicalModelId(result, modelId),
           },
           ...(originatorClientId ? { originatorClientId } : {}),
         });
@@ -3554,10 +3594,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   // `{ currentModelId: null, currentApprovalMode: null }` and the SDK reducer's
   // `!= null` guard would leave the client unseeded — defeating A5's primary
   // (initial-attach) use case. The agent's `currentModelId` is already the
-  // canonical `model(authType)` form (acpAgent `formatAcpModelId`), matching
-  // what `reconcileAfterRoundtrip` reads back, so seeding it keeps the model
-  // comparison format-stable. Mode ids pass the same `KNOWN_APPROVAL_MODES`
-  // backstop the demux/reconcile paths use.
+  // advertised selector (legacy or opaque), matching what
+  // `reconcileAfterRoundtrip` reads back, so seeding it keeps the comparison
+  // format-stable. Mode ids pass the same `KNOWN_APPROVAL_MODES` backstop the
+  // demux/reconcile paths use.
   const seedSnapshotCaches = (
     entry: SessionEntry,
     resp: {
@@ -6288,20 +6328,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ),
             transportClosed,
           ]);
-          // Cache the model id as received from the caller. The bridge
-          // layer does not have access to the CLI's `formatAcpModelId`
-          // (which requires `authType`), so it cannot canonicalize here.
-          // In practice callers always send canonical ids (from
-          // `buildAvailableModels`); any residual raw→canonical drift is
-          // corrected by the `reconcileAfterRoundtrip` below, which reads
-          // the agent's authoritative canonical id and re-publishes if it
-          // differs.
+          // Cache the advertised selector as received from the caller. Any
+          // drift is corrected by `reconcileAfterRoundtrip`, which reads the
+          // agent's authoritative selector and re-publishes if it differs.
           publishModelSwitched(entry, req.modelId, originatorClientId);
           broadcastWorkspaceEvent({
             type: 'settings_changed',
             data: {
               key: 'model.name',
-              value: req.modelId,
+              value: getCanonicalModelId(result, req.modelId),
             },
             ...(originatorClientId ? { originatorClientId } : {}),
           });
@@ -7600,11 +7635,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
     async preheat() {
       if (shuttingDown) return;
-      const ci = await ensureChannel();
-      const idleMs = resolvedChannelIdleTimeoutMs();
-      if (idleMs > 0 && hasNoChannelWork(ci)) {
-        await startIdleTimer(ci);
-      }
+      await telemetry.withSpan(
+        'channel.preheat',
+        { 'qwen-code.daemon.bridge.operation': 'channel.preheat' },
+        async () => {
+          const ci = await ensureChannel();
+          const idleMs = resolvedChannelIdleTimeoutMs();
+          if (idleMs > 0 && hasNoChannelWork(ci)) {
+            await startIdleTimer(ci);
+          }
+        },
+      );
     },
   };
 

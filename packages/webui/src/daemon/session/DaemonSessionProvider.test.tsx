@@ -13,6 +13,7 @@ import type {
   DaemonEvent,
   NonBlockingPromptAccepted,
   DaemonTranscriptBlock,
+  DaemonTranscriptStore,
   DaemonUiSessionActions,
   PromptResult,
 } from '@qwen-code/sdk/daemon';
@@ -26,6 +27,7 @@ import {
   useDaemonStreamingState,
   useDaemonTranscriptBlocks,
   useDaemonTranscriptState,
+  useDaemonTranscriptStore,
   useDaemonWorkspaceEventSignals,
   type DaemonSessionProviderProps,
   type DaemonConnectionState,
@@ -2433,6 +2435,7 @@ describe('DaemonSessionProvider', () => {
       await flushPromises();
       assistantChunk.resolve();
       await flushPromises();
+      await flushTranscriptDispatch();
     });
     expect(blocks).toMatchObject([
       { kind: 'user', text: 'cancel me' },
@@ -2536,6 +2539,7 @@ describe('DaemonSessionProvider', () => {
       await flushPromises();
       assistantChunk.resolve();
       await flushPromises();
+      await flushTranscriptDispatch();
     });
     expect(blocks).toMatchObject([
       { kind: 'user', text: 'fail later' },
@@ -2560,6 +2564,250 @@ describe('DaemonSessionProvider', () => {
         message: 'Prompt failed: network down',
       },
     ]);
+  });
+
+  it('coalesces a burst of streamed chunks into one complete ordered transcript', async () => {
+    // A burst of buffered SSE events — e.g. the stream catching up after the
+    // tab was hidden — must drain into a complete, correctly-ordered
+    // transcript even though transcript dispatch is batched onto a macrotask.
+    // Regression guard for the batched-dispatch path losing or reordering
+    // events.
+    const CHUNK_COUNT = 100;
+    const burstDrained = createDeferred<void>();
+    // Spy on the store factory to record how many events each dispatch
+    // receives. Batched dispatch must hand the whole burst to a single reducer
+    // pass; a regression to per-event dispatch would surface as many
+    // single-event dispatches and fail the batch-size assertion below.
+    const sdk = await import('@qwen-code/sdk/daemon');
+    const realCreateStore = sdk.createDaemonTranscriptStore;
+    const dispatchBatchSizes: number[] = [];
+    const createStoreSpy = vi
+      .spyOn(sdk, 'createDaemonTranscriptStore')
+      .mockImplementation((seed) => {
+        const store = realCreateStore(seed);
+        const realDispatch = store.dispatch.bind(store);
+        store.dispatch = (event) => {
+          dispatchBatchSizes.push(Array.isArray(event) ? event.length : 1);
+          return realDispatch(event);
+        };
+        return store;
+      });
+    const session = createMockSession({
+      events: async function* burstEvents(opts: { signal?: AbortSignal } = {}) {
+        for (let i = 0; i < CHUNK_COUNT; i += 1) {
+          yield {
+            id: i + 1,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: `chunk-${i} ` },
+              },
+            },
+          };
+        }
+        burstDrained.resolve();
+        // Stay alive so the consumer loop does not end (which would flush
+        // synchronously) — exercise the batched macrotask flush instead.
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) {
+            resolve();
+            return;
+          }
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await burstDrained.promise;
+      await flushPromises();
+      await flushTranscriptDispatch();
+    });
+
+    const assistant = blocks.find((block) => block.kind === 'assistant');
+    const text = (assistant as { text?: string } | undefined)?.text ?? '';
+    // No chunk lost, and all in order.
+    let lastIndex = -1;
+    for (let i = 0; i < CHUNK_COUNT; i += 1) {
+      const idx = text.indexOf(`chunk-${i} `);
+      expect(idx).toBeGreaterThan(lastIndex);
+      lastIndex = idx;
+    }
+    // The whole burst reached the store in a single dispatch — the coalescing
+    // property this fix exists to provide. `toContain` alone would still pass
+    // if a regression also emitted redundant per-event dispatches; pin that the
+    // burst is the only dispatch (one reducer pass, nothing duplicated).
+    expect(dispatchBatchSizes).toEqual([CHUNK_COUNT]);
+    createStoreSpy.mockRestore();
+  });
+
+  it('flushes buffered transcript events on unmount instead of dropping them', async () => {
+    // The SSE client advances lastSeenEventId as each event is yielded, before
+    // the batched dispatch runs. If teardown dropped the pending buffer, a
+    // same-session incremental resume would skip those events. The cleanup must
+    // flush, not drop — assert a still-buffered event lands in the store on
+    // unmount. Fake timers keep the batched macrotask flush from racing the
+    // pre-unmount assertion (otherwise the setTimeout(0) sometimes fires first).
+    vi.useFakeTimers();
+    try {
+      const eventBuffered = createDeferred<void>();
+      const session = createMockSession({
+        events: async function* oneChunkThenIdle(
+          opts: { signal?: AbortSignal } = {},
+        ) {
+          yield {
+            id: 1,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'buffered-chunk' },
+              },
+            },
+          };
+          eventBuffered.resolve();
+          // Stay alive so the event sits in the pending buffer (no loop-end
+          // flush) until the test unmounts the provider.
+          await new Promise<void>((resolve) => {
+            if (opts.signal?.aborted) {
+              resolve();
+              return;
+            }
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          });
+        },
+      });
+      sdkMocks.sessions.push(session);
+      let store: DaemonTranscriptStore | undefined;
+      function Harness() {
+        store = useDaemonTranscriptStore();
+        return null;
+      }
+
+      await renderWithProvider(<Harness />, { autoConnect: true });
+      await act(async () => {
+        await eventBuffered.promise;
+        await flushPromises();
+      });
+
+      expect(store).toBeDefined();
+      // The macrotask flush has not run (timer not advanced), so the event is
+      // still only in the pending buffer.
+      expect(
+        store?.getSnapshot().blocks.some((block) => block.kind === 'assistant'),
+      ).toBe(false);
+
+      await act(async () => {
+        root?.unmount();
+        root = null;
+      });
+
+      // Unmount flushed the buffered event into the store rather than dropping
+      // it. flushTranscriptSync runs synchronously, independent of timers.
+      const assistant = store
+        ?.getSnapshot()
+        .blocks.find((block) => block.kind === 'assistant') as
+        | { text?: string }
+        | undefined;
+      expect(assistant?.text ?? '').toContain('buffered-chunk');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps an observer assistant burst in one block when a debug event interleaves', async () => {
+    // Regression for the batched-dispatch debug guard (ytahdn, PR #7012 review).
+    // In observer mode a `debug` event (an unrecognized daemon event)
+    // interleaved between two assistant chunks must be filtered so the chunks
+    // stay in ONE assistant block. Batching leaves the first chunk in the
+    // pending buffer (not yet committed to the store), so the guard must flush
+    // before reading `activeAssistantBlockId` — otherwise the debug event is
+    // not filtered and splits the assistant block.
+    const burstDrained = createDeferred<void>();
+    const session = createMockSession({
+      events: async function* observerDebugBurst(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        yield {
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'first ' },
+            },
+          },
+        };
+        // An unrecognized daemon event normalizes to a `debug` UI event.
+        yield {
+          id: 2,
+          v: 1,
+          type: 'mystery_unrecognized_event',
+          data: {
+            note: 'should be filtered while an assistant block is active',
+          },
+        };
+        yield {
+          id: 3,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'second' },
+            },
+          },
+        };
+        burstDrained.resolve();
+        // Stay alive so the burst rides the batched macrotask flush rather than
+        // a synchronous loop-end flush.
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) {
+            resolve();
+            return;
+          }
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await burstDrained.promise;
+      await flushPromises();
+      await flushTranscriptDispatch();
+    });
+
+    // One assistant block with both chunks merged, and no debug block splitting
+    // it. Without the flush-before-guard fix this is
+    // `[assistant("first "), debug, assistant("second")]`.
+    const assistantBlocks = blocks.filter((b) => b.kind === 'assistant');
+    expect(assistantBlocks).toHaveLength(1);
+    expect((assistantBlocks[0] as { text?: string }).text).toBe('first second');
+    expect(blocks.some((b) => b.kind === 'debug')).toBe(false);
   });
 
   it('does not insert abort errors from shell commands into the transcript', async () => {
@@ -4511,6 +4759,10 @@ describe('DaemonSessionProvider', () => {
 
       await renderWithProvider(<Harness />, { autoConnect: true });
       await act(async () => {
+        await flushPromises();
+        // Batched transcript dispatch rides a setTimeout; under fake timers
+        // advance it so the passive assistant chunk lands before asserting.
+        await vi.advanceTimersByTimeAsync(0);
         await flushPromises();
       });
       expect(blocks).toMatchObject([
@@ -7482,6 +7734,7 @@ describe('DaemonSessionProvider', () => {
     await act(async () => {
       await reattachDelivered.promise;
       await flushPromises();
+      await flushTranscriptDispatch();
     });
     expect(blocks).not.toEqual(
       expect.arrayContaining([
@@ -8452,6 +8705,16 @@ function createDeferred<T>(): {
 }
 
 async function flushPromises(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+// Transcript dispatch is batched onto a macrotask (setTimeout 0) so a burst of
+// SSE events coalesces into one reducer pass. Stay-alive mock generators never
+// end the consumer loop (which would flush synchronously), so tests that assert
+// transcript state mid-stream drain the batched dispatch here.
+async function flushTranscriptDispatch(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
   await Promise.resolve();
   await Promise.resolve();
 }
