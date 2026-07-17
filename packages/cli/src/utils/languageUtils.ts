@@ -284,7 +284,7 @@ export function writeOutputLanguageAndRegisterPath(
  *
  * Behavior:
  * - If the rule file already exists and contains a valid language setting, do nothing (preserve user modifications)
- * - If the setting is explicitly 'auto' but the rule file contains a fixed language from the old auto behavior, migrate it to the same-language rule
+ * - If the setting resolves to 'auto' but the rule file contains a generated fixed-language rule from the old auto behavior, migrate it to the same-language rule
  * - If the rule file doesn't exist, create it with the configured rule ('auto' -> same-language rule, explicit language -> fixed-language rule)
  */
 export function initializeLlmOutputLanguage(outputLanguage?: string): void {
@@ -295,7 +295,7 @@ export function initializeLlmOutputLanguage(outputLanguage?: string): void {
       ? null
       : parseOutputLanguageFromContent(currentFileContent);
   const shouldMigrateFixedFileToAuto =
-    outputLanguage?.trim().toLowerCase() === OUTPUT_LANGUAGE_AUTO &&
+    isAutoLanguage(outputLanguage) &&
     currentFileLanguage !== null &&
     !isAutoLanguage(currentFileLanguage) &&
     currentFileContent !== null &&
@@ -304,8 +304,16 @@ export function initializeLlmOutputLanguage(outputLanguage?: string): void {
       currentFileLanguage,
     );
 
-  // If file exists with valid language, preserve it unless explicit auto needs migration.
-  if (currentFileLanguage && !shouldMigrateFixedFileToAuto) {
+  // If file exists with valid language, preserve it unless auto needs migration.
+  if (currentFileLanguage) {
+    if (shouldMigrateFixedFileToAuto) {
+      try {
+        const resolved = resolveOutputLanguageOrPreserveAuto(outputLanguage);
+        writeOutputLanguageFile(resolved);
+      } catch {
+        // Migration is best-effort: the existing rule file is still valid.
+      }
+    }
     return;
   }
 

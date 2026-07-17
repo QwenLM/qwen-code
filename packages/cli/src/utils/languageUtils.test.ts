@@ -438,6 +438,27 @@ describe('languageUtils', () => {
       expect(i18n.detectSystemLanguage).not.toHaveBeenCalled();
     });
 
+    it('should migrate an existing generated fixed-language file when setting is empty auto value', () => {
+      writeOutputLanguageFile('Chinese');
+      const generatedFixedLanguageContent = vi.mocked(fs.writeFileSync).mock
+        .calls[0][1] as string;
+      vi.mocked(fs.writeFileSync).mockClear();
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(generatedFixedLanguageContent);
+
+      initializeLlmOutputLanguage('');
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+        expect.stringContaining(
+          "Respond in the same language as the user's input.",
+        ),
+        'utf-8',
+      );
+      expect(i18n.detectSystemLanguage).not.toHaveBeenCalled();
+    });
+
     it('should migrate generated fixed-language files after harmless template wording changes', () => {
       writeOutputLanguageFile('Chinese');
       const generatedFixedLanguageContent = vi.mocked(fs.writeFileSync).mock
@@ -479,6 +500,21 @@ Always use formal tone.
       initializeLlmOutputLanguage('auto');
 
       expect(fs.writeFileSync).not.toHaveBeenCalled();
+    });
+
+    it('should ignore migration write failures when an existing generated file is still valid', () => {
+      writeOutputLanguageFile('Chinese');
+      const generatedFixedLanguageContent = vi.mocked(fs.writeFileSync).mock
+        .calls[0][1] as string;
+      vi.mocked(fs.writeFileSync).mockClear();
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(generatedFixedLanguageContent);
+      vi.mocked(fs.writeFileSync).mockImplementation(() => {
+        throw new Error('EACCES');
+      });
+
+      expect(() => initializeLlmOutputLanguage('auto')).not.toThrow();
     });
 
     it('should normalize Chinese locale and create Chinese rule file', () => {
