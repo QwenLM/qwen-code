@@ -233,4 +233,67 @@ describe('useCompletion', () => {
       expect(result.current.activeSuggestionIndex).toBe(0);
     });
   });
+
+  describe('category tabs', () => {
+    const mixed = [
+      { label: 'a.ts', value: 'a.ts', category: 'file' as const },
+      { label: 'S', value: 'session:1', category: 'session' as const },
+    ];
+
+    it('derives availableCategories from present categories', () => {
+      const { result } = renderHook(() => useCompletion());
+      act(() => {
+        result.current.setSuggestions(mixed);
+      });
+      expect(result.current.availableCategories).toEqual([
+        'all',
+        'file',
+        'session',
+      ]);
+      expect(result.current.activeCategory).toBe('all');
+    });
+
+    it('keeps a single "all" tab for a single-category set', () => {
+      const { result } = renderHook(() => useCompletion());
+      act(() => {
+        result.current.setSuggestions([mixed[0]]);
+      });
+      expect(result.current.availableCategories).toEqual(['all']);
+    });
+
+    it('cycles the active category and resets the active index', () => {
+      const { result } = renderHook(() => useCompletion());
+      act(() => {
+        result.current.setSuggestions(mixed);
+      });
+      act(() => result.current.switchCategory(1));
+      expect(result.current.activeCategory).toBe('file');
+      expect(result.current.activeSuggestionIndex).toBe(0);
+    });
+
+    it('filters the exposed suggestions to the active category', () => {
+      const { result } = renderHook(() => useCompletion());
+      act(() => {
+        result.current.setSuggestions(mixed);
+      });
+      act(() => result.current.switchCategory(1)); // → file
+      expect(result.current.suggestions).toEqual([mixed[0]]);
+      act(() => result.current.switchCategory(1)); // → session
+      expect(result.current.suggestions).toEqual([mixed[1]]);
+    });
+
+    it('falls back to "all" when the active tab disappears', () => {
+      const { result } = renderHook(() => useCompletion());
+      act(() => {
+        result.current.setSuggestions(mixed);
+      });
+      act(() => result.current.switchCategory(2 as 1)); // → session
+      expect(result.current.activeCategory).toBe('session');
+      act(() => {
+        // new set no longer has a session category
+        result.current.setSuggestions([mixed[0]]);
+      });
+      expect(result.current.activeCategory).toBe('all');
+    });
+  });
 });

@@ -39,6 +39,8 @@ export enum Command {
   ACCEPT_SUGGESTION = 'acceptSuggestion',
   COMPLETION_UP = 'completionUp',
   COMPLETION_DOWN = 'completionDown',
+  COMPLETION_TAB_LEFT = 'completionTabLeft',
+  COMPLETION_TAB_RIGHT = 'completionTabRight',
 
   // Text input
   SUBMIT = 'submit',
@@ -181,6 +183,9 @@ export const defaultKeyBindings: KeyBindingConfig = {
     { key: 'down', shift: false },
     { key: 'n', ctrl: true },
   ],
+  // Completion category tab switching (for the tabbed @ completion UI).
+  [Command.COMPLETION_TAB_LEFT]: [{ key: 'left', shift: false }],
+  [Command.COMPLETION_TAB_RIGHT]: [{ key: 'right', shift: false }],
 
   // Text input
   // Must also exclude shift to allow shift+enter for newline

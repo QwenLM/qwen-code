@@ -45,6 +45,10 @@ describe('keyMatchers', () => {
       (key.name === 'up' && !key.shift) || (key.ctrl && key.name === 'p'),
     [Command.COMPLETION_DOWN]: (key: Key) =>
       (key.name === 'down' && !key.shift) || (key.ctrl && key.name === 'n'),
+    [Command.COMPLETION_TAB_LEFT]: (key: Key) =>
+      key.name === 'left' && !key.shift,
+    [Command.COMPLETION_TAB_RIGHT]: (key: Key) =>
+      key.name === 'right' && !key.shift,
     [Command.ESCAPE]: (key: Key) => key.name === 'escape',
     [Command.SUBMIT]: (key: Key) =>
       key.name === 'return' && !key.ctrl && !key.meta && !key.paste,

@@ -4,10 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 
-import type { Suggestion } from '../components/SuggestionsDisplay.js';
+import type {
+  Suggestion,
+  SuggestionCategory,
+} from '../components/SuggestionsDisplay.js';
 import { MAX_SUGGESTIONS_TO_SHOW } from '../components/SuggestionsDisplay.js';
+
+/** Fixed display order of category tabs. */
+const CATEGORY_ORDER: SuggestionCategory[] = [
+  'file',
+  'session',
+  'mcp',
+  'extension',
+];
 
 export interface UseCompletionOptions {
   /** When the completion query changes, the dismissed flag is cleared
@@ -34,12 +45,24 @@ export interface UseCompletionReturn {
   resetCompletionState: () => void;
   navigateUp: () => void;
   navigateDown: () => void;
+  /** Active category tab for the `@` completion UI ('all' shows everything). */
+  activeCategory: SuggestionCategory | 'all';
+  /** Tabs available for the current suggestion set (always includes 'all'). */
+  availableCategories: Array<SuggestionCategory | 'all'>;
+  /** Cycle the active category tab; resets active/scroll index. */
+  switchCategory: (direction: 1 | -1) => void;
 }
 
 export function useCompletion(
   options: UseCompletionOptions = {},
 ): UseCompletionReturn {
-  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
+  // Raw, unfiltered suggestions as provided by producers. The publicly exposed
+  // `suggestions` below is this list filtered to the active category tab, so
+  // navigation/accept/display all operate on the same visible set.
+  const [rawSuggestions, setSuggestions] = useState<Suggestion[]>([]);
+  const [activeCategory, setActiveCategory] = useState<
+    SuggestionCategory | 'all'
+  >('all');
   const [activeSuggestionIndex, setActiveSuggestionIndex] =
     useState<number>(-1);
   const [visibleStartIndex, setVisibleStartIndex] = useState<number>(0);
@@ -54,8 +77,53 @@ export function useCompletion(
   // dismissed in that case.
   const skipNextClearRef = useRef<boolean>(false);
 
+  // Tabs present in the current suggestion set. Only becomes multi-entry when
+  // more than one category is present (e.g. files + sessions in `@` mode);
+  // slash/file-only completion keeps a single 'all' entry so the UI hides the
+  // tab bar and behavior is unchanged.
+  const availableCategories = useMemo<Array<SuggestionCategory | 'all'>>(() => {
+    const present = new Set(rawSuggestions.map((s) => s.category ?? 'file'));
+    const ordered = CATEGORY_ORDER.filter((c) => present.has(c));
+    return ordered.length > 1 ? ['all', ...ordered] : ['all'];
+  }, [rawSuggestions]);
+
+  // The visible suggestion set: the raw list filtered to the active tab.
+  const suggestions = useMemo<Suggestion[]>(
+    () =>
+      activeCategory === 'all'
+        ? rawSuggestions
+        : rawSuggestions.filter(
+            (s) => (s.category ?? 'file') === activeCategory,
+          ),
+    [rawSuggestions, activeCategory],
+  );
+
+  // If the active tab disappears (suggestion set changed), fall back to 'all'.
+  useEffect(() => {
+    if (!availableCategories.includes(activeCategory)) {
+      setActiveCategory('all');
+    }
+  }, [availableCategories, activeCategory]);
+
+  const switchCategory = useCallback(
+    (direction: 1 | -1) => {
+      setActiveCategory((cur) => {
+        const idx = availableCategories.indexOf(cur);
+        if (idx === -1) return 'all';
+        const next =
+          (idx + direction + availableCategories.length) %
+          availableCategories.length;
+        return availableCategories[next];
+      });
+      setActiveSuggestionIndex(0);
+      setVisibleStartIndex(0);
+    },
+    [availableCategories],
+  );
+
   const resetCompletionState = useCallback(() => {
     setSuggestions([]);
+    setActiveCategory('all');
     setActiveSuggestionIndex(-1);
     setVisibleStartIndex(0);
     setShowSuggestions(false);
@@ -164,5 +232,8 @@ export function useCompletion(
     dismissCompletion,
     navigateUp,
     navigateDown,
+    activeCategory,
+    availableCategories,
+    switchCategory,
   };
 }
