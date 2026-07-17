@@ -399,9 +399,12 @@ export class AskUserQuestionTool extends BaseDeclarativeTool<
         return `Question ${i + 1}: "header" must be a non-empty string.`;
       }
 
-      if (question.header.length > 12) {
-        return `Question ${i + 1}: "header" must be 12 characters or less.`;
-      }
+      // The schema advertises "max 12 chars" so the model keeps headers short
+      // enough for the chip/tab layout, but we deliberately do NOT hard-reject
+      // longer headers here: bouncing a slightly over-length label (e.g.
+      // "Target config", 13 chars) back to the model as a tool error is far
+      // worse UX than simply showing it. The TUI truncates over-length headers
+      // in the compact tab/chip contexts (see AskUserQuestionDialog).
 
       if (!Array.isArray(question.options)) {
         return `Question ${i + 1}: "options" must be an array.`;
