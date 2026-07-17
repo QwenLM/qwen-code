@@ -606,6 +606,91 @@ describe('ContentGenerationPipeline', () => {
       expect(apiCall.tools).toBeUndefined();
     });
 
+    describe('tool_choice mapping from Gemini toolConfig', () => {
+      const mockMessages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      const mockTools = [
+        { type: 'function', function: { name: 'respond_in_schema' } },
+      ] as OpenAI.Chat.ChatCompletionTool[];
+
+      async function executeWithToolConfig(
+        mode: string | undefined,
+        hasTools = true,
+      ) {
+        const request: GenerateContentParameters = {
+          model: 'test-model',
+          contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+          config: {
+            ...(hasTools && {
+              tools: [
+                {
+                  functionDeclarations: [
+                    {
+                      name: 'respond_in_schema',
+                      description: 'test',
+                      parameters: { type: Type.OBJECT, properties: {} },
+                    },
+                  ],
+                },
+              ],
+            }),
+            ...(mode !== undefined && {
+              toolConfig: {
+                functionCallingConfig: {
+                  mode: mode as import('@google/genai').FunctionCallingConfigMode,
+                },
+              },
+            }),
+          },
+        };
+
+        (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+          mockMessages,
+        );
+        if (hasTools) {
+          (mockConverter.convertGeminiToolsToOpenAI as Mock).mockResolvedValue(
+            mockTools,
+          );
+        }
+        (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+          new GenerateContentResponse(),
+        );
+        (mockClient.chat.completions.create as Mock).mockResolvedValue({
+          id: 'r',
+          choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+        } as OpenAI.Chat.ChatCompletion);
+
+        await pipeline.execute(request, 'test-prompt-id');
+        return (mockClient.chat.completions.create as Mock).mock.calls[0][0];
+      }
+
+      it('sets tool_choice=required when mode is ANY', async () => {
+        const apiCall = await executeWithToolConfig('ANY');
+        expect(apiCall.tool_choice).toBe('required');
+      });
+
+      it('sets tool_choice=none when mode is NONE', async () => {
+        const apiCall = await executeWithToolConfig('NONE');
+        expect(apiCall.tool_choice).toBe('none');
+      });
+
+      it('omits tool_choice when mode is AUTO', async () => {
+        const apiCall = await executeWithToolConfig('AUTO');
+        expect(apiCall.tool_choice).toBeUndefined();
+      });
+
+      it('omits tool_choice when no toolConfig is set', async () => {
+        const apiCall = await executeWithToolConfig(undefined);
+        expect(apiCall.tool_choice).toBeUndefined();
+      });
+
+      it('omits tool_choice when there are no tools even with mode ANY', async () => {
+        const apiCall = await executeWithToolConfig('ANY', false);
+        expect(apiCall.tool_choice).toBeUndefined();
+      });
+    });
+
     it('should override enable_thinking when thinkingConfig disables it', async () => {
       // Arrange — provider injects enable_thinking: true via extra_body
       // (e.g. user configured `enableThinking: true` via setup wizard,

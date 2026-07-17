@@ -793,12 +793,12 @@ export class ContentGenerationPipeline {
       // call instead of free-texting. Without this, thinking-heavy models
       // may consume the tiny output budget on reasoning and skip the tool.
       const fcMode = request.config?.toolConfig?.functionCallingConfig?.mode;
+      const typed =
+        baseRequest as unknown as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming;
       if (fcMode === 'ANY') {
-        (baseRequest as unknown as Record<string, unknown>)['tool_choice'] =
-          'required';
+        typed.tool_choice = 'required';
       } else if (fcMode === 'NONE') {
-        (baseRequest as unknown as Record<string, unknown>)['tool_choice'] =
-          'none';
+        typed.tool_choice = 'none';
       }
     }
 

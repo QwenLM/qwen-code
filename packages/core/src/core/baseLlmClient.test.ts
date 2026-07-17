@@ -14,7 +14,10 @@ import {
   type Mocked,
 } from 'vitest';
 
-import type { GenerateContentResponse } from '@google/genai';
+import {
+  FunctionCallingConfigMode,
+  type GenerateContentResponse,
+} from '@google/genai';
 import { BaseLlmClient, type GenerateJsonOptions } from './baseLlmClient.js';
 import type { ContentGenerator } from './contentGenerator.js';
 import type { Config } from '../config/config.js';
@@ -219,6 +222,11 @@ describe('BaseLlmClient', () => {
                 ],
               },
             ],
+            toolConfig: {
+              functionCallingConfig: {
+                mode: FunctionCallingConfigMode.ANY,
+              },
+            },
           }),
         }),
         'test-prompt-id',
