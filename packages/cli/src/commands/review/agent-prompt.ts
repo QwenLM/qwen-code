@@ -68,7 +68,9 @@ interface AgentPromptArgs {
   rules?: string;
   /**
    * A file of findings to fold into a verify/reverse-audit prompt, so the caller
-   * pastes one block instead of hand-prepending the list. Printed, not recorded.
+   * pastes one block instead of hand-prepending the list. Folded into BOTH the
+   * printed prompt and the record (keyed per findings digest) — a launch that
+   * drops the list matches no record.
    */
   findings?: string;
 }
@@ -1021,10 +1023,13 @@ export function buildRoleLaunchPrompt(
  * The findings block folded above a verify / reverse-audit launch prompt, so the
  * caller pastes one thing instead of hand-assembling it.
  *
- * This is what gets *printed*; it is not recorded (the record stays the findings-
- * free launch block, so the shared per-shard/round key still matches by the add-only
- * delivery rule). Its closing line restates that the brief is authoritative — the
- * exact sentence the orchestrator truncated when it used to build this by hand.
+ * This is folded into the printed prompt AND the record alike — the record is
+ * the exact printed block, keyed per findings digest, so a launch that drops or
+ * rewrites this section matches no record. (The first design recorded the
+ * findings-free block for a shared key; that receipt could be satisfied by
+ * delivering only the tail.) Its closing line restates that the brief is
+ * authoritative — the exact sentence the orchestrator truncated when it used to
+ * build this by hand.
  *
  * Each `acceptsFindings` role has its own framing, and the branches are explicit: a
  * future role that opts into `--findings` but has no framing here throws, rather than
@@ -1490,8 +1495,10 @@ export const agentPromptCommand: CommandModule = {
         describe:
           'Path to a file of findings to fold into a --role verify (the shard it ' +
           'rules on) / --role reverse-audit (the cumulative confirmed list) prompt, ' +
-          'so you paste ONE block. The findings are printed, not recorded — paste ' +
-          'the whole output verbatim, do not add a round number or reword it.',
+          'so you paste ONE block. The findings are part of the recorded prompt ' +
+          '(keyed per findings digest), so a launch that drops them matches no ' +
+          'record — paste the whole output verbatim, do not add a round number ' +
+          'or reword it.',
       }),
   handler: (argv) => {
     runAgentPrompt({
