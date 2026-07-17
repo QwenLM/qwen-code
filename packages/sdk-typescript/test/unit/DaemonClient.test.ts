@@ -31,6 +31,7 @@ import type {
   DaemonWorkspaceMcpStatus,
   DaemonWorkspacePreflightStatus,
   DaemonWorkspaceProvidersStatus,
+  DaemonWorkspaceSessionInfo,
   DaemonWorkspaceSkillsStatus,
 } from '../../src/daemon/types.js';
 
@@ -2627,6 +2628,27 @@ describe('DaemonClient', () => {
   });
 
   describe('listWorkspaceSessions', () => {
+    it('gets aggregate session info for a scoped workspace', async () => {
+      const reply: DaemonWorkspaceSessionInfo = {
+        active: 4,
+        archived: 2,
+        total: 6,
+        live: 1,
+        expensive: true,
+        cost: 'disk_scan',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.workspaceById('workspace/id').getWorkspaceSessionInfo(),
+      ).resolves.toEqual(reply);
+
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/workspaces/workspace%2Fid/session-info',
+      ]);
+    });
+
     it('GETs /workspace/:id/sessions and returns the array', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, {

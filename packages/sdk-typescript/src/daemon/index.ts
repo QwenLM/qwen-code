@@ -454,6 +454,7 @@ export type {
   DaemonSessionListPage,
   DaemonSessionListPageOptions,
   DaemonSessionListView,
+  DaemonWorkspaceSessionInfo,
   DaemonSessionOrganizationResult,
   DaemonSessionOrganizationUpdate,
   DaemonPendingInteraction,

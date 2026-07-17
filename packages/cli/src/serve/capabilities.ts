@@ -41,6 +41,13 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // the underlying ACP method from unstable_resumeSession to resumeSession.
   unstable_session_resume: { since: 'v1' },
   session_list: { since: 'v1' },
+  // Aggregate persisted session counts via
+  // `GET /workspace/:id/session-info` (and the plural
+  // `/workspaces/:workspace/session-info` twin). Performs a disk scan of
+  // local JSONL files — advertised so clients can discover it, but the
+  // response itself marks `expensive: true` / `cost: "disk_scan"` and
+  // must not be polled in a tight loop.
+  session_info: { since: 'v1' },
   session_source_metadata: { since: 'v1' },
   session_prompt: { since: 'v1' },
   session_cancel: { since: 'v1' },

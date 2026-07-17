@@ -724,6 +724,16 @@ export interface DaemonSessionListPage {
   truncated?: boolean;
 }
 
+export interface DaemonWorkspaceSessionInfo {
+  active: number;
+  archived: number;
+  total: number;
+  live?: number;
+  expensive: true;
+  cost: 'disk_scan';
+  truncated?: boolean;
+}
+
 export interface DaemonArchiveSessionsResult {
   archived: string[];
   alreadyArchived: string[];
