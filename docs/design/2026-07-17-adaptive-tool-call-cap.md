@@ -28,19 +28,30 @@ than twice. A genuinely stuck turn repeats the same call many times.
 
 ## Design
 
-Make the cap **adaptive**: distinguish a productive long turn from a stuck one
-using a repetition signal, and only hard-halt the latter (plus an absolute
-backstop).
+The behavior depends on whether `maxToolCallsPerTurn` was **explicitly
+configured** (tracked by `Config.isMaxToolCallsPerTurnExplicit()`):
 
-Two thresholds derived from the configured soft cap `S = maxToolCallsPerTurn`:
+- **Explicit value `N`** → a **hard cap** (the released contract): the turn
+  halts on the call that exceeds `N`, with no adaptive extension. This preserves
+  backward compatibility — a user who set the value to bound unattended cost
+  still gets exactly that bound. (v0.19.10 shipped the cap as a hard cap; an
+  earlier iteration of this PR multiplied explicit values by 3, which was a
+  breaking change — reverted.)
+- **Default (unset, `S = 100`)** → **adaptive**: distinguish a productive long
+  turn from a stuck one using a repetition signal, and only hard-halt the latter
+  (plus an absolute backstop). Modern models legitimately make hundreds of calls
+  per task, so the default must not hard-halt productive long turns.
 
-- **Soft cap `S`** (default 100): when the turn exceeds `S` tool calls, halt
-  only if a stuck-repetition signal is present; otherwise treat the turn as
-  productive and let it continue.
-- **Hard cap `S * ADAPTIVE_CAP_HARD_MULTIPLIER`** (multiplier 3 → 300 by
-  default): absolute backstop. Halt regardless of repetition once exceeded, so
-  a runaway that varies arguments on every call (which no repetition signal
-  catches) is still bounded.
+Two thresholds for the adaptive (default) cap:
+
+- **Soft cap `S`** (100): when the turn exceeds `S` tool calls, halt only if a
+  stuck-repetition signal is present; otherwise treat the turn as productive and
+  let it continue.
+- **Hard cap `S * ADAPTIVE_CAP_HARD_MULTIPLIER`** (multiplier 10 → 1000):
+  absolute backstop. Halt regardless of repetition once exceeded, so a runaway
+  that varies arguments on every call (which no repetition signal catches) is
+  still bounded. The multiplier is high enough that hundreds-of-calls productive
+  turns are not false-positived.
 
 Stuck-repetition signal: the maximum number of times any single `(tool, args)`
 key has appeared in the turn reaches `GLOBAL_DUPLICATE_THRESHOLD` (6). This
@@ -66,7 +77,16 @@ Maintained in `checkAlwaysOnSafeties` for every `ToolCallRequest`, cleared in
 `reset()` and on `Retry` (consistent with how the heuristic path clears
 `globalToolCallCounts` on retry).
 
-## Behavior matrix (soft cap `S`, hard cap `H = 3S`)
+## Behavior matrix
+
+Explicit value `N` (hard cap):
+
+| total calls | result      |
+| ----------- | ----------- |
+| `≤ N`       | allow       |
+| `> N`       | halt (hard) |
+
+Default (unset), soft cap `S = 100`, hard cap `H = 1000`:
 
 | total calls     | repetition signal    | result             |
 | --------------- | -------------------- | ------------------ |
@@ -80,10 +100,15 @@ When `S ≤ 0` the cap is disabled (`getMaxToolCallsPerTurn()` returns
 
 ## Files changed
 
-- `packages/core/src/services/loopDetectionService.ts` — adaptive cap logic +
-  always-on tracker.
-- `packages/core/src/services/loopDetectionService.test.ts` — updated cap tests
-  - new adaptive cases.
+- `packages/core/src/config/config.ts` — track `maxToolCallsPerTurnExplicit` +
+  `isMaxToolCallsPerTurnExplicit()` getter.
+- `packages/core/src/services/loopDetectionService.ts` — explicit-vs-default
+  cap logic + always-on tracker + canonicalized tool-call key.
+- `packages/core/src/services/loopDetectionService.test.ts` — explicit hard-cap
+  regression + adaptive (default) cases.
+- `packages/core/src/core/client.test.ts` — Stop-hook budget test (explicit
+  hard cap).
+- `packages/core/src/config/config.test.ts` — explicit-flag tracking.
 - `packages/cli/src/config/settingsSchema.ts` — `maxToolCallsPerTurn`
   description.
 - `docs/users/configuration/settings.md` — same.
@@ -106,11 +131,12 @@ When `S ≤ 0` the cap is disabled (`getMaxToolCallsPerTurn()` returns
 - Telemetry differentiation of the two halt reasons. Soft-cap-stuck and
   hard-backstop both emit `TURN_TOOL_CALL_CAP`; a boolean/attribute on
   `LoopDetectedEvent` would tell which fired in the wild (useful for validating
-  the 3× multiplier). The headless message already hedges to cover both.
+  the 10× multiplier). The headless message already hedges to cover both.
 - The ACP/daemon path (`recordDaemonToolCalls` in
   `packages/cli/src/acp-integration/session/Session.ts`) has its own blunt
-  per-turn cap that does not use `LoopDetectionService`. It still halts at the
-  soft cap regardless of repetition. Aligning it with this adaptive behavior is
+  per-turn cap that does not use `LoopDetectionService`. It always treats the
+  value as a hard cap regardless of repetition. Aligning it with the adaptive
+  default is
   a separate follow-up (it tracks tool calls in batches and would need its own
   per-`(tool,args)` repeat tracking). The interactive TUI path that produced
   the reported false positive is fixed here.

@@ -1800,6 +1800,7 @@ export class Config {
   private readonly worktreeSettings: WorktreeSettings;
   private readonly skipLoopDetection: boolean;
   private readonly maxToolCallsPerTurn: number;
+  private readonly maxToolCallsPerTurnExplicit: boolean;
   private readonly skipStartupContext: boolean;
   private readonly bareMode: boolean;
   private readonly safeMode: boolean;
@@ -2047,6 +2048,9 @@ export class Config {
     this.maxToolCallsPerTurn = validateMaxToolCallsPerTurn(
       params.maxToolCallsPerTurn,
     );
+    // Whether the user explicitly set the cap (vs. the resolved default). An
+    // explicit value is honored as a hard cap; the default is adaptive.
+    this.maxToolCallsPerTurnExplicit = params.maxToolCallsPerTurn !== undefined;
     this.skipStartupContext = params.skipStartupContext ?? false;
     this.bareMode = params.bareMode ?? false;
     this.safeMode = params.safeMode ?? isSafeModeEnv();
@@ -6039,6 +6043,16 @@ export class Config {
       return Number.POSITIVE_INFINITY;
     }
     return this.maxToolCallsPerTurn;
+  }
+
+  /**
+   * Whether maxToolCallsPerTurn was explicitly configured (vs. the resolved
+   * default). An explicit value is treated as a hard cap (the released
+   * contract); the default is treated adaptively (see
+   * LoopDetectionService.checkTurnToolCallCap).
+   */
+  isMaxToolCallsPerTurnExplicit(): boolean {
+    return this.maxToolCallsPerTurnExplicit;
   }
 
   getSkipStartupContext(): boolean {

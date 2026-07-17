@@ -74,17 +74,23 @@ const ALTERNATING_PATTERN_CYCLES = 3;
 // loopDetector.reset() in client.ts, so the cap bounds each iteration
 // rather than an entire goal chain.
 //
-// This value is a *soft* cap: once the turn exceeds it, the cap only halts
+// This default is a *soft* cap: once the turn exceeds it, the cap only halts
 // when a stuck-repetition signal is present (the model keeps repeating the
 // same call). A productive turn (diverse calls, no repetition) is allowed to
 // continue up to the hard cap below. This avoids halting legitimately large
-// multi-package implementation turns that simply need more than 100 calls.
+// multi-package implementation turns (modern models make hundreds of calls).
+// NOTE: this adaptive behavior applies only to the default; an *explicitly*
+// set `model.maxToolCallsPerTurn` is honored as a hard cap (the released
+// contract) — see checkTurnToolCallCap.
 export const DEFAULT_MAX_TOOL_CALLS_PER_TURN = 100;
 
-// Hard cap = soft cap * this multiplier. Absolute backstop that halts
-// regardless of repetition, so a runaway that varies its arguments on every
-// call (which no repetition signal catches) is still bounded.
-const ADAPTIVE_CAP_HARD_MULTIPLIER = 3;
+// Hard cap = soft cap * this multiplier, for the adaptive (default) cap only.
+// Absolute backstop that halts regardless of repetition, so a runaway that
+// varies its arguments on every call (which no repetition signal catches) is
+// still bounded. With the default soft cap of 100 this is 1000 — high enough
+// that modern models making hundreds of legitimate calls per task are not
+// false-positived, while still bounding a pathological runaway.
+const ADAPTIVE_CAP_HARD_MULTIPLIER = 10;
 
 /**
  * Recursively canonicalizes a JSON-compatible value for stable hashing: object
@@ -853,25 +859,31 @@ export class LoopDetectionService {
   }
 
   /**
-   * Adaptive per-turn cap. `getMaxToolCallsPerTurn()` is the soft cap (already
-   * resolved to an effective value, Infinity when disabled). Independent of
-   * skipLoopDetection. Once the turn exceeds the soft cap it halts only when a
-   * stuck-repetition signal is present (some (tool,args) call repeated
-   * GLOBAL_DUPLICATE_THRESHOLD times); a productive turn (diverse calls) is
-   * allowed to continue. The hard cap (soft * ADAPTIVE_CAP_HARD_MULTIPLIER) is
-   * an absolute backstop that halts regardless of repetition, bounding a
-   * runaway that varies its arguments on every call.
+   * Per-turn cap. `getMaxToolCallsPerTurn()` is the configured value (already
+   * resolved, Infinity when disabled). Independent of skipLoopDetection.
+   *
+   * Two behaviors depending on whether the value was explicitly configured:
+   * - Explicit value: a hard cap (the released contract) — the turn halts on
+   *   the call that exceeds it, with no adaptive extension.
+   * - Default (unset): adaptive — once the turn exceeds the soft cap it halts
+   *   only on a stuck-repetition signal (some (tool,args) call repeated
+   *   GLOBAL_DUPLICATE_THRESHOLD times); a productive turn (diverse calls)
+   *   continues up to the hard backstop (soft * ADAPTIVE_CAP_HARD_MULTIPLIER),
+   *   which always halts to bound an argument-varying runaway.
    */
   private checkTurnToolCallCap(): boolean {
     this.turnToolCallTotal++;
-    const softCap = this.config.getMaxToolCallsPerTurn();
-    if (this.turnToolCallTotal <= softCap) {
+    const cap = this.config.getMaxToolCallsPerTurn();
+    if (this.turnToolCallTotal <= cap) {
       return false;
     }
 
-    const hardCap = softCap * ADAPTIVE_CAP_HARD_MULTIPLIER;
+    // Over the configured cap. An explicit value is a hard cap; the default is
+    // adaptive (allow productive turns, halt on stuck or the hard backstop).
+    const explicitHardCap = this.config.isMaxToolCallsPerTurnExplicit();
+    const hardCap = cap * ADAPTIVE_CAP_HARD_MULTIPLIER;
     const stuck = this.capMaxKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD;
-    if (this.turnToolCallTotal > hardCap || stuck) {
+    if (explicitHardCap || this.turnToolCallTotal > hardCap || stuck) {
       this.lastLoopType = LoopType.TURN_TOOL_CALL_CAP;
       logLoopDetected(
         this.config,

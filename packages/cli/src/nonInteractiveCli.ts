@@ -146,7 +146,7 @@ const LOOP_TYPE_LABELS: Record<LoopType, string> = {
   [LoopType.ALTERNATING_TOOL_CALL_PATTERN]:
     'the model alternated between the same two tool calls in a repeating pattern',
   [LoopType.TURN_TOOL_CALL_CAP]:
-    'the turn hit the per-turn tool-call cap (the model kept repeating a call after the soft cap, or reached the hard backstop)',
+    'the turn reached the per-turn tool-call limit',
   [LoopType.INVALID_TOOL_PARAMS_STAGNATION]:
     'the model repeatedly sent invalid tool parameters without correcting them',
 };
@@ -165,7 +165,7 @@ function formatLoopDetectedMessage(loopType: LoopType | undefined): string {
     loopType === LoopType.INVALID_TOOL_PARAMS_STAGNATION;
   const hint =
     loopType === LoopType.TURN_TOOL_CALL_CAP
-      ? ' Raise `model.maxToolCallsPerTurn` to allow longer productive turns (the hard backstop is 3x that value), or set it to 0 to disable the cap. If the model was instead repeating the same call, investigate the repetition — raising the cap only delays the same stuck halt.'
+      ? ' A per-turn tool-call cap was reached. The default is adaptive (allows up to 1000 diverse calls, halting only on repeated calls); an explicitly set `model.maxToolCallsPerTurn` is a hard cap. If the model was repeating the same call, investigate the repetition; otherwise unset the value to use the adaptive default, or raise it (set 0 to disable).'
       : isAlwaysOn
         ? ' This is an always-on guard and cannot be disabled via `model.skipLoopDetection`.'
         : ' Set the `model.skipLoopDetection` setting to true to disable.';

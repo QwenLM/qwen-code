@@ -41,10 +41,16 @@ describe('LoopDetectionService', () => {
 
   // getMaxToolCallsPerTurn mimics the real Config getter, which always
   // returns an effective cap (default applied, <= 0 resolved to Infinity).
-  const makeConfig = (cap: number = DEFAULT_MAX_TOOL_CALLS_PER_TURN): Config =>
+  // `explicit` mimics isMaxToolCallsPerTurnExplicit: an explicit value is a
+  // hard cap, the default (unset) is adaptive.
+  const makeConfig = (
+    cap: number = DEFAULT_MAX_TOOL_CALLS_PER_TURN,
+    explicit = false,
+  ): Config =>
     ({
       getTelemetryEnabled: () => true,
       getMaxToolCallsPerTurn: () => cap,
+      isMaxToolCallsPerTurnExplicit: () => explicit,
     }) as unknown as Config;
 
   beforeEach(() => {
@@ -1392,20 +1398,22 @@ describe('LoopDetectionService', () => {
     });
   });
 
-  describe('Turn Tool Call Cap (Adaptive)', () => {
+  describe('Turn Tool Call Cap', () => {
     // The cap is configurable via model.maxToolCallsPerTurn; the service
     // reads the resolved Config getter with no fallback of its own, so the
     // pinned mock below is the single source of the cap in these tests.
     //
-    // The configured value is a *soft* cap: diverse (productive) calls are
-    // allowed past it up to a hard cap (soft * 3); only a stuck-repetition
-    // signal halts at the soft cap. A small soft cap keeps the tests compact.
+    // An explicit value is a hard cap; the default (unset) is adaptive — a
+    // *soft* cap where diverse (productive) calls are allowed past it up to a
+    // hard backstop (soft * 10), and only a stuck-repetition signal halts at
+    // the soft cap. A small soft cap keeps the adaptive tests compact.
     const SOFT_CAP = 10;
-    const HARD_CAP = SOFT_CAP * 3;
+    const HARD_CAP = SOFT_CAP * 10;
     let capConfig: Config;
 
     beforeEach(() => {
-      capConfig = makeConfig(SOFT_CAP);
+      // Default (unset) cap → adaptive behavior.
+      capConfig = makeConfig(SOFT_CAP, false);
       service = new LoopDetectionService(capConfig);
     });
 
@@ -1712,9 +1720,10 @@ describe('LoopDetectionService', () => {
     it('still accumulates across committed round-trips to trip the cap', () => {
       service.reset('');
       let fired = false;
-      // 4 diverse calls/round-trip; the hard cap is crossed partway through.
-      for (let rt = 0; rt < 10 && !fired; rt++) {
-        for (let i = 0; i < 4 && !fired; i++) {
+      // Diverse calls across committed round-trips accumulate; the hard
+      // backstop (soft * 10) is crossed partway through.
+      for (let rt = 0; rt < 12 && !fired; rt++) {
+        for (let i = 0; i < 15 && !fired; i++) {
           fired = service.checkAlwaysOnSafeties(
             createToolCallRequestEvent('t', { rt, i }),
           );
@@ -1725,6 +1734,40 @@ describe('LoopDetectionService', () => {
       }
       expect(fired).toBe(true);
       expect(service.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
+    });
+
+    it('treats an explicit value as a hard cap: cap of 2 halts call 3', () => {
+      // Regression for the released contract (yiliang114): an explicitly set
+      // maxToolCallsPerTurn halts on the call that exceeds it, even with
+      // diverse args — no adaptive ×N extension.
+      const svc = new LoopDetectionService(makeConfig(2, true));
+      svc.reset('');
+      expect(
+        svc.checkAlwaysOnSafeties(createToolCallRequestEvent('t', { a: 1 })),
+      ).toBe(false);
+      expect(
+        svc.checkAlwaysOnSafeties(createToolCallRequestEvent('t', { a: 2 })),
+      ).toBe(false);
+      expect(
+        svc.checkAlwaysOnSafeties(createToolCallRequestEvent('t', { a: 3 })),
+      ).toBe(true);
+      expect(svc.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
+    });
+
+    it('the same value left at the default is adaptive, not a hard cap', () => {
+      // Contrast proving the explicit flag (not the value) drives the hard-cap
+      // behavior: an unset cap of the same value does not halt at value+1.
+      const svc = new LoopDetectionService(makeConfig(2, false));
+      svc.reset('');
+      expect(
+        svc.checkAlwaysOnSafeties(createToolCallRequestEvent('t', { a: 1 })),
+      ).toBe(false);
+      expect(
+        svc.checkAlwaysOnSafeties(createToolCallRequestEvent('t', { a: 2 })),
+      ).toBe(false);
+      expect(
+        svc.checkAlwaysOnSafeties(createToolCallRequestEvent('t', { a: 3 })),
+      ).toBe(false);
     });
   });
 

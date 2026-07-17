@@ -5395,6 +5395,18 @@ describe('Server Config (config.ts)', () => {
       expect(config.getMaxToolCallsPerTurn()).toBe(42);
     });
 
+    it('tracks whether maxToolCallsPerTurn was explicitly set', () => {
+      expect(
+        new Config({ ...baseParams }).isMaxToolCallsPerTurnExplicit(),
+      ).toBe(false);
+      expect(
+        new Config({
+          ...baseParams,
+          maxToolCallsPerTurn: 42,
+        }).isMaxToolCallsPerTurnExplicit(),
+      ).toBe(true);
+    });
+
     it.each([0, -1])(
       'should return infinity (cap disabled) when set to %d',
       (capValue) => {
