@@ -11,6 +11,7 @@ import type {
   WorkspaceRuntime,
 } from '../workspace-registry.js';
 import { sendUntrustedWorkspaceResponse } from '../workspace-route-runtime.js';
+import { setDaemonTelemetryWorkspace } from '../server/telemetry.js';
 
 export function requireSessionRuntime(opts: {
   sessionId: string;
@@ -29,12 +30,15 @@ export function requireSessionRuntime(opts: {
     details = {},
   } = opts;
   if (workspaceRegistry.list().length === 1) {
-    return workspaceRegistry.primary;
+    const runtime = workspaceRegistry.primary;
+    setDaemonTelemetryWorkspace(res, runtime.workspaceCwd);
+    return runtime;
   }
 
   const resolution = workspaceRegistry.resolveLiveSessionOwner(sessionId);
   if (resolution.kind === 'found') {
     const runtime = resolution.runtime;
+    setDaemonTelemetryWorkspace(res, runtime.workspaceCwd);
     if (!runtime.primary && !runtime.trusted) {
       daemonLog?.warn('session routing failed', {
         route,
