@@ -292,6 +292,30 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async setWorkspaceSkillEnabled(skillName, enabled) {
+      const client = requireClient(getClient, 'Set skill enabled failed');
+      return withActionTimeout(
+        client.setWorkspaceSkillEnabled(skillName, enabled),
+        'Set skill enabled timed out',
+      );
+    },
+
+    async installWorkspaceSkill(request) {
+      const client = requireClient(getClient, 'Install skill failed');
+      return withActionTimeout(
+        client.installWorkspaceSkill(request),
+        'Install skill timed out',
+      );
+    },
+
+    async deleteWorkspaceSkill(skillName, scope) {
+      const client = requireClient(getClient, 'Delete skill failed');
+      return withActionTimeout(
+        client.deleteWorkspaceSkill(skillName, scope),
+        'Delete skill timed out',
+      );
+    },
+
     async loadExtensionsStatus() {
       const client = requireClient(getClient, 'Load extensions failed');
       return withActionTimeout(

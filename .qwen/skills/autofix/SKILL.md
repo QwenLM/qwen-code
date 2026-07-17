@@ -127,9 +127,13 @@ Classify every feedback point:
 
 - Required: correctness bug, broken build/test, security issue, or a
   `CHANGES_REQUESTED` item naming a real defect. Verify it, then fix minimally.
-- Optional: suggestion, nit, or hardening. Prefer NOT to deviate from this PR's
-  original direction and scope. Implement only if valuable,
-  codebase-consistent, and in scope; otherwise explain why no action is needed.
+- Optional: suggestion, nit, or hardening — including `**[Suggestion]**`
+  findings from the automated reviewer. Per AGENTS.md's review policy these ARE
+  addressed during a PR's early review rounds: implement each one that is
+  valuable, codebase-consistent, and in scope. Decline only with a recorded
+  reason per finding (out of scope, conflicts with the PR's direction, or not
+  worth the diff growth) so the deferral is visible in the PR thread — never
+  drop one silently.
 
 If `--conflict true`, merge `origin/<base>` and resolve conflicts by
 understanding both sides, never blindly taking one side. If false, do not merge
