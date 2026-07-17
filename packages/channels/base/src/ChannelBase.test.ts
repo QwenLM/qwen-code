@@ -2140,6 +2140,9 @@ describe('ChannelBase', () => {
           { allowedUsers: ['alice'] },
           { channelMemory, memoryIntentClassifier },
         );
+        const stderrSpy = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
 
         await ch.handleInbound(
           envelope({ text: '看看你记忆里有什么', senderId: 'alice' }),
@@ -2148,6 +2151,10 @@ describe('ChannelBase', () => {
         expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'agent response' }]);
         expect(channelMemory.addChannelMemoryEntries).not.toHaveBeenCalled();
         expect(bridge.prompt).toHaveBeenCalledTimes(1);
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining('channel memory intent validation failed'),
+        );
+        stderrSpy.mockRestore();
       },
     );
 

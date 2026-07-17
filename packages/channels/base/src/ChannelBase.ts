@@ -3222,7 +3222,13 @@ export abstract class ChannelBase {
             expectedText: entry.text,
           }
         : null;
-    } catch {
+    } catch (error) {
+      process.stderr.write(
+        `[${this.name}] channel memory intent validation failed: ${sanitizeLogText(
+          this.channelMemoryErrorMessage(error),
+          200,
+        )}\n`,
+      );
       return null;
     }
   }
