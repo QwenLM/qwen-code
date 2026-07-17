@@ -911,7 +911,7 @@ export default {
     '请将要卸载的扩展名称作为位置参数。',
   'Enables an extension.': '启用扩展。',
   'The name of the extension to enable.': '要启用的扩展名称。',
-  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
+  'The scope to enable the extension in. If not set, will be enabled in all scopes.':
     '启用扩展的作用域。如果未设置，将在所有作用域中启用。',
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
     '扩展 "{{name}}" 已在作用域 "{{scope}}" 中启用。',
@@ -921,7 +921,7 @@ export default {
     '无效的作用域：{{scope}}。请使用 {{scopes}} 之一。',
   'Disables an extension.': '禁用扩展。',
   'The name of the extension to disable.': '要禁用的扩展名称。',
-  'The scope to disable the extenison in.': '禁用扩展的作用域。',
+  'The scope to disable the extension in.': '禁用扩展的作用域。',
   'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
     '扩展 "{{name}}" 已在作用域 "{{scope}}" 中禁用。',
   'Extension "{{name}}" successfully updated: {{oldVersion}} → {{newVersion}}.':

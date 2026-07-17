@@ -68,7 +68,7 @@ cd /path/to/your/project
 qwen serve --channel my-plugin-test
 ```
 
-`qwen serve --channel` requires the channel's configured `cwd` to resolve to the daemon workspace.
+`qwen serve --channel` requires the channel's configured `cwd` to resolve to one registered, trusted daemon workspace. In a multi-workspace daemon, named channels are grouped into one worker per owning workspace; `--channel all` still selects only the primary workspace's channels.
 
 ### 6. Send a message
 

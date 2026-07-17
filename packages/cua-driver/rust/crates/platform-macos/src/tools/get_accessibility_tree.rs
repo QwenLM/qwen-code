@@ -50,8 +50,12 @@ impl Tool for GetAccessibilityTreeTool {
     async fn invoke(&self, _args: Value) -> ToolResult {
         let _ = &self.state; // state not needed for this tool
 
-        let apps    = crate::apps::list_running_apps();
-        let windows = crate::windows::visible_windows();
+        let (apps, windows) = match tokio::task::spawn_blocking(|| {
+            (crate::apps::list_running_apps(), crate::windows::visible_windows())
+        }).await {
+            Ok(result) => result,
+            Err(e) => return ToolResult::error(format!("desktop discovery task failed: {e}")),
+        };
 
         let mut lines = vec![format!(
             "{} running app(s), {} visible window(s)",

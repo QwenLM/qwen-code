@@ -236,6 +236,7 @@ function withLspDisabledConfig<T extends object>(
 describe('gemini.tsx main function', () => {
   let originalEnvGeminiSandbox: string | undefined;
   let originalEnvSandbox: string | undefined;
+  let originalEnvQwenSandboxImage: string | undefined;
   let originalEnvQwenCodeSimple: string | undefined;
   let initialUnhandledRejectionListeners: NodeJS.UnhandledRejectionListener[] =
     [];
@@ -249,9 +250,15 @@ describe('gemini.tsx main function', () => {
     // Store and clear sandbox-related env variables to ensure a consistent test environment
     originalEnvGeminiSandbox = process.env['QWEN_SANDBOX'];
     originalEnvSandbox = process.env['SANDBOX'];
+    // QWEN_SANDBOX_IMAGE selects the custom-image relaunch branch in main(),
+    // which skips the host-update capability computation; CI environments that
+    // export a resolved sandbox image (e.g. the autofix runner) would otherwise
+    // flip these tests' code path.
+    originalEnvQwenSandboxImage = process.env['QWEN_SANDBOX_IMAGE'];
     originalEnvQwenCodeSimple = process.env['QWEN_CODE_SIMPLE'];
     delete process.env['QWEN_SANDBOX'];
     delete process.env['SANDBOX'];
+    delete process.env['QWEN_SANDBOX_IMAGE'];
     delete process.env['QWEN_CODE_SIMPLE'];
 
     initialUnhandledRejectionListeners =
@@ -269,6 +276,11 @@ describe('gemini.tsx main function', () => {
       process.env['SANDBOX'] = originalEnvSandbox;
     } else {
       delete process.env['SANDBOX'];
+    }
+    if (originalEnvQwenSandboxImage !== undefined) {
+      process.env['QWEN_SANDBOX_IMAGE'] = originalEnvQwenSandboxImage;
+    } else {
+      delete process.env['QWEN_SANDBOX_IMAGE'];
     }
     if (originalEnvQwenCodeSimple !== undefined) {
       process.env['QWEN_CODE_SIMPLE'] = originalEnvQwenCodeSimple;
@@ -410,44 +422,64 @@ describe('gemini.tsx main function', () => {
     processExitSpy.mockRestore();
   });
 
-  it('scrubs Electron node bootstrap env before ACP startup', async () => {
-    const originalElectronRunAsNode = process.env['ELECTRON_RUN_AS_NODE'];
-    const originalScrubMarker =
-      process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'];
-    process.env['ELECTRON_RUN_AS_NODE'] = '1';
-    process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'] = '1';
-
-    const { parseArguments } = await import('./config/config.js');
-    const { loadSettings } = await import('./config/settings.js');
-
-    vi.mocked(parseArguments).mockResolvedValue({
-      acp: true,
-      experimentalAcp: undefined,
-    } as unknown as CliArgs);
-    vi.mocked(loadSettings).mockImplementation(() => {
-      expect(process.env['ELECTRON_RUN_AS_NODE']).toBeUndefined();
-      expect(
-        process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'],
-      ).toBeUndefined();
-      throw new Error('stop after scrub');
-    });
-
-    try {
-      await expect(main()).rejects.toThrow('stop after scrub');
-    } finally {
-      if (originalElectronRunAsNode === undefined) {
-        delete process.env['ELECTRON_RUN_AS_NODE'];
-      } else {
-        process.env['ELECTRON_RUN_AS_NODE'] = originalElectronRunAsNode;
+  it.each([
+    ['before the ACP relaunch', { acp: true }, {}, undefined, '1'],
+    [
+      'in the relaunched ACP process',
+      { acp: true },
+      { QWEN_CODE_NO_RELAUNCH: 'true' },
+      undefined,
+      undefined,
+    ],
+    [
+      'in the sandboxed ACP process',
+      { acp: true },
+      { SANDBOX: 'sandbox-exec' },
+      undefined,
+      undefined,
+    ],
+    [
+      'outside managed ACP startup',
+      {},
+      { QWEN_CODE_NO_RELAUNCH: 'true' },
+      '1',
+      '1',
+    ],
+    [
+      'ACP without bootstrap marker',
+      { acp: true },
+      { QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE: undefined },
+      '1',
+      undefined,
+    ],
+  ])(
+    'manages Electron bootstrap env %s',
+    async (_name, argv, extraEnv, expectedElectron, expectedMarker) => {
+      vi.stubEnv('ELECTRON_RUN_AS_NODE', '1');
+      vi.stubEnv('QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE', '1');
+      vi.stubEnv('QWEN_CODE_NO_RELAUNCH', '');
+      for (const [key, value] of Object.entries(extraEnv)) {
+        vi.stubEnv(key, value);
       }
-      if (originalScrubMarker === undefined) {
-        delete process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'];
-      } else {
-        process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'] =
-          originalScrubMarker;
+
+      const { parseArguments } = await import('./config/config.js');
+      const { loadSettings } = await import('./config/settings.js');
+      vi.mocked(parseArguments).mockResolvedValue(argv as CliArgs);
+      vi.mocked(loadSettings).mockImplementation(() => {
+        expect(process.env['ELECTRON_RUN_AS_NODE']).toBe(expectedElectron);
+        expect(process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE']).toBe(
+          expectedMarker,
+        );
+        throw new Error('stop after env check');
+      });
+
+      try {
+        await expect(main()).rejects.toThrow('stop after env check');
+      } finally {
+        vi.unstubAllEnvs();
       }
-    }
-  });
+    },
+  );
 
   it('should skip full settings discovery in bare mode', async () => {
     const originalArgv = process.argv;
@@ -2148,6 +2180,46 @@ describe('startInteractiveUI', () => {
       mockSettings,
       { connectIde: false, initializeTelemetry: false },
     );
+  });
+
+  // Regression for #6776: the kitty keyboard flags are tracked per screen
+  // (main vs alternate). The protocol is enabled on the main screen before
+  // render, so the pop must be written after Ink unmounts — i.e. after the
+  // alternate screen (when enabled) has been left — or the main screen's
+  // flags survive the exit and the shell receives kitty escape codes.
+  it('disables the Kitty keyboard protocol only after Ink has unmounted', async () => {
+    const unmount = vi.fn();
+    const { render } = await import('ink');
+    vi.mocked(render).mockReturnValue({ unmount } as never);
+    const { disableKittyProtocol } = await import(
+      './ui/utils/kittyProtocolDetector.js'
+    );
+
+    await startInteractiveUI(
+      mockConfig,
+      mockSettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      {
+        authError: null,
+        themeError: null,
+        shouldOpenAuthDialog: false,
+        geminiMdFileCount: 0,
+      },
+    );
+
+    const { registerCleanup } = await import('./utils/cleanup.js');
+    const cleanupFn = vi.mocked(registerCleanup).mock.calls.at(-1)?.[0] as
+      | (() => Promise<void> | void)
+      | undefined;
+    expect(cleanupFn).toBeTypeOf('function');
+    await cleanupFn?.();
+
+    expect(unmount).toHaveBeenCalledTimes(1);
+    expect(disableKittyProtocol).toHaveBeenCalledTimes(1);
+    expect(
+      vi.mocked(disableKittyProtocol).mock.invocationCallOrder[0],
+    ).toBeGreaterThan(unmount.mock.invocationCallOrder[0]);
   });
 
   describe('periodic memory-pressure check', () => {

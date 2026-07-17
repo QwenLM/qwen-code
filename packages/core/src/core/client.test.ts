@@ -570,6 +570,9 @@ describe('Gemini Client (client.ts)', () => {
       // Mimics the resolved Config getter: always a number (Infinity keeps
       // the cap out of the way of unrelated streaming tests).
       getMaxToolCallsPerTurn: vi.fn().mockReturnValue(Number.POSITIVE_INFINITY),
+      // Explicit values are hard caps; the cap tests below set a finite value
+      // and rely on hard-cap behavior.
+      isMaxToolCallsPerTurnExplicit: vi.fn().mockReturnValue(true),
       getChatRecordingService: vi.fn().mockReturnValue(undefined),
       getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
@@ -951,6 +954,10 @@ describe('Gemini Client (client.ts)', () => {
         SessionStartSource.Resume,
         SessionStartSource.Clear,
       ]);
+      for (const [, options] of sessionStartProfilerMocks
+        .createSessionStartProfiler.mock.calls) {
+        expect(options).toEqual({ sessionId: 'test-session-id' });
+      }
       expect(
         sessionStartProfilerMocks.profilers[1].finish,
       ).toHaveBeenCalledWith(
@@ -8067,7 +8074,9 @@ Other open files:
           (event: string) => event === 'Stop',
         );
         // Cap of 4: each turn's 3 tool calls fit, but 6 accumulated across
-        // the continuation boundary would not.
+        // the continuation boundary would not. The value is explicit, so it is
+        // a hard cap (no adaptive extension) and this stays a genuine guard on
+        // the reset.
         vi.mocked(mockConfig.getMaxToolCallsPerTurn).mockReturnValue(4);
 
         client['chat'] = {

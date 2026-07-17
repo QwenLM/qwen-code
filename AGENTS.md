@@ -128,15 +128,15 @@ cd integration-tests && \
 **Gotcha:** In interactive tests, always call `session.idle()` between sends —
 ANSI output streams asynchronously.
 
-### Linting, Formatting & Verification
+### Linting & Formatting
 
 ```bash
 npm run lint       # ESLint check
 npm run lint:fix   # Auto-fix lint issues
 npm run format     # Prettier formatting
 npm run typecheck  # TypeScript type checking
-npm run preflight  # Legacy broad check; writes formatting and omits some PR CI checks
-npm run verify:pr  # Final clean PR gate after committing, before pushing
+npm run preflight  # Full check: clean → install → format → lint → build
+                   # → typecheck → test
 ```
 
 ## Code Conventions
@@ -211,10 +211,6 @@ npm run verify:pr  # Final clean PR gate after committing, before pushing
    Here, `/review` means the Codex code-review workflow, not Qwen Review or
    the `qwen-review` plugin. Do not invoke Qwen Review unless the user
    explicitly requests it by name.
-6. **Final PR verification** — after the final changes are committed and the
-   working tree is clean, run `npm run verify:pr` before the first PR push and
-   before pushing updates. This is the final local deterministic gate; it does
-   not replace remote CI.
 
 ### Feature development
 
@@ -247,6 +243,15 @@ things a reviewer of _this_ codebase must check — not general advice.
   set by any caller is a dead switch (`options.foo ?? true` always takes the
   default). Decide severity at the read site; never explain an unpopulated field
   with author intent you cannot observe.
+- **Classify every added or changed daemon route by ownership.** Name whether it
+  is process-global, legacy-primary, selected-runtime, live-session-owner, or
+  persisted-workspace scoped, and verify every downstream consumer matches that
+  scope.
+- **Verify workspace-scoped routes stay inside the resolved runtime.** Check the
+  environment, bridge, service, filesystem, trust boundary, and failure paths.
+  Each unknown, untrusted, ambiguous, bootstrapping, draining, or removed state
+  must follow its declared failure semantics and must never fall back to the
+  primary runtime.
 - **Match the house style when judging.** ESM only; no `any`; no relative imports
   between packages; `kebab-case.ts` for `.ts` in `packages/core` and `packages/cli`,
   `PascalCase.tsx` for React components; tests collocated as `file.test.ts`.

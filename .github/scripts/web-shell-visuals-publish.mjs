@@ -136,43 +136,32 @@ export function buildComment(files, ctx = {}) {
   const runUrl = ctx.runUrl ?? '';
   const url = (name) => `${rawBase}/${encodeURIComponent(name)}`;
 
-  const shots = files.filter((f) => /\.png$/i.test(f));
-  const views = new Map();
-  for (const f of shots) {
-    const m = f.match(/^(.*)-(light|dark)\.png$/i);
-    if (!m) continue;
-    const [, view, theme] = m;
-    const entry = views.get(view) || {};
-    entry[theme.toLowerCase()] = f;
-    views.set(view, entry);
-  }
+  // Screenshots are before/after COMPOSITES (`<view>-<theme>.png`), one per
+  // changed view+theme. The compositor already dropped unchanged views, so an
+  // empty set means "no visual change vs main". The before/after labels and the
+  // view name are burned into each image, so we just list them.
+  const shots = files.filter((f) => /\.png$/i.test(f)).sort();
   const gifs = files.filter((f) => /\.gif$/i.test(f)).sort();
 
   const out = [];
   out.push('<!-- qwen:web-shell-visuals -->');
   out.push('### 🖼️ web-shell visual preview');
   out.push(
-    `Auto-rendered from this PR head \`${esc(shortSha)}\` against a mock daemon (no real backend). Refreshes on every push.`,
+    `Rendered against a mock daemon (no real backend): the PR base vs this PR head \`${esc(shortSha)}\`. Only **screenshots** that changed are shown (flows below, if any, are head-only) — refreshes on every push.`,
   );
   out.push('');
 
-  if (views.size > 0) {
-    out.push('#### Screenshots · light / dark');
-    out.push('');
-    out.push('<table>');
-    out.push('<tr><th align="left">view</th><th>light</th><th>dark</th></tr>');
-    for (const [view, pair] of [...views.entries()].sort()) {
-      const light = pair.light
-        ? `<img src="${url(pair.light)}" width="360" alt="${esc(view)} light">`
-        : '—';
-      const dark = pair.dark
-        ? `<img src="${url(pair.dark)}" width="360" alt="${esc(view)} dark">`
-        : '—';
+  out.push('#### Screenshots · before / after');
+  out.push('');
+  if (shots.length > 0) {
+    for (const f of shots) {
       out.push(
-        `<tr><td valign="top"><sub>${esc(pretty(view))}</sub></td><td>${light}</td><td>${dark}</td></tr>`,
+        `<img src="${url(f)}" width="900" alt="${esc(f.replace(/\.png$/i, ''))} before/after">`,
       );
+      out.push('');
     }
-    out.push('</table>');
+  } else {
+    out.push('✅ _No screenshot changes against the PR base._');
     out.push('');
   }
 

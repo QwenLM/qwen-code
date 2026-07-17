@@ -704,6 +704,143 @@ describe('ExtensionsManagerPage', () => {
     );
   });
 
+  it('keeps uninstall progress on the detail page and returns silently to the list', async () => {
+    vi.useFakeTimers();
+    let acceptUninstall:
+      | ((value: { accepted: true; operationId: string }) => void)
+      | undefined;
+    actions.uninstallExtension.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          acceptUninstall = resolve;
+        }),
+    );
+    actions.extensionOperationStatus
+      .mockResolvedValueOnce({
+        v: 1,
+        operationId: 'op-uninstall',
+        operation: 'uninstall',
+        status: 'running',
+        createdAt: 1,
+        updatedAt: 2,
+        name: 'demo',
+      })
+      .mockResolvedValueOnce({
+        v: 1,
+        operationId: 'op-uninstall',
+        operation: 'uninstall',
+        status: 'succeeded',
+        createdAt: 1,
+        updatedAt: 3,
+        name: 'demo',
+        result: { status: 'uninstalled', name: 'demo' },
+      });
+
+    try {
+      await mount([extension()]);
+      click(document.querySelector('[data-slot="card"]') ?? undefined);
+      await flush();
+      pointerDown(
+        document.querySelector('button[aria-label="Extension actions"]') ??
+          undefined,
+      );
+      await flush();
+      click(
+        elementIncluding(
+          '[data-slot="dropdown-menu-item"]',
+          'Uninstall Extension',
+        ),
+      );
+      await flush();
+      click(buttonIncluding('Uninstall Extension'));
+      await flush();
+
+      expect(document.querySelector('h1')?.textContent).toContain('Demo');
+      expect(document.body.textContent).toContain(
+        'Uninstalling extension "demo"',
+      );
+      expect(
+        document.querySelector<HTMLButtonElement>(
+          'button[aria-label="Extension actions"]',
+        )?.disabled,
+      ).toBe(true);
+      expect(actions.extensionOperationStatus).not.toHaveBeenCalled();
+
+      await act(async () => {
+        acceptUninstall?.({
+          accepted: true,
+          operationId: 'op-uninstall',
+        });
+      });
+      await flush();
+
+      actions.loadExtensionsStatus.mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/workspace',
+        initialized: true,
+        extensions: [],
+      });
+      signals.extensionsVersion += 1;
+      await act(async () => renderPage());
+      await flush();
+
+      expect(document.querySelector('h1')?.textContent).toContain('Demo');
+      expect(document.body.textContent).toContain(
+        'Uninstalling extension "demo"',
+      );
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      await flush();
+
+      expect(document.querySelector('h1')?.textContent).toContain(
+        'Manage Extensions',
+      );
+      expect(document.body.textContent).not.toContain(
+        'Extension "demo" uninstalled.',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shows disable progress and disables detail actions', async () => {
+    actions.disableExtension.mockResolvedValue({
+      accepted: true,
+      operationId: 'op-disable',
+    });
+    actions.extensionOperationStatus.mockResolvedValue({
+      v: 1,
+      operationId: 'op-disable',
+      operation: 'disable',
+      status: 'running',
+      createdAt: 1,
+      updatedAt: 2,
+      name: 'demo',
+    });
+    await mount([extension()]);
+
+    click(document.querySelector('[data-slot="card"]') ?? undefined);
+    await flush();
+    pointerDown(
+      document.querySelector('button[aria-label="Extension actions"]') ??
+        undefined,
+    );
+    await flush();
+    click(
+      elementIncluding('[data-slot="dropdown-menu-item"]', 'Disable Extension'),
+    );
+    await flush();
+
+    expect(document.body.textContent).toContain('Disabling extension "demo"');
+    expect(
+      document.querySelector<HTMLButtonElement>(
+        'button[aria-label="Extension actions"]',
+      )?.disabled,
+    ).toBe(true);
+  });
+
   it('opens extension details with the keyboard', async () => {
     await mount([extension()]);
 

@@ -32,6 +32,7 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 const { runSubmit } = await import('./submit.js');
 
 let dir: string;
+let savedSessionId: string | undefined;
 
 /**
  * The payload as it is now: findings and states. No verdict.
@@ -76,10 +77,14 @@ beforeEach(() => {
   ghMock.mockClear();
   writeStdoutSpy.mockClear();
   process.exitCode = undefined;
+  savedSessionId = process.env['QWEN_CODE_SESSION_ID'];
+  delete process.env['QWEN_CODE_SESSION_ID'];
 });
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
   process.exitCode = undefined;
+  if (savedSessionId === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+  else process.env['QWEN_CODE_SESSION_ID'] = savedSessionId;
 });
 
 describe('the posting gate', () => {

@@ -660,6 +660,42 @@ describe('createDaemonWorkspaceService', () => {
       expect(result.servers).toEqual([]);
     });
 
+    it('does not replay a stale MCP snapshot when the status provider is idle', async () => {
+      const liveStatus = {
+        v: 1 as const,
+        workspaceCwd: '/ws',
+        initialized: true,
+        discoveryState: 'completed' as const,
+        servers: [
+          {
+            kind: 'mcp_server' as const,
+            status: 'ok' as const,
+            name: 'docs',
+            mcpStatus: 'connected' as const,
+            transport: 'stdio' as const,
+            disabled: false,
+            hasOAuthTokens: false,
+          },
+        ],
+      };
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockResolvedValueOnce(liveStatus)
+        .mockImplementationOnce((_m: string, idle: () => unknown) =>
+          Promise.resolve(idle()),
+        );
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ queryWorkspaceStatus, boundWorkspace: '/ws' }),
+      );
+
+      await svc.getWorkspaceMcpStatus(makeCtx());
+      const result = await svc.getWorkspaceMcpStatus(makeCtx());
+
+      expect(result.initialized).toBe(false);
+      expect(result.discoveryState).toBe('not_started');
+      expect(result.servers).toEqual([]);
+    });
+
     it('getWorkspaceSkillsStatus delegates with correct method', async () => {
       const queryWorkspaceStatus = vi
         .fn()
@@ -1285,6 +1321,10 @@ describe('createDaemonWorkspaceService', () => {
       });
 
     it('uses the canonical skill name and refreshes every active session', async () => {
+      const invalidate = vi.fn();
+      const workspaceSkillsStatusProvider = Object.assign(vi.fn(), {
+        invalidate,
+      });
       const persistDisabledSkills = vi.fn().mockResolvedValue({
         changed: true,
         disabled: ['review'],
@@ -1297,6 +1337,7 @@ describe('createDaemonWorkspaceService', () => {
       const svc = createDaemonWorkspaceService(
         makeDeps({
           queryWorkspaceStatus: statusQuery(),
+          workspaceSkillsStatusProvider,
           persistDisabledSkills,
           invokeWorkspaceCommand,
           publishWorkspaceEvent,
@@ -1315,6 +1356,7 @@ describe('createDaemonWorkspaceService', () => {
         'review',
         false,
       );
+      expect(invalidate).toHaveBeenCalledWith('/workspace');
       expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
         'qwen/control/workspace/skills/refresh',
         { cwd: '/workspace' },

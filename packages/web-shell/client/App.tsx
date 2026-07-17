@@ -20,6 +20,7 @@ import {
   useSessionNotices,
   useStreamingState,
   useTranscriptBlocks,
+  useTranscriptHistory,
   useTranscriptStore,
   useWorkspace,
   useWorkspaceActions,
@@ -72,6 +73,7 @@ import {
 import { MemoryMessage } from './components/messages/MemoryMessage';
 import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
+import { SkillsManagerPage } from './components/skills/SkillsManagerPage';
 import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
 import { SplitView } from './components/SplitView';
@@ -95,6 +97,7 @@ import { useIsLargeScreen } from './hooks/useIsLargeScreen';
 import { MAX_SPLIT_PANES, parseSplitSessionIds } from './utils/splitUrl';
 import { ScheduledTasksDialog } from './components/dialogs/ScheduledTasksDialog';
 import { ExtensionsManagerPage } from './components/extensions/ExtensionsManagerPage';
+import { PluginManagerPage } from './components/plugins/PluginManagerPage';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { isAskUserPermission } from './utils/askUserPermission';
 import { ToolApproval } from './components/messages/ToolApproval';
@@ -110,6 +113,7 @@ import {
   type WebShellSidebarFooterOptions,
   type WebShellSidebarLockedWorkspace,
 } from './components/sidebar/WebShellSidebar';
+import { isSidebarToggleShortcut } from './components/sidebar/sidebarToggleShortcut';
 import {
   getLocalCommands,
   localizeBuiltinDescriptions,
@@ -148,6 +152,7 @@ import {
 import { appendOrDeferLocalUserMessage } from './utils/localCommandQueue';
 import { QueuedPromptDisplay } from './components/QueuedPromptDisplay';
 import { useQueuedPrompts } from './hooks/useQueuedPrompts';
+import { useNewSessionSuggestion } from './hooks/useNewSessionSuggestion';
 import {
   TasksStatusMessage,
   type SerializedTasksMessage,
@@ -163,7 +168,7 @@ import {
   type StatusInfo,
 } from './components/messages/StatusMessage';
 import type { SerializedMcpStatusMessage } from './components/messages/McpStatusMessage';
-import { McpDialog } from './components/dialogs/McpDialog';
+import { McpManagerPage } from './components/mcp/McpManagerPage';
 import {
   GOAL_STATUS_ACTIVE_EVENT,
   parseGoalStatusMessage,
@@ -301,13 +306,19 @@ interface PaneArtifactSnapshot {
 const BOUND_RUN_SWITCH_TIMEOUT_MS = 30_000;
 
 function availableSkillInfos(status: {
-  skills?: Array<{ status?: string; name: string; description?: string }>;
+  skills?: Array<{
+    status?: string;
+    name: string;
+    description?: string;
+    argumentHint?: string;
+  }>;
 }): SkillInfo[] {
   return (status.skills ?? [])
     .filter((skill) => skill.status === 'ok')
     .map((skill) => ({
       name: skill.name,
       description: skill.description ?? '',
+      ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -597,12 +608,14 @@ export interface WebShellProps {
 interface AppProps extends WebShellProps {
   lockedWorkspaceCwd?: string;
   lockedWorkspaceCapability?: DaemonWorkspaceCapability;
+  restartSseOnPrompt?: boolean;
 }
 
 type SessionActionsWithCreate = {
   createSession: (options?: {
     workspaceCwd?: string;
     approvalMode?: string;
+    sourceType?: string;
   }) => Promise<{ sessionId: string }>;
   attachSession: () => Promise<void>;
   clearSession: () => Promise<void>;
@@ -1033,6 +1046,7 @@ export function App({
   composerInputVersion,
   onSessionChange,
   onSubmitBefore,
+  restartSseOnPrompt,
   lockedWorkspaceCwd,
   lockedWorkspaceCapability,
 }: AppProps = {}) {
@@ -1133,6 +1147,33 @@ export function App({
     setSidebarCollapsed(collapsed);
     writeSidebarCollapsed(collapsed);
   }, []);
+
+  // #5074: Cmd+B / Ctrl+B toggles the session sidebar, matching the editor
+  // convention (VS Code et al.). It works while any element is focused —
+  // the composer has no bold formatting, so nothing competes for the
+  // binding. Phone-width layouts render the sidebar as a drawer, so the
+  // shortcut toggles that instead of the collapsed rail.
+  useEffect(() => {
+    if (!sidebarOptions.enabled) return undefined;
+    const onKey = (e: KeyboardEvent) => {
+      if (!isSidebarToggleShortcut(e)) return;
+      e.preventDefault();
+      if (window.matchMedia('(max-width: 760px)').matches) {
+        setMobileDrawerOpen((open) => {
+          if (open) setForceMobileDrawer(false);
+          return !open;
+        });
+        return;
+      }
+      setSidebarCollapsed((collapsed) => {
+        const next = !collapsed;
+        writeSidebarCollapsed(next);
+        return next;
+      });
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [sidebarOptions.enabled]);
   const customization = useMemo(
     () => ({
       composerTagIcons,
@@ -1184,6 +1225,7 @@ export function App({
   const store = useTranscriptStore();
   const blocks = useTranscriptBlocks();
   const connection = useConnection();
+  const transcriptHistory = useTranscriptHistory();
   const workspace = useWorkspace();
   const workspaces = useMemo(() => {
     const capabilityWorkspaces = workspace.capabilities?.workspaces ?? [];
@@ -2021,6 +2063,13 @@ export function App({
       editorRef.current?.insertText(suggestion);
     },
   });
+  const composerTextRef = useRef('');
+  const composerTextDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const [composerText, setComposerText] = useState('');
+  const [isStartingNewSessionSuggestion, setIsStartingNewSessionSuggestion] =
+    useState(false);
   const streamingState = useStreamingState();
   const streamingStateRef = useRef<DaemonStreamingState>(streamingState);
   const localStreamingStartedAtRef = useRef(Date.now());
@@ -2051,16 +2100,33 @@ export function App({
   const showRetryHintRef = useRef(showRetryHint);
   showRetryHintRef.current = showRetryHint;
   const connected = connection.status === 'connected';
+  const workspaceEventSignals = useWorkspaceEventSignals();
   const [loadedSkills, setLoadedSkills] = useState<SkillInfo[]>([]);
+  const [loadedSkillsReady, setLoadedSkillsReady] = useState(false);
+  const loadedSkillsRequestRef = useRef(0);
+  const reloadLoadedSkills = useCallback(
+    async (workspaceCwd?: string) => {
+      const request = ++loadedSkillsRequestRef.current;
+      try {
+        const status =
+          workspaceCwd && workspace.client
+            ? await workspace.client
+                .workspaceByCwd(workspaceCwd)
+                .workspaceSkills()
+            : await workspaceActions.loadSkillsStatus();
+        if (request !== loadedSkillsRequestRef.current) return;
+        setLoadedSkills(availableSkillInfos(status));
+        setLoadedSkillsReady(true);
+      } catch {
+        return;
+      }
+    },
+    [workspace.client, workspaceActions],
+  );
   useEffect(() => {
     if (!connected) return;
-    workspaceActions
-      .loadSkillsStatus()
-      .then((status) => {
-        setLoadedSkills(availableSkillInfos(status));
-      })
-      .catch(() => {});
-  }, [connected, workspaceActions]);
+    void reloadLoadedSkills(connection.workspaceCwd);
+  }, [connected, connection.workspaceCwd, reloadLoadedSkills]);
 
   const [modelDialogMode, setModelDialogMode] =
     useState<ModelDialogMode | null>(null);
@@ -2106,9 +2172,26 @@ export function App({
   // chat view (message list + composer), not as a modal overlay. Only one may be
   // active at a time; null means the normal chat view is shown.
   const [activePanel, setActivePanel] = useState<
-    'settings' | 'status' | 'sessions' | 'extensions' | null
+    | 'settings'
+    | 'status'
+    | 'sessions'
+    | 'extensions'
+    | 'mcp'
+    | 'skills'
+    | 'plugins'
+    | null
   >(null);
   const closePanel = useCallback(() => setActivePanel(null), []);
+  const handleUseSkill = useCallback(
+    (name: string) => {
+      closePanel();
+      window.setTimeout(() => {
+        editorRef.current?.setText(`/${name} `);
+        editorRef.current?.focus();
+      }, 0);
+    },
+    [closePanel],
+  );
   // The Settings/Status panel (activePanel) and the Scheduled Tasks page
   // (mainView) are mutually-exclusive full-pane views — the latter is a
   // position:absolute overlay that would otherwise cover the former — so opening
@@ -2116,12 +2199,32 @@ export function App({
   // Status left the panel rendered behind the Scheduled Tasks overlay, looking
   // like the button did nothing.
   const openPanel = useCallback(
-    (panel: 'settings' | 'status' | 'sessions' | 'extensions') => {
+    (
+      panel:
+        | 'settings'
+        | 'status'
+        | 'sessions'
+        | 'extensions'
+        | 'mcp'
+        | 'skills'
+        | 'plugins',
+    ) => {
       setMainView('chat');
       setActivePanel(panel);
     },
     [],
   );
+  const loadMcpManagerMessage = useCallback(async () => {
+    const status = await workspaceActions.loadMcpStatus();
+    setMcpDialogMessage({
+      status,
+      toolsByServer: {},
+      resourcesByServer: {},
+      showDescriptions: false,
+      showSchema: false,
+      showTips: false,
+    });
+  }, [workspaceActions]);
   const openScheduledTasks = useCallback(() => {
     setActivePanel(null);
     setMainView('scheduledTasks');
@@ -2270,6 +2373,18 @@ export function App({
       // split, or dropping back to that chat, is exactly what it was before.
       if (!externalSplitControlled) {
         splitFoldedByShrinkRef.current = true;
+        // …except when the chat has no session of its own — the common case
+        // when the split was entered from the Session Overview or a `?split=a,b`
+        // link. A bare fold would then strand the user on an empty "new chat",
+        // so land on the split's first (leftmost) pane instead. Guarded on the
+        // *empty* chat so it never re-points a chat that already has a session
+        // (which would wipe its git branch / change the session+URL it drops
+        // back to). Best-effort: a load failure (e.g. a non-primary-workspace
+        // pane the single connection can't own) just leaves the empty chat.
+        const firstPane = splitSessionIdsRef.current[0];
+        if (firstPane && !currentSessionIdRef.current) {
+          void sessionActions.loadSession(firstPane).catch(() => undefined);
+        }
       }
     }
   }, [
@@ -2278,6 +2393,7 @@ export function App({
     mainView,
     notifyControlledSplitClose,
     externalSplitControlled,
+    sessionActions,
   ]);
   // Land focus on the composer after a shrink-driven split close so keyboard
   // users aren't dropped onto <body> — but not when the chat now shows an
@@ -2293,6 +2409,7 @@ export function App({
   // closes, so keyboard users aren't stranded on an element that is hidden.
   const panelBackRef = useRef<HTMLButtonElement | null>(null);
   const panelHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  const pluginTabRef = useRef<HTMLButtonElement | null>(null);
   const prevActivePanelRef = useRef(activePanel);
   const prevApprovalOverlayRef = useRef(approvalOverlayActive);
   useEffect(() => {
@@ -2303,6 +2420,10 @@ export function App({
     if (activePanel) {
       if (activePanel === 'extensions') {
         panelHeadingRef.current?.focus();
+        return;
+      }
+      if (activePanel === 'plugins') {
+        pluginTabRef.current?.focus();
         return;
       }
       // Covers null→panel and panel→panel: the Back button lives outside the
@@ -2401,7 +2522,6 @@ export function App({
   }, []);
 
   // Refresh commands when extensions change (install/uninstall/update).
-  const workspaceEventSignals = useWorkspaceEventSignals();
   const extensionsVersionRef = useRef(
     workspaceEventSignals?.extensionsVersion ?? 0,
   );
@@ -2507,6 +2627,13 @@ export function App({
   const [isPreparingPrompt, setIsPreparingPrompt] = useState(false);
   const createSessionPromiseRef = useRef<Promise<void> | null>(null);
   const preparingSessionIdRef = useRef<string | null>(null);
+  const newSessionSuggestionSubmitTokenRef = useRef(0);
+  const pendingNewSessionSuggestionSubmitRef = useRef<{
+    token: number;
+    sourceSessionId: string | undefined;
+    sessionClearCompleted: boolean;
+    submitScheduled: boolean;
+  } | null>(null);
   const onSessionCreatedRef = useRef(onSessionCreated);
   onSessionCreatedRef.current = onSessionCreated;
   const ensureSessionForPrompt = useCallback(() => {
@@ -3629,7 +3756,10 @@ export function App({
           sessionActions as typeof sessionActions & SessionActionsWithCreate
         ).clearSession();
         focusRequest = scheduleComposerFocus();
-        await clearPromise;
+        await Promise.all([
+          clearPromise,
+          reloadLoadedSkills(targetWorkspaceCwd),
+        ]);
         return true;
       } catch (error) {
         if (composerFocusRequestRef.current === focusRequest) {
@@ -3644,10 +3774,150 @@ export function App({
       closePanel,
       lockedWorkspaceCwd,
       reportError,
+      reloadLoadedSkills,
       scheduleComposerFocus,
       sessionActions,
     ],
   );
+  useEffect(
+    () => () => {
+      if (composerTextDebounceRef.current) {
+        clearTimeout(composerTextDebounceRef.current);
+      }
+    },
+    [],
+  );
+
+  const handleComposerTextChange = useCallback((text: string) => {
+    composerTextRef.current = text;
+    if (composerTextDebounceRef.current) {
+      clearTimeout(composerTextDebounceRef.current);
+    }
+    composerTextDebounceRef.current = setTimeout(() => {
+      setComposerText(text);
+      composerTextDebounceRef.current = null;
+    }, 120);
+  }, []);
+
+  const {
+    suggestion: newSessionSuggestion,
+    dismiss: dismissNewSessionSuggestion,
+    suppress: suppressNewSessionSuggestion,
+  } = useNewSessionSuggestion({
+    enabled:
+      connection.capabilities?.features.includes('session_generation') === true,
+    inputText: composerText,
+    messages,
+    sessionId: connection.sessionId,
+    contextUsageRatio:
+      (connection.contextWindow ?? 0) > 0
+        ? (connection.tokenCount ?? 0) / (connection.contextWindow ?? 0)
+        : 0,
+    isRunning: streamingState !== 'idle',
+    dialogOpen: interactionBlocked || approvalOverlayActive,
+    generateContent: sessionActions.generateSessionContent,
+  });
+
+  const flushPendingNewSessionSuggestionSubmit = useCallback(
+    (expectedToken?: number) => {
+      const pending = pendingNewSessionSuggestionSubmitRef.current;
+      if (!pending) return;
+      if (expectedToken !== undefined && pending.token !== expectedToken)
+        return;
+
+      const activeSessionId = connectionRef.current.sessionId;
+      if (
+        pending.sourceSessionId !== undefined &&
+        activeSessionId !== undefined &&
+        activeSessionId !== pending.sourceSessionId
+      ) {
+        pendingNewSessionSuggestionSubmitRef.current = null;
+        setIsStartingNewSessionSuggestion(false);
+        return;
+      }
+
+      if (!pending.sessionClearCompleted) {
+        return;
+      }
+
+      if (activeSessionId !== undefined) {
+        return;
+      }
+
+      if (pending.submitScheduled) {
+        return;
+      }
+
+      pendingNewSessionSuggestionSubmitRef.current = {
+        ...pending,
+        submitScheduled: true,
+      };
+      window.setTimeout(() => {
+        const latestPending = pendingNewSessionSuggestionSubmitRef.current;
+        if (!latestPending || latestPending.token !== pending.token) {
+          return;
+        }
+        if (connectionRef.current.sessionId !== undefined) {
+          pendingNewSessionSuggestionSubmitRef.current = null;
+          setIsStartingNewSessionSuggestion(false);
+          return;
+        }
+        pendingNewSessionSuggestionSubmitRef.current = null;
+        editorRef.current?.submit();
+        editorRef.current?.focus();
+        setIsStartingNewSessionSuggestion(false);
+      }, 0);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    flushPendingNewSessionSuggestionSubmit();
+  }, [connection.sessionId, flushPendingNewSessionSuggestionSubmit]);
+
+  const handleAcceptNewSessionSuggestion = useCallback(() => {
+    const draft = composerTextRef.current.trim();
+    if (!draft || isStartingNewSessionSuggestion) return;
+    if (newSessionSuggestion?.classifiedInput !== draft) {
+      dismissNewSessionSuggestion();
+      return;
+    }
+    suppressNewSessionSuggestion();
+    setIsStartingNewSessionSuggestion(true);
+    const token = newSessionSuggestionSubmitTokenRef.current + 1;
+    newSessionSuggestionSubmitTokenRef.current = token;
+    pendingNewSessionSuggestionSubmitRef.current = {
+      token,
+      sourceSessionId: connectionRef.current.sessionId,
+      sessionClearCompleted: false,
+      submitScheduled: false,
+    };
+    void createNewSession().then((created) => {
+      const pending = pendingNewSessionSuggestionSubmitRef.current;
+      if (!created || pending?.token !== token) {
+        if (pending?.token === token) {
+          pendingNewSessionSuggestionSubmitRef.current = null;
+        }
+        setIsStartingNewSessionSuggestion(false);
+        return;
+      }
+      pendingNewSessionSuggestionSubmitRef.current = {
+        ...pending,
+        sessionClearCompleted: true,
+      };
+      onSessionIdChange?.(undefined);
+      flushPendingNewSessionSuggestionSubmit(token);
+    });
+  }, [
+    createNewSession,
+    dismissNewSessionSuggestion,
+    flushPendingNewSessionSuggestionSubmit,
+    isStartingNewSessionSuggestion,
+    newSessionSuggestion,
+    onSessionIdChange,
+    suppressNewSessionSuggestion,
+  ]);
+
   const shellApi = useMemo<WebShellApi>(
     () => ({
       openSplitView: () => {
@@ -4066,6 +4336,8 @@ export function App({
       if (
         shouldBlockComposerSubmit({
           connectionStatus: connectionRef.current.status,
+          hasSession: Boolean(connectionRef.current.sessionId),
+          restartSseOnPrompt: Boolean(restartSseOnPrompt),
         })
       ) {
         pushToast('warning', t('editor.connectionDisconnected'));
@@ -4409,53 +4681,16 @@ export function App({
             const mcpArg = text.slice(match[0].length).trim().toLowerCase();
             workspaceActions
               .loadMcpStatus()
-              .then(async (status) => {
-                const toolsByServer: Record<
-                  string,
-                  Awaited<ReturnType<typeof workspaceActions.loadMcpTools>>
-                > = {};
-                const resourcesByServer: Record<
-                  string,
-                  Awaited<ReturnType<typeof workspaceActions.loadMcpResources>>
-                > = {};
-                await Promise.all(
-                  (status?.servers ?? []).map(async (server) => {
-                    // Tools and resources load in parallel; a failure in one
-                    // must not hide the other, and per-server failures still
-                    // let sibling servers render.
-                    await Promise.all([
-                      (async () => {
-                        try {
-                          toolsByServer[server.name] =
-                            await workspaceActions.loadMcpTools(server.name);
-                        } catch {
-                          // Allow partial failure — other servers still render
-                        }
-                      })(),
-                      (async () => {
-                        // Skip the round-trip for servers that advertise no
-                        // resources (or older daemons that omit the count).
-                        if (!server.resourceCount) return;
-                        try {
-                          resourcesByServer[server.name] =
-                            await workspaceActions.loadMcpResources(
-                              server.name,
-                            );
-                        } catch {
-                          // Allow partial failure — other servers still render
-                        }
-                      })(),
-                    ]);
-                  }),
-                );
+              .then((status) => {
                 setMcpDialogMessage({
                   status,
-                  toolsByServer,
-                  resourcesByServer,
+                  toolsByServer: {},
+                  resourcesByServer: {},
                   showDescriptions: mcpArg === 'desc',
                   showSchema: mcpArg === 'schema',
                   showTips: !mcpArg,
                 });
+                openPanel('mcp');
               })
               .catch((error: unknown) => {
                 reportError(error, 'Failed to load MCP status');
@@ -4464,7 +4699,9 @@ export function App({
           }
           if (cmd === 'skills') {
             const skillArg = text.slice(match[0].length).trim();
-            if (skillArg) {
+            if (!skillArg || skillArg === 'detail' || skillArg === 'details') {
+              openPanel('skills');
+            } else {
               if (promptBlocked) {
                 return enqueuePrompt(
                   text,
@@ -4480,31 +4717,6 @@ export function App({
                 'Failed to send /skills command',
                 { inputAnnotations: metadata?.inputAnnotations },
               );
-            } else {
-              if (echoOrDeferLocalCommand(text, images)) return true;
-              workspaceActions
-                .loadSkillsStatus()
-                .then((status) => {
-                  const skills = availableSkillInfos(status);
-                  setLoadedSkills(skills);
-                  if (skills.length === 0) {
-                    store.dispatch([
-                      { type: 'status', text: t('skills.none') },
-                    ]);
-                  } else {
-                    const list = skills.map((s) => `- ${s.name}`).join('\n');
-                    store.dispatch([
-                      {
-                        type: 'status',
-                        text: `${t('skills.available')}\n\n${list}`,
-                      },
-                    ]);
-                  }
-                  resumeChatBottomFollow('smooth');
-                })
-                .catch((error: unknown) => {
-                  reportError(error, 'Failed to load skills');
-                });
             }
             return true;
           }
@@ -4985,6 +5197,7 @@ export function App({
       runVisibleRecap,
       runVisibleBtw,
       requireActiveSessionForLocalCommand,
+      restartSseOnPrompt,
       resumeChatBottomFollow,
       selectedLanguage,
       setPendingModel,
@@ -5479,8 +5692,31 @@ export function App({
   }, [modelDialogMode, showFallbacksDialog, showAuthDialog]);
 
   const commands = useMemo(() => {
+    const previousSkillNames = new Set(
+      (connection.skills ?? []).map((skill) => skill.toLowerCase()),
+    );
+    const retainedCommands = loadedSkillsReady
+      ? (connection.commands ?? []).filter(
+          (command) =>
+            command.source !== 'skill' &&
+            !previousSkillNames.has(command.name.toLowerCase()),
+        )
+      : (connection.commands ?? []);
+    const refreshedSkillCommands = loadedSkillsReady
+      ? loadedSkills.map((skill) => ({
+          name: skill.name,
+          description: skill.description,
+          ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),
+          source: 'skill',
+          displayCategory: 'skill' as const,
+        }))
+      : [];
     return localizeBuiltinDescriptions(
-      mergeCommands(connection.commands ?? [], getLocalCommands(t)),
+      mergeCommands(
+        retainedCommands,
+        refreshedSkillCommands,
+        getLocalCommands(t),
+      ),
       t,
     )
       .filter(
@@ -5495,7 +5731,14 @@ export function App({
           description: t(skillKey),
         };
       });
-  }, [connection.commands, hiddenCommands, t]);
+  }, [
+    connection.commands,
+    connection.skills,
+    hiddenCommands,
+    loadedSkills,
+    loadedSkillsReady,
+    t,
+  ]);
 
   const welcomeHeaderProps = useMemo(
     () => ({
@@ -5750,18 +5993,6 @@ export function App({
               <ToolsDialog />
             </DialogShell>
           )}
-          {mcpDialogMessage && (
-            <DialogShell
-              title={t('mcp.manageServers')}
-              size="lg"
-              onClose={() => setMcpDialogMessage(null)}
-            >
-              <McpDialog
-                message={mcpDialogMessage}
-                onClose={() => setMcpDialogMessage(null)}
-              />
-            </DialogShell>
-          )}
           {tasksDialogMessage && (
             <DialogShell
               title={t('tasks.title')}
@@ -5973,6 +6204,10 @@ export function App({
                     closeMobileDrawer();
                     openPanel('settings');
                   }}
+                  onOpenPlugins={() => {
+                    closeMobileDrawer();
+                    openPanel('plugins');
+                  }}
                   onOpenDaemonStatus={() => {
                     closeMobileDrawer();
                     openPanel('status');
@@ -6006,6 +6241,11 @@ export function App({
                   onLoadSession={(sessionId, workspaceCwd) => {
                     setMainView('chat');
                     return loadSidebarSession(sessionId, workspaceCwd);
+                  }}
+                  onSelectCurrentSession={() => {
+                    closeMobileDrawer();
+                    setMainView('chat');
+                    closePanel();
                   }}
                   onError={reportError}
                   mobileOpen={mobileDrawerOpen}
@@ -6080,10 +6320,19 @@ export function App({
                         ? t('daemon.title')
                         : activePanel === 'extensions'
                           ? t('extensions.manage.title')
-                        : t('sessionsOverview.title')
+                        : activePanel === 'mcp'
+                          ? t('mcp.title')
+                          : activePanel === 'skills'
+                            ? t('skills.title')
+                          : activePanel === 'plugins'
+                              ? t('plugins.title')
+                              : t('sessionsOverview.title')
                   }
                 >
-                  {activePanel !== 'extensions' && (
+                  {activePanel !== 'extensions' &&
+                    activePanel !== 'mcp' &&
+                    activePanel !== 'skills' &&
+                    activePanel !== 'plugins' && (
                     <div className={styles.panelHeader}>
                     <button
                       ref={panelBackRef}
@@ -6188,6 +6437,34 @@ export function App({
                       <ExtensionsManagerPage
                         onClose={closePanel}
                         initialFocusRef={panelHeadingRef}
+                      />
+                    ) : activePanel === 'mcp' && mcpDialogMessage ? (
+                      <McpManagerPage
+                        message={mcpDialogMessage}
+                        onClose={() => {
+                          setMcpDialogMessage(null);
+                          closePanel();
+                        }}
+                      />
+                    ) : activePanel === 'skills' ? (
+                      <SkillsManagerPage
+                        onClose={closePanel}
+                        onUseSkill={handleUseSkill}
+                      />
+                    ) : activePanel === 'plugins' ? (
+                      <PluginManagerPage
+                        mcpMessage={mcpDialogMessage}
+                        loadMcpMessage={async () => {
+                          try {
+                            await loadMcpManagerMessage();
+                          } catch (error) {
+                            reportError(error, 'Failed to load MCP status');
+                            throw error;
+                          }
+                        }}
+                        onClose={closePanel}
+                        onUseSkill={handleUseSkill}
+                        initialFocusRef={pluginTabRef}
                       />
                     ) : (
                       <SessionOverviewPanel
@@ -6324,6 +6601,7 @@ export function App({
                         onRightPanelOpen={handleTurnOutputOpen}
                         onPaneArtifactsChange={handlePaneArtifactsChange}
                         messageTurnOutputs={messageTurnOutputs}
+                        restartSseOnPrompt={restartSseOnPrompt}
                       />
                     </CompactModeContext.Provider>
                   </WebShellCustomizationProvider>
@@ -6404,6 +6682,12 @@ export function App({
                                 onShowContextDetail={handleShowContextDetail}
                                 loadingTranscript={connection.loadingTranscript}
                                 catchingUp={connection.catchingUp}
+                                hasOlderHistory={transcriptHistory.hasMore}
+                                loadingOlderHistory={transcriptHistory.loading}
+                                historyCapacityReached={
+                                  transcriptHistory.capacityReached
+                                }
+                                onLoadOlderHistory={transcriptHistory.loadMore}
                                 isResponding={streamingState !== 'idle'}
                                 activeTurnStartedAt={activeTurnStartedAt}
                                 workspaceCwd={connection.workspaceCwd || ''}
@@ -6445,6 +6729,13 @@ export function App({
                                 onReviewChanges={openReviewPanel}
                                 onOpenArtifact={openArtifactPanel}
                                 onOpenScheduledTask={openScheduledTaskPanel}
+                                generateContent={
+                                  connection.capabilities?.features.includes(
+                                    'session_generation',
+                                  )
+                                    ? sessionActions.generateSessionContent
+                                    : undefined
+                                }
                               />
                             );
 
@@ -6576,12 +6867,40 @@ export function App({
                         </div>
                       )}
                       <div className={styles.composer}>
-                        <StreamingStatus startedAt={activeTurnStartedAt} />
-                        {escapeHintVisible && streamingState === 'idle' && (
+                        {streamingState !== 'idle' ? (
+                          <StreamingStatus startedAt={activeTurnStartedAt} />
+                        ) : newSessionSuggestion ? (
+                          <div
+                            className={styles.composerActionTip}
+                            role="status"
+                            data-testid="new-session-suggestion"
+                          >
+                            <span
+                              className={styles.composerActionTipIcon}
+                              aria-hidden="true"
+                            >
+                              ✦
+                            </span>
+                            <span className={styles.composerActionTipText}>
+                              {t('editor.newSessionSuggestionTitle')}
+                            </span>
+                            <div className={styles.composerActionTipActions}>
+                              <button
+                                type="button"
+                                className={`${styles.composerActionTipButton} ${styles.composerActionTipButtonPrimary}`}
+                                data-testid="new-session-suggestion-start"
+                                onMouseDown={(event) => event.preventDefault()}
+                                onClick={handleAcceptNewSessionSuggestion}
+                              >
+                                {t('editor.newSessionSuggestionStart')}
+                              </button>
+                            </div>
+                          </div>
+                        ) : escapeHintVisible && streamingState === 'idle' ? (
                           <div className={styles.escClearStatus} role="status">
                             {t('editor.escClearHint')}
                           </div>
-                        )}
+                        ) : null}
                         <QueuedPromptDisplay
                           prompts={queuedPrompts}
                           t={t}
@@ -6603,13 +6922,18 @@ export function App({
                         <ChatEditor
                           ref={setEditorHandle}
                           onSubmit={handleEditorSubmit}
+                          onInputTextChange={handleComposerTextChange}
                           onCycleMode={handleCycleMode}
                           onToggleShortcuts={handleToggleShortcuts}
                           onCancel={handleCancel}
                           isRunning={streamingState !== 'idle'}
-                          isPreparing={isPreparingPrompt}
+                          isPreparing={
+                            isPreparingPrompt || isStartingNewSessionSuggestion
+                          }
                           cancelArmed={cancelArmed}
-                          disabled={isDisabled}
+                          disabled={
+                            isDisabled || isStartingNewSessionSuggestion
+                          }
                           commands={commands}
                           skills={loadedSkills}
                           slashCommandCategoryOrder={slashCommandCategoryOrder}
