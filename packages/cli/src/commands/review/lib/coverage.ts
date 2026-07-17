@@ -489,45 +489,91 @@ type Delivery =
   | 'rewritten'
   | 'brief-unread';
 
-/** What to say, and what to do about it, for each way a step's delivery failed. */
-type GapText = Record<Exclude<Delivery, 'ok'>, string>;
+/**
+ * Two sentences per failed shape, for two different readers.
+ *
+ * `gap` goes into the posted review body, under `Not reviewed:` — a PR author
+ * reads it, so it says what the review cannot certify and names no internal
+ * command (`agent-prompt --findings …` is not something an author can run, and on
+ * #7012 fourteen lines of exactly that register WERE the public review). `fix` is
+ * the per-shape remediation, printed to stderr where the orchestrator reads — the
+ * four shapes exist because the four fixes differ, and that precision belongs to
+ * the reader who relaunches agents, not the one who reads the verdict.
+ */
+interface GapEntry {
+  /** Author-facing: what this review cannot certify, and why. */
+  gap: string;
+  /** Orchestrator-facing: the exact fix, printed to stderr. */
+  fix: string;
+}
+type GapText = Record<Exclude<Delivery, 'ok'>, GapEntry>;
+
+/** The one rebuild command, spelled once. `role` differs; nothing else does. */
+const rebuildFix = (role: 'verify' | 'reverse-audit', noun: string): string =>
+  `build the prompt with \`"\${QWEN_CODE_CLI:-qwen}" review agent-prompt ` +
+  `--plan <plan> --role ${role} --findings <file>\` (an early round with ` +
+  `nothing confirmed passes an empty file) and launch an agent with EXACTLY ` +
+  `what it prints — no ${noun} number, no summary of your own, no rewording`;
 
 const REVERSE_AUDIT_GAP: GapText = {
-  'not-built':
-    'no auditor ran — Step 5 builds its prompt with `agent-prompt --role ' +
-    'reverse-audit --findings <file>`, and none was recorded, so the pass that ' +
-    'looks for what Step 3 missed never happened',
-  'not-launched':
-    'its prompt was built, but no agent was launched with it — the pass that ' +
-    'looks for what Step 3 missed did not run',
-  rewritten:
-    'an auditor ran and opened its brief, but **no agent was launched with the ' +
-    'prompt the CLI built** — the launch was written by hand instead of pasted. ' +
-    'What the agent was actually asked is not what this skill guarantees: pass ' +
-    '`--findings <file>` so there is nothing to assemble, and paste that output ' +
-    'verbatim — no round number, no summary of your own, no rewording',
-  'brief-unread':
-    'it was launched with the built prompt but never opened its brief, so it ' +
-    'audited without the gaps-only method and the finding format it was launched ' +
-    'to follow',
+  'not-built': {
+    gap:
+      'no auditor ran — the pass that hunts what the rest of the review ' +
+      'missed never happened',
+    fix: rebuildFix('reverse-audit', 'round'),
+  },
+  'not-launched': {
+    gap:
+      'its prompt was built, but no agent was launched with it — the pass ' +
+      'that hunts what the rest of the review missed did not run',
+    fix: rebuildFix('reverse-audit', 'round'),
+  },
+  rewritten: {
+    gap:
+      'an auditor ran, but **not with the prompt this skill builds** — the ' +
+      'launch was written by hand, so the gaps-only method and the finding ' +
+      'rules never reached it, and its pass cannot be certified',
+    fix: rebuildFix('reverse-audit', 'round'),
+  },
+  'brief-unread': {
+    gap:
+      'it was launched with the built prompt but never opened its brief, so it ' +
+      'audited without the gaps-only method and the finding format it was ' +
+      'launched to follow',
+    fix:
+      'relaunch with the same printed prompt — the agent must OPEN the brief ' +
+      'file the prompt names; that read is the receipt',
+  },
 };
 
 const VERIFY_GAP: GapText = {
-  'not-built':
-    'the review posts findings, but no verifier ran — Step 4 builds its prompt ' +
-    'with `agent-prompt --role verify --findings <file>`, and none was recorded, ' +
-    'so the findings were never verified',
-  'not-launched':
-    'its prompt was built, but no agent was launched with it, so the posted ' +
-    'findings were not verified',
-  rewritten:
-    'a verifier ran and opened its brief, but **no agent was launched with the ' +
-    'prompt the CLI built** — the launch was written by hand instead of pasted. ' +
-    'Pass `--findings <file>` so there is nothing to assemble, and paste that ' +
-    'output verbatim — no shard number, no summary of your own, no rewording',
-  'brief-unread':
-    'it was launched with the built prompt but never opened its brief, so it ' +
-    'ruled on the findings without the verdict bar it was launched to apply',
+  'not-built': {
+    gap:
+      'the review posts findings, but no verifier ran — the findings were ' +
+      'never verified',
+    fix: rebuildFix('verify', 'shard'),
+  },
+  'not-launched': {
+    gap:
+      'its prompt was built, but no agent was launched with it, so the posted ' +
+      'findings were not verified',
+    fix: rebuildFix('verify', 'shard'),
+  },
+  rewritten: {
+    gap:
+      'a verifier ran, but **not with the prompt this skill builds** — the ' +
+      'launch was written by hand, so the verdict bar it was meant to apply ' +
+      'never reached it, and the posted findings cannot be counted as verified',
+    fix: rebuildFix('verify', 'shard'),
+  },
+  'brief-unread': {
+    gap:
+      'it was launched with the built prompt but never opened its brief, so it ' +
+      'ruled on the findings without the verdict bar it was launched to apply',
+    fix:
+      'relaunch with the same printed prompt — the agent must OPEN the brief ' +
+      'file the prompt names; that read is the receipt',
+  },
 };
 
 export interface VerificationReport {
@@ -537,8 +583,15 @@ export interface VerificationReport {
    * Self-explanatory gap lines, shaped to drop straight into
    * `unreviewedDimensions` — each carries its own ` — ` reason, so
    * `compose-review` renders it verbatim rather than appending the whiff sentence.
+   * These reach the POSTED review body: author-facing register, no internal
+   * commands.
    */
   gaps: string[];
+  /**
+   * The per-shape fix for each gap, in the same order — for stderr, where the
+   * orchestrator reads. Never rendered into the body.
+   */
+  remediation: string[];
 }
 
 /**
@@ -574,6 +627,7 @@ export function verificationGaps(
   const records = readTranscripts(mtimeMs, env, plan.diffPathAbsolute);
   const built = readRecordedPrompts(planPath);
   const gaps: string[] = [];
+  const remediation: string[] = [];
 
   // How a step's agents actually got their prompt. The floor needs the four shapes
   // apart, not one boolean, because the fix for each is different — and a refusal
@@ -636,7 +690,8 @@ export function verificationGaps(
   );
   const reverse = bestDelivery(reverseKeys);
   if (reverse !== 'ok') {
-    gaps.push(`reverse audit — ${REVERSE_AUDIT_GAP[reverse]}`);
+    gaps.push(`reverse audit — ${REVERSE_AUDIT_GAP[reverse].gap}`);
+    remediation.push(`reverse audit: ${REVERSE_AUDIT_GAP[reverse].fix}`);
   }
 
   // Step 4: verify. Required when the review posts a finding a verifier rules on —
@@ -648,10 +703,13 @@ export function verificationGaps(
   // confirmed nothing has nothing to verify.
   if (opts.postsFindings) {
     const verify = deliveryOf('verify');
-    if (verify !== 'ok') gaps.push(`verification — ${VERIFY_GAP[verify]}`);
+    if (verify !== 'ok') {
+      gaps.push(`verification — ${VERIFY_GAP[verify].gap}`);
+      remediation.push(`verification: ${VERIFY_GAP[verify].fix}`);
+    }
   }
 
-  return { ok: gaps.length === 0, gaps };
+  return { ok: gaps.length === 0, gaps, remediation };
 }
 
 export { TranscriptsUnavailableError };

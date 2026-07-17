@@ -1122,28 +1122,38 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     const r = verificationGaps(p, { postsFindings: false }, ENV);
     expect(r.ok).toBe(false);
     const gap = r.gaps.join(' ');
-    // It says what happened: the agent ran and read the brief …
-    expect(gap).toMatch(/an auditor ran and opened its brief/);
-    // … and what was actually wrong, with the fix.
-    expect(gap).toMatch(
-      /no agent was launched with the \*\*prompt the CLI built|prompt the CLI built/,
-    );
-    expect(gap).toMatch(/--findings/);
+    // It says what happened: an auditor ran …
+    expect(gap).toMatch(/an auditor ran/);
+    // … and what was actually wrong.
+    expect(gap).toMatch(/not with the prompt this skill builds/);
+    expect(gap).toMatch(/written by hand/);
     // And it must NOT claim the agent never ran or never read its brief.
     expect(gap).not.toMatch(/no auditor ran/);
     expect(gap).not.toMatch(/never opened its brief/);
+    // The fix travels beside the gap, not inside it: the gap lands in the posted
+    // body, whose reader cannot run `agent-prompt`, and the remediation goes to
+    // stderr, whose reader can. #7012's public body was fourteen lines of the
+    // second register posted to the first reader.
+    expect(gap).not.toMatch(/agent-prompt|--findings|--role/);
+    const fix = r.remediation.join(' ');
+    expect(fix).toContain(
+      '"${QWEN_CODE_CLI:-qwen}" review agent-prompt ' +
+        '--plan <plan> --role reverse-audit --findings <file>',
+    );
+    expect(fix).toMatch(/no round number/);
   });
 
   it('names a rewritten verifier launch as itself too', () => {
     const p = plan();
     step45(p, 'reverse-audit');
     step45(p, 'verify', { rewritten: true });
-    const gap = verificationGaps(p, { postsFindings: true }, ENV).gaps.join(
-      ' ',
-    );
-    expect(gap).toMatch(/a verifier ran and opened its brief/);
-    expect(gap).toMatch(/prompt the CLI built/);
+    const r = verificationGaps(p, { postsFindings: true }, ENV);
+    const gap = r.gaps.join(' ');
+    expect(gap).toMatch(/a verifier ran/);
+    expect(gap).toMatch(/not with the prompt this skill builds/);
     expect(gap).not.toMatch(/no verifier ran/);
+    expect(gap).not.toMatch(/agent-prompt|--findings|--role/);
+    expect(r.remediation.join(' ')).toContain('--role verify');
   });
 
   it('flags a reverse audit built but whose agent never opened its brief', () => {

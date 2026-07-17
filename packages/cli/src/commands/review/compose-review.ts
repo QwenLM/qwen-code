@@ -106,6 +106,13 @@ export interface ComposeReviewResult {
    * read as "Comment, nothing blocking".
    */
   downgradedFrom: 'Approve' | 'Request changes' | null;
+  /**
+   * The orchestrator-facing fix for each coverage/verification gap the body
+   * discloses — printed to stderr by the command, never rendered into the body.
+   * The body tells the PR author what the review cannot certify; this tells the
+   * operator which command repairs it. Two registers, two channels.
+   */
+  remediation: string[];
 }
 
 const CRITICAL_MARKER = '**[Critical]**';
@@ -179,6 +186,11 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     input.unreviewedDimensions,
     'unreviewedDimensions',
   );
+  // The fixes for the gaps above, for stderr — never for the body. The gap says
+  // what the review cannot certify, to the PR author; the remediation names the
+  // command that repairs it, to the orchestrator. #7012's public body was fourteen
+  // lines of the second register posted to the first reader.
+  const remediation: string[] = [];
 
   // Coverage is shown, not asserted. Whatever the caller listed by hand, the
   // report's own gaps are added to it — a run cannot approve past a chunk nobody
@@ -231,11 +243,21 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       // launched with a prompt that never mentioned the diff, so it could not
       // have read it — and relaunching it would produce another agent that
       // cannot either. Do not call this a whiff; the prompt is the bug.
+      // The rebuild command goes to stderr with the other remediation, not into
+      // this line: the line lands in the posted body, and `qwen review
+      // agent-prompt` is not something a PR author can run.
       for (const label of cov.blindAgents) {
         unreviewed.push(
           `${label} — launched with a prompt that never named the diff file, ` +
-            'so it could not have read it (build the prompt with `qwen review ' +
-            'agent-prompt`)',
+            'so it could not have read it',
+        );
+      }
+      if (cov.blindAgents.length > 0) {
+        remediation.push(
+          'blind agents: rebuild each prompt with `"${QWEN_CODE_CLI:-qwen}" ' +
+            'review agent-prompt --plan <plan> --chunk <id>` (or `--role <r>`) ' +
+            'and launch an agent with it verbatim — do not relaunch the old ' +
+            'prompt; a second blind agent reads no more than the first',
         );
       }
       // Worked, but not on the diff. Not idle and not blind — it had the path and
@@ -306,6 +328,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
         input.env,
       );
       for (const gap of verification.gaps) unreviewed.push(gap);
+      remediation.push(...verification.remediation);
     } catch (err) {
       unreviewed.push(
         `verification — could not check that Step 4 and Step 5 ran ` +
@@ -454,6 +477,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       cappedBy,
       downgraded,
       downgradedFrom,
+      remediation,
     };
   }
 
@@ -465,6 +489,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       cappedBy,
       downgraded,
       downgradedFrom,
+      remediation,
     };
   }
 
@@ -538,6 +563,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     cappedBy,
     downgraded,
     downgradedFrom,
+    remediation,
   };
 }
 
@@ -585,6 +611,14 @@ export const composeReviewCommand: CommandModule = {
     // this command entirely and tell the user whatever it had concluded: dogfooded,
     // one did, and reported an Approve on a review whose coverage check had refused.
     // There is now nothing to compose. This is the sentence; print it.
+    //
+    // The fixes first, the verdict last. These lines are the orchestrator's copy
+    // of what the body's `Not reviewed:` disclosures only describe — the body
+    // names what cannot be certified for the PR author; this names the command
+    // that repairs it, on the channel the author never sees.
+    for (const fix of result.remediation) {
+      writeStderrLine(`FIX: ${fix}`);
+    }
     writeStderrLine(verdictLine(result));
   },
 };

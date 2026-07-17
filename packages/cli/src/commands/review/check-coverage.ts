@@ -146,10 +146,11 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         `brief it was never given, and a dimension reviewed without them cannot ` +
         `be certified clean. Build every required prompt in one call — ` +
         `\`"\${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan <plan> --roster\` ` +
+        // No "the label above names the role" here: when no role was briefed at
+        // all, the report collapses to one line that names none of them.
         `— and launch one agent per block it prints, verbatim. To rebuild a ` +
-        `single one: \`--role <n>\` (the role number is in each label above; a ` +
-        `per-file role takes \`--file <path>\`), or \`--chunk <id>\` for a ` +
-        `chunk agent.\n` +
+        `single one: \`--role <n>\` (a per-file role takes \`--file <path>\`), ` +
+        `or \`--chunk <id>\` for a chunk agent.\n` +
         // Where it looked, because "the builder never ran" and "the builder ran
         // against a different --plan" are indistinguishable from a missing file and
         // are fixed differently. The record dir hangs off the plan path as given, so

@@ -924,7 +924,9 @@ describe('coverage is recomputed, never accepted', () => {
   it('names a blind launch as itself, not as a whiff', () => {
     // An agent whose prompt never named the diff could not have read it, and
     // relaunching it produces another agent that cannot either. The prompt is the
-    // defect, and the body has to say so or the reader will retry forever.
+    // defect. The body says what happened — to the PR author, who cannot run
+    // `agent-prompt` — and the rebuild command rides in `remediation`, which the
+    // command prints to stderr for the orchestrator.
     const r = composeReview({
       criticalsInline: 0,
       suggestionsInline: 0,
@@ -934,7 +936,11 @@ describe('coverage is recomputed, never accepted', () => {
     });
     expect(r.event).not.toBe('APPROVE');
     expect(r.body).toContain('never named the diff file');
-    expect(r.body).toContain('agent-prompt');
+    expect(r.body).not.toContain('agent-prompt');
+    expect(r.remediation.join(' ')).toContain(
+      '"${QWEN_CODE_CLI:-qwen}" review agent-prompt',
+    );
+    expect(r.remediation.join(' ')).toMatch(/do not relaunch the old prompt/);
   });
 
   it('caps when the transcripts cannot be read at all — and says so', () => {
@@ -1063,6 +1069,7 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
       cappedBy: [],
       downgraded: false,
       downgradedFrom: null,
+      remediation: [],
       ...over,
     });
 
