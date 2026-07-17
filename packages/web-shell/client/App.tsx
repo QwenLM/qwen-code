@@ -606,6 +606,7 @@ export interface WebShellProps {
 interface AppProps extends WebShellProps {
   lockedWorkspaceCwd?: string;
   lockedWorkspaceCapability?: DaemonWorkspaceCapability;
+  restartSseOnPrompt?: boolean;
 }
 
 type SessionActionsWithCreate = {
@@ -1043,6 +1044,7 @@ export function App({
   composerInputVersion,
   onSessionChange,
   onSubmitBefore,
+  restartSseOnPrompt,
   lockedWorkspaceCwd,
   lockedWorkspaceCapability,
 }: AppProps = {}) {
@@ -4304,6 +4306,8 @@ export function App({
       if (
         shouldBlockComposerSubmit({
           connectionStatus: connectionRef.current.status,
+          hasSession: Boolean(connectionRef.current.sessionId),
+          restartSseOnPrompt: Boolean(restartSseOnPrompt),
         })
       ) {
         pushToast('warning', t('editor.connectionDisconnected'));
@@ -5163,6 +5167,7 @@ export function App({
       runVisibleRecap,
       runVisibleBtw,
       requireActiveSessionForLocalCommand,
+      restartSseOnPrompt,
       resumeChatBottomFollow,
       selectedLanguage,
       setPendingModel,
@@ -6566,6 +6571,7 @@ export function App({
                         onRightPanelOpen={handleTurnOutputOpen}
                         onPaneArtifactsChange={handlePaneArtifactsChange}
                         messageTurnOutputs={messageTurnOutputs}
+                        restartSseOnPrompt={restartSseOnPrompt}
                       />
                     </CompactModeContext.Provider>
                   </WebShellCustomizationProvider>

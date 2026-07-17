@@ -932,6 +932,21 @@ afterEach(() => {
 });
 
 describe('App session callbacks', () => {
+  it('submits through a disconnected session when prompt SSE restart is enabled', async () => {
+    mockConnection.status = 'disconnected';
+    renderApp({ restartSseOnPrompt: true });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('recover connection');
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'recover connection',
+      expect.objectContaining({ images: undefined }),
+    );
+  });
+
   it('reports the current workspace id and path', async () => {
     mockConnection.workspaceCwd = '/work/secondary';
     mockWorkspace.capabilities = {
