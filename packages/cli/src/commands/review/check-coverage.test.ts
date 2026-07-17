@@ -956,7 +956,11 @@ describe('the prompt the CLI built, against the prompt the agent got', () => {
 
     const r = coverageFromTranscripts(p, ENV);
     expect(r.rewrittenPrompts).toHaveLength(2);
-    expect(r.rewrittenPrompts[0]).toContain('`agent-prompt` never ran');
+    expect(r.rewrittenPrompts[0]).toContain('a prompt the run wrote itself');
+    // No internal command in the label: compose-review pushes it into the posted
+    // body as-is, and `agent-prompt` is not something a PR author can run. The
+    // rebuild command rides the remediation channel instead.
+    expect(r.rewrittenPrompts[0]).not.toMatch(/agent-prompt|--chunk/);
     expect(r.ok).toBe(false);
   });
 
@@ -1104,11 +1108,20 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     expect(verificationGaps(p, { postsFindings: true }, ENV).ok).toBe(true);
   });
 
-  it('flags a review that never ran the reverse audit', () => {
+  it('flags a review that never built the reverse-audit prompt', () => {
     const p = plan(); // no reverse-audit fixture: the step was skipped
     const r = verificationGaps(p, { postsFindings: false }, ENV);
     expect(r.ok).toBe(false);
-    expect(r.gaps.join(' ')).toMatch(/reverse audit — no auditor ran/);
+    const gap = r.gaps.join(' ');
+    expect(gap).toMatch(
+      /reverse audit — no auditor was launched with a prompt this skill builds/,
+    );
+    // Not "no auditor ran": this shape is decided before the transcripts are
+    // consulted (a hand-written launch leaves no brief to open), so the check
+    // cannot see such an auditor — and it may not claim to. Say what a missing
+    // record proves, and what it costs.
+    expect(gap).not.toMatch(/no auditor ran/);
+    expect(gap).toContain('if at all');
   });
 
   it('names a rewritten launch as itself, not as an agent that never ran', () => {

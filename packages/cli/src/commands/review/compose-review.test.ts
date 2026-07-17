@@ -1017,7 +1017,9 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
     });
     expect(r.event).toBe('COMMENT');
     expect(r.cappedBy).toContain('unreviewed-dimension');
-    expect(r.body).toMatch(/reverse audit — no auditor ran/);
+    expect(r.body).toMatch(
+      /reverse audit — no auditor was launched with a prompt this skill builds/,
+    );
   });
 
   it('discloses that posted findings were not verified when Step 4 was skipped', () => {

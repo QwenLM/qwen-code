@@ -313,8 +313,12 @@ export function coverageFromTranscripts(
     if (chunk !== null) {
       const b = built.get(`chunk-${chunk}`);
       if (b === undefined) {
+        // No internal command in this label: `compose-review` pushes it into the
+        // posted body as-is, and the PR author cannot run `agent-prompt`. The
+        // rebuild command rides the rewritten-launches remediation line, on stderr.
         rewrittenPrompts.push(
-          `${name} — no prompt was built for it (\`agent-prompt\` never ran for this chunk)`,
+          `${name} — ran on a prompt the run wrote itself (none was built for ` +
+            `this chunk), so the brief with its method and rules never reached it`,
         );
       } else if (!wasDeliveredVerbatim(rec.launchPrompt, b)) {
         rewrittenPrompts.push(
@@ -476,7 +480,11 @@ export function coverageFromTranscripts(
  * How a Step 4/5 step's agents got their prompt — four shapes, four different fixes.
  *
  * `ok` — an agent was launched with the prompt the CLI built and opened its brief.
- * `not-built` — `agent-prompt --role <r>` never ran: the step was skipped.
+ * `not-built` — `agent-prompt --role <r>` never ran. Decided before the transcripts
+ *   are consulted (there is no brief whose open could be looked for), so it proves
+ *   the builder was skipped — NOT that no agent ran: a hand-written launch with no
+ *   brief on disk is invisible to this check, and the texts below say "if at all"
+ *   because of it.
  * `not-launched` — the prompt was built and nothing was launched with it.
  * `rewritten` — an agent ran and opened the brief, but no agent got the built prompt
  *   intact: the orchestrator wrote the launch itself.
@@ -516,10 +524,16 @@ const rebuildFix = (role: 'verify' | 'reverse-audit', noun: string): string =>
   `what it prints — no ${noun} number, no summary of your own, no rewording`;
 
 const REVERSE_AUDIT_GAP: GapText = {
+  // Not "no auditor ran": a run that skipped the builder and hand-wrote the
+  // launch leaves no brief file to open, so this shape is reached before the
+  // transcripts are ever consulted — the check cannot see that auditor, and it
+  // may not claim to. Same honest construction as the roster texts: what is
+  // provable ("no brief was built"), then what that costs ("if at all").
   'not-built': {
     gap:
-      'no auditor ran — the pass that hunts what the rest of the review ' +
-      'missed never happened',
+      'no auditor was launched with a prompt this skill builds — the pass ' +
+      'that hunts what the rest of the review missed ran, if at all, without ' +
+      'the method its brief carries',
     fix: rebuildFix('reverse-audit', 'round'),
   },
   'not-launched': {
@@ -547,10 +561,13 @@ const REVERSE_AUDIT_GAP: GapText = {
 };
 
 const VERIFY_GAP: GapText = {
+  // Same reach limit as the reverse-audit text above: `not-built` is decided
+  // before the transcripts are consulted, so it may not assert nobody ran.
   'not-built': {
     gap:
-      'the review posts findings, but no verifier ran — the findings were ' +
-      'never verified',
+      'the review posts findings, but no verifier was launched with a prompt ' +
+      'this skill builds — they were ruled on, if at all, without the verdict ' +
+      'bar its brief carries',
     fix: rebuildFix('verify', 'shard'),
   },
   'not-launched': {
