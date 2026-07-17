@@ -467,7 +467,10 @@ describe('Session', () => {
       getTool: vi.fn(),
       ensureTool: vi.fn().mockResolvedValue(true),
     };
-    const fileService = { shouldGitIgnoreFile: vi.fn().mockReturnValue(false) };
+    const fileService = {
+      shouldGitIgnoreFile: vi.fn().mockReturnValue(false),
+      shouldIgnoreFile: vi.fn().mockReturnValue(false),
+    };
 
     mockConfig = {
       setApprovalMode: vi.fn(),
@@ -492,6 +495,13 @@ describe('Session', () => {
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
       getFileService: vi.fn().mockReturnValue(fileService),
       getFileFilteringRespectGitIgnore: vi.fn().mockReturnValue(true),
+      getFileFilteringOptions: vi.fn().mockReturnValue({
+        respectGitIgnore: true,
+        respectQwenIgnore: true,
+      }),
+      getWorkspaceContext: vi.fn().mockReturnValue({
+        isPathWithinWorkspace: vi.fn().mockReturnValue(true),
+      }),
       getEnableRecursiveFileSearch: vi.fn().mockReturnValue(false),
       getTargetDir: vi.fn().mockReturnValue(process.cwd()),
       getDebugMode: vi.fn().mockReturnValue(false),
@@ -3571,6 +3581,11 @@ describe('Session', () => {
       );
       const imagePath = path.join(tempDir, 'image.png');
       await fs.writeFile(imagePath, 'image');
+      mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
+      mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+        isPathWithinWorkspace: (pathSpec: string) =>
+          path.resolve(tempDir, pathSpec).startsWith(`${tempDir}${path.sep}`),
+      });
       mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
       mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
         id: 'qwen3.7-plus',
@@ -3618,6 +3633,65 @@ describe('Session', () => {
       } finally {
         readManyFilesSpy.mockRestore();
         await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('ignores unsafe ACP text @ paths before reading files', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-acp-paths-'),
+      );
+      const outsideDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-acp-outside-'),
+      );
+      const outsidePath = path.join(outsideDir, 'secret.txt');
+      await fs.writeFile(path.join(tempDir, 'allowed.txt'), 'ok');
+      await fs.mkdir(path.join(tempDir, 'dir'));
+      await fs.writeFile(path.join(tempDir, 'ignored.txt'), 'ignored');
+      await fs.writeFile(outsidePath, 'secret');
+      mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
+      mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+        isPathWithinWorkspace: (pathSpec: string) =>
+          path.resolve(tempDir, pathSpec).startsWith(`${tempDir}${path.sep}`),
+      });
+      const fileService = {
+        shouldIgnoreFile: vi.fn(
+          (pathSpec: string) => pathSpec === 'ignored.txt',
+        ),
+      };
+      mockConfig.getFileService = vi.fn().mockReturnValue(fileService);
+      mockConfig.getFileFilteringOptions = vi.fn().mockReturnValue({
+        respectGitIgnore: true,
+        respectQwenIgnore: true,
+      });
+      const readManyFilesSpy = vi
+        .spyOn(core, 'readManyFiles')
+        .mockResolvedValue({
+          contentParts: 'allowed file',
+          files: [],
+        } as Awaited<ReturnType<typeof core.readManyFiles>>);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            {
+              type: 'text',
+              text: `read @allowed.txt @dir @${outsidePath} @ignored.txt`,
+            },
+          ],
+        });
+
+        expect(readManyFilesSpy).toHaveBeenCalledWith(mockConfig, {
+          paths: ['allowed.txt'],
+          signal: expect.any(AbortSignal),
+        });
+      } finally {
+        readManyFilesSpy.mockRestore();
+        await fs.rm(tempDir, { recursive: true, force: true });
+        await fs.rm(outsideDir, { recursive: true, force: true });
       }
     });
 

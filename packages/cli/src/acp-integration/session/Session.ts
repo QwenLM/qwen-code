@@ -5,7 +5,7 @@
  */
 
 import { Buffer } from 'node:buffer';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type {
@@ -5962,8 +5962,20 @@ export class Session implements SessionContext {
           collectExtensionMentionRefs(part.text, extensionMentions);
           collectMcpServerMentionRefs(part.text, mcpServerMentions);
           for (const pathSpec of extractAtPathCommands(part.text)) {
+            const resolved = path.resolve(
+              this.config.getProjectRoot(),
+              pathSpec,
+            );
+            const filteringOptions = this.config.getFileFilteringOptions();
             if (
-              existsSync(path.resolve(this.config.getProjectRoot(), pathSpec))
+              existsSync(resolved) &&
+              statSync(resolved).isFile() &&
+              this.config
+                .getWorkspaceContext()
+                .isPathWithinWorkspace(pathSpec) &&
+              !this.config
+                .getFileService()
+                .shouldIgnoreFile(pathSpec, filteringOptions)
             ) {
               textPathSpecsToRead.add(pathSpec);
             }
