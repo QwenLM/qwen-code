@@ -1425,6 +1425,35 @@ describe('LoopDetectionService', () => {
       expect(service.getLastLoopType()).toBeNull();
     });
 
+    it('fires when a stuck signal accumulates between the soft and hard cap', () => {
+      // The primary scenario the adaptive cap targets: a productive turn
+      // crosses the soft cap with diverse calls, THEN a stuck pattern emerges
+      // mid-range. Guards against a refactor that only evaluates `stuck` at the
+      // soft-cap boundary (the other stuck test crosses the boundary and builds
+      // the signal simultaneously, so it would not catch that regression).
+      service.reset('');
+      for (let i = 0; i < SOFT_CAP; i++) {
+        expect(
+          service.checkAlwaysOnSafeties(
+            createToolCallRequestEvent('any_tool', { i }),
+          ),
+        ).toBe(false);
+      }
+      // Now interleave 6 repeats of one key with distinct fillers so the
+      // consecutive-identical guard does not fire; the stuck signal completes
+      // well inside the (softCap, hardCap] range and halts there.
+      let fired = false;
+      for (let i = 0; i < GLOBAL_DUPLICATE_THRESHOLD * 2 && !fired; i++) {
+        const isRepeat = i % 2 === 0;
+        const args = isRepeat ? { stuck: true } : { filler: i };
+        fired = service.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('any_tool', args),
+        );
+      }
+      expect(fired).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
+    });
+
     it('fires at the hard cap regardless of diversity', () => {
       // The hard cap is the backstop for a runaway that varies its arguments
       // on every call (which no repetition signal catches).
