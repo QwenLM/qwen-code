@@ -18,6 +18,7 @@ import {
   setStartupEventSink,
   createDebugLogger,
   persistSessionUsage,
+  type SessionMetrics,
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import dns from 'node:dns';
@@ -86,6 +87,7 @@ import {
 import { getInstallationInfo } from './utils/installationInfo.js';
 
 const debugLogger = createDebugLogger('STARTUP');
+const LIVE_USAGE_FLUSH_INTERVAL_MS = 5 * 60 * 1000;
 
 interface RuntimeLspReinitializeResult {
   reconcile: {
@@ -185,6 +187,77 @@ ${reason.stack}`
 
 function getSignalExitCode(signal: NodeJS.Signals): number {
   return signal === 'SIGINT' ? 130 : 143;
+}
+
+export interface SessionUsageSnapshotDeps {
+  getMetrics: () => SessionMetrics;
+  getSessionStartTime: () => Date;
+  persist: typeof persistSessionUsage;
+  now: () => Date;
+}
+
+function hasUsageActivity(metrics: SessionMetrics): boolean {
+  return Object.values(metrics.models).some((m) => m.api.totalRequests > 0);
+}
+
+export function flushSessionUsageSnapshot(
+  config: Pick<Config, 'getProjectRoot' | 'getSessionId'>,
+  deps: SessionUsageSnapshotDeps = {
+    getMetrics: () => uiTelemetryService.getMetrics(),
+    getSessionStartTime: () => uiTelemetryService.getSessionStartTime(),
+    persist: persistSessionUsage,
+    now: () => new Date(),
+  },
+): boolean {
+  const metrics = deps.getMetrics();
+  if (!hasUsageActivity(metrics)) return false;
+
+  deps.persist({
+    sessionId: config.getSessionId(),
+    startTime: deps.getSessionStartTime(),
+    endTime: deps.now(),
+    project: config.getProjectRoot(),
+    metrics,
+  });
+  return true;
+}
+
+export function startSessionUsageSnapshots(
+  config: Pick<Config, 'getProjectRoot' | 'getSessionId'>,
+  registerCleanupFn: typeof registerCleanup = registerCleanup,
+  deps?: Partial<SessionUsageSnapshotDeps> & {
+    intervalMs?: number;
+    setIntervalFn?: typeof setInterval;
+    clearIntervalFn?: typeof clearInterval;
+  },
+): void {
+  const snapshotDeps: SessionUsageSnapshotDeps = {
+    getMetrics: deps?.getMetrics ?? (() => uiTelemetryService.getMetrics()),
+    getSessionStartTime:
+      deps?.getSessionStartTime ??
+      (() => uiTelemetryService.getSessionStartTime()),
+    persist: deps?.persist ?? persistSessionUsage,
+    now: deps?.now ?? (() => new Date()),
+  };
+  const flush = () => {
+    try {
+      flushSessionUsageSnapshot(config, snapshotDeps);
+    } catch {
+      // Best-effort — usage reporting must not affect the session.
+    }
+  };
+  const setIntervalFn = deps?.setIntervalFn ?? setInterval;
+  const clearIntervalFn = deps?.clearIntervalFn ?? clearInterval;
+  const timer = setIntervalFn(
+    flush,
+    deps?.intervalMs ?? LIVE_USAGE_FLUSH_INTERVAL_MS,
+  );
+  timer.unref?.();
+
+  registerCleanupFn(() => {
+    clearIntervalFn(timer);
+    flush();
+  });
 }
 
 function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
@@ -761,28 +834,9 @@ export async function main() {
       }
     }
 
-    // Persist session usage for cross-session reports (must run before
-    // config.shutdown() which clears telemetry state).
-    // sessionStartTime is read from uiTelemetryService so it stays correct
-    // after /clear resets the session (reset() updates the internal timestamp).
-    registerCleanup(() => {
-      try {
-        const metrics = uiTelemetryService.getMetrics();
-        const hasActivity = Object.values(metrics.models).some(
-          (m) => m.api.totalRequests > 0,
-        );
-        if (!hasActivity) return;
-        persistSessionUsage({
-          sessionId: config.getSessionId(),
-          startTime: uiTelemetryService.getSessionStartTime(),
-          endTime: new Date(),
-          project: config.getProjectRoot(),
-          metrics,
-        });
-      } catch {
-        // Best-effort — don't block shutdown
-      }
-    });
+    // Persist session usage periodically and on shutdown. Must register before
+    // config.shutdown(), which clears telemetry state.
+    startSessionUsageSnapshots(config);
 
     // Register cleanup for MCP clients as early as possible
     // This ensures MCP server subprocesses are properly terminated on exit
