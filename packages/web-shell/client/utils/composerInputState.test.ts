@@ -111,22 +111,47 @@ describe('composer input state', () => {
     expect(
       shouldBlockComposerSubmit({
         connectionStatus: 'disconnected',
+        hasSession: true,
+        restartSseOnPrompt: false,
       }),
     ).toBe(true);
     expect(
       shouldBlockComposerSubmit({
         connectionStatus: 'error',
+        hasSession: true,
+        restartSseOnPrompt: true,
       }),
     ).toBe(true);
     expect(
       shouldBlockComposerSubmit({
         connectionStatus: 'connecting',
+        hasSession: false,
+        restartSseOnPrompt: false,
       }),
     ).toBe(false);
     expect(
       shouldBlockComposerSubmit({
         connectionStatus: 'connected',
+        hasSession: false,
+        restartSseOnPrompt: false,
       }),
     ).toBe(false);
+  });
+
+  it('allows a disconnected session to submit when prompt SSE restart is enabled', () => {
+    expect(
+      shouldBlockComposerSubmit({
+        connectionStatus: 'disconnected',
+        hasSession: true,
+        restartSseOnPrompt: true,
+      }),
+    ).toBe(false);
+    expect(
+      shouldBlockComposerSubmit({
+        connectionStatus: 'disconnected',
+        hasSession: false,
+        restartSseOnPrompt: true,
+      }),
+    ).toBe(true);
   });
 });
