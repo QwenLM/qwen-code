@@ -2297,6 +2297,7 @@ export class CoreToolScheduler {
             pmForcedAsk,
             pmCtx,
             denyMessage,
+            requiresUserInteraction,
           } = flowResult;
 
           // ---- L5: Final decision based on permission + ApprovalMode ----
@@ -2415,7 +2416,10 @@ export class CoreToolScheduler {
           // Grep, LS, in-cwd Edit, …) short-circuit even in a denial-streak
           // fallback state — otherwise every trivially safe tool would
           // force manual approval until the user toggles modes.
-          if (shouldRunAutoModeForCall(approvalMode, canonicalName)) {
+          if (
+            !requiresUserInteraction &&
+            shouldRunAutoModeForCall(approvalMode, canonicalName)
+          ) {
             const denialState = this.config.getAutoModeDenialState();
             const fallback = shouldFallback(denialState);
             // `buildClassifierContents` retains only the most recent
@@ -2522,6 +2526,7 @@ export class CoreToolScheduler {
               confirmationPermission,
               approvalMode,
               canonicalName,
+              requiresUserInteraction,
             )
           ) {
             this.setToolCallOutcome(
@@ -2578,7 +2583,10 @@ export class CoreToolScheduler {
             }
 
             // AUTO_EDIT mode: auto-approve edit-like and info tools
-            if (isAutoEditApproved(approvalMode, confirmationDetails)) {
+            if (
+              !requiresUserInteraction &&
+              isAutoEditApproved(approvalMode, confirmationDetails)
+            ) {
               this.setToolCallOutcome(
                 reqInfo.callId,
                 ToolConfirmationOutcome.ProceedAlways,
@@ -2632,7 +2640,10 @@ export class CoreToolScheduler {
                 permissionMode,
               );
 
-              if (hookResult.hasDecision) {
+              if (
+                hookResult.hasDecision &&
+                (!hookResult.shouldAllow || !requiresUserInteraction)
+              ) {
                 if (hookResult.shouldAllow) {
                   // Hook granted permission - apply updated input if provided and proceed
                   if (
@@ -2751,7 +2762,9 @@ export class CoreToolScheduler {
               // When PM has an explicit 'ask' rule, 'always allow' would be
               // ineffective because ask takes priority over allow.
               // Hide the option so users aren't misled.
-              ...(pmForcedAsk ? { hideAlwaysAllow: true } : {}),
+              ...(pmForcedAsk || requiresUserInteraction
+                ? { hideAlwaysAllow: true }
+                : {}),
               onConfirm: (
                 outcome: ToolConfirmationOutcome,
                 payload?: ToolConfirmationPayload,
@@ -4897,7 +4910,12 @@ export class CoreToolScheduler {
           pendingTool.request.name,
           toolParams,
         );
-        const { finalPermission, pmForcedAsk, pmCtx } = flowResult;
+        const { finalPermission, pmForcedAsk, pmCtx, requiresUserInteraction } =
+          flowResult;
+
+        if (requiresUserInteraction) {
+          continue;
+        }
 
         const forceAutoReviewForAllow =
           this.config.getApprovalMode() === ApprovalMode.AUTO &&

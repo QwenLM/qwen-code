@@ -229,13 +229,33 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain('"${N_FAILED_CHECKS}" -eq 0');
     expect(reviewScanJob).toContain('${N_FAILED_CHECKS} failed check(s) new');
     expect(reviewScanJob).toContain('.completedAt // .updatedAt // ""');
-    expect(reviewScanJob.indexOf('EFF_WM="${PUSH_WM}"')).toBeLessThan(
+    expect(reviewScanJob.indexOf('EFF_WM="${EVAL_WM}"')).toBeLessThan(
       reviewScanJob.indexOf('N_FAILED_CHECKS='),
     );
+    // The else-branch floor is the behavioral change: fall back to the immutable
+    // CREATED_WM, never the mutable head commit date (PUSH_WM) that buried feedback.
+    expect(reviewScanJob).toContain('EFF_WM="${CREATED_WM}"');
     expect(reviewScanJob).toContain('echo "targets=[]" >> "${GITHUB_OUTPUT}"');
-    expect(reviewScanJob).toContain(
-      'PR has pending checks; skipping until the current verification finishes',
-    );
+    expect(reviewScanJob).toContain('active checks in flight; skipping until');
+    // Staleness bound must sit above legitimate check runtimes (review-address is
+    // capped at 120m) so an active run is never aged out mid-flight.
+    expect(reviewScanJob).toContain('PENDING_STALE_MIN=240');
+    // The staleness filter itself, including the comparison operator: a check only
+    // blocks if its start is newer than the cutoff. Asserting `> $cut` too means a
+    // flipped comparison (which would age out live checks → double-processing) is
+    // caught, not just a removed constant.
+    expect(reviewScanJob).toContain('.startedAt // $cut) > $cut');
+    // Round is the max across markers so a terminal handoff marker is honored
+    // regardless of its timestamp.
+    expect(reviewScanJob).toContain('map(.round) | max // 0');
+    // Never fall back to the mutable head commit date for the pre-first-eval
+    // floor (a base-sync HEAD would recreate feedback burial); use the immutable
+    // createdAt, or an empty floor if the metadata query failed.
+    expect(reviewScanJob).not.toContain('commit.committer.date');
+    expect(reviewScanJob).toContain('.createdAt // ""');
+    // A failed metadata fetch (empty branch) must skip the candidate, not fall
+    // through to an address job that fails on `git checkout -B "" origin/`.
+    expect(reviewScanJob).toContain('could not fetch PR metadata');
   });
 
   it('falls back to existing issue backlog only when review has no target', () => {
@@ -441,6 +461,9 @@ describe('qwen-autofix workflow', () => {
     expect(prepareBranchAndFeedbackStep).toContain(
       'gsub("[^A-Za-z0-9 _./()-]"; "") | .[0:80]',
     );
+    // Failed checks render the specific check name (falling back to workflow
+    // name), so a "Test" job failing on a non-test step is identifiable.
+    expect(prepareBranchAndFeedbackStep).toContain('.name // .workflowName');
     expect(prepareBranchAndFeedbackStep).not.toContain(
       '.detailsUrl // .targetUrl',
     );
@@ -685,6 +708,10 @@ describe('qwen-autofix workflow', () => {
       'run_shell_command(npm run typecheck)',
       'run_shell_command(npm run lint)',
       'run_shell_command(npx vitest)',
+      // The agent must be able to regenerate a committed generated artifact
+      // (e.g. settings.schema.json) so a settingsSchema.ts edit does not trip
+      // CI's schema-freshness gate — invisible to build/typecheck/lint/vitest.
+      'run_shell_command(npm run generate:settings-schema)',
     ]) {
       expect(developFixStep).toContain(command);
       expect(triageAndAddressStep).toContain(command);
@@ -930,12 +957,48 @@ describe('qwen-autofix workflow', () => {
       expect(step).toContain('npm run build');
       expect(step).toContain('npm run typecheck');
       expect(step).toContain('npm run lint');
+      // The settings-schema freshness gate is extracted to a shared script so the
+      // two gates cannot drift; each verify step just invokes it.
+      expect(step).toContain('bash .github/scripts/check-settings-schema.sh');
       expect(step).toContain(
         'No package changes detected; skipping package tests.',
       );
       expect(step).not.toContain('Fix does not touch any package');
       expect(step).not.toContain('PR does not touch any package');
     }
+    // The shared script mirrors CI's freshness gate: regenerate + `git status
+    // --porcelain` (version-agnostic — the generator's --check was reverted from
+    // main by #7031 and must NOT be relied on), with a generator-crash guard, and
+    // writes outcome=failed so the caller reports a definite outcome.
+    const schemaScript = readFileSync(
+      '.github/scripts/check-settings-schema.sh',
+      'utf8',
+    );
+    expect(schemaScript).toContain('npm run generate:settings-schema');
+    expect(schemaScript).not.toContain('generate:settings-schema -- --check');
+    expect(schemaScript).toContain(
+      'if ! npm run generate:settings-schema; then',
+    );
+    expect(schemaScript).toContain(
+      'packages/vscode-ide-companion/schemas/settings.schema.json',
+    );
+    expect(schemaScript).toContain('is out of date');
+    expect(schemaScript).toContain('git status --porcelain');
+    expect(schemaScript).toContain('outcome=failed');
+    // The review gate's freshness check is a STRUCTURAL guard: the script call
+    // must run BEFORE the no-op/unchanged return, so a stale-schema PR the agent
+    // wrongly no-ops fails (outcome=failed) instead of being reported as evaluated
+    // while CI stays red (the motivating bug).
+    const reviewVerifyGate = verificationGateSteps.find((s) =>
+      s.includes('outcome=noop'),
+    );
+    expect(reviewVerifyGate).toBeTruthy();
+    expect(
+      reviewVerifyGate.indexOf('bash .github/scripts/check-settings-schema.sh'),
+    ).toBeGreaterThanOrEqual(0);
+    expect(
+      reviewVerifyGate.indexOf('bash .github/scripts/check-settings-schema.sh'),
+    ).toBeLessThan(reviewVerifyGate.indexOf('outcome=noop'));
   });
 
   it('passes model credentials directly to qwen subprocesses', () => {
@@ -1070,12 +1133,51 @@ describe('qwen-autofix workflow', () => {
       "NEWEST: '${{ steps.prepare.outputs.newest }}'",
     );
     expect(reviewAddressReportStep).toContain('"${DRY_RUN}" != "true"');
-    expect(reviewAddressReportStep).toContain('-s "${WORKDIR}/handoff.md"');
+    // Handoff no longer requires the agent to have written handoff.md: an infra
+    // or agent crash before the verify gate (OUTCOME unset, JOB_STATUS != success)
+    // must still post a handoff + marker so the loop never goes silent.
+    expect(reviewAddressReportStep).toContain('POST_HANDOFF=true');
+    expect(reviewAddressReportStep).toContain('"${JOB_STATUS:-}" != "success"');
+    // The env declaration must exist, else JOB_STATUS is always empty at runtime,
+    // the :- default fires, and "!= success" is always true → over-eager handoffs.
+    expect(reviewAddressReportStep).toContain("JOB_STATUS: '${{ job.status }}'");
+    // ...but a published run (OUTCOME fixed/noop) must NOT post a handoff, even if
+    // a later always() step fails the job — otherwise it contradicts the success.
+    expect(reviewAddressReportStep).toContain('"${OUTCOME:-unknown}" != "fixed"');
+    expect(reviewAddressReportStep).toContain('"${OUTCOME:-unknown}" != "noop"');
+    // Terminal round when feedback was never read (empty NEWEST) so the scan skips
+    // instead of re-handing-off every tick.
+    expect(reviewAddressReportStep).toContain('MARK_ROUND="${MAX_ROUNDS}"');
     expect(reviewAddressReportStep).toContain(
-      '<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} -->',
+      '<!-- autofix-eval ts=${MARK_TS} acted=false round=${MARK_ROUND} -->',
+    );
+    // The ts fallback must be non-empty even under cascading API failure (empty
+    // WATERMARK), or the scan's `ts=([^ ]+)` regex would not match the terminal
+    // marker and the PR would be re-handed-off every cycle.
+    expect(reviewAddressReportStep).toContain(
+      'MARK_TS="${NEWEST:-${WATERMARK:-9999-12-31T23:59:59Z}}"',
+    );
+    // A pre-prepare crash must NOT claim MAX_ROUNDS attempts were made, and since
+    // the terminal marker makes the scan skip forever, the headline must state the
+    // real recovery (delete the marker), not promise a re-trigger the guard ignores.
+    expect(reviewAddressReportStep).toContain('could not start evaluation');
+    expect(reviewAddressReportStep).toContain(
+      'delete this bot\'s terminal',
+    );
+    // Truncate UTF-8 safely so a split multi-byte sequence can't corrupt the body,
+    // and keep the `|| true` — iconv -c exits 1 when it discards a byte, which under
+    // set -eo pipefail would abort the step and skip the marker (a silent stall).
+    expect(reviewAddressReportStep).toContain(
+      "iconv -f utf-8 -t utf-8 -c | sed 's/<!--[^>]*-->//g' || true",
+    );
+    // Prefer failure.md, but also attach the agent's success outputs so a verify
+    // gate failing after an agent success (e.g. the schema gate) shows the real
+    // summary instead of a false "crashed or timed out".
+    expect(reviewAddressReportStep).toContain(
+      'for f in failure.md handoff.md address-summary.md no-action.md',
     );
     expect(reviewAddressReportStep).toContain(
-      'Could not address the latest review feedback automatically',
+      'Could not address the latest feedback automatically',
     );
     expect(reviewAddressReportStep).toContain('gh pr comment "${PR}"');
     expect(reviewAddressReportStep).toContain(
@@ -1089,6 +1191,89 @@ describe('qwen-autofix workflow', () => {
     );
     expect(reviewAddressReportStep).toContain('human should take over');
     expect(reviewAddressReportStep).toContain("sed 's/<!--[^>]*-->//g'");
+  });
+
+  it('replays the handoff decision and terminal-round transitions under bash', () => {
+    // The agent step is bounded below the 120-minute job timeout so a runaway
+    // agent fails the STEP, not the job, leaving the always() report step time to
+    // run (a job-level timeout would cancel that step too and go silent).
+    // 120 is the review-address job timeout (unique; other jobs use 5/15/180).
+    expect(workflow).toContain('timeout-minutes: 120');
+    const addressStep =
+      workflow.match(
+        /- name: 'Triage and address'[\s\S]*?(?=\n {6}- name: )/,
+      )?.[0] ?? '';
+    expect(addressStep).toContain('timeout-minutes: 80');
+
+    // Replay the ACTUAL POST_HANDOFF decision extracted from the workflow so the
+    // state transitions are exercised, not merely string-matched.
+    const decision = reviewAddressReportStep.match(
+      /(POST_HANDOFF=false\n[\s\S]*?\n\s*fi\n\s*fi)\n\s*if \[\[ "\$\{POST_HANDOFF\}" == "true" \]\]/,
+    )?.[1];
+    expect(decision).toBeTruthy();
+    const runPostHandoff = (env) =>
+      execFileSync(
+        'bash',
+        ['-c', `${decision}\nprintf '%s' "$POST_HANDOFF"`],
+        { env: { ...process.env, ...env }, encoding: 'utf8' },
+      );
+    const base = { DRY_RUN: 'false', GITHUB_TOKEN: 'x' };
+    // A published run (fixed/noop) must NOT hand off even if a later always() step
+    // failed the job — otherwise it contradicts the already-reported success.
+    expect(runPostHandoff({ ...base, OUTCOME: 'fixed', JOB_STATUS: 'failure' })).toBe('false');
+    expect(runPostHandoff({ ...base, OUTCOME: 'noop', JOB_STATUS: 'failure' })).toBe('false');
+    expect(runPostHandoff({ ...base, OUTCOME: 'fixed', JOB_STATUS: 'success' })).toBe('false');
+    // Dry-run never hands off.
+    expect(runPostHandoff({ ...base, DRY_RUN: 'true', OUTCOME: 'failed', JOB_STATUS: 'failure' })).toBe('false');
+    // Real non-success ends DO hand off: verify failure, pre-verify crash (empty
+    // OUTCOME), and cancellation / job timeout.
+    expect(runPostHandoff({ ...base, OUTCOME: 'failed', JOB_STATUS: 'failure' })).toBe('true');
+    expect(runPostHandoff({ ...base, OUTCOME: '', JOB_STATUS: 'failure' })).toBe('true');
+    expect(runPostHandoff({ ...base, OUTCOME: '', JOB_STATUS: 'cancelled' })).toBe('true');
+    // Empty OUTCOME with a *successful* job — documents that no handoff is posted
+    // (verify runs always(), so in practice OUTCOME is set on a successful job).
+    expect(runPostHandoff({ ...base, OUTCOME: '', JOB_STATUS: 'success' })).toBe('false');
+
+    // Terminal-round transition: feedback read (NEWEST set) → normal increment;
+    // feedback never read (empty) → MAX_ROUNDS so the scan skips instead of
+    // re-handing-off forever.
+    const markRound = reviewAddressReportStep.match(
+      /(if \[\[ -n "\$\{NEWEST:-\}" \]\]; then\n[\s\S]*?\n\s*fi)/,
+    )?.[1];
+    expect(markRound).toBeTruthy();
+    const runMarkRound = (env) =>
+      execFileSync('bash', ['-c', `${markRound}\nprintf '%s' "$MARK_ROUND"`], {
+        env: { ...process.env, MAX_ROUNDS: '5', ROUND: '2', ...env },
+        encoding: 'utf8',
+      });
+    expect(runMarkRound({ NEWEST: '2026-07-16T00:00:00Z' })).toBe('3');
+    expect(runMarkRound({ NEWEST: '' })).toBe('5');
+
+    // Behaviorally replay the pending-staleness jq filter against sample checks so
+    // a flipped comparison (which would age out live checks → double-processing)
+    // is caught, not just string-matched.
+    const jqFilter = reviewScanJob.match(
+      /--arg cut "\$\{PENDING_CUTOFF\}" '([\s\S]*?)' <<< "\$\{CHECKS_JSON\}"/,
+    )?.[1];
+    expect(jqFilter).toBeTruthy();
+    const runStaleness = (checks) =>
+      execFileSync(
+        'jq',
+        ['-r', '--arg', 'cut', '2026-07-16T00:00:00Z', jqFilter],
+        { input: JSON.stringify(checks), encoding: 'utf8' },
+      ).trim();
+    // Started AFTER the cutoff (recent) → active → blocks.
+    expect(
+      runStaleness([{ status: 'IN_PROGRESS', startedAt: '2026-07-16T01:00:00Z', workflowName: 'CI' }]),
+    ).toBe('true');
+    // Started BEFORE the cutoff (stuck past the bound) → dead → does not block.
+    expect(
+      runStaleness([{ status: 'IN_PROGRESS', startedAt: '2026-07-15T00:00:00Z', workflowName: 'CI' }]),
+    ).toBe('false');
+    // Queued, never started (no startedAt) → does not block.
+    expect(
+      runStaleness([{ status: 'QUEUED', workflowName: 'CI' }]),
+    ).toBe('false');
   });
 
   it('writes agent output to a log and marks loop guard failures for handoff', () => {
