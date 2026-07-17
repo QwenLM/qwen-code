@@ -233,6 +233,25 @@ describe('useComposerCore tags', () => {
     ).toBeNull();
   });
 
+  it('renders built-in icons for inline composer tags', async () => {
+    const kinds = ['extension', 'file', 'mcp', 'skill'] as const;
+    await mount({
+      composerInput: {
+        tags: kinds.map((kind) => ({
+          id: `${kind}:reference`,
+          kind,
+          value: kind,
+          serialized: `@${kind}:reference`,
+        })),
+        tagPlacement: 'inline',
+      },
+    });
+
+    expect(
+      document.body.querySelectorAll('[style*="--composer-tag-icon-url"]'),
+    ).toHaveLength(kinds.length);
+  });
+
   it('keeps inline tags after trimming leading whitespace on submit', async () => {
     const { onSubmit } = await mount();
 

@@ -1035,7 +1035,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: false,
         description:
-          'Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled; for native text selection, hold Shift (or Option on macOS) while dragging.',
+          'Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled. Drag to select text in the viewport (double/triple click selects a word/line), copied on release. To use the terminal’s own selection instead, hold Shift (or Option on macOS) while dragging.',
         showInDialog: true,
       },
       showScrollbar: {
@@ -3184,9 +3184,9 @@ const SETTINGS_SCHEMA = {
         label: 'Enable Artifacts',
         category: 'Experimental',
         requiresRestart: true,
-        default: false,
+        default: true,
         description:
-          'Enable the Artifact tool (experimental). When enabled, the model can publish a self-contained HTML page as an interactive Artifact and open it in the browser. Interactive, non-SDK sessions only. QWEN_CODE_ENABLE_ARTIFACT=1 enables the metadata-only record_artifact tool for non-SDK daemon sessions, and also enables the Artifact tool in interactive sessions. QWEN_CODE_DISABLE_ARTIFACT=1 hard-disables both.',
+          'Enable artifact tools. Enabled by default. In interactive, non-SDK sessions, the model can publish a self-contained HTML page as an interactive Artifact and open it in the browser. Non-SDK daemon sessions can use the metadata-only record_artifact tool. Set this to false or use QWEN_CODE_DISABLE_ARTIFACT=1 to disable both.',
         showInDialog: true,
       },
       emitToolUseSummaries: {
@@ -3209,7 +3209,7 @@ const SETTINGS_SCHEMA = {
     requiresRestart: true,
     default: {},
     description:
-      'Configuration for the experimental Artifact tool (enable it via experimental.artifact). Selects the publish backend and, for the host backend, the upload command and shareable URL template.',
+      'Configuration for artifact publishing. Selects the publish backend and, for the host backend, the upload command and shareable URL template.',
     showInDialog: false,
     properties: {
       autoOpen: {
