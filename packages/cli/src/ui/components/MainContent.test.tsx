@@ -89,6 +89,10 @@ vi.mock('./DebugModeNotification.js', () => ({
   DebugModeNotification: () => <Text>DEBUG_NOTIFICATION</Text>,
 }));
 
+vi.mock('../selection/use-text-selection.js', () => ({
+  TextSelectionController: () => null,
+}));
+
 vi.mock('./shared/ScrollableList.js', async () => {
   const actual = await vi.importActual<
     typeof import('./shared/ScrollableList.js')

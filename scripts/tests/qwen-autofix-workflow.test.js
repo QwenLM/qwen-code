@@ -958,14 +958,43 @@ describe('qwen-autofix workflow', () => {
       expect(step).toContain('npm run typecheck');
       expect(step).toContain('npm run lint');
       // The settings-schema freshness gate is extracted to a shared script so the
-      // two gates cannot drift; each verify step just invokes it.
-      expect(step).toContain('bash .github/scripts/check-settings-schema.sh');
+      // two gates cannot drift. Each verify step MUST invoke the copy staged from
+      // the trusted base checkout, NOT the working-tree path: after "Prepare
+      // branch and feedback" the tree is the PR branch, and a branch that predates
+      // the script does not contain it (bash exits 127 and the gate dies with no
+      // outcome), while an in-branch copy would let branch code define its own
+      // gate.
+      expect(step).toContain('bash "${RUNNER_TEMP}/check-settings-schema.sh"');
+      expect(step).not.toContain('bash .github/scripts/check-settings-schema.sh');
       expect(step).toContain(
         'No package changes detected; skipping package tests.',
       );
       expect(step).not.toContain('Fix does not touch any package');
       expect(step).not.toContain('PR does not touch any package');
     }
+    // Both jobs must stage the trusted copy before any branch switch.
+    expect(
+      workflow.match(
+        /cp \.github\/scripts\/check-settings-schema\.sh "\$\{RUNNER_TEMP\}\/check-settings-schema\.sh"/g,
+      ) ?? [],
+    ).toHaveLength(2);
+    // In the issue-autofix job the staging must happen BEFORE the verify gate's
+    // `git checkout "${BRANCH}"` (first occurrence in the file is the issue
+    // job's): the agent's commits can touch .github/scripts, so a post-checkout
+    // copy would stage the agent's version of the gate instead of the trusted
+    // base's. indexOf resolves to the issue job's staging (first occurrence).
+    expect(
+      workflow.indexOf("- name: 'Stage trusted schema gate'"),
+    ).toBeGreaterThanOrEqual(0);
+    expect(
+      workflow.indexOf("- name: 'Stage trusted schema gate'"),
+    ).toBeLessThan(workflow.indexOf('git checkout "${BRANCH}"'));
+    // In the review-address job the staging must happen BEFORE the branch switch
+    // ("Prepare branch and feedback" exists only in that job; the job's staging
+    // step is the last occurrence of the staging step name in the file).
+    expect(
+      workflow.lastIndexOf("- name: 'Stage trusted schema gate'"),
+    ).toBeLessThan(workflow.indexOf("- name: 'Prepare branch and feedback'"));
     // The shared script mirrors CI's freshness gate: regenerate + `git status
     // --porcelain` (version-agnostic — the generator's --check was reverted from
     // main by #7031 and must NOT be relied on), with a generator-crash guard, and
@@ -994,10 +1023,10 @@ describe('qwen-autofix workflow', () => {
     );
     expect(reviewVerifyGate).toBeTruthy();
     expect(
-      reviewVerifyGate.indexOf('bash .github/scripts/check-settings-schema.sh'),
+      reviewVerifyGate.indexOf('bash "${RUNNER_TEMP}/check-settings-schema.sh"'),
     ).toBeGreaterThanOrEqual(0);
     expect(
-      reviewVerifyGate.indexOf('bash .github/scripts/check-settings-schema.sh'),
+      reviewVerifyGate.indexOf('bash "${RUNNER_TEMP}/check-settings-schema.sh"'),
     ).toBeLessThan(reviewVerifyGate.indexOf('outcome=noop'));
   });
 
