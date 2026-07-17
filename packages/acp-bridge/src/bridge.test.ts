@@ -5046,16 +5046,23 @@ describe('createAcpSessionBridge', () => {
       })();
 
       await expect(
-        bridge.sendPrompt(session.sessionId, {
-          sessionId: session.sessionId,
-          prompt: [{ type: 'text', text: 'stream may fail' }],
-        }),
+        bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'stream may fail' }],
+          },
+          undefined,
+          { promptId: 'prompt-error' },
+        ),
       ).rejects.toThrow('terminated');
 
       const event = await turnError;
+      expect(event.promptId).toBe('prompt-error');
       expect(event.data).toMatchObject({
         message: 'terminated',
         errorKind: 'model_stream_interrupted',
+        promptId: 'prompt-error',
       });
 
       abort.abort();
@@ -5087,15 +5094,24 @@ describe('createAcpSessionBridge', () => {
         iter: AsyncIterable<{
           type: string;
           data: unknown;
+          promptId?: string;
           originatorClientId?: string;
         }>,
-      ): Promise<{ originatorClientId?: string; data: unknown }> => {
+      ): Promise<{
+        promptId?: string;
+        originatorClientId?: string;
+        data: unknown;
+      }> => {
         for await (const e of iter) {
           if (e.type !== 'session_update') continue;
           const update = (e.data as { update?: { sessionUpdate?: string } })
             ?.update;
           if (update?.sessionUpdate === 'user_message_chunk') {
-            return { originatorClientId: e.originatorClientId, data: e.data };
+            return {
+              promptId: e.promptId,
+              originatorClientId: e.originatorClientId,
+              data: e.data,
+            };
           }
         }
         throw new Error('no user_message_chunk observed');
@@ -5127,7 +5143,7 @@ describe('createAcpSessionBridge', () => {
           _meta: { inputAnnotations, privateRequestId: 'hidden' },
         },
         undefined,
-        { clientId: session.clientId },
+        { clientId: session.clientId, promptId: 'prompt-echo' },
       );
 
       const [aChunk, bChunk] = await Promise.all([aPromise, bPromise]);
@@ -5148,6 +5164,7 @@ describe('createAcpSessionBridge', () => {
         // Originator stamp present so SDK `suppressOwnUserEcho` can dedup
         // on the originator's own UI.
         expect(chunk.originatorClientId).toBe(session.clientId);
+        expect(chunk.promptId).toBe('prompt-echo');
         // Source marker distinguishes the bridge echo from agent content.
         expect((update._meta as { source?: string })?.source).toBe(
           'bridge-echo',
@@ -5297,7 +5314,7 @@ describe('createAcpSessionBridge', () => {
             prompt: [{ type: 'text', text: 'long running' }],
           },
           promptAbort.signal,
-          { clientId: session.clientId },
+          { clientId: session.clientId, promptId: 'prompt-cancelled' },
         )
         .catch(() => {
           // AbortError is expected — the originator's connection dropped.
@@ -5314,6 +5331,7 @@ describe('createAcpSessionBridge', () => {
       );
       // Attributed to the prompt's originator (whose connection dropped).
       expect(evt.originatorClientId).toBe(session.clientId);
+      expect(evt.promptId).toBe('prompt-cancelled');
 
       // Let the hung promptImpl settle so shutdown doesn't wait on it.
       releasePrompt?.();
@@ -6064,14 +6082,26 @@ describe('createAcpSessionBridge', () => {
           events.push(ev);
         }
       })();
-      await bridge.sendPrompt(session.sessionId, {
-        sessionId: session.sessionId,
-        prompt: [{ type: 'text', text: 'first prompt' }],
-      });
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'first prompt' }],
+        },
+        undefined,
+        { promptId: 'prompt-single' },
+      );
       const addedEvents = events.filter(
         (e) => e.type === 'pending_prompt_added',
       );
       expect(addedEvents).toHaveLength(0);
+      await vi.waitFor(() => {
+        const completed = events.find((e) => e.type === 'turn_complete');
+        expect(completed?.promptId).toBe('prompt-single');
+        expect(
+          (completed?.data as { promptId?: string } | undefined)?.promptId,
+        ).toBe('prompt-single');
+      });
       expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(0);
       sub.catch(() => {});
       await bridge.shutdown();
@@ -6101,20 +6131,31 @@ describe('createAcpSessionBridge', () => {
         }
       })();
 
-      const p1 = bridge.sendPrompt(session.sessionId, {
-        sessionId: session.sessionId,
-        prompt: [{ type: 'text', text: 'blocking' }],
-      });
-      const p2 = bridge.sendPrompt(session.sessionId, {
-        sessionId: session.sessionId,
-        prompt: [{ type: 'text', text: 'queued behind first' }],
-      });
+      const p1 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'blocking' }],
+        },
+        undefined,
+        { promptId: 'prompt-first' },
+      );
+      const p2 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'queued behind first' }],
+        },
+        undefined,
+        { promptId: 'prompt-second' },
+      );
 
       await new Promise((r) => setTimeout(r, 20));
       const addedEvents = events.filter(
         (e) => e.type === 'pending_prompt_added',
       );
       expect(addedEvents).toHaveLength(1);
+      expect(addedEvents[0]?.promptId).toBe('prompt-second');
       expect(
         (addedEvents[0] as BridgeEvent & { data: { text: string } }).data.text,
       ).toBe('queued behind first');
@@ -6144,10 +6185,15 @@ describe('createAcpSessionBridge', () => {
         (e) => e.type === 'pending_prompt_started',
       );
       expect(startedEvents).toHaveLength(1);
+      expect(startedEvents[0]?.promptId).toBe('prompt-second');
       expect(
         (startedEvents[0] as BridgeEvent & { data: { text: string } }).data
           .text,
       ).toBe('queued behind first');
+      const completedEvents = events.filter(
+        (e) => e.type === 'pending_prompt_completed',
+      );
+      expect(completedEvents[0]?.promptId).toBe('prompt-second');
       expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(0);
       sub.catch(() => {});
       await bridge.shutdown();
@@ -6170,21 +6216,37 @@ describe('createAcpSessionBridge', () => {
         channelFactory: async () => handle.channel,
       });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const events: BridgeEvent[] = [];
+      const sub = (async () => {
+        for await (const event of bridge.subscribeEvents(session.sessionId)) {
+          events.push(event);
+        }
+      })();
 
-      const p1 = bridge.sendPrompt(session.sessionId, {
-        sessionId: session.sessionId,
-        prompt: [{ type: 'text', text: 'blocker' }],
-      });
-      const p2 = bridge.sendPrompt(session.sessionId, {
-        sessionId: session.sessionId,
-        prompt: [{ type: 'text', text: 'to be removed' }],
-      });
+      const p1 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'blocker' }],
+        },
+        undefined,
+        { promptId: 'prompt-running' },
+      );
+      const p2 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'to be removed' }],
+        },
+        undefined,
+        { promptId: 'prompt-removed' },
+      );
 
       await new Promise((r) => setTimeout(r, 20));
       const pending = bridge.getPendingPrompts(session.sessionId);
       expect(pending).toHaveLength(2);
       const queuedId = pending[1]?.promptId;
-      expect(queuedId).toBeDefined();
+      expect(queuedId).toBe('prompt-removed');
 
       const result = bridge.removePendingPrompt(session.sessionId, queuedId!);
       expect(result.removed).toBe(true);
@@ -6200,6 +6262,19 @@ describe('createAcpSessionBridge', () => {
       await p1;
       await expect(p2).rejects.toBeDefined();
       expect(handle.agent.cancelCalls).toHaveLength(0);
+      await vi.waitFor(() => {
+        const removed = events.find(
+          (event) =>
+            event.type === 'pending_prompt_completed' &&
+            (event.data as { state?: string }).state === 'removed',
+        );
+        expect(removed?.promptId).toBe('prompt-removed');
+        expect(removed?.data).toMatchObject({
+          promptId: 'prompt-removed',
+          state: 'removed',
+        });
+      });
+      sub.catch(() => {});
       await bridge.shutdown();
     });
 
@@ -15818,19 +15893,30 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     });
     const bridge = makeBridge({ channelFactory: async () => handle.channel });
     const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-    const send = (text: string) =>
+    const send = (text: string, promptId: string) =>
       bridge
         .sendPrompt(
           session.sessionId,
           { sessionId: session.sessionId, prompt: [{ type: 'text', text }] },
           undefined,
-          { clientId: session.clientId },
+          { clientId: session.clientId, promptId },
         )
         .catch(() => {});
 
-    const p1 = send('p1');
+    const abort = new AbortController();
+    const iter = bridge.subscribeEvents(session.sessionId, {
+      signal: abort.signal,
+    });
+    const injected = (async () => {
+      for await (const event of iter) {
+        if (event.type === 'mid_turn_message_injected') return event;
+      }
+      throw new Error('no mid_turn_message_injected observed');
+    })();
+
+    const p1 = send('p1', 'prompt-1');
     await new Promise((r) => setTimeout(r, 10));
-    const p2 = send('p2'); // queued behind p1 ⇒ pendingPromptCount = 2
+    const p2 = send('p2', 'prompt-2'); // queued behind p1 ⇒ pendingPromptCount = 2
     expect(bridge.enqueueMidTurnMessage(session.sessionId, 'x')).toEqual({
       accepted: true,
     });
@@ -15843,9 +15929,101 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         sessionId: session.sessionId,
       }),
     ).toEqual({ messages: ['x'] });
+    expect((await injected).promptId).toBe('prompt-2');
 
     releases[1]!();
     await Promise.all([p1, p2]);
+    abort.abort();
+    await bridge.shutdown();
+  });
+
+  it('switches session-update attribution between queued turns and clears it at idle', async () => {
+    const releases: Array<() => void> = [];
+    const handle = makeChannel({
+      promptImpl: async () => {
+        await new Promise<void>((resolve) => {
+          releases.push(resolve);
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const abort = new AbortController();
+    const iter = bridge.subscribeEvents(session.sessionId, {
+      signal: abort.signal,
+    });
+    const updates = (async () => {
+      const observed: Array<{ text: string; promptId?: string }> = [];
+      for await (const event of iter) {
+        if (event.type !== 'session_update') continue;
+        const update = (
+          event.data as {
+            update?: { content?: { text?: string } };
+          }
+        ).update;
+        const text = update?.content?.text;
+        if (!text?.startsWith('agent-')) continue;
+        observed.push({ text, promptId: event.promptId });
+        if (observed.length === 3) return observed;
+      }
+      throw new Error('session update stream ended early');
+    })();
+
+    const p1 = bridge.sendPrompt(
+      session.sessionId,
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'p1' }],
+      },
+      undefined,
+      { clientId: session.clientId, promptId: 'prompt-1' },
+    );
+    await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+    await handle.agentConnection.sessionUpdate({
+      sessionId: session.sessionId,
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'agent-one' },
+      },
+    });
+
+    const p2 = bridge.sendPrompt(
+      session.sessionId,
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'p2' }],
+      },
+      undefined,
+      { clientId: session.clientId, promptId: 'prompt-2' },
+    );
+    releases[0]!();
+    await p1;
+    await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(2));
+    await handle.agentConnection.sessionUpdate({
+      sessionId: session.sessionId,
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'agent-two' },
+      },
+    });
+
+    releases[1]!();
+    await p2;
+    await handle.agentConnection.sessionUpdate({
+      sessionId: session.sessionId,
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'agent-idle' },
+      },
+    });
+
+    await expect(updates).resolves.toEqual([
+      { text: 'agent-one', promptId: 'prompt-1' },
+      { text: 'agent-two', promptId: 'prompt-2' },
+      { text: 'agent-idle', promptId: undefined },
+    ]);
+    abort.abort();
     await bridge.shutdown();
   });
 
@@ -15889,7 +16067,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
           prompt: [{ type: 'text', text: 'go' }],
         },
         undefined,
-        { clientId: session.clientId },
+        { clientId: session.clientId, promptId: 'prompt-mid-turn' },
       )
       .catch(() => {});
     await new Promise((r) => setTimeout(r, 10));
@@ -15915,6 +16093,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     const it = iter[Symbol.asyncIterator]();
     const next = await it.next();
     expect(next.value?.type).toBe('mid_turn_message_injected');
+    expect(next.value?.promptId).toBe('prompt-mid-turn');
     expect(next.value?.originatorClientId).toBe(session.clientId);
     expect(next.value?.data).toMatchObject({ messages: ['hi'] });
 

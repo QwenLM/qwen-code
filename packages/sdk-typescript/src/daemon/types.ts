@@ -2756,6 +2756,8 @@ export interface DaemonEvent {
   type: string;
   /** Frame payload — opaque JSON. */
   data: unknown;
+  /** Admitted prompt identifier for events belonging to a specific turn. */
+  promptId?: string;
   /** Envelope metadata, including daemon-emitted timestamps when available. */
   _meta?: Record<string, unknown>;
   originatorClientId?: string;

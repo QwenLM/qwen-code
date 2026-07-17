@@ -95,26 +95,28 @@ describe('EventBus', () => {
     // Need to start consuming before publishing so the subscriber is
     // registered in the loop below.
     setTimeout(() => {
-      bus.publish({ type: 'foo', data: 'a' });
+      bus.publish({ type: 'foo', data: 'a', promptId: 'prompt-live' });
       bus.publish({ type: 'foo', data: 'b' });
     }, 5);
 
     const events = await collect(iter, 2);
     expect(events.map((e) => e.data)).toEqual(['a', 'b']);
+    expect(events.map((e) => e.promptId)).toEqual(['prompt-live', undefined]);
     abort.abort();
   });
 
   it('replays events newer than lastEventId from the ring', async () => {
     const bus = new EventBus();
-    bus.publish({ type: 'foo', data: 'a' });
-    bus.publish({ type: 'foo', data: 'b' });
-    bus.publish({ type: 'foo', data: 'c' });
+    bus.publish({ type: 'foo', data: 'a', promptId: 'prompt-a' });
+    bus.publish({ type: 'foo', data: 'b', promptId: 'prompt-b' });
+    bus.publish({ type: 'foo', data: 'c', promptId: 'prompt-c' });
 
     const abort = new AbortController();
     const iter = bus.subscribe({ lastEventId: 1, signal: abort.signal });
     const events = await collect(iter, 2);
     expect(events.map((e) => e.id)).toEqual([2, 3]);
     expect(events.map((e) => e.data)).toEqual(['b', 'c']);
+    expect(events.map((e) => e.promptId)).toEqual(['prompt-b', 'prompt-c']);
     abort.abort();
   });
 
