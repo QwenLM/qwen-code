@@ -12,6 +12,7 @@ import {
   useDaemonFollowupSuggestion,
   useStreamingState,
   useTranscriptBlocks,
+  useTranscriptHistory,
   useTranscriptStore,
   useWorkspace,
   useWorkspaceActions,
@@ -127,6 +128,7 @@ export function ChatPane({
   const workspace = useWorkspace();
   const messages = useMessages(t);
   const blocks = useTranscriptBlocks();
+  const transcriptHistory = useTranscriptHistory();
   const store = useTranscriptStore();
   const streamingState = useStreamingState();
   const { artifacts } = useSessionArtifacts();
@@ -520,6 +522,10 @@ export function ChatPane({
           pendingApproval={pendingToolApproval}
           loadingTranscript={connection.loadingTranscript}
           catchingUp={connection.catchingUp}
+          hasOlderHistory={transcriptHistory.hasMore}
+          loadingOlderHistory={transcriptHistory.loading}
+          historyCapacityReached={transcriptHistory.capacityReached}
+          onLoadOlderHistory={transcriptHistory.loadMore}
           isResponding={isResponding}
           workspaceCwd={connection.workspaceCwd || ''}
           hideSessionTimeline

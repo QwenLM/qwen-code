@@ -115,6 +115,15 @@ export type {
   SendPromptOptions,
 } from './types.js';
 
+export interface DaemonTranscriptHistory {
+  hasMore: boolean;
+  loading: boolean;
+  capacityReached: boolean;
+  loadMore(): Promise<void>;
+}
+
+const SESSION_TRANSCRIPT_PAGINATION_FEATURE = 'session_transcript_pagination';
+
 function assistantDoneFromTurnEvent(
   event: DaemonEvent,
   reason: string,
@@ -128,6 +137,53 @@ function assistantDoneFromTurnEvent(
   };
 }
 
+function getPersistedReplayRecordId(event: DaemonEvent): string | undefined {
+  if (event.type !== 'session_update') {
+    return undefined;
+  }
+  try {
+    if (!isRecord(event.data)) return undefined;
+    const update = event.data['update'];
+    const meta = isRecord(update) ? update['_meta'] : event.data['_meta'];
+    return isRecord(meta)
+      ? getString(meta, 'qwen.session.recordId')
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function prependTranscriptHistory(
+  store: DaemonTranscriptStore,
+  events: DaemonUiEvent[],
+  maxBlocks: number,
+): boolean {
+  const current = store.getSnapshot();
+  const historyStore = createDaemonTranscriptStore({
+    maxBlocks: Number.MAX_SAFE_INTEGER,
+    nextOrdinal: current.nextOrdinal,
+  });
+  historyStore.dispatch(events);
+  const history = historyStore.getSnapshot();
+  if (history.blocks.length + current.blocks.length > maxBlocks) {
+    return false;
+  }
+  store.reset({
+    ...current,
+    blocks: [...history.blocks, ...current.blocks],
+    nextOrdinal: history.nextOrdinal,
+    toolBlockByCallId: {
+      ...history.toolBlockByCallId,
+      ...current.toolBlockByCallId,
+    },
+    permissionBlockByRequestId: {
+      ...history.permissionBlockByRequestId,
+      ...current.permissionBlockByRequestId,
+    },
+  });
+  return true;
+}
+
 const DaemonStoreContext = createContext<DaemonTranscriptStore | undefined>(
   undefined,
 );
@@ -137,6 +193,9 @@ const DaemonConnectionContext = createContext<
 const DaemonActionsContext = createContext<DaemonSessionActions | undefined>(
   undefined,
 );
+const DaemonTranscriptHistoryContext = createContext<
+  DaemonTranscriptHistory | undefined
+>(undefined);
 const DaemonPromptStatusContext = createContext<DaemonPromptStatus | undefined>(
   undefined,
 );
@@ -208,6 +267,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     createSessionRequest,
     maxQueued = 1024,
     maxBlocks = DEFAULT_MAX_BLOCKS,
+    historyPageSize,
     suppressOwnUserEcho = true,
     includeRawEvent = false,
     autoConnect = true,
@@ -250,6 +310,19 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     [maxBlocks],
   );
   const sessionRef = useRef<DaemonSessionClient | undefined>(undefined);
+  const transcriptHistoryRef = useRef<{
+    sessionId?: string;
+    beforeRecordId?: string;
+    cursor?: string;
+    hasMore: boolean;
+    loading: boolean;
+    capacityReached: boolean;
+  }>({ hasMore: false, loading: false, capacityReached: false });
+  const [transcriptHistoryState, setTranscriptHistoryState] = useState({
+    hasMore: false,
+    loading: false,
+    capacityReached: false,
+  });
   const eventStreamRef = useRef<
     | {
         sessionId: string;
@@ -282,6 +355,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const eventOptionsRef = useRef({ suppressOwnUserEcho, includeRawEvent });
   const reconnectConfigRef = useRef({ reconnectDelayMs, maxReconnectDelayMs });
   const loadWarningsRef = useRef(loadWarnings);
+  const historyPageSizeRef = useRef(historyPageSize);
   const clientIdRef = useRef<string | undefined>(undefined);
   if (!clientIdRef.current || clientId) {
     clientIdRef.current = getStableClientId(clientId);
@@ -289,6 +363,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   eventOptionsRef.current = { suppressOwnUserEcho, includeRawEvent };
   reconnectConfigRef.current = { reconnectDelayMs, maxReconnectDelayMs };
   loadWarningsRef.current = loadWarnings;
+  historyPageSizeRef.current = historyPageSize;
   const modelServiceId = createSessionRequest?.modelServiceId;
   const sessionScope = createSessionRequest?.sessionScope;
   const createSessionRequestRef = useRef(createSessionRequest);
@@ -541,6 +616,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 : await client.capabilities());
             if (disposed || abort.signal.aborted) return;
             capabilities = caps;
+            const historyPaginationSupported =
+              Array.isArray(caps.features) &&
+              caps.features.includes(SESSION_TRANSCRIPT_PAGINATION_FEATURE);
             heartbeatSupportedRef.current =
               Array.isArray(caps.features) &&
               caps.features.includes('client_heartbeat');
@@ -693,14 +771,27 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ? await restoreMethod(
                   client,
                   restoreSessionId,
-                  { workspaceCwd: effectWorkspaceCwd },
+                  {
+                    workspaceCwd: effectWorkspaceCwd,
+                    ...(historyPaginationSupported &&
+                    restoreMode === 'load' &&
+                    historyPageSizeRef.current !== undefined
+                      ? { historyPageSize: historyPageSizeRef.current }
+                      : {}),
+                  },
                   requestClientId,
                 )
               : reconnectSessionId
                 ? await DaemonSessionClient.load(
                     client,
                     reconnectSessionId,
-                    { workspaceCwd: effectWorkspaceCwd },
+                    {
+                      workspaceCwd: effectWorkspaceCwd,
+                      ...(historyPaginationSupported &&
+                      historyPageSizeRef.current !== undefined
+                        ? { historyPageSize: historyPageSizeRef.current }
+                        : {}),
+                    },
                     requestClientId,
                   )
                 : await DaemonSessionClient.createOrAttach(
@@ -841,6 +932,30 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // only fires once with the fully-populated state.
           const { compactedReplay, liveJournal } = activeSession.replaySnapshot;
           const replayEvents = [...compactedReplay, ...liveJournal];
+          const firstPersistedRecordId = replayEvents
+            .map(getPersistedReplayRecordId)
+            .find((recordId): recordId is string => recordId !== undefined);
+          const historyHasMore =
+            Array.isArray(capabilities?.features) &&
+            capabilities.features.includes(
+              SESSION_TRANSCRIPT_PAGINATION_FEATURE,
+            ) &&
+            activeSession.historyHasMore &&
+            firstPersistedRecordId !== undefined;
+          transcriptHistoryRef.current = {
+            sessionId: activeSession.sessionId,
+            ...(firstPersistedRecordId !== undefined
+              ? { beforeRecordId: firstPersistedRecordId }
+              : {}),
+            hasMore: historyHasMore,
+            loading: false,
+            capacityReached: false,
+          };
+          setTranscriptHistoryState({
+            hasMore: historyHasMore,
+            loading: false,
+            capacityReached: false,
+          });
           const replayInjected =
             shouldInjectReplaySnapshot && replayEvents.length > 0;
           if (needsStoreReset && !replayInjected) {
@@ -901,12 +1016,32 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 );
               }
             }
-            if (needsStoreReset) {
-              store.reset();
+            let replayExceededCapacity = false;
+            if (needsStoreReset || store.getSnapshot().blocks.length === 0) {
+              const replayStore = createDaemonTranscriptStore({
+                maxBlocks: Number.MAX_SAFE_INTEGER,
+              });
+              replayStore.dispatch(allUiEvents);
+              const replayState = replayStore.getSnapshot();
+              replayExceededCapacity = replayState.blocks.length > maxBlocks;
+              store.reset({
+                ...replayState,
+                maxBlocks: Math.max(maxBlocks, replayState.blocks.length),
+              });
+            } else if (allUiEvents.length > 0) {
+              store.dispatch(allUiEvents);
             }
             if (allUiEvents.length > 0) {
-              store.dispatch(allUiEvents);
               bumpWorkspaceEventSignals(allUiEvents, setWorkspaceEventSignals);
+            }
+            if (replayExceededCapacity && historyHasMore) {
+              transcriptHistoryRef.current.hasMore = false;
+              transcriptHistoryRef.current.capacityReached = true;
+              setTranscriptHistoryState({
+                hasMore: false,
+                loading: false,
+                capacityReached: true,
+              });
             }
             for (const replayEvent of replayEvents) {
               settleActivePromptFromTurnEvent(
@@ -1738,6 +1873,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     modelServiceId,
     sessionScope,
     maxQueued,
+    maxBlocks,
     store,
     restoreSessionId,
     restoreWorkspaceCwd,
@@ -1970,6 +2106,159 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       store,
     ],
   );
+  const loadMoreTranscript = useCallback(async () => {
+    const history = transcriptHistoryRef.current;
+    const activeSession = sessionRef.current;
+    if (
+      !history.hasMore ||
+      history.loading ||
+      !activeSession ||
+      activeSession.sessionId !== history.sessionId
+    ) {
+      return;
+    }
+
+    history.loading = true;
+    setTranscriptHistoryState({
+      hasMore: true,
+      loading: true,
+      capacityReached: false,
+    });
+    let terminalFailure = false;
+    try {
+      const page = await activeSession.client.getSessionTranscriptPage(
+        activeSession.sessionId,
+        {
+          ...(history.cursor !== undefined
+            ? { cursor: history.cursor }
+            : history.beforeRecordId !== undefined
+              ? { beforeRecordId: history.beforeRecordId }
+              : {}),
+          limit: historyPageSizeRef.current ?? 100,
+          clientId: activeSession.clientId,
+        },
+      );
+      if (
+        sessionRef.current !== activeSession ||
+        transcriptHistoryRef.current !== history
+      ) {
+        return;
+      }
+      if (page.partial || page.replayError) {
+        terminalFailure = true;
+        throw new Error(
+          page.replayError ?? 'Earlier session history was only partially read',
+        );
+      }
+
+      const replayOpts = {
+        ...eventOptionsRef.current,
+        suppressOwnUserEcho: false,
+      };
+      const uiEvents: DaemonUiEvent[] = [];
+      for (const replayEvent of page.events) {
+        try {
+          uiEvents.push(
+            ...filterDaemonUiEventsForTranscript(
+              replayEvent,
+              normalizeAndFilterEvent(
+                replayEvent,
+                activeSession.clientId,
+                replayOpts,
+                setConnection,
+                { updateConnection: false },
+              ),
+              addNotice,
+              dismissNotice,
+            ),
+          );
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          addNotice({
+            severity: 'warning',
+            category: 'protocol',
+            operation: 'normalize_event',
+            code: 'daemon.replay_event_malformed',
+            message: 'Skipped malformed history event',
+            debugMessage: message,
+            recoverable: true,
+          });
+          console.warn(
+            '[DaemonSessionProvider] skipped malformed history event:',
+            error,
+          );
+        }
+      }
+      if (
+        uiEvents.length > 0 &&
+        !prependTranscriptHistory(store, uiEvents, maxBlocks)
+      ) {
+        history.hasMore = false;
+        history.loading = false;
+        history.capacityReached = true;
+        setTranscriptHistoryState({
+          hasMore: false,
+          loading: false,
+          capacityReached: true,
+        });
+        return;
+      }
+      const hasCapacity = store.getSnapshot().blocks.length < maxBlocks;
+      history.capacityReached = page.hasMore && !hasCapacity;
+      history.cursor = page.nextCursor;
+      history.beforeRecordId = undefined;
+      history.hasMore = page.hasMore && hasCapacity;
+      history.loading = false;
+      setTranscriptHistoryState({
+        hasMore: history.hasMore,
+        loading: false,
+        capacityReached: history.capacityReached,
+      });
+    } catch (error) {
+      if (
+        sessionRef.current !== activeSession ||
+        transcriptHistoryRef.current !== history
+      ) {
+        return;
+      }
+      const retryable =
+        !terminalFailure &&
+        (!(error instanceof DaemonHttpError) ||
+          error.status >= 500 ||
+          error.status === 408 ||
+          error.status === 429);
+      history.hasMore = retryable;
+      history.loading = false;
+      history.capacityReached = false;
+      setTranscriptHistoryState({
+        hasMore: retryable,
+        loading: false,
+        capacityReached: false,
+      });
+      addNotice({
+        severity: 'warning',
+        category: 'user_action',
+        operation: 'load_session',
+        code: 'daemon.transcript_history.failed',
+        message: 'Failed to load earlier session history',
+        debugMessage: error instanceof Error ? error.message : String(error),
+        recoverable: retryable,
+      });
+      throw error;
+    }
+  }, [addNotice, dismissNotice, maxBlocks, store]);
+  const transcriptHistoryValue = useMemo<DaemonTranscriptHistory>(() => {
+    const active =
+      connection.sessionId === transcriptHistoryRef.current.sessionId &&
+      sessionRef.current?.sessionId === transcriptHistoryRef.current.sessionId;
+    return {
+      hasMore: active && transcriptHistoryState.hasMore,
+      loading: active && transcriptHistoryState.loading,
+      capacityReached: active && transcriptHistoryState.capacityReached,
+      loadMore: loadMoreTranscript,
+    };
+  }, [connection.sessionId, loadMoreTranscript, transcriptHistoryState]);
   const lastHandledSessionIdRef = useRef<
     string | undefined | typeof UNHANDLED_SESSION
   >(UNHANDLED_SESSION);
@@ -2006,7 +2295,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               value={workspaceEventSignals}
             >
               <DaemonActionsContext.Provider value={actions}>
-                {children}
+                <DaemonTranscriptHistoryContext.Provider
+                  value={transcriptHistoryValue}
+                >
+                  {children}
+                </DaemonTranscriptHistoryContext.Provider>
               </DaemonActionsContext.Provider>
             </DaemonWorkspaceEventSignalsContext.Provider>
           </DaemonSessionNoticesContext.Provider>
@@ -2280,6 +2573,16 @@ export function useDaemonTranscriptStore(): DaemonTranscriptStore {
     );
   }
   return store;
+}
+
+export function useDaemonTranscriptHistory(): DaemonTranscriptHistory {
+  const history = useContext(DaemonTranscriptHistoryContext);
+  if (!history) {
+    throw new Error(
+      'useDaemonTranscriptHistory must be used within DaemonSessionProvider',
+    );
+  }
+  return history;
 }
 
 export function useDaemonTranscriptState(): DaemonTranscriptState {

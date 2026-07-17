@@ -677,6 +677,9 @@ const EN: Messages = {
   'editor.hintSearch': 'search',
   'editor.noHistory': 'No matching history',
   'editor.placeholder': 'Type a message or @ file path',
+  'history.loadingEarlier': 'Loading earlier messages…',
+  'history.capacityReached':
+    'History display limit reached. Earlier messages remain saved.',
   'editor.shellPlaceholder': 'Enter terminal command',
   'editor.send': 'Send message',
   'editor.connectionDisconnected':
@@ -2762,6 +2765,8 @@ const ZH: Messages = {
   'editor.hintSearch': '搜索',
   'editor.noHistory': '没有匹配的历史记录',
   'editor.placeholder': '输入消息或 @ 文件路径',
+  'history.loadingEarlier': '正在加载更早消息…',
+  'history.capacityReached': '已达到历史显示上限，更早消息仍保存在会话中。',
   'editor.shellPlaceholder': '请输入终端命令',
   'editor.send': '发送消息',
   'editor.connectionDisconnected': '连接已中断，请在恢复后重试。',
