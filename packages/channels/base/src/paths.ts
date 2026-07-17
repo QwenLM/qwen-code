@@ -1,3 +1,4 @@
+import * as crypto from 'node:crypto';
 import * as path from 'node:path';
 import * as os from 'node:os';
 
@@ -44,4 +45,28 @@ export function getGlobalQwenDir(): string {
   return homeDir
     ? path.join(homeDir, '.qwen')
     : path.join(os.tmpdir(), '.qwen');
+}
+
+/**
+ * Directory name for a workspace-scoped slice of channel state, derived from
+ * the workspace's working directory.
+ *
+ * `<sanitized-basename>-<sha256[:12]>`: the basename keeps the directory
+ * human-recognizable; the hash of the FULL resolved path makes it unique, so
+ * two workspaces named `app` in different parents never collide. The input is
+ * resolved first so `/a/b`, `/a/b/`, and `~/…` equivalents map to the same
+ * scope.
+ */
+export function getWorkspaceScopeDirName(workspaceCwd: string): string {
+  const resolved = resolvePath(workspaceCwd);
+  const hash = crypto
+    .createHash('sha256')
+    .update(resolved)
+    .digest('hex')
+    .slice(0, 12);
+  const base = path
+    .basename(resolved)
+    .replace(/[^a-zA-Z0-9._-]/g, '_')
+    .slice(0, 32);
+  return base ? `${base}-${hash}` : hash;
 }

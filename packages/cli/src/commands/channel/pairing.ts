@@ -2,17 +2,32 @@ import type { CommandModule } from 'yargs';
 import { PairingStore } from '@qwen-code/channel-base';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 
-export const pairingListCommand: CommandModule<object, { name: string }> = {
+// Pairing state is scoped by the channel's workspace (#7017), so the CLI has
+// to address the same scope the channel worker uses. Default to the current
+// directory — running the command from the workspace selects its store.
+const cwdOption = {
+  type: 'string',
+  describe:
+    'Workspace directory the channel runs in (defaults to the current directory)',
+  default: '.',
+} as const;
+
+export const pairingListCommand: CommandModule<
+  object,
+  { name: string; cwd: string }
+> = {
   command: 'list <name>',
   describe: 'List pending pairing requests for a channel',
   builder: (yargs) =>
-    yargs.positional('name', {
-      type: 'string',
-      describe: 'Channel name',
-      demandOption: true,
-    }),
+    yargs
+      .positional('name', {
+        type: 'string',
+        describe: 'Channel name',
+        demandOption: true,
+      })
+      .option('cwd', cwdOption),
   handler: (argv) => {
-    const store = new PairingStore(argv.name);
+    const store = new PairingStore(argv.name, argv.cwd);
     const pending = store.listPending();
 
     if (pending.length === 0) {
@@ -32,7 +47,7 @@ export const pairingListCommand: CommandModule<object, { name: string }> = {
 
 export const pairingApproveCommand: CommandModule<
   object,
-  { name: string; code: string }
+  { name: string; code: string; cwd: string }
 > = {
   command: 'approve <name> <code>',
   describe: 'Approve a pending pairing request',
@@ -47,14 +62,15 @@ export const pairingApproveCommand: CommandModule<
         type: 'string',
         describe: 'Pairing code',
         demandOption: true,
-      }),
+      })
+      .option('cwd', cwdOption),
   handler: (argv) => {
-    const store = new PairingStore(argv.name);
+    const store = new PairingStore(argv.name, argv.cwd);
     const request = store.approve(argv.code);
 
     if (!request) {
       writeStderrLine(
-        `No pending request found for code "${argv.code.toUpperCase()}". It may have expired.`,
+        `No pending request found for code "${argv.code.toUpperCase()}" in this workspace. It may have expired, or the channel may run in a different workspace (pass --cwd <dir>).`,
       );
       process.exit(1);
     }

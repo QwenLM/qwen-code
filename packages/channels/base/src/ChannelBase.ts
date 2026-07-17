@@ -449,8 +449,12 @@ export abstract class ChannelBase {
     this.groupGate = new GroupGate(config.groupPolicy, config.groups);
     this.dmGate = new DmGate(config.dmPolicy);
 
+    // Scoped by the channel's workspace cwd: two workspaces reusing the same
+    // channel name must not share pairing/allowlist state (#7017).
     const pairingStore =
-      config.senderPolicy === 'pairing' ? new PairingStore(name) : undefined;
+      config.senderPolicy === 'pairing'
+        ? new PairingStore(name, config.cwd)
+        : undefined;
     this.gate = new SenderGate(
       config.senderPolicy,
       config.allowedUsers,

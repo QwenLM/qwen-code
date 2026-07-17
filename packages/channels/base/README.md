@@ -298,10 +298,10 @@ When `requireMention` is `true` (default), group messages are only processed if 
 ### PairingStore
 
 ```typescript
-constructor(channelName: string)
+constructor(channelName: string, workspaceCwd?: string)
 ```
 
-Persists pairing state to `~/.qwen/channels/{channelName}-pairing.json` and `{channelName}-allowlist.json`.
+Persists pairing state to `{channelName}-pairing.json` and `{channelName}-allowlist.json`. With `workspaceCwd` (what `ChannelBase` passes — the channel's `cwd`), the files live under the workspace-scoped directory `~/.qwen/channels/<workspace-scope>/` so two workspaces reusing the same channel name never share pairing requests or allowlist entries. Without it, the legacy global `~/.qwen/channels/` layout is used. On first scoped use, existing legacy global files are copied in once (grandfathering) so already-approved senders stay approved.
 
 | Method                                | Description                                                                                               |
 | ------------------------------------- | --------------------------------------------------------------------------------------------------------- |

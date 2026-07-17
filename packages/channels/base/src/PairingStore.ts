@@ -1,7 +1,7 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { getGlobalQwenDir } from './paths.js';
+import { getGlobalQwenDir, getWorkspaceScopeDirName } from './paths.js';
 
 // Alphabet without ambiguous chars: 0/O, 1/I
 const SAFE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -21,10 +21,62 @@ export class PairingStore {
   private pendingPath: string;
   private allowlistPath: string;
 
-  constructor(channelName: string) {
-    this.dir = path.join(getGlobalQwenDir(), 'channels');
+  /**
+   * @param channelName Channel name the state is keyed by.
+   * @param workspaceCwd Workspace working directory to scope the state to.
+   *   When provided, files live under
+   *   `<qwen-home>/channels/<workspace-scope>/` so two workspaces using the
+   *   same channel name never share pairing requests or allowlist entries
+   *   (see #7017 — sharing them is an authorization-boundary violation in
+   *   multi-workspace daemon deployments). Omitting it preserves the legacy
+   *   global layout (`<qwen-home>/channels/`).
+   */
+  constructor(channelName: string, workspaceCwd?: string) {
+    const channelsRoot = path.join(getGlobalQwenDir(), 'channels');
+    this.dir = workspaceCwd
+      ? path.join(channelsRoot, getWorkspaceScopeDirName(workspaceCwd))
+      : channelsRoot;
     this.pendingPath = path.join(this.dir, `${channelName}-pairing.json`);
     this.allowlistPath = path.join(this.dir, `${channelName}-allowlist.json`);
+    if (workspaceCwd) {
+      this.migrateLegacyState(channelsRoot, channelName);
+    }
+  }
+
+  /**
+   * One-time grandfathering of pre-scoping state: if this scoped store has no
+   * files yet but the legacy GLOBAL files exist, copy them in so senders that
+   * were already approved stay approved after upgrading.
+   *
+   * Copy, not move: another workspace upgrading later must be able to
+   * grandfather the same baseline, and an older qwen version running
+   * concurrently still reads the global files. This is a snapshot — the
+   * scoped stores diverge from each other immediately afterwards, so the
+   * ongoing cross-workspace sharing that motivated #7017 is not reintroduced,
+   * and a legacy file appearing later can never overwrite scoped state.
+   */
+  private migrateLegacyState(channelsRoot: string, channelName: string): void {
+    const legacyPairs: Array<[string, string]> = [
+      [
+        path.join(channelsRoot, `${channelName}-pairing.json`),
+        this.pendingPath,
+      ],
+      [
+        path.join(channelsRoot, `${channelName}-allowlist.json`),
+        this.allowlistPath,
+      ],
+    ];
+    for (const [legacyPath, scopedPath] of legacyPairs) {
+      try {
+        if (!fs.existsSync(scopedPath) && fs.existsSync(legacyPath)) {
+          this.ensureDir();
+          fs.copyFileSync(legacyPath, scopedPath);
+        }
+      } catch {
+        // Best-effort: an unreadable legacy file must not prevent the channel
+        // from starting; the scoped store just starts empty.
+      }
+    }
   }
 
   isApproved(senderId: string): boolean {
