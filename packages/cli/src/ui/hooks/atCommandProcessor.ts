@@ -19,6 +19,8 @@ import {
   emptyMcpResourceText,
   formatMcpResourceContents,
   summarizeMcpResource,
+  SessionService,
+  SessionReferenceService,
 } from '@qwen-code/qwen-code-core';
 import type {
   HistoryItemToolGroup,
@@ -32,6 +34,7 @@ import {
   matchExtensionByRef,
   buildExtensionRef,
 } from './extension-mention-ref.js';
+import { parseSessionRef, buildSessionRef } from './session-mention-ref.js';
 import {
   buildExtensionMentionContext,
   EXTENSION_CONTEXT_BUDGET,
@@ -232,6 +235,14 @@ export async function resolveAtCommandQuery({
     extension: Extension;
   }> = [];
 
+  // Session references (`@session:<id|title>`) collected during the loop and
+  // resolved after it. Each resolves to a slimmed, read-only block of a prior
+  // session's history injected as reference context (never a fork/resume).
+  const sessionMentions: Array<{
+    originalAtPath: string;
+    ref: { id?: string; title?: string };
+  }> = [];
+
   for (const atPathPart of atPathCommandParts) {
     const originalAtPath = atPathPart.content; // e.g., "@file.txt" or "@"
 
@@ -303,6 +314,17 @@ export async function resolveAtCommandQuery({
         `MCP server "${mcpServerRef.name}" not found among configured MCP servers. ` +
           `Available: ${Object.keys(config.getMcpServers() || {}).join(', ') || '(none)'}`,
       );
+      continue;
+    }
+
+    // Session reference (`@session:<id|title>`): detected BEFORE filesystem
+    // resolution so the ':' in the token isn't mistaken for a path. Resolution
+    // (load + slim) happens after the loop; here we only collect and keep the
+    // token verbatim in the prompt text.
+    const sessionRef = parseSessionRef(pathName);
+    if (sessionRef) {
+      sessionMentions.push({ originalAtPath, ref: sessionRef });
+      atPathToResolvedSpecMap.set(originalAtPath, pathName);
       continue;
     }
 
@@ -526,7 +548,8 @@ export async function resolveAtCommandQuery({
     pathSpecsToRead.length === 0 &&
     mcpResourceRefs.length === 0 &&
     mcpServerMentions.length === 0 &&
-    extensionMentions.length === 0
+    extensionMentions.length === 0 &&
+    sessionMentions.length === 0
   ) {
     onDebugMessage('No valid file paths found in @ commands to read.');
     if (initialQueryText === '@' && query.trim() === '@') {
@@ -593,6 +616,84 @@ export async function resolveAtCommandQuery({
         callId: `client-mcp-server-${userMessageTimestamp}-${i}`,
         name: 'Activate MCP Server',
         description: `Activated MCP server ${serverName}`,
+        status: ToolCallStatus.Success,
+        resultDisplay: undefined,
+        confirmationDetails: undefined,
+      },
+    });
+  }
+
+  // Resolve session references: load + deterministically slim a prior session
+  // and inject it as a read-only reference block. A miss (not-found / ambiguous
+  // title) surfaces an error card and leaves the `@session:` token as literal
+  // text (already retained above), never aborting the turn.
+  for (let i = 0; i < sessionMentions.length; i++) {
+    const { originalAtPath, ref } = sessionMentions[i];
+    const callId = `client-session-${userMessageTimestamp}-${i}`;
+
+    let sessionId = ref.id;
+    if (!sessionId && ref.title) {
+      const matches = await new SessionService(
+        config.getProjectRoot(),
+      ).findSessionsByTitle(ref.title);
+      if (matches.length === 1) {
+        sessionId = matches[0].sessionId;
+      } else {
+        const reason =
+          matches.length === 0
+            ? `No session matches "@${originalAtPath.substring(1)}".`
+            : `"@${originalAtPath.substring(1)}" is ambiguous (${matches.length} matches); use the picker or a session id.`;
+        onDebugMessage(reason);
+        scopedMentionEntries.push({
+          originalAtPath,
+          part: { text: '' },
+          label: buildSessionRef(ref.title),
+          display: {
+            callId,
+            name: 'Referenced Session',
+            description: `Reference session "${ref.title}"`,
+            status: ToolCallStatus.Error,
+            resultDisplay: reason,
+            confirmationDetails: undefined,
+          },
+        });
+        continue;
+      }
+    }
+
+    const resolved = await new SessionReferenceService(
+      config.getProjectRoot(),
+    ).resolve(sessionId!, ref.title ? { title: ref.title } : {});
+
+    if ('notFound' in resolved) {
+      const reason = `Session "${sessionId}" not found in this project.`;
+      onDebugMessage(reason);
+      scopedMentionEntries.push({
+        originalAtPath,
+        part: { text: '' },
+        label: buildSessionRef(sessionId!),
+        display: {
+          callId,
+          name: 'Referenced Session',
+          description: `Reference session ${sessionId}`,
+          status: ToolCallStatus.Error,
+          resultDisplay: reason,
+          confirmationDetails: undefined,
+        },
+      });
+      continue;
+    }
+
+    scopedMentionEntries.push({
+      originalAtPath,
+      part: { text: resolved.text },
+      label: buildSessionRef(sessionId!),
+      display: {
+        callId,
+        name: 'Referenced Session',
+        description: `Referenced session "${resolved.meta.title}"${
+          resolved.truncated ? ' (truncated)' : ''
+        }`,
         status: ToolCallStatus.Success,
         resultDisplay: undefined,
         confirmationDetails: undefined,
