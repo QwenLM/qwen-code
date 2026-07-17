@@ -95,6 +95,18 @@ When `S ≤ 0` the cap is disabled (`getMaxToolCallsPerTurn()` returns
 - Changing the loop-detected dialog UI (separate improvement).
 - A separate config knob for the hard cap (derived from the soft cap; raising
   `maxToolCallsPerTurn` scales both).
+- A recency-windowed or result-aware stuck signal. The current signal is a
+  monotone per-turn max: the same `(tool, args)` repeated 6 times anywhere in
+  the turn marks it stuck, even if those repeats are legitimate (e.g. re-running
+  the same build/test after successive fixes). This is never a regression — the
+  signal only acts past the soft cap, where the old cap always halted — but that
+  productive class does not benefit. The "productive turns repeat ≤ 2" evidence
+  comes from one session's three turns; revisit with a windowed signal if
+  telemetry shows this false-stuck pattern.
+- Telemetry differentiation of the two halt reasons. Soft-cap-stuck and
+  hard-backstop both emit `TURN_TOOL_CALL_CAP`; a boolean/attribute on
+  `LoopDetectedEvent` would tell which fired in the wild (useful for validating
+  the 3× multiplier). The headless message already hedges to cover both.
 - The ACP/daemon path (`recordDaemonToolCalls` in
   `packages/cli/src/acp-integration/session/Session.ts`) has its own blunt
   per-turn cap that does not use `LoopDetectionService`. It still halts at the

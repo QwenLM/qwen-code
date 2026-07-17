@@ -8070,9 +8070,12 @@ Other open files:
         vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
           (event: string) => event === 'Stop',
         );
-        // Cap of 4: each turn's 3 tool calls fit, but 6 accumulated across
-        // the continuation boundary would not.
-        vi.mocked(mockConfig.getMaxToolCallsPerTurn).mockReturnValue(4);
+        // Cap of 1 (hard backstop 3): each turn's 3 diverse calls stay under
+        // the hard backstop, but without the continuation reset the second
+        // turn would reach 4 calls and trip the backstop. Under the adaptive
+        // cap diverse calls no longer trip the soft cap on their own, so the
+        // small cap keeps this test a genuine guard on the reset.
+        vi.mocked(mockConfig.getMaxToolCallsPerTurn).mockReturnValue(1);
 
         client['chat'] = {
           addHistory: vi.fn(),
@@ -8112,9 +8115,10 @@ Other open files:
 
         // The hook continuation turn actually ran...
         expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
-        // ...and 3+3 tool calls under a cap of 4 never tripped the cap: the
-        // continuation started a fresh budget instead of inheriting the
-        // first turn's accumulated count.
+        // ...and 3+3 tool calls under a cap of 1 (hard backstop 3) never
+        // tripped the cap: the continuation started a fresh budget instead of
+        // inheriting the first turn's accumulated count (which would have
+        // reached 4 and tripped the backstop).
         expect(events).not.toContainEqual(
           expect.objectContaining({ type: GeminiEventType.LoopDetected }),
         );

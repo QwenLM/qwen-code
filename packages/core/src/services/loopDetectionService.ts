@@ -318,10 +318,22 @@ export class LoopDetectionService {
       return false;
     }
 
+    // All always-on guards below honor an explicit in-session disable (the
+    // user's active "stop detecting" choice). When disabled there is no
+    // consumer for the per-call key, so skip the SHA-256 hashing entirely.
+    if (this.disabledForSession) {
+      return false;
+    }
+
+    // Hash the (tool,args) key once and share it across the guards that need
+    // it (consecutive-identical and the adaptive cap's stuck tracker). Args
+    // can be large (e.g. write_file content), so avoid recomputing per guard.
+    const key = this.getToolCallKey(event.value);
+
     // Always-on stuck-repetition tracking for the adaptive cap (see
-    // checkTurnToolCallCap). Runs regardless of skipLoopDetection so the cap
-    // can tell a productive turn from a stuck one.
-    this.trackCapKeyRepeat(event.value);
+    // checkTurnToolCallCap): lets the cap tell a productive turn from a stuck
+    // one, regardless of skipLoopDetection.
+    this.trackCapKeyRepeat(key);
 
     // Consecutive identical tool calls (same name AND identical args) are the
     // one repetition signal precise enough to halt unconditionally — an
@@ -329,31 +341,25 @@ export class LoopDetectionService {
     // Promoted here from the opt-in tier so it protects every user regardless
     // of the `skipLoopDetection` config default: the DashScope server rejects
     // this pattern with a 400 (issue #5019) far below the per-turn cap, so
-    // the gated default left users unprotected. Like the per-turn cap below,
-    // it honors an explicit in-session disable — the user's active "stop
-    // detecting" choice.
-    if (!this.disabledForSession && this.checkToolCallLoop(event.value)) {
+    // the gated default left users unprotected.
+    if (this.checkToolCallLoop(key)) {
       this.loopDetected = true;
       return true;
     }
 
-    if (
-      !this.disabledForSession &&
-      this.checkShellCommandStagnation(event.value)
-    ) {
+    if (this.checkShellCommandStagnation(event.value)) {
       this.loopDetected = true;
       return true;
     }
 
-    if (!this.disabledForSession && this.checkTurnToolCallCap()) {
+    if (this.checkTurnToolCallCap()) {
       this.loopDetected = true;
       return true;
     }
     return false;
   }
 
-  private checkToolCallLoop(toolCall: { name: string; args: object }): boolean {
-    const key = this.getToolCallKey(toolCall);
+  private checkToolCallLoop(key: string): boolean {
     if (this.lastToolCallKey === key) {
       this.toolCallRepetitionCount++;
     } else {
@@ -812,10 +818,10 @@ export class LoopDetectionService {
 
   /**
    * Records a (tool,args) occurrence for the adaptive cap and updates the
-   * running max repeat count. Always-on (called from checkAlwaysOnSafeties).
+   * running max repeat count. Always-on (called from checkAlwaysOnSafeties
+   * with the already-hashed key).
    */
-  private trackCapKeyRepeat(toolCall: { name: string; args: object }): void {
-    const key = this.getToolCallKey(toolCall);
+  private trackCapKeyRepeat(key: string): void {
     const count = (this.capKeyCounts.get(key) ?? 0) + 1;
     this.capKeyCounts.set(key, count);
     if (count > this.capMaxKeyRepeat) {

@@ -1454,6 +1454,36 @@ describe('LoopDetectionService', () => {
       expect(service.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
     });
 
+    it('fires on a stuck signal accumulated across Finished round-trips', () => {
+      // The stuck-repetition tracker must survive Finished boundaries within a
+      // turn (only reset() / Retry clear it): a model repeating the same call
+      // across successful round-trips halts at the soft cap via the stuck
+      // signal, not the hard backstop. Guards against a regression that clears
+      // capKeyCounts on Finished.
+      service.reset('');
+      const same = { same: true };
+      let fired = false;
+      const step = (args: Record<string, unknown>) => {
+        if (!fired)
+          fired = service.checkAlwaysOnSafeties(
+            createToolCallRequestEvent('t', args),
+          );
+      };
+      // 3 round-trips, each repeating the same key twice (interleaved with
+      // distinct calls so the consecutive-identical guard does not fire). The
+      // 6th repeat crosses the soft cap and halts via the stuck signal, well
+      // before the hard backstop.
+      for (let rt = 0; rt < 3 && !fired; rt++) {
+        step(same);
+        step({ d: rt * 2 });
+        step(same);
+        step({ d: rt * 2 + 1 });
+        if (!fired) service.checkAlwaysOnSafeties(finishedEvent);
+      }
+      expect(fired).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
+    });
+
     it('fires at the hard cap regardless of diversity', () => {
       // The hard cap is the backstop for a runaway that varies its arguments
       // on every call (which no repetition signal catches).
