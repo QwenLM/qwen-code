@@ -23,6 +23,7 @@ import type {
   EditorType,
   GeminiClient,
   AnyToolInvocation,
+  SteerInput,
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
@@ -1070,7 +1071,7 @@ describe('useGeminiStream', () => {
     );
   });
 
-  it('records mid-turn queued user messages before submitting tool results', async () => {
+  it('records mid-turn queued user messages after tool results accept them', async () => {
     const queuedPrompt = 'save the logs locally first';
     const recordMidTurnUserMessage = vi.fn();
     mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
@@ -1110,7 +1111,10 @@ describe('useGeminiStream', () => {
       } as TrackedCompletedToolCall,
     ];
     const midTurnDrainRef = {
-      current: vi.fn().mockReturnValue([queuedPrompt]),
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
     };
 
     let capturedOnComplete:
@@ -1157,9 +1161,7 @@ describe('useGeminiStream', () => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
     });
 
-    const expectedMidTurnMessage = {
-      text: `\n[User message received during tool execution]: ${queuedPrompt}`,
-    };
+    const expectedMidTurnMessage = { text: queuedPrompt };
     expect(recordMidTurnUserMessage).toHaveBeenCalledWith(
       [expectedMidTurnMessage],
       queuedPrompt,
@@ -1172,8 +1174,8 @@ describe('useGeminiStream', () => {
     expect(recordMidTurnUserMessage.mock.invocationCallOrder[0]).toBeLessThan(
       mockAddItem.mock.invocationCallOrder[queuedPromptAddItemIndex],
     );
-    expect(recordMidTurnUserMessage.mock.invocationCallOrder[0]).toBeLessThan(
-      mockSendMessageStream.mock.invocationCallOrder[0],
+    expect(mockSendMessageStream.mock.invocationCallOrder[0]).toBeLessThan(
+      recordMidTurnUserMessage.mock.invocationCallOrder[0],
     );
     expect(mockAddItem).toHaveBeenCalledWith(
       { type: MessageType.NOTIFICATION, text: queuedPrompt },
@@ -1183,7 +1185,149 @@ describe('useGeminiStream', () => {
       [...toolCallResponseParts, expectedMidTurnMessage],
       expect.any(AbortSignal),
       'prompt-id-midturn',
-      { type: SendMessageType.ToolResult },
+      expect.objectContaining({
+        type: SendMessageType.ToolResult,
+        steerInput: expect.objectContaining({
+          parts: [expectedMidTurnMessage],
+          accept: expect.any(Function),
+          restore: expect.any(Function),
+        }),
+      }),
+    );
+  });
+
+  it('provides queued steer input to core at the next sampling boundary', async () => {
+    const steeredPrompt = 'focus on the error handling';
+    const recordMidTurnUserMessage = vi.fn();
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordMidTurnUserMessage,
+    });
+    mockSendMessageStream.mockImplementation(() => (async function* () {})());
+    const drainSteer = vi
+      .fn<() => string[]>()
+      .mockReturnValueOnce([steeredPrompt])
+      .mockReturnValue([]);
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        { current: drainSteer },
+      ),
+    );
+
+    await act(async () => {
+      await result.current.submitQuery(
+        'start the analysis',
+        SendMessageType.UserQuery,
+        'prompt-id-steer',
+      );
+    });
+
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    const sendOptions = mockSendMessageStream.mock.calls[0][3] as {
+      getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
+    };
+    expect(sendOptions.getSteerInput).toEqual(expect.any(Function));
+    let steerInput: SteerInput | undefined;
+    await act(async () => {
+      steerInput = await sendOptions.getSteerInput!(
+        new AbortController().signal,
+      );
+    });
+    expect(steerInput?.parts).toEqual([{ text: steeredPrompt }]);
+    expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
+    expect(mockAddItem).not.toHaveBeenCalledWith(
+      { type: MessageType.NOTIFICATION, text: steeredPrompt },
+      expect.any(Number),
+    );
+    steerInput?.accept();
+    expect(recordMidTurnUserMessage).toHaveBeenCalledWith(
+      [{ text: steeredPrompt }],
+      steeredPrompt,
+    );
+    expect(mockAddItem).toHaveBeenCalledWith(
+      { type: MessageType.NOTIFICATION, text: steeredPrompt },
+      expect.any(Number),
+    );
+  });
+
+  it('restores drained steer input when attachment resolution is cancelled', async () => {
+    const steeredPrompt = 'inspect @/tmp/slow.png';
+    const restoreSteer = vi.fn();
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockImplementation(
+      () => new Promise(() => {}),
+    );
+    const drainSteer = vi
+      .fn<() => string[]>()
+      .mockReturnValueOnce([steeredPrompt])
+      .mockReturnValue([]);
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        { current: drainSteer },
+        undefined,
+        undefined,
+        undefined,
+        { current: restoreSteer },
+      ),
+    );
+
+    await act(async () => {
+      await result.current.submitQuery('start the analysis');
+    });
+    const sendOptions = mockSendMessageStream.mock.calls[0][3] as {
+      getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
+    };
+    const abort = new AbortController();
+    let steerInput: SteerInput | undefined;
+    await act(async () => {
+      const pending = sendOptions.getSteerInput!(abort.signal);
+      abort.abort();
+      steerInput = await pending;
+    });
+
+    expect(steerInput).toBeUndefined();
+    expect(restoreSteer).toHaveBeenCalledWith([steeredPrompt]);
+    expect(mockAddItem).not.toHaveBeenCalledWith(
+      { type: MessageType.NOTIFICATION, text: steeredPrompt },
+      expect.any(Number),
     );
   });
 
@@ -1263,7 +1407,10 @@ describe('useGeminiStream', () => {
       } as TrackedCompletedToolCall,
     ];
     const midTurnDrainRef = {
-      current: vi.fn().mockReturnValue([queuedPrompt]),
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
     };
 
     let capturedOnComplete:
@@ -1310,11 +1457,7 @@ describe('useGeminiStream', () => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
     });
 
-    const expectedMidTurnParts: Part[] = [
-      {
-        text: `\n[User message received during tool execution]: ${transcriptPart.text}`,
-      },
-    ];
+    const expectedMidTurnParts: Part[] = [transcriptPart];
     expect(mockRunVisionBridge).toHaveBeenCalledWith({
       config: mockConfig,
       parts: [resolvedTextPart, resolvedImagePart],
@@ -1361,7 +1504,7 @@ describe('useGeminiStream', () => {
       [...toolCallResponseParts, ...expectedMidTurnParts],
       expect.any(AbortSignal),
       'prompt-id-midturn-image',
-      { type: SendMessageType.ToolResult },
+      expect.objectContaining({ type: SendMessageType.ToolResult }),
     );
   });
 
@@ -1436,7 +1579,10 @@ describe('useGeminiStream', () => {
       } as TrackedCompletedToolCall,
     ];
     const midTurnDrainRef = {
-      current: vi.fn().mockReturnValue([queuedPrompt]),
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
     };
 
     let capturedOnComplete:
@@ -1484,11 +1630,7 @@ describe('useGeminiStream', () => {
     expect(sent).toContain('inspect @/tmp/screenshot.png and summarize');
     expect(sent).not.toContain('inlineData');
     expect(recordMidTurnUserMessage).toHaveBeenCalledWith(
-      [
-        {
-          text: `\n[User message received during tool execution]: ${resolvedTextPart.text}`,
-        },
-      ],
+      [resolvedTextPart],
       queuedPrompt,
     );
   });
@@ -1557,7 +1699,10 @@ describe('useGeminiStream', () => {
       } as TrackedCompletedToolCall,
     ];
     const midTurnDrainRef = {
-      current: vi.fn().mockReturnValue([queuedPrompt]),
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
     };
 
     let capturedOnComplete:
@@ -1630,7 +1775,7 @@ describe('useGeminiStream', () => {
       toolCallResponseParts,
       expect.any(AbortSignal),
       'prompt-id-midturn-at-error',
-      { type: SendMessageType.ToolResult },
+      expect.objectContaining({ type: SendMessageType.ToolResult }),
     );
   });
 
@@ -1677,7 +1822,10 @@ describe('useGeminiStream', () => {
       } as TrackedCompletedToolCall,
     ];
     const midTurnDrainRef = {
-      current: vi.fn().mockReturnValue([queuedPrompt]),
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
     };
 
     let capturedOnComplete:
@@ -1736,7 +1884,7 @@ describe('useGeminiStream', () => {
       toolCallResponseParts,
       expect.any(AbortSignal),
       'prompt-id-midturn-at-throw',
-      { type: SendMessageType.ToolResult },
+      expect.objectContaining({ type: SendMessageType.ToolResult }),
     );
   });
 
@@ -1802,7 +1950,10 @@ describe('useGeminiStream', () => {
       } as TrackedCompletedToolCall,
     ];
     const midTurnDrainRef = {
-      current: vi.fn().mockReturnValue([queuedPrompt]),
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
     };
 
     let capturedOnComplete:
@@ -1912,7 +2063,10 @@ describe('useGeminiStream', () => {
       } as TrackedCompletedToolCall,
     ];
     const midTurnDrainRef = {
-      current: vi.fn().mockReturnValue([queuedPrompt]),
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
     };
 
     let capturedOnComplete:
@@ -2019,7 +2173,10 @@ describe('useGeminiStream', () => {
       } as TrackedCompletedToolCall,
     ];
     const midTurnDrainRef = {
-      current: vi.fn().mockReturnValue([queuedPrompt]),
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
     };
 
     let capturedOnComplete:
@@ -2123,7 +2280,10 @@ describe('useGeminiStream', () => {
       } as TrackedCompletedToolCall,
     ];
     const midTurnDrainRef = {
-      current: vi.fn().mockReturnValue([queuedPrompt]),
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
     };
 
     let capturedOnComplete:
@@ -2175,15 +2335,10 @@ describe('useGeminiStream', () => {
       expect.any(Number),
     );
     expect(mockSendMessageStream).toHaveBeenCalledWith(
-      [
-        ...toolCallResponseParts,
-        {
-          text: `\n[User message received during tool execution]: ${queuedPrompt}`,
-        },
-      ],
+      [...toolCallResponseParts, { text: queuedPrompt }],
       expect.any(AbortSignal),
       'prompt-id-midturn',
-      { type: SendMessageType.ToolResult },
+      expect.objectContaining({ type: SendMessageType.ToolResult }),
     );
   });
 

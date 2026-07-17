@@ -27,6 +27,7 @@ import {
   type GeminiErrorEventValue,
   type StopFailureErrorType,
   type ActiveGoal,
+  type SteerInput,
   GeminiEventType as ServerGeminiEventType,
   SendMessageType,
   createDebugLogger,
@@ -89,7 +90,7 @@ import {
 import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
 import { fitPendingSlice } from '../utils/pending-rendered-height.js';
 import { useStateAndRef } from './useStateAndRef.js';
-import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
+import { normalizePartList } from '../../utils/nonInteractiveHelpers.js';
 import { isInlineModelOverrideAllowed } from '../../utils/acpModelUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import {
@@ -149,6 +150,11 @@ interface PendingDuplicateToolResponses {
   executableCallIds: Set<string>;
   promptId: string | undefined;
   responseParts: Part[];
+}
+
+interface ResolvedSteerMessages {
+  parts: Part[];
+  accept: () => void;
 }
 
 /**
@@ -444,6 +450,7 @@ export const useGeminiStream = (
   // Live terminal width, paired with the height ref so the commit loop reads
   // both dimensions consistently across a mid-stream resize.
   terminalWidthRef?: React.RefObject<number>,
+  midTurnRestoreRef?: React.RefObject<((messages: string[]) => void) | null>,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -2288,6 +2295,201 @@ export const useGeminiStream = (
     ],
   );
 
+  const resolveSteeredMessages = useCallback(
+    async (
+      messages: string[],
+      signal: AbortSignal,
+    ): Promise<ResolvedSteerMessages | undefined> => {
+      const resolvedMessages: Part[] = [];
+      const resolvedForRecording: Array<{
+        message: string;
+        parts: Part[];
+        sideEffects: Array<() => void>;
+      }> = [];
+      const timestamp = Date.now();
+
+      for (let index = 0; index < messages.length; index += 1) {
+        if (signal.aborted) break;
+
+        const message = messages[index];
+        const sideEffects: Array<() => void> = [];
+        let resolvedQuery: PartListUnion = [{ text: message }];
+        if (isAtCommand(message)) {
+          const timeout = new AbortController();
+          const atCommandSignal = AbortSignal.any([signal, timeout.signal]);
+          const timeoutId = setTimeout(() => {
+            timeout.abort(
+              new Error(MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE),
+            );
+          }, MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS);
+          try {
+            const atCommandResult = await resolveWithAbort(
+              atCommandSignal,
+              () =>
+                resolveAtCommandQuery({
+                  query: message,
+                  config,
+                  onDebugMessage,
+                  messageId: timestamp + index,
+                  signal: atCommandSignal,
+                }),
+            );
+            const shouldSkipMessage =
+              !atCommandResult.shouldProceed &&
+              (atCommandResult.toolDisplays?.length ?? 0) > 0;
+            if (
+              atCommandResult.shouldProceed &&
+              atCommandResult.processedQuery !== null
+            ) {
+              resolvedQuery = atCommandResult.processedQuery;
+            } else if (atCommandResult.toolDisplays?.length) {
+              const toolDisplays = atCommandResult.toolDisplays;
+              const showToolDisplays = () =>
+                addItem(
+                  { type: 'tool_group', tools: toolDisplays },
+                  timestamp + index,
+                );
+              if (shouldSkipMessage) showToolDisplays();
+              else sideEffects.push(showToolDisplays);
+            }
+            if (atCommandResult.recording) {
+              const recordAtCommand = () =>
+                config.getChatRecordingService?.()?.recordAtCommand?.({
+                  filesRead: atCommandResult.recording!.filesRead,
+                  status: atCommandResult.recording!.status,
+                  ...(atCommandResult.recording!.message
+                    ? { message: atCommandResult.recording!.message }
+                    : {}),
+                  userText: message,
+                });
+              if (shouldSkipMessage) recordAtCommand();
+              else sideEffects.push(recordAtCommand);
+            }
+            if (shouldSkipMessage) continue;
+          } catch (error) {
+            const errorMessage = getErrorMessage(error);
+            onDebugMessage(
+              `Failed to resolve mid-turn @ command: ${errorMessage}`,
+            );
+            if (!signal.aborted) {
+              addItem(
+                {
+                  type: MessageType.WARNING,
+                  text: `Could not attach file: ${errorMessage}`,
+                },
+                Date.now(),
+              );
+            }
+            continue;
+          } finally {
+            clearTimeout(timeoutId);
+          }
+          if (signal.aborted) break;
+        }
+
+        const bridgeResult = await applyVisionBridgeIfNeeded(
+          resolvedQuery,
+          timestamp + index,
+          signal,
+        );
+        if (!bridgeResult.shouldProceed) {
+          if (signal.aborted) break;
+          continue;
+        }
+
+        const messageParts = normalizePartList(
+          bridgeResult.parts ?? resolvedQuery,
+        );
+        const formatCheck = checkImageFormatsSupport(messageParts);
+        if (formatCheck.hasUnsupportedFormats) {
+          sideEffects.push(() =>
+            addItem(
+              {
+                type: MessageType.INFO,
+                text: getUnsupportedImageFormatWarning(),
+              },
+              Date.now(),
+            ),
+          );
+        }
+
+        if (resolvedMessages.length > 0 && messageParts.length > 0) {
+          resolvedMessages.push({ text: '\n\n' });
+        }
+        resolvedMessages.push(...messageParts);
+        resolvedForRecording.push({
+          message,
+          parts: messageParts,
+          sideEffects,
+        });
+      }
+
+      if (signal.aborted) return undefined;
+      return {
+        parts: resolvedMessages,
+        accept: () => {
+          for (const { message, parts, sideEffects } of resolvedForRecording) {
+            for (const sideEffect of sideEffects) sideEffect();
+            config
+              .getChatRecordingService?.()
+              ?.recordMidTurnUserMessage(parts, message);
+            addItem(
+              { type: MessageType.NOTIFICATION, text: message },
+              Date.now(),
+            );
+          }
+        },
+      };
+    },
+    [addItem, applyVisionBridgeIfNeeded, config, onDebugMessage],
+  );
+
+  const resolveDrainedSteerMessages = useCallback(
+    async (
+      messages: string[],
+      signal: AbortSignal,
+    ): Promise<SteerInput | undefined> => {
+      try {
+        const resolved = await resolveSteeredMessages(messages, signal);
+        if (signal.aborted) {
+          midTurnRestoreRef?.current?.(messages);
+          return undefined;
+        }
+        if (!resolved || resolved.parts.length === 0) return undefined;
+        let settled = false;
+        return {
+          parts: resolved.parts,
+          accept: () => {
+            if (settled) return;
+            settled = true;
+            resolved.accept();
+          },
+          restore: () => {
+            if (settled) return;
+            settled = true;
+            midTurnRestoreRef?.current?.(messages);
+          },
+        };
+      } catch (error) {
+        midTurnRestoreRef?.current?.(messages);
+        onDebugMessage(
+          `Failed to prepare steer input: ${getErrorMessage(error)}`,
+        );
+        return undefined;
+      }
+    },
+    [midTurnRestoreRef, onDebugMessage, resolveSteeredMessages],
+  );
+
+  const drainSteerAtBoundary = useCallback(
+    async (signal: AbortSignal): Promise<SteerInput | undefined> => {
+      const messages = midTurnDrainRef?.current?.() ?? [];
+      if (messages.length === 0) return undefined;
+      return resolveDrainedSteerMessages(messages, signal);
+    },
+    [midTurnDrainRef, resolveDrainedSteerMessages],
+  );
+
   const submitQuery = useCallback(
     async (
       query: PartListUnion,
@@ -2297,6 +2499,7 @@ export const useGeminiStream = (
         notificationDisplayText?: string;
         onDelivered?: () => void;
         onDeliveryFailed?: () => void;
+        steerInput?: SteerInput;
       },
     ) => {
       const allowConcurrentBtwDuringResponse =
@@ -2304,12 +2507,15 @@ export const useGeminiStream = (
         streamingState === StreamingState.Responding &&
         typeof query === 'string' &&
         isBtwCommand(query);
+      const isTurnContinuation =
+        submitType === SendMessageType.ToolResult ||
+        submitType === SendMessageType.Steer;
 
       // Prevent concurrent executions of submitQuery, but allow continuations
       // which are part of the same logical flow (tool responses)
       if (
         isSubmittingQueryRef.current &&
-        submitType !== SendMessageType.ToolResult &&
+        !isTurnContinuation &&
         !allowConcurrentBtwDuringResponse
       ) {
         metadata?.onDeliveryFailed?.();
@@ -2319,7 +2525,7 @@ export const useGeminiStream = (
       if (
         (streamingState === StreamingState.Responding ||
           streamingState === StreamingState.WaitingForConfirmation) &&
-        submitType !== SendMessageType.ToolResult &&
+        !isTurnContinuation &&
         !allowConcurrentBtwDuringResponse
       ) {
         metadata?.onDeliveryFailed?.();
@@ -2349,10 +2555,7 @@ export const useGeminiStream = (
       // ToolResult continuations and same-turn btw concurrencies keep
       // the trackers untouched — they're piggybacking on an in-flight
       // turn that already owns its own snapshot.
-      if (
-        submitType !== SendMessageType.ToolResult &&
-        !allowConcurrentBtwDuringResponse
-      ) {
+      if (!isTurnContinuation && !allowConcurrentBtwDuringResponse) {
         lastTurnUserItemRef.current = null;
         turnSawContentEventRef.current = false;
         handledProviderToolCallIdsRef.current.clear();
@@ -2364,10 +2567,7 @@ export const useGeminiStream = (
       const userMessageTimestamp = Date.now();
 
       // Reset quota error flag when starting a new query (not a continuation)
-      if (
-        submitType !== SendMessageType.ToolResult &&
-        !allowConcurrentBtwDuringResponse
-      ) {
+      if (!isTurnContinuation && !allowConcurrentBtwDuringResponse) {
         setModelSwitchedFromQuotaError(false);
         // Clear model override for new user turns. On retry, preserve a
         // skill-selected override so the same model is used again, but drop an
@@ -2504,7 +2704,7 @@ export const useGeminiStream = (
         setIsReceivingContent(false);
         // Reset char counter only on new user queries; tool-result continuations
         // keep accumulating so the token count only goes up within a turn.
-        if (submitType !== SendMessageType.ToolResult) {
+        if (!isTurnContinuation) {
           streamingResponseLengthRef.current = 0;
         }
 
@@ -2533,6 +2733,10 @@ export const useGeminiStream = (
               type: submitType,
               notificationDisplayText: metadata?.notificationDisplayText,
               modelOverride: modelOverrideRef.current,
+              steerInput: metadata?.steerInput,
+              ...(!allowConcurrentBtwDuringResponse && midTurnDrainRef
+                ? { getSteerInput: drainSteerAtBoundary }
+                : {}),
             },
           );
 
@@ -2571,7 +2775,8 @@ export const useGeminiStream = (
           if (retryCountdownTimerRef.current) {
             clearRetryCountdown();
           }
-          if (loopDetectedRef.current) {
+          const loopDetected = loopDetectedRef.current;
+          if (loopDetected) {
             loopDetectedRef.current = false;
             handleLoopDetectedEvent();
           }
@@ -2664,6 +2869,8 @@ export const useGeminiStream = (
       setPendingRetryErrorItem,
       setPendingThoughtItem,
       dualOutput,
+      drainSteerAtBoundary,
+      midTurnDrainRef,
     ],
   );
 
@@ -3129,15 +3336,15 @@ export const useGeminiStream = (
         return;
       }
 
-      // Mid-turn queue drain: inject queued user messages alongside tool
-      // results so the model sees them in the next API call.
+      // Drain steerable user messages at this sampling boundary and append
+      // them after the tool responses as genuine user content.
       // Skip if the turn was cancelled — messages stay in queue for next turn.
       const drained =
         turnCancelledRef.current || abortControllerRef.current?.signal.aborted
           ? []
           : (midTurnDrainRef?.current?.() ?? []);
+      let drainedSteer: SteerInput | undefined;
       if (drained.length > 0) {
-        const midTurnTimestamp = Date.now();
         const midTurnAbort =
           abortControllerRef.current ?? new AbortController();
         const shouldTrackMidTurnAbort = !abortControllerRef.current;
@@ -3145,119 +3352,12 @@ export const useGeminiStream = (
           auxiliaryAbortRefsRef.current.add(midTurnAbort);
         }
         try {
-          for (let index = 0; index < drained.length; index += 1) {
-            if (midTurnAbort.signal.aborted) {
-              break;
-            }
-            const msg = drained[index];
-            let resolvedMidTurnQuery: PartListUnion = [{ text: msg }];
-            if (isAtCommand(msg)) {
-              const atCommandTimeout = new AbortController();
-              const atCommandSignal = AbortSignal.any([
-                midTurnAbort.signal,
-                atCommandTimeout.signal,
-              ]);
-              const atCommandTimeoutId = setTimeout(() => {
-                atCommandTimeout.abort(
-                  new Error(MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE),
-                );
-              }, MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS);
-              try {
-                const atCommandResult = await resolveWithAbort(
-                  atCommandSignal,
-                  () =>
-                    resolveAtCommandQuery({
-                      query: msg,
-                      config,
-                      onDebugMessage,
-                      messageId: midTurnTimestamp + index,
-                      signal: atCommandSignal,
-                    }),
-                );
-                const shouldSkipMidTurnMessage =
-                  !atCommandResult.shouldProceed &&
-                  (atCommandResult.toolDisplays?.length ?? 0) > 0;
-                if (
-                  atCommandResult.shouldProceed &&
-                  atCommandResult.processedQuery !== null
-                ) {
-                  resolvedMidTurnQuery = atCommandResult.processedQuery;
-                } else if (atCommandResult.toolDisplays?.length) {
-                  addItem(
-                    { type: 'tool_group', tools: atCommandResult.toolDisplays },
-                    midTurnTimestamp + index,
-                  );
-                }
-                if (atCommandResult.recording) {
-                  config.getChatRecordingService?.()?.recordAtCommand?.({
-                    filesRead: atCommandResult.recording.filesRead,
-                    status: atCommandResult.recording.status,
-                    ...(atCommandResult.recording.message
-                      ? { message: atCommandResult.recording.message }
-                      : {}),
-                    userText: msg,
-                  });
-                }
-                if (shouldSkipMidTurnMessage) {
-                  continue;
-                }
-              } catch (error) {
-                const errorMessage = getErrorMessage(error);
-                onDebugMessage(
-                  `Failed to resolve mid-turn @ command: ${errorMessage}`,
-                );
-                if (!midTurnAbort.signal.aborted) {
-                  addItem(
-                    {
-                      type: MessageType.WARNING,
-                      text: `Could not attach file: ${errorMessage}`,
-                    },
-                    Date.now(),
-                  );
-                }
-                continue;
-              } finally {
-                clearTimeout(atCommandTimeoutId);
-              }
-              if (midTurnAbort.signal.aborted) {
-                break;
-              }
-            }
-
-            const bridgeResult = await applyVisionBridgeIfNeeded(
-              resolvedMidTurnQuery,
-              midTurnTimestamp + index,
-              midTurnAbort.signal,
-            );
-            if (!bridgeResult.shouldProceed) {
-              if (midTurnAbort.signal.aborted) {
-                break;
-              }
-              continue;
-            }
-            resolvedMidTurnQuery = bridgeResult.parts ?? resolvedMidTurnQuery;
-
-            const midTurnUserMessageParts = prefixMidTurnUserMessageParts(
-              resolvedMidTurnQuery,
-              msg,
-            );
-            const formatCheck = checkImageFormatsSupport(
-              midTurnUserMessageParts,
-            );
-            if (formatCheck.hasUnsupportedFormats) {
-              addItem(
-                {
-                  type: MessageType.INFO,
-                  text: getUnsupportedImageFormatWarning(),
-                },
-                Date.now(),
-              );
-            }
-            responsesToSend.push(...midTurnUserMessageParts);
-            config
-              .getChatRecordingService?.()
-              ?.recordMidTurnUserMessage(midTurnUserMessageParts, msg);
-            addItem({ type: MessageType.NOTIFICATION, text: msg }, Date.now());
+          drainedSteer = await resolveDrainedSteerMessages(
+            drained,
+            midTurnAbort.signal,
+          );
+          if (drainedSteer) {
+            responsesToSend.push(...drainedSteer.parts);
           }
         } finally {
           if (shouldTrackMidTurnAbort) {
@@ -3271,10 +3371,15 @@ export const useGeminiStream = (
         turnCancelledRef.current ||
         abortControllerRef.current?.signal.aborted
       ) {
+        drainedSteer?.restore();
         return;
       }
 
-      submitQuery(responsesToSend, SendMessageType.ToolResult, promptId);
+      void submitQuery(responsesToSend, SendMessageType.ToolResult, promptId, {
+        steerInput: drainedSteer,
+        onDelivered: drainedSteer?.accept,
+        onDeliveryFailed: drainedSteer?.restore,
+      });
     },
     [
       submitQuery,
@@ -3286,8 +3391,7 @@ export const useGeminiStream = (
       midTurnDrainRef,
       addItem,
       dualOutput,
-      onDebugMessage,
-      applyVisionBridgeIfNeeded,
+      resolveDrainedSteerMessages,
     ],
   );
 

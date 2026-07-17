@@ -1763,7 +1763,11 @@ export default {
   'Press Ctrl+C again to exit.': '再次按 Ctrl+C 退出',
   'Press Ctrl+D again to exit.': '再次按 Ctrl+D 退出',
   'Press Esc again to clear.': '再次按 Esc 清除',
-  'Press ↑ to edit queued messages': '按 ↑ 编辑排队消息',
+  'Ctrl+Q to queue · ↑ to edit queued messages':
+    'Ctrl+Q 排到下一轮 · ↑ 编辑排队消息',
+  'Enter to steer · Ctrl+Q to queue':
+    'Enter 追加到当前任务 · Ctrl+Q 排到下一轮',
+  'Queue message for the next turn': '将消息排到下一轮',
 
   // ============================================================================
   // MCP Status
@@ -2017,6 +2021,7 @@ export default {
   'Press Ctrl+Y to retry': '按 Ctrl+Y 重试。',
   'No failed request to retry.': '没有可重试的失败请求。',
   'to retry last request': '重试上一次请求',
+  'to queue for the next turn': '排到下一轮',
 
   // ============================================================================
   // Coding Plan Authentication
