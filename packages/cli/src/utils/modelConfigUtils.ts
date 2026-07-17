@@ -191,6 +191,8 @@ export interface ResolvedCliGenerationConfig {
   baseUrl: string;
   /** The full generation config to pass to core Config */
   generationConfig: Partial<ContentGeneratorConfig>;
+  /** Exact selected modelProviders baseUrl; null selects an implicit route. */
+  registryBaseUrl?: string | null;
   /** Source attribution for each resolved field */
   sources: ContentGeneratorConfigSources;
   /** Warnings generated during resolution */
@@ -445,6 +447,9 @@ export function resolveCliGenerationConfig(
     apiKey: resolved.config.apiKey || '',
     baseUrl: resolved.config.baseUrl || '',
     generationConfig,
+    ...(modelProvider
+      ? { registryBaseUrl: modelProvider.baseUrl ?? null }
+      : {}),
     sources: resolved.sources,
     warnings: [
       ...resolved.warnings,

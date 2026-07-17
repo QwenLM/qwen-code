@@ -202,14 +202,51 @@ describe('createWorkspaceProvidersStatusProvider', () => {
 
     const result = await provider(workspace, false);
     const models = result.providers.flatMap((p) => p.models);
+    const first = models.find(
+      (m) => m.baseUrl === 'https://api-one.example/v1',
+    );
+    const second = models.find(
+      (m) => m.baseUrl === 'https://api-two.example/v1',
+    );
 
-    expect(result.current?.modelId).toBe('shared-model(openai)');
-    expect(
-      models.find((m) => m.baseUrl === 'https://api-one.example/v1')?.isCurrent,
-    ).toBe(false);
-    expect(
-      models.find((m) => m.baseUrl === 'https://api-two.example/v1')?.isCurrent,
-    ).toBe(true);
+    expect(first?.modelId).toMatch(/^qwen-route:v1:/);
+    expect(second?.modelId).toMatch(/^qwen-route:v1:/);
+    expect(first?.modelId).not.toBe(second?.modelId);
+    expect(result.current?.modelId).toBe(second?.modelId);
+    expect(first?.isCurrent).toBe(false);
+    expect(second?.isCurrent).toBe(true);
+  });
+
+  it('does not mark a configured route for an unmatched explicit endpoint', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: {
+        name: 'shared-model',
+        baseUrl: 'https://outside.example/v1',
+      },
+      modelProviders: {
+        openai: [
+          {
+            id: 'shared-model',
+            name: 'Shared One',
+            baseUrl: 'https://api-one.example/v1',
+          },
+          {
+            id: 'shared-model',
+            name: 'Shared Two',
+            baseUrl: 'https://api-two.example/v1',
+          },
+        ],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const models = result.providers.flatMap((entry) => entry.models);
+
+    expect(result.current?.modelId).toBe('shared-model');
+    expect(result.current?.baseUrl).toBe('https://outside.example/v1');
+    expect(models.every((model) => model.isCurrent === false)).toBe(true);
   });
 
   it('filters fastOnly and voiceOnly models from the workspace provider catalog', async () => {
@@ -331,11 +368,10 @@ describe('createWorkspaceProvidersStatusProvider', () => {
 
     const result = await provider(workspace, false);
     const models = result.providers.flatMap((p) => p.models);
+    const defaultModel = models.find((m) => m.name === 'Shared Default');
 
-    expect(result.current?.modelId).toBe('shared-model(openai)');
-    expect(models.find((m) => m.name === 'Shared Default')?.isCurrent).toBe(
-      true,
-    );
+    expect(result.current?.modelId).toBe(defaultModel?.modelId);
+    expect(defaultModel?.isCurrent).toBe(true);
     expect(
       models.find((m) => m.baseUrl === 'https://proxy.example/v1')?.isCurrent,
     ).toBe(false);

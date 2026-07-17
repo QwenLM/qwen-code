@@ -733,6 +733,9 @@ describe('SplitView', () => {
     expect(options.some((o) => o.includes('Beta') && o.includes('wsB'))).toBe(
       true,
     );
+    // Primary-workspace sessions show their own basename too, not a "Primary"
+    // tag — the redundant label was removed from the picker.
+    expect(options.some((o) => o.includes('Primary'))).toBe(false);
   });
 
   it('attaches an added other-workspace pane under its own workspace cwd', async () => {

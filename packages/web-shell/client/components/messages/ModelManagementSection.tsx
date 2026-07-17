@@ -34,11 +34,9 @@ function rowKeyFor(
 
 /**
  * Resolves the single row that is "current", returning its row key. Preferring a
- * provider-qualified `modelId` match means a bare `currentModelId` (which can
- * equal several endpoint variants' `baseModelId`) marks only ONE row current
- * instead of every same-base-id variant. Falls back to the persisted `isCurrent`
- * flag when no live current id is available yet (the live id is updated
- * optimistically on select, so it's authoritative while present).
+ * provider-qualified `modelId` match identifies an endpoint variant precisely.
+ * A bare id is used only when it has one possible row; ambiguous ids defer to
+ * the server's `isCurrent` flag instead of guessing the first endpoint.
  */
 function findCurrentRowKey(
   providers: DaemonWorkspaceProviderStatus[],
@@ -50,10 +48,12 @@ function findCurrentRowKey(
   if (currentModelId) {
     const exact = all.find(({ model }) => model.modelId === currentModelId);
     if (exact) return rowKeyFor(exact.provider, exact.model);
-    const byBase = all.find(
+    const byBase = all.filter(
       ({ model }) => model.baseModelId === currentModelId,
     );
-    return byBase ? rowKeyFor(byBase.provider, byBase.model) : undefined;
+    if (byBase.length === 1) {
+      return rowKeyFor(byBase[0]!.provider, byBase[0]!.model);
+    }
   }
   const flagged = all.find(({ model }) => model.isCurrent);
   return flagged ? rowKeyFor(flagged.provider, flagged.model) : undefined;

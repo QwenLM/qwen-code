@@ -61,6 +61,107 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `session-transcript-${theme}`);
     });
 
+    test(`extensions manager`, async ({ page }, testInfo) => {
+      // Seed a few extensions so the full-page manager renders real cards —
+      // enabled + disabled, marketplace + local, with varied capability counts
+      // — instead of its empty state. `capabilities` is required on every entry.
+      const scenario = createWebShellDaemonScenario({
+        extensions: {
+          extensions: [
+            {
+              kind: 'extension',
+              id: 'context7',
+              name: 'context7',
+              displayName: 'Context7',
+              description:
+                'Up-to-date library docs injected into your prompts.',
+              version: '1.4.0',
+              isActive: true,
+              path: '/ext/context7',
+              source: 'marketplace',
+              capabilities: {
+                mcpServerCount: 1,
+                skillCount: 0,
+                agentCount: 0,
+                hookCount: 0,
+                commandCount: 0,
+                contextFileCount: 0,
+                channelCount: 0,
+                hasSettings: true,
+              },
+            },
+            {
+              kind: 'extension',
+              id: 'playwright',
+              name: 'playwright',
+              displayName: 'Playwright',
+              description: 'Drive a real browser for end-to-end checks.',
+              version: '0.9.2',
+              isActive: true,
+              path: '/ext/playwright',
+              source: 'marketplace',
+              capabilities: {
+                mcpServerCount: 1,
+                skillCount: 1,
+                agentCount: 0,
+                hookCount: 0,
+                commandCount: 2,
+                contextFileCount: 0,
+                channelCount: 0,
+                hasSettings: false,
+              },
+            },
+            {
+              kind: 'extension',
+              id: 'local-notes',
+              name: 'local-notes',
+              displayName: 'Local Notes',
+              description: 'A scratchpad extension loaded from disk.',
+              version: '0.1.0',
+              isActive: false,
+              path: '/ext/local-notes',
+              source: 'local',
+              capabilities: {
+                mcpServerCount: 0,
+                skillCount: 0,
+                agentCount: 0,
+                hookCount: 0,
+                commandCount: 1,
+                contextFileCount: 1,
+                channelCount: 0,
+                hasSettings: false,
+              },
+            },
+          ],
+        },
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      // Open the full-page Extensions manager via the `/extensions` command.
+      // Gate on the page heading — a stable structural role, unlike card text a
+      // refactor could reshape or that could also match a toast/sidebar — to
+      // prove the manager PAGE (not a transcript/dialog) is reachable, then
+      // confirm seeded cards rendered via their button role — both an enabled
+      // marketplace one and the disabled, local-source one, so a regression
+      // that hides `isActive: false` or local rows fails an assertion rather
+      // than only differing in the (visually reviewed) screenshot.
+      await submitLocalCommand(page, '/extensions');
+      await expect(
+        page.getByRole('heading', { name: 'Manage Extensions' }),
+      ).toBeVisible();
+      await expect(
+        page.getByRole('button', { name: 'Context7' }),
+      ).toBeVisible();
+      await expect(
+        page.getByRole('button', { name: 'Local Notes' }),
+      ).toBeVisible();
+      await captureScreenshot(page, `extensions-manager-${theme}`);
+    });
+
     test(`mermaid diagram`, async ({ page }, testInfo) => {
       const scenario = createWebShellDaemonScenario({
         events: [
@@ -165,12 +266,16 @@ for (const theme of THEMES) {
 
       // Restore the tiled layout (#6951): the solo pane returns to the split and
       // the hidden pane reappears — so the maximize control is back on both
-      // panes. Captures the restore path so a regression there is caught too.
+      // panes. Assert the restore path (behavioral coverage) but do NOT capture
+      // a screenshot: the restored layout is visually identical to the tiled
+      // `split view` shot above, and the reappearing pane re-renders its content
+      // just after this click, so the capture is byte-nondeterministic between
+      // identical runs — a flaky, redundant view that surfaces false-positive
+      // "changed" previews unrelated to the PR under review.
       await page.getByRole('button', { name: 'Restore pane' }).click();
       await expect(
         page.getByRole('button', { name: 'Maximize pane' }).first(),
       ).toBeVisible();
-      await captureScreenshot(page, `split-view-restored-${theme}`);
     });
 
     test(`sidebar attention`, async ({ page }, testInfo) => {
@@ -234,6 +339,66 @@ for (const theme of THEMES) {
       await expect(sidebar.getByText('Run test suite')).toBeVisible();
       await expect(sidebar.getByText('Draft release notes')).toBeVisible();
       await captureScreenshot(page, `sidebar-attention-${theme}`);
+    });
+
+    test(`workspace sidebar`, async ({ page }, testInfo) => {
+      // Two workspaces make the sidebar group sessions per workspace and tag the
+      // primary one — the surface the "primary workspace" label/badge lives on.
+      // Every other scenario here is single-workspace, where that tag never
+      // renders (it is gated on more than one displayed workspace), so this is
+      // the only scenario that can surface a change to the workspace labels.
+      //
+      // Pin the primary workspace cwd and its loaded session name explicitly,
+      // rather than leaning on createWebShellDaemonScenario's defaults: the
+      // basename ("qwen-web-shell-e2e") and the settle-wait below both depend on
+      // them, so a rename of those defaults in mockDaemon.ts would otherwise
+      // turn this into a cryptic "not visible" failure.
+      const primaryCwd = '/tmp/qwen-web-shell-e2e';
+      const primarySessionName = 'Run auth migration';
+      const scenario = createWebShellDaemonScenario({
+        workspaceCwd: primaryCwd,
+        displayName: primarySessionName,
+        capabilities: {
+          workspaces: [
+            {
+              id: 'ws-primary',
+              cwd: primaryCwd,
+              primary: true,
+              trusted: true,
+            },
+            {
+              id: 'ws-api',
+              cwd: '/tmp/qwen-api-service',
+              primary: false,
+              trusted: true,
+            },
+          ],
+        },
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      // Each workspace renders a section headed by its basename; the primary one
+      // also carries a "Primary" tag. Assert both workspace names and the tag so
+      // a regression in the grouping or the (removable) primary label fails an
+      // assertion, not only the visually-reviewed screenshot.
+      const sidebar = page.getByRole('complementary');
+      await expect(
+        sidebar.getByText('qwen-web-shell-e2e', { exact: true }),
+      ).toBeVisible();
+      await expect(
+        sidebar.getByText('qwen-api-service', { exact: true }),
+      ).toBeVisible();
+      await expect(sidebar.getByText('Primary', { exact: true })).toBeVisible();
+      // The primary workspace auto-expands and streams its session rows in via a
+      // per-workspace fetch. Wait for the loaded session's row before capturing
+      // so the async load has settled — otherwise the row list races the
+      // screenshot and the capture differs between runs.
+      await expect(sidebar.getByText(primarySessionName)).toBeVisible();
+      await captureScreenshot(page, `workspace-sidebar-${theme}`);
     });
 
     test(`slash menu`, async ({ page }, testInfo) => {

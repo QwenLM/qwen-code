@@ -229,16 +229,16 @@
 
 /* Color tags mirror the sidebar's session-group palette. */
 .colorRed {
-  background: #ff5a5f;
+  background: var(--accent-red);
 }
 .colorOrange {
-  background: #ff8a2a;
+  background: var(--accent-orange);
 }
 .colorYellow {
-  background: #f6c431;
+  background: var(--accent-yellow);
 }
 .colorGreen {
-  background: #69c987;
+  background: var(--accent-green);
 }
 .colorBlue {
   background: var(--agent-blue-500);

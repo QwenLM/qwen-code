@@ -1083,19 +1083,19 @@
 }
 
 .groupColorRed {
-  background: #ff5a5f;
+  background: var(--accent-red);
 }
 
 .groupColorOrange {
-  background: #ff8a2a;
+  background: var(--accent-orange);
 }
 
 .groupColorYellow {
-  background: #f6c431;
+  background: var(--accent-yellow);
 }
 
 .groupColorGreen {
-  background: #69c987;
+  background: var(--accent-green);
 }
 
 .groupColorBlue {

@@ -34,6 +34,7 @@ import { isDaemonApprovalMode } from '../utils/sessionPreparation';
 import { isVisibleComposerModel } from '../utils/composerModels';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { hasMultipleWorkspaces, workspaceBasename } from '../utils/workspace';
+import { workspaceAccentColor } from '../utils/workspaceColor';
 import {
   getLocalCommands,
   localizeBuiltinDescriptions,
@@ -57,6 +58,7 @@ import {
   getScheduledTasksByTurn,
 } from './artifacts/turnOutputSelectors';
 import styles from './ChatPane.module.css';
+import accentStyles from './WorkspaceAccent.module.css';
 
 // Split-view panes get the same interactive composer controls as the main chat,
 // each scoped to the pane's own session: the approval-mode and model pickers,
@@ -398,13 +400,47 @@ export function ChatPane({
     [showWorkspaceChip],
   );
 
+  // Also surface the workspace in the pane HEADER (always visible at the top),
+  // not just the composer chip at the bottom — on a narrow split the composer
+  // chip collapses to a bare folder icon, so the header is where you tell panes
+  // apart. A stable per-workspace accent color (same palette as the sidebar
+  // session-group dots) lets same-workspace panes read as a group at a glance,
+  // and keeps them distinguishable even when the header name ellipsizes.
+  const workspaceLabel =
+    showWorkspaceChip && paneWorkspaceCwd
+      ? workspaceBasename(paneWorkspaceCwd)
+      : undefined;
+  const workspaceAccent = showWorkspaceChip
+    ? workspaceAccentColor(paneWorkspaceCwd, workspace.capabilities)
+    : undefined;
+  const workspaceAccentClass = workspaceAccent
+    ? accentStyles[workspaceAccent]
+    : undefined;
+
   return (
     <section
       className={styles.pane}
       data-testid="chat-pane"
       aria-label={headerLabel}
     >
-      <header className={styles.header}>
+      <header
+        className={`${styles.header} ${workspaceAccentClass ?? ''}`.trim()}
+      >
+        {workspaceLabel && (
+          <span
+            // role="img" so the whole dot+name badge is announced as its
+            // aria-label ("Workspace: <name>"); aria-label on a bare <span>
+            // (generic role) isn't reliably surfaced by screen readers.
+            role="img"
+            className={styles.workspaceTag}
+            title={paneWorkspaceCwd}
+            aria-label={t('workspace.paneLabel', { name: workspaceLabel })}
+            data-web-shell-pane-workspace
+          >
+            <span className={styles.workspaceTagDot} aria-hidden="true" />
+            <span className={styles.workspaceTagText}>{workspaceLabel}</span>
+          </span>
+        )}
         <span className={styles.title} title={headerLabel}>
           {headerLabel}
         </span>
@@ -536,6 +572,7 @@ export function ChatPane({
               : undefined
           }
           workspaceTitle={paneWorkspaceCwd}
+          workspaceColor={workspaceAccent}
           currentMode={connection.currentMode ?? 'default'}
           currentModel={connection.currentModel ?? ''}
           availableModels={availableModels}

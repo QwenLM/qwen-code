@@ -152,6 +152,10 @@ interface FakeBridge extends AcpSessionBridge {
     signal?: AbortSignal;
     context?: BridgeClientRequestContext;
   }>;
+  readonly primaryOnlyMutationCalls: Array<{
+    route: 'branch' | 'fork' | 'cd';
+    sessionId: string;
+  }>;
 }
 
 function makeSummary(
@@ -284,6 +288,7 @@ function makeBridge(
   const rewindSnapshotCalls: string[] = [];
   const rewindCalls: FakeBridge['rewindCalls'] = [];
   const shellCalls: FakeBridge['shellCalls'] = [];
+  const primaryOnlyMutationCalls: FakeBridge['primaryOnlyMutationCalls'] = [];
   const bridge = {
     permissionPolicy: 'first-responder' as const,
     spawnCalls,
@@ -314,6 +319,7 @@ function makeBridge(
     rewindSnapshotCalls,
     rewindCalls,
     shellCalls,
+    primaryOnlyMutationCalls,
     get sessionCount() {
       return live.size;
     },
@@ -606,6 +612,18 @@ function makeBridge(
         return options.shellImpl(sessionId, command, signal, context);
       }
       return { exitCode: 0, output: workspaceCwd, aborted: false };
+    },
+    async branchSession(sessionId: string) {
+      primaryOnlyMutationCalls.push({ route: 'branch', sessionId });
+      throw new Error('Unexpected branchSession call');
+    },
+    async launchSessionForkAgent(sessionId: string) {
+      primaryOnlyMutationCalls.push({ route: 'fork', sessionId });
+      throw new Error('Unexpected launchSessionForkAgent call');
+    },
+    async changeSessionCwd(sessionId: string) {
+      primaryOnlyMutationCalls.push({ route: 'cd', sessionId });
+      throw new Error('Unexpected changeSessionCwd call');
     },
     async cancelSession(sessionId: string) {
       cancelCalls.push(sessionId);
@@ -1548,20 +1566,55 @@ describe('multi-workspace session dispatch', () => {
     );
   });
 
-  it('returns a clear Phase 2a error for non-primary sessions on primary-only routes', async () => {
-    const { app, primaryBridge, secondaryBridge } = makeHarness();
+  it.each([
+    {
+      suffix: 'branch',
+      route: 'POST /session/:id/branch',
+      body: { name: 'next' },
+    },
+    {
+      suffix: 'fork',
+      route: 'POST /session/:id/fork',
+      body: { directive: 'review this' },
+    },
+    {
+      suffix: 'cd',
+      route: 'POST /session/:id/cd',
+      body: { path: path.resolve(path.sep, 'work', 'next') },
+    },
+  ])(
+    'rejects $route for a non-primary live-session owner',
+    async ({ suffix, route, body }) => {
+      const daemonLog = makeDaemonLog();
+      const { app, primaryBridge, secondaryBridge } = makeHarness({
+        daemonLog,
+      });
 
-    const res = await request(app)
-      .post('/session/secondary-session/branch')
-      .set('Host', host())
-      .send({ name: 'next' });
+      const res = await request(app)
+        .post(`/session/secondary-session/${suffix}`)
+        .set('Host', host())
+        .send(body);
 
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe('non_primary_session_route_not_supported');
-    expect(res.body.workspaceCwd).toBe(SECONDARY_CWD);
-    expect(primaryBridge.restoreCalls).toEqual([]);
-    expect(secondaryBridge.restoreCalls).toEqual([]);
-  });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({
+        error: `Route "${route}" is only available for primary workspace sessions.`,
+        code: 'non_primary_session_route_not_supported',
+        sessionId: 'secondary-session',
+        workspaceId: 'secondary-id',
+        workspaceCwd: SECONDARY_CWD,
+        route,
+      });
+      expect(primaryBridge.primaryOnlyMutationCalls).toEqual([]);
+      expect(secondaryBridge.primaryOnlyMutationCalls).toEqual([]);
+      expect(daemonLog.warn).toHaveBeenCalledWith('session routing failed', {
+        route,
+        resolutionKind: 'non_primary_session_route_not_supported',
+        sessionId: 'secondary-session',
+        workspaceId: 'secondary-id',
+        workspaceCwd: SECONDARY_CWD,
+      });
+    },
+  );
 
   it('routes POST /session/:id/model to the owning non-primary workspace bridge', async () => {
     const { app, primaryBridge, secondaryBridge } = makeHarness();
