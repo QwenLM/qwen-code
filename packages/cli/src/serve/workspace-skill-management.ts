@@ -430,6 +430,19 @@ async function downloadGitHubSkill(
     skillError('invalid_skill_source', 'Invalid GitHub Skill URL');
   }
   const directory = filePath.slice(0, -1).join('/');
+  const directorySegments = directory.split('/');
+  if (
+    directory &&
+    (directory.length > MAX_PATH_LENGTH ||
+      directory.includes('\\') ||
+      directory.startsWith('/') ||
+      directorySegments.length > MAX_PATH_DEPTH ||
+      directorySegments.some(
+        (segment) => !segment || segment === '.' || segment === '..',
+      ))
+  ) {
+    skillError('invalid_skill_source', 'Invalid GitHub Skill URL path');
+  }
   try {
     return await downloadGitHubDirectory(
       owner,
@@ -680,6 +693,26 @@ function skillBaseDir(workspace: string, scope: WorkspaceSkillScope): string {
     : path.join(Storage.getGlobalQwenDir(), 'skills');
 }
 
+async function removeLegacyInstallArtifacts(
+  baseDir: string,
+  skillName: string,
+): Promise<void> {
+  const prefixes = [`.${skillName}.installing-`, `.${skillName}.backup-`];
+  const entries = await fs.readdir(baseDir, { withFileTypes: true });
+  await Promise.all(
+    entries
+      .filter((entry) =>
+        prefixes.some((prefix) => entry.name.startsWith(prefix)),
+      )
+      .map((entry) =>
+        fs.rm(path.join(baseDir, entry.name), {
+          recursive: true,
+          force: true,
+        }),
+      ),
+  );
+}
+
 async function ensureDirectoryWithoutSymlinks(
   directory: string,
 ): Promise<void> {
@@ -712,15 +745,18 @@ export async function installWorkspaceSkill(
   const files = await filesFromSource(request.source, githubToken);
   const baseDir = skillBaseDir(workspace, request.scope);
   await ensureDirectoryWithoutSymlinks(baseDir);
+  await removeLegacyInstallArtifacts(baseDir, skillName);
   const destination = path.join(baseDir, skillName);
   const existing = await fs.lstat(destination).catch(() => undefined);
   if (existing?.isSymbolicLink() || (existing && !existing.isDirectory())) {
     skillError('unsafe_skill_path', 'Refusing to replace an unsafe Skill path');
   }
+  const workDir = path.dirname(baseDir);
+  const workPrefix = `.${path.basename(baseDir)}-${skillName}`;
   const staging = await fs.mkdtemp(
-    path.join(baseDir, `.${skillName}.installing-`),
+    path.join(workDir, `${workPrefix}.installing-`),
   );
-  const backup = path.join(baseDir, `.${skillName}.backup-${Date.now()}`);
+  const backup = path.join(workDir, `${workPrefix}.backup-${Date.now()}`);
   let movedExisting = false;
   try {
     for (const file of files) {
