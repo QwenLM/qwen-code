@@ -856,6 +856,7 @@ const EN: Messages = {
     'The daemon did not confirm persistent workspace registration',
   'sidebar.addWorkspaceAbsError': 'Path must be absolute',
   'sidebar.addWorkspaceHint': 'Enter the absolute path to a project directory.',
+  'sidebar.addWorkspaceSuggestions': 'Directory suggestions',
   'sidebar.addWorkspacePersist': 'Keep after daemon restart',
   'sidebar.addWorkspacePersistHint':
     'Persist this workspace registration in the daemon configuration.',
@@ -2932,6 +2933,7 @@ const ZH: Messages = {
   'sidebar.addWorkspacePersistenceError': '守护进程未确认工作区已持久化注册',
   'sidebar.addWorkspaceAbsError': '路径必须是绝对路径',
   'sidebar.addWorkspaceHint': '请输入项目目录的绝对路径。',
+  'sidebar.addWorkspaceSuggestions': '目录建议',
   'sidebar.addWorkspacePersist': '服务重启后保留',
   'sidebar.addWorkspacePersistHint': '将此工作区注册持久化到守护进程配置中。',
   'sidebar.addWorkspaceAdding': '添加中…',
