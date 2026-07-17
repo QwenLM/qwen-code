@@ -3669,7 +3669,16 @@ export function App({
     return request;
   }, []);
   const createNewSession = useCallback(
-    async (workspaceCwd?: string) => {
+    async (
+      workspaceCwd?: string,
+      /**
+       * Leave `mainView` alone. The default is to switch to the chat, because a
+       * user who asks for a new chat wants to see it — but the Goals form has to
+       * stay mounted until its prompt is admitted, or a rejection has nowhere to
+       * render. Only that caller passes this.
+       */
+      opts?: { keepView?: boolean },
+    ) => {
       const targetWorkspaceCwd = lockedWorkspaceCwd ?? workspaceCwd;
       selectedWorkspaceCwdRef.current = targetWorkspaceCwd;
       setSelectedWorkspaceCwd(targetWorkspaceCwd);
@@ -3679,7 +3688,7 @@ export function App({
       // Starting a new chat means the user wants to see it — leave any open
       // Settings/Status panel so the fresh chat is visible (no-op when closed).
       closePanel();
-      setMainView('chat');
+      if (!opts?.keepView) setMainView('chat');
       let focusRequest: number | undefined;
       try {
         const clearPromise = (
@@ -6388,7 +6397,14 @@ export function App({
                           stranded !== undefined &&
                           connectionRef.current.sessionId === stranded;
                         if (!canReuseStranded) {
-                          const created = await createNewSession();
+                          // `keepView`: createNewSession switches to the chat by
+                          // default, which would unmount this form before the
+                          // prompt is even sent and leave a later rejection with
+                          // nowhere to render — the exact failure the deferred
+                          // switch below exists to prevent.
+                          const created = await createNewSession(undefined, {
+                            keepView: true,
+                          });
                           // createNewSession already surfaced the failure; don't
                           // drop the goal into the wrong (still-current) session.
                           // `false` keeps the form open with the typed condition

@@ -286,11 +286,14 @@ export function GoalsDialog({
         <div className={styles.empty}>{t('goals.empty')}</div>
       )}
 
-      <div className={styles.list}>
+      {/* Explicit list semantics: these are divs, and even a real <ul> loses its
+          implicit role under `display: flex` in Safari. Without them a screen
+          reader cannot announce "list, N items" or navigate goal by goal. */}
+      <div className={styles.list} role="list">
         {(goals ?? []).map((goal) => {
           const busy = busySessionId === goal.sessionId;
           return (
-            <div key={goal.sessionId} className={styles.card}>
+            <div key={goal.sessionId} className={styles.card} role="listitem">
               <div className={styles.cardHeader}>
                 <span
                   className={`${styles.statusDot} ${goal.hasActivePrompt ? styles.statusDotRunning : ''}`}
@@ -341,6 +344,11 @@ export function GoalsDialog({
                   className={styles.sessionLink}
                   onClick={() => onOpenSession(goal.sessionId)}
                   title={t('goals.openSessionHint')}
+                  // The visible text is just the session's name, which says
+                  // nothing about what activating it does. Name the action AND
+                  // the target — the target stays in the accessible name so it
+                  // still contains the visible label (WCAG 2.5.3).
+                  aria-label={`${t('goals.openSessionHint')}: ${goal.displayName || goal.sessionId}`}
                 >
                   {goal.displayName || goal.sessionId}
                 </button>

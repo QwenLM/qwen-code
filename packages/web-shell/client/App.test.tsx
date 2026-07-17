@@ -3893,6 +3893,39 @@ describe('App /goal command', () => {
     );
   });
 
+  it('keeps the Goals page mounted across createNewSession, not just after it', async () => {
+    // `createNewSession` switches to the chat view itself, before any await. That
+    // silently defeated the deferred switch below: by the time `sendPrompt`
+    // rejected, the Goals page — and the form that renders the error — was already
+    // gone, dumping the user in an empty chat with no explanation. The handler
+    // passes `keepView` so the page survives until the prompt is admitted.
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal';
+    await clickSubmit(container);
+    await flush();
+
+    const onCreateGoal = testState.latestGoalsProps?.onCreateGoal;
+    if (!onCreateGoal) throw new Error('onCreateGoal was not captured');
+    mockSessionActions.sendPrompt.mockRejectedValueOnce(
+      new Error('daemon says no'),
+    );
+
+    await act(async () => {
+      await expect(onCreateGoal('all tests pass')).rejects.toThrow(
+        'daemon says no',
+      );
+    });
+
+    // createNewSession ran (a fresh session was started) …
+    expect(mockSessionActions.clearSession).toHaveBeenCalled();
+    // … and the Goals page is STILL up, so the rejection has somewhere to land.
+    expect(
+      container.querySelector('[data-testid="goals-page"]'),
+    ).not.toBeNull();
+  });
+
   it('keeps the Goals page open when the goal prompt is rejected', async () => {
     const { container } = renderApp();
     await flush();
@@ -3961,7 +3994,10 @@ describe('App /goal command', () => {
     });
     await flush();
 
-    expect(mockSessionActions.loadSession).toHaveBeenCalledWith(
+    // Pin the session id, not the options bag — main added a `{ workspaceCwd }`
+    // second argument and will likely keep evolving it; the id is what this test
+    // is about.
+    expect(mockSessionActions.loadSession.mock.calls[0][0]).toBe(
       'goal-session-9',
     );
     // It must leave the Goals page, or the user loads a transcript they cannot see.

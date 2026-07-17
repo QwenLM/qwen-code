@@ -90,10 +90,13 @@
   min-width: 0;
 }
 
+/* `--muted-foreground`, matching `.fieldLabel` in ScheduledTasksDialog: these two
+   dialogs sit side by side in the same sidebar and a field label is secondary
+   text in both. */
 .fieldLabel {
   font-size: 12px;
   font-weight: 600;
-  color: var(--foreground);
+  color: var(--muted-foreground);
 }
 
 .required {
