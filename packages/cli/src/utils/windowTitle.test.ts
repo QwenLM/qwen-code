@@ -4,11 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   computeWindowTitle,
   writeTerminalTitle,
   formatSessionWindowTitle,
+  restoreWindowTitle,
 } from './windowTitle.js';
 
 describe('computeWindowTitle', () => {
@@ -204,11 +205,93 @@ describe('formatSessionWindowTitle', () => {
     expect(formatSessionWindowTitle(null, 'my-project')).toBe('Custom Title');
   });
 
+  it('should prefer CLI_TITLE over sessionName when both are set', () => {
+    vi.stubEnv('CLI_TITLE', '[g-glm] starring-glm');
+    expect(formatSessionWindowTitle('auto-session-title', 'my-project')).toBe(
+      '[g-glm] starring-glm',
+    );
+  });
+
+  it('should prefer CLI_TITLE even when sessionName is non-null and no folder', () => {
+    vi.stubEnv('CLI_TITLE', '[ap-glm] starring-glm');
+    expect(formatSessionWindowTitle('some session')).toBe(
+      '[ap-glm] starring-glm',
+    );
+  });
+
   it('should sanitize control characters from session name', () => {
     expect(formatSessionWindowTitle('Bad\x07Title')).toBe('BadTitle');
   });
 
   it('should use default title when sessionName is null and no folder', () => {
     expect(formatSessionWindowTitle(null)).toBe('Qwen - qwen');
+  });
+});
+
+describe('restoreWindowTitle', () => {
+  const writeCalls: string[] = [];
+  let originalWrite: typeof process.stdout.write;
+
+  beforeEach(() => {
+    vi.stubEnv('CLI_TITLE', undefined);
+    vi.stubEnv('TMUX', undefined);
+    vi.stubEnv('STY', undefined);
+    vi.stubEnv('ZELLIJ', undefined);
+    vi.stubEnv('DVTM', undefined);
+    writeCalls.length = 0;
+    originalWrite = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((chunk: unknown) => {
+      writeCalls.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write;
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    process.stdout.write = originalWrite;
+  });
+
+  it('should write OSC escape sequences to process.stdout using folder name', () => {
+    restoreWindowTitle(null, 'my-project');
+
+    const padded = 'Qwen - my-project'.padEnd(80, ' ');
+    expect(writeCalls).toContain(`\x1b]0;${padded}\x07\x1b]2;${padded}\x07`);
+  });
+
+  it('should prefer CLI_TITLE over folder name', () => {
+    vi.stubEnv('CLI_TITLE', '[g-glm] starring-glm');
+    restoreWindowTitle(null, 'starring-glm');
+
+    const padded = '[g-glm] starring-glm'.padEnd(80, ' ');
+    expect(writeCalls).toContain(`\x1b]0;${padded}\x07\x1b]2;${padded}\x07`);
+  });
+
+  it('should prefer CLI_TITLE over session name', () => {
+    vi.stubEnv('CLI_TITLE', '[ap-glm] starring-glm');
+    restoreWindowTitle('auto-session', 'starring-glm');
+
+    const padded = '[ap-glm] starring-glm'.padEnd(80, ' ');
+    expect(writeCalls).toContain(`\x1b]0;${padded}\x07\x1b]2;${padded}\x07`);
+  });
+
+  it('should use session name when CLI_TITLE is not set', () => {
+    restoreWindowTitle('my session', 'my-project');
+
+    const padded = 'my session'.padEnd(80, ' ');
+    expect(writeCalls).toContain(`\x1b]0;${padded}\x07\x1b]2;${padded}\x07`);
+  });
+
+  it('should use default title when no args provided', () => {
+    restoreWindowTitle();
+
+    const padded = 'Qwen - qwen'.padEnd(80, ' ');
+    expect(writeCalls).toContain(`\x1b]0;${padded}\x07\x1b]2;${padded}\x07`);
+  });
+
+  it('should only write OSC 2 inside tmux', () => {
+    vi.stubEnv('TMUX', '/tmp/tmux-0/default');
+    restoreWindowTitle(null, 'my-project');
+
+    expect(writeCalls).toContain(`\x1b]2;Qwen - my-project\x07`);
   });
 });

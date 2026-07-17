@@ -27,6 +27,7 @@ import type {
 import {
   getShellAbortReasonKind,
   ShellExecutionService,
+  stripOscTitleSequences,
 } from './shellExecutionService.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
 
@@ -3601,5 +3602,81 @@ describe('getShellAbortReasonKind (defensive abort-reason read)', () => {
 
   it("returns 'cancel' for the canonical cancel reason", () => {
     expect(getShellAbortReasonKind({ kind: 'cancel' })).toBe('cancel');
+  });
+});
+
+describe('stripOscTitleSequences', () => {
+  const originalPlatform = process.platform;
+
+  afterEach(() => {
+    Object.defineProperty(process, 'platform', {
+      value: originalPlatform,
+      configurable: true,
+    });
+  });
+
+  it('returns non-string input unchanged (Buffer safety)', () => {
+    const buf = Buffer.from('hello') as unknown as string;
+    expect(stripOscTitleSequences(buf)).toBe(buf);
+  });
+
+  describe('on non-win32 platforms', () => {
+    beforeEach(() => {
+      Object.defineProperty(process, 'platform', {
+        value: 'linux',
+        configurable: true,
+      });
+    });
+
+    it('passes data through unchanged (no regex overhead)', () => {
+      const data = '\x1b]0;Title\x07some text\x1b]2;Other\x07';
+      expect(stripOscTitleSequences(data)).toBe(data);
+    });
+  });
+
+  describe('on win32', () => {
+    beforeEach(() => {
+      Object.defineProperty(process, 'platform', {
+        value: 'win32',
+        configurable: true,
+      });
+    });
+
+    it('returns empty string for empty input', () => {
+      expect(stripOscTitleSequences('')).toBe('');
+    });
+
+    it('strips OSC 0 sequence with BEL terminator', () => {
+      expect(stripOscTitleSequences('\x1b]0;My Title\x07')).toBe('');
+    });
+
+    it('strips OSC 1 sequence with BEL terminator', () => {
+      expect(stripOscTitleSequences('\x1b]1;Icon Name\x07')).toBe('');
+    });
+
+    it('strips OSC 2 sequence with BEL terminator', () => {
+      expect(stripOscTitleSequences('\x1b]2;Window Title\x07')).toBe('');
+    });
+
+    it('strips OSC sequence with ST terminator (ESC \\)', () => {
+      expect(stripOscTitleSequences('\x1b]0;Title\x1b\\')).toBe('');
+    });
+
+    it('preserves surrounding text around OSC sequences', () => {
+      expect(stripOscTitleSequences('before \x1b]0;Title\x07 after')).toBe(
+        'before  after',
+      );
+    });
+
+    it('handles multiple OSC sequences in one string', () => {
+      expect(stripOscTitleSequences('\x1b]0;A\x07text\x1b]2;B\x07more')).toBe(
+        'textmore',
+      );
+    });
+
+    it('does not strip OSC sequences with parameter > 2 (e.g. OSC 8 hyperlinks)', () => {
+      const hyperlink = '\x1b]8;;http://example.com\x07click\x1b]8;;\x07';
+      expect(stripOscTitleSequences(hyperlink)).toBe(hyperlink);
+    });
   });
 });

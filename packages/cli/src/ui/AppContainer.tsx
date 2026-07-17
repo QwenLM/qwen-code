@@ -1899,6 +1899,8 @@ export const AppContainer = (props: AppContainerProps) => {
     logger,
     availableTerminalHeightRef,
     terminalWidthRef,
+    sessionName,
+    settings.merged.ui?.hideWindowTitle,
   );
   cancelOngoingRequestRef.current = cancelOngoingRequest;
 

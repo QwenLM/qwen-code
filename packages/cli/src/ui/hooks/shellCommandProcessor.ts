@@ -31,6 +31,7 @@ import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
 import { themeManager } from '../../ui/themes/theme-manager.js';
+import { restoreWindowTitle } from '../../utils/windowTitle.js';
 
 export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
 const MAX_OUTPUT_LENGTH = 10000;
@@ -85,6 +86,8 @@ export const useShellCommandProcessor = (
   setShellInputFocused: (value: boolean) => void,
   terminalWidth?: number,
   terminalHeight?: number,
+  sessionName?: string | null,
+  hideWindowTitle?: boolean,
 ) => {
   const [activeShellPtyId, setActiveShellPtyId] = useState<number | null>(null);
   const handleShellCommand = useCallback(
@@ -150,6 +153,9 @@ export const useShellCommandProcessor = (
         abortSignal.addEventListener('abort', abortHandler, { once: true });
 
         onDebugMessage(`Executing in ${targetDir}: ${commandToExecute}`);
+
+        // Hoist outside try{} so the catch block can also clear it.
+        let titleWatchdog: ReturnType<typeof setInterval> | undefined;
 
         try {
           const activeTheme = themeManager.getActiveTheme();
@@ -265,6 +271,16 @@ export const useShellCommandProcessor = (
             });
           }
 
+          // cmd.exe / ConPTY clobbers the console title during shell
+          // execution. Re-assert every 150ms — but only on Windows and
+          // only when the user hasn't disabled window titles.
+          if (isWindows && !hideWindowTitle) {
+            titleWatchdog = setInterval(
+              () => restoreWindowTitle(sessionName, path.basename(targetDir)),
+              150,
+            );
+          }
+
           result
             .then((result: ShellExecutionResult) => {
               setPendingHistoryItem(null);
@@ -340,12 +356,17 @@ export const useShellCommandProcessor = (
               );
             })
             .finally(() => {
+              if (titleWatchdog) clearInterval(titleWatchdog);
               abortSignal.removeEventListener('abort', abortHandler);
               if (pwdFilePath && fs.existsSync(pwdFilePath)) {
                 fs.unlinkSync(pwdFilePath);
               }
               setActiveShellPtyId(null);
               setShellInputFocused(false);
+              // cmd.exe / ConPTY overwrites the console title during shell
+              // execution; re-emit our title since the useEffect in
+              // AppContainer won't re-fire (deps unchanged).
+              restoreWindowTitle(sessionName, path.basename(targetDir));
               resolve();
             });
         } catch (err) {
@@ -361,11 +382,13 @@ export const useShellCommandProcessor = (
           );
 
           // Perform cleanup here as well
+          if (titleWatchdog) clearInterval(titleWatchdog);
           if (pwdFilePath && fs.existsSync(pwdFilePath)) {
             fs.unlinkSync(pwdFilePath);
           }
           setActiveShellPtyId(null);
           setShellInputFocused(false);
+          restoreWindowTitle(sessionName, path.basename(targetDir));
           resolve(); // Resolve the promise to unblock `onExec`
         }
       };
@@ -387,6 +410,8 @@ export const useShellCommandProcessor = (
       setShellInputFocused,
       terminalHeight,
       terminalWidth,
+      sessionName,
+      hideWindowTitle,
     ],
   );
 

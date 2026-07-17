@@ -278,6 +278,27 @@ function setWindowTitle(settings: LoadedSettings, folderName?: string) {
   const windowTitle = computeWindowTitle(folderName);
   writeTerminalTitle((value) => process.stdout.write(value), windowTitle);
 
+  // Startup watchdog: ConPTY / Ink renderer initialization can overwrite
+  // the console title with "Windows PowerShell" during the first few
+  // seconds. Re-assert every 300ms for 3s to cover that window.
+  // Windows-only: other platforms don't have ConPTY title clobbering.
+  if (process.platform === 'win32') {
+    const restore = () =>
+      writeTerminalTitle((value) => process.stdout.write(value), windowTitle);
+    let elapsed = 0;
+    const startupWatchdog = setInterval(() => {
+      restore();
+      elapsed += 300;
+      if (elapsed >= 3000) clearInterval(startupWatchdog);
+    }, 300);
+    // Don't keep the Node.js event loop alive solely for this timer.
+    startupWatchdog.unref();
+
+    process.on('exit', () => {
+      clearInterval(startupWatchdog);
+    });
+  }
+
   process.on('exit', () => {
     try {
       writeTerminalTitle((value) => process.stdout.write(value), '');

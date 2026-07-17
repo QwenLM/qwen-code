@@ -86,6 +86,41 @@ import { createPatchSmart, getDiffStat } from './diffOptions.js';
 const debugLogger = createDebugLogger('SHELL');
 
 /**
+ * Re-emit OSC escape sequences to restore the console window title
+ * after a child process (cmd.exe / ConPTY) overwrites it.
+ *
+ * On Windows, `process.title` preserves the last value set by
+ * `writeTerminalTitle` during startup, even after a child process
+ * changes the visible console title. This re-synchronises the
+ * visible title by re-emitting OSC 0/2 sequences padded to 80 chars
+ * (matching `writeTerminalTitle`'s behaviour to avoid taskbar jitter).
+ *
+ * Detects terminal multiplexers (tmux, screen, zellij, dvtm) and
+ * emits only OSC 2 inside them, mirroring `writeTerminalTitle`.
+ */
+const TITLE_MULTIPLEXER_ENV_KEYS = ['TMUX', 'STY', 'ZELLIJ', 'DVTM'] as const;
+
+export function restoreConsoleTitle(): void {
+  if (process.platform !== 'win32' || !process.title) return;
+  // Sanitize: process.title may have been overwritten by a child process
+  // with text containing ESC/BEL — re-emitting those verbatim would inject
+  // rogue OSC sequences. Strip all C0 controls, DEL, and BiDi marks.
+  const safe = process.title
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\x00-\x1f\x7f\x80-\x9f\u2028\u2029]/g, '')
+    .substring(0, 80)
+    .padEnd(80, ' ');
+  const inMultiplexer = TITLE_MULTIPLEXER_ENV_KEYS.some(
+    (k) => !!process.env[k],
+  );
+  if (inMultiplexer) {
+    process.stdout.write(`\x1b]2;${safe}\x07`);
+  } else {
+    process.stdout.write(`\x1b]0;${safe}\x07\x1b]2;${safe}\x07`);
+  }
+}
+
+/**
  * Strip a single bare trailing `&` (bash background operator) from a
  * command string. Returns the input unchanged if the trailing form is
  * `&&` (logical AND), `\&` (escaped literal `&`), or there is no `&`
@@ -2565,18 +2600,24 @@ export class ShellToolInvocation extends BaseToolInvocation<
     }
 
     let result;
+    // Title watchdog: re-assert process.title every 150ms while a child
+    // process is running. ConPTY / cmd.exe / powershell.exe emit OSC 0/2
+    // title sequences that overwrite our role-name title. The PTY-level
+    // stripOscTitleSequences filter catches sequences in the data stream,
+    // but the OS console title may still be changed via Win32 API or
+    // split-chunk sequences that evade per-chunk regex. This interval
+    // guarantees the title snaps back within 150ms regardless of mechanism.
+    const titleWatchdog = setInterval(restoreConsoleTitle, 150);
+
     try {
       result = await resultPromise;
     } finally {
-      // Cancel any pending trailing flush — the command has settled (or
-      // threw) and either the final ToolResult carries the complete output
-      // or the caller will surface an error. Either way the timer must not
-      // fire a stale frame after we've returned. `finally` covers both the
-      // happy path and the (theoretical) reject path so no timer leaks.
+      clearInterval(titleWatchdog);
       cancelTrailingFlush();
       cancelTimeoutWarning();
       cancelHeartbeat();
       combinedSignal.removeEventListener('abort', onAbort);
+      restoreConsoleTitle();
     }
 
     // Background-promote path: the user pressed Ctrl+B (PR-3 wires the
