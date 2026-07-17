@@ -105,7 +105,9 @@ Notes:
         ToolNames.MEMORY,
         ToolNames.SKILL,
         ToolNames.LSP,
-        ToolNames.ASK_USER_QUESTION,
+        // ASK_USER_QUESTION is deliberately absent: Explore is a read-only
+        // search worker that typically runs as a subagent with no human in
+        // the loop — an interactive question would block forever (#7126).
       ],
     },
     {
