@@ -1048,64 +1048,20 @@ const PROTOCOL_TAG_PREFIXES = [
   '<summary',
   '</summary',
 ] as const;
-// ponytail: Bound undecided provider output; use incremental parsing if valid
-// protocol prefixes outgrow these caps.
-const MAX_PENDING_PROTOCOL_CHUNKS = 256;
-const MAX_PROTOCOL_TAG_PREFIX_LENGTH = 256;
-const OPENING_THINKING_TAG = '<think>';
-const CLOSING_THINKING_TAG = '</think>';
-
-function classifyEmptyThinkingBlockChainPrefix(
-  candidate: string,
-): 'pending' | 'clean' | 'partial-leak' | 'leaked' {
-  if (!candidate || OPENING_THINKING_TAG.startsWith(candidate)) {
-    return 'pending';
-  }
-  if (!candidate.startsWith(OPENING_THINKING_TAG)) return 'clean';
-
-  const afterOpeningTag = candidate
-    .slice(OPENING_THINKING_TAG.length)
-    .trimStart();
-  if (!afterOpeningTag) return 'pending';
-  if (!afterOpeningTag.startsWith(CLOSING_THINKING_TAG)) {
-    return CLOSING_THINKING_TAG.startsWith(afterOpeningTag)
-      ? 'pending'
-      : 'clean';
-  }
-
-  const afterClosingTag = afterOpeningTag
-    .slice(CLOSING_THINKING_TAG.length)
-    .trimStart();
-  if (!afterClosingTag) return 'pending';
-  if (afterClosingTag.startsWith(OPENING_THINKING_TAG)) return 'leaked';
-  return OPENING_THINKING_TAG.startsWith(afterClosingTag)
-    ? 'partial-leak'
-    : 'clean';
-}
 
 class LeadingProtocolTagLeakDetector {
   private state: 'detecting' | 'clean' | 'leaked' = 'detecting';
   private buffer = '';
 
-  accept(text: string): void {
-    if (this.state !== 'detecting') return;
+  accept(text: string): string {
+    if (this.state === 'clean') return text;
+    if (this.state === 'leaked') return '';
 
-    const remaining = MAX_PROTOCOL_TAG_PREFIX_LENGTH + 1 - this.buffer.length;
-    this.buffer += text.slice(0, remaining);
+    this.buffer += text;
     const candidate = this.buffer.trimStart().toLowerCase();
-    const thinkingTagState = classifyEmptyThinkingBlockChainPrefix(candidate);
-    if (thinkingTagState === 'leaked') {
-      this.reject();
-      return;
-    }
-    if (
-      thinkingTagState === 'pending' ||
-      thinkingTagState === 'partial-leak' ||
-      PROTOCOL_TAG_PREFIXES.some((prefix) => prefix.startsWith(candidate))
-    ) {
-      if (this.buffer.length <= MAX_PROTOCOL_TAG_PREFIX_LENGTH) return;
-      this.reject();
-      return;
+    if (!candidate) return '';
+    if (PROTOCOL_TAG_PREFIXES.some((prefix) => prefix.startsWith(candidate))) {
+      return '';
     }
 
     for (const prefix of PROTOCOL_TAG_PREFIXES) {
@@ -1113,42 +1069,41 @@ class LeadingProtocolTagLeakDetector {
         candidate.startsWith(prefix) &&
         /[\s/>]/.test(candidate[prefix.length] ?? '')
       ) {
-        this.reject();
-        return;
+        this.state = 'leaked';
+        this.buffer = '';
+        return '';
       }
     }
 
     this.state = 'clean';
+    const output = this.buffer;
     this.buffer = '';
+    return output;
   }
 
-  finish(): void {
-    if (this.state !== 'detecting') return;
+  finish(): string {
+    if (this.state !== 'detecting') return '';
     const candidate = this.buffer.trimStart().toLowerCase();
-    const thinkingTagState = classifyEmptyThinkingBlockChainPrefix(candidate);
     if (
-      thinkingTagState === 'partial-leak' ||
-      (candidate &&
-        PROTOCOL_TAG_PREFIXES.some((prefix) => prefix.startsWith(candidate)))
+      candidate &&
+      PROTOCOL_TAG_PREFIXES.some((prefix) => prefix.startsWith(candidate))
     ) {
-      this.reject();
-      return;
+      this.state = 'leaked';
+      this.buffer = '';
+      return '';
     }
     this.state = 'clean';
+    const output = this.buffer;
     this.buffer = '';
-  }
-
-  reject(): void {
-    this.state = 'leaked';
-    this.buffer = '';
+    return output;
   }
 
   get leaked(): boolean {
     return this.state === 'leaked';
   }
 
-  get hasBufferedText(): boolean {
-    return this.buffer.length > 0;
+  get blockingOutput(): boolean {
+    return this.state !== 'clean';
   }
 }
 
@@ -3628,11 +3583,6 @@ export class GeminiChat {
   ): AsyncGenerator<GenerateContentResponse> {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
-    const yieldedModelParts: Part[] = [];
-    const trackYieldedParts = (response: GenerateContentResponse): void => {
-      const parts = response.candidates?.[0]?.content?.parts;
-      if (parts) yieldedModelParts.push(...parts);
-    };
     const usedToolCallIds = collectToolCallIdsFromHistory(this.history);
     const rawToolCallIdsInCurrentTurn = new Set<string>();
     const reservedToolCallIds = new Map<string, string>();
@@ -3650,7 +3600,7 @@ export class GeminiChat {
     let hasToolCall = false;
     let hasFinishReason = false;
     const protocolTagDetector = new LeadingProtocolTagLeakDetector();
-    const pendingProtocolChunks: GenerateContentResponse[] = [];
+    let protocolTextWasSuppressed = false;
     // Captured if the upstream stream throws mid-iteration (typical on weak
     // networks: SSE drops between `content_block_stop` of a tool_use and the
     // terminal `message_stop`). We still build / record / push a partial
@@ -3686,16 +3636,20 @@ export class GeminiChat {
           const candidate = chunk.candidates?.[0];
           const content = candidate?.content;
           if (content?.parts) {
-            for (const part of content.parts) {
-              if (typeof part.text === 'string' && !part.thought) {
-                protocolTagDetector.accept(part.text);
-              }
+            content.parts = content.parts.flatMap((part) => {
+              if (typeof part.text !== 'string' || part.thought) return [part];
+              const text = protocolTagDetector.accept(part.text);
+              if (text) return [{ ...part, text }];
+              protocolTextWasSuppressed ||= part.text.length > 0;
+              const { text: _text, ...rest } = part;
+              return Object.values(rest).some((value) => value !== undefined)
+                ? [rest]
+                : [];
+            });
+            if (candidate?.finishReason) {
+              const text = protocolTagDetector.finish();
+              if (text) content.parts.push({ text });
             }
-          }
-          if (candidate?.finishReason) {
-            protocolTagDetector.finish();
-          }
-          if (content?.parts) {
             content.parts = normalizeModelToolCallIds(
               content.parts,
               usedToolCallIds,
@@ -3786,41 +3740,16 @@ export class GeminiChat {
           }
         }
 
-        if (protocolTagDetector.leaked) {
-          pendingProtocolChunks.length = 0;
-          break;
-        } else if (protocolTagDetector.hasBufferedText) {
-          pendingProtocolChunks.push(chunk);
-          if (pendingProtocolChunks.length > MAX_PENDING_PROTOCOL_CHUNKS) {
-            protocolTagDetector.reject();
-            pendingProtocolChunks.length = 0;
-            break;
-          }
-        } else {
-          for (const pendingChunk of pendingProtocolChunks) {
-            trackYieldedParts(pendingChunk);
-            yield pendingChunk;
-          }
-          pendingProtocolChunks.length = 0;
-          trackYieldedParts(chunk);
+        if (!protocolTextWasSuppressed || !protocolTagDetector.blockingOutput) {
           yield chunk;
         }
       }
     } catch (e) {
-      if (!protocolTagDetector.leaked) {
-        streamError = e;
-      }
+      streamError = e;
     }
 
-    protocolTagDetector.finish();
-    if (protocolTagDetector.leaked) {
-      pendingProtocolChunks.length = 0;
-    }
-
-    const modelPartsForHistory =
-      streamError === null ? allModelParts : yieldedModelParts;
     let thoughtContentPart: Part | undefined;
-    const thoughtText = modelPartsForHistory
+    const thoughtText = allModelParts
       .filter((part) => part.thought)
       .map((part) => part.text)
       .join('')
@@ -3832,7 +3761,7 @@ export class GeminiChat {
         thought: true,
       };
 
-      const thoughtSignature = modelPartsForHistory.filter(
+      const thoughtSignature = allModelParts.filter(
         (part) => part.thoughtSignature && part.thought,
       )?.[0]?.thoughtSignature;
       if (thoughtContentPart && thoughtSignature) {
@@ -3840,7 +3769,7 @@ export class GeminiChat {
       }
     }
 
-    const contentParts = modelPartsForHistory.filter((part) => !part.thought);
+    const contentParts = allModelParts.filter((part) => !part.thought);
     const consolidatedHistoryParts: Part[] = [];
     for (const part of contentParts) {
       const lastPart =
@@ -3850,10 +3779,7 @@ export class GeminiChat {
         isValidNonThoughtTextPart(lastPart) &&
         isValidNonThoughtTextPart(part)
       ) {
-        consolidatedHistoryParts[consolidatedHistoryParts.length - 1] = {
-          ...lastPart,
-          text: lastPart.text + part.text,
-        };
+        lastPart.text += part.text;
       } else if (isValidContentPart(part)) {
         consolidatedHistoryParts.push(part);
       }
@@ -3895,14 +3821,6 @@ export class GeminiChat {
       );
     }
 
-    if (streamError === null) {
-      for (const pendingChunk of pendingProtocolChunks) {
-        trackYieldedParts(pendingChunk);
-        yield pendingChunk;
-      }
-      pendingProtocolChunks.length = 0;
-    }
-
     // Record assistant turn with raw Content and metadata. Gate matches
     // the in-memory `this.history.push` decision below so chat-recording
     // JSONL never carries a partial turn we deliberately dropped from
@@ -3911,14 +3829,10 @@ export class GeminiChat {
     // (text-only mid-stream errors, where the Retry re-issues the user
     // prompt — a stale partial-text record would bias the resumed
     // conversation or surface as duplicate output).
-    const hasYieldedToolCall = yieldedModelParts.some(
-      (part) => part.functionCall,
-    );
     const willPersistToHistory =
-      streamError === null
-        ? !protocolTagDetector.leaked
-        : hasYieldedToolCall &&
-          Boolean(thoughtContentPart || consolidatedHistoryParts.length > 0);
+      streamError === null ||
+      (hasToolCall &&
+        (thoughtContentPart || consolidatedHistoryParts.length > 0));
     if (
       willPersistToHistory &&
       (thoughtContentPart || contentText || hasToolCall || usageMetadata)
