@@ -652,6 +652,24 @@ describe('TodoWriteTool', () => {
       expect(tool.kind).toBe('think');
     });
 
+    it('should describe selective, outcome-oriented task tracking', () => {
+      expect(tool.description).toContain('complex, ambiguous, or multi-phase');
+      expect(tool.description).toContain(
+        'Do not use it for simple or single-step work',
+      );
+      expect(tool.description).toContain(
+        'unless the user explicitly requests a todo list',
+      );
+      expect(tool.description).toContain('short and outcome-oriented');
+      expect(tool.description).toContain(
+        'Do not create a separate todo for every error, file, command, or minor edit',
+      );
+      expect(tool.description).not.toContain(
+        'After receiving new instructions',
+      );
+      expect(tool.description).not.toContain('When in doubt, use this tool');
+    });
+
     it('should have schema with required properties', () => {
       const schema = tool.schema;
       expect(schema.name).toBe('todo_write');
