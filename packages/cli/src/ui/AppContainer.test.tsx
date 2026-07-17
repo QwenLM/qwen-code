@@ -673,6 +673,23 @@ describe('AppContainer State Management', () => {
       }).not.toThrow();
     });
 
+    it('does not crash when follow-up suggestion gate config lookup fails', () => {
+      vi.spyOn(mockConfig, 'getModelsConfig').mockImplementation(() => {
+        throw new Error('models config unavailable');
+      });
+
+      expect(() => {
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+      }).not.toThrow();
+    });
+
     it('renders with startup warnings', () => {
       const startupWarnings = ['Warning 1', 'Warning 2'];
 

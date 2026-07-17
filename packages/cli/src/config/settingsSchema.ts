@@ -950,9 +950,9 @@ const SETTINGS_SCHEMA = {
         label: 'Enable Follow-up Suggestions',
         category: 'UI',
         requiresRestart: false,
-        default: true,
+        default: undefined as boolean | undefined,
         description:
-          'Show context-aware follow-up suggestions after task completion. Press Tab, Right Arrow, or Enter to accept into the input buffer.',
+          'Show context-aware follow-up suggestions after task completion. Press Tab, Right Arrow, or Enter to accept into the input buffer. Defaults off for local OpenAI-compatible backends unless explicitly enabled.',
         showInDialog: true,
       },
       enableCacheSharing: {

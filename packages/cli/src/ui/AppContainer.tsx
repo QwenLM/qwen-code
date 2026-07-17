@@ -167,6 +167,7 @@ import {
   detectWorkflowKeyword,
   buildWorkflowSteeringNotice,
 } from './utils/workflow-keyword.js';
+import { getFollowupSuggestionFeatureDecision } from './utils/followup-suggestions.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { type InitializationResult } from '../core/initializer.js';
 import { ExtensionRefreshState } from '../config/extension-refresh-state.js';
@@ -2682,11 +2683,31 @@ export const AppContainer = (props: AppContainerProps) => {
     geminiClient,
   ]);
 
-  // Generate prompt suggestions when streaming completes. Enabled by default:
-  // `mergeSettings` doesn't apply the schema `default: true`, so the runtime
-  // gate must treat an unset value as enabled. Only an explicit `false` opts out.
-  const followupSuggestionsEnabled =
-    settings.merged.ui?.enableFollowupSuggestions !== false;
+  let followupSuggestionDecision: ReturnType<
+    typeof getFollowupSuggestionFeatureDecision
+  >;
+  try {
+    followupSuggestionDecision = getFollowupSuggestionFeatureDecision(
+      settings,
+      config,
+    );
+  } catch (err) {
+    debugLogger.debug(
+      `Follow-up suggestion gate failed: ${getErrorMessage(err)}`,
+    );
+    followupSuggestionDecision = { enabled: true };
+  }
+  const followupSuggestionsEnabled = followupSuggestionDecision.enabled;
+
+  useEffect(() => {
+    if (
+      followupSuggestionDecision.suppressedReason === 'loopback_openai_default'
+    ) {
+      debugLogger.debug(
+        'Follow-up suggestions suppressed by loopback OpenAI-compatible default; set ui.enableFollowupSuggestions=true to override.',
+      );
+    }
+  }, [followupSuggestionDecision.suppressedReason]);
 
   useEffect(() => {
     // Clear suggestion when feature is disabled at runtime
