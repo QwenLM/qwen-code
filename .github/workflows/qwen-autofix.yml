@@ -783,29 +783,11 @@ jobs:
           npm run typecheck
           npm run lint
 
-          # Mirror CI's "Check settings schema is up-to-date" step EXACTLY:
-          # regenerate, then fail if the committed artifact changed. Uses
-          # regenerate+`git status --porcelain` (NOT the generator's --check, which
-          # was reverted from main by #7031 — after merge this runs against main's
-          # generator, which ignores args and would make --check fail-open). Stale
-          # schemas are invisible to build/typecheck/lint/vitest.
-          SCHEMA_FILE='packages/vscode-ide-companion/schemas/settings.schema.json'
-          # Guard the generator itself: if it CRASHES (e.g. a type error the agent
-          # introduced in the schema source), set -eo pipefail would abort this step
-          # before outcome=failed is written, leaving OUTCOME unset. Set it here so
-          # the failure is explicit, not inferred from job.status.
-          if ! npm run generate:settings-schema; then
-            echo "❌ Settings schema generator failed to run."
-            echo "outcome=failed" >> "${GITHUB_OUTPUT}"
-            exit 1
-          fi
-          if [[ -n "$(git status --porcelain "${SCHEMA_FILE}")" ]]; then
-            echo "❌ ${SCHEMA_FILE} is out of date. Run: npm run generate:settings-schema"
-            git --no-pager diff -- "${SCHEMA_FILE}" || true
-            git checkout -- "${SCHEMA_FILE}" || true
-            echo "outcome=failed" >> "${GITHUB_OUTPUT}"
-            exit 1
-          fi
+          # Settings-schema freshness gate, shared with the triage-and-address
+          # verify step so the two copies cannot drift (rationale + the
+          # generator crash guard live in the script). On failure it writes
+          # outcome=failed to GITHUB_OUTPUT and exits 1.
+          bash .github/scripts/check-settings-schema.sh
 
           # Run changed/related tests for the packages this fix touches.
           # --changed follows the import graph so transitive breakage is caught.
@@ -1487,28 +1469,12 @@ jobs:
           # no-op/unchanged return: on a stale-schema PR the agent can wrongly
           # write no-action.md, and without this the no-op path would report the
           # feedback as evaluated (acted=false) while CI stays red — the exact bug
-          # this PR fixes. So it runs on EVERY path. Regenerate+`git status`
-          # mirrors CI's gate and works with any generator version (NOT --check,
-          # reverted from main by #7031); the write is on a tracked file compared by
-          # `git status`, not the commit-level no-op git-diff below, and it is
-          # restored on failure.
-          SCHEMA_FILE='packages/vscode-ide-companion/schemas/settings.schema.json'
-          # Guard the generator itself: if it CRASHES (e.g. a type error the agent
-          # introduced in the schema source), set -eo pipefail would abort this step
-          # before outcome=failed is written, leaving OUTCOME unset. Set it here so
-          # the failure is explicit, not inferred from job.status.
-          if ! npm run generate:settings-schema; then
-            echo "❌ Settings schema generator failed to run."
-            echo "outcome=failed" >> "${GITHUB_OUTPUT}"
-            exit 1
-          fi
-          if [[ -n "$(git status --porcelain "${SCHEMA_FILE}")" ]]; then
-            echo "❌ ${SCHEMA_FILE} is out of date. Run: npm run generate:settings-schema"
-            git --no-pager diff -- "${SCHEMA_FILE}" || true
-            git checkout -- "${SCHEMA_FILE}" || true
-            echo "outcome=failed" >> "${GITHUB_OUTPUT}"
-            exit 1
-          fi
+          # this PR fixes. So it runs on EVERY path. The gate is shared with the
+          # issue-fix verify step (rationale + the generator crash guard live in
+          # the script); the write is on a tracked file compared by `git status`,
+          # not the commit-level no-op git-diff below, and it is restored on
+          # failure. On failure it writes outcome=failed and exits 1.
+          bash .github/scripts/check-settings-schema.sh
 
           if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then
             # No new commit. That is only legitimate as a deliberate no-action.
