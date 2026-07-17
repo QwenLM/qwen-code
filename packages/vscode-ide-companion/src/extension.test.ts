@@ -126,7 +126,7 @@ describe('activate', () => {
     );
   });
 
-  it('writes production logs to the Champion output channel', async () => {
+  it('writes production logs to the Qwen Code Companion output channel', async () => {
     const appendLine = vi.fn();
     vi.mocked(vscode.window.createOutputChannel).mockReturnValue({
       appendLine,
@@ -134,7 +134,9 @@ describe('activate', () => {
 
     await activate(context);
 
-    expect(vscode.window.createOutputChannel).toHaveBeenCalledWith('Champion');
+    expect(vscode.window.createOutputChannel).toHaveBeenCalledWith(
+      'Qwen Code Companion',
+    );
     expect(appendLine).toHaveBeenCalledWith('[INFO] Extension activated');
   });
 
