@@ -110,7 +110,7 @@ class ResizeObserverStub {
   unobserve() {}
   disconnect() {}
 }
-(globalThis as { ResizeObserver?: unknown }).ResizeObserver ??=
+(globalThis as { ResizeObserver?: unknown }).ResizeObserver =
   ResizeObserverStub;
 if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
@@ -199,6 +199,10 @@ function mount(
     hideSessionTimeline?: boolean;
     loadingTranscript?: boolean;
     catchingUp?: boolean;
+    hasOlderHistory?: boolean;
+    loadingOlderHistory?: boolean;
+    historyCapacityReached?: boolean;
+    onLoadOlderHistory?: () => Promise<void>;
     isResponding?: boolean;
     onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
     customization?: WebShellCustomization;
@@ -218,6 +222,10 @@ function mount(
             hideSessionTimeline={opts.hideSessionTimeline}
             loadingTranscript={opts.loadingTranscript}
             catchingUp={opts.catchingUp}
+            hasOlderHistory={opts.hasOlderHistory}
+            loadingOlderHistory={opts.loadingOlderHistory}
+            historyCapacityReached={opts.historyCapacityReached}
+            onLoadOlderHistory={opts.onLoadOlderHistory}
             isResponding={opts.isResponding}
             onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
           />
@@ -1132,6 +1140,113 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(
       idle.querySelector('[data-testid="message-list-loading-skeleton"]'),
     ).toBeNull();
+  });
+
+  it('loads earlier history once when the transcript reaches the top', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const onLoadOlderHistory = vi.fn().mockResolvedValue(undefined);
+    const c = mount([userMsg('u1')], undefined, {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    const list = c.querySelector('[data-web-shell-message-list]');
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+
+    await act(async () => {
+      list?.dispatchEvent(new Event('scroll'));
+      list?.dispatchEvent(new Event('scroll'));
+      await Promise.resolve();
+    });
+
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it('loads earlier history when the transcript does not overflow', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 300,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const onLoadOlderHistory = vi.fn().mockResolvedValue(undefined);
+
+    mount([userMsg('u1')], undefined, {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it('loads earlier history when a resize removes the overflow', async () => {
+    let clientHeight = 600;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      get: () => clientHeight,
+    });
+    const onLoadOlderHistory = vi.fn().mockResolvedValue(undefined);
+
+    const c = mount([userMsg('u1')], undefined, {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    expect(onLoadOlderHistory).not.toHaveBeenCalled();
+    expect(list.scrollHeight).toBe(1200);
+    expect(list.clientHeight).toBe(600);
+
+    clientHeight = 1200;
+    expect(list.clientHeight).toBe(1200);
+    await act(async () => {
+      triggerResizeObservers();
+      await Promise.resolve();
+    });
+
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows a status while loading earlier history', () => {
+    const c = mount([userMsg('u1')], undefined, {
+      hasOlderHistory: true,
+      loadingOlderHistory: true,
+    });
+
+    expect(c.querySelector('[role="status"]')?.textContent).toBe(
+      'Loading earlier messages…',
+    );
+    expect(c.querySelector('button')).toBeNull();
+  });
+
+  it('shows when the history display limit is reached', () => {
+    const c = mount([userMsg('u1')], undefined, {
+      historyCapacityReached: true,
+    });
+
+    expect(c.querySelector('[role="status"]')?.textContent).toBe(
+      'History display limit reached. Earlier messages remain saved.',
+    );
   });
 
   it('does not smooth-scroll when existing session history loads after an empty render', () => {

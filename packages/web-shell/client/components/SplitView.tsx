@@ -22,6 +22,7 @@ import type {
 import {
   SESSION_LIST_PAGE_SIZE,
   SESSION_ORGANIZATION_FEATURE,
+  WEB_SHELL_HISTORY_PAGE_SIZE,
   WEB_SHELL_MAX_TRANSCRIPT_BLOCKS,
 } from '../constants/sessions';
 import { useOtherWorkspaceSessions } from '../hooks/useOtherWorkspaceSessions';
@@ -468,8 +469,9 @@ export function SplitView({
                     // tab's panes) for the same session, so the attachments don't
                     // collide on one client identity.
                     clientId={`split-pane:${instanceId}:${sessionId}`}
-                    suppressOwnUserEcho
+                    historyPageSize={WEB_SHELL_HISTORY_PAGE_SIZE}
                     maxBlocks={WEB_SHELL_MAX_TRANSCRIPT_BLOCKS}
+                    suppressOwnUserEcho
                   >
                     <ChatPane
                       title={titleById.get(sessionId)}

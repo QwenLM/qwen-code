@@ -7,8 +7,11 @@ import {
 } from '@qwen-code/webui/daemon-react-sdk';
 import type { DaemonWorkspaceCapability } from '@qwen-code/sdk/daemon';
 import { App, type WebShellProps } from '../App';
+import {
+  WEB_SHELL_HISTORY_PAGE_SIZE,
+  WEB_SHELL_MAX_TRANSCRIPT_BLOCKS,
+} from '../constants/sessions';
 import { getTranslator, normalizeLanguage } from '../i18n';
-import { WEB_SHELL_MAX_TRANSCRIPT_BLOCKS } from '../constants/sessions';
 import { Spinner } from './ui/spinner';
 import { WorkspaceUnavailableState } from './WorkspaceUnavailableState';
 
@@ -226,8 +229,9 @@ export function WorkspaceSessionProvider({
       sessionId={effectiveSessionId}
       workspaceCwd={targetWorkspace?.cwd}
       clientId={clientId}
-      suppressOwnUserEcho
+      historyPageSize={WEB_SHELL_HISTORY_PAGE_SIZE}
       maxBlocks={WEB_SHELL_MAX_TRANSCRIPT_BLOCKS}
+      suppressOwnUserEcho
     >
       <App
         {...webShellProps}

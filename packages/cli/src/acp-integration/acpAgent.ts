@@ -100,6 +100,7 @@ import {
   type SessionArtifactEventRecordPayload,
   type SessionArtifactSnapshotRecordPayload,
   type WorkspaceRememberContextMode,
+  type ChatRecord,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -284,6 +285,7 @@ import {
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_META_KEY,
   LOAD_REPLAY_MODE_META_KEY,
+  LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
   type ClientMcpOverWsRuntimeConfig,
   type BridgeLoadReplayEnvelope,
@@ -495,6 +497,47 @@ function invalidArtifactPersistPayload(): Error {
 function isBulkLoadReplayRequest(params: LoadSessionRequest): boolean {
   const meta = isObjectRecord(params._meta) ? params._meta : undefined;
   return meta?.[LOAD_REPLAY_MODE_META_KEY] === LOAD_REPLAY_BULK_MODE;
+}
+
+function getLoadReplayPageSize(params: LoadSessionRequest): number | undefined {
+  const meta = isObjectRecord(params._meta) ? params._meta : undefined;
+  const value = meta?.[LOAD_REPLAY_PAGE_SIZE_META_KEY];
+  if (value === undefined) return undefined;
+  if (
+    !Number.isSafeInteger(value) ||
+    (value as number) < 1 ||
+    (value as number) > SESSION_TRANSCRIPT_MAX_LIMIT
+  ) {
+    throw RequestError.invalidParams(
+      undefined,
+      `Invalid load replay page size; expected 1..${SESSION_TRANSCRIPT_MAX_LIMIT}`,
+    );
+  }
+  return value as number;
+}
+
+function isHistoryTurnStart(record: ChatRecord): boolean {
+  return record.type === 'user' && record.subtype !== 'mid_turn_user_message';
+}
+
+function selectRecentHistoryRecords(
+  records: ChatRecord[],
+  pageSize: number | undefined,
+): { records: ChatRecord[]; hasMore: boolean } {
+  if (pageSize === undefined || records.length <= pageSize) {
+    return { records, hasMore: false };
+  }
+  let start = records.length - pageSize;
+  for (let i = start; i < records.length; i++) {
+    if (isHistoryTurnStart(records[i]!)) {
+      start = i;
+      break;
+    }
+  }
+  while (start > 0 && !isHistoryTurnStart(records[start]!)) {
+    start--;
+  }
+  return { records: records.slice(start), hasMore: start > 0 };
 }
 
 function createHiddenWorkspaceMemoryConfig(config: Config): Config {
@@ -3441,6 +3484,9 @@ class QwenAgent implements Agent {
 
     const sessionData = config.getResumedSessionData();
     const bulkReplay = isBulkLoadReplayRequest(params);
+    const replayPageSize = bulkReplay
+      ? getLoadReplayPageSize(params)
+      : undefined;
     const session = await this.createAndStoreSession(
       config,
       settings,
@@ -3456,11 +3502,15 @@ class QwenAgent implements Agent {
         let replayUpdates: SessionUpdate[] = [];
         if (records) {
           session.primeTurnFromHistory(records);
+          const replayPage = selectRecentHistoryRecords(
+            records,
+            replayPageSize,
+          );
           const replayUsage = createReplayCumulativeUsage();
           const replay = await collectHistoryReplayUpdates({
             sessionId: params.sessionId,
             config,
-            records,
+            records: replayPage.records,
             gaps: sessionData?.historyGaps,
             cumulativeUsage: replayUsage,
             logger: debugLogger,
@@ -3473,8 +3523,14 @@ class QwenAgent implements Agent {
               updates: replayUpdates,
               partial: true,
               replayError: replay.replayError,
+              ...(replayPage.hasMore ? { hasMore: true } : {}),
             };
           }
+          replayEnvelope ??= {
+            v: LOAD_REPLAY_VERSION,
+            updates: replayUpdates,
+            ...(replayPage.hasMore ? { hasMore: true } : {}),
+          };
         }
         replayEnvelope ??= {
           v: LOAD_REPLAY_VERSION,
@@ -6212,6 +6268,23 @@ class QwenAgent implements Agent {
             'Invalid transcript cursor',
           );
         }
+        const rawBeforeRecordId = params['beforeRecordId'];
+        if (
+          rawBeforeRecordId !== undefined &&
+          (typeof rawBeforeRecordId !== 'string' ||
+            rawBeforeRecordId.length === 0)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid transcript record boundary',
+          );
+        }
+        if (rawCursor !== undefined && rawBeforeRecordId !== undefined) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Transcript cursor and record boundary are mutually exclusive',
+          );
+        }
         const rawLimit = params['limit'];
         if (
           rawLimit !== undefined &&
@@ -6231,6 +6304,9 @@ class QwenAgent implements Agent {
             const reader = new SessionTranscriptReader(cwd);
             const page = await reader.readPage(sessionId, {
               ...(typeof rawCursor === 'string' ? { cursor: rawCursor } : {}),
+              ...(typeof rawBeforeRecordId === 'string'
+                ? { beforeRecordId: rawBeforeRecordId }
+                : {}),
               ...(typeof rawLimit === 'number' ? { limit: rawLimit } : {}),
             });
             const config = await this.getTranscriptReplayConfig(cwd, settings);

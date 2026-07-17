@@ -1581,7 +1581,7 @@ describe('createAcpSessionBridge', () => {
 
     const result = await bridge.getSessionTranscriptPage({
       sessionId: 'session-1',
-      cursor: 'opaque',
+      beforeRecordId: 'record-3',
       limit: 2,
     });
 
@@ -1597,7 +1597,7 @@ describe('createAcpSessionBridge', () => {
         params: {
           cwd: WS_A,
           sessionId: 'session-1',
-          cursor: 'opaque',
+          beforeRecordId: 'record-3',
           limit: 2,
         },
       },
@@ -2775,12 +2775,14 @@ describe('createAcpSessionBridge', () => {
         loadSessionImpl: (p) => {
           expect(p._meta).toMatchObject({
             'qwen.session.loadReplayMode': 'bulk',
+            'qwen.session.loadReplayPageSize': 100,
           });
           return {
             _meta: {
               keep: 'state',
               'qwen.session.loadReplay': {
                 v: 1,
+                hasMore: true,
                 partial: true,
                 replayError: 'replay boom',
                 updates: [
@@ -2808,17 +2810,22 @@ describe('createAcpSessionBridge', () => {
       sessionId: 'persisted-bulk-history',
       workspaceCwd: WS_A,
       historyReplay: 'response',
+      historyPageSize: 100,
     });
 
     expect(handles[0]?.agent.loadSessionCalls[0]).toMatchObject({
       sessionId: 'persisted-bulk-history',
       cwd: WS_A,
       mcpServers: [],
-      _meta: { 'qwen.session.loadReplayMode': 'bulk' },
+      _meta: {
+        'qwen.session.loadReplayMode': 'bulk',
+        'qwen.session.loadReplayPageSize': 100,
+      },
     });
     expect(loaded.state).toEqual({ _meta: { keep: 'state' } });
     expect(loaded.partial).toBe(true);
     expect(loaded.replayError).toBe('replay boom');
+    expect(loaded.historyHasMore).toBe(true);
     expect(loaded.lastEventId).toBe(2);
     expect(loaded.compactedReplay).toHaveLength(2);
     expect(loaded.liveJournal).toEqual([]);
@@ -2916,10 +2923,12 @@ describe('createAcpSessionBridge', () => {
                 {
                   sessionUpdate: 'user_message_chunk',
                   content: { type: 'text', text: `old-${'x'.repeat(600)}` },
+                  _meta: { recordId: 'record-1' },
                 },
                 {
                   sessionUpdate: 'agent_message_chunk',
                   content: { type: 'text', text: `new-${'y'.repeat(600)}` },
+                  _meta: { recordId: 'record-2' },
                 },
               ],
             },
@@ -2935,6 +2944,7 @@ describe('createAcpSessionBridge', () => {
       sessionId: 'persisted-bounded-history',
       workspaceCwd: WS_A,
       historyReplay: 'response',
+      historyPageSize: 100,
     });
 
     expect(loaded.lastEventId).toBe(2);
@@ -2951,6 +2961,7 @@ describe('createAcpSessionBridge', () => {
       update?: { content?: { text?: string } };
     };
     expect(retained.update?.content?.text).toBe(`new-${'y'.repeat(600)}`);
+    expect(loaded.historyHasMore).toBe(true);
 
     await bridge.shutdown();
   });

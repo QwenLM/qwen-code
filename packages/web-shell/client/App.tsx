@@ -20,6 +20,7 @@ import {
   useSessionNotices,
   useStreamingState,
   useTranscriptBlocks,
+  useTranscriptHistory,
   useTranscriptStore,
   useWorkspace,
   useWorkspaceActions,
@@ -1186,6 +1187,7 @@ export function App({
   const store = useTranscriptStore();
   const blocks = useTranscriptBlocks();
   const connection = useConnection();
+  const transcriptHistory = useTranscriptHistory();
   const workspace = useWorkspace();
   const workspaces = useMemo(() => {
     const capabilityWorkspaces = workspace.capabilities?.workspaces ?? [];
@@ -6431,6 +6433,12 @@ export function App({
                                 onShowContextDetail={handleShowContextDetail}
                                 loadingTranscript={connection.loadingTranscript}
                                 catchingUp={connection.catchingUp}
+                                hasOlderHistory={transcriptHistory.hasMore}
+                                loadingOlderHistory={transcriptHistory.loading}
+                                historyCapacityReached={
+                                  transcriptHistory.capacityReached
+                                }
+                                onLoadOlderHistory={transcriptHistory.loadMore}
                                 isResponding={streamingState !== 'idle'}
                                 activeTurnStartedAt={activeTurnStartedAt}
                                 workspaceCwd={connection.workspaceCwd || ''}

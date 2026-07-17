@@ -300,6 +300,19 @@ const MCP_RESTART_DEFAULT_TIMEOUT_MS =
 const CLIENT_ID_HEADER = 'X-Qwen-Client-Id';
 const urlEncode = encodeURIComponent;
 
+function transcriptPageSuffix(
+  opts: DaemonSessionTranscriptPageOptions,
+): string {
+  const query = new URLSearchParams();
+  if (opts.cursor !== undefined) query.set('cursor', opts.cursor);
+  if (opts.beforeRecordId !== undefined) {
+    query.set('beforeRecordId', opts.beforeRecordId);
+  }
+  if (opts.limit !== undefined) query.set('limit', String(opts.limit));
+  const value = query.toString();
+  return value ? `?${value}` : '';
+}
+
 function normalizePermissionRuleInput(rule: string): string {
   const trimmed = rule.trim();
   if (!trimmed) {
@@ -453,6 +466,8 @@ export interface RestoreSessionRequest {
    */
   workspaceCwd?: string;
   approvalMode?: string;
+  /** Latest persisted records to include in the initial load replay. */
+  historyPageSize?: number;
 }
 
 export interface PromptRequest {
@@ -2093,12 +2108,8 @@ export class DaemonClient {
     sessionId: string,
     opts: DaemonSessionTranscriptPageOptions = {},
   ): Promise<DaemonSessionTranscriptPage> {
-    const params = new URLSearchParams();
-    if (opts.cursor !== undefined) params.set('cursor', opts.cursor);
-    if (opts.limit !== undefined) params.set('limit', String(opts.limit));
-    const query = params.toString();
     return await this.jsonRequest<DaemonSessionTranscriptPage>(
-      `/session/${urlEncode(sessionId)}/transcript${query ? `?${query}` : ''}`,
+      `/session/${urlEncode(sessionId)}/transcript${transcriptPageSuffix(opts)}`,
       'GET /session/:id/transcript',
       {
         clientId: opts.clientId,
@@ -2348,6 +2359,9 @@ export class DaemonClient {
           cwd: req.workspaceCwd,
           ...(req.approvalMode !== undefined
             ? { approvalMode: req.approvalMode }
+            : {}),
+          ...(action === 'load' && req.historyPageSize !== undefined
+            ? { historyPageSize: req.historyPageSize }
             : {}),
         }),
       },
@@ -4306,13 +4320,9 @@ export class WorkspaceDaemonClient {
     sessionId: string,
     opts: DaemonSessionTranscriptPageOptions = {},
   ): Promise<DaemonSessionTranscriptPage> {
-    const query = new URLSearchParams();
-    if (opts.cursor !== undefined) query.set('cursor', opts.cursor);
-    if (opts.limit !== undefined) query.set('limit', String(opts.limit));
-    const suffix = query.size > 0 ? `?${query.toString()}` : '';
     return this.client.workspaceJsonRequest<DaemonSessionTranscriptPage>(
       this.workspaceSelector,
-      `/session/${urlEncode(sessionId)}/transcript${suffix}`,
+      `/session/${urlEncode(sessionId)}/transcript${transcriptPageSuffix(opts)}`,
       'GET /workspaces/:workspace/session/:id/transcript',
       { clientId: opts.clientId, mode: 'rest' },
     );

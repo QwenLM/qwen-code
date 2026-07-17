@@ -56,6 +56,10 @@ interface MessageListProps {
   onShowContextDetail?: () => void;
   loadingTranscript?: boolean;
   catchingUp?: boolean;
+  hasOlderHistory?: boolean;
+  loadingOlderHistory?: boolean;
+  historyCapacityReached?: boolean;
+  onLoadOlderHistory?: () => Promise<void>;
   /**
    * True while the agent is still answering. The newest turn then stays
    * expanded and un-collapsible so streaming output is never hidden.
@@ -1541,6 +1545,7 @@ const ESTIMATE_MESSAGE = 80;
 const ESTIMATE_TURN_COLLAPSE = 32;
 const ESTIMATE_TAIL = 240;
 const FOLLOW_BOTTOM_THRESHOLD_PX = 30;
+const LOAD_OLDER_HISTORY_THRESHOLD_PX = 48;
 export const VIRTUAL_SCROLL_THRESHOLD = 200;
 const SESSION_TIMELINE_MIN_VISIBLE_ENTRIES = 4;
 
@@ -2174,6 +2179,10 @@ export const MessageList = memo(
       onShowContextDetail,
       loadingTranscript,
       catchingUp,
+      hasOlderHistory = false,
+      loadingOlderHistory = false,
+      historyCapacityReached = false,
+      onLoadOlderHistory,
       isResponding = false,
       activeTurnStartedAt,
       welcomeHeader,
@@ -2309,6 +2318,7 @@ export const MessageList = memo(
     const followPausedByUserRef = useRef(false);
     const userScrollIntentUntil = useRef(0);
     const lastScrollTop = useRef(0);
+    const olderHistoryLoadInFlight = useRef(false);
     const scrollCooldown = useRef(false);
     const scrollCooldownCount = useRef(0);
     const sessionTimelineFrame = useRef<number | null>(null);
@@ -2908,19 +2918,49 @@ export const MessageList = memo(
       performScrollToRow(idx + headerOffset, pending);
     }, [visibleItems, headerOffset, performScrollToRow]);
 
+    const loadOlderHistory = useCallback(async () => {
+      const el = containerRef.current;
+      if (
+        !el ||
+        !onLoadOlderHistory ||
+        loadingOlderHistory ||
+        olderHistoryLoadInFlight.current
+      ) {
+        return;
+      }
+      olderHistoryLoadInFlight.current = true;
+      const previousHeight = el.scrollHeight;
+      const previousTop = el.scrollTop;
+      followPausedByUserRef.current = true;
+      try {
+        await onLoadOlderHistory();
+        window.requestAnimationFrame(() => {
+          const current = containerRef.current;
+          if (!current) return;
+          current.scrollTop =
+            previousTop + Math.max(0, current.scrollHeight - previousHeight);
+        });
+      } finally {
+        olderHistoryLoadInFlight.current = false;
+      }
+    }, [loadingOlderHistory, onLoadOlderHistory]);
+
     // Rules 2 & 3: detect scroll direction to toggle follow mode.
     // Runs synchronously in the scroll handler — no rAF needed since
     // the browser already coalesces scroll events.
     const handleScroll = useCallback(() => {
       const el = getScrollElement();
       if (!el) return;
+      const curr = el.scrollTop;
+      if (hasOlderHistory && curr <= LOAD_OLDER_HISTORY_THRESHOLD_PX) {
+        void loadOlderHistory();
+      }
       if (scrollCooldown.current) {
-        lastScrollTop.current = el.scrollTop;
+        lastScrollTop.current = curr;
         return;
       }
       scheduleSessionTimelineRangeUpdate();
       const prev = lastScrollTop.current;
-      const curr = el.scrollTop;
       lastScrollTop.current = curr;
       const distanceFromBottom = el.scrollHeight - curr - el.clientHeight;
       scheduleScrollOverflowReport();
@@ -2951,6 +2991,8 @@ export const MessageList = memo(
       }
     }, [
       getScrollElement,
+      hasOlderHistory,
+      loadOlderHistory,
       scheduleScrollOverflowReport,
       scheduleSessionTimelineRangeUpdate,
       setShouldFollow,
@@ -2962,6 +3004,31 @@ export const MessageList = memo(
       el.addEventListener('scroll', handleScroll, { passive: true });
       return () => el.removeEventListener('scroll', handleScroll);
     }, [getScrollElement, handleScroll]);
+
+    const loadOlderHistoryIfUnderfilled = useCallback(() => {
+      if (
+        !hasOlderHistory ||
+        loadingOlderHistory ||
+        catchingUp ||
+        showLoadingSkeleton
+      ) {
+        return;
+      }
+      const el = getScrollElement();
+      if (!el || el.scrollHeight > el.clientHeight + 1) return;
+      void loadOlderHistory();
+    }, [
+      catchingUp,
+      getScrollElement,
+      hasOlderHistory,
+      loadOlderHistory,
+      loadingOlderHistory,
+      showLoadingSkeleton,
+    ]);
+
+    useEffect(() => {
+      loadOlderHistoryIfUnderfilled();
+    }, [loadOlderHistoryIfUnderfilled, totalVirtualSize]);
 
     useEffect(() => {
       const el = getScrollElement();
@@ -3006,7 +3073,10 @@ export const MessageList = memo(
     useEffect(() => {
       const el = getScrollElement();
       if (!el || typeof ResizeObserver === 'undefined') return;
-      const observer = new ResizeObserver(scheduleScrollOverflowReport);
+      const observer = new ResizeObserver(() => {
+        scheduleScrollOverflowReport();
+        loadOlderHistoryIfUnderfilled();
+      });
       observer.observe(el);
       for (const child of Array.from(el.children)) {
         observer.observe(child);
@@ -3028,7 +3098,11 @@ export const MessageList = memo(
         observer.disconnect();
         mutationObserver.disconnect();
       };
-    }, [getScrollElement, scheduleScrollOverflowReport]);
+    }, [
+      getScrollElement,
+      loadOlderHistoryIfUnderfilled,
+      scheduleScrollOverflowReport,
+    ]);
 
     // Clear screen (e.g. /clear) → reset to follow mode, drop stale per-turn
     // collapse overrides, and disarm any deferred scroll so it can't fire
@@ -3442,6 +3516,16 @@ export const MessageList = memo(
       >
         {showLoadingSkeleton && (
           <LoadingTranscriptSkeleton label={t('editor.sessionLoading')} />
+        )}
+        {loadingOlderHistory && !showLoadingSkeleton && (
+          <div className={styles.historyStatus} role="status">
+            {t('history.loadingEarlier')}
+          </div>
+        )}
+        {historyCapacityReached && !showLoadingSkeleton && (
+          <div className={styles.historyStatus} role="status">
+            {t('history.capacityReached')}
+          </div>
         )}
         <SessionTimeline
           entries={sessionTimelineEntries}

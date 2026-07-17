@@ -276,6 +276,46 @@ function parseTranscriptCursorQuery(
   return rawCursor;
 }
 
+function parseTranscriptRecordBoundaryQuery(
+  rawBoundary: unknown,
+  res: Response,
+): string | undefined | null {
+  if (rawBoundary === undefined) return undefined;
+  if (
+    typeof rawBoundary !== 'string' ||
+    rawBoundary.trim() === '' ||
+    rawBoundary.length > 200
+  ) {
+    res.status(400).json({
+      error: '`beforeRecordId` must be a non-empty record id',
+      code: 'invalid_transcript_cursor',
+    });
+    return null;
+  }
+  return rawBoundary;
+}
+
+function parseHistoryPageSize(
+  body: Record<string, unknown>,
+  res: Response,
+): number | undefined | null {
+  const value = body['historyPageSize'];
+  if (value === undefined) return undefined;
+  if (
+    !Number.isSafeInteger(value) ||
+    (value as number) < 1 ||
+    (value as number) > SESSION_TRANSCRIPT_MAX_LIMIT
+  ) {
+    res.status(400).json({
+      error: `\`historyPageSize\` must be between 1 and ${SESSION_TRANSCRIPT_MAX_LIMIT}`,
+      code: 'invalid_transcript_limit',
+      maxLimit: SESSION_TRANSCRIPT_MAX_LIMIT,
+    });
+    return null;
+  }
+  return value as number;
+}
+
 function workspaceTranscriptCursorExceedsLimit(
   cursor: string,
   maxBytes = WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES,
@@ -1274,6 +1314,12 @@ export function registerSessionRoutes(
         releaseRestoreOwner();
         return;
       }
+      const historyPageSize =
+        action === 'load' ? parseHistoryPageSize(body ?? {}, res) : undefined;
+      if (historyPageSize === null) {
+        releaseRestoreOwner();
+        return;
+      }
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) {
         releaseRestoreOwner();
@@ -1295,6 +1341,7 @@ export function registerSessionRoutes(
                   sessionId,
                   workspaceCwd,
                   historyReplay: 'response',
+                  ...(historyPageSize !== undefined ? { historyPageSize } : {}),
                   ...(clientId !== undefined ? { clientId } : {}),
                   ...(approvalMode !== undefined ? { approvalMode } : {}),
                   ...metadata,
@@ -1512,6 +1559,18 @@ export function registerSessionRoutes(
     if (limit === null) return;
     const cursor = parseTranscriptCursorQuery(req.query['cursor'], res);
     if (cursor === null) return;
+    const beforeRecordId = parseTranscriptRecordBoundaryQuery(
+      req.query['beforeRecordId'],
+      res,
+    );
+    if (beforeRecordId === null) return;
+    if (cursor !== undefined && beforeRecordId !== undefined) {
+      res.status(400).json({
+        error: '`cursor` and `beforeRecordId` are mutually exclusive',
+        code: 'invalid_transcript_cursor',
+      });
+      return;
+    }
 
     try {
       const result = await archiveCoordinator.runSharedMany(
@@ -1528,6 +1587,7 @@ export function registerSessionRoutes(
             sessionId,
             ...(limit !== undefined ? { limit } : {}),
             ...(cursor !== undefined ? { cursor } : {}),
+            ...(beforeRecordId !== undefined ? { beforeRecordId } : {}),
           });
         },
       );
@@ -1563,6 +1623,18 @@ export function registerSessionRoutes(
     if (limit === null) return;
     const cursor = parseTranscriptCursorQuery(req.query['cursor'], res);
     if (cursor === null) return;
+    const beforeRecordId = parseTranscriptRecordBoundaryQuery(
+      req.query['beforeRecordId'],
+      res,
+    );
+    if (beforeRecordId === null) return;
+    if (cursor !== undefined && beforeRecordId !== undefined) {
+      res.status(400).json({
+        error: '`cursor` and `beforeRecordId` are mutually exclusive',
+        code: 'invalid_transcript_cursor',
+      });
+      return;
+    }
     if (cursor !== undefined && workspaceTranscriptCursorExceedsLimit(cursor)) {
       res.status(400).json({
         error: '`cursor` exceeds the maximum size',
@@ -1588,6 +1660,7 @@ export function registerSessionRoutes(
             page = await reader.readPage(sessionId, {
               ...(limit !== undefined ? { limit } : {}),
               ...(cursor !== undefined ? { cursor } : {}),
+              ...(beforeRecordId !== undefined ? { beforeRecordId } : {}),
               maxBytes: WORKSPACE_TRANSCRIPT_PAGE_SOURCE_MAX_BYTES,
             });
           } catch (error) {

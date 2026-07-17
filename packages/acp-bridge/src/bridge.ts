@@ -88,6 +88,7 @@ import {
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_META_KEY,
   LOAD_REPLAY_MODE_META_KEY,
+  LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
 } from './bridgeTypes.js';
 import type {
@@ -218,6 +219,7 @@ function extractLoadReplayResponse(state: BridgeSessionState): {
   updates: SessionUpdate[];
   partial?: true;
   replayError?: string;
+  hasMore?: boolean;
 } {
   const meta = isRecord(state._meta) ? state._meta : undefined;
   const replay = meta?.[LOAD_REPLAY_META_KEY];
@@ -256,6 +258,13 @@ function extractLoadReplayResponse(state: BridgeSessionState): {
         `(version=${LOAD_REPLAY_VERSION}, replayError=${describeLoadReplayValue(replayError)})`,
     );
   }
+  const hasMore = replay['hasMore'];
+  if (hasMore !== undefined && typeof hasMore !== 'boolean') {
+    throw new Error(
+      `Invalid qwen.session.loadReplay hasMore ` +
+        `(version=${LOAD_REPLAY_VERSION}, hasMore=${describeLoadReplayValue(hasMore)})`,
+    );
+  }
   const invalidUpdateIndex = rawUpdates.findIndex(
     (update) => !isBulkReplayUpdate(update),
   );
@@ -284,6 +293,7 @@ function extractLoadReplayResponse(state: BridgeSessionState): {
     updates: rawUpdates,
     ...(partial === true ? { partial: true as const } : {}),
     ...(typeof replayError === 'string' ? { replayError } : {}),
+    ...(hasMore === true ? { hasMore: true } : {}),
   };
 }
 
@@ -588,6 +598,7 @@ interface SessionEntry {
   /** Response-mode `session/load` can return a partial replay prefix. */
   restoreReplayPartial?: true;
   restoreReplayError?: string;
+  restoreHistoryHasMore?: true;
   /**
    * Most recent heartbeat across any client on this session (Date.now()
    * epoch ms). Set on every `recordHeartbeat` call regardless of whether
@@ -3637,7 +3648,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   const replayFieldsFor = (
     entry: Pick<
       SessionEntry,
-      'events' | 'restoreReplayPartial' | 'restoreReplayError'
+      | 'events'
+      | 'restoreReplayPartial'
+      | 'restoreReplayError'
+      | 'restoreHistoryHasMore'
     >,
     action: 'load' | 'resume',
   ): Pick<
@@ -3647,6 +3661,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     | 'lastEventId'
     | 'partial'
     | 'replayError'
+    | 'historyHasMore'
   > => {
     const replayStatus =
       action === 'load' && entry.restoreReplayPartial === true
@@ -3667,6 +3682,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         liveJournal: snapshot.liveJournal,
         lastEventId: snapshot.lastEventId,
         ...replayStatus,
+        ...(entry.restoreHistoryHasMore === true
+          ? { historyHasMore: true }
+          : {}),
       };
     }
     return { lastEventId: snapshot.lastEventId, ...replayStatus };
@@ -3890,6 +3908,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       let replayUpdates: SessionUpdate[] = [];
       let replayPartial: true | undefined;
       let replayError: string | undefined;
+      let replayHasMore: true | undefined;
       try {
         if (action === 'load') {
           state = await Promise.race([
@@ -3907,6 +3926,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   ? {
                       _meta: {
                         [LOAD_REPLAY_MODE_META_KEY]: LOAD_REPLAY_BULK_MODE,
+                        ...(req.historyPageSize !== undefined
+                          ? {
+                              [LOAD_REPLAY_PAGE_SIZE_META_KEY]:
+                                req.historyPageSize,
+                            }
+                          : {}),
                       },
                     }
                   : {}),
@@ -3936,6 +3961,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           replayUpdates = extracted.updates;
           replayPartial = extracted.partial;
           replayError = extracted.replayError;
+          replayHasMore = extracted.hasMore === true ? true : undefined;
         }
       } catch (err) {
         restoreEvents.close();
@@ -4031,6 +4057,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (replayError !== undefined) {
         entry.restoreReplayError = replayError;
       }
+      if (replayHasMore === true) {
+        entry.restoreHistoryHasMore = true;
+      }
       seedSnapshotCaches(entry, publicState);
       const artifactRestoreWarnings = await entry.artifacts.restore(
         restoredArtifactSnapshot,
@@ -4050,6 +4079,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ingestArtifacts:
             restoredArtifactSnapshot === undefined || artifactRestoreFailed,
         });
+        if (
+          req.historyPageSize !== undefined &&
+          entry.events
+            .snapshotReplay()
+            ?.compactedTurns.some((event) => event.type === 'history_truncated')
+        ) {
+          entry.restoreHistoryHasMore = true;
+        }
         ci.client.drainEarlyEvents(entry.sessionId, entry);
       }
       const clientId = registerClient(entry, req.clientId);

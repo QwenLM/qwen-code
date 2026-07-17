@@ -66,6 +66,8 @@ export interface SessionTranscriptCursorState {
   fileIdentity: SessionTranscriptFileIdentity;
   snapshotSize: number;
   position: number;
+  /** Omitted for legacy oldest-to-newest cursors. */
+  direction?: 'backward';
   leafUuid: string;
   startTime: string;
   lastUpdated: string;
@@ -74,6 +76,8 @@ export interface SessionTranscriptCursorState {
 
 export interface SessionTranscriptReadPageOptions {
   cursor?: string;
+  /** Start a newest-to-oldest snapshot immediately before this active record. */
+  beforeRecordId?: string;
   limit?: number;
   maxBytes?: number;
 }
@@ -84,6 +88,7 @@ export interface SessionTranscriptRecordPage {
   records: ChatRecord[];
   gaps: HistoryGap[];
   hasMore: boolean;
+  direction?: 'backward';
   nextCursorState?: SessionTranscriptCursorState;
   replay?: unknown;
   startTime: string;
@@ -104,6 +109,8 @@ interface RecordSegment {
 
 interface UuidIndexEntry {
   parentUuid: string | null;
+  type: ChatRecord['type'];
+  subtype?: ChatRecord['subtype'];
   segments: RecordSegment[];
 }
 
@@ -181,6 +188,7 @@ function cursorPayload(
     },
     snapshotSize: state.snapshotSize,
     position: state.position,
+    ...(state.direction === 'backward' ? { direction: 'backward' } : {}),
     leafUuid: state.leafUuid,
     startTime: state.startTime,
     lastUpdated: state.lastUpdated,
@@ -310,6 +318,8 @@ function decodeCursorState(
       !isFiniteNonNegativeInteger(fileIdentity['ino']) ||
       !isFiniteNonNegativeInteger(parsed['snapshotSize']) ||
       !isFiniteNonNegativeInteger(parsed['position']) ||
+      (parsed['direction'] !== undefined &&
+        parsed['direction'] !== 'backward') ||
       typeof parsed['leafUuid'] !== 'string' ||
       typeof parsed['startTime'] !== 'string' ||
       typeof parsed['lastUpdated'] !== 'string' ||
@@ -327,6 +337,9 @@ function decodeCursorState(
       },
       snapshotSize: parsed['snapshotSize'],
       position: parsed['position'],
+      ...(parsed['direction'] === 'backward'
+        ? { direction: 'backward' as const }
+        : {}),
       leafUuid: parsed['leafUuid'],
       startTime: parsed['startTime'],
       lastUpdated: parsed['lastUpdated'],
@@ -445,6 +458,81 @@ function selectPageUuids(
     selectedBytes += bytes;
   }
   return selected;
+}
+
+function isReplayTurnStart(index: TranscriptIndex, uuid: string): boolean {
+  const entry = index.byUuid.get(uuid);
+  return entry?.type === 'user' && entry.subtype !== 'mid_turn_user_message';
+}
+
+function selectBackwardPageUuids(
+  index: TranscriptIndex,
+  sessionId: string,
+  position: number,
+  limit: number,
+  maxBytes: number | undefined,
+): { uuids: string[]; nextPosition: number } {
+  let start = Math.max(0, position - limit);
+  for (let i = start; i < position; i++) {
+    if (isReplayTurnStart(index, index.activeUuids[i]!)) {
+      start = i;
+      break;
+    }
+  }
+  while (start > 0 && !isReplayTurnStart(index, index.activeUuids[start]!)) {
+    start--;
+  }
+
+  let selectedStart = position;
+  let selectedBytes = 0;
+  for (let i = position - 1; i >= start; i--) {
+    const uuid = index.activeUuids[i]!;
+    const bytes = recordSegmentBytes(index, uuid);
+    if (
+      selectedStart === position &&
+      maxBytes !== undefined &&
+      bytes > maxBytes
+    ) {
+      throw new SessionTranscriptPageTooLargeError(sessionId, bytes, maxBytes);
+    }
+    if (maxBytes !== undefined && selectedBytes + bytes > maxBytes) break;
+    selectedStart = i;
+    selectedBytes += bytes;
+  }
+
+  let alignedToReplayBoundary = false;
+  for (let i = selectedStart; i < position; i++) {
+    if (isReplayTurnStart(index, index.activeUuids[i]!)) {
+      selectedStart = i;
+      alignedToReplayBoundary = true;
+      break;
+    }
+  }
+  if (!alignedToReplayBoundary) {
+    while (
+      selectedStart > 0 &&
+      !isReplayTurnStart(index, index.activeUuids[selectedStart]!)
+    ) {
+      selectedStart--;
+    }
+    if (maxBytes !== undefined) {
+      const alignedBytes = index.activeUuids
+        .slice(selectedStart, position)
+        .reduce((total, uuid) => total + recordSegmentBytes(index, uuid), 0);
+      if (alignedBytes > maxBytes) {
+        throw new SessionTranscriptPageTooLargeError(
+          sessionId,
+          alignedBytes,
+          maxBytes,
+        );
+      }
+    }
+  }
+
+  return {
+    uuids: index.activeUuids.slice(selectedStart, position),
+    nextPosition: selectedStart,
+  };
 }
 
 function fileIdentityFromStats(stats: fs.Stats): SessionTranscriptFileIdentity {
@@ -783,6 +871,10 @@ async function buildIndex(params: {
         } else {
           byUuid.set(record.uuid, {
             parentUuid: record.parentUuid,
+            type: record.type,
+            ...(record.subtype !== undefined
+              ? { subtype: record.subtype }
+              : {}),
             segments: [segment],
           });
         }
@@ -944,6 +1036,9 @@ export class SessionTranscriptReader {
         ? (this.cursorCodec?.decode(options.cursor) ??
           decodeSessionTranscriptCursor(options.cursor, this.workspaceCwd))
         : undefined;
+    if (cursor && options.beforeRecordId !== undefined) {
+      throw new InvalidSessionTranscriptCursorError();
+    }
     if (cursor && cursor.sessionId !== sessionId) {
       debugLogger.debug(
         `cursor session mismatch requested=${sessionId} cursor=${cursor.sessionId}`,
@@ -983,7 +1078,26 @@ export class SessionTranscriptReader {
       throw new SessionTranscriptSnapshotUnavailableError(sessionId);
     }
 
-    const position = cursor?.position ?? 0;
+    const direction =
+      cursor?.direction ??
+      (options.beforeRecordId !== undefined ? 'backward' : 'forward');
+    let position = cursor?.position ?? 0;
+    if (!cursor && options.beforeRecordId !== undefined) {
+      if (options.beforeRecordId.length === 0) {
+        throw new InvalidSessionTranscriptCursorError();
+      }
+      position = index.activeUuids.indexOf(options.beforeRecordId);
+      if (position < 0) {
+        throw new InvalidSessionTranscriptCursorError();
+      }
+    }
+    if (
+      !cursor &&
+      direction === 'backward' &&
+      options.beforeRecordId === undefined
+    ) {
+      position = index.activeUuids.length;
+    }
     if (position > index.activeUuids.length) {
       debugLogger.debug(
         `cursor position out of range session=${sessionId} ` +
@@ -991,16 +1105,20 @@ export class SessionTranscriptReader {
       );
       throw new InvalidSessionTranscriptCursorError();
     }
-    const pageUuids = selectPageUuids(
-      index,
-      sessionId,
-      position,
-      limit,
-      maxBytes,
-    );
-    const nextPosition = position + pageUuids.length;
+    const backwardPage =
+      direction === 'backward'
+        ? selectBackwardPageUuids(index, sessionId, position, limit, maxBytes)
+        : undefined;
+    const pageUuids =
+      backwardPage?.uuids ??
+      selectPageUuids(index, sessionId, position, limit, maxBytes);
+    const nextPosition =
+      backwardPage?.nextPosition ?? position + pageUuids.length;
     const records = await readAggregatedRecords(index, pageUuids);
-    const hasMore = nextPosition < index.activeUuids.length;
+    const hasMore =
+      direction === 'backward'
+        ? nextPosition > 0
+        : nextPosition < index.activeUuids.length;
     const nextCursorState: SessionTranscriptCursorState | undefined = hasMore
       ? {
           v: SESSION_TRANSCRIPT_CURSOR_VERSION,
@@ -1008,6 +1126,9 @@ export class SessionTranscriptReader {
           fileIdentity,
           snapshotSize,
           position: nextPosition,
+          ...(direction === 'backward'
+            ? { direction: 'backward' as const }
+            : {}),
           leafUuid: index.leafUuid,
           startTime: index.startTime,
           lastUpdated: index.lastUpdated,
@@ -1026,6 +1147,7 @@ export class SessionTranscriptReader {
       records,
       gaps: index.gaps,
       hasMore,
+      ...(direction === 'backward' ? { direction: 'backward' as const } : {}),
       ...(nextCursorState ? { nextCursorState } : {}),
       ...(cursor?.replay !== undefined ? { replay: cursor.replay } : {}),
       startTime: index.startTime,

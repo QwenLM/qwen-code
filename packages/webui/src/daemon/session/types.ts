@@ -113,6 +113,8 @@ export interface DaemonSessionProviderProps {
   maxQueued?: number;
   /** Maximum normalized transcript blocks retained in memory. */
   maxBlocks?: number;
+  /** Latest persisted records requested during an existing-session load. */
+  historyPageSize?: number;
   /** Hide this client's own user prompt echo when the daemon replays events. */
   suppressOwnUserEcho?: boolean;
   /** Attach raw daemon events to normalized transcript blocks for debugging. */
