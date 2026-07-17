@@ -781,6 +781,33 @@ describe('microcompactHistory', () => {
     ).toBe('Y'.repeat(25_500));
   });
 
+  it('size-compacts old skill results and keeps the most recent result', () => {
+    const oldSkillContent = 'old skill instructions '.repeat(20);
+    const recentSkillContent = 'recent skill instructions';
+    const history: Content[] = [
+      makeToolCall('skill'),
+      makeToolResult('skill', oldSkillContent),
+      makeToolCall('skill'),
+      makeToolResult('skill', recentSkillContent),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      ...DEFAULT_SETTINGS,
+      toolResultsTotalCharsThreshold: 100,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.triggerReason).toBe('size');
+    expect(result.meta!.toolsCleared).toBe(1);
+    expect(result.meta!.toolsKept).toBe(1);
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+    expect(
+      result.history[3]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(recentSkillContent);
+  });
+
   it('counts pending content as a virtual tail for size-triggered compaction', () => {
     const history: Content[] = [];
     for (let i = 0; i < 4; i++) {

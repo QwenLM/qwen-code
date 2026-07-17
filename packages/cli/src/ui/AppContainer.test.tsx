@@ -36,6 +36,7 @@ import { useContext, act } from 'react';
 import {
   AppContainer,
   dedupeNewestFirst,
+  getSpeculativeToolResult,
   getNextRenderMode,
   isInputActiveForState,
   isRenderModeToggleKey,
@@ -415,8 +416,29 @@ describe('AppContainer State Management', () => {
     } as InitializationResult;
   });
 
+  describe('speculative tool results', () => {
+    it('renders error envelopes as failed tools', () => {
+      expect(
+        getSpeculativeToolResult({
+          error: 'Command timed out.\npartial output',
+        }),
+      ).toEqual({
+        text: 'Command timed out.\npartial output',
+        status: ToolCallStatus.Error,
+      });
+    });
+
+    it('keeps output envelopes successful', () => {
+      expect(getSpeculativeToolResult({ output: 'done' })).toEqual({
+        text: 'done',
+        status: ToolCallStatus.Success,
+      });
+    });
+  });
+
   afterEach(() => {
     cleanup();
+    vi.useRealTimers();
   });
 
   const rewindUserItem = (
@@ -554,6 +576,46 @@ describe('AppContainer State Management', () => {
   };
 
   describe('Basic Rendering', () => {
+    it('cancels an active request before quitting', () => {
+      vi.useFakeTimers();
+      const cancelOngoingRequest = vi.fn();
+      const requestShutdown = vi.fn();
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: StreamingState.Responding,
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest,
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue({
+        initialize: vi.fn().mockResolvedValue(undefined),
+        setTools: vi.fn().mockResolvedValue(undefined),
+        isInitialized: vi.fn().mockReturnValue(false),
+        requestShutdown,
+      } as unknown as GeminiClient);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      const slashCommandActions = mockedUseSlashCommandProcessor.mock.calls.at(
+        -1,
+      )?.[12] as { quit: (messages: HistoryItem[]) => void };
+      slashCommandActions.quit([]);
+
+      expect(cancelOngoingRequest).toHaveBeenCalledOnce();
+      expect(requestShutdown).toHaveBeenCalledOnce();
+    });
+
     it('shows recording failures as warnings and unsubscribes on unmount', async () => {
       const addItem = vi.fn();
       mockedUseHistory.mockReturnValue({
@@ -1007,6 +1069,56 @@ describe('AppContainer State Management', () => {
           commandContext: {},
           shellConfirmationRequest: null,
           confirmationRequest: null,
+        });
+        mockedUseMessageQueue.mockReturnValue({
+          messageQueue: [],
+          addMessage: mockQueueMessage,
+          clearQueue: vi.fn(),
+          getQueuedMessagesText: vi.fn().mockReturnValue(''),
+          popAllMessages: vi.fn().mockReturnValue(null),
+          drainQueue: vi.fn().mockReturnValue([]),
+          popNextSegment: vi.fn().mockReturnValue(null),
+        });
+
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+
+        capturedUIActions.handleFinalSubmit(command);
+
+        expect(mockHandleSlashCommand).toHaveBeenCalledWith('/quit');
+        expect(mockQueueMessage).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['/quit', '/exit'])(
+      'routes "%s" immediately while responding',
+      (command) => {
+        const mockHandleSlashCommand = vi.fn();
+        const mockQueueMessage = vi.fn();
+        mockedUseSlashCommandProcessor.mockReturnValue({
+          handleSlashCommand: mockHandleSlashCommand,
+          slashCommands: [],
+          pendingHistoryItems: [],
+          commandContext: {},
+          shellConfirmationRequest: null,
+          confirmationRequest: null,
+        });
+        mockedUseGeminiStream.mockReturnValue({
+          streamingState: StreamingState.Responding,
+          submitQuery: vi.fn(),
+          initError: null,
+          pendingHistoryItems: [],
+          thought: null,
+          cancelOngoingRequest: vi.fn(),
+          retryLastPrompt: vi.fn(),
+          streamingResponseLengthRef: { current: 0 },
+          isReceivingContent: false,
         });
         mockedUseMessageQueue.mockReturnValue({
           messageQueue: [],

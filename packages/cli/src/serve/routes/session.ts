@@ -25,6 +25,7 @@ import {
   type SessionArchiveState,
 } from '@qwen-code/qwen-code-core';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
+import { parseSessionSource } from '@qwen-code/acp-bridge';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
@@ -54,12 +55,14 @@ import {
 } from '../server/request-helpers.js';
 import {
   InvalidCursorError,
+  getWorkspaceSessionInfoForResponse,
   listLiveWorkspaceSessionsForResponse,
   listWorkspaceSessionsForResponse,
   parseSessionPageSizeQuery,
 } from '../server/session-list.js';
 import {
   archiveDaemonSessions,
+  assertSessionArchived,
   assertSessionLoadable,
   deleteDaemonSessions,
   logSessionArchiveWarning,
@@ -73,6 +76,7 @@ import {
 } from '../server/session-export.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
 import { replayTranscriptRecordPage } from '../../acp-integration/session/history-replay-page.js';
+import { GENERATION_MAX_PROMPT_BYTES } from '../../acp-integration/generation.js';
 import { requireSessionRuntime } from './session-runtime.js';
 import {
   resolveWorkspaceRuntimeFromParam,
@@ -101,6 +105,66 @@ const WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
 const WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES = 64 * 1024;
 const TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR =
   'Transcript pagination state exceeds the safe limit';
+const GENERATION_HEARTBEAT_MS = 15_000;
+const PRIMARY_ONLY_LIVE_SESSION_ROUTES = [
+  'POST /session/:id/branch',
+  'POST /session/:id/fork',
+  'POST /session/:id/cd',
+] as const;
+type PrimaryOnlyLiveSessionRoute =
+  (typeof PRIMARY_ONLY_LIVE_SESSION_ROUTES)[number];
+
+function isPrimaryOnlyLiveSessionRoute(
+  route: string,
+): route is PrimaryOnlyLiveSessionRoute {
+  return (PRIMARY_ONLY_LIVE_SESSION_ROUTES as readonly string[]).includes(
+    route,
+  );
+}
+
+function formatGenerationSse(
+  event: string,
+  data: Record<string, unknown>,
+): string {
+  return `event: ${event}\ndata: ${JSON.stringify({ v: 1, ...data })}\n\n`;
+}
+
+function writeGenerationSseChunk(res: Response, chunk: string): Promise<void> {
+  if (res.destroyed) {
+    return Promise.reject(new Error('Generation SSE connection destroyed'));
+  }
+  const writable = res.write(chunk);
+  const flush = (res as Response & { flush?: () => void }).flush;
+  flush?.call(res);
+  if (writable) {
+    return res.destroyed
+      ? Promise.reject(new Error('Generation SSE connection destroyed'))
+      : Promise.resolve();
+  }
+  return new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      res.off('drain', onDrain);
+      res.off('close', onClose);
+      res.off('error', onError);
+    };
+    const onDrain = () => {
+      cleanup();
+      resolve();
+    };
+    const onClose = () => {
+      cleanup();
+      reject(new Error('Generation SSE connection closed'));
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    res.once('drain', onDrain);
+    res.once('close', onClose);
+    res.once('error', onError);
+    if (res.destroyed) onClose();
+  });
+}
 
 function isReadOnlyWorkspaceInspection(runtime: WorkspaceRuntime): boolean {
   return !runtime.primary && !runtime.trusted;
@@ -513,6 +577,74 @@ export function registerSessionRoutes(
     return runtime;
   };
 
+  const handleSessionExport = async (
+    req: Request,
+    res: Response,
+    target: {
+      route: string;
+      workspaceCwd: string;
+      workspaceQualified?: boolean;
+      archiveState?: SessionArchiveState;
+    },
+  ): Promise<void> => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const rawFormat = req.query['format'];
+    const format = parseSessionExportFormat(rawFormat);
+    if (!format) {
+      res.status(400).json({
+        error: 'Invalid export format',
+        code: 'invalid_export_format',
+        format: typeof rawFormat === 'string' ? rawFormat : String(rawFormat),
+        allowedFormats: sessionExportFormatValues(),
+      });
+      return;
+    }
+    try {
+      const result = await archiveCoordinator.runSharedMany(
+        [sessionId],
+        async () => {
+          if (target.archiveState === 'archived') {
+            await assertSessionArchived(target.workspaceCwd, sessionId);
+          } else {
+            await assertSessionLoadable(target.workspaceCwd, sessionId);
+          }
+          return exportSessionTranscript({
+            workspaceCwd: target.workspaceCwd,
+            sessionId,
+            format,
+            archiveState: target.archiveState,
+            config: { getChannel: () => 'daemon' },
+          });
+        },
+      );
+      const filename = result.filename.replace(/["\\\r\n]/g, '_');
+      res
+        .status(200)
+        .set('Cache-Control', 'no-store')
+        .set('X-Content-Type-Options', 'nosniff')
+        .set('Content-Type', result.mimeType)
+        .set('Content-Disposition', `attachment; filename="${filename}"`)
+        .send(result.content);
+    } catch (err) {
+      if (target.workspaceQualified && err instanceof SessionNotFoundError) {
+        res.status(404).json({
+          error: err.message,
+          code: 'session_not_found',
+          sessionId: err.sessionId,
+        });
+        return;
+      }
+      sendBridgeError(res, err, {
+        route: target.route,
+        sessionId,
+        ...(target.workspaceQualified
+          ? { workspaceCwd: target.workspaceCwd }
+          : {}),
+      });
+    }
+  };
+
   const sendAmbiguousSessionOwner = (
     res: Response,
     route: string,
@@ -720,12 +852,12 @@ export function registerSessionRoutes(
 
   const sendNonPrimarySessionRouteUnsupported = (
     res: Response,
-    route: string,
+    route: PrimaryOnlyLiveSessionRoute,
     sessionId: string,
     runtime: WorkspaceRuntime,
   ): void => {
     res.status(400).json({
-      error: `Route "${route}" is primary-only for non-primary workspace sessions in Phase 2a.`,
+      error: `Route "${route}" is only available for primary workspace sessions.`,
       code: 'non_primary_session_route_not_supported',
       sessionId,
       workspaceId: runtime.workspaceId,
@@ -942,21 +1074,32 @@ export function registerSessionRoutes(
     return key;
   };
 
-  const withMutableSession =
-    (
-      route: string,
-      handler: (
-        req: Request,
-        res: Response,
-        sessionId: string,
-      ) => Promise<void> | void,
-    ): RequestHandler =>
-    async (req, res) => {
+  const withPrimaryOnlyMutableSession = (
+    route: string,
+    handler: (
+      req: Request,
+      res: Response,
+      sessionId: string,
+    ) => Promise<void> | void,
+  ): RequestHandler => {
+    if (!isPrimaryOnlyLiveSessionRoute(route)) {
+      throw new Error(`Unregistered primary-only session route: ${route}`);
+    }
+    return async (req, res) => {
       const sessionId = requireSessionId(req, res);
       if (sessionId === null) return;
       const runtime = resolveLiveSessionRuntime(sessionId, res, route);
       if (!runtime) return;
       if (!runtime.primary) {
+        logSessionRoutingFailure(
+          route,
+          'non_primary_session_route_not_supported',
+          {
+            sessionId,
+            workspaceId: runtime.workspaceId,
+            workspaceCwd: runtime.workspaceCwd,
+          },
+        );
         sendNonPrimarySessionRouteUnsupported(res, route, sessionId, runtime);
         return;
       }
@@ -968,6 +1111,7 @@ export function registerSessionRoutes(
         sendBridgeError(res, err, { route, sessionId });
       }
     };
+  };
 
   app.post('/session', mutate(), async (req, res) => {
     const body = safeBody(req);
@@ -994,6 +1138,14 @@ export function registerSessionRoutes(
     }
     const approvalMode = parseOptionalApprovalMode(body, res);
     if (approvalMode === null) return;
+    const source = parseSessionSource(body['sourceType'], body['sourceId']);
+    if ('error' in source) {
+      res.status(400).json({
+        error: source.error,
+        code: 'invalid_session_source',
+      });
+      return;
+    }
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
     try {
@@ -1003,6 +1155,10 @@ export function registerSessionRoutes(
         ...(clientId !== undefined ? { clientId } : {}),
         ...(sessionScope !== undefined ? { sessionScope } : {}),
         ...(approvalMode !== undefined ? { approvalMode } : {}),
+        ...(source.sourceType !== undefined
+          ? { sourceType: source.sourceType }
+          : {}),
+        ...(source.sourceId !== undefined ? { sourceId: source.sourceId } : {}),
       });
       // Client may have disconnected during the 1–3s spawn window. If
       // so, the response can't be delivered. The session is otherwise
@@ -1049,11 +1205,18 @@ export function registerSessionRoutes(
           // dispatching, the bridge will see `attachCount > 0` and
           // skip the kill. Without the flag, that second client's
           // session would die mid-prompt.
-          runtime.bridge
-            .killSession(session.sessionId, { requireZeroAttaches: true })
-            .catch(() => {
-              // Best-effort cleanup; channel.exited will eventually reap.
+          try {
+            const killed = await runtime.bridge.killSession(session.sessionId, {
+              requireZeroAttaches: true,
             });
+            if (killed) {
+              await new SessionService(runtime.workspaceCwd).removeSession(
+                session.sessionId,
+              );
+            }
+          } catch {
+            // Best-effort cleanup; channel.exited will eventually reap.
+          }
         } else {
           // When an attaching client disconnects
           // before its 200 response can be written, the
@@ -1125,9 +1288,9 @@ export function registerSessionRoutes(
             // Recover the persisted parent lineage so the restored live entry
             // reports it (the bridge otherwise creates the entry without it, and
             // status calls would show a restored sub-session as top-level).
-            const parentSessionId = await new SessionService(
+            const metadata = await new SessionService(
               workspaceCwd,
-            ).readParentSessionId(sessionId);
+            ).readCreationMetadata(sessionId);
             return action === 'load'
               ? await runtime.bridge.loadSession({
                   sessionId,
@@ -1135,14 +1298,14 @@ export function registerSessionRoutes(
                   historyReplay: 'response',
                   ...(clientId !== undefined ? { clientId } : {}),
                   ...(approvalMode !== undefined ? { approvalMode } : {}),
-                  ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+                  ...metadata,
                 })
               : await runtime.bridge.resumeSession({
                   sessionId,
                   workspaceCwd,
                   ...(clientId !== undefined ? { clientId } : {}),
                   ...(approvalMode !== undefined ? { approvalMode } : {}),
-                  ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+                  ...metadata,
                 });
           },
         );
@@ -1193,7 +1356,7 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/branch',
     mutate(),
-    withMutableSession(
+    withPrimaryOnlyMutableSession(
       'POST /session/:id/branch',
       async (req, res, sessionId) => {
         const body = safeBody(req);
@@ -1235,7 +1398,7 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/fork',
     mutate(),
-    withMutableSession(
+    withPrimaryOnlyMutableSession(
       'POST /session/:id/fork',
       async (req, res, sessionId) => {
         const body = safeBody(req);
@@ -1262,29 +1425,32 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/cd',
     mutate(),
-    withMutableSession('POST /session/:id/cd', async (req, res, sessionId) => {
-      const body = safeBody(req);
-      const targetPath = body['path'];
-      if (
-        typeof targetPath !== 'string' ||
-        targetPath.length === 0 ||
-        !path.isAbsolute(targetPath)
-      ) {
-        res.status(400).json({
-          error: '`path` is required and must be an absolute path',
-          code: 'invalid_path',
-        });
-        return;
-      }
-      const clientId = parseClientIdHeader(req, res);
-      if (clientId === null) return;
-      const result = await bridge.changeSessionCwd(
-        sessionId,
-        { path: targetPath },
-        clientId !== undefined ? { clientId } : undefined,
-      );
-      res.status(200).json(result);
-    }),
+    withPrimaryOnlyMutableSession(
+      'POST /session/:id/cd',
+      async (req, res, sessionId) => {
+        const body = safeBody(req);
+        const targetPath = body['path'];
+        if (
+          typeof targetPath !== 'string' ||
+          targetPath.length === 0 ||
+          !path.isAbsolute(targetPath)
+        ) {
+          res.status(400).json({
+            error: '`path` is required and must be an absolute path',
+            code: 'invalid_path',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const result = await bridge.changeSessionCwd(
+          sessionId,
+          { path: targetPath },
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json(result);
+      },
+    ),
   );
 
   app.get('/session/:id/status', (req, res) => {
@@ -1307,47 +1473,37 @@ export function registerSessionRoutes(
   });
 
   app.get('/session/:id/export', async (req, res) => {
-    const sessionId = requireSessionId(req, res);
-    if (sessionId === null) return;
-    const rawFormat = req.query['format'];
-    const format = parseSessionExportFormat(rawFormat);
-    if (!format) {
-      res.status(400).json({
-        error: 'Invalid export format',
-        code: 'invalid_export_format',
-        format: typeof rawFormat === 'string' ? rawFormat : String(rawFormat),
-        allowedFormats: sessionExportFormatValues(),
-      });
-      return;
-    }
-    try {
-      const result = await archiveCoordinator.runSharedMany(
-        [sessionId],
-        async () => {
-          await assertSessionLoadable(boundWorkspace, sessionId);
-          return exportSessionTranscript({
-            workspaceCwd: boundWorkspace,
-            sessionId,
-            format,
-            config: { getChannel: () => 'daemon' },
-          });
-        },
-      );
-      const filename = result.filename.replace(/["\\\r\n]/g, '_');
-      res
-        .status(200)
-        .set('Cache-Control', 'no-store')
-        .set('X-Content-Type-Options', 'nosniff')
-        .set('Content-Type', result.mimeType)
-        .set('Content-Disposition', `attachment; filename="${filename}"`)
-        .send(result.content);
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'GET /session/:id/export',
-        sessionId,
-      });
-    }
+    await handleSessionExport(req, res, {
+      route: 'GET /session/:id/export',
+      workspaceCwd: boundWorkspace,
+    });
   });
+
+  app.get('/workspaces/:workspace/session/:id/export', async (req, res) => {
+    const route = 'GET /workspaces/:workspace/session/:id/export';
+    const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+    if (!runtime) return;
+    await handleSessionExport(req, res, {
+      route,
+      workspaceCwd: runtime.workspaceCwd,
+      workspaceQualified: true,
+    });
+  });
+
+  app.get(
+    '/workspaces/:workspace/session/:id/archive/export',
+    async (req, res) => {
+      const route = 'GET /workspaces/:workspace/session/:id/archive/export';
+      const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+      if (!runtime) return;
+      await handleSessionExport(req, res, {
+        route,
+        workspaceCwd: runtime.workspaceCwd,
+        workspaceQualified: true,
+        archiveState: 'archived',
+      });
+    },
+  );
 
   app.get('/session/:id/transcript', async (req, res) => {
     const route = 'GET /session/:id/transcript';
@@ -1613,9 +1769,9 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/artifacts',
     mutate({ strict: true }),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/artifacts',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         if (!requireSessionArtifactClientId(clientId, res)) return;
@@ -1641,9 +1797,11 @@ export function registerSessionRoutes(
               'clientRetained'
             ] as SessionArtifactInput['clientRetained'],
           };
-          const result = await bridge.addSessionArtifact(sessionId, artifact, {
-            clientId,
-          });
+          const result = await runtime.bridge.addSessionArtifact(
+            sessionId,
+            artifact,
+            { clientId },
+          );
           res.status(200).json(result);
         } catch (err) {
           if (sendArtifactValidationError(res, err)) return;
@@ -1659,9 +1817,9 @@ export function registerSessionRoutes(
   app.delete(
     '/session/:id/artifacts/:artifactId',
     mutate({ strict: true }),
-    withMutableSession(
+    withOwnerMutableSession(
       'DELETE /session/:id/artifacts/:artifactId',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         const artifactId = req.params['artifactId'];
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
@@ -1678,7 +1836,7 @@ export function registerSessionRoutes(
           return;
         }
         try {
-          const result = await bridge.removeSessionArtifact(
+          const result = await runtime.bridge.removeSessionArtifact(
             sessionId,
             artifactId,
             { clientId },
@@ -1698,9 +1856,9 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/tasks/:taskId/cancel',
     mutate({ strict: true }),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/tasks/:taskId/cancel',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         const taskId = req.params['taskId'];
         if (!taskId) {
           res.status(400).json({
@@ -1718,7 +1876,9 @@ export function registerSessionRoutes(
         }
         res
           .status(200)
-          .json(await bridge.cancelSessionTask(sessionId, taskId, kind));
+          .json(
+            await runtime.bridge.cancelSessionTask(sessionId, taskId, kind),
+          );
       },
     ),
   );
@@ -1726,10 +1886,10 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/goal/clear',
     mutate({ strict: true }),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/goal/clear',
-      async (_req, res, sessionId) => {
-        res.status(200).json(await bridge.clearSessionGoal(sessionId));
+      async (_req, res, sessionId, runtime) => {
+        res.status(200).json(await runtime.bridge.clearSessionGoal(sessionId));
       },
     ),
   );
@@ -1737,9 +1897,9 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/continue',
     mutate({ strict: true }),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/continue',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         // Forward the originator and a generated promptId so the bridge can
         // attribute and correlate the continuation turn (it now runs through the
         // prompt-admission path, same as POST /session/:id/prompt). The accepted
@@ -1748,7 +1908,7 @@ export function registerSessionRoutes(
         if (clientId === null) return;
         const promptId = crypto.randomUUID();
         res.status(200).json(
-          await bridge.continueSession(sessionId, {
+          await runtime.bridge.continueSession(sessionId, {
             ...(clientId !== undefined ? { clientId } : {}),
             promptId,
           }),
@@ -1909,6 +2069,98 @@ export function registerSessionRoutes(
           daemonLog.info('prompt enqueued', { sessionId, promptId, clientId });
         }
         res.status(202).json({ promptId, lastEventId });
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/generate',
+    mutate(),
+    withOwnerReadSession(
+      'POST /session/:id/generate',
+      async (req, res, sessionId, runtime) => {
+        const body = safeBody(req);
+        const prompt = body['prompt'];
+        if (
+          typeof prompt !== 'string' ||
+          prompt.trim().length === 0 ||
+          Buffer.byteLength(prompt, 'utf8') > GENERATION_MAX_PROMPT_BYTES
+        ) {
+          res.status(400).json({
+            error: `\`prompt\` must be a non-empty string no larger than ${GENERATION_MAX_PROMPT_BYTES} UTF-8 bytes`,
+            code: 'invalid_prompt',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        if (!runtime.bridge.generateSessionContent) {
+          res.status(501).json({
+            error: 'Stateless generation is not supported by this bridge',
+            code: 'generation_not_supported',
+          });
+          return;
+        }
+
+        const abort = new AbortController();
+        let completed = false;
+        const onClose = () => {
+          if (!completed) abort.abort();
+        };
+        res.once('close', onClose);
+
+        const stream = runtime.bridge.generateSessionContent(
+          sessionId,
+          prompt,
+          abort.signal,
+          clientId !== undefined ? { clientId } : undefined,
+        );
+
+        res.status(200);
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        res.flushHeaders();
+
+        let writeChain = Promise.resolve();
+        const write = (chunk: string): Promise<void> => {
+          writeChain = writeChain.then(() =>
+            writeGenerationSseChunk(res, chunk),
+          );
+          return writeChain;
+        };
+        await write(': connected\n\n');
+        const heartbeat = setInterval(() => {
+          void write(': heartbeat\n\n').catch(() => abort.abort());
+        }, GENERATION_HEARTBEAT_MS);
+        heartbeat.unref();
+
+        try {
+          for await (const event of stream) {
+            await write(formatGenerationSse(event.type, event));
+          }
+        } catch (err) {
+          if (!abort.signal.aborted && !res.destroyed) {
+            daemonLog?.error(
+              'session generation failed',
+              err instanceof Error ? err : new Error(String(err)),
+              { sessionId, clientId },
+            );
+            await write(
+              formatGenerationSse('error', {
+                type: 'error',
+                code: 'generation_failed',
+                message: 'Generation failed',
+              }),
+            ).catch(() => undefined);
+          }
+        } finally {
+          completed = true;
+          clearInterval(heartbeat);
+          res.off('close', onClose);
+          if (!res.destroyed) res.end();
+        }
       },
     ),
   );
@@ -2167,30 +2419,36 @@ export function registerSessionRoutes(
   app.patch(
     '/session/:id/metadata',
     mutate({ strict: true }),
-    withMutableSession('PATCH /session/:id/metadata', (req, res, sessionId) => {
-      const body = safeBody(req);
-      const clientId = parseClientIdHeader(req, res);
-      if (clientId === null) return;
-      const rawDisplayName = body['displayName'];
-      if (rawDisplayName !== undefined && typeof rawDisplayName !== 'string') {
-        res.status(400).json({
-          error: '`displayName` must be a string',
-          code: 'invalid_metadata',
-          field: 'displayName',
-        });
-        return;
-      }
-      const displayName =
-        typeof rawDisplayName === 'string'
-          ? rawDisplayName.slice(0, 256)
-          : undefined;
-      const effective = bridge.updateSessionMetadata(
-        sessionId,
-        { displayName },
-        clientId !== undefined ? { clientId } : undefined,
-      );
-      res.status(200).json({ sessionId, ...effective });
-    }),
+    withOwnerMutableSession(
+      'PATCH /session/:id/metadata',
+      (req, res, sessionId, runtime) => {
+        const body = safeBody(req);
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const rawDisplayName = body['displayName'];
+        if (
+          rawDisplayName !== undefined &&
+          typeof rawDisplayName !== 'string'
+        ) {
+          res.status(400).json({
+            error: '`displayName` must be a string',
+            code: 'invalid_metadata',
+            field: 'displayName',
+          });
+          return;
+        }
+        const displayName =
+          typeof rawDisplayName === 'string'
+            ? rawDisplayName.slice(0, 256)
+            : undefined;
+        const effective = runtime.bridge.updateSessionMetadata(
+          sessionId,
+          { displayName },
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json({ sessionId, ...effective });
+      },
+    ),
   );
 
   type SessionOrganizationTarget = {
@@ -2571,6 +2829,17 @@ export function registerSessionRoutes(
           }
           parentSessionId = rawParentSessionId;
         }
+        const parsedSource = parseSessionSource(
+          req.query['sourceType'],
+          req.query['sourceId'],
+        );
+        if ('error' in parsedSource) {
+          res.status(400).json({
+            error: parsedSource.error,
+            code: 'invalid_session_source',
+          });
+          return;
+        }
         const options = {
           ...(cursor !== undefined ? { cursor } : {}),
           ...(size !== undefined ? { size } : {}),
@@ -2578,11 +2847,12 @@ export function registerSessionRoutes(
           ...(view !== undefined ? { view } : {}),
           ...(group !== undefined ? { group } : {}),
           ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+          ...parsedSource,
         };
         // Organized/archived views always need the persisted store: organized
         // cursors are opaque (non-numeric) and archived-only workspaces have no
         // active persisted sessions, so the live-only fallback would drop them.
-        // A parentSessionId filter joins them: it gathers the whole workspace
+        // Metadata filters gather the whole workspace
         // (persisted + live) to filter completely and paginates with an opaque
         // activity cursor, so the numeric-cursor live fallback can't serve it.
         const usePersisted =
@@ -2591,6 +2861,7 @@ export function registerSessionRoutes(
           view === 'organized' ||
           archiveState === 'archived' ||
           parentSessionId !== undefined ||
+          parsedSource.sourceType !== undefined ||
           (cursor !== undefined && cursor !== ''
             ? isNumericSessionCursor(cursor)
             : await hasActivePersistedSessions(key));
@@ -2600,7 +2871,10 @@ export function registerSessionRoutes(
         // a future option added to validation but not to that gate fails loudly.
         if (
           !usePersisted &&
-          (view !== undefined || archiveState === 'archived')
+          (view !== undefined ||
+            archiveState === 'archived' ||
+            parentSessionId !== undefined ||
+            parsedSource.sourceType !== undefined)
         ) {
           throw new Error(
             'session list live path received persisted-only options',
@@ -2656,6 +2930,43 @@ export function registerSessionRoutes(
     listWorkspaceSessionsHandler('workspace'),
   );
 
+  const workspaceSessionInfoHandler =
+    (paramName: 'id' | 'workspace'): RequestHandler =>
+    async (req, res) => {
+      const route =
+        paramName === 'workspace'
+          ? 'GET /workspaces/:workspace/session-info'
+          : 'GET /workspace/:id/session-info';
+      const runtime = resolveRuntimeForCatalogRoute(req, res, paramName, route);
+      if (runtime === null) return;
+      const key = runtime.workspaceCwd;
+      try {
+        // Disk-scan aggregate: do not call this from hot paths / UI polls.
+        const info = await runWorkspaceInspectionWithLogPolicy(runtime, () =>
+          getWorkspaceSessionInfoForResponse(runtime.bridge, key, {
+            includeLive: !isReadOnlyWorkspaceInspection(runtime),
+          }),
+        );
+        res.status(200).json(info);
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: failed to read session-info for workspace ${safeLogValue(
+            key,
+          )}: ${safeLogValue(err instanceof Error ? err.message : String(err))}`,
+        );
+        res.status(500).json({
+          error: 'Failed to read session info',
+          code: 'session_info_failed',
+        });
+      }
+    };
+
+  app.get('/workspace/:id/session-info', workspaceSessionInfoHandler('id'));
+  app.get(
+    '/workspaces/:workspace/session-info',
+    workspaceSessionInfoHandler('workspace'),
+  );
+
   app.post(
     '/session/:id/model',
     mutate(),
@@ -2689,16 +3000,16 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/recap',
     mutate(),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/recap',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         // Wraps `generateSessionRecap` so daemon clients can fetch a
         // one-sentence "where did I leave off" summary without a full
         // prompt turn. Best-effort — `recap: null` on short history or
         // transient model failure is a normal 200, not an error.
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
-        const response = await bridge.generateSessionRecap(
+        const response = await runtime.bridge.generateSessionRecap(
           sessionId,
           clientId !== undefined ? { clientId } : undefined,
         );
@@ -2719,53 +3030,56 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/btw',
     mutate(),
-    withMutableSession('POST /session/:id/btw', async (req, res, sessionId) => {
-      const body = safeBody(req);
-      const question = body['question'];
-      if (
-        typeof question !== 'string' ||
-        question.trim().length === 0 ||
-        question.length > BTW_MAX_INPUT_LENGTH
-      ) {
-        res.status(400).json({
-          error: `\`question\` is required, must be a non-empty string, and at most ${BTW_MAX_INPUT_LENGTH} characters`,
-        });
-        return;
-      }
-      const abort = new AbortController();
-      const onResClose = () => {
-        if (!res.writableEnded) abort.abort();
-      };
-      res.once('close', onResClose);
-      const clientId = parseClientIdHeader(req, res);
-      if (clientId === null) {
-        res.off('close', onResClose);
-        return;
-      }
-      try {
-        const result = await bridge.generateSessionBtw(
-          sessionId,
-          question.trim(),
-          abort.signal,
-          clientId !== undefined ? { clientId } : undefined,
-        );
-        res.status(200).json(result);
-      } catch (err) {
+    withOwnerMutableSession(
+      'POST /session/:id/btw',
+      async (req, res, sessionId, runtime) => {
+        const body = safeBody(req);
+        const question = body['question'];
         if (
-          err instanceof DOMException &&
-          err.name === 'AbortError' &&
-          abort.signal.aborted
+          typeof question !== 'string' ||
+          question.trim().length === 0 ||
+          question.length > BTW_MAX_INPUT_LENGTH
         ) {
+          res.status(400).json({
+            error: `\`question\` is required, must be a non-empty string, and at most ${BTW_MAX_INPUT_LENGTH} characters`,
+          });
           return;
         }
-        sendBridgeError(res, err, {
-          route: 'POST /session/:id/btw',
-          sessionId,
-        });
-      } finally {
-        res.off('close', onResClose);
-      }
-    }),
+        const abort = new AbortController();
+        const onResClose = () => {
+          if (!res.writableEnded) abort.abort();
+        };
+        res.once('close', onResClose);
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) {
+          res.off('close', onResClose);
+          return;
+        }
+        try {
+          const result = await runtime.bridge.generateSessionBtw(
+            sessionId,
+            question.trim(),
+            abort.signal,
+            clientId !== undefined ? { clientId } : undefined,
+          );
+          res.status(200).json(result);
+        } catch (err) {
+          if (
+            err instanceof DOMException &&
+            err.name === 'AbortError' &&
+            abort.signal.aborted
+          ) {
+            return;
+          }
+          sendBridgeError(res, err, {
+            route: 'POST /session/:id/btw',
+            sessionId,
+          });
+        } finally {
+          res.off('close', onResClose);
+        }
+      },
+    ),
   );
 
   // Queue a user message typed while the session's turn is still running. The
@@ -2785,9 +3099,9 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/mid-turn-message',
     mutate(),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/mid-turn-message',
-      (req, res, sessionId) => {
+      (req, res, sessionId, runtime) => {
         const body = safeBody(req);
         const message = body['message'];
         // Validate (and length-check, and enqueue) the TRIMMED value — the bridge
@@ -2812,7 +3126,7 @@ export function registerSessionRoutes(
         // originator for SSE echo routing. `null` = malformed id (already answered).
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
-        const result = bridge.enqueueMidTurnMessage(
+        const result = runtime.bridge.enqueueMidTurnMessage(
           sessionId,
           trimmed,
           clientId !== undefined ? { clientId } : undefined,
@@ -2876,9 +3190,9 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/shell',
     mutate({ strict: true }),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/shell',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         if (!sessionShellCommandEnabled) {
           sendBridgeError(res, new SessionShellDisabledError(), {
             route: 'POST /session/:id/shell',
@@ -2911,7 +3225,7 @@ export function registerSessionRoutes(
         };
         res.once('close', onResClose);
         try {
-          const result = await bridge.executeShellCommand(
+          const result = await runtime.bridge.executeShellCommand(
             sessionId,
             command.trim(),
             abort.signal,
@@ -2922,6 +3236,8 @@ export function registerSessionRoutes(
               sessionId,
               clientId,
               exitCode: result.exitCode,
+              workspaceId: runtime.workspaceId,
+              workspaceCwd: runtime.workspaceCwd,
             });
           }
           res.status(200).json(result);
@@ -2944,30 +3260,31 @@ export function registerSessionRoutes(
     ),
   );
 
-  app.get('/session/:id/rewind/snapshots', async (req, res) => {
-    const sessionId = req.params['id'];
-    if (!sessionId) {
-      res
-        .status(400)
-        .json({ error: '`sessionId` route parameter is required' });
-      return;
-    }
-    try {
-      res.status(200).json(await bridge.getRewindSnapshots(sessionId));
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'GET /session/:id/rewind/snapshots',
-        sessionId,
-      });
-    }
-  });
+  app.get(
+    '/session/:id/rewind/snapshots',
+    withOwnerReadSession(
+      'GET /session/:id/rewind/snapshots',
+      async (_req, res, sessionId, runtime) => {
+        const response = await runtime.bridge.getRewindSnapshots(sessionId);
+        if (daemonLog) {
+          daemonLog.info('rewind snapshots loaded', {
+            sessionId,
+            snapshotCount: response.snapshots.length,
+            workspaceId: runtime.workspaceId,
+            workspaceCwd: runtime.workspaceCwd,
+          });
+        }
+        res.status(200).json(response);
+      },
+    ),
+  );
 
   app.post(
     '/session/:id/rewind',
     mutate({ strict: true }),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/rewind',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         const body = safeBody(req);
         const promptId = body['promptId'];
         if (typeof promptId !== 'string' || promptId.length === 0) {
@@ -2977,13 +3294,33 @@ export function registerSessionRoutes(
           });
           return;
         }
+        const rewindFiles = body['rewindFiles'];
+        if (rewindFiles !== undefined && typeof rewindFiles !== 'boolean') {
+          res.status(400).json({
+            error: '`rewindFiles` must be a boolean when provided',
+            code: 'invalid_rewind_files_flag',
+          });
+          return;
+        }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
-        const response = await bridge.rewindSession(
+        const response = await runtime.bridge.rewindSession(
           sessionId,
-          { promptId, rewindFiles: body['rewindFiles'] !== false },
+          { promptId, rewindFiles: rewindFiles !== false },
           clientId !== undefined ? { clientId } : undefined,
         );
+        if (daemonLog) {
+          daemonLog.info('session rewind completed', {
+            sessionId,
+            promptId,
+            rewindFiles: rewindFiles !== false,
+            rewound: response.rewound,
+            filesChangedCount: response.filesChanged.length,
+            filesFailedCount: response.filesFailed.length,
+            workspaceId: runtime.workspaceId,
+            workspaceCwd: runtime.workspaceCwd,
+          });
+        }
         res.status(200).json(response);
       },
     ),
@@ -3034,9 +3371,9 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/language',
     mutate(),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/language',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         const body = safeBody(req);
         const language = body['language'];
         const syncOutputLanguage = body['syncOutputLanguage'];
@@ -3069,7 +3406,7 @@ export function registerSessionRoutes(
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
 
-        const response = await bridge.setSessionLanguage(
+        const response = await runtime.bridge.setSessionLanguage(
           sessionId,
           {
             language,

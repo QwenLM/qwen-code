@@ -612,6 +612,22 @@ describe('voice-transcriber', () => {
     ).rejects.toThrow(/DNS lookup failed for asr\.example/);
   });
 
+  it('aborts a pending DNS safety lookup', async () => {
+    const controller = new AbortController();
+    const check = assertVoiceBaseUrlNetworkAllowed(
+      {
+        model: 'qwen3-asr-flash',
+        baseUrl: 'https://asr.example/v1',
+      },
+      () => new Promise(() => undefined),
+      controller.signal,
+    );
+
+    controller.abort(new Error('Workspace runtime was removed'));
+
+    await expect(check).rejects.toThrow('Workspace runtime was removed');
+  });
+
   it('allows localhost voice URLs for development', () => {
     const config = createConfig([
       {

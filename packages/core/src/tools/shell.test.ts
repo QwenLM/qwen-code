@@ -21,6 +21,13 @@ const mockDebugLogger = vi.hoisted(() => ({
 }));
 vi.mock('../services/shellExecutionService.js', () => ({
   ShellExecutionService: { execute: mockShellExecutionService },
+  getShellAbortReasonKind: (reason: unknown) =>
+    typeof reason === 'object' &&
+    reason !== null &&
+    'kind' in reason &&
+    reason.kind === 'background'
+      ? 'background'
+      : 'cancel',
 }));
 vi.mock('../utils/debugLogger.js', () => ({
   createDebugLogger: vi.fn(() => mockDebugLogger),
@@ -143,6 +150,7 @@ describe('ShellTool', () => {
       setApprovalMode: vi.fn(),
       getShouldUseNodePtyShell: vi.fn().mockReturnValue(false),
       getShellDefaultTimeoutMs: vi.fn().mockReturnValue(undefined),
+      getShellHeartbeatIntervalMs: vi.fn().mockReturnValue(undefined),
       getBackgroundShellRegistry: vi.fn().mockReturnValue({
         register: vi.fn(),
         get: vi.fn(),
@@ -909,7 +917,16 @@ describe('ShellTool', () => {
           expect(mockShellExecutionService).not.toHaveBeenCalled();
           expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
           expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
-          expect(result.llmContent).toContain('Command timed out after 5000ms');
+          expect(result.llmContent).toBe(
+            'Command timed out after 5000ms before it could complete. There was no output before it timed out.',
+          );
+          expect(result.returnDisplay).toBe(
+            'Command timed out after 5000ms before it could complete. There was no output before it timed out.',
+          );
+          expect(result.error).toEqual({
+            message: 'Command timed out after 5000ms before it could complete.',
+            type: ToolErrorType.EXECUTION_TIMEOUT,
+          });
         } finally {
           vi.stubGlobal('AbortSignal', originalAbortSignal);
         }
@@ -1565,6 +1582,230 @@ describe('ShellTool', () => {
           is_background: false,
         }),
       ).toThrow('Directory must be an absolute path.');
+    });
+
+    describe('Silent-command heartbeat', () => {
+      let updateOutputMock: Mock;
+      beforeEach(() => {
+        vi.useFakeTimers({
+          toFake: [
+            'Date',
+            'performance',
+            'setTimeout',
+            'clearTimeout',
+            'setInterval',
+            'clearInterval',
+          ],
+        });
+        updateOutputMock = vi.fn();
+      });
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      const heartbeats = () =>
+        updateOutputMock.mock.calls
+          .map(([arg]) => arg)
+          .filter(
+            (arg) =>
+              typeof arg === 'object' &&
+              arg !== null &&
+              (arg as { type?: string }).type === 'shell_progress',
+          );
+
+      const settle = async () => {
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+      };
+
+      it('emits a heartbeat per silent interval with elapsed and effective timeout', async () => {
+        const invocation = shellTool.build({
+          command: 'quiet-soak-test',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        // Let execute() reach the post-spawn heartbeat setup.
+        await vi.advanceTimersByTimeAsync(0);
+
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(heartbeats()).toHaveLength(1);
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(heartbeats()).toHaveLength(2);
+
+        const [first, second] = heartbeats() as Array<Record<string, unknown>>;
+        expect(first).toMatchObject({
+          type: 'shell_progress',
+          elapsedMs: 10_000,
+          timeoutMs: 120_000,
+        });
+        // No output yet → no lastOutputAgeMs, no stats.
+        expect(first).not.toHaveProperty('lastOutputAgeMs');
+        expect(first).not.toHaveProperty('totalLines');
+        expect(first).not.toHaveProperty('totalBytes');
+        expect(second['elapsedMs']).toBe(20_000);
+
+        await settle();
+        await promise;
+      });
+
+      it('stays silent while output keeps the display fresh', async () => {
+        const invocation = shellTool.build({
+          command: 'npm test',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        await vi.advanceTimersByTimeAsync(0);
+
+        for (let i = 0; i < 4; i++) {
+          await vi.advanceTimersByTimeAsync(5_000);
+          mockShellOutputCallback({ type: 'data', chunk: `line ${i}` });
+        }
+
+        expect(heartbeats()).toHaveLength(0);
+
+        await settle();
+        await promise;
+      });
+
+      it('reports lastOutputAgeMs once output has been seen', async () => {
+        const invocation = shellTool.build({
+          command: 'npm test',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        await vi.advanceTimersByTimeAsync(0);
+
+        mockShellOutputCallback({ type: 'data', chunk: 'starting...' });
+        await vi.advanceTimersByTimeAsync(20_000);
+
+        const beats = heartbeats() as Array<Record<string, unknown>>;
+        expect(beats.length).toBeGreaterThan(0);
+        expect(beats.at(-1)!['lastOutputAgeMs']).toBe(20_000);
+
+        await settle();
+        await promise;
+      });
+
+      it('is disabled by heartbeatIntervalMs: 0', async () => {
+        (mockConfig.getShellHeartbeatIntervalMs as Mock).mockReturnValue(0);
+        const invocation = shellTool.build({
+          command: 'quiet-soak-test',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        await vi.advanceTimersByTimeAsync(30_000);
+
+        expect(heartbeats()).toHaveLength(0);
+
+        await settle();
+        await promise;
+      });
+
+      it('honours a configured interval', async () => {
+        (mockConfig.getShellHeartbeatIntervalMs as Mock).mockReturnValue(5_000);
+        const invocation = shellTool.build({
+          command: 'quiet-soak-test',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        await vi.advanceTimersByTimeAsync(0);
+
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(heartbeats()).toHaveLength(1);
+
+        await settle();
+        await promise;
+      });
+
+      it('stops on abort before the process settles', async () => {
+        const abortController = new AbortController();
+        const invocation = shellTool.build({
+          command: 'quiet-soak-test',
+          is_background: false,
+        });
+        const promise = invocation.execute(
+          abortController.signal,
+          updateOutputMock,
+        );
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(heartbeats()).toHaveLength(1);
+
+        abortController.abort();
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(heartbeats()).toHaveLength(1);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: null,
+          signal: 15,
+          error: null,
+          aborted: true,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+      });
+
+      it('stops once the command settles', async () => {
+        const invocation = shellTool.build({
+          command: 'quiet-soak-test',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(heartbeats()).toHaveLength(1);
+
+        await settle();
+        await promise;
+
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(heartbeats()).toHaveLength(1);
+      });
+
+      it('carries output stats on the AnsiOutput path', async () => {
+        const invocation = shellTool.build({
+          command: 'ansi-soak-test',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        await vi.advanceTimersByTimeAsync(0);
+
+        const ansiChunk: import('../utils/terminalSerializer.js').AnsiOutput = [
+          [
+            {
+              text: 'hello',
+              bold: false,
+              italic: false,
+              dim: false,
+              underline: false,
+              inverse: false,
+              fg: '',
+              bg: '',
+            },
+          ],
+        ];
+        mockShellOutputCallback({ type: 'data', chunk: ansiChunk });
+        await vi.advanceTimersByTimeAsync(20_000);
+
+        const beats = heartbeats() as Array<Record<string, unknown>>;
+        expect(beats.length).toBeGreaterThan(0);
+        expect(beats.at(-1)).toMatchObject({
+          totalLines: 1,
+          totalBytes: 5,
+        });
+
+        await settle();
+        await promise;
+      });
     });
 
     describe('Streaming to `updateOutput`', () => {
@@ -2367,6 +2608,123 @@ describe('ShellTool', () => {
       });
     });
 
+    it('reports a foreground non-zero exit as a tool error', async () => {
+      const invocation = shellTool.build({
+        command: 'failing-command',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: 'failed output',
+        exitCode: 3,
+        error: null,
+      });
+
+      const result = await promise;
+
+      expect(result.returnDisplay).toContain('failed output');
+      expect(result.error).toEqual({
+        message: expect.stringContaining('Exit Code: 3'),
+        type: ToolErrorType.SHELL_EXECUTE_ERROR,
+      });
+      expect(result.error?.message).toContain('failed output');
+    });
+
+    it.each([
+      'grep pattern file',
+      'rg pattern file',
+      'diff before after',
+      'test -f missing',
+      '[ -f missing ]',
+      '[[ -f missing ]]',
+      '"C:\\\\tools\\\\grep.exe" pattern file',
+    ])('does not report exit 1 from %s as a tool error', async (command) => {
+      const invocation = shellTool.build({
+        command,
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: 'negative result',
+        exitCode: 1,
+        error: null,
+      });
+
+      const result = await promise;
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('Exit Code: 1');
+    });
+
+    it('does not report exit 1 from a pipeline ending in grep as a tool error', async () => {
+      const invocation = shellTool.build({
+        command: 'ps aux | grep missing-process',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: '',
+        exitCode: 1,
+        error: null,
+      });
+
+      const result = await promise;
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('Exit Code: 1');
+    });
+
+    it('reports exit 1 from find as a tool error', async () => {
+      const invocation = shellTool.build({
+        command: 'find missing-directory',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: 'find: missing-directory: No such file or directory',
+        exitCode: 1,
+        error: null,
+      });
+
+      const result = await promise;
+
+      expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
+    });
+
+    it('does not exempt exit 1 from a mixed compound command', async () => {
+      const invocation = shellTool.build({
+        command: 'false && ps aux | grep pattern',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: '',
+        exitCode: 1,
+        error: null,
+      });
+
+      const result = await promise;
+
+      expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
+    });
+
+    it('reports exit 2 from an allowlisted command as a tool error', async () => {
+      const invocation = shellTool.build({
+        command: 'grep pattern file',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: 'grep failed',
+        exitCode: 2,
+        error: null,
+      });
+
+      const result = await promise;
+
+      expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
+    });
+
     describe('long-running foreground hint', () => {
       // Auto-bg advisory. Threshold = effectiveTimeout / 2 — for the
       // default 120s timeout that's 60_000ms, which the tests below
@@ -2511,6 +2869,7 @@ describe('ShellTool', () => {
         } as unknown as AbortSignal;
         const mockCombinedSignal = {
           aborted: true,
+          reason: new DOMException('timed out', 'TimeoutError'),
           addEventListener: vi.fn(),
           removeEventListener: vi.fn(),
         } as unknown as AbortSignal;
@@ -2539,6 +2898,7 @@ describe('ShellTool', () => {
           expect(result.llmContent).toContain(
             'Command timed out after 60000ms',
           );
+          expect(result.error?.type).toBe(ToolErrorType.EXECUTION_TIMEOUT);
           expect(result.llmContent).not.toContain('foreground command ran for');
         } finally {
           // Restore even if assertions throw, otherwise globalThis.AbortSignal
@@ -6653,7 +7013,7 @@ describe('ShellTool', () => {
       expect(calledSignal).not.toBe(mockAbortSignal);
     });
 
-    it('should handle timeout vs user cancellation correctly', async () => {
+    it('keeps the first timeout after a later user cancellation', async () => {
       const userAbortController = new AbortController();
       const invocation = shellTool.build({
         command: 'long-running-command',
@@ -6670,6 +7030,7 @@ describe('ShellTool', () => {
 
       const mockCombinedSignal = {
         aborted: true,
+        reason: new DOMException('timed out', 'TimeoutError'),
         addEventListener: vi.fn(),
         removeEventListener: vi.fn(),
       } as unknown as AbortSignal;
@@ -6682,6 +7043,7 @@ describe('ShellTool', () => {
       });
 
       const promise = invocation.execute(userAbortController.signal);
+      userAbortController.abort();
 
       resolveExecutionPromise({
         rawOutput: Buffer.from('partial output'),
@@ -6694,15 +7056,165 @@ describe('ShellTool', () => {
         executionMethod: 'child_process',
       });
 
-      const result = await promise;
-
-      // Restore original AbortSignal
-      vi.stubGlobal('AbortSignal', originalAbortSignal);
+      let result;
+      try {
+        result = await promise;
+      } finally {
+        vi.stubGlobal('AbortSignal', originalAbortSignal);
+      }
 
       expect(result.llmContent).toContain('Command timed out after 5000ms');
       expect(result.llmContent).toContain(
         'Below is the output before it timed out',
       );
+      expect(result.returnDisplay).toContain(
+        'Command timed out after 5000ms before it could complete.',
+      );
+      expect(result.returnDisplay).toContain('partial output');
+      expect(result.error).toEqual({
+        message: 'Command timed out after 5000ms before it could complete.',
+        type: ToolErrorType.EXECUTION_TIMEOUT,
+      });
+    });
+
+    it('returns a structured timeout when the command produced no output', async () => {
+      const invocation = shellTool.build({
+        command: 'long-running-command',
+        is_background: false,
+        timeout: 5000,
+      });
+      const mockCombinedSignal = {
+        aborted: true,
+        reason: new DOMException('timed out', 'TimeoutError'),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      } as unknown as AbortSignal;
+      const originalAbortSignal = globalThis.AbortSignal;
+      vi.stubGlobal('AbortSignal', {
+        ...originalAbortSignal,
+        timeout: vi.fn().mockReturnValue(mockCombinedSignal),
+        any: vi.fn().mockReturnValue(mockCombinedSignal),
+      });
+
+      try {
+        const promise = invocation.execute(new AbortController().signal);
+        resolveExecutionPromise({
+          rawOutput: Buffer.alloc(0),
+          output: '',
+          exitCode: null,
+          signal: null,
+          error: null,
+          aborted: true,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        const result = await promise;
+
+        expect(result.llmContent).toContain(
+          'There was no output before it timed out.',
+        );
+        expect(result.returnDisplay).toContain(
+          'There was no output before it timed out.',
+        );
+        expect(result.error?.type).toBe(ToolErrorType.EXECUTION_TIMEOUT);
+      } finally {
+        vi.stubGlobal('AbortSignal', originalAbortSignal);
+      }
+    });
+
+    it('keeps truncated timeout detail out of the operational error summary', async () => {
+      const truncationModule = await import('../utils/truncation.js');
+      const truncationSpy = vi
+        .spyOn(truncationModule, 'truncateToolOutput')
+        .mockResolvedValue({
+          content:
+            'Tool output was too large and has been truncated.\n' +
+            'Full output saved to: /tmp/tool-output.txt',
+          outputFile: '/tmp/tool-output.txt',
+        });
+      const invocation = shellTool.build({
+        command: 'long-running-command',
+        is_background: false,
+        timeout: 5000,
+      });
+      const mockCombinedSignal = {
+        aborted: true,
+        reason: new DOMException('timed out', 'TimeoutError'),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      } as unknown as AbortSignal;
+      const originalAbortSignal = globalThis.AbortSignal;
+      vi.stubGlobal('AbortSignal', {
+        ...originalAbortSignal,
+        timeout: vi.fn().mockReturnValue(mockCombinedSignal),
+        any: vi.fn().mockReturnValue(mockCombinedSignal),
+      });
+
+      try {
+        const promise = invocation.execute(new AbortController().signal);
+        resolveExecutionPromise({
+          rawOutput: Buffer.from('x'.repeat(40_000)),
+          output: 'x'.repeat(40_000),
+          exitCode: null,
+          signal: null,
+          error: null,
+          aborted: true,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        const result = await promise;
+
+        expect(result.llmContent).toContain('/tmp/tool-output.txt');
+        expect(result.returnDisplay).toContain('/tmp/tool-output.txt');
+        expect(result.error).toEqual({
+          message: 'Command timed out after 5000ms before it could complete.',
+          type: ToolErrorType.EXECUTION_TIMEOUT,
+        });
+      } finally {
+        vi.stubGlobal('AbortSignal', originalAbortSignal);
+        truncationSpy.mockRestore();
+      }
+    });
+
+    it('keeps the first user cancellation after a later timeout', async () => {
+      const userAbortController = new AbortController();
+      const invocation = shellTool.build({
+        command: 'long-running-command',
+        is_background: false,
+        timeout: 5000,
+      });
+      const mockCombinedSignal = {
+        aborted: true,
+        reason: new DOMException('cancelled', 'AbortError'),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      } as unknown as AbortSignal;
+      const originalAbortSignal = globalThis.AbortSignal;
+      vi.stubGlobal('AbortSignal', {
+        ...originalAbortSignal,
+        timeout: vi.fn().mockReturnValue({ aborted: true }),
+        any: vi.fn().mockReturnValue(mockCombinedSignal),
+      });
+
+      try {
+        const promise = invocation.execute(userAbortController.signal);
+        userAbortController.abort();
+        resolveExecutionPromise({
+          rawOutput: Buffer.alloc(0),
+          output: '',
+          exitCode: null,
+          signal: null,
+          error: null,
+          aborted: true,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        const result = await promise;
+        expect(result.llmContent).toContain('cancelled by user');
+        expect(result.error).toBeUndefined();
+      } finally {
+        vi.stubGlobal('AbortSignal', originalAbortSignal);
+      }
     });
 
     it('should use default timeout behavior when timeout is not specified', async () => {

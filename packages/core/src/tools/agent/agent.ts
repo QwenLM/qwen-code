@@ -97,6 +97,7 @@ import {
   ApprovalMode,
   Config,
   normalizeMaxSubagentDepth,
+  validateMaxSessionTurns,
 } from '../../config/config.js';
 import { createDenialState } from '../../permissions/denialTracking.js';
 import { isTeammate } from '../../agents/team/identity.js';
@@ -570,7 +571,8 @@ function applyPersistedCliFlagOverrides(
     ov.getModel = () => flags.model;
   }
   if (flags.maxSessionTurns !== undefined) {
-    ov.getMaxSessionTurns = () => flags.maxSessionTurns;
+    const maxSessionTurns = validateMaxSessionTurns(flags.maxSessionTurns);
+    ov.getMaxSessionTurns = () => maxSessionTurns;
   }
   if (flags.maxToolCalls !== undefined) {
     ov.getMaxToolCalls = () => flags.maxToolCalls;
@@ -650,15 +652,7 @@ export async function createApprovalModeOverride(
         ? base.getPrePlanMode()
         : baseApprovalMode
       : undefined;
-  const basePlanGateState =
-    mode === ApprovalMode.PLAN ? base.getPlanGateState() : undefined;
-  override.planGateState = basePlanGateState
-    ? {
-        ...basePlanGateState,
-        lastFindings: [...basePlanGateState.lastFindings],
-      }
-    : undefined;
-  override.planGateEntryCounter = override.planGateState?.entryId ?? 0;
+  override.approvalModeRevision = 0;
   override.autoModeDenialState = createDenialState();
   override.setApprovalMode = (
     nextMode: ApprovalMode,

@@ -49,6 +49,7 @@ import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { GeminiClient } from '../core/client.js';
 import { ShellTool } from '../tools/shell.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
+import { getSessionProjectDir } from '../utils/sessionIdContext.js';
 import { logRipgrepFallback } from '../telemetry/loggers.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
@@ -508,6 +509,18 @@ describe('Server Config (config.ts)', () => {
         sources: {},
       }),
     );
+  });
+
+  describe('project-dir registry lifecycle', () => {
+    it('drops its session entry on shutdown — no daemon leak', async () => {
+      const sessionId = 'cfg-shutdown-test-session';
+      const config = new Config({ ...baseParams, sessionId });
+      // Registered in the constructor, resolvable while alive.
+      expect(getSessionProjectDir(sessionId)).toBeDefined();
+      await config.shutdown();
+      // In daemon mode this is what stops the map growing per session.
+      expect(getSessionProjectDir(sessionId)).toBeUndefined();
+    });
   });
 
   describe('shell execution config', () => {
@@ -5392,6 +5405,31 @@ describe('Server Config (config.ts)', () => {
         expect(config.getMaxToolCallsPerTurn()).toBe(Number.POSITIVE_INFINITY);
       },
     );
+
+    it.each([0.5, Number.NaN, Number.POSITIVE_INFINITY])(
+      'should reject an invalid maxToolCallsPerTurn value: %s',
+      (capValue) => {
+        expect(
+          () => new Config({ ...baseParams, maxToolCallsPerTurn: capValue }),
+        ).toThrow(/maxToolCallsPerTurn: must be an integer/);
+      },
+    );
+  });
+
+  describe('getMaxSessionTurns', () => {
+    it.each([-42, -1, 0, 42])('should accept %d', (maxSessionTurns) => {
+      const config = new Config({ ...baseParams, maxSessionTurns });
+      expect(config.getMaxSessionTurns()).toBe(maxSessionTurns);
+    });
+
+    it.each([0.5, Number.NaN, Number.POSITIVE_INFINITY])(
+      'should reject an invalid value: %s',
+      (maxSessionTurns) => {
+        expect(() => new Config({ ...baseParams, maxSessionTurns })).toThrow(
+          /maxSessionTurns: must be an integer/,
+        );
+      },
+    );
   });
 
   describe('getClearContextOnIdle', () => {
@@ -5681,25 +5719,21 @@ describe('setApprovalMode with folder trust', () => {
       expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
     });
 
-    // Regression for #5574: the gate state records whether the model or the
-    // user entered plan mode, so exit_plan_mode can decide whether to gate.
-    it('marks the plan gate entry as user-initiated by default', () => {
+    it('increments the approval mode revision only for actual changes', () => {
       const config = new Config(baseParams);
       vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
 
+      const initialRevision = config.getApprovalModeRevision();
       config.setApprovalMode(ApprovalMode.PLAN);
-      expect(config.getPlanGateState()?.enteredByModel).toBe(false);
-    });
-
-    it('marks the plan gate entry as model-initiated when enter_plan_mode requests it', () => {
-      const config = new Config(baseParams);
-      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
-
+      expect(config.getApprovalModeRevision()).toBe(initialRevision + 1);
+      config.setApprovalMode(ApprovalMode.PLAN);
       config.setApprovalMode(ApprovalMode.PLAN, { enteredByModel: true });
-      expect(config.getPlanGateState()?.enteredByModel).toBe(true);
+      expect(config.getApprovalModeRevision()).toBe(initialRevision + 1);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      expect(config.getApprovalModeRevision()).toBe(initialRevision + 2);
     });
 
-    it('records prePlanMode=yolo and enteredByModel=false for a Shift+Tab cycle into plan mode (#5574)', () => {
+    it('records prePlanMode=yolo for a Shift+Tab cycle into plan mode', () => {
       const config = new Config(baseParams);
       vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
 
@@ -5710,10 +5744,35 @@ describe('setApprovalMode with folder trust', () => {
       config.setApprovalMode(ApprovalMode.YOLO);
       config.setApprovalMode(ApprovalMode.PLAN);
 
-      // prePlanMode is yolo purely because it precedes plan in the cycle —
-      // it does NOT mean the user wants autonomous execution.
       expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
-      expect(config.getPlanGateState()?.enteredByModel).toBe(false);
+    });
+
+    it('does not partially apply plan exit bookkeeping when transition work fails', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      config.setApprovalMode(ApprovalMode.AUTO);
+      config.setApprovalMode(ApprovalMode.PLAN);
+      const revision = config.getApprovalModeRevision();
+      (
+        config as unknown as {
+          permissionManager: {
+            stripDangerousRulesForAutoMode: () => void;
+            restoreDangerousRules: () => void;
+          };
+        }
+      ).permissionManager = {
+        stripDangerousRulesForAutoMode: () => {
+          throw new Error('strip failed');
+        },
+        restoreDangerousRules: vi.fn(),
+      };
+
+      expect(() => config.setApprovalMode(ApprovalMode.AUTO)).toThrow(
+        'strip failed',
+      );
+      expect(config.getApprovalMode()).toBe(ApprovalMode.PLAN);
+      expect(config.getPrePlanMode()).toBe(ApprovalMode.AUTO);
+      expect(config.getApprovalModeRevision()).toBe(revision);
     });
   });
 

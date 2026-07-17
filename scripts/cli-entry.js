@@ -19,8 +19,17 @@
  * monitor.
  */
 
+const relaunchArgs = process.env['QWEN_CODE_RELAUNCH_ARGS'];
+let cliArgs = process.argv.slice(2);
+try {
+  cliArgs = relaunchArgs ? JSON.parse(relaunchArgs) : cliArgs;
+} catch {
+  // Ignore stale or user-provided junk; normal argv is still usable.
+}
+delete process.env['QWEN_CODE_RELAUNCH_ARGS'];
+
 function hasFlag(flag, alias) {
-  for (const arg of process.argv.slice(2)) {
+  for (const arg of cliArgs) {
     if (arg === '--') {
       return false;
     }
@@ -32,7 +41,7 @@ function hasFlag(flag, alias) {
 }
 
 function isInProcessFastPath() {
-  const first = process.argv[2];
+  const first = cliArgs[0];
   if (first === 'serve' || first === 'mcp') {
     return true;
   }
@@ -43,7 +52,7 @@ function isInProcessFastPath() {
 }
 
 const isTopLevelVersion =
-  (process.argv[2] === undefined || process.argv[2].startsWith('-')) &&
+  (cliArgs[0] === undefined || cliArgs[0].startsWith('-')) &&
   hasFlag('--version', '-v');
 
 if (isTopLevelVersion && process.env['CLI_VERSION']) {
@@ -51,9 +60,11 @@ if (isTopLevelVersion && process.env['CLI_VERSION']) {
   process.exit(0);
 }
 
-const { existsSync } = await import('node:fs');
+const { existsSync, realpathSync } = await import('node:fs');
 const { fileURLToPath, pathToFileURL } = await import('node:url');
-const { dirname, join } = await import('node:path');
+const { delimiter, dirname, join, parse, resolve, sep } = await import(
+  'node:path'
+);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const cliPathCandidates = [
@@ -89,15 +100,88 @@ if (isInProcessFastPath()) {
   await import(pathToFileURL(cliPath).href);
 } else {
   const { spawnSync } = await import('node:child_process');
+  const UPDATE_COMPLETE_EXIT_CODE = 44;
+  const launcherNames =
+    process.platform === 'win32' ? ['qwen.cmd', 'qwen.exe', 'qwen'] : ['qwen'];
+  const entryPath = resolve(process.argv[1]);
+  const entryRootLength = parse(entryPath).root.length;
+  const launcherFromEnv = process.env['QWEN_CODE_LAUNCHER_PATH'];
+  delete process.env['QWEN_CODE_LAUNCHER_PATH'];
+  delete process.env['QWEN_CODE_LAUNCHER_PID'];
+  const launcherCandidates = process.env['PATH']
+    ?.split(delimiter)
+    .flatMap((dir) => launcherNames.map((name) => join(dir, name)))
+    .filter((candidate) => existsSync(candidate));
+  const launcher =
+    launcherFromEnv && existsSync(launcherFromEnv)
+      ? launcherFromEnv
+      : launcherCandidates
+          ?.map((candidate) => {
+            if (resolve(candidate) === entryPath) {
+              return { candidate, score: Number.MAX_SAFE_INTEGER };
+            }
+            try {
+              if (realpathSync(candidate) === realpathSync(entryPath)) {
+                return { candidate, score: Number.MAX_SAFE_INTEGER };
+              }
+            } catch {
+              // Fall back to matching the installation prefix.
+            }
+            let parent = resolve(dirname(candidate));
+            while (
+              parent.length > entryRootLength &&
+              entryPath !== parent &&
+              !entryPath.startsWith(`${parent}${sep}`)
+            ) {
+              const next = dirname(parent);
+              if (next === parent) break;
+              parent = next;
+            }
+            return { candidate, score: parent.length };
+          })
+          .filter(({ score }) => score > entryRootLength)
+          .sort((a, b) => b.score - a.score)[0]?.candidate;
+  const env = {
+    ...process.env,
+    QWEN_CODE_LAUNCHER_PID: String(process.pid),
+  };
   const result = spawnSync(
     process.execPath,
-    ['--expose-gc', cliPath, ...process.argv.slice(2)],
-    { stdio: 'inherit' },
+    ['--expose-gc', cliPath, ...cliArgs],
+    { stdio: 'inherit', env },
   );
 
   if (result.signal) {
     process.kill(process.pid, result.signal);
-  } else {
+  } else if (result.status !== UPDATE_COMPLETE_EXIT_CODE) {
     process.exit(result.status ?? 1);
+  } else {
+    if (!launcher) {
+      process.stderr.write(
+        'Update installed. Restart Qwen Code to use the new version.\n',
+      );
+      process.exit(0);
+    }
+    const relaunchEnv = {
+      ...process.env,
+      QWEN_CODE_RELAUNCH_ARGS: JSON.stringify(cliArgs),
+      QWEN_CODE_SKIP_UPDATE_CHECK_ONCE: 'true',
+    };
+    const relaunchResult =
+      process.platform === 'win32' && launcher.endsWith('.cmd')
+        ? spawnSync(
+            process.env['ComSpec'] ?? 'cmd.exe',
+            ['/d', '/s', '/c', `""${launcher}""`],
+            { stdio: 'inherit', env: relaunchEnv },
+          )
+        : spawnSync(launcher, [], {
+            stdio: 'inherit',
+            env: relaunchEnv,
+          });
+    if (relaunchResult.signal) {
+      process.kill(process.pid, relaunchResult.signal);
+    } else {
+      process.exit(relaunchResult.status ?? 1);
+    }
   }
 }

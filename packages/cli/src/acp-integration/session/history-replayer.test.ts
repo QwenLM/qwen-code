@@ -857,6 +857,20 @@ describe('HistoryReplayer', () => {
       );
     });
 
+    it('should preserve a stored error status without an error object', async () => {
+      const record = createToolResultRecord('run_shell_command');
+      record.toolCallResult!.status = 'error';
+
+      await replayer.replay([record]);
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          status: 'failed',
+        }),
+      );
+    });
+
     it('should emit plan update for TodoWriteTool results', async () => {
       const todoDisplay: TodoResultDisplay = {
         type: 'todo_list',
@@ -963,6 +977,37 @@ describe('HistoryReplayer', () => {
       await replayer.replay([systemRecord]);
 
       expect(sendUpdateSpy).not.toHaveBeenCalled();
+    });
+
+    it('preserves slash-command provenance when replaying results', async () => {
+      const systemRecord: ChatRecord = {
+        uuid: 'system-uuid',
+        parentUuid: null,
+        sessionId: 'test-session',
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'slash_command',
+        cwd: '/test',
+        version: '1.0.0',
+        systemPayload: {
+          phase: 'result',
+          rawCommand: '/compress-fast',
+          outputHistoryItems: [
+            { type: 'assistant', text: 'Context compressed.' },
+          ],
+        },
+      };
+
+      await replayer.replay([systemRecord]);
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Context compressed.' },
+        _meta: {
+          source: 'slash_command',
+          timestamp: toEpochMs(systemRecord.timestamp),
+        },
+      });
     });
   });
 

@@ -892,6 +892,7 @@ describe('ScheduledTasksDialog multi-workspace', () => {
   async function mountMulti(
     byWorkspace: Record<string, MockTask[]>,
     ws: typeof WORKSPACES = WORKSPACES,
+    lockedWorkspace?: (typeof WORKSPACES)[number],
   ) {
     actions.listScheduledTasks.mockImplementation(async (wsId?: string) =>
       wsId === undefined
@@ -914,6 +915,7 @@ describe('ScheduledTasksDialog multi-workspace', () => {
             onRunPrompt={vi.fn()}
             onCreateViaChat={vi.fn()}
             workspaces={ws}
+            lockedWorkspace={lockedWorkspace}
             onError={vi.fn()}
           />
         </I18nProvider>,
@@ -945,11 +947,12 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     expect(actions.listScheduledTasks).toHaveBeenCalledWith('id-other');
     expect(actions.listScheduledTasks).not.toHaveBeenCalledWith('id-locked');
 
-    // Each card carries a workspace badge (title = cwd), the primary marked.
+    // Each card carries a workspace badge (title = cwd), labeled by basename.
     const primaryBadge = document.querySelector('[title="/repo/main"]');
     const secondaryBadge = document.querySelector('[title="/repo/other"]');
     expect(primaryBadge?.textContent).toContain('main');
-    expect(primaryBadge?.textContent).toContain('(primary)');
+    // The primary is no longer singled out with a "(primary)" tag.
+    expect(primaryBadge?.textContent).not.toContain('(primary)');
     expect(secondaryBadge?.textContent).toContain('other');
   });
 
@@ -961,6 +964,14 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     const wsSelect = findWorkspaceSelect();
     expect(wsSelect).toBeDefined();
     expect(wsSelect!.querySelectorAll('option')).toHaveLength(2);
+    // Options show the workspace basename only — no "(primary)" tag on the
+    // primary entry (the label this PR removed). Guards the visible dropdown
+    // text, which the count/value assertions above do not cover.
+    expect(
+      Array.from(wsSelect!.querySelectorAll('option')).map(
+        (o) => o.textContent,
+      ),
+    ).toEqual(['main', 'other']);
 
     // Choose the secondary workspace.
     act(() => {
@@ -979,6 +990,38 @@ describe('ScheduledTasksDialog multi-workspace', () => {
 
     expect(actions.createScheduledTask).toHaveBeenCalledWith(
       expect.objectContaining({ prompt: 'do secondary work' }),
+      'id-other',
+    );
+  });
+
+  it('lists and creates tasks in a locked secondary workspace', async () => {
+    const secondary = WORKSPACES[1]!;
+    await mountMulti(
+      {
+        primary: [baseTask({ id: 'p1', name: 'Primary task' })],
+        'id-other': [baseTask({ id: 's1', name: 'Secondary task' })],
+      },
+      [secondary],
+      secondary,
+    );
+
+    expect(actions.listScheduledTasks).toHaveBeenCalledWith('id-other');
+    expect(actions.listScheduledTasks).not.toHaveBeenCalledWith(undefined);
+    expect(document.body.textContent).toContain('Secondary task');
+    expect(document.body.textContent).not.toContain('Primary task');
+
+    click(findButton('New scheduled task'));
+    expect(findWorkspaceSelect()).toBeUndefined();
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]')!;
+    act(() => {
+      prompt.textContent = 'do locked work';
+      prompt.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    });
+    click(findButton('Create'));
+    await flush();
+
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: 'do locked work' }),
       'id-other',
     );
   });

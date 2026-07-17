@@ -13,8 +13,10 @@ function makeSkill(overrides: Partial<SkillConfig> = {}): SkillConfig {
     name: 'review',
     description: 'Review changed code',
     level: 'bundled',
+    filePath: '/skills/review/SKILL.md',
+    body: 'Review instructions',
     ...overrides,
-  } as SkillConfig;
+  };
 }
 
 describe('mapSkillConfigToStatus', () => {
@@ -31,6 +33,7 @@ describe('mapSkillConfigToStatus', () => {
       level: 'bundled',
       modelInvocable: true,
       argumentHint: '[pr-number]',
+      installedPath: '/skills/review/SKILL.md',
     });
   });
 
@@ -42,6 +45,15 @@ describe('mapSkillConfigToStatus', () => {
     expect(status.status).toBe('ok');
     expect(status.modelInvocable).toBe(false);
     expect(status.name).toBe('internal');
+  });
+
+  it('only emits userInvocable when manual invocation is disabled', () => {
+    expect(mapSkillConfigToStatus(makeSkill())).not.toHaveProperty(
+      'userInvocable',
+    );
+    expect(
+      mapSkillConfigToStatus(makeSkill({ userInvocable: false })),
+    ).toMatchObject({ userInvocable: false });
   });
 
   it('marks a settings-disabled skill as disabled', () => {

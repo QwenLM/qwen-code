@@ -3363,6 +3363,86 @@ describe('ShellExecutionService execution method selection', () => {
     mockCpSpawn.mockReturnValue(mockChildProcess);
   });
 
+  it.each([
+    { shouldUseNodePty: true, label: 'PTY' },
+    { shouldUseNodePty: false, label: 'child_process' },
+  ])(
+    'does not spawn through $label when the signal is already aborted',
+    async ({ shouldUseNodePty }) => {
+      const abortController = new AbortController();
+      abortController.abort();
+
+      const handle = await ShellExecutionService.execute(
+        'test command',
+        '/test/dir',
+        onOutputEventMock,
+        abortController.signal,
+        shouldUseNodePty,
+        shellExecutionConfig,
+      );
+      const result = await handle.result;
+
+      expect(handle.pid).toBeUndefined();
+      expect(result).toMatchObject({
+        aborted: true,
+        pid: undefined,
+        executionMethod: 'none',
+        output: '',
+      });
+      expect(mockGetPty).not.toHaveBeenCalled();
+      expect(mockPtySpawn).not.toHaveBeenCalled();
+      expect(mockCpSpawn).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['resolve', 'reject'] as const)(
+    'returns on abort while getPty is pending and ignores its late %s',
+    async (settlement) => {
+      let resolvePty: ((value: null) => void) | undefined;
+      let rejectPty: ((reason: Error) => void) | undefined;
+      mockGetPty.mockReturnValue(
+        new Promise((resolve, reject) => {
+          resolvePty = resolve;
+          rejectPty = reject;
+        }),
+      );
+      const abortController = new AbortController();
+      const removeAbortListener = vi.spyOn(
+        abortController.signal,
+        'removeEventListener',
+      );
+      const handlePromise = ShellExecutionService.execute(
+        'test command',
+        '/test/dir',
+        onOutputEventMock,
+        abortController.signal,
+        true,
+        shellExecutionConfig,
+      );
+
+      abortController.abort();
+      const handle = await handlePromise;
+      expect((await handle.result).executionMethod).toBe('none');
+      expect(removeAbortListener).toHaveBeenCalledWith(
+        'abort',
+        expect.any(Function),
+      );
+      expect(mockPtySpawn).not.toHaveBeenCalled();
+      expect(mockCpSpawn).not.toHaveBeenCalled();
+
+      if (settlement === 'resolve') {
+        resolvePty?.(null);
+      } else {
+        rejectPty?.(new Error('late PTY failure'));
+      }
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(mockPtySpawn).not.toHaveBeenCalled();
+      expect(mockCpSpawn).not.toHaveBeenCalled();
+    },
+  );
+
   it('should use node-pty when shouldUseNodePty is true and pty is available', async () => {
     const abortController = new AbortController();
     const handle = await ShellExecutionService.execute(

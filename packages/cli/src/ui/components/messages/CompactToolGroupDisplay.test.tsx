@@ -10,6 +10,7 @@ import { Text } from 'ink';
 import {
   CompactToolGroupDisplay,
   buildToolSummary,
+  estimateCompactToolGroupHeight,
   isCollapsibleTool,
 } from './CompactToolGroupDisplay.js';
 import { ToolCallStatus } from '../../types.js';
@@ -146,6 +147,20 @@ describe('<CompactToolGroupDisplay /> — summary label', () => {
       <CompactToolGroupDisplay toolCalls={tools} contentWidth={80} />,
     );
     expect(lastFrame()).toContain('Ran ls -la');
+  });
+
+  it('wraps long summaries instead of truncating them', () => {
+    const description =
+      'packages/cli/src/ui/components/messages/CompactToolGroupDisplay.tsx';
+    const tool = toolCall({ name: 'ReadFile', description });
+    const { lastFrame } = render(
+      <CompactToolGroupDisplay toolCalls={[tool]} contentWidth={30} />,
+    );
+    const frame = lastFrame()!;
+
+    expect(frame.split('\n').length).toBeGreaterThan(1);
+    expect(frame).not.toContain('…');
+    expect(frame.replace(/\s/g, '')).toContain(`Read${description}`);
   });
 });
 
@@ -291,6 +306,67 @@ describe('buildToolSummary', () => {
     expect(buildToolSummary(tools, false)).toBe(
       'Searched pattern, listed /src',
     );
+  });
+});
+
+describe('estimateCompactToolGroupHeight', () => {
+  it('returns 0 when there are no tool calls', () => {
+    expect(estimateCompactToolGroupHeight([], 80)).toBe(0);
+  });
+
+  it('returns 1 for summaries that fit on one line', () => {
+    expect(estimateCompactToolGroupHeight([toolCall()], 80)).toBe(1);
+  });
+
+  it('accounts for wrapped long summaries', () => {
+    const description =
+      'packages/cli/src/ui/components/messages/CompactToolGroupDisplay.tsx';
+    const tool = toolCall({ name: 'ReadFile', description });
+
+    expect(estimateCompactToolGroupHeight([tool], 30)).toBeGreaterThan(1);
+  });
+
+  it('reserves additional width for active summary status', () => {
+    const description =
+      'packages/cli/src/ui/components/messages/CompactToolGroupDisplay.tsx';
+    const completed = toolCall({ name: 'ReadFile', description });
+    const active = toolCall({
+      name: 'ReadFile',
+      description,
+      status: ToolCallStatus.Executing,
+    });
+
+    expect(estimateCompactToolGroupHeight([active], 30)).toBeGreaterThan(
+      estimateCompactToolGroupHeight([completed], 30),
+    );
+  });
+
+  it('reserves timeout label width for active shell summaries', () => {
+    const description =
+      'npm test -- --filter packages/cli/src/ui/components/messages';
+    const activeShell = shellTool({ description });
+    const activeShellWithTimeout = shellTool({
+      description,
+      resultDisplay: {
+        ansiOutput: [],
+        totalLines: 0,
+        totalBytes: 0,
+        timeoutMs: 30_000,
+      },
+    });
+
+    expect(
+      estimateCompactToolGroupHeight([activeShellWithTimeout], 55),
+    ).toBeGreaterThan(estimateCompactToolGroupHeight([activeShell], 55));
+  });
+
+  it('uses terminal display width for wide characters', () => {
+    const tool = toolCall({
+      name: 'ReadFile',
+      description: '中文中文中文中文',
+    });
+
+    expect(estimateCompactToolGroupHeight([tool], 12)).toBe(3);
   });
 });
 

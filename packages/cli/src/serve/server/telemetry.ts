@@ -15,8 +15,17 @@ import type { NextFunction, Request, Response } from 'express';
 import {
   CLIENT_ID_HEADER,
   CLIENT_ID_RE,
+  getDeferredRuntimeRequestTiming,
   MAX_CLIENT_ID_LENGTH,
 } from './request-helpers.js';
+
+function decodePathSegment(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
 
 // Route handlers are split across `routes/*.ts`; any added or renamed route
 // that needs daemon telemetry must keep these patterns in sync.
@@ -34,6 +43,13 @@ export function resolveDaemonTelemetryRoute(
   }
   if (req.method === 'GET' && path === '/daemon/status') {
     return { route: 'GET /daemon/status' };
+  }
+  const rewindSnapshots = path.match(/^\/session\/([^/]+)\/rewind\/snapshots$/);
+  if (rewindSnapshots?.[1] && req.method === 'GET') {
+    return {
+      route: 'GET /session/:id/rewind/snapshots',
+      sessionId: rewindSnapshots[1],
+    };
   }
   const sessionAction = path.match(
     /^\/session\/([^/]+)\/(load|resume|prompt|cancel|recap|btw|mid-turn-message|model|shell|detach|rewind|approval-mode|language|a2ui-action)$/,
@@ -117,6 +133,15 @@ export function resolveDaemonTelemetryRoute(
   if (req.method === 'GET' && /^\/workspaces\/[^/]+\/sessions$/.test(path)) {
     return { route: 'GET /workspace/:id/sessions' };
   }
+  if (req.method === 'GET' && /^\/workspace\/[^/]+\/session-info$/.test(path)) {
+    return { route: 'GET /workspace/:id/session-info' };
+  }
+  if (
+    req.method === 'GET' &&
+    /^\/workspaces\/[^/]+\/session-info$/.test(path)
+  ) {
+    return { route: 'GET /workspace/:id/session-info' };
+  }
   const workspaceTranscript = path.match(
     /^\/workspaces\/[^/]+\/session\/([^/]+)\/transcript$/,
   );
@@ -124,6 +149,24 @@ export function resolveDaemonTelemetryRoute(
     return {
       route: 'GET /workspaces/:workspace/session/:id/transcript',
       sessionId: workspaceTranscript[1],
+    };
+  }
+  const workspaceExport = path.match(
+    /^\/workspaces\/[^/]+\/session\/([^/]+)\/export$/,
+  );
+  if (workspaceExport?.[1] && req.method === 'GET') {
+    return {
+      route: 'GET /workspaces/:workspace/session/:id/export',
+      sessionId: workspaceExport[1],
+    };
+  }
+  const workspaceArchivedExport = path.match(
+    /^\/workspaces\/[^/]+\/session\/([^/]+)\/archive\/export$/,
+  );
+  if (workspaceArchivedExport?.[1] && req.method === 'GET') {
+    return {
+      route: 'GET /workspaces/:workspace/session/:id/archive/export',
+      sessionId: workspaceArchivedExport[1],
     };
   }
   const pluralWorkspacePrefix = /^\/workspaces\/[^/]+/;
@@ -139,6 +182,7 @@ export function resolveDaemonTelemetryRoute(
         suffix === '/workspace/preflight' ||
         suffix === '/workspace/hooks' ||
         suffix === '/workspace/settings' ||
+        suffix === '/workspace/voice' ||
         suffix === '/workspace/permissions' ||
         suffix === '/workspace/trust' ||
         suffix === '/workspace/memory' ||
@@ -166,6 +210,8 @@ export function resolveDaemonTelemetryRoute(
     if (req.method === 'POST') {
       if (
         suffix === '/workspace/settings' ||
+        suffix === '/workspace/voice' ||
+        suffix === '/workspace/voice/transcribe' ||
         suffix === '/workspace/permissions' ||
         suffix === '/workspace/trust/request' ||
         suffix === '/workspace/init' ||
@@ -192,7 +238,7 @@ export function resolveDaemonTelemetryRoute(
         return { route: 'POST /workspace/agents/:agentType' };
       }
       if (
-        /^\/workspace\/mcp\/[^/]+\/(enable|disable|authenticate|clear-auth)$/.test(
+        /^\/workspace\/mcp\/[^/]+\/(approve|enable|disable|authenticate|clear-auth)$/.test(
           suffix,
         )
       ) {
@@ -295,6 +341,7 @@ export function daemonTelemetryMiddleware(
   // the OTel counter's scope, so the "requests" line reflects daemon API
   // traffic rather than static-asset or unrouted noise.
   recordRequest?: (durationMs: number, statusCode: number) => void,
+  resolveSessionWorkspaceCwd?: (sessionId: string) => string | undefined,
 ): (req: Request, res: Response, next: NextFunction) => void {
   const workspaceHashByCwd = new Map<string, string>();
   const resolveWorkspaceHash = (workspaceCwd: string): string => {
@@ -311,7 +358,18 @@ export function daemonTelemetryMiddleware(
       next();
       return;
     }
-    const workspaceHash = resolveWorkspaceHash(resolveWorkspaceCwd(req));
+    const resolveOwnerWorkspace =
+      route.route === 'GET /session/:id/rewind/snapshots' ||
+      route.route === 'POST /session/:id/rewind' ||
+      route.route === 'POST /session/:id/shell';
+    const sessionId = route.sessionId
+      ? decodePathSegment(route.sessionId)
+      : undefined;
+    const workspaceCwd =
+      (resolveOwnerWorkspace && sessionId
+        ? resolveSessionWorkspaceCwd?.(sessionId)
+        : undefined) ?? resolveWorkspaceCwd(req);
+    const workspaceHash = resolveWorkspaceHash(workspaceCwd);
     const rawClientId = req.get(CLIENT_ID_HEADER);
     const clientId =
       rawClientId !== undefined &&
@@ -320,17 +378,25 @@ export function daemonTelemetryMiddleware(
       CLIENT_ID_RE.test(rawClientId)
         ? rawClientId
         : undefined;
-    const startMs = Date.now();
+    const deferredRuntime = getDeferredRuntimeRequestTiming(req);
+    const startMs = deferredRuntime?.startedAt.getTime() ?? Date.now();
     void withDaemonRequestSpan(
       {
         method: req.method,
         route: route.route,
         workspaceHash,
-        ...(route.sessionId ? { sessionId: route.sessionId } : {}),
+        ...(sessionId ? { sessionId } : {}),
         ...(route.permissionRequestId
           ? { permissionRequestId: route.permissionRequestId }
           : {}),
         ...(clientId ? { clientId } : {}),
+        ...(deferredRuntime?.waitMs !== undefined
+          ? {
+              startTime: deferredRuntime.startedAt,
+              deferredRuntimeWaitMs: deferredRuntime.waitMs,
+              deferredRuntimePath: deferredRuntime.path,
+            }
+          : {}),
       },
       async (span) =>
         await new Promise<void>((resolve, reject) => {
@@ -340,7 +406,12 @@ export function daemonTelemetryMiddleware(
             done = true;
             recordDaemonHttpResponse(span, res.statusCode);
             const durationMs = Date.now() - startMs;
-            recordDaemonHttpRequest(durationMs, route.route, res.statusCode);
+            recordDaemonHttpRequest(
+              durationMs,
+              route.route,
+              res.statusCode,
+              deferredRuntime?.path,
+            );
             // Exclude the dashboard's own status poll from the metrics-ring
             // request rate/latency, or the Requests chart shows a baseline of
             // ≥1/window with no external traffic (the dashboard counting itself)

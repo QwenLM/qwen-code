@@ -105,6 +105,56 @@ describe('ChatRecordingService - recordParentSession', () => {
     expect(writtenRecord.sessionId).toBe('test-session-id');
   });
 
+  it('records immutable session source metadata', async () => {
+    const first = await chatRecordingService.recordSessionSource(
+      'scheduled_task',
+      'task-123',
+    );
+    const second = await chatRecordingService.recordSessionSource(
+      'scheduled_task',
+      'task-123',
+    );
+    await chatRecordingService.flush();
+
+    expect(first).toBe(true);
+    expect(second).toBe(true);
+    expect(jsonl.writeLine).toHaveBeenCalledOnce();
+    const writtenRecord = vi.mocked(jsonl.writeLine).mock
+      .calls[0][1] as ChatRecord;
+    expect(writtenRecord).toMatchObject({
+      type: 'system',
+      subtype: 'session_source',
+      systemPayload: {
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+      },
+    });
+  });
+
+  it('rejects a different session source after the first write', async () => {
+    await expect(
+      chatRecordingService.recordSessionSource('scheduled_task', 'task-123'),
+    ).resolves.toBe(true);
+    await expect(
+      chatRecordingService.recordSessionSource('web_shell', 'window-1'),
+    ).resolves.toBe(false);
+    await chatRecordingService.flush();
+
+    expect(jsonl.writeLine).toHaveBeenCalledOnce();
+  });
+
+  it('reports a session source write failure', async () => {
+    const writeError = new Error('disk full');
+    vi.mocked(jsonl.writeLine).mockRejectedValueOnce(writeError);
+
+    await expect(
+      chatRecordingService.recordSessionSource('scheduled_task', 'task-123'),
+    ).resolves.toBe(false);
+    await expect(chatRecordingService.flush()).rejects.toBe(writeError);
+
+    expect(jsonl.writeLine).toHaveBeenCalledOnce();
+  });
+
   it('includes the standard record metadata', async () => {
     await chatRecordingService.recordParentSession('parent-abc');
     await chatRecordingService.flush();

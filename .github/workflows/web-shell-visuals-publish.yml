@@ -1,0 +1,273 @@
+name: 'Web-shell Visuals Publish'
+
+# Privileged companion to `web-shell-visuals.yml`. It runs AFTER that workflow
+# via workflow_run, so it executes in the base-repo context with a write token
+# but NEVER checks out or runs PR code — it only downloads the image artifact
+# (opaque bytes), hosts it on the `pr-assets` branch, and posts an inline
+# comment. This is the GitHub-recommended split for commenting on fork PRs with
+# the results of untrusted-code execution.
+on:
+  workflow_run:
+    workflows:
+      - 'Web-shell Visuals'
+    types:
+      - 'completed'
+
+# GITHUB_TOKEN only needs to read the triggering run's artifact; the branch push
+# and PR comment are done with CI_BOT_PAT, which carries its own scope.
+permissions:
+  actions: 'read'
+
+# Serialize publishes for the SAME PR (identified by its source repo + branch),
+# since they force-push to that PR's own `pr-assets/web-shell-visuals-<n>`
+# branch; serializing means the force-push never has to reconcile a concurrent
+# same-PR snapshot (a bounded retry below covers transient failures). Different
+# PRs — including forks that happen to share a branch name like `main` — get
+# distinct groups and publish in parallel. Never cancel an in-flight publish.
+concurrency:
+  group: >-
+    web-shell-visuals-publish-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: 'bash'
+
+jobs:
+  publish:
+    name: 'Publish web-shell visuals to the PR'
+    if: >-
+      github.repository == 'QwenLM/qwen-code' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    steps:
+      # Trusted base-repo script (staging + comment builder). workflow_run
+      # checks out the default branch, never PR code. Sparse — just the script.
+      - name: 'Checkout the publish script'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          sparse-checkout: '.github/scripts/web-shell-visuals-publish.mjs'
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: 'Download visuals artifact'
+        id: 'download'
+        continue-on-error: true
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v5.0.0
+        with:
+          name: 'web-shell-visuals'
+          run-id: '${{ github.event.workflow_run.id }}'
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          path: 'visuals'
+
+      - name: 'Publish visuals to the PR'
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          RUN_ID: '${{ github.event.workflow_run.id }}'
+          RUN_URL: '${{ github.event.workflow_run.html_url }}'
+          # Authenticated (NOT artifact-sourced) head SHA of the run that
+          # triggered this publish — used to bind the artifact to its real PR.
+          RUN_HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
+          # Authenticated head repo + branch. A (repo, branch) pair maps to at
+          # most one open PR, so binding on it rejects a sibling PR that merely
+          # shares the same head commit SHA.
+          RUN_HEAD_REPO: '${{ github.event.workflow_run.head_repository.full_name }}'
+          RUN_HEAD_BRANCH: '${{ github.event.workflow_run.head_branch }}'
+        run: |-
+          set -euo pipefail
+
+          ART='visuals'
+          if [ ! -d "${ART}" ]; then
+            echo "::notice::No visuals artifact was downloaded; nothing to publish."
+            exit 0
+          fi
+
+          # --- Validate + bind the untrusted PR number ----------------------
+          # pr.txt is written by a job that ran PR code, so it is UNTRUSTED: a
+          # malicious PR could put a *victim* PR number here. Sanitize it, then
+          # BIND it to this run — require the PR's current head SHA to equal the
+          # authenticated head SHA of the run that produced the artifact. A
+          # victim PR's head won't match, so the misdirection is rejected.
+          PR="$(tr -dc '0-9' < "${ART}/pr.txt" 2>/dev/null | head -c 12 || true)"
+          if [ -z "${PR}" ]; then
+            echo "::warning::Artifact has no valid PR number; aborting."
+            exit 0
+          fi
+
+          # Authenticated bot identity — the dedup lookup filters on this so a
+          # participant who posts the marker can't hijack or redirect the update.
+          BOT_LOGIN="$(gh api user --jq '.login' 2>/dev/null || true)"
+          if [ -z "${BOT_LOGIN}" ]; then
+            echo "::warning::Could not resolve the bot identity; skipping to avoid mis-targeting a comment."
+            exit 0
+          fi
+
+          # Re-runnable gate: PR must be open AND its current head must equal this
+          # run's authenticated head SHA. This binds the untrusted artifact PR
+          # number to the real run, and is re-checked right before the comment
+          # write to close the validate->write TOCTOU window (a push/close during
+          # asset upload must not let a stale run post).
+          # Returns 0 = valid, 1 = genuinely invalid (closed / head mismatch),
+          # 2 = TRANSIENT API failure (empty after retries) — distinguished so a
+          # blip fails loudly (re-triggerable) instead of silently skipping.
+          validate_pr() {
+            local j st hd rr rf attempt
+            j=''
+            for attempt in 1 2 3; do
+              j="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" 2>/dev/null || true)"
+              [ -n "${j}" ] && break
+              sleep 2
+            done
+            [ -n "${j}" ] || { echo "::warning::Could not fetch PR #${PR} after retries."; return 2; }
+            st="$(jq -r '.state // empty' <<< "${j}")"
+            hd="$(jq -r '.head.sha // empty' <<< "${j}")"
+            rr="$(jq -r '.head.repo.full_name // empty' <<< "${j}")"
+            rf="$(jq -r '.head.ref // empty' <<< "${j}")"
+            [ "${st}" = "open" ] || { echo "::notice::PR #${PR} not open (state=${st:-unknown})."; return 1; }
+            { [ -n "${RUN_HEAD_SHA}" ] && [ "${hd}" = "${RUN_HEAD_SHA}" ]; } || {
+              echo "::warning::PR #${PR} head (${hd:-none}) != run head (${RUN_HEAD_SHA:-none}); refusing."
+              return 1
+            }
+            # Also bind repo+branch: two open PRs can share a head SHA (same
+            # commit on different branches) but not the same (repo, branch).
+            { [ -n "${RUN_HEAD_REPO}" ] && [ "${rr}" = "${RUN_HEAD_REPO}" ] && [ "${rf}" = "${RUN_HEAD_BRANCH}" ]; } || {
+              echo "::warning::PR #${PR} head ${rr:-none}#${rf:-none} != run ${RUN_HEAD_REPO:-none}#${RUN_HEAD_BRANCH:-none}; refusing."
+              return 1
+            }
+            return 0
+          }
+          # Gate: proceed when valid; a genuine invalid state SKIPS quietly, but a
+          # transient failure EXITS 1 so the publish surfaces as re-triggerable.
+          gate() {
+            local rc
+            if validate_pr; then rc=0; else rc=$?; fi
+            [ "${rc}" -eq 0 ] && return 0
+            if [ "${rc}" -eq 2 ]; then
+              echo "::error::Transient API failure validating PR #${PR}; failing so the publish can be re-triggered."
+              exit 1
+            fi
+            echo "::notice::PR #${PR} no longer valid for publishing; skipping."
+            exit 0
+          }
+          gate
+          SHORT_SHA="${RUN_HEAD_SHA:0:7}"
+
+          # --- Stage + validate the images ----------------------------------
+          # Delegated to the unit-tested script: magic-byte validation, filename
+          # sanitization, and the examined/accepted/size caps over untrusted
+          # artifact content live in web-shell-visuals-publish.mjs (covered by
+          # web-shell-visuals-publish.test.mjs). It prints the accepted count.
+          STAGE="${RUNNER_TEMP}/visuals-stage"
+          rm -rf "${STAGE}"
+          count="$(node .github/scripts/web-shell-visuals-publish.mjs stage "${ART}/screenshots" "${ART}/gifs" "${STAGE}")"
+          # A zero count is a MEANINGFUL "no visual change" state, not "nothing
+          # to do": still update the marker comment (so a prior preview's stale
+          # images + SHA don't linger — the comment promises to refresh on every
+          # push), just without hosting a new asset commit.
+          if [ -z "${count}" ] || [ "${count}" = "0" ]; then
+            echo "::notice::No changed screenshots; updating the marker with a no-change note (no asset commit)."
+            HAS_IMAGES=0
+          else
+            echo "Staged ${count} image(s) for PR #${PR}."
+            HAS_IMAGES=1
+          fi
+
+          # Re-validate right before the force-push too: a close/new-head during
+          # download+staging must not force-push a stale snapshot (which would
+          # orphan the commit the existing comment still points at).
+          gate
+
+          # --- Host on the PR's own pr-assets branch (bounded) --------------
+          # Replace the branch with a SINGLE orphan snapshot each run and
+          # force-push, so untrusted PR content can't accumulate unbounded
+          # history in the base repo. The comment always points at the new
+          # immutable commit SHA; the previous snapshot becomes unreachable and
+          # is GC'd. Per-PR branch under the existing pr-assets/<slug> convention
+          # (a bare `pr-assets` branch would D/F-conflict with pr-assets/*), and
+          # the per-PR concurrency group serializes same-PR runs so the
+          # force-push never drops a concurrent snapshot.
+          # Host the images ONLY when there are changed views. A no-change run
+          # skips the asset commit entirely; RAW_BASE stays empty and the
+          # comment below is image-less ("no screenshot changes").
+          RAW_BASE=''
+          if [ "${HAS_IMAGES}" = "1" ]; then
+            BRANCH="pr-assets/web-shell-visuals-${PR}"
+            AUTH_URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+            WORK="${RUNNER_TEMP}/pr-assets"
+            rm -rf "${WORK}"
+            mkdir -p "${WORK}/imgs"
+            cp "${STAGE}"/* "${WORK}/imgs/"
+            cd "${WORK}"
+            git init -q
+            git config user.name 'qwen-code-bot'
+            git config user.email 'qwen-code-bot@users.noreply.github.com'
+            git checkout -q --orphan snapshot
+            git add imgs
+            git commit -q -m "web-shell visuals: PR #${PR} (run ${RUN_ID})"
+            # Bounded retry for transient push failures (network / brief lock).
+            # Same-PR runs are serialized by concurrency, so this never needs to
+            # reconcile a concurrent snapshot — a plain retry suffices.
+            pushed=0
+            for attempt in 1 2 3; do
+              if git push -q --force "${AUTH_URL}" "HEAD:${BRANCH}"; then
+                pushed=1
+                break
+              fi
+              echo "::notice::force-push attempt ${attempt} failed; retrying."
+              sleep 2
+            done
+            if [ "${pushed}" -ne 1 ]; then
+              echo "::error::Failed to push web-shell visuals to ${BRANCH} after retries."
+              exit 1
+            fi
+            ASSET_SHA="$(git rev-parse HEAD)"
+            cd "${GITHUB_WORKSPACE}"
+            echo "web-shell visuals hosted on ${BRANCH} at ${ASSET_SHA}."
+            RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${ASSET_SHA}/imgs"
+          fi
+
+          # --- Build the comment body ---------------------------------------
+          # Delegated to the same unit-tested script (light/dark pairing, flow
+          # labels, and HTML escaping live in web-shell-visuals-publish.mjs).
+          BODY_FILE="${RUNNER_TEMP}/visuals-comment.md"
+          node .github/scripts/web-shell-visuals-publish.mjs comment \
+            "${STAGE}" \
+            "${RAW_BASE}" \
+            "${SHORT_SHA}" "${RUN_URL}" "${BODY_FILE}"
+
+          # --- Post or update the PR comment --------------------------------
+          # Dedup only against OUR OWN prior comment (bot author + marker), and
+          # only after a SUCCESSFUL listing — a failed/partial list must not read
+          # as "no existing comment" (that would POST a duplicate on every failure).
+          MARKER='<!-- qwen:web-shell-visuals -->'
+          EXISTING=''
+          listed=0
+          for attempt in 1 2 3; do
+            if resp="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --method GET --paginate -F per_page=100 2>/dev/null)"; then
+              EXISTING="$(jq -sr --arg m "${MARKER}" --arg u "${BOT_LOGIN}" \
+                '[.[][] | select((.user.login == $u) and (.body | contains($m)))] | last | .id // empty' <<< "${resp}")"
+              listed=1
+              break
+            fi
+            echo "::notice::comment lookup attempt ${attempt} failed; retrying."
+            sleep 2
+          done
+          if [ "${listed}" -ne 1 ]; then
+            echo "::error::Could not list PR comments after retries; not posting (avoids duplicates)."
+            exit 1
+          fi
+
+          # Final TOCTOU gate: re-validate (open + head SHA + repo/branch) AFTER
+          # the paginated/retried lookup, immediately before the write — a
+          # close or new head during validation/lookup must not post a stale one.
+          gate
+
+          if [ -n "${EXISTING}" ]; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${EXISTING}" -F body=@"${BODY_FILE}" >/dev/null
+            echo "Updated existing web-shell visuals comment on PR #${PR}."
+          else
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" -F body=@"${BODY_FILE}" >/dev/null
+            echo "Posted web-shell visuals comment on PR #${PR}."
+          fi

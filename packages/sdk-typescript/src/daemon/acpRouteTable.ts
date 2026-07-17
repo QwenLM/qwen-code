@@ -211,6 +211,24 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       extractParams: () => ({}),
     },
   },
+  // POST /workspace/mcp/initialize → _qwen/workspace/mcp/initialize
+  {
+    httpMethod: 'POST',
+    pattern: /^\/workspace\/mcp\/initialize\/?$/,
+    mapping: {
+      method: '_qwen/workspace/mcp/initialize',
+      extractParams: (_segs, body) => bodyRecord(body),
+    },
+  },
+  // POST /workspace/mcp/reload → _qwen/workspace/mcp/reload
+  {
+    httpMethod: 'POST',
+    pattern: /^\/workspace\/mcp\/reload\/?$/,
+    mapping: {
+      method: '_qwen/workspace/mcp/reload',
+      extractParams: (_segs, body) => bodyRecord(body),
+    },
+  },
   // GET /health
   {
     httpMethod: 'GET',
@@ -761,6 +779,8 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
           ...strParam(query, 'view'),
           ...strParam(query, 'group'),
           ...strParam(query, 'parentSessionId'),
+          ...strParam(query, 'sourceType'),
+          ...strParam(query, 'sourceId'),
           ...(size == null || size === ''
             ? {}
             : { _meta: { size: Number(size) } }),

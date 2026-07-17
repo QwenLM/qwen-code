@@ -195,6 +195,21 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
+  it('forwards options.sourceType to the detached create branch', async () => {
+    const nextSession = createMockSession('session-b');
+    const createDetachedSession = vi.fn(async () => nextSession);
+    const { actions } = createActionsHarness({
+      connection: { status: 'connected' },
+      createDetachedSession,
+    });
+
+    await actions.createSession({ sourceType: 'default' });
+
+    expect(createDetachedSession).toHaveBeenCalledWith(undefined, {
+      sourceType: 'default',
+    });
+  });
+
   it('merges options.workspaceCwd into the active session request', async () => {
     const existingSession = createMockSession('session-a');
     const nextSession = createMockSession('session-b');
@@ -224,6 +239,22 @@ describe('createDaemonSessionActions', () => {
 
     expect(existingSession.client.createOrAttachSession).toHaveBeenCalledWith(
       expect.objectContaining({ approvalMode: 'yolo' }),
+    );
+  });
+
+  it('folds options.sourceType into the active session request', async () => {
+    const existingSession = createMockSession('session-a');
+    const nextSession = createMockSession('session-b');
+    existingSession.client.createOrAttachSession.mockResolvedValue(nextSession);
+    const { actions } = createActionsHarness({
+      connection: { status: 'connected', sessionId: 'session-a' },
+      session: existingSession,
+    });
+
+    await actions.createSession({ sourceType: 'default' });
+
+    expect(existingSession.client.createOrAttachSession).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceType: 'default' }),
     );
   });
 
@@ -270,6 +301,35 @@ describe('createDaemonSessionActions', () => {
       catchingUp: undefined,
     });
     expect(pendingSessionLoadRef.current?.sessionId).toBe('session-b');
+  });
+
+  it('keeps the active workspace when a session load omits one', () => {
+    const setRestoreWorkspaceCwd = vi.fn();
+    const { actions } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace/secondary',
+      },
+      setRestoreWorkspaceCwd,
+    });
+
+    void actions.loadSession('session-b').catch(() => undefined);
+
+    expect(setRestoreWorkspaceCwd).toHaveBeenCalledWith('/workspace/secondary');
+  });
+
+  it('forwards the workspace when resuming a session', () => {
+    const setRestoreWorkspaceCwd = vi.fn();
+    const { actions } = createActionsHarness({
+      connection: { status: 'connected', workspaceCwd: '/workspace/primary' },
+      setRestoreWorkspaceCwd,
+    });
+
+    void actions
+      .resumeSession('session-b', { workspaceCwd: '/workspace/secondary' })
+      .catch(() => undefined);
+
+    expect(setRestoreWorkspaceCwd).toHaveBeenCalledWith('/workspace/secondary');
   });
 
   it('clears transcript loading when a session switch fails', async () => {
@@ -418,6 +478,7 @@ function createActionsHarness(
     pendingSessionLoadRef?: { current: PendingSessionLoad | undefined };
     session?: ReturnType<typeof createMockSession>;
     setAttachSessionNonce?: ReturnType<typeof vi.fn>;
+    setRestoreWorkspaceCwd?: ReturnType<typeof vi.fn>;
   } = {},
 ) {
   let connection: DaemonConnectionState = opts.connection ?? {
@@ -467,6 +528,7 @@ function createActionsHarness(
     },
     setPromptStatus: vi.fn(),
     setRestoreSessionId: vi.fn(),
+    setRestoreWorkspaceCwd: opts.setRestoreWorkspaceCwd ?? vi.fn(),
     setRestoreMode: vi.fn(),
     setRestoreSessionNonce: vi.fn(),
     setAttachSessionNonce: opts.setAttachSessionNonce ?? vi.fn(),

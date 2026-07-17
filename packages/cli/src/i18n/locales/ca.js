@@ -2140,6 +2140,16 @@ export default {
     'No es pot actualitzar automàticament aquesta instal·lació autònoma. Reinstal·leu des de:',
   'Manual update required. Please reinstall Qwen Code.':
     'Actualització manual requerida. Reinstal·leu Qwen Code.',
+  'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.':
+    'Aquesta sessió utilitza la imatge de sandbox personalitzada {{image}}. Actualitzeu la imatge i reinicieu Qwen Code.',
+  'Update Qwen Code on the host, then restart the sandbox.':
+    "Actualitzeu Qwen Code a l'amfitrió i reinicieu l'entorn aïllat.",
+  'The update will be installed after you exit this session.':
+    "L'actualització s'instal·larà després de sortir d'aquesta sessió.",
+  'Run /update to install the update on the host.':
+    "Executeu /update per instal·lar l'actualització a l'amfitrió.",
+  'Run /update to install the update.':
+    "Executeu /update per instal·lar l'actualització.",
 
   // ============================================================================
   // reload-plugins command

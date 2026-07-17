@@ -244,6 +244,20 @@ describe('deriveSessionCards', () => {
     expect(cards[0].model).toBe('qwen-max');
     expect(cards[0].clientCount).toBe(2);
   });
+
+  it('does not expose opaque route ids as model names', () => {
+    const cards = deriveSessionCards(
+      [session('s')],
+      [
+        statusSession('s', {
+          currentModelId: 'qwen-route:v1:abcdefghijklmnop',
+        }),
+      ],
+      undefined,
+    );
+
+    expect(cards[0].model).toBeUndefined();
+  });
 });
 
 describe('SessionOverviewPanel', () => {
@@ -459,8 +473,9 @@ describe('SessionOverviewPanel', () => {
     expect(cardLabels()).toContain('Beta');
     // …tagged with its workspace basename…
     expect(container!.textContent).toContain('wsB');
-    // …while the primary card carries the localized "primary" badge.
-    expect(container!.textContent).toContain('primary');
+    // …while the primary card no longer carries a localized "Primary" word
+    // (it now shows its own basename, like every other card).
+    expect(container!.textContent).not.toContain('Primary');
   });
 
   it('does not query other workspaces on a single-workspace daemon', async () => {

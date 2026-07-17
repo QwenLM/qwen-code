@@ -27,6 +27,7 @@ import type {
 import { useI18n } from '../../i18n';
 import { getComposerTagIconUrl } from '../../utils/composerTag';
 import { cssUrlValue } from '../../utils/cssUrlVar';
+import { workspaceBasename } from '../../utils/workspace';
 import { DialogShell } from './DialogShell';
 import {
   buildCron,
@@ -86,15 +87,9 @@ interface ScheduledTasksDialogProps {
    * tasks (each card tagged with its workspace) and the New-task form offers a
    * workspace picker. Absent or a single entry → the plain primary-only view. */
   workspaces?: DaemonWorkspaceCapability[];
+  /** Forces all task operations through this workspace's route. */
+  lockedWorkspace?: DaemonWorkspaceCapability;
   onError: (error: unknown, fallback: string) => void;
-}
-
-/** A short, human-readable label for a workspace card badge / picker option:
- * the cwd's last path segment, marked when it's the primary. */
-function workspaceLabel(cwd: string, primary: boolean, t: TranslateFn): string {
-  const segments = cwd.split(/[\\/]/).filter(Boolean);
-  const base = segments[segments.length - 1] || cwd;
-  return primary ? `${base} ${t('scheduledTasks.workspacePrimaryTag')}` : base;
 }
 
 /** A stable per-card identity. Task ids are unique only WITHIN a workspace's
@@ -457,6 +452,7 @@ export function ScheduledTasksDialog({
   onCreateViaChat,
   onOpenSession,
   workspaces,
+  lockedWorkspace,
   onError,
 }: ScheduledTasksDialogProps) {
   const { t } = useI18n();
@@ -469,7 +465,7 @@ export function ScheduledTasksDialog({
   // derived arrays are stable identities — `reload` depends on them, and a fresh
   // array each render would re-fire its mount effect in a loop.
   const workspaceList = useMemo(() => workspaces ?? [], [workspaces]);
-  const isMultiWorkspace = workspaceList.length > 1;
+  const isMultiWorkspace = !lockedWorkspace && workspaceList.length > 1;
   // The workspaces the page can actually read + write: every trusted one, PLUS
   // the primary even when it is untrusted. The primary is reached through the
   // trust-free unqualified route (the same one the single-workspace page always
@@ -488,6 +484,9 @@ export function ScheduledTasksDialog({
       ws.primary ? undefined : ws.id,
     [],
   );
+  const lockedWorkspaceId = lockedWorkspace
+    ? workspaceActionId(lockedWorkspace)
+    : undefined;
 
   const [tasks, setTasks] = useState<DaemonScheduledTask[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -505,7 +504,7 @@ export function ScheduledTasksDialog({
   // = primary); on edit it's pinned to the task's own workspace (a task can't
   // move files, so the picker is read-only). Passed to create/update actions.
   const [formWorkspaceId, setFormWorkspaceId] = useState<string | undefined>(
-    undefined,
+    lockedWorkspaceId,
   );
   const [name, setName] = useState('');
   const [prompt, setPrompt] = useState('');
@@ -555,7 +554,15 @@ export function ScheduledTasksDialog({
     try {
       let list: DaemonScheduledTask[];
       let firstError: string | null = null;
-      if (isMultiWorkspace) {
+      if (lockedWorkspace) {
+        list = (await actions.listScheduledTasks(lockedWorkspaceId)).map(
+          (task) => ({
+            ...task,
+            workspaceId: lockedWorkspaceId,
+            workspaceCwd: lockedWorkspace.cwd,
+          }),
+        );
+      } else if (isMultiWorkspace) {
         // Fan out over every OPERABLE workspace (trusted secondaries + the
         // primary, which is always reachable via its trust-free route) and tag
         // each task with its workspace so the cards can badge it and the
@@ -595,7 +602,14 @@ export function ScheduledTasksDialog({
       setLoadError(err instanceof Error ? err.message : String(err));
       setTasks((prev) => prev ?? []);
     }
-  }, [actions, isMultiWorkspace, operableWorkspaces, workspaceActionId]);
+  }, [
+    actions,
+    isMultiWorkspace,
+    lockedWorkspace,
+    lockedWorkspaceId,
+    operableWorkspaces,
+    workspaceActionId,
+  ]);
 
   useEffect(() => {
     void reload();
@@ -801,22 +815,22 @@ export function ScheduledTasksDialog({
     setFormError(null);
     setShowForm(false);
     setEditingId(null);
-    setFormWorkspaceId(undefined);
+    setFormWorkspaceId(lockedWorkspaceId);
     resetReferenceState();
-  }, [resetReferenceState]);
+  }, [lockedWorkspaceId, resetReferenceState]);
 
   const openCreate = useCallback(() => {
     setEditingId(null);
-    // Default a new task to the primary workspace (undefined). The picker can
-    // move it to a trusted secondary before submit.
-    setFormWorkspaceId(undefined);
+    // Default to the locked workspace, or primary when the page is unlocked.
+    // In the latter case the picker can move it to a trusted secondary.
+    setFormWorkspaceId(lockedWorkspaceId);
     setName('');
     setPrompt('');
     setBuilder(DEFAULT_BUILDER);
     setFormError(null);
     resetReferenceState();
     setShowForm(true);
-  }, [resetReferenceState]);
+  }, [lockedWorkspaceId, resetReferenceState]);
 
   const openEdit = useCallback(
     (task: DaemonScheduledTask) => {
@@ -1126,7 +1140,7 @@ export function ScheduledTasksDialog({
                 >
                   {operableWorkspaces.map((ws) => (
                     <option key={ws.id} value={workspaceActionId(ws) ?? ''}>
-                      {workspaceLabel(ws.cwd, ws.primary, t)}
+                      {workspaceBasename(ws.cwd)}
                     </option>
                   ))}
                 </select>
@@ -1441,7 +1455,7 @@ export function ScheduledTasksDialog({
                     <span className={styles.workspaceIcon} aria-hidden="true">
                       ⌂
                     </span>
-                    {workspaceLabel(task.workspaceCwd, !task.workspaceId, t)}
+                    {workspaceBasename(task.workspaceCwd)}
                   </span>
                 )}
                 <span className={styles.schedulePill}>

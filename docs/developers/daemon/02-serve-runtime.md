@@ -20,7 +20,7 @@
 
 **App factory**: `createServeApp(opts, getPort, deps)` in `packages/cli/src/serve/server.ts`. Builds the Express `Application`. Direct embedders and tests call it without the bootstrap wrapper.
 
-**Capability registry**: `SERVE_CAPABILITY_REGISTRY` in `packages/cli/src/serve/capabilities.ts`. Each tag has a `since` version and optional `modes`. Ten conditional tags (`require_auth`, `mcp_workspace_pool`, `mcp_pool_restart`, `allow_origin`, `prompt_absolute_deadline`, `writer_idle_timeout`, `workspace_settings`, `session_shell_command`, `rate_limit`, `workspace_reload`) are omitted when their corresponding toggle is off. See [`11-capabilities-versioning.md`](./11-capabilities-versioning.md).
+**Capability registry**: `SERVE_CAPABILITY_REGISTRY` in `packages/cli/src/serve/capabilities.ts`. Each tag has a `since` version and optional `modes`. Conditional tags are omitted when their deployment or runtime predicate is false; the registry and predicate map are the source of truth. See [`11-capabilities-versioning.md`](./11-capabilities-versioning.md).
 
 **Middleware** (`packages/cli/src/serve/auth.ts` and `server.ts`):
 
@@ -123,7 +123,7 @@ Calling `createServeApp` directly returns only an `Application`; the embedder ow
 | Env             | `QWEN_SERVE_DEBUG=1`                                                                            | Verbose stderr logs. See [`19-observability.md`](./19-observability.md).                              |
 | Flags           | `--hostname`, `--port`                                                                          | Listen binding.                                                                                       |
 | Flags           | `--token`, `--require-auth`, `--enable-session-shell`                                           | Bearer token, loopback auth hardening, and explicit shell execution switch.                           |
-| Flag            | `--workspace`                                                                                   | Overrides `process.cwd()`; repeat to register additional sessions-only workspaces.                    |
+| Flag            | `--workspace`                                                                                   | Overrides `process.cwd()`; repeat to register additional isolated workspace runtimes.                 |
 | Flags           | `--max-sessions`, `--max-pending-prompts-per-session`, `--max-connections`, `--event-ring-size` | Bridge / Express caps.                                                                                |
 | Flags           | `--mcp-client-budget=N`, `--mcp-budget-mode={off,warn,enforce}`                                 | Forwarded to the ACP child.                                                                           |
 | Flags           | `--allow-origin`, `--allow-private-auth-base-url`                                               | Browser CORS allowlist and localhost/private auth provider installation switch.                       |

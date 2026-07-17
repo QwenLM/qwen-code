@@ -288,6 +288,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const [restoreSessionId, setRestoreSessionId] = useState<string | undefined>(
     initialRestoreSessionId,
   );
+  const [restoreWorkspaceCwd, setRestoreWorkspaceCwd] = useState<
+    string | undefined
+  >(undefined);
   const [restoreMode, setRestoreMode] = useState<'load' | 'resume'>('load');
   const [restoreSessionNonce, setRestoreSessionNonce] = useState(0);
   const [attachSessionNonce, setAttachSessionNonce] = useState(0);
@@ -298,6 +301,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   });
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
+  useEffect(() => {
+    if (!workspace?.capabilities) return;
+    setConnection((current) =>
+      current.capabilities === workspace.capabilities
+        ? current
+        : { ...current, capabilities: workspace.capabilities },
+    );
+  }, [workspace?.capabilities]);
   const noticeIdRef = useRef(0);
   const [notices, setNotices] = useState<DaemonSessionNotice[]>([]);
   const addNotice = useCallback<AddDaemonSessionNotice>((input) => {
@@ -351,6 +362,70 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     }
     const abort = new AbortController();
     let disposed = false;
+
+    // ── Batched transcript dispatch ────────────────────────────────
+    // The live SSE loop dispatches transcript events through this batcher
+    // instead of one `store.dispatch` per event. Each dispatch costs O(B) in
+    // the reducer (block-array copy in `takeBlocksOwnership` + freeze), so a
+    // burst of E buffered events draining at once — e.g. the stream catching
+    // up when the tab returns from being hidden — is O(E×B) and can freeze the
+    // main thread for minutes on a large transcript. Coalescing into one
+    // dispatch per macrotask makes a burst O(B) once.
+    //
+    // The flush MUST be a macrotask (setTimeout), not a microtask: `for await`
+    // drains already-buffered events back-to-back via microtasks, so a
+    // microtask flush would run between every event and never coalesce. A
+    // macrotask only runs once the generator blocks on a genuinely new network
+    // event, so a whole burst collapses into a single dispatch while steady
+    // streaming stays at ~one dispatch per network chunk.
+    let pendingTranscriptEvents: DaemonUiEvent[] = [];
+    let transcriptFlushTimer: ReturnType<typeof setTimeout> | undefined;
+    const runTranscriptFlush = () => {
+      transcriptFlushTimer = undefined;
+      if (pendingTranscriptEvents.length === 0) return;
+      const batch = pendingTranscriptEvents;
+      pendingTranscriptEvents = [];
+      // Swallow a reducer throw (log it) so it cannot escape as an uncaught
+      // timer error or — via flushTranscriptSync — abort the catch block's
+      // error recovery and the unmount cleanup.
+      try {
+        store.dispatch(batch);
+      } catch (error) {
+        console.error(
+          '[DaemonSessionProvider] batched transcript dispatch failed',
+          { eventCount: batch.length, error },
+        );
+      }
+    };
+    const cancelTranscriptFlush = () => {
+      if (transcriptFlushTimer === undefined) return;
+      clearTimeout(transcriptFlushTimer);
+      transcriptFlushTimer = undefined;
+    };
+    const enqueueTranscriptEvents = (events: DaemonUiEvent[]) => {
+      if (events.length === 0) return;
+      for (const event of events) pendingTranscriptEvents.push(event);
+      if (transcriptFlushTimer === undefined) {
+        transcriptFlushTimer = setTimeout(runTranscriptFlush, 0);
+      }
+    };
+    // Apply buffered transcript events immediately. Called before any control
+    // interaction that reads the store or dispatches a control event, so the
+    // buffered content stays correctly ordered ahead of it.
+    const flushTranscriptSync = () => {
+      cancelTranscriptFlush();
+      runTranscriptFlush();
+    };
+    const dispatchTranscriptNow = (events: DaemonUiEvent | DaemonUiEvent[]) => {
+      flushTranscriptSync();
+      store.dispatch(events);
+    };
+    // Drop buffered events. Used before `store.reset()`: pending events belong
+    // to the epoch the reset is discarding, so flushing them would be wrong.
+    const clearPendingTranscriptEvents = () => {
+      cancelTranscriptFlush();
+      pendingTranscriptEvents = [];
+    };
 
     const run = async () => {
       const client =
@@ -443,7 +518,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               Array.isArray(caps.features) &&
               caps.features.includes('client_heartbeat');
             const effectWorkspaceCwd =
-              resolvedWorkspaceCwdRef.current ?? caps.workspaceCwd;
+              restoreWorkspaceCwd ??
+              resolvedWorkspaceCwdRef.current ??
+              caps.workspaceCwd;
             activeWorkspaceCwdRef.current = effectWorkspaceCwd;
             if (
               (shouldDeferInitialSessionCreation ||
@@ -1008,6 +1085,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             }
             clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
             setPromptStatus('idle');
+            clearPendingTranscriptEvents();
             store.reset();
             activeSession.setLastEventId(0);
             reconnectSessionId = activeSession.sessionId;
@@ -1088,6 +1166,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     : current,
                 );
               }
+              // Flush buffered transcript events before settling a turn so the
+              // turn's content is applied ahead of the assistant.done that
+              // settle (and the restored-prompt / observer branches below)
+              // dispatch. Guarded to turn terminals so steady streaming keeps
+              // batching.
+              if (
+                event.type === 'turn_complete' ||
+                event.type === 'turn_error'
+              ) {
+                flushTranscriptSync();
+              }
               const activePromptSettled = settleActivePromptFromTurnEvent(
                 activePromptsRef.current,
                 settledPromptsRef.current,
@@ -1115,10 +1204,26 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     ? ((event.data as DaemonTurnCompleteData | undefined)
                         ?.stopReason ?? 'end_turn')
                     : 'error';
-                store.dispatch(assistantDoneFromTurnEvent(event, stopReason));
+                dispatchTranscriptNow(
+                  assistantDoneFromTurnEvent(event, stopReason),
+                );
                 if (!hasSessionActivePrompt()) {
                   setPromptStatus('idle');
                 }
+              }
+              // The debug guard below reads the committed store's active
+              // assistant block, but batching leaves earlier chunks from this
+              // same burst in the pending buffer until the macrotask flush. An
+              // observer burst that interleaves a debug event between assistant
+              // chunks would otherwise miss the still-pending assistant block
+              // and let the debug event split it. Commit the buffer first so the
+              // guard sees the effective state. Scoped to observer-mode debug
+              // events (rare) so steady streaming keeps batching.
+              if (
+                !hasSessionActivePrompt() &&
+                uiEvents.some((e) => e.type === 'debug')
+              ) {
+                flushTranscriptSync();
               }
               const shouldGuardAssistant =
                 !hasSessionActivePrompt() &&
@@ -1126,14 +1231,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               const eventsToDispatch = shouldGuardAssistant
                 ? uiEvents.filter((e) => e.type !== 'debug')
                 : uiEvents;
-              store.dispatch(eventsToDispatch);
+              enqueueTranscriptEvents(eventsToDispatch);
               for (const uiEvent of uiEvents) {
                 if (
                   uiEvent.type === 'prompt.cancelled' &&
                   (restoredActivePrompt ||
                     uiEvent.originatorClientId !== activeSession.clientId)
                 ) {
-                  store.dispatch(
+                  dispatchTranscriptNow(
                     assistantDoneFromTurnEvent(event, 'cancelled'),
                   );
                   const cancellingRestoredPrompt = restoredActivePrompt;
@@ -1147,6 +1252,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     setPromptStatus('idle');
                   }
                 } else if (uiEvent.type === 'session.replay_complete') {
+                  // Flush first so the awaitingResync read below reflects every
+                  // event up to replay_complete (e.g. a buffered
+                  // state_resync_required from this same burst).
+                  flushTranscriptSync();
                   setConnection((c) => ({ ...c, catchingUp: undefined }));
                   if (store.getSnapshot().awaitingResync) {
                     store.clearAwaitingResync();
@@ -1155,7 +1264,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     clearPassiveAssistantDoneTimer(
                       passiveAssistantDoneTimerRef,
                     );
-                    store.dispatch({
+                    dispatchTranscriptNow({
                       type: 'assistant.done',
                       reason: 'replay_complete',
                     });
@@ -1188,11 +1297,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 const stopReason =
                   (event.data as DaemonTurnCompleteData | undefined)
                     ?.stopReason ?? 'end_turn';
-                store.dispatch(assistantDoneFromTurnEvent(event, stopReason));
+                dispatchTranscriptNow(
+                  assistantDoneFromTurnEvent(event, stopReason),
+                );
                 setPromptStatus('idle');
               } else if (isObserver && event.type === 'turn_error') {
                 clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-                store.dispatch(assistantDoneFromTurnEvent(event, 'error'));
+                dispatchTranscriptNow(
+                  assistantDoneFromTurnEvent(event, 'error'),
+                );
                 setPromptStatus('idle');
               } else if (isObserver && hasActiveGenerationSignal(uiEvents)) {
                 schedulePassiveAssistantDone(
@@ -1223,6 +1336,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                       passiveAssistantDoneTimerRef,
                     );
                   }
+                  clearPendingTranscriptEvents();
                   store.reset();
                   // Ring eviction means the SSE replay window has a real gap.
                   // Resetting and continuing on the same stream can only replay
@@ -1288,6 +1402,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               );
             }
           }
+          // The stream ended or broke: apply any buffered transcript events now
+          // so post-loop handling (and consumers reading the snapshot) see a
+          // complete transcript without waiting for the scheduled flush.
+          flushTranscriptSync();
           if (userDeletedSession) {
             // Session was explicitly closed (user deleted it). Do NOT
             // reconnect — doing so would auto-create a new session.
@@ -1295,7 +1413,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             // here because restoreSessionId is in the useEffect dependency
             // array — changing it would trigger an effect re-run that could
             // create a new session via createOrAttach.
-            store.dispatch({ type: 'assistant.done', reason: 'cancelled' });
+            dispatchTranscriptNow({
+              type: 'assistant.done',
+              reason: 'cancelled',
+            });
             setPromptStatus('idle');
             clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
             setConnection((current) => ({
@@ -1327,7 +1448,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 // real turn_complete/turn_error/prompt_cancelled arrives.
                 clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
                 setPromptStatus('idle');
-                store.dispatch({
+                dispatchTranscriptNow({
                   type: 'assistant.done',
                   reason: 'stream_ended',
                 });
@@ -1345,6 +1466,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           }
         } catch (error) {
           if (disposed || abort.signal.aborted) return;
+          // The loop threw, so the in-try post-loop flush was skipped. Apply
+          // buffered transcript events now: leaving them with a scheduled timer
+          // would let it fire after a reconnect reset and dispatch stale events.
+          // Flush (not clear) because the retriable path below resumes via
+          // Last-Event-ID without resetting the store — clearing would drop
+          // events the SSE client already yielded (lastSeenEventId has advanced
+          // past them).
+          flushTranscriptSync();
           const message =
             error instanceof Error ? error.message : String(error);
           const errorStatus = extractHttpStatus(error);
@@ -1502,6 +1631,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       const session = sessionRef.current;
       disposed = true;
       abort.abort();
+      // Apply buffered transcript events before tearing down (do NOT drop them).
+      // The SSE client advances lastSeenEventId as each event is *yielded* —
+      // before our batched dispatch runs — so dropping here would make a
+      // same-session incremental resume (the keepSessionForNextEffect path)
+      // skip them permanently. Flushing is free and safe: the store notifies
+      // via queueMicrotask, so there is no synchronous setState; on unmount it
+      // is an orphaned dispatch and on a session switch the next run resets the
+      // store anyway.
+      flushTranscriptSync();
       hasCurrentSessionActivePromptRef.current = () => false;
       setPromptStatus('idle');
       clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
@@ -1543,6 +1681,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     maxQueued,
     store,
     restoreSessionId,
+    restoreWorkspaceCwd,
     restoreMode,
     restoreSessionNonce,
     attachSessionNonce,
@@ -1714,7 +1853,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         }),
         createDetachedSession: (
           workspaceCwd?: string,
-          overrides?: Pick<CreateSessionRequest, 'approvalMode'>,
+          overrides?: Pick<CreateSessionRequest, 'approvalMode' | 'sourceType'>,
         ) => {
           const client =
             workspaceClientRef.current ??
@@ -1732,6 +1871,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             ...(overrides?.approvalMode !== undefined
               ? { approvalMode: overrides.approvalMode }
               : {}),
+            ...(overrides?.sourceType !== undefined
+              ? { sourceType: overrides.sourceType }
+              : {}),
           };
           const requestClientId = clientId
             ? clientIdRef.current
@@ -1747,6 +1889,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         setConnection,
         setPromptStatus,
         setRestoreSessionId,
+        setRestoreWorkspaceCwd,
         setRestoreMode,
         setRestoreSessionNonce,
         setAttachSessionNonce,
@@ -1800,6 +1943,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   );
 }
 
+/**
+ * Settle the session's active prompt from a `turn_complete` / `turn_error`
+ * event. Dispatches `assistant.done` directly on `store`, so callers that have
+ * buffered (batched) transcript events must flush them first
+ * (`flushTranscriptSync()`) — otherwise `assistant.done` is applied ahead of
+ * the turn's still-buffered transcript content.
+ */
 function settleActivePromptFromTurnEvent(
   activePrompts: Map<string, ActivePrompt>,
   settledPrompts: Map<string, SettledPrompt>,
@@ -2316,6 +2466,7 @@ function bumpWorkspaceEventSignals(
       case 'workspace.mcp.child_refused':
       case 'workspace.mcp.server_restarted':
       case 'workspace.mcp.server_restart_refused':
+      case 'workspace.mcp.server_changed':
         mcp += 1;
         break;
       case 'workspace.extensions.changed':

@@ -1,9 +1,11 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createAndAttachSessionForPrompt } from './sessionPreparation';
 
 type CreateSessionArgs = Parameters<typeof createAndAttachSessionForPrompt>[0];
 const sessionResult = { sessionId: 'session-1' };
 const modelResult = { model: 'qwen3' };
+
+afterEach(() => vi.useRealTimers());
 
 function createActions(
   overrides: Partial<CreateSessionArgs['sessionActions']> = {},
@@ -11,11 +13,21 @@ function createActions(
   return {
     createSession: vi.fn(async () => sessionResult),
     attachSession: vi.fn(async () => {}),
-    closeSession: vi.fn(async () => {}),
     clearSession: vi.fn(async () => {}),
+    releaseSession: vi.fn(async () => {}),
     setModel: vi.fn(async () => modelResult),
     ...overrides,
   };
+}
+
+function prepareSession(
+  args: Omit<CreateSessionArgs, 'getCurrentSessionId'> &
+    Partial<Pick<CreateSessionArgs, 'getCurrentSessionId'>>,
+): Promise<void> {
+  return createAndAttachSessionForPrompt({
+    getCurrentSessionId: () => sessionResult.sessionId,
+    ...args,
+  });
 }
 
 describe('createAndAttachSessionForPrompt', () => {
@@ -35,7 +47,7 @@ describe('createAndAttachSessionForPrompt', () => {
       }),
     });
 
-    await createAndAttachSessionForPrompt({
+    await prepareSession({
       sessionActions: actions,
       modelId: 'qwen3',
       modeId: 'yolo',
@@ -46,6 +58,7 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(actions.createSession).toHaveBeenCalledWith({
       workspaceCwd: '/ws/secondary',
       approvalMode: 'yolo',
+      sourceType: 'default',
     });
     // Model is still a post-create call, sequenced after attach.
     expect(order).toEqual(['create', 'attach', 'model']);
@@ -55,20 +68,21 @@ describe('createAndAttachSessionForPrompt', () => {
   it('omits approvalMode when the mode is not a recognized daemon approval mode', async () => {
     const actions = createActions();
 
-    await createAndAttachSessionForPrompt({
+    await prepareSession({
       sessionActions: actions,
       modeId: 'not-a-mode',
     });
 
     expect(actions.createSession).toHaveBeenCalledWith({
       workspaceCwd: undefined,
+      sourceType: 'default',
     });
   });
 
   it('creates the session without a model call when no model is selected', async () => {
     const actions = createActions();
 
-    await createAndAttachSessionForPrompt({
+    await prepareSession({
       sessionActions: actions,
       modeId: 'plan',
     });
@@ -76,8 +90,22 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(actions.createSession).toHaveBeenCalledWith({
       workspaceCwd: undefined,
       approvalMode: 'plan',
+      sourceType: 'default',
     });
     expect(actions.setModel).not.toHaveBeenCalled();
+  });
+
+  it('attaches without a callback while connection state catches up', async () => {
+    const actions = createActions();
+
+    await prepareSession({
+      sessionActions: actions,
+      getCurrentSessionId: () => undefined,
+    });
+
+    expect(actions.attachSession).toHaveBeenCalledOnce();
+    expect(actions.releaseSession).not.toHaveBeenCalled();
+    expect(actions.clearSession).not.toHaveBeenCalled();
   });
 
   it('warns but resolves when the post-create model switch fails', async () => {
@@ -99,7 +127,7 @@ describe('createAndAttachSessionForPrompt', () => {
     });
 
     await expect(
-      createAndAttachSessionForPrompt({
+      prepareSession({
         sessionActions: actions,
         modelId: 'qwen3',
         modeId: 'yolo',
@@ -127,7 +155,7 @@ describe('createAndAttachSessionForPrompt', () => {
     });
 
     await expect(
-      createAndAttachSessionForPrompt({
+      prepareSession({
         sessionActions: actions,
         modelId: 'qwen3',
         modeId: 'yolo',
@@ -137,21 +165,22 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(actions.createSession).toHaveBeenCalledWith({
       workspaceCwd: undefined,
       approvalMode: 'yolo',
+      sourceType: 'default',
     });
     expect(actions.attachSession).not.toHaveBeenCalled();
     expect(actions.setModel).not.toHaveBeenCalled();
-    // Nothing was created client-side, so there is nothing to close/clear.
-    expect(actions.closeSession).not.toHaveBeenCalled();
+    // Nothing was created client-side, so there is nothing to release/clear.
+    expect(actions.releaseSession).not.toHaveBeenCalled();
     expect(actions.clearSession).not.toHaveBeenCalled();
   });
 
-  it('closes and clears the created session when attach fails', async () => {
+  it('releases and clears the created session when attach fails', async () => {
     const order: string[] = [];
     const error = new Error('attach failed');
     const warn = vi.fn();
     const actions = createActions({
-      closeSession: vi.fn(async () => {
-        order.push('close');
+      releaseSession: vi.fn(async () => {
+        order.push('release');
       }),
       clearSession: vi.fn(async () => {
         order.push('clear');
@@ -162,7 +191,7 @@ describe('createAndAttachSessionForPrompt', () => {
     });
 
     await expect(
-      createAndAttachSessionForPrompt({
+      prepareSession({
         sessionActions: actions,
         modelId: 'qwen3',
         modeId: 'yolo',
@@ -170,9 +199,9 @@ describe('createAndAttachSessionForPrompt', () => {
       }),
     ).rejects.toThrow(error);
 
-    expect(actions.closeSession).toHaveBeenCalledOnce();
+    expect(actions.releaseSession).toHaveBeenCalledWith('session-1');
     expect(actions.clearSession).toHaveBeenCalledOnce();
-    expect(order).toEqual(['close', 'clear']);
+    expect(order).toEqual(['release', 'clear']);
     expect(actions.setModel).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledWith(
       '[WebShell] failed to attach new session:',
@@ -180,42 +209,225 @@ describe('createAndAttachSessionForPrompt', () => {
     );
   });
 
-  it('still clears the created session when close after attach failure fails', async () => {
+  it('preserves the original error when release and clear both fail', async () => {
     const attachError = new Error('attach failed');
-    const closeError = new Error('close failed');
+    const releaseError = new Error('release failed');
+    const clearError = new Error('clear failed');
     const warn = vi.fn();
     const actions = createActions({
       attachSession: vi.fn(async () => {
         throw attachError;
       }),
-      closeSession: vi.fn(async () => {
-        throw closeError;
+      releaseSession: vi.fn(async () => {
+        throw releaseError;
+      }),
+      clearSession: vi.fn(async () => {
+        throw clearError;
       }),
     });
 
     await expect(
-      createAndAttachSessionForPrompt({
+      prepareSession({
         sessionActions: actions,
         warn,
       }),
     ).rejects.toThrow(attachError);
 
-    expect(actions.closeSession).toHaveBeenCalledOnce();
+    expect(actions.releaseSession).toHaveBeenCalledWith('session-1');
     expect(actions.clearSession).toHaveBeenCalledOnce();
     expect(warn).toHaveBeenCalledWith(
-      '[WebShell] failed to close unattached session:',
-      closeError,
+      '[WebShell] failed to release unattached session:',
+      releaseError,
+    );
+    expect(warn).toHaveBeenCalledWith(
+      '[WebShell] failed to clear unattached session:',
+      clearError,
     );
   });
 
   it('forwards workspaceCwd to createSession', async () => {
     const actions = createActions();
-    await createAndAttachSessionForPrompt({
+    await prepareSession({
       sessionActions: actions,
       workspaceCwd: '/ws/secondary',
     });
     expect(actions.createSession).toHaveBeenCalledWith({
       workspaceCwd: '/ws/secondary',
+      sourceType: 'default',
     });
   });
+
+  it('waits for onSessionCreated before attaching the session', async () => {
+    const order: string[] = [];
+    const callbackFinished = createDeferred<void>();
+    const actions = createActions({
+      createSession: vi.fn(async () => {
+        order.push('create');
+        return sessionResult;
+      }),
+      attachSession: vi.fn(async () => {
+        order.push('attach');
+      }),
+    });
+
+    const result = prepareSession({
+      sessionActions: actions,
+      onSessionCreated: vi.fn(async (sessionId) => {
+        order.push(`callback:${sessionId}`);
+        await callbackFinished.promise;
+        order.push('callback-finished');
+      }),
+    });
+
+    await vi.waitFor(() => {
+      expect(order).toEqual(['create', 'callback:session-1']);
+    });
+    callbackFinished.resolve();
+    await result;
+
+    expect(order).toEqual([
+      'create',
+      'callback:session-1',
+      'callback-finished',
+      'attach',
+    ]);
+  });
+
+  it('releases only the created session when the current session changes', async () => {
+    let currentSessionId = 'session-1';
+    const callbackFinished = createDeferred<void>();
+    const actions = createActions();
+    const warn = vi.fn();
+
+    const result = prepareSession({
+      sessionActions: actions,
+      getCurrentSessionId: () => currentSessionId,
+      onSessionCreated: () => callbackFinished.promise,
+      warn,
+    });
+    await vi.waitFor(() => {
+      expect(actions.createSession).toHaveBeenCalledOnce();
+    });
+    currentSessionId = 'session-2';
+    callbackFinished.resolve();
+
+    await expect(result).rejects.toThrow(
+      'Session changed before attach: expected session-1, found session-2',
+    );
+    expect(actions.attachSession).not.toHaveBeenCalled();
+    expect(actions.releaseSession).toHaveBeenCalledWith('session-1');
+    expect(actions.clearSession).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      '[WebShell] skipping clearSession: expected session-1, found session-2',
+    );
+  });
+
+  it('does not set the model when the session changes during attach', async () => {
+    let currentSessionId = 'session-1';
+    const attachFinished = createDeferred<void>();
+    const actions = createActions({
+      attachSession: vi.fn(() => attachFinished.promise),
+    });
+    const warn = vi.fn();
+
+    const result = prepareSession({
+      sessionActions: actions,
+      modelId: 'qwen3',
+      getCurrentSessionId: () => currentSessionId,
+      warn,
+    });
+    await vi.waitFor(() => {
+      expect(actions.attachSession).toHaveBeenCalledOnce();
+    });
+    currentSessionId = 'session-2';
+    attachFinished.resolve();
+
+    await expect(result).rejects.toThrow(
+      'Session changed while attaching: expected session-1, found session-2',
+    );
+    expect(actions.setModel).not.toHaveBeenCalled();
+    expect(actions.releaseSession).toHaveBeenCalledWith('session-1');
+    expect(actions.clearSession).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      '[WebShell] skipping clearSession: expected session-1, found session-2',
+    );
+  });
+
+  it('cleans up the created session when onSessionCreated rejects', async () => {
+    const error = new Error('callback failed');
+    const actions = createActions();
+    const warn = vi.fn();
+
+    await expect(
+      prepareSession({
+        sessionActions: actions,
+        onSessionCreated: vi.fn(async () => {
+          throw error;
+        }),
+        warn,
+      }),
+    ).rejects.toThrow(error);
+
+    expect(actions.attachSession).not.toHaveBeenCalled();
+    expect(actions.releaseSession).toHaveBeenCalledWith('session-1');
+    expect(actions.clearSession).toHaveBeenCalledOnce();
+    expect(actions.setModel).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      '[WebShell] failed to run onSessionCreated:',
+      error,
+    );
+  });
+
+  it('clears a rejected session while connection state catches up', async () => {
+    const actions = createActions();
+
+    await expect(
+      prepareSession({
+        sessionActions: actions,
+        getCurrentSessionId: () => undefined,
+        onSessionCreated: vi.fn(async () => {
+          throw new Error('callback failed');
+        }),
+        warn: vi.fn(),
+      }),
+    ).rejects.toThrow('callback failed');
+
+    expect(actions.releaseSession).toHaveBeenCalledWith('session-1');
+    expect(actions.clearSession).toHaveBeenCalledOnce();
+  });
+
+  it('cleans up when onSessionCreated times out', async () => {
+    vi.useFakeTimers();
+    const actions = createActions();
+
+    const result = prepareSession({
+      sessionActions: actions,
+      onSessionCreated: () => new Promise<void>(() => {}),
+      warn: vi.fn(),
+    });
+    const rejection = result.catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(29_999);
+
+    expect(actions.attachSession).not.toHaveBeenCalled();
+    expect(actions.releaseSession).not.toHaveBeenCalled();
+    expect(actions.clearSession).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(await rejection).toEqual(new Error('onSessionCreated timed out'));
+    expect(actions.attachSession).not.toHaveBeenCalled();
+    expect(actions.releaseSession).toHaveBeenCalledWith('session-1');
+    expect(actions.clearSession).toHaveBeenCalledOnce();
+  });
 });
+
+function createDeferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value?: T | PromiseLike<T>) => void;
+} {
+  let resolve!: (value?: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = (value) => res(value as T | PromiseLike<T>);
+  });
+  return { promise, resolve };
+}

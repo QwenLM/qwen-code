@@ -11,6 +11,7 @@ import {
   dedupeToolCallsById,
   getProviderToolCallId,
   normalizeModelToolCallIds,
+  reserveModelToolCallId,
 } from './toolCallIdUtils.js';
 
 describe('toolCallIdUtils', () => {
@@ -98,6 +99,50 @@ describe('toolCallIdUtils', () => {
     expect(
       normalized.map((part) => getProviderToolCallId(part.functionCall!)),
     ).toEqual([undefined, undefined]);
+  });
+
+  it('reserves a fresh model tool call id', () => {
+    const usedIds = new Set<string>();
+    const reservedIds = new Map<string, string>();
+
+    expect(reserveModelToolCallId('call-1', usedIds, reservedIds)).toBe(
+      'call-1',
+    );
+    expect(reservedIds.get('call-1')).toBe('call-1');
+    expect(usedIds.has('call-1')).toBe(true);
+  });
+
+  it('returns the same id when reserving a raw id repeatedly', () => {
+    const usedIds = new Set<string>(['call-1']);
+    const reservedIds = new Map<string, string>();
+
+    const first = reserveModelToolCallId('call-1', usedIds, reservedIds);
+    const second = reserveModelToolCallId('call-1', usedIds, reservedIds);
+
+    expect(first).toBe('call-1__qwen_dup_2');
+    expect(second).toBe(first);
+    expect([...usedIds]).toEqual(['call-1', 'call-1__qwen_dup_2']);
+  });
+
+  it('normalizes a colliding raw id to its reserved suffixed id', () => {
+    const usedIds = new Set<string>(['call-1']);
+    const reservedIds = new Map<string, string>();
+    const reservedId = reserveModelToolCallId('call-1', usedIds, reservedIds);
+
+    const normalized = normalizeModelToolCallIds(
+      [
+        {
+          functionCall: { id: 'call-1', name: 'read_file', args: {} },
+        },
+      ],
+      usedIds,
+      new Set<string>(),
+      reservedIds,
+    );
+
+    expect(reservedId).toBe('call-1__qwen_dup_2');
+    expect(normalized[0]?.functionCall?.id).toBe(reservedId);
+    expect(getProviderToolCallId(normalized[0]!.functionCall!)).toBe('call-1');
   });
 
   it('deduplicates direct function call batches by id', () => {

@@ -632,7 +632,7 @@ function atomicReplace(
     const deferredMarker = `${standaloneDir}.deferred`;
     const logFile = path.join(path.dirname(standaloneDir), 'qwen-update.log');
     // Bat script runs detached after Node exits. It must:
-    // 1. Wait for this Node process to release file locks (<= 30s).
+    // 1. Wait for the CLI and its launcher to release file locks (<= 30s).
     // 2. Run both moves with errorlevel checks; if move #2 fails, roll back
     //    move #1 so the user is never left without a working install.
     // 3. Log success/failure to qwen-update.log for post-mortem (the bat
@@ -647,6 +647,15 @@ function atomicReplace(
       'set /a TRIES+=1',
       'if %TRIES% GTR 30 goto proceed',
       `tasklist /FI "PID eq ${process.pid}" 2>nul | find "${process.pid}" >nul && (timeout /t 1 >nul & goto wait)`,
+      ...(process.env['QWEN_CODE_LAUNCHER_PID']?.match(/^\d+$/)
+        ? [
+            'set /a LAUNCHER_TRIES=0',
+            ':wait_launcher',
+            'set /a LAUNCHER_TRIES+=1',
+            'if %LAUNCHER_TRIES% GTR 30 goto proceed',
+            `tasklist /FI "PID eq ${process.env['QWEN_CODE_LAUNCHER_PID']}" 2>nul | find "${process.env['QWEN_CODE_LAUNCHER_PID']}" >nul && (timeout /t 1 >nul & goto wait_launcher)`,
+          ]
+        : []),
       ':proceed',
       `echo [%DATE% %TIME%] starting swap >> "${logFile}"`,
       `move /Y "${standaloneDir}" "${oldDir}"`,

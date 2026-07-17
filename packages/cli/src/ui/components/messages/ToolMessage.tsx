@@ -24,7 +24,12 @@ import type {
   McpToolProgressData,
   FileDiff,
 } from '@qwen-code/qwen-code-core';
-import { ToolNames, ToolNamesMigration } from '@qwen-code/qwen-code-core';
+import {
+  formatVisionBridgeNoticeDisplay,
+  isVisionBridgeNoticeDisplay,
+  ToolNames,
+  ToolNamesMigration,
+} from '@qwen-code/qwen-code-core';
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
 import { ShellInputPrompt } from '../ShellInputPrompt.js';
@@ -803,9 +808,19 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         : detailedDisplay,
     [detailedDisplay, usingDetailedDisplay],
   );
+  const visionBridgeNoticeDisplay = isVisionBridgeNoticeDisplay(resultDisplay)
+    ? resultDisplay
+    : undefined;
+  const visionBridgeNoticeText = visionBridgeNoticeDisplay
+    ? sanitizeTerminalText(
+        formatVisionBridgeNoticeDisplay(visionBridgeNoticeDisplay),
+      )
+    : undefined;
   const effectiveResultDisplay = usingDetailedDisplay
     ? sanitizedDetailedDisplay
-    : resultDisplay;
+    : visionBridgeNoticeDisplay
+      ? undefined
+      : resultDisplay;
 
   // detailedDisplay is RAW tool output (file content, grep hits, directory
   // listings). Render it as plain text — Markdown formatting would turn the
@@ -855,6 +870,15 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         />
         {emphasis === 'high' && <TrailingIndicator />}
       </Box>
+      {visionBridgeNoticeText && (
+        <Box paddingLeft={STATUS_INDICATOR_WIDTH} width="100%">
+          <StringResultRenderer
+            data={visionBridgeNoticeText}
+            renderAsMarkdown={false}
+            childWidth={innerWidth}
+          />
+        </Box>
+      )}
       {effectiveDisplayRenderer.type !== 'none' && !shouldCollapseResult && (
         <Box paddingLeft={STATUS_INDICATOR_WIDTH} width="100%">
           <Box flexDirection="column">
