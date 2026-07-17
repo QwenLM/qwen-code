@@ -112,6 +112,9 @@ import { InvalidStreamError } from './invalid-stream-error.js';
 export { InvalidStreamError };
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
+// Gemini can emit this filler after tool results; filtering and validation
+// must stay in sync.
+const GEMINI_EMPTY_CONTENT_PLACEHOLDER = '(empty content)';
 
 function isToolCallPreparationOnly(response: GenerateContentResponse): boolean {
   if (getToolCallPreparations(response).length === 0) return false;
@@ -2239,6 +2242,17 @@ export class GeminiChat {
           (cgConfig?.samplingParams?.max_tokens !== undefined &&
             cgConfig?.samplingParams?.max_tokens !== null) ||
           parsedEnvMaxTokens !== undefined;
+        // params.config.maxOutputTokens is set by the first-send clamp; the
+        // outputCeiling fallback is defensive and should not fire in practice.
+        const effectiveInitialMaxOutputTokens =
+          params.config?.maxOutputTokens ?? outputCeiling;
+        const escalatedLimit = clampOutputTokensToWindow(
+          OUTPUT_TOKEN_CEILING,
+          contextWindowForClamp,
+          promptTokensForClamp,
+        );
+        const shouldEscalateMaxOutputTokens =
+          effectiveInitialMaxOutputTokens < escalatedLimit;
 
         let lastFinishReason: string | undefined;
 
@@ -2492,6 +2506,18 @@ export class GeminiChat {
               break;
             }
 
+            if (
+              error instanceof InvalidStreamError &&
+              error.type === 'NO_TOOL_RESULT_PROGRESS_MAX_TOKENS' &&
+              !maxTokensEscalated &&
+              !hasUserMaxTokensOverride &&
+              shouldEscalateMaxOutputTokens
+            ) {
+              lastError = null;
+              lastFinishReason = FinishReason.MAX_TOKENS;
+              break;
+            }
+
             // Invalid stream responses use INVALID_STREAM_RETRY_CONFIG, which
             // is independent from HTTP retries handled by retryWithBackoff.
             const isInvalidStreamError = error instanceof InvalidStreamError;
@@ -2658,19 +2684,6 @@ export class GeminiChat {
             }
           }
         };
-        // params.config.maxOutputTokens is always set by the first-send clamp
-        // above; the `?? outputCeiling` is a defensive fallback that never
-        // fires in practice.
-        const effectiveInitialMaxOutputTokens =
-          params.config?.maxOutputTokens ?? outputCeiling;
-        const escalatedLimit = clampOutputTokensToWindow(
-          OUTPUT_TOKEN_CEILING,
-          contextWindowForClamp,
-          promptTokensForClamp,
-        );
-        const shouldEscalateMaxOutputTokens =
-          effectiveInitialMaxOutputTokens < escalatedLimit;
-
         if (
           lastError === null &&
           lastFinishReason === FinishReason.MAX_TOKENS &&
@@ -3601,6 +3614,11 @@ export class GeminiChat {
     let hasFinishReason = false;
     const protocolTagDetector = new LeadingProtocolTagLeakDetector();
     let protocolTextWasSuppressed = false;
+    const currentUserTurn = this.history[this.history.length - 1];
+    const isToolResultContinuation =
+      currentUserTurn?.role === 'user' &&
+      currentUserTurn.parts?.some((part) => part.functionResponse) === true;
+    let deferredFinishReason: FinishReason | undefined;
     // Captured if the upstream stream throws mid-iteration (typical on weak
     // networks: SSE drops between `content_block_stop` of a tool_use and the
     // terminal `message_stop`). We still build / record / push a partial
@@ -3637,6 +3655,13 @@ export class GeminiChat {
           const content = candidate?.content;
           if (content?.parts) {
             content.parts = content.parts.flatMap((part) => {
+              if (
+                isToolResultContinuation &&
+                !part.thought &&
+                part.text?.trim() === GEMINI_EMPTY_CONTENT_PLACEHOLDER
+              ) {
+                return [];
+              }
               if (typeof part.text !== 'string' || part.thought) return [part];
               const text = protocolTagDetector.accept(part.text);
               if (text) return [{ ...part, text }];
@@ -3740,6 +3765,17 @@ export class GeminiChat {
           }
         }
 
+        if (isToolResultContinuation) {
+          // Do not let consumers commit Finished before post-stream validation
+          // can reject a semantically empty continuation.
+          for (const candidate of chunk.candidates ?? []) {
+            if (candidate.finishReason) {
+              deferredFinishReason ??= candidate.finishReason;
+              delete candidate.finishReason;
+            }
+          }
+        }
+
         if (!protocolTextWasSuppressed || !protocolTagDetector.blockingOutput) {
           yield chunk;
         }
@@ -3802,17 +3838,29 @@ export class GeminiChat {
     // 1. There's a tool call (tool calls can end without explicit finish reasons), OR
     // 2. There's a finish reason AND we have non-empty response text or thought text
     //
-    // Note: Thoughts-only responses are valid for models that use thinking modes.
+    // Thought-only responses remain valid for ordinary user turns. After a tool
+    // result, they do not advance the agent without text or another tool call.
     const hasAnyContent = contentText || thoughtText;
+    const lacksVisibleToolResultProgress =
+      isToolResultContinuation &&
+      (!contentText || contentText === GEMINI_EMPTY_CONTENT_PLACEHOLDER);
     if (
       streamError === null &&
       !hasToolCall &&
-      (!hasFinishReason || !hasAnyContent)
+      (!hasFinishReason || !hasAnyContent || lacksVisibleToolResultProgress)
     ) {
       if (!hasFinishReason) {
         throw new InvalidStreamError(
           'Model stream ended without a finish reason.',
           'NO_FINISH_REASON',
+        );
+      }
+      if (lacksVisibleToolResultProgress) {
+        throw new InvalidStreamError(
+          'Model stream ended after a tool result without visible progress.',
+          deferredFinishReason === FinishReason.MAX_TOKENS
+            ? 'NO_TOOL_RESULT_PROGRESS_MAX_TOKENS'
+            : 'NO_TOOL_RESULT_PROGRESS',
         );
       }
       throw new InvalidStreamError(
@@ -3946,6 +3994,12 @@ export class GeminiChat {
         ...consolidatedHistoryParts,
       ],
     });
+    if (deferredFinishReason) {
+      yield {
+        candidates: [{ finishReason: deferredFinishReason }],
+        usageMetadata,
+      } as GenerateContentResponse;
+    }
   }
 
   /**

@@ -10768,6 +10768,45 @@ describe('createServeApp', () => {
       });
     });
 
+    it('marks lower-bound HTTP results as truncated', async () => {
+      await writeStoredSession({
+        sessionId: '550e8400-e29b-41d4-a716-446655440004',
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'readable session',
+        mtime: new Date('2026-05-17T12:00:00.000Z'),
+      });
+      const chatsDir = path.join(
+        new Storage(WS_BOUND).getProjectDir(),
+        'chats',
+      );
+      await fsp.writeFile(
+        path.join(chatsDir, '550e8400-e29b-41d4-a716-446655440005.jsonl'),
+        '{not-json}\n',
+        'utf8',
+      );
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge(), boundWorkspace: WS_BOUND },
+      );
+
+      const res = await request(app)
+        .get(`/workspace/${encodeURIComponent(WS_BOUND)}/session-info`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        active: 1,
+        archived: 0,
+        total: 1,
+        live: 0,
+        expensive: true,
+        cost: 'disk_scan',
+        truncated: true,
+      });
+    });
+
     it('supports plural /workspaces/:workspace/session-info for non-primary workspaces', async () => {
       await writeStoredSession({
         sessionId: '550e8400-e29b-41d4-a716-446655440010',
@@ -10800,15 +10839,14 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual(
-        expect.objectContaining({
-          active: 1,
-          archived: 0,
-          total: 1,
-          expensive: true,
-          cost: 'disk_scan',
-        }),
-      );
+      expect(res.body).toEqual({
+        active: 1,
+        archived: 0,
+        total: 1,
+        live: 0,
+        expensive: true,
+        cost: 'disk_scan',
+      });
     });
 
     it('omits live state for an untrusted secondary workspace', async () => {
@@ -10883,6 +10921,30 @@ describe('createServeApp', () => {
         live: 0,
         expensive: true,
         cost: 'disk_scan',
+      });
+    });
+
+    it('returns session_info_failed when the persisted scan fails', async () => {
+      const chatsPath = path.join(
+        new Storage(WS_BOUND).getProjectDir(),
+        'chats',
+      );
+      await fsp.mkdir(path.dirname(chatsPath), { recursive: true });
+      await fsp.writeFile(chatsPath, 'not a directory', 'utf8');
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge(), boundWorkspace: WS_BOUND },
+      );
+
+      const res = await request(app)
+        .get(`/workspace/${encodeURIComponent(WS_BOUND)}/session-info`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual({
+        error: 'Failed to read session info',
+        code: 'session_info_failed',
       });
     });
   });
@@ -19133,6 +19195,7 @@ describe('GET /session/:id/events (SSE)', () => {
           id: 1,
           v: 1,
           type: 'session_update',
+          promptId: 'prompt-1',
           data: { foo: 'bar' },
         };
         yield { id: 2, v: 1, type: 'session_update', data: { foo: 'baz' } };
@@ -19162,9 +19225,11 @@ describe('GET /session/:id/events (SSE)', () => {
       id: 1,
       v: 1,
       type: 'session_update',
+      promptId: 'prompt-1',
       data: { foo: 'bar' },
     });
     expect(frames[1]?.id).toBe('2');
+    expect(JSON.parse(frames[1]!.data!)).not.toHaveProperty('promptId');
   });
 
   it('stamps _meta.serverTimestamp on every SSE frame (#4175 F4 prereq, chiga0 #19 P0)', async () => {

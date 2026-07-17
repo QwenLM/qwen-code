@@ -18,6 +18,7 @@ interface WorkspaceSessionProviderProps {
   workspaceCwd?: string;
   lockWorkspaceCwd?: string;
   clientId?: string;
+  restartSseOnPrompt?: boolean;
   webShellProps: WebShellProps;
 }
 
@@ -27,6 +28,7 @@ export function WorkspaceSessionProvider({
   workspaceCwd,
   lockWorkspaceCwd,
   clientId,
+  restartSseOnPrompt,
   webShellProps,
 }: WorkspaceSessionProviderProps) {
   const workspace = useWorkspace();
@@ -228,9 +230,11 @@ export function WorkspaceSessionProvider({
       clientId={clientId}
       suppressOwnUserEcho
       maxBlocks={WEB_SHELL_MAX_TRANSCRIPT_BLOCKS}
+      restartEventStreamOnPrompt={restartSseOnPrompt}
     >
       <App
         {...webShellProps}
+        restartSseOnPrompt={restartSseOnPrompt}
         lockedWorkspaceCwd={lockWorkspaceCwd ? targetWorkspace?.cwd : undefined}
         lockedWorkspaceCapability={
           lockWorkspaceCwd ? targetWorkspace : undefined

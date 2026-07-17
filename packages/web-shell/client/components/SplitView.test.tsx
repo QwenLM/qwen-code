@@ -35,6 +35,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
       data-session={props.sessionId}
       data-clientid={props.clientId}
       data-workspace={props.workspaceCwd}
+      data-restart-sse={props.restartEventStreamOnPrompt ? 'true' : 'false'}
     >
       {props.children}
     </div>
@@ -70,6 +71,7 @@ vi.mock('./ChatPane', () => ({
         data-testid="chat-pane"
         data-pane-workspace={props.workspaceCwd}
         data-maximized={props.isMaximized ? 'true' : 'false'}
+        data-pane-restart-sse={props.restartSseOnPrompt ? 'true' : 'false'}
       >
         <span data-testid="pane-title">{props.title}</span>
         {props.onToggleMaximize && (
@@ -185,6 +187,20 @@ describe('SplitView', () => {
     const s2ClientId = providers[1].getAttribute('data-clientid') ?? '';
     const nonce = clientId.slice('split-pane:'.length, -':s1'.length);
     expect(s2ClientId).toBe(`split-pane:${nonce}:s2`);
+  });
+
+  it('passes the prompt SSE restart option to pane providers', () => {
+    render({ sessionIds: ['s1'], restartSseOnPrompt: true });
+    expect(
+      container!
+        .querySelector('[data-session="s1"]')
+        ?.getAttribute('data-restart-sse'),
+    ).toBe('true');
+    expect(
+      container!
+        .querySelector('[data-session="s1"] [data-testid="chat-pane"]')
+        ?.getAttribute('data-pane-restart-sse'),
+    ).toBe('true');
   });
 
   it('seeds with the current session when no session ids are given', () => {

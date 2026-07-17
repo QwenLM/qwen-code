@@ -554,14 +554,27 @@ describe('AgentTool', () => {
       );
     });
 
-    it('should reject non-existent subagent', async () => {
+    it('accepts a subagent_type missing from the cache (may have been created after startup)', () => {
       const result = agentTool.validateToolParams({
         ...validParams,
-        subagent_type: 'non-existent',
+        subagent_type: 'created-after-startup',
       });
-      expect(result).toBe(
-        'Subagent "non-existent" not found. Available subagents: file-search, code-review',
-      );
+      expect(result).toBeNull();
+    });
+
+    it('kicks a cache refresh on a subagent_type cache miss', () => {
+      vi.mocked(mockSubagentManager.listSubagents).mockClear();
+      agentTool.validateToolParams({
+        ...validParams,
+        subagent_type: 'created-after-startup',
+      });
+      expect(mockSubagentManager.listSubagents).toHaveBeenCalled();
+    });
+
+    it('does not refresh the cache when the subagent_type is already known', () => {
+      vi.mocked(mockSubagentManager.listSubagents).mockClear();
+      agentTool.validateToolParams(validParams);
+      expect(mockSubagentManager.listSubagents).not.toHaveBeenCalled();
     });
 
     it('accepts isolation="worktree" when subagent_type is set', () => {
@@ -795,6 +808,42 @@ describe('AgentTool', () => {
       } finally {
         await fs.rm(repo, { recursive: true, force: true });
       }
+    });
+  });
+
+  describe('execution with an unknown subagent', () => {
+    it('reports not-found with the available list when the agent is missing on disk', async () => {
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(null);
+
+      const invocation = agentTool.build({
+        description: 'Use missing agent',
+        prompt: 'Do work',
+        subagent_type: 'non-existent',
+      });
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'non-existent',
+      );
+      expect(result.llmContent).toBe(
+        'Subagent "non-existent" not found. Available subagents: file-search, code-review',
+      );
+    });
+
+    it('still reports not-found when listing available subagents fails', async () => {
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(null);
+      vi.mocked(mockSubagentManager.listSubagents).mockRejectedValue(
+        new Error('fs error'),
+      );
+
+      const invocation = agentTool.build({
+        description: 'Use missing agent',
+        prompt: 'Do work',
+        subagent_type: 'non-existent',
+      });
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).toBe('Subagent "non-existent" not found');
     });
   });
 
