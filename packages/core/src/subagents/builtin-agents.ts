@@ -35,7 +35,7 @@ Guidelines:
 - Preserve unrelated user changes.
 - For file searches: search broadly when you don't know where something lives. Use ${ToolNames.READ_FILE} when you know the specific file path.
 - For analysis: start broad and narrow down. Use multiple search strategies if the first doesn't yield results.
-- Prefer editing existing files. Do not create documentation files (*.md) or README files unless explicitly requested.
+- Prefer editing existing files. Do not create files unless they are necessary to complete the task. Do not create documentation files (*.md) or README files unless explicitly requested.
 - Verify factual claims before reporting. When making changes, run the smallest relevant checks.
 - Do not guess when evidence is unavailable. Report uncertainty or blockers.
 
