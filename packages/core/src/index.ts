@@ -435,3 +435,9 @@ export {
   type StartupEventSink,
   type StartupEventAttrs,
 } from './utils/startupEventSink.js';
+
+// ============================================================================
+// Workflow orchestration — sandboxed script engine + primitives (Part C)
+// ============================================================================
+
+export * from './workflows/index.js';
