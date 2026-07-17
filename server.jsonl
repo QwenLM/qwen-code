@@ -1,0 +1,5 @@
+{"t":"2026-07-17T06:33:12.985Z","kind":"listening","port":18735}
+{"t":"2026-07-17T06:33:44.293Z","kind":"request","requestIndex":0,"stage":"tool-call","stream":true,"messageCount":2,"bodySha256":"44ca8fb4595cafbf5ac38778189b523caeb6494cba140ef797720b932ca29f48"}
+{"t":"2026-07-17T06:33:44.346Z","kind":"request","requestIndex":1,"stage":"split-empty-continuation","stream":true,"messageCount":4,"bodySha256":"b0c66d9d3c30cea1e5cadb0bc6c1b34dd67c88793bc6756b282d0d6624d4c68e"}
+{"t":"2026-07-17T06:33:46.356Z","kind":"request","requestIndex":2,"stage":"recovered-visible-answer","stream":true,"messageCount":4,"bodySha256":"b0c66d9d3c30cea1e5cadb0bc6c1b34dd67c88793bc6756b282d0d6624d4c68e"}
+{"t":"2026-07-17T06:34:23.345Z","kind":"request","requestIndex":3,"stage":"direct-thought-only-control","stream":true,"messageCount":6,"bodySha256":"9310b7e39d0ef7f0005d7fa91670306d43fdc48ff6b43f709af25d2acfe84062"}
