@@ -238,6 +238,15 @@ export function AskUserQuestion({
   const handleKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLDivElement>) => {
       if (isEditableTarget(e.target)) return;
+      // Only react when focus is on an option (a roving-tabindex button or the
+      // "Other" trigger) — not on the action buttons (Submit/Previous/Next) or
+      // the collapse toggle. Otherwise a digit / j-k / Escape pressed while
+      // focused there would silently pick an option or cancel the question; when
+      // collapsed the options aren't even rendered, so the toggle is the only
+      // focusable element and must not trigger any of this.
+      if (!(e.target as HTMLElement).closest('[data-web-shell-ask-option]')) {
+        return;
+      }
       if (!current) return;
       const total = current.options.length + 1;
       if (e.key === 'ArrowDown' || e.key === 'j') {

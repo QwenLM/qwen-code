@@ -167,4 +167,24 @@ describe('ToolApproval accessibility', () => {
     // (which would silently change what Enter confirms).
     expect(document.activeElement).toBe(opts[1]);
   });
+
+  it('leaves Enter to native button activation (no double-press guard)', () => {
+    render(undefined);
+    const opts = optionButtons();
+    opts[1]!.focus();
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      opts[1]!.dispatchEvent(event);
+    });
+    // handleKeyDown must not intercept Enter: the focused button activates
+    // natively on Enter, so a single press confirms. The old interactedRef
+    // double-press guard preventDefault'd the first Enter — assert that no such
+    // interception exists. (jsdom doesn't synthesize the native Enter->click, so
+    // we assert the handler leaves the event un-cancelled instead.)
+    expect(event.defaultPrevented).toBe(false);
+  });
 });

@@ -220,4 +220,40 @@ describe('AskUserQuestion accessibility', () => {
     // (an unguarded handler would have called preventDefault).
     expect(event.defaultPrevented).toBe(false);
   });
+
+  it('ignores option shortcuts when focus is on an action button, not an option', () => {
+    render(undefined);
+    // Click Blue so it is the committed single-select answer (arrow keys only
+    // move the highlight; they don't change the answer).
+    act(() => {
+      optionButtons()[1]!.click();
+    });
+    const submit = submitButton()!;
+    submit.focus();
+
+    // Escape on Submit must not cancel the question...
+    act(() =>
+      submit.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Escape',
+          bubbles: true,
+          cancelable: true,
+        }),
+      ),
+    );
+    expect(onConfirm).not.toHaveBeenCalled();
+
+    // ...and a digit must not silently overwrite the selected answer.
+    act(() =>
+      submit.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: '1',
+          bubbles: true,
+          cancelable: true,
+        }),
+      ),
+    );
+    act(() => submit.click());
+    expect(onConfirm).toHaveBeenCalledWith('req-1', 'submit', { '0': 'Blue' });
+  });
 });
