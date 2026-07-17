@@ -64,13 +64,26 @@ function getInteractionModePrompt(mode: SystemPromptInteractionMode): {
           "Use 'ask_user_question' when clarification is necessary. The ACP host can relay the question and response.",
       };
     case 'interactive':
-    default:
-      return {
-        role: 'an interactive CLI agent',
-        questions:
-          "Use 'ask_user_question' when you need clarification or want to validate assumptions. Never include time estimates in options.",
-      };
+      return getInteractiveInteractionModePrompt();
+    default: {
+      // Exhaustiveness guard: adding a new SystemPromptInteractionMode without a
+      // case above now fails typecheck here instead of silently falling back.
+      const _exhaustive: never = mode;
+      void _exhaustive;
+      return getInteractiveInteractionModePrompt();
+    }
   }
+}
+
+function getInteractiveInteractionModePrompt(): {
+  role: string;
+  questions: string;
+} {
+  return {
+    role: 'an interactive CLI agent',
+    questions:
+      "Use 'ask_user_question' when you need clarification or want to validate assumptions. Never include time estimates in options.",
+  };
 }
 
 export function resolvePathFromEnv(envVar?: string): {
