@@ -27,6 +27,7 @@ import {
   type MicrocompactMeta,
   type MicrocompactOptions,
 } from '../services/microcompaction/microcompact.js';
+import { slimCompactionInput } from '../services/compactionInputSlimming.js';
 import {
   activeGoalEquals,
   getActiveGoal,
@@ -2844,10 +2845,14 @@ export class GeminiClient {
         try {
           const chat = this.getChat();
           const maxHistoryForCache = 40;
-          const cachedHistory = this.getHistoryTailShallow(
+          const historyForCache = this.getHistoryTailShallow(
             maxHistoryForCache,
             true,
           );
+          const cachedHistory = slimCompactionInput(
+            historyForCache,
+            this.config.getEffectiveInputModalities(),
+          ).slimmedHistory;
           saveCacheSafeParams(
             chat.getGenerationConfig(),
             cachedHistory,
@@ -2992,10 +2997,15 @@ export class GeminiClient {
       // the target model's provider.
       const {
         contentGenerator,
+        contentGeneratorConfig,
         retryAuthType,
         retryErrorCodes,
         model: requestModel,
       } = await this.config.getBaseLlmClient().resolveForModel(model);
+      const requestContents = slimCompactionInput(
+        contents,
+        contentGeneratorConfig?.modalities ?? {},
+      ).slimmedHistory;
 
       const apiCall = () => {
         currentAttemptModel = requestModel;
@@ -3004,7 +3014,7 @@ export class GeminiClient {
           {
             model: requestModel,
             config: requestConfig,
-            contents,
+            contents: requestContents,
           },
           promptId,
         );

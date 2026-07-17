@@ -58,6 +58,11 @@ export * from './output/types.js';
 
 export * from './core/client.js';
 export * from './core/contentGenerator.js';
+export {
+  getRuntimeContentGenerator,
+  runWithRuntimeContentGenerator,
+  type RuntimeContentGeneratorView,
+} from './agents/runtime/agent-context.js';
 export * from './core/reasoning-effort.js';
 export * from './core/coreToolScheduler.js';
 export * from './core/permissionFlow.js';
