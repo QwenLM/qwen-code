@@ -1729,7 +1729,7 @@ describe('GeminiChat', async () => {
       vi.useFakeTimers();
       try {
         vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
-          authType: 'gemini',
+          authType: AuthType.USE_GEMINI,
           model: 'test-model',
           samplingParams: { max_tokens: 1024 },
         });
