@@ -413,6 +413,13 @@ describe('gemini.tsx main function', () => {
   it.each([
     ['before the ACP relaunch', { acp: true }, {}, undefined, '1'],
     [
+      'before the experimental ACP relaunch',
+      { experimentalAcp: true },
+      {},
+      undefined,
+      '1',
+    ],
+    [
       'in the relaunched ACP process',
       { acp: true },
       { QWEN_CODE_NO_RELAUNCH: 'true' },
@@ -432,6 +439,13 @@ describe('gemini.tsx main function', () => {
       { QWEN_CODE_NO_RELAUNCH: 'true' },
       '1',
       '1',
+    ],
+    [
+      'ACP without bootstrap marker',
+      { acp: true },
+      { QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE: undefined },
+      '1',
+      undefined,
     ],
   ])(
     'manages Electron bootstrap env %s',
