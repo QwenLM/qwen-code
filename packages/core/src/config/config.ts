@@ -3599,6 +3599,8 @@ export class Config {
         m.id === selector.modelId &&
         (!selector.authType || m.authType === selector.authType) &&
         (!parsedSetting.baseUrl || m.baseUrl === parsedSetting.baseUrl) &&
+        !m.fastOnly &&
+        !m.voiceOnly &&
         !this.isCurrentPrimaryModel(m),
     );
     if (routeMatches.length > 1) {
@@ -3607,7 +3609,7 @@ export class Config {
       );
       return undefined;
     }
-    const match = routeMatches.find((m) => !m.fastOnly && !m.voiceOnly);
+    const match = routeMatches[0];
     if (!match) {
       this.debugLogger.warn(
         `vision model pin '${visionModelForLog}' did not match a usable configured model ` +

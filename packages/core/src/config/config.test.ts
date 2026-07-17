@@ -1125,7 +1125,7 @@ describe('Server Config (config.ts)', () => {
     });
 
     it.each([false, true])(
-      'rejects an exact visionModel route that matches multiple entries (reversed=%s)',
+      'honors an exact visionModel route with ignored fast-only namesakes (reversed=%s)',
       (reversed) => {
         const baseUrl = 'https://vision.example.com/v1';
         const routeEntries = [
@@ -1149,7 +1149,11 @@ describe('Server Config (config.ts)', () => {
         });
         stubProvider(config, reversed ? routeEntries.reverse() : routeEntries);
 
-        expect(config.getDefaultVisionBridgeModel()).toBeUndefined();
+        expect(config.getDefaultVisionBridgeModel()).toEqual({
+          id: 'openai:vision-agent',
+          baseUrl,
+          agentCapable: true,
+        });
       },
     );
 

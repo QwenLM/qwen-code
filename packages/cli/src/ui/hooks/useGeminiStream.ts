@@ -56,6 +56,7 @@ import {
   formatFullTurnVisionNotice,
   getFullTurnVisionModelSelector,
   hasImageParts,
+  clampInlineMediaPart,
   splitImageParts,
   generateToolUseSummary,
   getActiveGoal,
@@ -920,6 +921,10 @@ export const useGeminiStream = (
       debugLogger.debug('vision bridge: gate matched, running conversion');
       const fullTurnModel = config.getDefaultVisionBridgeModel();
       if (fullTurnModel?.agentCapable) {
+        const fullTurnParts = parts.map((part) => clampInlineMediaPart(part));
+        if (!hasImageParts(fullTurnParts)) {
+          return { parts: fullTurnParts, shouldProceed: true };
+        }
         applyModelOverride(
           modelOverrideRef,
           inlineModelOverrideActiveRef,
@@ -933,7 +938,7 @@ export const useGeminiStream = (
           },
           timestamp,
         );
-        return { parts, shouldProceed: true };
+        return { parts: fullTurnParts, shouldProceed: true };
       }
 
       const bridgeResult = await runVisionBridge({ config, parts, signal });

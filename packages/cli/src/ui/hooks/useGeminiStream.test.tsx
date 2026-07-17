@@ -287,6 +287,7 @@ describe('useGeminiStream', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllEnvs();
   });
 
   const mockLoadedSettings: LoadedSettings = {
@@ -580,6 +581,99 @@ describe('useGeminiStream', () => {
       expect(
         mockSendMessageStream.mock.calls[3]?.[3].modelOverride,
       ).toBeUndefined();
+    });
+
+    it('clamps oversized agent-capable image routes before applying a full-turn override', async () => {
+      vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
+      enableBridge();
+      mockConfig.getDefaultVisionBridgeModel = vi.fn(() => ({
+        id: 'vision-agent',
+        agentCapable: true,
+      }));
+      mockHandleSlashCommand.mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'describe' }, imagePart],
+      });
+      const { result, mockSendMessageStream } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('/inspect-image');
+      });
+
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+      expect(
+        JSON.stringify(mockSendMessageStream.mock.calls[0]?.[0]),
+      ).toContain('Media omitted:');
+      expect(
+        mockSendMessageStream.mock.calls[0]?.[3].modelOverride,
+      ).toBeUndefined();
+      expect(mockRunVisionBridge).not.toHaveBeenCalled();
+    });
+
+    it('does not let a skill tool override clobber an active full-turn route', async () => {
+      enableBridge();
+      mockConfig.getDefaultVisionBridgeModel = vi.fn(() => ({
+        id: 'vision-agent',
+        baseUrl: 'https://vision.example.com/v1',
+        agentCapable: true,
+      }));
+      mockHandleSlashCommand.mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'describe' }, imagePart],
+      });
+      const selector = 'vision-agent\0https://vision.example.com/v1\0';
+      const { result, mockSendMessageStream } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('/inspect-image');
+      });
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+      expect(mockSendMessageStream.mock.calls[0]?.[3]).toMatchObject({
+        modelOverride: selector,
+      });
+
+      mockSendMessageStream.mockClear();
+      const onComplete = mockUseReactToolScheduler.mock.calls.at(-1)?.[0] as
+        | ((completedTools: TrackedToolCall[]) => Promise<void>)
+        | undefined;
+      await act(async () => {
+        await onComplete?.([
+          {
+            request: {
+              callId: 'skill-call',
+              name: 'pdf-skill',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-id-skill',
+            },
+            status: 'success',
+            responseSubmittedToGemini: false,
+            response: {
+              callId: 'skill-call',
+              responseParts: [{ text: 'skill loaded' }],
+              errorType: undefined,
+              modelOverride: 'other-model',
+            },
+            tool: {
+              name: 'pdf-skill',
+              displayName: 'pdf-skill',
+              description: 'd',
+              build: vi.fn(),
+            } as never,
+            invocation: {
+              getDescription: () => 'desc',
+            } as unknown as AnyToolInvocation,
+            startTime: Date.now(),
+            endTime: Date.now(),
+          } as TrackedCompletedToolCall,
+        ]);
+      });
+
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+      expect(mockSendMessageStream.mock.calls[0]?.[3]).toMatchObject({
+        type: SendMessageType.ToolResult,
+        modelOverride: selector,
+      });
     });
 
     it('does not query bridge config for text-only messages', async () => {

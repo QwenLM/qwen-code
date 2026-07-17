@@ -275,7 +275,7 @@ export function useReactToolScheduler(
               };
             },
           );
-          setToolCallsForDisplay(completedCalls);
+          setToolCallsForDisplay((prev) => [...prev, ...completedCalls]);
           await allToolCallsCompleteHandler(completedCalls);
           return;
         }
