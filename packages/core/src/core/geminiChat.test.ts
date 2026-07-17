@@ -7841,6 +7841,7 @@ describe('GeminiChat', async () => {
 
   it('discards an empty content-only thinking block followed by another opening tag', async () => {
     const recordAssistantTurn = vi.fn();
+    const afterLeakConsumed = vi.fn();
     const chatWithRecording = new GeminiChat(
       mockConfig,
       config,
@@ -7851,31 +7852,37 @@ describe('GeminiChat', async () => {
       } as unknown as ConstructorParameters<typeof GeminiChat>[3],
       uiTelemetryService,
     );
+    const leakingStream = (async function* () {
+      yield {
+        candidates: [{ content: { parts: [{ text: '<think>\n\n' }] } }],
+      } as unknown as GenerateContentResponse;
+      yield {
+        candidates: [{ content: { parts: [{ text: '</think><thi' }] } }],
+      } as unknown as GenerateContentResponse;
+      yield {
+        candidates: [
+          {
+            content: { parts: [{ text: 'nk>9<think>-3' }] },
+            finishReason: 'STOP',
+          },
+        ],
+        usageMetadata: {
+          promptTokenCount: 300_473,
+          candidatesTokenCount: 58,
+          thoughtsTokenCount: 0,
+          totalTokenCount: 300_531,
+        },
+      } as unknown as GenerateContentResponse;
+      afterLeakConsumed();
+      yield {
+        usageMetadata: { totalTokenCount: 300_531 },
+      } as unknown as GenerateContentResponse;
+    })();
+    vi.spyOn(leakingStream, 'return').mockRejectedValue(
+      new Error('provider cleanup failed'),
+    );
     vi.mocked(mockContentGenerator.generateContentStream)
-      .mockImplementationOnce(async () =>
-        (async function* () {
-          yield {
-            candidates: [{ content: { parts: [{ text: '<think>\n\n' }] } }],
-          } as unknown as GenerateContentResponse;
-          yield {
-            candidates: [{ content: { parts: [{ text: '</think><thi' }] } }],
-          } as unknown as GenerateContentResponse;
-          yield {
-            candidates: [
-              {
-                content: { parts: [{ text: 'nk>9<think>-3' }] },
-                finishReason: 'STOP',
-              },
-            ],
-            usageMetadata: {
-              promptTokenCount: 300_473,
-              candidatesTokenCount: 58,
-              thoughtsTokenCount: 0,
-              totalTokenCount: 300_531,
-            },
-          } as unknown as GenerateContentResponse;
-        })(),
-      )
+      .mockImplementationOnce(async () => leakingStream)
       .mockImplementationOnce(async () =>
         (async function* () {
           yield {
@@ -7914,6 +7921,7 @@ describe('GeminiChat', async () => {
     expect(recordAssistantTurn.mock.calls[0]?.[0].message).toEqual([
       { text: 'Successful final response' },
     ]);
+    expect(afterLeakConsumed).not.toHaveBeenCalled();
   });
 
   it('preserves a leading literal thinking block', async () => {
@@ -8089,6 +8097,54 @@ describe('GeminiChat', async () => {
       .map((part) => part.text ?? '')
       .join('');
     expect(emittedText).toBe('Successful final response');
+  });
+
+  it('discards an overlong sequence of pending protocol chunks', async () => {
+    vi.mocked(mockContentGenerator.generateContentStream)
+      .mockImplementationOnce(async () =>
+        (async function* () {
+          yield {
+            candidates: [{ content: { parts: [{ text: '<think>' }] } }],
+          } as unknown as GenerateContentResponse;
+          for (let index = 0; index < 256; index++) {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [{ text: 'buffered thought', thought: true }],
+                  },
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          }
+          yield {
+            candidates: [{ finishReason: 'STOP' }],
+          } as unknown as GenerateContentResponse;
+        })(),
+      )
+      .mockResolvedValueOnce(
+        streamResponse(stopResponse([{ text: 'Successful final response' }])),
+      );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-overlong-pending-protocol-chunks',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(2);
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      true,
+    );
+    const emittedParts = events
+      .filter((event) => event.type === StreamEventType.CHUNK)
+      .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? []);
+    expect(emittedParts.some((part) => part.thought)).toBe(false);
+    expect(emittedParts.map((part) => part.text ?? '').join('')).toBe(
+      'Successful final response',
+    );
   });
 
   it('preserves a structured part that follows an undecided text prefix', async () => {

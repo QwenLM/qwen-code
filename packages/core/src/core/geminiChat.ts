@@ -1048,6 +1048,8 @@ const PROTOCOL_TAG_PREFIXES = [
   '<summary',
   '</summary',
 ] as const;
+// ponytail: Bound undecided provider output; use incremental parsing if valid
+// protocol prefixes outgrow these caps.
 const MAX_PENDING_PROTOCOL_CHUNKS = 256;
 const MAX_PROTOCOL_TAG_PREFIX_LENGTH = 256;
 const OPENING_THINKING_TAG = '<think>';
@@ -1085,27 +1087,25 @@ class LeadingProtocolTagLeakDetector {
   private state: 'detecting' | 'clean' | 'leaked' = 'detecting';
   private buffer = '';
 
-  accept(text: string): string {
-    if (this.state === 'clean') return text;
-    if (this.state === 'leaked') return '';
+  accept(text: string): void {
+    if (this.state !== 'detecting') return;
 
-    this.buffer += text;
+    const remaining = MAX_PROTOCOL_TAG_PREFIX_LENGTH + 1 - this.buffer.length;
+    this.buffer += text.slice(0, remaining);
     const candidate = this.buffer.trimStart().toLowerCase();
     const thinkingTagState = classifyEmptyThinkingBlockChainPrefix(candidate);
     if (thinkingTagState === 'leaked') {
-      this.state = 'leaked';
-      this.buffer = '';
-      return '';
+      this.reject();
+      return;
     }
     if (
       thinkingTagState === 'pending' ||
       thinkingTagState === 'partial-leak' ||
       PROTOCOL_TAG_PREFIXES.some((prefix) => prefix.startsWith(candidate))
     ) {
-      if (this.buffer.length <= MAX_PROTOCOL_TAG_PREFIX_LENGTH) return '';
-      this.state = 'leaked';
-      this.buffer = '';
-      return '';
+      if (this.buffer.length <= MAX_PROTOCOL_TAG_PREFIX_LENGTH) return;
+      this.reject();
+      return;
     }
 
     for (const prefix of PROTOCOL_TAG_PREFIXES) {
@@ -1113,20 +1113,17 @@ class LeadingProtocolTagLeakDetector {
         candidate.startsWith(prefix) &&
         /[\s/>]/.test(candidate[prefix.length] ?? '')
       ) {
-        this.state = 'leaked';
-        this.buffer = '';
-        return '';
+        this.reject();
+        return;
       }
     }
 
     this.state = 'clean';
-    const output = this.buffer;
     this.buffer = '';
-    return output;
   }
 
-  finish(): string {
-    if (this.state !== 'detecting') return '';
+  finish(): void {
+    if (this.state !== 'detecting') return;
     const candidate = this.buffer.trimStart().toLowerCase();
     const thinkingTagState = classifyEmptyThinkingBlockChainPrefix(candidate);
     if (
@@ -1134,14 +1131,11 @@ class LeadingProtocolTagLeakDetector {
       (candidate &&
         PROTOCOL_TAG_PREFIXES.some((prefix) => prefix.startsWith(candidate)))
     ) {
-      this.state = 'leaked';
-      this.buffer = '';
-      return '';
+      this.reject();
+      return;
     }
     this.state = 'clean';
-    const output = this.buffer;
     this.buffer = '';
-    return output;
   }
 
   reject(): void {
@@ -3794,11 +3788,13 @@ export class GeminiChat {
 
         if (protocolTagDetector.leaked) {
           pendingProtocolChunks.length = 0;
+          break;
         } else if (protocolTagDetector.hasBufferedText) {
           pendingProtocolChunks.push(chunk);
           if (pendingProtocolChunks.length > MAX_PENDING_PROTOCOL_CHUNKS) {
             protocolTagDetector.reject();
             pendingProtocolChunks.length = 0;
+            break;
           }
         } else {
           for (const pendingChunk of pendingProtocolChunks) {
@@ -3811,7 +3807,9 @@ export class GeminiChat {
         }
       }
     } catch (e) {
-      streamError = e;
+      if (!protocolTagDetector.leaked) {
+        streamError = e;
+      }
     }
 
     protocolTagDetector.finish();
