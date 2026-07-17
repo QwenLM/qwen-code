@@ -193,8 +193,11 @@ For **cross-repo lightweight reviews**, do the same with the diff GitHub hands y
 mkdir -p .qwen/tmp
 gh pr diff <pr_number> --repo <owner>/<repo> > .qwen/tmp/qwen-review-pr-<n>-diff.txt
 "${QWEN_CODE_CLI:-qwen}" review plan-diff .qwen/tmp/qwen-review-pr-<n>-diff.txt \
+  --pr <pr_number> --repo <owner>/<repo> \
   --out .qwen/tmp/qwen-review-pr-<n>-plan.json
 ```
+
+**Pass `--pr`/`--repo` only when the `pr-context` fetch above succeeded** — they put the PR identity into the plan, which makes the roster REQUIRE Agent 0 (`check-coverage` will name it if it never runs, exactly as in worktree mode). If `pr-context` failed, omit them: the run is in the context-unavailable state, Agent 0 has nothing to work from, and a roster demanding an agent nobody can brief would wedge the review.
 
 `plan-diff` and `capture-local` emit the same `diffPathAbsolute`, `chunks[]`, `files[]` and topology counts as `fetch-pr`, so Steps 3A, 3B and 7 work identically on all four review paths. Neither can decide `heavy` — that needs a tree to read the post-change file from — so no invariant agents run on a bare diff.
 

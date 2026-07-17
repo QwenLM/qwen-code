@@ -848,7 +848,15 @@ export function verificationGaps(
   const reverse = bestDelivery(reverseKeys);
   if (reverse !== 'ok') {
     gaps.push(`reverse audit — ${REVERSE_AUDIT_GAP[reverse].gap}`);
-    remediation.push(`reverse audit: ${REVERSE_AUDIT_GAP[reverse].fix}`);
+    // The fix template carries `--plan <plan>`; a literal `<plan>` pasted into a
+    // POSIX shell parses as input redirection, so the one repair round Step 6
+    // prescribes could never run. This function is handed the real path.
+    remediation.push(
+      `reverse audit: ${REVERSE_AUDIT_GAP[reverse].fix.replace(
+        '--plan <plan>',
+        `--plan ${planPath}`,
+      )}`,
+    );
   }
 
   // Step 4: verify. Required when the review posts a finding a verifier rules on —
@@ -862,7 +870,12 @@ export function verificationGaps(
     const verify = deliveryOf('verify');
     if (verify !== 'ok') {
       gaps.push(`verification — ${VERIFY_GAP[verify].gap}`);
-      remediation.push(`verification: ${VERIFY_GAP[verify].fix}`);
+      remediation.push(
+        `verification: ${VERIFY_GAP[verify].fix.replace(
+          '--plan <plan>',
+          `--plan ${planPath}`,
+        )}`,
+      );
     }
   }
 

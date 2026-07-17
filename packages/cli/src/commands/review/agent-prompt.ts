@@ -583,7 +583,12 @@ function tail(
  * newline and remains the parseable single-line form the transcripts checks read.
  */
 function inertPath(p: string): string {
-  return p.replace(/[\r\n\u2500]+/g, ' ');
+  // \p{Cc} covers every control character (newlines, tabs, ESC — a terminal
+  // control sequence in a filename must not reach a terminal either); U+2500 is
+  // the roster separator glyph; the backtick would close the Markdown code span
+  // these paths are rendered inside, letting the tail of a filename run as
+  // markup in the file the agent treats as authoritative.
+  return p.replace(/[\p{Cc}\u2500`]+/gu, ' ');
 }
 
 function invariantFileBlock(
@@ -940,7 +945,7 @@ export function buildRoleLaunchPrompt(
   // filename could open a forged block boundary. Flattened, exactly as the
   // separator label is; a path that needed the newline was never readable as a
   // one-line `read_file` argument anyway.
-  const safeFile = opts.file?.replace(/[\r\n\u2500]+/g, ' ');
+  const safeFile = opts.file === undefined ? undefined : inertPath(opts.file);
   const parts = [
     `You are review agent \`${role}\` — ${b.label}.` +
       (safeFile ? ` Your file: \`${safeFile}\`.` : ''),
@@ -1129,7 +1134,7 @@ function rosterLabel(req: RequiredAgent): string {
   // rebuild hint downstream names roles, so keep the id visible when the label
   // does not carry it.
   const label = BRIEFS[req.role]?.label ?? `role ${req.role}`;
-  const file = req.file?.replace(/[\r\n\u2500]+/g, ' ');
+  const file = req.file === undefined ? undefined : inertPath(req.file);
   return file ? `${label} — ${file}` : label;
 }
 

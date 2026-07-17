@@ -966,6 +966,34 @@ describe('the roster — who should have been here', () => {
     expect(r.ok).toBe(false); // suppressing the text never suppresses the cap
   });
 
+  it('requires Agent 0 on a lightweight plan that carries the PR identity', () => {
+    // A cross-repo review has no worktree, but it HAS a pull request — and the
+    // skill runs Agent 0 there whenever pr-context succeeded. The roster used to
+    // gate role 0 on worktree mode, so the lightweight fan-out could silently
+    // omit issue fidelity and check-coverage would bless the omission. plan-diff
+    // now writes prNumber/ownerRepo (only when pr-context succeeded), and the
+    // roster requires role 0 wherever the full identity is present.
+    const withPr = requiredAgents({
+      srcDiffLines: 100,
+      diffLines: 100,
+      files: [{ path: 'a.ts', kind: 'source', removedLines: 0 }],
+      chunks: [{ id: 1 }],
+      prNumber: '6998',
+      ownerRepo: 'QwenLM/qwen-code',
+    } as RosterPlan);
+    expect(withPr.map((r) => r.key)).toContain('0');
+
+    // Without the identity (pr-context failed → flags omitted), no role 0: a
+    // roster demanding an agent nobody can brief would wedge the run.
+    const without = requiredAgents({
+      srcDiffLines: 100,
+      diffLines: 100,
+      files: [{ path: 'a.ts', kind: 'source', removedLines: 0 }],
+      chunks: [{ id: 1 }],
+    } as RosterPlan);
+    expect(without.map((r) => r.key)).not.toContain('0');
+  });
+
   it('hands the operator exact selectors beside the human labels', () => {
     // `Test coverage matrix (whole-diff)` does not say `--role test-matrix`, and
     // a wrong guess costs a full-roster rerun. The selectors ride the report for
@@ -1333,10 +1361,14 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     // second register posted to the first reader.
     expect(gap).not.toMatch(/agent-prompt|--findings|--role/);
     const fix = r.remediation.join(' ');
+    // The REAL plan path, not a `<plan>` placeholder — pasted literally into a
+    // POSIX shell that parses as input redirection, and the repair round the
+    // skill prescribes could never run.
     expect(fix).toContain(
-      '"${QWEN_CODE_CLI:-qwen}" review agent-prompt ' +
-        '--plan <plan> --role reverse-audit --findings <file>',
+      `"\${QWEN_CODE_CLI:-qwen}" review agent-prompt ` +
+        `--plan ${p} --role reverse-audit --findings <file>`,
     );
+    expect(fix).not.toContain('<plan>');
     expect(fix).toMatch(/no round number/);
   });
 
