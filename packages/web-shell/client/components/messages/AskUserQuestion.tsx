@@ -75,6 +75,9 @@ export function AskUserQuestion({
     submittedRef.current = false;
     setCollapsed(false);
     setCurrentIdx(0);
+    // Sync the ref too so the focus effect (which runs in this same commit on a
+    // new request) reads the fresh index, not the previous request's selection.
+    selectedIdxRef.current = firstQuestion?.options.length ? 0 : null;
     setSelectedIdx(firstQuestion?.options.length ? 0 : null);
     setAnswers(
       firstQuestion && !firstQuestion.multiSelect && firstQuestion.options[0]
@@ -219,6 +222,7 @@ export function AskUserQuestion({
       // side effect inside it).
       const base = selectedIdxRef.current ?? 0;
       const next = (base + delta + total) % total;
+      selectedIdxRef.current = next;
       setSelectedIdx(next);
       if (next === current.options.length) customRef.current?.focus();
       else optionRefs.current[next]?.focus();
@@ -518,6 +522,7 @@ export function AskUserQuestion({
                           data-web-shell-ask-option
                           tabIndex={isCustomActive ? 0 : -1}
                           aria-pressed={hasCustomValue}
+                          aria-keyshortcuts={String(current.options.length + 1)}
                           onClick={() => chooseOption(current.options.length)}
                           onFocus={() => setSelectedIdx(current.options.length)}
                         >

@@ -38,10 +38,7 @@ afterEach(() => {
   container = null;
 });
 
-function render(keyboardActive?: boolean): void {
-  container = document.createElement('div');
-  document.body.appendChild(container);
-  root = createRoot(container);
+function rerender(keyboardActive?: boolean): void {
   act(() =>
     root!.render(
       <I18nProvider language="en">
@@ -53,6 +50,13 @@ function render(keyboardActive?: boolean): void {
       </I18nProvider>,
     ),
   );
+}
+
+function render(keyboardActive?: boolean): void {
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  rerender(keyboardActive);
 }
 
 function optionButtons(): HTMLButtonElement[] {
@@ -132,5 +136,35 @@ describe('ToolApproval accessibility', () => {
     pressKey(opts[1]!, 'ArrowUp');
     expect(document.activeElement).toBe(opts[0]);
     expect(opts[0]!.tabIndex).toBe(0);
+  });
+
+  it('jumps to first/last option with Home/End', () => {
+    render(undefined);
+    const opts = optionButtons();
+    expect(document.activeElement).toBe(opts[0]);
+
+    pressKey(opts[0]!, 'End');
+    expect(document.activeElement).toBe(opts[1]);
+    expect(opts[1]!.tabIndex).toBe(0);
+
+    pressKey(opts[1]!, 'Home');
+    expect(document.activeElement).toBe(opts[0]);
+    expect(opts[0]!.tabIndex).toBe(0);
+  });
+
+  it('restores the selected option when re-activated, not the safe default', () => {
+    render(undefined); // keyboardActive=true (topmost)
+    const opts = optionButtons();
+    // User moves off the default (Reject) to Proceed.
+    pressKey(opts[0]!, 'ArrowDown');
+    expect(document.activeElement).toBe(opts[1]);
+
+    // A covering panel opens (keyboardActive=false) then closes (true).
+    rerender(false);
+    rerender(true);
+
+    // Focus returns to the user's selection — it must not snap back to Reject
+    // (which would silently change what Enter confirms).
+    expect(document.activeElement).toBe(opts[1]);
   });
 });

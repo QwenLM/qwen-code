@@ -145,4 +145,59 @@ describe('AskUserQuestion accessibility', () => {
     pressKey(optionButtons()[0]!, 'Escape');
     expect(onConfirm).toHaveBeenCalledWith('req-1', 'cancel', undefined);
   });
+
+  it('jumps to first/last with Home/End', () => {
+    render(undefined);
+    const opts = optionButtons(); // [Red, Blue, "Other" trigger]
+    expect(document.activeElement).toBe(opts[0]);
+
+    pressKey(opts[0]!, 'End');
+    expect(document.activeElement).toBe(opts[2]);
+    expect(opts[2]!.tabIndex).toBe(0);
+
+    pressKey(opts[2]!, 'Home');
+    expect(document.activeElement).toBe(opts[0]);
+    expect(opts[0]!.tabIndex).toBe(0);
+  });
+
+  it('advances on rapid repeated ArrowDown without a re-render in between', () => {
+    // Regression: moveSelection must write selectedIdxRef synchronously, else a
+    // held key (repeating faster than React re-renders) reads a stale ref and
+    // the cursor sticks. Two keydowns in one act() run before any re-render.
+    render(undefined);
+    const opts = optionButtons();
+    expect(document.activeElement).toBe(opts[0]);
+
+    act(() => {
+      opts[0]!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }),
+      );
+      opts[0]!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }),
+      );
+    });
+    expect(document.activeElement).toBe(opts[2]);
+  });
+
+  it('does not treat digits as shortcuts while typing in the custom input', () => {
+    render(undefined);
+    // Reveal the "Other" input.
+    act(() => {
+      optionButtons()[2]!.click();
+    });
+    const input = container!.querySelector('input');
+    expect(input).not.toBeNull();
+
+    const event = new KeyboardEvent('keydown', {
+      key: '1',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      input!.dispatchEvent(event);
+    });
+    // isEditableTarget exempts the input: the digit is typed, not a shortcut
+    // (an unguarded handler would have called preventDefault).
+    expect(event.defaultPrevented).toBe(false);
+  });
 });

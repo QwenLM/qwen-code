@@ -234,9 +234,17 @@ export function ToolApproval({
     prevKeyboardActiveRef.current = keyboardActive;
     prevRequestIdRef.current = request.id;
     if (!keyboardActive) return;
-    if (wasActive && request.id === prevRequestId) return;
+    const requestChanged = request.id !== prevRequestId;
+    if (wasActive && !requestChanged) return;
+    // Fresh request → safe default; same request re-activated (e.g. a covering
+    // panel closed) → restore the option the user had selected rather than
+    // snapping focus back to the default and silently changing their choice.
     focusOption(
-      getSafeDefaultIndex(orderPermissionOptions(requestRef.current.options)),
+      requestChanged
+        ? getSafeDefaultIndex(
+            orderPermissionOptions(requestRef.current.options),
+          )
+        : selectedRef.current,
     );
   }, [keyboardActive, request.id, focusOption]);
 

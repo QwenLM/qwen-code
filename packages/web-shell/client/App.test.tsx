@@ -3530,6 +3530,27 @@ describe('App session callbacks', () => {
     expect(testState.latestToolApprovalKeyboardActive).toBe(true);
   });
 
+  it('marks the ask-user question overlay keyboard-active when it appears', async () => {
+    // Symmetric to the ToolApproval case: guards against askUserOverlayVisible
+    // being mis-derived (e.g. from pendingToolApproval) so the question overlay
+    // would never pull focus.
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    expect(
+      document.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+    expect(testState.latestAskUserQuestionKeyboardActive).toBe(true);
+  });
+
   it('closes the panel on Escape from outside the sidebar', async () => {
     const { container } = renderApp();
     await flush();
