@@ -189,6 +189,7 @@ describe('AgentTool', () => {
       isAgentTeamEnabled: vi.fn().mockReturnValue(false),
       getApprovalMode: vi.fn().mockReturnValue('default'),
       getModel: vi.fn().mockReturnValue('parent-model'),
+      getFastModel: vi.fn().mockReturnValue(undefined),
       getBareMode: vi.fn().mockReturnValue(false),
       isSafeMode: vi.fn().mockReturnValue(false),
       getSandbox: vi.fn().mockReturnValue(undefined),
@@ -4314,6 +4315,38 @@ describe('AgentTool', () => {
       attachSpy.mockRestore();
       writeMetaSpy.mockRestore();
       patchMetaSpy.mockRestore();
+    });
+
+    it("persists a foreground subagent's resolved model in its meta sidecar", async () => {
+      const fgSubagent: SubagentConfig = {
+        ...bgSubagent,
+        name: 'file-search',
+        background: undefined,
+        model: 'fast',
+      };
+      vi.mocked(config.getFastModel).mockReturnValue('openai:qwen3.6lf');
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(fgSubagent);
+      const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      });
+      await invocation.execute();
+
+      expect(writeMetaSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/agent-file-search-.*\.meta\.json$/),
+        expect.objectContaining({
+          persistedCliFlags: expect.objectContaining({
+            model: 'qwen3.6lf',
+          }),
+        }),
+      );
+
+      writeMetaSpy.mockRestore();
     });
 
     it.each([

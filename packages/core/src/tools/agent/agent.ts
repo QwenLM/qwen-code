@@ -112,6 +112,7 @@ import {
 } from '../../agents/agent-transcript.js';
 import type { BackgroundSlotReservation } from '../../agents/background-tasks.js';
 import { getGitBranch } from '../../utils/gitUtils.js';
+import { buildModelIdContext, resolveModelId } from '../../utils/modelId.js';
 
 // Memoize git branch per cwd for the agent-launch path. `getGitBranch`
 // shells out to `git rev-parse` synchronously; caching avoids the per-launch
@@ -591,6 +592,7 @@ function applyPersistedCliFlagOverrides(
 function capturePersistedCliFlags(
   config: Config,
   resolvedApprovalMode: ApprovalMode,
+  resolvedModel?: string,
 ): AgentPersistedCliFlags {
   return {
     approvalMode: resolvedApprovalMode,
@@ -598,11 +600,26 @@ function capturePersistedCliFlags(
     safeMode: config.isSafeMode(),
     sandbox: config.getSandbox() ?? null,
     screenReader: config.getScreenReader(),
-    model: config.getModel(),
+    model: resolvedModel ?? config.getModel(),
     maxSessionTurns: config.getMaxSessionTurns(),
     maxToolCalls: config.getMaxToolCalls(),
     maxSubagentDepth: config.getMaxSubagentDepth(),
   };
+}
+
+/**
+ * Mirrors SubagentManager.resolveModelOverride, which omits currentModel so
+ * that inherit / no override resolves to undefined; the caller then falls
+ * back to the parent's model, which is what such a subagent genuinely runs on.
+ */
+function resolveSubagentModel(
+  config: Config,
+  subagentConfig: SubagentConfig,
+): string | undefined {
+  return resolveModelId(subagentConfig.model, {
+    ...buildModelIdContext(config),
+    currentModel: undefined,
+  })?.modelId;
 }
 
 /**
@@ -2904,6 +2921,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           persistedCliFlags: capturePersistedCliFlags(
             this.config,
             resolvedApprovalMode,
+            resolveSubagentModel(this.config, subagentConfig),
           ),
           subagentName: subagentConfig.name,
           agentColor: subagentConfig.color,
@@ -3473,6 +3491,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           persistedCliFlags: capturePersistedCliFlags(
             this.config,
             resolvedApprovalMode,
+            resolveSubagentModel(this.config, subagentConfig),
           ),
           subagentName: subagentConfig.name,
           agentColor: subagentConfig.color,
