@@ -473,8 +473,9 @@ describe('SessionOverviewPanel', () => {
     expect(cardLabels()).toContain('Beta');
     // …tagged with its workspace basename…
     expect(container!.textContent).toContain('wsB');
-    // …while the primary card carries the localized "Primary" badge.
-    expect(container!.textContent).toContain('Primary');
+    // …while the primary card no longer carries a localized "Primary" word
+    // (it now shows its own basename, like every other card).
+    expect(container!.textContent).not.toContain('Primary');
   });
 
   it('does not query other workspaces on a single-workspace daemon', async () => {
