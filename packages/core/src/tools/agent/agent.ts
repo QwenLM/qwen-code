@@ -591,6 +591,7 @@ function applyPersistedCliFlagOverrides(
 function capturePersistedCliFlags(
   config: Config,
   resolvedApprovalMode: ApprovalMode,
+  modelOverride?: string,
 ): AgentPersistedCliFlags {
   return {
     approvalMode: resolvedApprovalMode,
@@ -598,7 +599,7 @@ function capturePersistedCliFlags(
     safeMode: config.isSafeMode(),
     sandbox: config.getSandbox() ?? null,
     screenReader: config.getScreenReader(),
-    model: config.getModel(),
+    model: modelOverride ?? config.getModel(),
     maxSessionTurns: config.getMaxSessionTurns(),
     maxToolCalls: config.getMaxToolCalls(),
     maxSubagentDepth: config.getMaxSubagentDepth(),
@@ -2904,6 +2905,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           persistedCliFlags: capturePersistedCliFlags(
             this.config,
             resolvedApprovalMode,
+            bgSubagent.getCore().modelConfig.model,
           ),
           subagentName: subagentConfig.name,
           agentColor: subagentConfig.color,
@@ -3473,6 +3475,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           persistedCliFlags: capturePersistedCliFlags(
             this.config,
             resolvedApprovalMode,
+            subagent.getCore().modelConfig.model,
           ),
           subagentName: subagentConfig.name,
           agentColor: subagentConfig.color,

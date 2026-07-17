@@ -1094,6 +1094,9 @@ describe('AgentTool', () => {
         execute: vi.fn().mockResolvedValue(undefined),
         result: 'Task completed successfully',
         terminateMode: AgentTerminateMode.GOAL,
+        getCore: vi.fn().mockReturnValue({
+          modelConfig: { model: 'subagent-model' },
+        }),
         getFinalText: vi.fn().mockReturnValue('Task completed successfully'),
         formatCompactResult: vi
           .fn()
@@ -2288,6 +2291,9 @@ describe('AgentTool', () => {
     beforeEach(() => {
       mockAgent = {
         execute: vi.fn().mockResolvedValue(undefined),
+        getCore: vi.fn().mockReturnValue({
+          modelConfig: { model: 'subagent-model' },
+        }),
         getFinalText: vi.fn().mockReturnValue(''),
         getExecutionSummary: vi.fn().mockReturnValue({
           rounds: 0,
@@ -2691,6 +2697,9 @@ describe('AgentTool', () => {
         execute: vi.fn().mockResolvedValue(undefined),
         result: 'Task completed successfully',
         terminateMode: AgentTerminateMode.GOAL,
+        getCore: vi.fn().mockReturnValue({
+          modelConfig: { model: 'subagent-model' },
+        }),
         getFinalText: vi.fn().mockReturnValue('Task completed successfully'),
         formatCompactResult: vi.fn().mockReturnValue('✅ Success'),
         getExecutionSummary: vi.fn().mockReturnValue({
@@ -2879,6 +2888,9 @@ describe('AgentTool', () => {
         execute: vi.fn().mockResolvedValue(undefined),
         result: 'Task completed successfully',
         terminateMode: AgentTerminateMode.GOAL,
+        getCore: vi.fn().mockReturnValue({
+          modelConfig: { model: 'subagent-model' },
+        }),
         getFinalText: vi.fn().mockReturnValue('Task completed successfully'),
         formatCompactResult: vi.fn().mockReturnValue('✅ Success'),
         getExecutionSummary: vi.fn().mockReturnValue({
@@ -3219,6 +3231,9 @@ describe('AgentTool', () => {
         execute: vi.fn(),
         result: 'Done',
         terminateMode: AgentTerminateMode.GOAL,
+        getCore: vi.fn().mockReturnValue({
+          modelConfig: { model: 'subagent-model' },
+        }),
         getFinalText: vi.fn().mockReturnValue('Done'),
         formatCompactResult: vi.fn().mockReturnValue('✅ Success'),
         getExecutionSummary: vi.fn().mockReturnValue({
@@ -3615,6 +3630,7 @@ describe('AgentTool', () => {
         // whose getEventEmitter() yields a minimal on/off surface so the
         // test-time listener hookup doesn't throw.
         getCore: vi.fn().mockReturnValue({
+          modelConfig: { model: 'subagent-model' },
           getEventEmitter: () => ({ on: vi.fn(), off: vi.fn() }),
         }),
       } as unknown as AgentHeadless;
@@ -3673,6 +3689,7 @@ describe('AgentTool', () => {
     });
 
     it('should run in background when agent definition has background: true', async () => {
+      const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
       const params: AgentParams = {
         description: 'Start monitor',
         prompt: 'Watch for changes',
@@ -3720,6 +3737,15 @@ describe('AgentTool', () => {
       ).toHaveBeenCalled();
       const display = result.returnDisplay as AgentResultDisplay;
       expect(display.status).toBe('background');
+      expect(writeMetaSpy).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          persistedCliFlags: expect.objectContaining({
+            model: 'subagent-model',
+          }),
+        }),
+      );
+      writeMetaSpy.mockRestore();
     });
 
     it('stores sanitized background results in the registry', async () => {
@@ -4296,7 +4322,7 @@ describe('AgentTool', () => {
             bare: false,
             sandbox: null,
             screenReader: false,
-            model: 'parent-model',
+            model: 'subagent-model',
             maxSessionTurns: -1,
             maxToolCalls: -1,
             maxSubagentDepth: 5,
