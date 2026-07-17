@@ -406,6 +406,7 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
       expect.any(Number),
       'POST /session/:id/heartbeat',
       200,
+      undefined,
     );
     expect(recordRequest).not.toHaveBeenCalled();
   });
@@ -445,6 +446,7 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
       expect.any(Number),
       'POST /session/:id/generate',
       200,
+      undefined,
     );
     expect(recordRequest).toHaveBeenCalledWith(expect.any(Number), 200);
   });
@@ -466,6 +468,7 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
       expect.any(Number),
       'GET /session/:id/events',
       200,
+      undefined,
     );
     expect(recordRequest).toHaveBeenCalledWith(expect.any(Number), 200);
   });
@@ -488,6 +491,7 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
         expect.any(Number),
         'GET /session/:id/events',
         statusCode,
+        undefined,
       );
       expect(recordRequest).toHaveBeenCalledWith(
         expect.any(Number),
