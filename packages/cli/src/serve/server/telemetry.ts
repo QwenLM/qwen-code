@@ -133,6 +133,15 @@ export function resolveDaemonTelemetryRoute(
   if (req.method === 'GET' && /^\/workspaces\/[^/]+\/sessions$/.test(path)) {
     return { route: 'GET /workspace/:id/sessions' };
   }
+  if (req.method === 'GET' && /^\/workspace\/[^/]+\/session-info$/.test(path)) {
+    return { route: 'GET /workspace/:id/session-info' };
+  }
+  if (
+    req.method === 'GET' &&
+    /^\/workspaces\/[^/]+\/session-info$/.test(path)
+  ) {
+    return { route: 'GET /workspace/:id/session-info' };
+  }
   const workspaceTranscript = path.match(
     /^\/workspaces\/[^/]+\/session\/([^/]+)\/transcript$/,
   );
