@@ -227,21 +227,21 @@ export function useReactToolScheduler(
         return;
       }
       void (async () => {
-        let runtimeView;
         try {
-          runtimeView = await config
+          const runtimeView = await config
             .getBaseLlmClient()
             .resolveForModel(modelOverride.slice(0, -1), {
               failClosed: true,
             });
+          await scheduler.schedule(request, signal, runtimeView);
         } catch (error) {
           debugLogger.error(
-            `Failed to resolve full-turn tool runtime: ${
+            `Full-turn tool scheduling failed: ${
               error instanceof Error ? error.message : String(error)
             }`,
           );
           const message =
-            'Full-turn model route could not be resolved. The tool was not executed.';
+            'Full-turn tool scheduling failed. The tool was not executed.';
           const requests = Array.isArray(request) ? request : [request];
           const completedCalls: CompletedToolCall[] = requests.map(
             (toolRequest) => {
@@ -279,14 +279,7 @@ export function useReactToolScheduler(
           await allToolCallsCompleteHandler(completedCalls);
           return;
         }
-        await scheduler.schedule(request, signal, runtimeView);
-      })().catch((error) => {
-        debugLogger.error(
-          `Full-turn tool scheduling failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      });
+      })();
     },
     [allToolCallsCompleteHandler, config, scheduler],
   );

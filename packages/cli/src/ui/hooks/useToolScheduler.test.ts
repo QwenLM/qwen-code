@@ -30,6 +30,7 @@ import {
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
   MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
   ApprovalMode,
+  CoreToolScheduler,
   getRuntimeContentGenerator,
   MockTool,
 } from '@qwen-code/qwen-code-core';
@@ -446,6 +447,55 @@ describe('useReactToolScheduler', () => {
         }),
       }),
     ]);
+  });
+
+  it('fails closed when full-turn tool scheduling rejects', async () => {
+    mockToolRegistry.getTool.mockReturnValue(mockTool);
+    const runtimeView = {
+      contentGenerator: {},
+      contentGeneratorConfig: {
+        model: 'vision-agent',
+        authType: 'openai',
+      },
+      model: 'vision-agent',
+    };
+    (mockConfig.getBaseLlmClient as Mock).mockReturnValue({
+      resolveForModel: vi.fn().mockResolvedValue(runtimeView),
+    });
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockRejectedValueOnce(new Error('already running'));
+    const { result } = renderScheduler();
+    const request = {
+      callId: 'rejected-full-turn-call',
+      name: 'mockTool',
+      args: {},
+    } as ToolCallRequestInfo;
+
+    act(() => {
+      result.current[1](
+        [request],
+        new AbortController().signal,
+        'vision-agent\0',
+      );
+    });
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(mockTool.execute).not.toHaveBeenCalled();
+    expect(onComplete).toHaveBeenCalledWith([
+      expect.objectContaining({
+        status: 'error',
+        request,
+        response: expect.objectContaining({
+          error: expect.objectContaining({
+            message: expect.stringContaining('tool was not executed'),
+          }),
+        }),
+      }),
+    ]);
+    scheduleSpy.mockRestore();
   });
 
   it('should handle tool not found', async () => {
