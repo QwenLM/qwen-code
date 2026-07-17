@@ -70,6 +70,7 @@ import {
   type RosterPlan,
 } from './roster.js';
 import { BRIEFS } from './agent-briefs.js';
+import { shellQuotePath } from './shell-quote.js';
 
 export interface CoverageFromTranscripts {
   /** True only when every chunk was reviewed by an agent that could and did. */
@@ -895,7 +896,7 @@ export function verificationGaps(
     remediation.push(
       `reverse audit: ${REVERSE_AUDIT_GAP[reverse].fix.replace(
         '--plan <plan>',
-        () => `--plan '${planPath}'`,
+        () => `--plan ${shellQuotePath(planPath)}`,
       )}`,
     );
   }
@@ -922,7 +923,7 @@ export function verificationGaps(
           '--plan <plan>',
           // A function replacer: a plain string gives `$&`/`$\`` special
           // meaning, and a path is not a place for replacement patterns.
-          () => `--plan '${planPath}'`,
+          () => `--plan ${shellQuotePath(planPath)}`,
         )}`,
       );
     }

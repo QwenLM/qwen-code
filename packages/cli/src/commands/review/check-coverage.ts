@@ -40,6 +40,7 @@ import {
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
 import { promptRecordDir } from './lib/prompt-record.js';
+import { shellQuotePath } from './lib/shell-quote.js';
 
 interface CheckCoverageArgs {
   plan: string;
@@ -112,7 +113,7 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         `could not have read the diff, whatever they returned. Do NOT relaunch ` +
         `them as they are: a second blind agent reads no more than the first. ` +
         `Build each prompt with \`"\${QWEN_CODE_CLI:-qwen}" review agent-prompt ` +
-        `--plan '${args.plan}' --chunk <id>\` and pass it verbatim.`,
+        `--plan ${shellQuotePath(args.plan)} --chunk <id>\` and pass it verbatim.`,
     );
   }
   // The prompt was built in code and then edited on the way to the agent. Nothing
@@ -145,7 +146,7 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         `severity bar, the finding format and this project's rules live in the ` +
         `brief it was never given, and a dimension reviewed without them cannot ` +
         `be certified clean. Build every required prompt in one call — ` +
-        `\`"\${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan '${args.plan}' --roster\` ` +
+        `\`"\${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan ${shellQuotePath(args.plan)} --roster\` ` +
         // No "the label above names the role" here: when no role was briefed at
         // all, the report collapses to one line that names none of them.
         `— and launch one agent per block it prints, verbatim. To rebuild a ` +
@@ -197,7 +198,7 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         'the harness recorded that agent opening the diff. An agent handed the ' +
         'diff with no line ranges covers nothing. Build every whole-diff ' +
         'agent\'s prompt with `"${QWEN_CODE_CLI:-qwen}" review agent-prompt ' +
-        `--plan '${args.plan}' --whole-diff\` and paste it verbatim ahead of its brief.`,
+        `--plan ${shellQuotePath(args.plan)} --whole-diff\` and paste it verbatim ahead of its brief.`,
     );
   }
   if (report.idleAgents.length > 0) {

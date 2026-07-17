@@ -1371,6 +1371,36 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     expect(verificationGaps(p, { postsFindings: true }, ENV).ok).toBe(true);
   });
 
+  it('quotes a plan path with an apostrophe so the pasted repair survives it', () => {
+    // A macOS workspace like ~/Documents/John's Projects is ordinary. A bare
+    // '…' wrap closed the quote at the apostrophe; the shared shell-quoting
+    // emits the '\'' dance, so the copy-pasted FIX parses whole.
+    const sub = join(dir, "john's-project");
+    mkdirSync(sub, { recursive: true });
+    mkdirSync(join(sub, 'subagents', 'S1'), { recursive: true });
+    const p = join(sub, 'plan.json');
+    writeFileSync(
+      p,
+      JSON.stringify({
+        diffPathAbsolute: DIFF,
+        srcDiffLines: 5000,
+        diffLines: 5000,
+        files: [{ path: 'a.ts', kind: 'source', removedLines: 0 }],
+        chunks: [{ id: 1, startLine: 1, endLine: 100 }],
+      }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    const env = { QWEN_CODE_PROJECT_DIR: sub, QWEN_CODE_SESSION_ID: 'S1' };
+
+    const r = verificationGaps(p, { postsFindings: false }, env);
+    expect(r.ok).toBe(false);
+    const fix = r.remediation.join(' ');
+    expect(fix).toContain(`--plan '${p.replace(/'/g, "'\\''")}'`);
+    // And never the naive wrap that dies at the apostrophe.
+    expect(fix).not.toContain(`--plan '${p}'`);
+  });
+
   it('flags a review that never built the reverse-audit prompt', () => {
     const p = plan(); // no reverse-audit fixture: the step was skipped
     const r = verificationGaps(p, { postsFindings: false }, ENV);

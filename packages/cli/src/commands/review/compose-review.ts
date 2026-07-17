@@ -28,6 +28,7 @@ import {
   verificationGaps,
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
+import { shellQuotePath } from './lib/shell-quote.js';
 
 export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
 
@@ -195,10 +196,10 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // and fill; pasted literally it parses as a shell redirection. The run KNOWS
   // its plan path — substitute it, and leave only the selectors (`<id>`, `<r>`)
   // that genuinely vary per agent, resolvable from the labels alongside.
-  // Single-quoted: a workspace path containing a space would otherwise split
-  // the copy-pasted repair at the space. (`<plan>` stays bare — it is the
-  // no-plan placeholder, not a path.)
-  const planRef = input.planPath ? `'${input.planPath}'` : '<plan>';
+  // Shell-quoted: a workspace path containing a space would otherwise split
+  // the copy-pasted repair at the space, and a bare '…' wrap broke on embedded
+  // apostrophes instead. (`<plan>` stays bare — a placeholder, not a path.)
+  const planRef = input.planPath ? shellQuotePath(input.planPath) : '<plan>';
 
   // Coverage is shown, not asserted. Whatever the caller listed by hand, the
   // report's own gaps are added to it — a run cannot approve past a chunk nobody
