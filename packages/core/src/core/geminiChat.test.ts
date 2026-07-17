@@ -1522,6 +1522,70 @@ describe('GeminiChat', async () => {
       }
     });
 
+    it('should surface the last empty tool result continuation after retry exhaustion', async () => {
+      vi.useFakeTimers();
+      try {
+        chat.setHistory([
+          { role: 'user', parts: [{ text: 'inspect the project' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  args: { path: '/tmp/example' },
+                },
+              },
+            ],
+          },
+        ]);
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () =>
+          streamResponse(
+            stopResponse([{ thought: true, text: 'I should keep working.' }]),
+          ),
+        );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          {
+            message: [
+              {
+                functionResponse: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  response: { output: 'file contents' },
+                },
+              },
+            ],
+          },
+          'prompt-id-tool-result-empty-response-exhausted',
+        );
+        const collecting = (async () => {
+          for await (const _ of stream) {
+            // consume stream
+          }
+        })();
+        const resultPromise = expect(collecting).rejects.toMatchObject({
+          message:
+            'Model stream ended after a tool result without visible progress.',
+          type: 'NO_TOOL_RESULT_PROGRESS',
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(35_000);
+        await resultPromise;
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(5);
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(4);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('should not retry tool result continuations that make another tool call', async () => {
       chat.setHistory([
         { role: 'user', parts: [{ text: 'inspect the project' }] },
@@ -1659,6 +1723,90 @@ describe('GeminiChat', async () => {
         role: 'model',
         parts: [{ text: 'Finished the analysis.' }],
       });
+    });
+
+    it('should not escalate thought-only MAX_TOKENS responses when max tokens are user-set', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+          authType: 'gemini',
+          model: 'test-model',
+          samplingParams: { max_tokens: 1024 },
+        });
+        chat.setHistory([
+          { role: 'user', parts: [{ text: 'inspect the project' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  args: { path: '/tmp/example' },
+                },
+              },
+            ],
+          },
+        ]);
+
+        const responses = [
+          streamResponse({
+            candidates: [
+              {
+                content: {
+                  parts: [{ thought: true, text: 'I need more tokens.' }],
+                },
+                finishReason: 'MAX_TOKENS',
+              },
+            ],
+          } as GenerateContentResponse),
+          streamResponse(stopResponse([{ text: 'Finished the analysis.' }])),
+        ];
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => responses.shift()!);
+
+        const stream = await chat.sendMessageStream(
+          'gemini-pro',
+          {
+            message: [
+              {
+                functionResponse: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  response: { output: 'file contents' },
+                },
+              },
+            ],
+          },
+          'prompt-id-tool-result-user-max-tokens',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 5_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        expect(
+          events.some(
+            (event) =>
+              event.type === StreamEventType.RETRY &&
+              event.maxOutputTokensEscalated !== undefined,
+          ),
+        ).toBe(false);
+        expect(mockLogContentRetry).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            error_type: 'NO_TOOL_RESULT_PROGRESS_MAX_TOKENS',
+            model: 'gemini-pro',
+          }),
+        );
+        expect(chat.getHistory().at(-1)).toEqual({
+          role: 'model',
+          parts: [{ text: 'Finished the analysis.' }],
+        });
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('should preserve (empty content) outside tool result continuations', async () => {
