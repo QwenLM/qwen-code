@@ -100,6 +100,94 @@ describe('SessionReferenceService', () => {
     expect(res.text).toContain('[tool: write_file — error]');
   });
 
+  it('keeps assistant text on a turn that ALSO calls a tool', async () => {
+    // An assistant turn that calls a tool is a SINGLE record carrying both the
+    // text and the functionCall parts; the paired tool_result carries the
+    // response. The assistant preamble must not be dropped.
+    const svc = makeSvc(
+      fakeResumed([
+        {
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              { text: "I'll read the config to check X" },
+              { functionCall: { name: 'read_file', args: {} } },
+            ],
+          },
+        },
+        {
+          type: 'tool_result',
+          toolCallResult: { callId: 'c1' },
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  name: 'read_file',
+                  response: { huge: 'BODY' },
+                },
+              },
+            ],
+          },
+        },
+      ]),
+    );
+    const res = await svc.resolve('s1');
+    if ('notFound' in res) throw new Error('unexpected');
+    expect(res.text).toContain("Assistant: I'll read the config to check X");
+    // exactly one tool line (from the response side), not duplicated
+    expect(res.text.match(/\[tool: read_file — ok\]/g)).toHaveLength(1);
+    expect(res.text).not.toContain('BODY');
+  });
+
+  it('emits one tool line per parallel tool call in a single turn', async () => {
+    const svc = makeSvc(
+      fakeResumed([
+        {
+          type: 'tool_result',
+          toolCallResult: { callId: 'c1' },
+          message: {
+            role: 'user',
+            parts: [
+              { functionResponse: { name: 'read_file', response: {} } },
+              { functionResponse: { name: 'grep', response: {} } },
+            ],
+          },
+        },
+      ]),
+    );
+    const res = await svc.resolve('s1');
+    if ('notFound' in res) throw new Error('unexpected');
+    expect(res.text).toContain('[tool: read_file — ok]');
+    expect(res.text).toContain('[tool: grep — ok]');
+  });
+
+  it('retains the newest turn even when it alone exceeds the budget', async () => {
+    const svc = makeSvc(
+      fakeResumed([
+        {
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'old turn' }] },
+        },
+        {
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [{ text: 'huge newest turn ' + 'y'.repeat(4000) }],
+          },
+        },
+      ]),
+    );
+    const res = await svc.resolve('s1', { budgetTokens: 50 });
+    if ('notFound' in res) throw new Error('unexpected');
+    expect(res.truncated).toBe(true);
+    expect(res.text).toContain('[earlier turns omitted]');
+    // the newest turn is still present, not collapsed to just the marker
+    expect(res.text).toContain('huge newest turn');
+    expect(res.text).not.toContain('old turn');
+  });
+
   it('tail-trims to budget and marks truncated', async () => {
     const many = Array.from({ length: 50 }, (_, i) => ({
       type: 'user',

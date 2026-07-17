@@ -72,8 +72,11 @@ export class SessionReferenceService {
 
     const kept = [...lines];
     let truncated = false;
-    while (kept.length > 0 && this.estimate(kept) > budget) {
-      kept.shift(); // drop oldest first (tail-retention)
+    // Tail-retention: drop the oldest lines first until under budget, but
+    // always keep at least the newest line so an over-budget final turn still
+    // yields content (rather than collapsing to just the omission marker).
+    while (kept.length > 1 && this.estimate(kept) > budget) {
+      kept.shift();
       truncated = true;
     }
 
@@ -108,12 +111,10 @@ export class SessionReferenceService {
   private recordsToLines(records: ChatRecord[]): string[] {
     const out: string[] = [];
     for (const rec of records) {
-      if (rec.toolCallResult || this.hasFunctionPart(rec.message)) {
-        const name = this.functionName(rec.message) ?? 'tool';
-        const status = rec.toolCallResult?.error ? 'error' : 'ok';
-        out.push(`[tool: ${name} — ${status}]`);
-        continue;
-      }
+      // User / assistant visible text. An assistant turn that also calls tools
+      // is a SINGLE record carrying both the text and the functionCall parts,
+      // so we must emit its text here rather than short-circuiting on the tool
+      // parts (which would silently drop the assistant's reasoning).
       if (rec.type === 'user') {
         const text = this.visibleText(rec.message);
         if (text) out.push(`User: ${text}`);
@@ -121,7 +122,16 @@ export class SessionReferenceService {
         const text = this.visibleText(rec.message);
         if (text) out.push(`Assistant: ${text}`);
       }
-      // system records ignored
+
+      // Tool summaries: derived ONLY from the response side (functionResponse),
+      // which carries the accurate status via `toolCallResult`. The call side
+      // (functionCall on the assistant record) is intentionally NOT summarized
+      // to avoid a duplicate, always-"ok" line. Never includes result bodies.
+      for (const name of this.functionResponseNames(rec.message)) {
+        const status = rec.toolCallResult?.error ? 'error' : 'ok';
+        out.push(`[tool: ${name} — ${status}]`);
+      }
+      // system records contribute nothing
     }
     return out;
   }
@@ -135,22 +145,14 @@ export class SessionReferenceService {
       .trim();
   }
 
-  private hasFunctionPart(message?: Content): boolean {
-    return (
-      message?.parts?.some(
-        (p: Part) =>
-          (p as FunctionCallPart).functionCall ||
-          (p as FunctionCallPart).functionResponse,
-      ) ?? false
-    );
-  }
-
-  private functionName(message?: Content): string | undefined {
-    const p = message?.parts?.find(
-      (x: Part) =>
-        (x as FunctionCallPart).functionCall ||
-        (x as FunctionCallPart).functionResponse,
-    ) as FunctionCallPart | undefined;
-    return p?.functionCall?.name ?? p?.functionResponse?.name;
+  /** Names of every `functionResponse` part in a record (parallel tool calls
+   * each yield their own line; a single tool call yields one). */
+  private functionResponseNames(message?: Content): string[] {
+    if (!message?.parts) return [];
+    return message.parts
+      .map((p: Part) => (p as FunctionCallPart).functionResponse?.name)
+      .filter(
+        (name): name is string => typeof name === 'string' && name.length > 0,
+      );
   }
 }

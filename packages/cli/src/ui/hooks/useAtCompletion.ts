@@ -454,6 +454,11 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
         // File index not ready yet; still surface non-file matches so they
         // don't have to wait on the crawler.
         const sessionSuggestions = await sessionPromise;
+        // The disk listing awaited above opens a window in which a newer
+        // keystroke may have superseded this search; drop a stale result.
+        if (cancelled) {
+          return;
+        }
         const scoped = [...mcpSuggestions, ...sessionSuggestions];
         if (scoped.length > 0) {
           if (slowSearchTimer.current) {
@@ -499,7 +504,7 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
           category: 'file' as const,
         }));
         const sessionSuggestions = await sessionPromise;
-        if (controller.signal.aborted) {
+        if (controller.signal.aborted || cancelled) {
           return;
         }
         dispatch({
@@ -515,6 +520,9 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
           // A file-search failure shouldn't swallow non-file matches we already
           // have; show those rather than dropping to an error state.
           const sessionSuggestions = await sessionPromise;
+          if (cancelled) {
+            return;
+          }
           const scoped = [...mcpSuggestions, ...sessionSuggestions];
           if (scoped.length > 0) {
             dispatch({ type: 'SEARCH_SUCCESS', payload: scoped });
