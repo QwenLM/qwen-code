@@ -41,11 +41,12 @@ interface ThoughtPart {
  * mechanical.
  *
  * Slimming rules:
- * - user / assistant visible text is kept (thoughts dropped);
+ * - user / assistant visible text is kept (thoughts dropped), including the
+ *   preamble on an assistant turn that also calls a tool;
  * - each tool call collapses to a single line `[tool: <name> — <status>]`
- *   (never the tool result body);
+ *   (never the tool result body), derived from the response side;
  * - the joined transcript is tail-retained to a fixed token budget, dropping
- *   the oldest turns first.
+ *   the oldest turns first but always keeping at least the newest line.
  */
 export class SessionReferenceService {
   private readonly sessionService: SessionService;
