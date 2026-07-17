@@ -1,6 +1,15 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import {
+  useState,
+  useEffect,
+  useCallback,
+  useMemo,
+  useRef,
+  useId,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from 'react';
 import type { PermissionRequest } from '../../adapters/types';
 import { useI18n } from '../../i18n';
+import { isEditableTarget } from '../../utils/dom';
 import { localizeToolDisplayName } from './toolFormatting';
 import styles from './AskUserQuestion.module.css';
 
@@ -19,12 +28,21 @@ interface AskUserQuestionProps {
     answers?: Record<string, string>,
   ) => void;
   variant?: 'inline' | 'floating';
+  /**
+   * Whether this question should pull keyboard focus to its first option when it
+   * becomes the topmost one. Defaults to true. Split-view panes pass false so an
+   * question in one pane doesn't steal focus from the pane the user is in; like
+   * ToolApproval, keyboard handling is focus-scoped, so it stays operable once
+   * the user tabs/clicks into it.
+   */
+  keyboardActive?: boolean;
 }
 
 export function AskUserQuestion({
   request,
   onConfirm,
   variant = 'inline',
+  keyboardActive = true,
 }: AskUserQuestionProps) {
   const { t } = useI18n();
   const questions = useMemo(
@@ -44,6 +62,13 @@ export function AskUserQuestion({
   const [customFocused, setCustomFocused] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const submittedRef = useRef(false);
+  // Roving-tabindex refs: option buttons (one per question option) plus the
+  // "Other" trigger that reveals the custom input.
+  const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const customRef = useRef<HTMLButtonElement | null>(null);
+  const selectedIdxRef = useRef<number | null>(selectedIdx);
+  selectedIdxRef.current = selectedIdx;
+  const questionTextId = useId();
 
   useEffect(() => {
     const firstQuestion = questions[0];
@@ -167,6 +192,101 @@ export function AskUserQuestion({
     [current, isMulti, selectedMulti, currentIdx, focusCustomInput],
   );
 
+  // Unified option activation for click, native Enter/Space, and digit
+  // shortcuts: the "Other" row reveals/focuses the custom input; otherwise
+  // toggle (multi) or pick (single).
+  const chooseOption = useCallback(
+    (idx: number) => {
+      if (!current) return;
+      selectedIdxRef.current = idx;
+      setSelectedIdx(idx);
+      if (idx === current.options.length) {
+        focusCustomInput();
+        return;
+      }
+      if (isMulti) handleToggle(idx);
+      else handleSelectOption(idx);
+    },
+    [current, isMulti, focusCustomInput, handleToggle, handleSelectOption],
+  );
+
+  const moveSelection = useCallback(
+    (delta: number) => {
+      if (!current) return;
+      const total = current.options.length + 1;
+      // Compute from the ref (kept in sync) so rapid key repeats advance
+      // correctly before re-render, and keep the state updater pure (no focus()
+      // side effect inside it).
+      const base = selectedIdxRef.current ?? 0;
+      const next = (base + delta + total) % total;
+      setSelectedIdx(next);
+      if (next === current.options.length) customRef.current?.focus();
+      else optionRefs.current[next]?.focus();
+    },
+    [current],
+  );
+
+  // Focus-scoped keyboard nav (fires only while focus is inside this question):
+  // arrows/j/k move between options and the "Other" row, Home/End jump to the
+  // ends, digits pick by position, Escape ignores. Enter/Space activate the
+  // focused control natively; the custom <input> keeps its own arrow/caret keys
+  // (guarded by isEditableTarget above).
+  const handleKeyDown = useCallback(
+    (e: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (isEditableTarget(e.target)) return;
+      if (!current) return;
+      const total = current.options.length + 1;
+      if (e.key === 'ArrowDown' || e.key === 'j') {
+        e.preventDefault();
+        moveSelection(1);
+      } else if (e.key === 'ArrowUp' || e.key === 'k') {
+        e.preventDefault();
+        moveSelection(-1);
+      } else if (e.key === 'Home') {
+        e.preventDefault();
+        selectedIdxRef.current = 0;
+        setSelectedIdx(0);
+        optionRefs.current[0]?.focus();
+      } else if (e.key === 'End') {
+        e.preventDefault();
+        const last = total - 1;
+        selectedIdxRef.current = last;
+        setSelectedIdx(last);
+        if (last === current.options.length) customRef.current?.focus();
+        else optionRefs.current[last]?.focus();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        handleCancel();
+      } else if (e.key >= '1' && e.key <= '9') {
+        const idx = parseInt(e.key, 10) - 1;
+        if (idx < total) {
+          e.preventDefault();
+          chooseOption(idx);
+        }
+      }
+    },
+    [current, moveSelection, handleCancel, chooseOption],
+  );
+
+  // Pull focus to the current option (or the custom input while editing) when
+  // this question becomes the topmost one or a new request arrives. See
+  // ToolApproval's matching effect for the prev-flag reasoning.
+  const prevKeyboardActiveRef = useRef(false);
+  const prevRequestIdRef = useRef(request.id);
+  const optionCountRef = useRef(current?.options.length ?? 0);
+  optionCountRef.current = current?.options.length ?? 0;
+  useEffect(() => {
+    const wasActive = prevKeyboardActiveRef.current;
+    const prevRequestId = prevRequestIdRef.current;
+    prevKeyboardActiveRef.current = keyboardActive;
+    prevRequestIdRef.current = request.id;
+    if (!keyboardActive) return;
+    if (wasActive && request.id === prevRequestId) return;
+    const idx = selectedIdxRef.current ?? 0;
+    if (idx === optionCountRef.current) customRef.current?.focus();
+    else optionRefs.current[idx]?.focus();
+  }, [keyboardActive, request.id]);
+
   if (questions.length === 0) return null;
 
   // Check which questions have answers
@@ -218,10 +338,17 @@ export function AskUserQuestion({
       className={`${styles.question} ${
         variant === 'floating' ? styles.floating : ''
       } ${collapsed ? styles.collapsed : ''}`}
+      data-web-shell-ask-panel
+      role="alertdialog"
+      aria-label={localizeToolDisplayName('ask_user_question', t)}
+      aria-labelledby={collapsed ? undefined : questionTextId}
+      onKeyDown={handleKeyDown}
     >
       {/* Header line like CLI */}
       <div className={styles.titleLine}>
-        <span className={styles.icon}>?</span>
+        <span className={styles.icon} aria-hidden="true">
+          ?
+        </span>
         <span className={styles.toolName}>
           {localizeToolDisplayName('ask_user_question', t)}
         </span>
@@ -278,7 +405,7 @@ export function AskUserQuestion({
             /* Question content */
             <>
               {/* Question text */}
-              <p className={styles.text}>
+              <p className={styles.text} id={questionTextId}>
                 {current.question}
                 {isMulti && (
                   <span className={styles.multiHint}>
@@ -289,10 +416,13 @@ export function AskUserQuestion({
               </p>
               <p className={styles.description}>{t('askUser.selectAnswer')}</p>
 
-              {/* Options list */}
+              {/* Options list — a roving-tabindex group of toggle buttons; the
+                  "Other" row is a trigger that reveals a text input (kept out of
+                  the button so interactive content isn't nested in a button). */}
               <div
                 className={styles.options}
-                onMouseLeave={() => setSelectedIdx(null)}
+                role="group"
+                aria-labelledby={questionTextId}
               >
                 {current.options.map((opt, i) => {
                   const isActive = i === selectedIdx;
@@ -301,25 +431,28 @@ export function AskUserQuestion({
                     : answers[currentIdx] === opt.label;
 
                   return (
-                    <div
+                    <button
                       key={opt.label}
+                      type="button"
+                      ref={(el) => {
+                        optionRefs.current[i] = el;
+                      }}
                       className={`${styles.option} ${
                         isActive ? styles.optionActive : ''
                       } ${isSelected ? styles.optionSelected : ''}`}
-                      onClick={() => {
-                        setSelectedIdx(i);
-                        if (isMulti) {
-                          handleToggle(i);
-                        } else {
-                          handleSelectOption(i);
-                        }
-                      }}
-                      onMouseEnter={() => setSelectedIdx(i)}
+                      data-web-shell-ask-option
+                      tabIndex={isActive ? 0 : -1}
+                      aria-pressed={isSelected}
+                      aria-keyshortcuts={String(i + 1)}
+                      onClick={() => chooseOption(i)}
+                      onFocus={() => setSelectedIdx(i)}
                     >
-                      <span className={styles.pointer}>
+                      <span className={styles.pointer} aria-hidden="true">
                         {isActive ? '›' : ' '}
                       </span>
-                      <span className={styles.optionNum}>{i + 1}</span>
+                      <span className={styles.optionNum} aria-hidden="true">
+                        {i + 1}
+                      </span>
                       <span className={styles.optionContent}>
                         <span className={styles.optionLabel}>{opt.label}</span>
                         {opt.description && (
@@ -328,7 +461,7 @@ export function AskUserQuestion({
                           </span>
                         )}
                       </span>
-                    </div>
+                    </button>
                   );
                 })}
 
@@ -341,15 +474,8 @@ export function AskUserQuestion({
                       className={`${styles.option} ${
                         isCustomActive ? styles.optionActive : ''
                       } ${hasCustomValue ? styles.optionSelected : ''}`}
-                      onClick={() => {
-                        setSelectedIdx(current.options.length);
-                        focusCustomInput();
-                      }}
-                      onMouseEnter={() =>
-                        setSelectedIdx(current.options.length)
-                      }
                     >
-                      <span className={styles.pointer}>
+                      <span className={styles.pointer} aria-hidden="true">
                         {isCustomActive ? '›' : ' '}
                       </span>
                       <span className={styles.editIcon} aria-hidden="true">
@@ -369,26 +495,35 @@ export function AskUserQuestion({
                           className={styles.customInput}
                           placeholder={t('askUser.typePlaceholder')}
                           value={customInputs[currentIdx] || ''}
+                          aria-label={t('askUser.typePlaceholder')}
                           onChange={(e) =>
                             setCustomInputs({
                               ...customInputs,
                               [currentIdx]: e.target.value,
                             })
                           }
+                          onFocus={() => setSelectedIdx(current.options.length)}
                           onBlur={() => setCustomFocused(false)}
                           autoFocus
                         />
                       ) : (
-                        <span
-                          className={`${styles.optionLabel} ${
+                        <button
+                          type="button"
+                          ref={customRef}
+                          className={`${styles.customTrigger} ${
                             customInputs[currentIdx]
                               ? ''
                               : styles.optionPlaceholder
                           }`}
+                          data-web-shell-ask-option
+                          tabIndex={isCustomActive ? 0 : -1}
+                          aria-pressed={hasCustomValue}
+                          onClick={() => chooseOption(current.options.length)}
+                          onFocus={() => setSelectedIdx(current.options.length)}
                         >
                           {customInputs[currentIdx] ||
                             t('askUser.typePlaceholder')}
-                        </span>
+                        </button>
                       )}
                     </div>
                   );

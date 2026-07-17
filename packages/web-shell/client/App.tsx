@@ -2398,30 +2398,24 @@ export function App({
     showApprovalModeDialog,
     mainView,
   ]);
-  // Once the effect above uncovers the approval, the overlay is the topmost
-  // surface but the just-unmounted panel Back button dropped focus to <body>.
-  // Move focus onto the overlay when it becomes visible so keyboard/AT users
-  // land on it. Only for ToolApproval: it drives keyboard entirely through a
-  // window listener, so focusing its (tabindex=-1) wrapper is safe and gives AT
-  // a landing spot without confirming (Enter arms first, confirms second — a
-  // focused button would confirm on the first press). AskUserQuestion instead
-  // manages its own focus across its options/input, so stealing focus to the
-  // wrapper would break its arrow-key navigation.
-  const approvalOverlayRef = useRef<HTMLDivElement | null>(null);
+  // Whether each approval overlay is the topmost (visible, uncovered) one. The
+  // overlay components consume this as `keyboardActive`: when it flips true — on
+  // appearance, or once a panel/dialog that was covering it closes — they pull
+  // keyboard focus to their own safe-default option. Focus handling now lives in
+  // ToolApproval/AskUserQuestion (their keyboard handling is focus-scoped), so
+  // the app no longer focuses the wrapper element directly.
   const toolApprovalOverlayVisible =
     pendingToolApproval !== null &&
     !activePanel &&
     modelDialogMode === null &&
     !showApprovalModeDialog &&
     mainView === 'chat';
-  const prevToolApprovalOverlayVisibleRef = useRef(toolApprovalOverlayVisible);
-  useEffect(() => {
-    const wasVisible = prevToolApprovalOverlayVisibleRef.current;
-    prevToolApprovalOverlayVisibleRef.current = toolApprovalOverlayVisible;
-    if (toolApprovalOverlayVisible && !wasVisible) {
-      approvalOverlayRef.current?.focus();
-    }
-  }, [toolApprovalOverlayVisible]);
+  const askUserOverlayVisible =
+    pendingAskUserApproval !== null &&
+    !activePanel &&
+    modelDialogMode === null &&
+    !showApprovalModeDialog &&
+    mainView === 'chat';
   const [showMemoryDialog, setShowMemoryDialog] = useState(false);
   const [showAuthDialog, setShowAuthDialog] = useState(false);
   const showAuthDialogRef = useRef(showAuthDialog);
@@ -6578,13 +6572,11 @@ export function App({
                       )}
                       {/* Only render the outer session's approval on the chat
                           view. Under a full-page view (split / scheduled tasks)
-                          it would sit hidden yet still own global keyboard
-                          shortcuts — a keypress could confirm an unseen
-                          approval. Each split pane surfaces its own approval. */}
+                          it would sit hidden and unreachable. Each split pane
+                          surfaces its own approval. `keyboardActive` tells the
+                          overlay to grab focus only when it's the topmost one. */}
                       {pendingToolApproval && mainView === 'chat' && (
                         <div
-                          ref={approvalOverlayRef}
-                          tabIndex={-1}
                           data-testid="approval-overlay"
                           className={styles.approvalOverlay}
                         >
@@ -6592,13 +6584,12 @@ export function App({
                             request={pendingToolApproval}
                             onConfirm={handleConfirm}
                             variant="floating"
+                            keyboardActive={toolApprovalOverlayVisible}
                           />
                         </div>
                       )}
                       {pendingAskUserApproval && mainView === 'chat' && (
                         <div
-                          ref={approvalOverlayRef}
-                          tabIndex={-1}
                           data-testid="approval-overlay"
                           className={styles.approvalOverlay}
                         >
@@ -6606,6 +6597,7 @@ export function App({
                             request={pendingAskUserApproval}
                             onConfirm={handleConfirm}
                             variant="floating"
+                            keyboardActive={askUserOverlayVisible}
                           />
                         </div>
                       )}

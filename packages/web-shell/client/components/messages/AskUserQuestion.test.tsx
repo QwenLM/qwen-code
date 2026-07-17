@@ -10,7 +10,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
 import type { PermissionRequest } from '../../adapters/types';
-import { ToolApproval } from './ToolApproval';
+import { AskUserQuestion } from './AskUserQuestion';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -18,9 +18,21 @@ const request: PermissionRequest = {
   id: 'req-1',
   content: [],
   options: [
-    { id: 'proceed', label: 'Proceed', kind: 'allow_once' },
-    { id: 'reject', label: 'Reject', kind: 'reject_once' },
+    { id: 'submit', label: 'Submit', kind: 'allow_once' },
+    { id: 'cancel', label: 'Cancel', kind: 'reject_once' },
   ],
+  rawInput: {
+    questions: [
+      {
+        question: 'Pick a color',
+        header: 'Color',
+        options: [
+          { label: 'Red', description: 'warm' },
+          { label: 'Blue', description: 'cool' },
+        ],
+      },
+    ],
+  },
 };
 
 let root: Root | null = null;
@@ -45,7 +57,7 @@ function render(keyboardActive?: boolean): void {
   act(() =>
     root!.render(
       <I18nProvider language="en">
-        <ToolApproval
+        <AskUserQuestion
           request={request}
           onConfirm={onConfirm}
           keyboardActive={keyboardActive}
@@ -58,8 +70,16 @@ function render(keyboardActive?: boolean): void {
 function optionButtons(): HTMLButtonElement[] {
   return Array.from(
     container!.querySelectorAll<HTMLButtonElement>(
-      '[data-web-shell-permission-option]',
+      '[data-web-shell-ask-option]',
     ),
+  );
+}
+
+function submitButton(): HTMLButtonElement | null {
+  return (
+    Array.from(container!.querySelectorAll<HTMLButtonElement>('button')).find(
+      (b) => b.textContent === 'Submit' || b.textContent === '提交',
+    ) ?? null
   );
 }
 
@@ -69,24 +89,16 @@ function pressKey(target: Element, key: string): void {
   });
 }
 
-describe('ToolApproval accessibility', () => {
-  it('exposes an alertdialog of real, focusable buttons', () => {
+describe('AskUserQuestion accessibility', () => {
+  it('exposes an alertdialog of real buttons and focuses the first option', () => {
     render(undefined);
-    const panel = container!.querySelector('[data-web-shell-permission-panel]');
+    const panel = container!.querySelector('[data-web-shell-ask-panel]');
     expect(panel?.getAttribute('role')).toBe('alertdialog');
 
+    // Two answer options + the "Other" trigger.
     const opts = optionButtons();
-    expect(opts).toHaveLength(2);
+    expect(opts).toHaveLength(3);
     expect(opts.every((o) => o.tagName === 'BUTTON')).toBe(true);
-    // Exactly one option is in the tab order (roving tabindex).
-    expect(opts.filter((o) => o.tabIndex === 0)).toHaveLength(1);
-  });
-
-  it('focuses the safe-default option when keyboardActive (the default)', () => {
-    render(undefined);
-    // Reject sorts first and is the safe default.
-    const opts = optionButtons();
-    expect(opts[0]?.getAttribute('data-option-id')).toBe('reject');
     expect(document.activeElement).toBe(opts[0]);
   });
 
@@ -97,29 +109,7 @@ describe('ToolApproval accessibility', () => {
     );
   });
 
-  it('confirms the clicked option', () => {
-    render(undefined);
-    act(() => {
-      optionButtons()[1]!.click();
-    });
-    expect(onConfirm).toHaveBeenCalledWith('req-1', 'proceed');
-  });
-
-  it('confirms by digit shortcut, scoped to the panel', () => {
-    render(undefined);
-    // '2' picks the second ordered option (proceed). Dispatched on a button so
-    // it bubbles to the panel's onKeyDown — a window-level keypress would not.
-    pressKey(optionButtons()[0]!, '2');
-    expect(onConfirm).toHaveBeenCalledWith('req-1', 'proceed');
-  });
-
-  it('rejects on Escape', () => {
-    render(undefined);
-    pressKey(optionButtons()[0]!, 'Escape');
-    expect(onConfirm).toHaveBeenCalledWith('req-1', 'reject');
-  });
-
-  it('moves focus between options with arrow keys (roving tabindex)', () => {
+  it('moves focus between options with arrow keys', () => {
     render(undefined);
     const opts = optionButtons();
     expect(document.activeElement).toBe(opts[0]);
@@ -128,9 +118,31 @@ describe('ToolApproval accessibility', () => {
     expect(document.activeElement).toBe(opts[1]);
     expect(opts[1]!.tabIndex).toBe(0);
     expect(opts[0]!.tabIndex).toBe(-1);
+  });
 
-    pressKey(opts[1]!, 'ArrowUp');
-    expect(document.activeElement).toBe(opts[0]);
-    expect(opts[0]!.tabIndex).toBe(0);
+  it('selects an option then submits the answer', () => {
+    render(undefined);
+    act(() => {
+      optionButtons()[1]!.click();
+    });
+    act(() => {
+      submitButton()!.click();
+    });
+    expect(onConfirm).toHaveBeenCalledWith('req-1', 'submit', { '0': 'Blue' });
+  });
+
+  it('picks by digit shortcut, scoped to the panel', () => {
+    render(undefined);
+    pressKey(optionButtons()[0]!, '2');
+    act(() => {
+      submitButton()!.click();
+    });
+    expect(onConfirm).toHaveBeenCalledWith('req-1', 'submit', { '0': 'Blue' });
+  });
+
+  it('ignores (cancels) on Escape', () => {
+    render(undefined);
+    pressKey(optionButtons()[0]!, 'Escape');
+    expect(onConfirm).toHaveBeenCalledWith('req-1', 'cancel', undefined);
   });
 });

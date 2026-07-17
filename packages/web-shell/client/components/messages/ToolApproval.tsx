@@ -1,8 +1,15 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import {
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+  useMemo,
+  useId,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from 'react';
 import { isAgentTool } from '@qwen-code/webui/daemon-react-sdk';
 import type { PermissionRequest } from '../../adapters/types';
 import { useI18n } from '../../i18n';
-import { isEditableTarget } from '../../utils/dom';
 import { localizeToolDisplayName } from './toolFormatting';
 import styles from './ToolApproval.module.css';
 
@@ -11,10 +18,14 @@ interface ToolApprovalProps {
   onConfirm: (id: string, selectedOption: string) => void;
   variant?: 'inline' | 'floating';
   /**
-   * Whether this instance owns the global keyboard shortcuts (Enter/Escape/j/k/
-   * digits). Defaults to true. Set false when several approvals can be mounted
-   * at once (e.g. split-view panes) so a keypress can't confirm the wrong
-   * session's request from behind or beside the focused one.
+   * Whether this approval should pull keyboard focus to its safe-default option
+   * when it becomes the topmost (visible) one — on appearance, or when a panel/
+   * dialog that was covering it closes. Defaults to true. Split-view panes pass
+   * false: each pane's approval stays visible side-by-side, so auto-focusing one
+   * would steal focus from the pane the user is working in. Keyboard handling
+   * itself is focus-scoped (an onKeyDown on the panel), so a keyboardActive=false
+   * approval is still fully operable by keyboard once the user tabs/clicks into
+   * it — it just never grabs focus on its own.
    */
   keyboardActive?: boolean;
 }
@@ -175,15 +186,17 @@ export function ToolApproval({
   const requestRef = useRef(request);
   requestRef.current = request;
   const selectedRef = useRef(selected);
+  selectedRef.current = selected;
   const submittedRef = useRef(false);
-  const interactedRef = useRef(false);
+  const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const headingId = useId();
+  const questionId = useId();
 
   useEffect(() => {
     const safeDefaultIndex = getSafeDefaultIndex(
       orderPermissionOptions(requestRef.current.options),
     );
     submittedRef.current = false;
-    interactedRef.current = false;
     selectedRef.current = safeDefaultIndex;
     setSelected(safeDefaultIndex);
   }, [request.id]);
@@ -204,68 +217,92 @@ export function ToolApproval({
     [onConfirm],
   );
 
+  const focusOption = useCallback((index: number) => {
+    optionRefs.current[index]?.focus();
+  }, []);
+
+  // Pull focus to the safe-default option when this approval becomes the
+  // topmost one — on appearance (false→true) or when a new request arrives
+  // while already active. Initializing the prev flag to false makes the first
+  // mount with keyboardActive=true count as a transition, so an approval that is
+  // already topmost on mount still focuses its default.
+  const prevKeyboardActiveRef = useRef(false);
+  const prevRequestIdRef = useRef(request.id);
+  useEffect(() => {
+    const wasActive = prevKeyboardActiveRef.current;
+    const prevRequestId = prevRequestIdRef.current;
+    prevKeyboardActiveRef.current = keyboardActive;
+    prevRequestIdRef.current = request.id;
+    if (!keyboardActive) return;
+    if (wasActive && request.id === prevRequestId) return;
+    focusOption(
+      getSafeDefaultIndex(orderPermissionOptions(requestRef.current.options)),
+    );
+  }, [keyboardActive, request.id, focusOption]);
+
+  const moveSelection = useCallback(
+    (delta: number) => {
+      const count = displayOptions.length;
+      // Compute from the ref (kept in sync) so rapid key repeats advance
+      // correctly even before React re-renders, and keep the state updater pure
+      // (no focus() side effect inside it).
+      const next = (selectedRef.current + delta + count) % count;
+      selectedRef.current = next;
+      setSelected(next);
+      focusOption(next);
+    },
+    [displayOptions.length, focusOption],
+  );
+
+  // Keyboard handling is scoped to the panel (onKeyDown), so it only fires while
+  // focus is inside this approval — a keypress can never confirm a different
+  // pane's request. Arrow/j/k move focus (roving tabindex); Enter/Space confirm
+  // the focused option natively; digits confirm by position; Escape rejects.
   const handleKeyDown = useCallback(
-    (e: KeyboardEvent) => {
-      if (e.defaultPrevented || isEditableTarget(e.target)) return;
-      const currentRequest = requestRef.current;
-      const currentOptions = orderPermissionOptions(currentRequest.options);
-      const optCount = currentOptions.length;
-      if (e.key === 'ArrowUp' || e.key === 'k') {
+    (e: ReactKeyboardEvent<HTMLDivElement>) => {
+      const count = displayOptions.length;
+      if (e.key === 'ArrowDown' || e.key === 'j') {
         e.preventDefault();
-        interactedRef.current = true;
-        setSelected((s) => {
-          const next = (s - 1 + optCount) % optCount;
-          selectedRef.current = next;
-          return next;
-        });
-      } else if (e.key === 'ArrowDown' || e.key === 'j') {
+        moveSelection(1);
+      } else if (e.key === 'ArrowUp' || e.key === 'k') {
         e.preventDefault();
-        interactedRef.current = true;
-        setSelected((s) => {
-          const next = (s + 1) % optCount;
-          selectedRef.current = next;
-          return next;
-        });
-      } else if (e.key === 'Enter') {
+        moveSelection(-1);
+      } else if (e.key === 'Home') {
         e.preventDefault();
-        if (!interactedRef.current) {
-          interactedRef.current = true;
-          return;
-        }
-        const option = currentOptions[selectedRef.current];
-        if (option) confirm(option.id);
+        selectedRef.current = 0;
+        setSelected(0);
+        focusOption(0);
+      } else if (e.key === 'End') {
+        e.preventDefault();
+        const last = count - 1;
+        selectedRef.current = last;
+        setSelected(last);
+        focusOption(last);
       } else if (e.key === 'Escape') {
         e.preventDefault();
-        const reject = currentRequest.options.find(
+        const reject = requestRef.current.options.find(
           (o) => o.kind === 'reject_once' || o.kind === 'reject_always',
         );
         if (reject) confirm(reject.id);
       } else if (e.key >= '1' && e.key <= '9') {
-        const idx = parseInt(e.key) - 1;
-        if (idx < optCount) {
+        const idx = parseInt(e.key, 10) - 1;
+        if (idx < count) {
           e.preventDefault();
-          interactedRef.current = true;
-          confirm(currentOptions[idx].id);
+          confirm(displayOptions[idx].id);
         }
       }
     },
-    [confirm],
+    [displayOptions, moveSelection, confirm, focusOption],
   );
-
-  useEffect(() => {
-    if (!keyboardActive) return;
-    const timer = setTimeout(() => {
-      window.addEventListener('keydown', handleKeyDown);
-    }, 250);
-    return () => {
-      clearTimeout(timer);
-      window.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [handleKeyDown, keyboardActive]);
 
   const isExec = isExecKind(request);
   const isAgent = isAgentTool(request.toolName);
   const command = getCommandFromRawInput(request);
+  const questionText = isAgent
+    ? t('approval.launchAgentQuestion')
+    : isExec
+      ? t('approval.execQuestion', { tool: toolName })
+      : t('approval.changeQuestion');
 
   return (
     <div
@@ -275,10 +312,18 @@ export function ToolApproval({
           : styles.approval
       }
       data-web-shell-permission-panel
+      role="alertdialog"
+      aria-labelledby={headingId}
+      aria-describedby={questionId}
+      onKeyDown={handleKeyDown}
     >
       <div className={styles.header}>
-        <span className={styles.icon}>?</span>
-        <span className={styles.name}>{toolName}</span>
+        <span className={styles.icon} aria-hidden="true">
+          ?
+        </span>
+        <span className={styles.name} id={headingId}>
+          {toolName}
+        </span>
       </div>
 
       {descriptionText && (
@@ -299,33 +344,43 @@ export function ToolApproval({
         </pre>
       ) : null}
 
-      <div className={styles.question}>
-        {isAgent
-          ? t('approval.launchAgentQuestion')
-          : isExec
-            ? t('approval.execQuestion', { tool: toolName })
-            : t('approval.changeQuestion')}
+      <div className={styles.question} id={questionId}>
+        {questionText}
       </div>
 
-      <div className={styles.options}>
+      <div className={styles.options} role="group" aria-labelledby={questionId}>
         {displayOptions.map((option, i) => {
           const isSelected = i === selected;
           const i18nKey = getOptionI18nKey(option);
           const label = i18nKey ? t(i18nKey) : option.label;
           return (
-            <div
+            <button
               key={option.id}
+              type="button"
+              ref={(el) => {
+                optionRefs.current[i] = el;
+              }}
               className={`${styles.option} ${getOptionClassName(option)} ${
                 isSelected ? styles.optionActive : ''
               }`}
               data-web-shell-permission-option
               data-option-id={option.id}
+              tabIndex={isSelected ? 0 : -1}
+              aria-keyshortcuts={String(i + 1)}
               onClick={() => confirm(option.id)}
+              onFocus={() => {
+                selectedRef.current = i;
+                setSelected(i);
+              }}
             >
-              <span className={styles.pointer}>{isSelected ? '›' : ' '}</span>
-              <span className={styles.num}>{i + 1}.</span>
+              <span className={styles.pointer} aria-hidden="true">
+                {isSelected ? '›' : ' '}
+              </span>
+              <span className={styles.num} aria-hidden="true">
+                {i + 1}.
+              </span>
               <span className={styles.label}>{label}</span>
-            </div>
+            </button>
           );
         })}
       </div>
