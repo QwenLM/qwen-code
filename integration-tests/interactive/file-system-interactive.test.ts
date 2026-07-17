@@ -81,8 +81,8 @@ describe('Interactive file system', () => {
       // append a trailing newline. Poll the file until it reflects the new
       // version instead of reading it once.
       const updated = await rig.poll(
-        () => rig.readFile(fileName).includes('1.0.1'),
-        15000,
+        () => rig.readFile(fileName).trimEnd() === '1.0.1',
+        rig.getDefaultTimeout(),
         200,
       );
       if (!updated) {
