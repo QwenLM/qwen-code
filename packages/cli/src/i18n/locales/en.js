@@ -1841,7 +1841,10 @@ export default {
   'Press Ctrl+C again to exit.': 'Press Ctrl+C again to exit.',
   'Press Ctrl+D again to exit.': 'Press Ctrl+D again to exit.',
   'Press Esc again to clear.': 'Press Esc again to clear.',
-  'Press ↑ to edit queued messages': 'Press ↑ to edit queued messages',
+  'Ctrl+Q to queue · ↑ to edit queued messages':
+    'Ctrl+Q to queue · ↑ to edit queued messages',
+  'Enter to steer · Ctrl+Q to queue': 'Enter to steer · Ctrl+Q to queue',
+  'Queue message for the next turn': 'Queue message for the next turn',
 
   // ============================================================================
   // MCP Status
@@ -2228,6 +2231,7 @@ export default {
   'Press Ctrl+Y to retry': 'Press Ctrl+Y to retry',
   'No failed request to retry.': 'No failed request to retry.',
   'to retry last request': 'to retry last request',
+  'to queue for the next turn': 'to queue for the next turn',
 
   // ============================================================================
   // Coding Plan Authentication

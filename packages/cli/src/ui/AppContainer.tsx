@@ -1860,6 +1860,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const cancelHandlerRef = useRef<(info?: CancelSubmitInfo) => void>(() => {});
   const midTurnDrainRef = useRef<(() => string[]) | null>(null);
+  const midTurnRestoreRef = useRef<((messages: string[]) => void) | null>(null);
 
   const {
     streamingState,
@@ -1899,6 +1900,7 @@ export const AppContainer = (props: AppContainerProps) => {
     logger,
     availableTerminalHeightRef,
     terminalWidthRef,
+    midTurnRestoreRef,
   );
   cancelOngoingRequestRef.current = cancelOngoingRequest;
 
@@ -2010,6 +2012,7 @@ export const AppContainer = (props: AppContainerProps) => {
     messageQueue,
     addMessage,
     popAllMessages,
+    restoreMessages,
     drainQueue,
     popNextSegment,
   } = useMessageQueue();
@@ -2018,6 +2021,7 @@ export const AppContainer = (props: AppContainerProps) => {
   // drainQueue reads the synchronous queueRef inside the hook, so it
   // stays consistent with popNextSegment even before React re-renders.
   midTurnDrainRef.current = drainQueue;
+  midTurnRestoreRef.current = restoreMessages;
 
   // Connect remote input watcher to submitQuery for bidirectional sync.
   // When an external process writes a command to the input-file,
@@ -2147,7 +2151,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(
-    (submittedValue: string) => {
+    (submittedValue: string, options?: { deferUntilIdle?: boolean }) => {
       // Route to active in-process agent if viewing a sub-agent tab.
       if (agentViewState.activeView !== 'main') {
         const agent = agentViewState.agents.get(agentViewState.activeView);
@@ -2194,6 +2198,10 @@ export const AppContainer = (props: AppContainerProps) => {
         submittedValue =
           `<system-reminder>\n${buildWorkflowSteeringNotice()}\n</system-reminder>\n\n` +
           submittedValue;
+      }
+      if (options?.deferUntilIdle) {
+        addMessage(submittedValue, true);
+        return;
       }
       if (
         streamingState === StreamingState.Responding &&
@@ -3969,7 +3977,7 @@ export const AppContainer = (props: AppContainerProps) => {
     if (isTranscriptOpenRef.current) return;
 
     // Two-phase: batch plain prompts as one turn, else pop next slash command.
-    const plainPrompts = drainQueue();
+    const plainPrompts = drainQueue(true);
     const submission =
       plainPrompts.length > 0 ? plainPrompts.join('\n\n') : popNextSegment();
     if (submission === null) return;
