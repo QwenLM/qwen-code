@@ -9,7 +9,7 @@ import { getTranslator, I18nProvider } from '../i18n';
 import { GitBranchIndicator } from './GitBranchIndicator';
 
 let container: HTMLDivElement;
-let root: Root;
+let root: Root | undefined;
 
 function render(
   props: {
@@ -33,7 +33,13 @@ function render(
 }
 
 afterEach(() => {
-  act(() => root.unmount());
+  // The localization tests below assert on getTranslator() without render(),
+  // so `root` may already be unmounted by a preceding test's afterEach — guard
+  // instead of unconditionally double-unmounting (a TypeError under React 19).
+  if (root) {
+    act(() => root.unmount());
+    root = undefined;
+  }
   container.remove();
 });
 

@@ -42,6 +42,9 @@ type UnifiedFile = {
   path: string;
   /** Sanitized version of `path` safe to drop into a `<Text>` node. */
   displayPath: string;
+  /** Sanitized pre-rename path for renames; absent otherwise. `displayPath`
+   *  is the current (post-rename) path used to address the file. */
+  oldDisplayPath?: string;
   added: number;
   removed: number;
   isBinary: boolean;
@@ -479,6 +482,16 @@ function FileRow({
         bold={selected}
       >
         {pointer}
+      </Text>
+      {file.oldDisplayPath ? (
+        <Text color={theme.text.secondary}>
+          {truncatePathStart(file.oldDisplayPath, maxPathChars)} →{' '}
+        </Text>
+      ) : null}
+      <Text
+        color={selected ? theme.text.accent : theme.text.primary}
+        bold={selected}
+      >
         {path}
       </Text>
       <Text color={theme.text.secondary}>{tag} </Text>
@@ -623,6 +636,11 @@ function perFileToUnified(
   return {
     path,
     displayPath: sanitizeFilenameForDisplay(path),
+    // Carry the pre-rename path so the interactive viewer can show `old → new`
+    // for renames (keyed/addressed by the new path).
+    oldDisplayPath: s.oldPath
+      ? sanitizeFilenameForDisplay(s.oldPath)
+      : undefined,
     added: s.added ?? 0,
     removed: s.isUntracked ? 0 : (s.removed ?? 0),
     isBinary: !!s.isBinary,
