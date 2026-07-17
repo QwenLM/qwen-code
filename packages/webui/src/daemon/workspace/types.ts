@@ -55,6 +55,10 @@ import type {
   DaemonWorkspacePreflightStatus,
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillsStatus,
+  DaemonSkillToggleResult,
+  DaemonSkillInstallRequest,
+  DaemonSkillMutationResult,
+  DaemonSkillScope,
   DaemonWorkspaceToolsStatus,
   DaemonWorkspaceSettingsStatus,
   DaemonSettingUpdateResult,
@@ -323,8 +327,19 @@ export interface DaemonWorkspaceActions {
     heatmapDays?: number;
   }): Promise<DaemonUsageDashboard>;
 
-  // Skills (read-only)
+  // Skills
   loadSkillsStatus(): Promise<DaemonWorkspaceSkillsStatus>;
+  setWorkspaceSkillEnabled(
+    skillName: string,
+    enabled: boolean,
+  ): Promise<DaemonSkillToggleResult>;
+  installWorkspaceSkill(
+    request: DaemonSkillInstallRequest,
+  ): Promise<DaemonSkillMutationResult>;
+  deleteWorkspaceSkill(
+    skillName: string,
+    scope: DaemonSkillScope,
+  ): Promise<DaemonSkillMutationResult>;
 
   // Extensions
   loadExtensionsStatus(): Promise<DaemonWorkspaceExtensionsStatus>;

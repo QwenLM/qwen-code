@@ -72,6 +72,7 @@ import {
 import { MemoryMessage } from './components/messages/MemoryMessage';
 import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
+import { SkillsManagerPage } from './components/skills/SkillsManagerPage';
 import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
 import { SplitView } from './components/SplitView';
@@ -303,13 +304,19 @@ interface PaneArtifactSnapshot {
 const BOUND_RUN_SWITCH_TIMEOUT_MS = 30_000;
 
 function availableSkillInfos(status: {
-  skills?: Array<{ status?: string; name: string; description?: string }>;
+  skills?: Array<{
+    status?: string;
+    name: string;
+    description?: string;
+    argumentHint?: string;
+  }>;
 }): SkillInfo[] {
   return (status.skills ?? [])
     .filter((skill) => skill.status === 'ok')
     .map((skill) => ({
       name: skill.name,
       description: skill.description ?? '',
+      ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -2061,16 +2068,33 @@ export function App({
   const showRetryHintRef = useRef(showRetryHint);
   showRetryHintRef.current = showRetryHint;
   const connected = connection.status === 'connected';
+  const workspaceEventSignals = useWorkspaceEventSignals();
   const [loadedSkills, setLoadedSkills] = useState<SkillInfo[]>([]);
+  const [loadedSkillsReady, setLoadedSkillsReady] = useState(false);
+  const loadedSkillsRequestRef = useRef(0);
+  const reloadLoadedSkills = useCallback(
+    async (workspaceCwd?: string) => {
+      const request = ++loadedSkillsRequestRef.current;
+      try {
+        const status =
+          workspaceCwd && workspace.client
+            ? await workspace.client
+                .workspaceByCwd(workspaceCwd)
+                .workspaceSkills()
+            : await workspaceActions.loadSkillsStatus();
+        if (request !== loadedSkillsRequestRef.current) return;
+        setLoadedSkills(availableSkillInfos(status));
+        setLoadedSkillsReady(true);
+      } catch {
+        return;
+      }
+    },
+    [workspace.client, workspaceActions],
+  );
   useEffect(() => {
     if (!connected) return;
-    workspaceActions
-      .loadSkillsStatus()
-      .then((status) => {
-        setLoadedSkills(availableSkillInfos(status));
-      })
-      .catch(() => {});
-  }, [connected, workspaceActions]);
+    void reloadLoadedSkills(connection.workspaceCwd);
+  }, [connected, connection.workspaceCwd, reloadLoadedSkills]);
 
   const [modelDialogMode, setModelDialogMode] =
     useState<ModelDialogMode | null>(null);
@@ -2116,9 +2140,26 @@ export function App({
   // chat view (message list + composer), not as a modal overlay. Only one may be
   // active at a time; null means the normal chat view is shown.
   const [activePanel, setActivePanel] = useState<
-    'settings' | 'status' | 'sessions' | 'extensions' | 'mcp' | 'plugins' | null
+    | 'settings'
+    | 'status'
+    | 'sessions'
+    | 'extensions'
+    | 'mcp'
+    | 'skills'
+    | 'plugins'
+    | null
   >(null);
   const closePanel = useCallback(() => setActivePanel(null), []);
+  const handleUseSkill = useCallback(
+    (name: string) => {
+      closePanel();
+      window.setTimeout(() => {
+        editorRef.current?.setText(`/${name} `);
+        editorRef.current?.focus();
+      }, 0);
+    },
+    [closePanel],
+  );
   // The Settings/Status panel (activePanel) and the Scheduled Tasks page
   // (mainView) are mutually-exclusive full-pane views — the latter is a
   // position:absolute overlay that would otherwise cover the former — so opening
@@ -2133,6 +2174,7 @@ export function App({
         | 'sessions'
         | 'extensions'
         | 'mcp'
+        | 'skills'
         | 'plugins',
     ) => {
       setMainView('chat');
@@ -2448,7 +2490,6 @@ export function App({
   }, []);
 
   // Refresh commands when extensions change (install/uninstall/update).
-  const workspaceEventSignals = useWorkspaceEventSignals();
   const extensionsVersionRef = useRef(
     workspaceEventSignals?.extensionsVersion ?? 0,
   );
@@ -3683,7 +3724,10 @@ export function App({
           sessionActions as typeof sessionActions & SessionActionsWithCreate
         ).clearSession();
         focusRequest = scheduleComposerFocus();
-        await clearPromise;
+        await Promise.all([
+          clearPromise,
+          reloadLoadedSkills(targetWorkspaceCwd),
+        ]);
         return true;
       } catch (error) {
         if (composerFocusRequestRef.current === focusRequest) {
@@ -3698,6 +3742,7 @@ export function App({
       closePanel,
       lockedWorkspaceCwd,
       reportError,
+      reloadLoadedSkills,
       scheduleComposerFocus,
       sessionActions,
     ],
@@ -4620,7 +4665,9 @@ export function App({
           }
           if (cmd === 'skills') {
             const skillArg = text.slice(match[0].length).trim();
-            if (skillArg) {
+            if (!skillArg || skillArg === 'detail' || skillArg === 'details') {
+              openPanel('skills');
+            } else {
               if (promptBlocked) {
                 return enqueuePrompt(
                   text,
@@ -4636,31 +4683,6 @@ export function App({
                 'Failed to send /skills command',
                 { inputAnnotations: metadata?.inputAnnotations },
               );
-            } else {
-              if (echoOrDeferLocalCommand(text, images)) return true;
-              workspaceActions
-                .loadSkillsStatus()
-                .then((status) => {
-                  const skills = availableSkillInfos(status);
-                  setLoadedSkills(skills);
-                  if (skills.length === 0) {
-                    store.dispatch([
-                      { type: 'status', text: t('skills.none') },
-                    ]);
-                  } else {
-                    const list = skills.map((s) => `- ${s.name}`).join('\n');
-                    store.dispatch([
-                      {
-                        type: 'status',
-                        text: `${t('skills.available')}\n\n${list}`,
-                      },
-                    ]);
-                  }
-                  resumeChatBottomFollow('smooth');
-                })
-                .catch((error: unknown) => {
-                  reportError(error, 'Failed to load skills');
-                });
             }
             return true;
           }
@@ -5635,8 +5657,31 @@ export function App({
   }, [modelDialogMode, showFallbacksDialog, showAuthDialog]);
 
   const commands = useMemo(() => {
+    const previousSkillNames = new Set(
+      (connection.skills ?? []).map((skill) => skill.toLowerCase()),
+    );
+    const retainedCommands = loadedSkillsReady
+      ? (connection.commands ?? []).filter(
+          (command) =>
+            command.source !== 'skill' &&
+            !previousSkillNames.has(command.name.toLowerCase()),
+        )
+      : (connection.commands ?? []);
+    const refreshedSkillCommands = loadedSkillsReady
+      ? loadedSkills.map((skill) => ({
+          name: skill.name,
+          description: skill.description,
+          ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),
+          source: 'skill',
+          displayCategory: 'skill' as const,
+        }))
+      : [];
     return localizeBuiltinDescriptions(
-      mergeCommands(connection.commands ?? [], getLocalCommands(t)),
+      mergeCommands(
+        retainedCommands,
+        refreshedSkillCommands,
+        getLocalCommands(t),
+      ),
       t,
     )
       .filter(
@@ -5651,7 +5696,14 @@ export function App({
           description: t(skillKey),
         };
       });
-  }, [connection.commands, hiddenCommands, t]);
+  }, [
+    connection.commands,
+    connection.skills,
+    hiddenCommands,
+    loadedSkills,
+    loadedSkillsReady,
+    t,
+  ]);
 
   const welcomeHeaderProps = useMemo(
     () => ({
@@ -6233,15 +6285,18 @@ export function App({
                         ? t('daemon.title')
                         : activePanel === 'extensions'
                           ? t('extensions.manage.title')
-                          : activePanel === 'mcp'
-                            ? t('mcp.title')
-                            : activePanel === 'plugins'
+                        : activePanel === 'mcp'
+                          ? t('mcp.title')
+                          : activePanel === 'skills'
+                            ? t('skills.title')
+                          : activePanel === 'plugins'
                               ? t('plugins.title')
                               : t('sessionsOverview.title')
                   }
                 >
                   {activePanel !== 'extensions' &&
                     activePanel !== 'mcp' &&
+                    activePanel !== 'skills' &&
                     activePanel !== 'plugins' && (
                     <div className={styles.panelHeader}>
                     <button
@@ -6356,6 +6411,11 @@ export function App({
                           closePanel();
                         }}
                       />
+                    ) : activePanel === 'skills' ? (
+                      <SkillsManagerPage
+                        onClose={closePanel}
+                        onUseSkill={handleUseSkill}
+                      />
                     ) : activePanel === 'plugins' ? (
                       <PluginManagerPage
                         mcpMessage={mcpDialogMessage}
@@ -6368,6 +6428,7 @@ export function App({
                           }
                         }}
                         onClose={closePanel}
+                        onUseSkill={handleUseSkill}
                         initialFocusRef={pluginTabRef}
                       />
                     ) : (

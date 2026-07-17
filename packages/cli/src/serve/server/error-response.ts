@@ -169,7 +169,10 @@ export function sendBridgeError(
   if (err instanceof WorkspaceSkillNotToggleableError) {
     res.status(409).json({
       error: err.message,
-      code: 'skill_not_toggleable',
+      code:
+        err.reason === 'inactive_extension'
+          ? 'skill_inactive_extension'
+          : 'skill_not_toggleable',
       skillName: err.skillName,
       reason: err.reason,
       ...(err.lockedScope ? { lockedScope: err.lockedScope } : {}),
