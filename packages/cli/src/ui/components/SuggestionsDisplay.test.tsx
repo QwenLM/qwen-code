@@ -171,6 +171,66 @@ describe('SuggestionsDisplay', () => {
   });
 });
 
+describe('SuggestionsDisplay tabs', () => {
+  const mixed = [
+    { label: 'a.ts', value: 'a.ts', category: 'file' as const },
+    { label: 'Fix bug', value: 'session:id-1', category: 'session' as const },
+  ];
+
+  it('shows a tab bar when multiple categories are present', () => {
+    const { lastFrame } = render(
+      <SuggestionsDisplay
+        suggestions={mixed}
+        activeIndex={0}
+        isLoading={false}
+        width={80}
+        scrollOffset={0}
+        userInput=""
+        mode="reverse"
+        activeCategory="all"
+        availableCategories={['all', 'file', 'session']}
+      />,
+    );
+    expect(lastFrame()).toContain('Files');
+    expect(lastFrame()).toContain('Sessions');
+  });
+
+  it('filters rows to the active category', () => {
+    const { lastFrame } = render(
+      <SuggestionsDisplay
+        suggestions={mixed}
+        activeIndex={0}
+        isLoading={false}
+        width={80}
+        scrollOffset={0}
+        userInput=""
+        mode="reverse"
+        activeCategory="session"
+        availableCategories={['all', 'file', 'session']}
+      />,
+    );
+    expect(lastFrame()).toContain('Fix bug');
+    expect(lastFrame()).not.toContain('a.ts');
+  });
+
+  it('hides the tab bar for single-category (file-only) completion', () => {
+    const { lastFrame } = render(
+      <SuggestionsDisplay
+        suggestions={[mixed[0]]}
+        activeIndex={0}
+        isLoading={false}
+        width={80}
+        scrollOffset={0}
+        userInput=""
+        mode="reverse"
+        activeCategory="all"
+        availableCategories={['all', 'file']}
+      />,
+    );
+    expect(lastFrame()).not.toContain('Sessions');
+  });
+});
+
 describe('normalizeDescription', () => {
   it('collapses all whitespace runs into single spaces and trims', () => {
     expect(normalizeDescription('  a\n\nb\t c  ')).toBe('a b c');
