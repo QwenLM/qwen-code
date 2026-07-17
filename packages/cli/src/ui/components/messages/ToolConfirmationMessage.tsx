@@ -6,6 +6,9 @@
 
 import type React from 'react';
 import { useEffect, useState } from 'react';
+import { promises as fs } from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { Box, Text } from 'ink';
 import { DiffRenderer } from './DiffRenderer.js';
 import { RenderInline } from '../../utils/InlineMarkdownRenderer.js';
@@ -26,6 +29,7 @@ import type { RadioSelectItem } from '../shared/RadioButtonSelect.js';
 import { RadioButtonSelect } from '../shared/RadioButtonSelect.js';
 import { MaxSizedBox } from '../shared/MaxSizedBox.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
+import { useLaunchEditor } from '../../hooks/useLaunchEditor.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
 import { theme } from '../../semantic-colors.js';
 import { t } from '../../../i18n/index.js';
@@ -103,11 +107,42 @@ export const ToolConfirmationMessage: React.FC<
 
   const isTrustedFolder = config.isTrustedFolder();
 
+  const launchEditor = useLaunchEditor();
+  const [planViewError, setPlanViewError] = useState<string | null>(null);
+
+  // #7001: a long plan can exceed the confirmation dialog's height budget and
+  // get truncated (with a "... N more lines not shown ..." cue since #6882),
+  // yet the user is asked to approve it. `o` writes the FULL plan to a temp
+  // file and opens it in the configured editor so the decision is informed;
+  // the dialog stays open (nothing is confirmed) while the user reads.
+  const openFullPlanInEditor = () => {
+    if (confirmationDetails.type !== 'plan') return;
+    setPlanViewError(null);
+    const openPlan = async () => {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-plan-'));
+      const planPath = path.join(dir, 'plan.md');
+      await fs.writeFile(planPath, confirmationDetails.plan);
+      await launchEditor(planPath);
+    };
+    void openPlan().catch((err: unknown) => {
+      setPlanViewError(err instanceof Error ? err.message : String(err));
+    });
+  };
+
   useKeypress(
     (key) => {
       if (!isFocused) return;
       if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
         handleConfirm(ToolConfirmationOutcome.Cancel);
+        return;
+      }
+      if (
+        key.name === 'o' &&
+        !key.ctrl &&
+        !key.meta &&
+        confirmationDetails.type === 'plan'
+      ) {
+        openFullPlanInEditor();
       }
     },
     { isActive: isFocused },
@@ -347,12 +382,15 @@ export const ToolConfirmationMessage: React.FC<
       value: ToolConfirmationOutcome.Cancel,
     });
 
-    const planHeight = compactMode
+    // Reserve one row for the "o open full plan" hint below the plan body.
+    const rawPlanHeight = compactMode
       ? Math.min(
           availableBodyContentHeight() ?? COMPACT_BODY_MAX_LINES,
           COMPACT_BODY_MAX_LINES,
         )
       : availableBodyContentHeight();
+    const planHeight =
+      rawPlanHeight === undefined ? undefined : Math.max(rawPlanHeight - 1, 1);
     bodyContent = (
       <Box flexDirection="column" paddingX={1} marginLeft={1}>
         <MarkdownDisplay
@@ -368,6 +406,17 @@ export const ToolConfirmationMessage: React.FC<
           // See #6867.
           enforceHeightBudget
         />
+        {/* The plan can be height-truncated above, and the user is about to
+            approve it — always offer a way to read the WHOLE thing. See #7001. */}
+        {planViewError ? (
+          <Text color={theme.status.error} wrap="truncate">
+            {planViewError}
+          </Text>
+        ) : (
+          <Text color={theme.text.secondary} wrap="truncate">
+            {t('o open full plan in editor')}
+          </Text>
+        )}
       </Box>
     );
   } else if (confirmationDetails.type === 'info') {
