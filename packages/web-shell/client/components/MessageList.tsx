@@ -2344,6 +2344,7 @@ export const MessageList = memo(
     const pendingOverflowFrame = useRef<number | undefined>(undefined);
     catchingUpRef.current = catchingUp;
     const containerRef = useRef<HTMLDivElement>(null);
+    const olderHistoryRetryBlocked = useRef(false);
     const [olderHistoryAnchor, setOlderHistoryAnchor] = useState<{
       scrollHeight: number;
       scrollTop: number;
@@ -2360,6 +2361,10 @@ export const MessageList = memo(
       olderHistoryLoadInFlight.current = false;
       setOlderHistoryAnchor(null);
     }, [olderHistoryAnchor]);
+
+    useEffect(() => {
+      if (!hasOlderHistory) olderHistoryRetryBlocked.current = false;
+    }, [hasOlderHistory]);
 
     const reportCanScrollToBottom = useCallback(() => {
       const el = containerRef.current;
@@ -2934,31 +2939,36 @@ export const MessageList = memo(
       performScrollToRow(idx + headerOffset, pending);
     }, [visibleItems, headerOffset, performScrollToRow]);
 
-    const loadOlderHistory = useCallback(async () => {
-      const el = containerRef.current;
-      if (
-        !el ||
-        !onLoadOlderHistory ||
-        loadingOlderHistory ||
-        olderHistoryLoadInFlight.current
-      ) {
-        return;
-      }
-      olderHistoryLoadInFlight.current = true;
-      const previousHeight = el.scrollHeight;
-      const previousTop = el.scrollTop;
-      followPausedByUserRef.current = true;
-      try {
-        await onLoadOlderHistory();
-        setOlderHistoryAnchor({
-          scrollHeight: previousHeight,
-          scrollTop: previousTop,
-        });
-      } catch (error) {
-        olderHistoryLoadInFlight.current = false;
-        throw error;
-      }
-    }, [loadingOlderHistory, onLoadOlderHistory]);
+    const loadOlderHistory = useCallback(
+      async (allowRetry = false) => {
+        const el = containerRef.current;
+        if (
+          !el ||
+          !onLoadOlderHistory ||
+          loadingOlderHistory ||
+          olderHistoryLoadInFlight.current ||
+          (olderHistoryRetryBlocked.current && !allowRetry)
+        ) {
+          return;
+        }
+        olderHistoryRetryBlocked.current = false;
+        olderHistoryLoadInFlight.current = true;
+        const previousHeight = el.scrollHeight;
+        const previousTop = el.scrollTop;
+        followPausedByUserRef.current = true;
+        try {
+          await onLoadOlderHistory();
+          setOlderHistoryAnchor({
+            scrollHeight: previousHeight,
+            scrollTop: previousTop,
+          });
+        } catch {
+          olderHistoryRetryBlocked.current = true;
+          olderHistoryLoadInFlight.current = false;
+        }
+      },
+      [loadingOlderHistory, onLoadOlderHistory],
+    );
 
     // Rules 2 & 3: detect scroll direction to toggle follow mode.
     // Runs synchronously in the scroll handler — no rAF needed since
@@ -2968,7 +2978,7 @@ export const MessageList = memo(
       if (!el) return;
       const curr = el.scrollTop;
       if (hasOlderHistory && curr <= LOAD_OLDER_HISTORY_THRESHOLD_PX) {
-        void loadOlderHistory();
+        void loadOlderHistory(true);
       }
       if (scrollCooldown.current) {
         lastScrollTop.current = curr;
@@ -3048,6 +3058,22 @@ export const MessageList = memo(
     useEffect(() => {
       const el = getScrollElement();
       if (!el) return;
+      const retryOlderHistoryAtTop = () => {
+        if (
+          olderHistoryRetryBlocked.current &&
+          el.scrollTop <= LOAD_OLDER_HISTORY_THRESHOLD_PX
+        ) {
+          void loadOlderHistory(true);
+        }
+      };
+      const markFromWheel = (event: WheelEvent) => {
+        markUserScrollIntent();
+        if (event.deltaY < 0) retryOlderHistoryAtTop();
+      };
+      const markFromTouch = () => {
+        markUserScrollIntent();
+        retryOlderHistoryAtTop();
+      };
       const markFromPointer = (event: PointerEvent) => {
         const rect = el.getBoundingClientRect();
         const scrollbarEdge = 20;
@@ -3069,21 +3095,28 @@ export const MessageList = memo(
           event.key === ' '
         ) {
           markUserScrollIntent();
+          if (
+            event.key === 'ArrowUp' ||
+            event.key === 'PageUp' ||
+            event.key === 'Home'
+          ) {
+            retryOlderHistoryAtTop();
+          }
         }
       };
-      el.addEventListener('wheel', markUserScrollIntent, { passive: true });
-      el.addEventListener('touchstart', markUserScrollIntent, {
+      el.addEventListener('wheel', markFromWheel, { passive: true });
+      el.addEventListener('touchstart', markFromTouch, {
         passive: true,
       });
       el.addEventListener('pointerdown', markFromPointer, { passive: true });
       el.addEventListener('keydown', markFromKey, { passive: true });
       return () => {
-        el.removeEventListener('wheel', markUserScrollIntent);
-        el.removeEventListener('touchstart', markUserScrollIntent);
+        el.removeEventListener('wheel', markFromWheel);
+        el.removeEventListener('touchstart', markFromTouch);
         el.removeEventListener('pointerdown', markFromPointer);
         el.removeEventListener('keydown', markFromKey);
       };
-    }, [getScrollElement, markUserScrollIntent]);
+    }, [getScrollElement, loadOlderHistory, markUserScrollIntent]);
 
     useEffect(() => {
       const el = getScrollElement();

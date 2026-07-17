@@ -2051,6 +2051,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       loading: true,
       capacityReached: false,
     });
+    let terminalFailure = false;
     try {
       const page = await activeSession.client.getSessionTranscriptPage(
         activeSession.sessionId,
@@ -2071,6 +2072,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         return;
       }
       if (page.partial || page.replayError) {
+        terminalFailure = true;
         throw new Error(
           page.replayError ?? 'Earlier session history was only partially read',
         );
@@ -2129,11 +2131,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       ) {
         return;
       }
-      history.hasMore = false;
+      const retryable =
+        !terminalFailure &&
+        (!(error instanceof DaemonHttpError) ||
+          error.status >= 500 ||
+          error.status === 408 ||
+          error.status === 429);
+      history.hasMore = retryable;
       history.loading = false;
       history.capacityReached = false;
       setTranscriptHistoryState({
-        hasMore: false,
+        hasMore: retryable,
         loading: false,
         capacityReached: false,
       });
@@ -2144,8 +2152,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         code: 'daemon.transcript_history.failed',
         message: 'Failed to load earlier session history',
         debugMessage: error instanceof Error ? error.message : String(error),
-        recoverable: true,
+        recoverable: retryable,
       });
+      throw error;
     }
   }, [addNotice, dismissNotice, maxBlocks, store]);
   const transcriptHistoryValue = useMemo<DaemonTranscriptHistory>(() => {

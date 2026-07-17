@@ -344,6 +344,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_organization',
       'session_export',
       'session_transcript',
+      'session_transcript_pagination',
       'mcp_guardrails',
       'workspace_mcp_manage',
       'mcp_guardrail_events',
