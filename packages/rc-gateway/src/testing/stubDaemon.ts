@@ -21,6 +21,8 @@ export interface StubDaemon {
   createdSessionCount: number;
   /** Body of the most recent POST /session request. */
   lastCreateSessionBody: unknown;
+  /** Body of the most recent POST /session/:id/prompt request. */
+  lastPromptBody: unknown;
   /**
    * Start/end wall-clock timestamps (ms, `Date.now()`) for every
    * POST /session/:id/prompt call the stub has served, in completion order.
@@ -89,6 +91,7 @@ export async function startStubDaemon(
     lastEndedSessionId: undefined as string | undefined,
     createdSessionCount: 0,
     lastCreateSessionBody: undefined as unknown,
+    lastPromptBody: undefined as unknown,
     promptCallLog: [] as Array<{
       sessionId: string;
       startedAt: number;
@@ -177,6 +180,7 @@ export async function startStubDaemon(
 
   app.post('/session/:id/prompt', (req, res) => {
     const status = opts.promptStatus ?? 200;
+    state.lastPromptBody = req.body;
     const startedAt = Date.now();
     const respond = () => {
       state.promptCallLog.push({
@@ -254,6 +258,9 @@ export async function startStubDaemon(
     },
     get lastCreateSessionBody() {
       return state.lastCreateSessionBody;
+    },
+    get lastPromptBody() {
+      return state.lastPromptBody;
     },
     get promptCallLog() {
       return state.promptCallLog;

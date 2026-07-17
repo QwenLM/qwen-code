@@ -55,6 +55,7 @@ export class SessionSpawner implements AgentSpawner {
     const session = await this.deps.daemon.createOrAttachSession({
       sessionScope: 'thread',
       ...(req.model !== undefined ? { modelServiceId: req.model } : {}),
+      ...(req.cwd ? { workspaceCwd: req.cwd } : {}),
     });
     const sessionId = session.sessionId;
     const record = await this.deps.registry.register({
@@ -78,11 +79,21 @@ export class SessionSpawner implements AgentSpawner {
       let promptText = req.schema
         ? `${req.prompt}\n\nReply with ONLY JSON conforming to:\n${JSON.stringify(req.schema)}`
         : req.prompt;
+      // No system-prompt field exists on CreateSessionRequest/PromptRequest,
+      // so fold systemContext into the prompt text itself — mirroring how
+      // HeadlessSpawner combines systemContext with the task (spawner.ts).
+      promptText = req.systemContext
+        ? `${req.systemContext}\n\n${promptText}`
+        : promptText;
       let lastError = '';
       for (let attempt = 0; attempt < attempts; attempt++) {
-        const turn = await this.deps.daemon.prompt(sessionId, {
-          prompt: [{ type: 'text', text: promptText }],
-        });
+        const turn = await this.deps.daemon.prompt(
+          sessionId,
+          {
+            prompt: [{ type: 'text', text: promptText }],
+          },
+          req.signal,
+        );
         tokens += extractTokens(turn);
         const text = extractText(turn);
         if (!req.schema) return { text, tokens };
