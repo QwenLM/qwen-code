@@ -94,6 +94,9 @@ const DiffRow: React.FC<DiffRowProps> = ({
           <Text color={theme.text.primary}>{'  '}</Text>
           <Text color={theme.text.secondary}>{marker}</Text>
           <Text color={theme.text.primary}>{'  '}</Text>
+          {row.oldPath ? (
+            <Text color={theme.text.secondary}>{row.oldPath} → </Text>
+          ) : null}
           <Text color={theme.text.primary}>{row.filename}</Text>
           <Text color={theme.text.secondary}> {suffix}</Text>
         </Text>
@@ -116,6 +119,9 @@ const DiffRow: React.FC<DiffRowProps> = ({
         <Text color={theme.text.primary}> </Text>
         <Text color={theme.status.error}>-{removed}</Text>
         <Text color={theme.text.primary}>{'  '}</Text>
+        {row.oldPath ? (
+          <Text color={theme.text.secondary}>{row.oldPath} → </Text>
+        ) : null}
         <Text color={theme.text.primary}>{row.filename}</Text>
         {suffix && <Text color={theme.text.secondary}> {suffix}</Text>}
       </Text>

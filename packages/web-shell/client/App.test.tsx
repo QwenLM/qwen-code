@@ -391,6 +391,18 @@ vi.mock('./components/dialogs/ModelDialog', async () => {
   };
 });
 
+// The /diff intercept opens this dialog; render it through the (mocked)
+// DialogShell so tests can detect it via [data-testid="dialog-shell"] without
+// exercising the dialog's diff-fetching hooks.
+vi.mock('./components/dialogs/GitDiffDialog', async () => {
+  const React = await import('react');
+  const { DialogShell } = await import('./components/dialogs/DialogShell');
+  return {
+    GitDiffDialog: () =>
+      React.createElement(DialogShell, null, 'changes dialog'),
+  };
+});
+
 // Render DialogShell as an observable container so tests can detect an open
 // sub-dialog (model picker, approval-mode picker) via [data-testid="dialog-shell"].
 vi.mock('./components/dialogs/DialogShell', async () => {
@@ -3618,6 +3630,22 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
     expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+  });
+
+  it('opens the Changes dialog for /diff and does not forward it to the agent', async () => {
+    // /diff is intercepted locally — it opens the working-tree Changes dialog
+    // rather than being forwarded to the daemon/agent as a prompt.
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/diff';
+    await clickSubmit(container);
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="dialog-shell"]'),
+    ).not.toBeNull();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
   });
 
   it('moves focus to the approval overlay when it appears', async () => {

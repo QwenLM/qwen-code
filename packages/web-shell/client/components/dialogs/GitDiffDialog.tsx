@@ -198,6 +198,12 @@ function DiffHunks({ hunks, path }: { hunks: DaemonDiffHunk[]; path: string }) {
     );
   }
 
+  // null while the rows are first built and again while re-tokenizing after a
+  // theme switch; show a placeholder instead of an empty, jumpily-resized box.
+  if (rows === null) {
+    return <div className={styles.filePlaceholder}>{t('gitDiff.loading')}</div>;
+  }
+
   return (
     <div className={styles.diffLines}>
       {(rows ?? []).map((row, index) => (
@@ -388,7 +394,10 @@ export function GitDiffDialog({
       <div className={styles.fileList}>
         {diff.files.map((file) => (
           <DiffFileRow
-            key={file.path}
+            // Key by workspace + path so switching workspace remounts the row
+            // instead of reusing another workspace's hunks/open state for a
+            // path both workspaces share.
+            key={`${workspaceCwd}:${file.path}`}
             workspaceCwd={workspaceCwd}
             file={file}
           />
