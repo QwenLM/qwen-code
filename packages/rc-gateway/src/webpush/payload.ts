@@ -54,6 +54,15 @@ export const AGENT_EVENT_KINDS: Record<string, string> = {
 };
 
 /**
+ * Workflow SSE event type → notification kind. ONLY the two terminal-of-note
+ * events map; started/phase/cancelled are stream-only (design: two kinds).
+ */
+export const WORKFLOW_EVENT_KINDS: Record<string, string> = {
+  workflow_completed: 'workflow.completed',
+  workflow_failed: 'workflow.failed',
+};
+
+/**
  * Map a daemon event to a metadata-only push payload, or null if the event is
  * not notifiable this cycle. `data` is read defensively with optional chaining;
  * only whitelisted, non-sensitive fields ever reach the payload.
@@ -80,6 +89,24 @@ export function buildPayload(
       sessionId: ctx.sessionId,
       ...(ctx.sessionName ? { sessionName: ctx.sessionName } : {}),
       summary: truncate(`Agent ${status}: ${agentType}`),
+      url: sessionUrl(ctx.sessionId),
+    };
+  }
+
+  const workflowKind = WORKFLOW_EVENT_KINDS[event.type];
+  if (workflowKind !== undefined) {
+    const name =
+      typeof data.name === 'string' && data.name.length > 0
+        ? data.name
+        : 'workflow';
+    const status =
+      typeof data.status === 'string' ? data.status : event.type.slice(9);
+    return {
+      v: 1,
+      kind: workflowKind,
+      sessionId: ctx.sessionId,
+      ...(ctx.sessionName ? { sessionName: ctx.sessionName } : {}),
+      summary: truncate(`Workflow ${status}: ${name}`),
       url: sessionUrl(ctx.sessionId),
     };
   }

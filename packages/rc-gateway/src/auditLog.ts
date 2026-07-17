@@ -111,7 +111,9 @@ export type AuditAction =
   | 'agent_spawned'
   | 'agent_message_sent'
   | 'agent_cancelled'
-  | 'hook_ingest_rejected';
+  | 'hook_ingest_rejected'
+  | 'workflow_started'
+  | 'workflow_cancelled';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -176,6 +178,8 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'agent_message_sent',
   'agent_cancelled',
   'hook_ingest_rejected',
+  'workflow_started',
+  'workflow_cancelled',
 ];
 
 export interface AuditEntry {

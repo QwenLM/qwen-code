@@ -46,6 +46,24 @@ export interface IdleRateLimitState {
   max: number;
 }
 
+/** The four workflow lifecycle SSE event types (wire-protocol registry rows). */
+export type WorkflowLifecycleEventType =
+  | 'workflow_started'
+  | 'workflow_completed'
+  | 'workflow_failed'
+  | 'workflow_cancelled';
+
+/** Payload of a workflow lifecycle frame (design: `{ runId, name, scriptHash,
+ * status, agentCount, tokensSpent }`). Never carries the script source. */
+export interface WorkflowEventPayload {
+  runId: string;
+  name: string;
+  scriptHash: string;
+  status: string;
+  agentCount: number;
+  tokensSpent: number;
+}
+
 /** The five lifecycle SSE event types (wire-protocol SSE registry rows). */
 export type AgentLifecycleEventType =
   | 'agent_spawned'
@@ -125,6 +143,18 @@ export type OwnerEvent =
       toolName?: string;
       payload: unknown;
       dropped?: number;
+    }
+  | {
+      /** Workflow lifecycle frame (add-workflow-orchestration). */
+      type: WorkflowLifecycleEventType;
+      workflow: WorkflowEventPayload;
+    }
+  | {
+      /** The running workflow called `phase(title)`. Owner stream only. */
+      type: 'workflow_phase';
+      runId: string;
+      phase: string;
+      phaseIndex?: number;
     };
 
 export type OwnerEventHandler = (event: OwnerEvent) => void;

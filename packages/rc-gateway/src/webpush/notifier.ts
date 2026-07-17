@@ -63,6 +63,8 @@ export const KIND_SCOPE: Record<string, RcScope> = {
   'agent.failed': SESSION_READ,
   'agent.blocked': SESSION_READ,
   'agent.cancelled': SESSION_READ,
+  'workflow.completed': SESSION_READ,
+  'workflow.failed': SESSION_READ,
 };
 
 /**
