@@ -2239,6 +2239,15 @@ export class GeminiChat {
           (cgConfig?.samplingParams?.max_tokens !== undefined &&
             cgConfig?.samplingParams?.max_tokens !== null) ||
           parsedEnvMaxTokens !== undefined;
+        const effectiveInitialMaxOutputTokens =
+          params.config?.maxOutputTokens ?? outputCeiling;
+        const escalatedLimit = clampOutputTokensToWindow(
+          OUTPUT_TOKEN_CEILING,
+          contextWindowForClamp,
+          promptTokensForClamp,
+        );
+        const shouldEscalateMaxOutputTokens =
+          effectiveInitialMaxOutputTokens < escalatedLimit;
 
         let lastFinishReason: string | undefined;
 
@@ -2492,6 +2501,18 @@ export class GeminiChat {
               break;
             }
 
+            if (
+              error instanceof InvalidStreamError &&
+              error.type === 'NO_TOOL_RESULT_PROGRESS_MAX_TOKENS' &&
+              !maxTokensEscalated &&
+              !hasUserMaxTokensOverride &&
+              shouldEscalateMaxOutputTokens
+            ) {
+              lastError = null;
+              lastFinishReason = FinishReason.MAX_TOKENS;
+              break;
+            }
+
             // Invalid stream responses use INVALID_STREAM_RETRY_CONFIG, which
             // is independent from HTTP retries handled by retryWithBackoff.
             const isInvalidStreamError = error instanceof InvalidStreamError;
@@ -2661,16 +2682,6 @@ export class GeminiChat {
         // params.config.maxOutputTokens is always set by the first-send clamp
         // above; the `?? outputCeiling` is a defensive fallback that never
         // fires in practice.
-        const effectiveInitialMaxOutputTokens =
-          params.config?.maxOutputTokens ?? outputCeiling;
-        const escalatedLimit = clampOutputTokensToWindow(
-          OUTPUT_TOKEN_CEILING,
-          contextWindowForClamp,
-          promptTokensForClamp,
-        );
-        const shouldEscalateMaxOutputTokens =
-          effectiveInitialMaxOutputTokens < escalatedLimit;
-
         if (
           lastError === null &&
           lastFinishReason === FinishReason.MAX_TOKENS &&
@@ -3829,7 +3840,8 @@ export class GeminiChat {
     // result, they do not advance the agent without text or another tool call.
     const hasAnyContent = contentText || thoughtText;
     const lacksVisibleToolResultProgress =
-      isToolResultContinuation && !contentText;
+      isToolResultContinuation &&
+      (!contentText || contentText === '(empty content)');
     if (
       streamError === null &&
       !hasToolCall &&
@@ -3844,7 +3856,9 @@ export class GeminiChat {
       if (lacksVisibleToolResultProgress) {
         throw new InvalidStreamError(
           'Model stream ended after a tool result without visible progress.',
-          'NO_TOOL_RESULT_PROGRESS',
+          deferredFinishReason === FinishReason.MAX_TOKENS
+            ? 'NO_TOOL_RESULT_PROGRESS_MAX_TOKENS'
+            : 'NO_TOOL_RESULT_PROGRESS',
         );
       }
       throw new InvalidStreamError(
