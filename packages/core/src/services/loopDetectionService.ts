@@ -87,6 +87,29 @@ export const DEFAULT_MAX_TOOL_CALLS_PER_TURN = 100;
 const ADAPTIVE_CAP_HARD_MULTIPLIER = 3;
 
 /**
+ * Recursively canonicalizes a JSON-compatible value for stable hashing: object
+ * keys are sorted (so property insertion order does not change the identity)
+ * while array order is preserved. Used by getToolCallKey so two semantically
+ * identical tool-call arguments that differ only in field order hash to the
+ * same key — otherwise a stuck model could evade the repeat guards just by
+ * reordering fields.
+ */
+function canonicalizeForHash(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(canonicalizeForHash);
+  }
+  if (value !== null && typeof value === 'object') {
+    const source = value as Record<string, unknown>;
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(source).sort()) {
+      sorted[key] = canonicalizeForHash(source[key]);
+    }
+    return sorted;
+  }
+  return value;
+}
+
+/**
  * Service for detecting and preventing infinite loops in AI responses.
  * Monitors tool call repetitions and content sentence repetitions.
  */
@@ -197,7 +220,7 @@ export class LoopDetectionService {
   }
 
   private getToolCallKey(toolCall: { name: string; args: object }): string {
-    const argsString = JSON.stringify(toolCall.args);
+    const argsString = JSON.stringify(canonicalizeForHash(toolCall.args));
     const keyString = `${toolCall.name}:${argsString}`;
     return createHash('sha256').update(keyString).digest('hex');
   }

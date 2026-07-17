@@ -1484,6 +1484,36 @@ describe('LoopDetectionService', () => {
       expect(service.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
     });
 
+    it('treats reordered argument fields as one call for the stuck signal', () => {
+      // getToolCallKey canonicalizes object keys, so the same semantic call
+      // with fields in different insertion orders hashes to the same key and
+      // accumulates as repeats. Without canonicalization each permutation
+      // would be a distinct key and the stuck signal would never build. The
+      // variants are interleaved with distinct fillers so the
+      // consecutive-identical guard does not fire first.
+      service.reset('');
+      const variants = [
+        { a: 1, b: 2, c: 3 },
+        { b: 2, c: 3, a: 1 },
+        { c: 3, a: 1, b: 2 },
+        { a: 1, c: 3, b: 2 },
+        { b: 2, a: 1, c: 3 },
+        { c: 3, b: 2, a: 1 },
+      ];
+      let fired = false;
+      for (let i = 0; i < SOFT_CAP + variants.length && !fired; i++) {
+        const isRepeat = i % 2 === 0;
+        const args = isRepeat
+          ? variants[(i / 2) % variants.length]
+          : { filler: i };
+        fired = service.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('any_tool', args),
+        );
+      }
+      expect(fired).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
+    });
+
     it('fires at the hard cap regardless of diversity', () => {
       // The hard cap is the backstop for a runaway that varies its arguments
       // on every call (which no repetition signal catches).

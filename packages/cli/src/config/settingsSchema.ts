@@ -1474,7 +1474,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: DEFAULT_MAX_TOOL_CALLS_PER_TURN,
         description:
-          'Soft cap on tool calls within a single turn (one model turn plus its tool-result continuations; blocking Stop-hook continuations such as /goal iterations start a fresh budget). Adaptive in interactive sessions: once the turn exceeds this value it halts only when the model keeps repeating the same call (a stuck loop); a productive turn (diverse calls, no repetition) is allowed to continue up to a hard backstop of 3x this value, which always halts. The daemon/ACP path still halts at this value regardless of repetition. An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.',
+          'Soft cap on tool calls within a single turn (one model turn plus its tool-result continuations; blocking Stop-hook continuations such as /goal iterations start a fresh budget). Adaptive: once the turn exceeds this value it halts only when the model keeps repeating the same call (a stuck loop); a productive turn (diverse calls, no repetition) is allowed to continue up to a hard backstop of 3x this value, which always halts. This adaptive behavior applies to both the interactive TUI and non-interactive (-p / JSON / stream-JSON) core-client runs; only the daemon/ACP path still halts at this value regardless of repetition. An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.',
         showInDialog: false,
       },
       skipStartupContext: {
