@@ -452,3 +452,84 @@ describe('isAllowedMemoryPath with a symlinked managed-memory suffix', () => {
     expect(isAllowedMemoryPath(memoryFile, projectRoot)).toBe(false);
   });
 });
+
+describe('isAllowedMemoryPath in default (shared) memory mode', () => {
+  // The two symlink blocks above both force QWEN_CODE_MEMORY_LOCAL=1, so they
+  // only exercise the local-mode anchor (the project root). In the default
+  // (shared) mode the managed root lives under getMemoryBaseDir() and THAT is
+  // the trusted anchor — a distinct branch of getAutoMemoryTrustedAnchor /
+  // resolveTrustedMemoryRoot. Pin both sides of its trust boundary too, so a
+  // regression in the shared-base-dir path can't stay green behind the local
+  // tests.
+  const originalMemoryLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+  const originalMemoryBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+  let tempDir: string;
+  let projectRoot: string;
+
+  beforeEach(async () => {
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'memory-shared-'));
+    projectRoot = path.join(tempDir, 'project');
+    await fs.mkdir(projectRoot, { recursive: true });
+    clearAutoMemoryRootCache();
+  });
+
+  afterEach(async () => {
+    if (originalMemoryLocal === undefined) {
+      delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    } else {
+      process.env['QWEN_CODE_MEMORY_LOCAL'] = originalMemoryLocal;
+    }
+    if (originalMemoryBase === undefined) {
+      delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    } else {
+      process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBase;
+    }
+    clearAutoMemoryRootCache();
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('allows a write under a symlinked shared base dir whose managed root is absent', async () => {
+    // Route the shared base dir (the trusted anchor in this mode) through an
+    // explicit symlink — like macOS /var -> /private/var — and leave the managed
+    // root uncreated. The anchor must canonicalize so the symlinked root and the
+    // realpath'd candidate agree, instead of falsely denying the write.
+    const realBase = path.join(tempDir, 'real-base');
+    const linkBase = path.join(tempDir, 'link-base');
+    await fs.mkdir(realBase, { recursive: true });
+    await fs.symlink(realBase, linkBase);
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = linkBase;
+    clearAutoMemoryRootCache();
+
+    // Sanity: this is the default (shared) mode — the root lives under the
+    // (symlinked) base dir, not under `<projectRoot>/.qwen`. Guards the test
+    // against silently falling back into local mode.
+    const root = getAutoMemoryRoot(projectRoot);
+    expect(root.startsWith(linkBase + path.sep)).toBe(true);
+
+    const memoryFile = path.join(root, 'project.md');
+    expect(isAllowedMemoryPath(memoryFile, projectRoot)).toBe(true);
+  });
+
+  it('denies a write when a symlink below the shared suffix escapes the anchor', async () => {
+    // A symlink planted INSIDE the managed suffix (here the `memory` dir itself
+    // -> outside) must NOT be followed: the base-dir anchor is canonicalized but
+    // the `projects/<id>/memory` suffix is appended literally, so the escape
+    // stays denied even though the candidate realpath-resolves into /outside.
+    const realBase = path.join(tempDir, 'real-base');
+    const outside = path.join(tempDir, 'outside');
+    await fs.mkdir(realBase, { recursive: true });
+    await fs.mkdir(outside, { recursive: true });
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = realBase;
+    clearAutoMemoryRootCache();
+
+    const managedRoot = getAutoMemoryRoot(projectRoot);
+    // Sanity: default (shared) mode — the root lives under the base dir.
+    expect(managedRoot.startsWith(realBase + path.sep)).toBe(true);
+    await fs.mkdir(path.dirname(managedRoot), { recursive: true });
+    await fs.symlink(outside, managedRoot);
+
+    const memoryFile = path.join(managedRoot, 'project.md');
+    expect(isAllowedMemoryPath(memoryFile, projectRoot)).toBe(false);
+  });
+});
