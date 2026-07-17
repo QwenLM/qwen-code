@@ -202,6 +202,74 @@ describe('ToolConfirmationMessage', () => {
     expect(lastFrame()).toContain('Step one');
   });
 
+  describe('expanded plan toggle (#7001)', () => {
+    const longPlan = Array.from(
+      { length: 60 },
+      (_, i) => `## Step ${i + 1}\nDo something here`,
+    ).join(EOL);
+
+    it('shows "Press \'e\' to collapse" hint when plan is expanded (availableTerminalHeight undefined)', () => {
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'plan',
+        title: 'Would you like to proceed?',
+        plan: longPlan,
+        onConfirm: vi.fn(),
+      };
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={undefined}
+          contentWidth={80}
+        />,
+      );
+
+      expect(lastFrame()).toContain("Press 'e' to collapse");
+    });
+
+    it('does NOT show collapse hint when plan is bounded (availableTerminalHeight defined)', () => {
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'plan',
+        title: 'Would you like to proceed?',
+        plan: longPlan,
+        onConfirm: vi.fn(),
+      };
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+      );
+
+      expect(lastFrame()).not.toContain("Press 'e' to collapse");
+    });
+
+    it('does NOT show collapse hint for non-plan confirmations when expanded', () => {
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'exec',
+        title: 'Confirm Execution',
+        command: 'echo "hello"',
+        rootCommand: 'echo',
+        onConfirm: vi.fn(),
+      };
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={undefined}
+          contentWidth={80}
+        />,
+      );
+
+      expect(lastFrame()).not.toContain("Press 'e' to collapse");
+    });
+  });
+
   describe('with folder trust', () => {
     const editConfirmationDetails: ToolCallConfirmationDetails = {
       type: 'edit',
