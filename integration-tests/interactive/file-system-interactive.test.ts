@@ -76,8 +76,21 @@ describe('Interactive file system', () => {
         true,
       );
 
-      const newFileContent = rig.readFile(fileName);
-      expect(newFileContent).toBe('1.0.1');
+      // The tool call is logged once the model issues it, but the turn may
+      // still be settling (a failed edit can be retried) and the model may
+      // append a trailing newline. Poll the file until it reflects the new
+      // version instead of reading it once.
+      const updated = await rig.poll(
+        () => rig.readFile(fileName).trimEnd() === '1.0.1',
+        rig.getDefaultTimeout(),
+        200,
+      );
+      if (!updated) {
+        printDebugInfo(rig, rig._interactiveOutput, { toolCall });
+      }
+      expect(updated, 'Expected file content to be updated to 1.0.1').toBe(
+        true,
+      );
     },
   );
 });

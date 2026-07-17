@@ -1553,6 +1553,9 @@ describe('ContentGenerationPipeline', () => {
       (mockConverter.convertOpenAIChunkToGemini as Mock)
         .mockReturnValueOnce(mockGeminiResponse1)
         .mockReturnValueOnce(mockGeminiResponse2);
+      mockProvider.getResponseParsingOptions = vi.fn().mockReturnValue({
+        contentOnlyThinkingTagLeaks: true,
+      });
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockStream,
       );
@@ -1582,6 +1585,7 @@ describe('ContentGenerationPipeline', () => {
           model: 'test-model',
           modalities: {},
           toolCallParser: expect.any(StreamingToolCallParser),
+          responseParsingOptions: { contentOnlyThinkingTagLeaks: true },
         }),
       );
       expect(secondChunkContext.toolCallParser).toBe(

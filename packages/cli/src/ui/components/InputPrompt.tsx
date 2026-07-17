@@ -165,7 +165,7 @@ export function expandPendingPastePlaceholders(
 
 export interface InputPromptProps {
   buffer: TextBuffer;
-  onSubmit: (value: string) => void;
+  onSubmit: (value: string, options?: { deferUntilIdle?: boolean }) => void;
   userMessages: readonly string[];
   onClearScreen: () => void;
   config: Config;
@@ -585,7 +585,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const resetHistoryNavRef = useRef<() => void>(() => {});
 
   const handleSubmitAndClear = useCallback(
-    (submittedValue: string) => {
+    (submittedValue: string, deferUntilIdle = false) => {
       exportCompletion.reset();
       // Expand any large paste placeholders to their full content before submitting
       let finalValue = submittedValue;
@@ -610,7 +610,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // if onSubmit triggers a re-render while the buffer still holds the old value.
       buffer.setText('');
       clearPromptStash(targetDir);
-      onSubmit(finalValue);
+      if (deferUntilIdle) {
+        onSubmit(finalValue, { deferUntilIdle: true });
+      } else {
+        onSubmit(finalValue);
+      }
 
       // Reset history navigation so the next Up-arrow starts from the newest
       // entry rather than advancing from whatever index the user picked.
@@ -1624,6 +1628,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           if (nextCommand !== null) buffer.setText(nextCommand);
           return true;
         }
+      }
+
+      if (keyMatchers[Command.QUEUE_MESSAGE](key)) {
+        if (buffer.text.trim()) {
+          handleSubmitAndClear(buffer.text, true);
+        }
+        return true;
       }
 
       if (keyMatchers[Command.SUBMIT](key)) {

@@ -1191,6 +1191,11 @@ export function WebShellSidebar({
     [t, workspaceActions, workspace],
   );
 
+  const handleSuggestWorkspacePaths = useCallback(
+    (prefix: string) => workspaceActions.suggestWorkspacePaths(prefix),
+    [workspaceActions],
+  );
+
   const reconcileRemovedWorkspace = useCallback(
     async (removed: DaemonWorkspaceCapability) => {
       if (!workspaceRemovalMountedRef.current) return;
@@ -3480,11 +3485,6 @@ export function WebShellSidebar({
                             }
                             client={workspace.client}
                             reloadToken={workspaceSessionsReloadToken}
-                            primaryLabel={
-                              displayedWorkspaces.length > 1
-                                ? t('sidebar.workspacePrimary')
-                                : ''
-                            }
                             untrustedLabel={t('sidebar.workspaceUntrusted')}
                             readOnlyLabel={t('sidebar.workspaceReadOnly')}
                             trustToOpenLabel={t('sidebar.workspaceTrustToOpen')}
@@ -3773,6 +3773,7 @@ export function WebShellSidebar({
         <AddWorkspaceDialog
           onClose={() => setShowAddWorkspaceDialog(false)}
           onAdd={handleAddWorkspace}
+          onSuggest={handleSuggestWorkspacePaths}
         />
       )}
     </>

@@ -976,6 +976,48 @@ describe('AppContainer State Management', () => {
       ).toBe(true);
     });
 
+    it('marks Ctrl+Q submissions to wait for the idle boundary', () => {
+      const mockQueueMessage = vi.fn();
+      const mockSubmitQuery = vi.fn();
+
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'responding',
+        submitQuery: mockSubmitQuery,
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      capturedUIActions.handleFinalSubmit('/btw next turn', {
+        deferUntilIdle: true,
+      });
+
+      expect(mockQueueMessage).toHaveBeenCalledWith('/btw next turn', true);
+      expect(mockSubmitQuery).not.toHaveBeenCalled();
+    });
+
     it('submits /btw immediately instead of queueing while responding', () => {
       const mockSubmitQuery = vi.fn();
       const mockQueueMessage = vi.fn();

@@ -125,10 +125,34 @@ The daemon also exposes read-only runtime snapshots for client UIs and
 operators: `GET /daemon/status`, `GET /workspace/mcp`,
 `GET /workspace/skills`, `GET /workspace/providers`, `GET /workspace/env`,
 `GET /workspace/preflight`,
+`GET /workspace/:id/session-info`,
 `GET /session/:id/status`, `GET /session/:id/context`,
 `GET /session/:id/supported-commands`, and
 `GET /session/:id/tasks`, `GET /session/:id/lsp`, and
 `GET /session/:id/transcript`.
+
+`GET /workspace/:id/session-info` (and the plural
+`GET /workspaces/:workspace/session-info` twin) returns aggregate session
+counts for a workspace: persisted `active` / `archived` / `total`, plus the
+current in-memory `live` count when live state is available. Registered
+untrusted secondary workspaces omit `live` because their catalog reads do not
+query the live bridge. The paginated `GET /workspace/:id/sessions` list does
+not include a total, so this is the dedicated surface for “how many sessions
+exist?” — useful when scheduled or recurring tasks leave a large local store.
+
+> ⚠️ **Disk scan — do not poll.** This endpoint walks local session JSONL
+> files under the workspace chats directory. Responses always include
+> `expensive: true` and `cost: "disk_scan"`. Call it infrequently (manual
+> refresh, operator tooling, occasional UI load) — never on a tight timer or
+> on every sidebar render. Prefer `GET /workspace/:id/sessions` for browsing
+> pages and `GET /daemon/status` for live in-memory session counts. A response
+> with `truncated: true` means the scan hit its safety limit or could not
+> classify every candidate file, so persisted counts are lower bounds.
+
+```bash
+curl http://127.0.0.1:4170/workspace/$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.getcwd(), safe=''))")/session-info
+# → {"active":450,"archived":30,"total":480,"live":2,"expensive":true,"cost":"disk_scan"}
+```
 
 `GET /session/:id/status` returns the live bridge summary for a single session:
 `sessionId`, `workspaceCwd`, `createdAt`, optional `displayName`, `clientCount`,

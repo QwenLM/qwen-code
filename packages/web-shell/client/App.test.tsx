@@ -17,6 +17,7 @@ type MockConnection = {
   currentMode: string;
   models: Array<{ id: string; label?: string }>;
   commands: unknown[];
+  skills: string[];
   capabilities: { qwenCodeVersion: string; features: string[] };
   loadingTranscript: boolean;
   catchingUp: boolean;
@@ -28,11 +29,15 @@ type MockConnection = {
 type ChatEditorTestProps = {
   onSubmit: (
     text: string,
-    images?: undefined,
+    images?: { data: string; media_type: string }[],
     commitAccepted?: () => void,
     metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
   ) => boolean | void;
+  onInputTextChange?: (text: string) => void;
+  onStartNewSessionSuggestion?: () => void;
+  newSessionSuggestion?: { isVisible: boolean; classifiedInput: string } | null;
   skills?: Array<{ name: string; description: string }>;
+  commands?: Array<{ name: string }>;
   isPreparing?: boolean;
   dialogOpen?: boolean;
   placeholderText?: string;
@@ -67,19 +72,23 @@ const {
     currentMode: 'default',
     models: [{ id: 'qwen', label: 'Qwen' }],
     commands: [],
+    skills: [],
     capabilities: { qwenCodeVersion: '1.2.3', features: [] },
     loadingTranscript: false,
     catchingUp: false,
   };
+  const loadSkillsStatus = vi.fn().mockResolvedValue({ skills: [] });
   const workspaceClient = {
     workspaceByCwd: vi.fn(() => ({
       workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: loadSkillsStatus,
     })),
   };
   return {
     mockConnection: connection,
     mockSessionActions: {
       sendPrompt: vi.fn().mockResolvedValue(undefined),
+      generateSessionContent: vi.fn(async function* () {}),
       createSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
       attachSession: vi.fn().mockResolvedValue(undefined),
       clearSession: vi.fn().mockResolvedValue(undefined),
@@ -104,7 +113,7 @@ const {
       client: workspaceClient,
     },
     mockWorkspaceActions: {
-      loadSkillsStatus: vi.fn().mockResolvedValue({ skills: [] }),
+      loadSkillsStatus,
       loadProviders: vi.fn().mockResolvedValue({ current: null }),
       loadPreflight: vi.fn().mockResolvedValue(null),
       loadEnv: vi.fn().mockResolvedValue(null),
@@ -139,8 +148,12 @@ const {
     testState: {
       prompt: 'hello',
       inputAnnotations: undefined as DaemonInputAnnotation[] | undefined,
+      promptImages: undefined as
+        | { data: string; media_type: string }[]
+        | undefined,
       streamingState: 'idle' as StreamingState,
       blocks: [] as unknown[],
+      messages: [] as unknown[],
       latestChatEditorProps: null as ChatEditorTestProps | null,
       latestScheduledTasksProps: null as {
         onRunPrompt?: (
@@ -189,6 +202,12 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   }),
   useStreamingState: () => testState.streamingState,
   useTranscriptBlocks: () => testState.blocks,
+  useTranscriptHistory: () => ({
+    hasMore: false,
+    loading: false,
+    capacityReached: false,
+    loadMore: vi.fn(),
+  }),
   useTranscriptStore: () => mockStore,
   useWorkspace: () => mockWorkspace,
   useWorkspaceActions: () => mockWorkspaceActions,
@@ -205,7 +224,7 @@ vi.mock('@qwen-code/sdk/daemon', () => ({
 }));
 
 vi.mock('./hooks/useMessages', () => ({
-  useMessages: () => [],
+  useMessages: () => testState.messages,
 }));
 
 vi.mock('./hooks/useBackgroundTasks', () => ({
@@ -236,35 +255,71 @@ vi.mock('./components/ChatEditor', async () => {
       props: ChatEditorTestProps,
       ref: React.ForwardedRef<{
         clear: () => void;
+        hasInput: () => boolean;
         insertText: (text: string) => void;
         focus: () => void;
       }>,
     ) {
       testState.latestChatEditorProps = props;
       React.useImperativeHandle(ref, () => ({
-        clear: editorClear,
+        clear: () => {
+          testState.prompt = '';
+          testState.promptImages = undefined;
+          props.onInputTextChange?.('');
+          editorClear();
+        },
+        hasInput: () => testState.prompt.trim().length > 0,
         insertText: editorInsertText,
+        submit: () => {
+          props.onSubmit(
+            testState.prompt,
+            testState.promptImages,
+            editorCommit,
+            testState.inputAnnotations
+              ? { inputAnnotations: testState.inputAnnotations }
+              : undefined,
+          );
+        },
         // The panel focus effect calls editorRef.current?.focus() when a panel
         // closes with no pending approval (e.g. resuming a session).
         focus: editorFocus,
       }));
       return React.createElement(
-        'button',
-        {
-          'data-testid': 'submit',
-          'data-preparing': props.isPreparing ? 'true' : 'false',
-          onClick: () => {
-            if (testState.inputAnnotations) {
-              props.onSubmit(testState.prompt, undefined, editorCommit, {
-                inputAnnotations: testState.inputAnnotations,
-              });
-              return;
-            }
-            props.onSubmit(testState.prompt, undefined, editorCommit);
+        React.Fragment,
+        null,
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'submit',
+            'data-preparing': props.isPreparing ? 'true' : 'false',
+            onClick: () => {
+              if (testState.inputAnnotations) {
+                props.onSubmit(testState.prompt, undefined, editorCommit, {
+                  inputAnnotations: testState.inputAnnotations,
+                });
+                return;
+              }
+              props.onSubmit(testState.prompt, undefined, editorCommit);
+            },
+            type: 'button',
           },
-          type: 'button',
-        },
-        'submit',
+          'submit',
+        ),
+        props.newSessionSuggestion
+          ? React.createElement(
+              'div',
+              { 'data-testid': 'new-session-suggestion' },
+              React.createElement(
+                'button',
+                {
+                  'data-testid': 'new-session-suggestion-start',
+                  onClick: () => props.onStartNewSessionSuggestion?.(),
+                  type: 'button',
+                },
+                'This looks like a new topic',
+              ),
+            )
+          : null,
       );
     }),
   };
@@ -800,15 +855,20 @@ beforeEach(() => {
   mockConnection.error = undefined;
   mockConnection.errorStatus = undefined;
   mockConnection.missingSession = false;
+  mockConnection.commands = [];
+  mockConnection.skills = [];
   mockConnection.loadingTranscript = false;
   mockConnection.catchingUp = false;
   mockWorkspace.capabilities = {
     workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
   };
+  mockWorkspace.client.workspaceByCwd.mockClear();
   testState.prompt = 'hello';
   testState.inputAnnotations = undefined;
+  testState.promptImages = undefined;
   testState.streamingState = 'idle';
   testState.blocks = [];
+  testState.messages = [];
   testState.latestChatEditorProps = null;
   testState.latestScheduledTasksProps = null;
   sidebarTokens.length = 0;
@@ -878,6 +938,21 @@ afterEach(() => {
 });
 
 describe('App session callbacks', () => {
+  it('submits through a disconnected session when prompt SSE restart is enabled', async () => {
+    mockConnection.status = 'disconnected';
+    renderApp({ restartSseOnPrompt: true });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('recover connection');
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'recover connection',
+      expect.objectContaining({ images: undefined }),
+    );
+  });
+
   it('reports the current workspace id and path', async () => {
     mockConnection.workspaceCwd = '/work/secondary';
     mockWorkspace.capabilities = {
@@ -922,6 +997,25 @@ describe('App session callbacks', () => {
     });
     expect(mockSessionActions.createSession).toHaveBeenCalledWith(
       expect.objectContaining({ workspaceCwd: '/work/secondary' }),
+    );
+  });
+
+  it('reloads skills from the target workspace when starting a new session', async () => {
+    const { container } = renderApp({
+      lockedWorkspaceCwd: '/work/secondary',
+    });
+    await flush();
+    mockWorkspace.client.workspaceByCwd.mockClear();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(mockWorkspace.client.workspaceByCwd).toHaveBeenCalledWith(
+      '/work/secondary',
     );
   });
 
@@ -1018,6 +1112,87 @@ describe('App session callbacks', () => {
     expect(testState.latestChatEditorProps?.skills).toEqual([
       { name: 'enabled-skill', description: 'Enabled' },
     ]);
+  });
+
+  it('reloads skills when starting a new session', async () => {
+    mockConnection.commands = [
+      {
+        name: 'review',
+        description: 'Review',
+        raw: {
+          name: 'review',
+          description: 'Review',
+          input: null,
+          _meta: { source: 'skill' },
+        },
+      },
+    ];
+    mockConnection.skills = ['review'];
+    mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
+      skills: [{ name: 'review', description: 'Review', status: 'ok' }],
+    });
+    const { container } = renderApp();
+    await flush();
+    expect(testState.latestChatEditorProps?.skills).toEqual([
+      { name: 'review', description: 'Review' },
+    ]);
+    expect(testState.latestChatEditorProps?.commands).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'review' })]),
+    );
+
+    mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
+      skills: [{ name: 'review', description: 'Review', status: 'disabled' }],
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(testState.latestChatEditorProps?.skills).toEqual([]);
+    expect(testState.latestChatEditorProps?.commands).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'review' })]),
+    );
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it('adds an enabled skill command when starting a new session', async () => {
+    mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
+      skills: [{ name: 'review', description: 'Review', status: 'disabled' }],
+    });
+    const { container } = renderApp();
+    await flush();
+    expect(testState.latestChatEditorProps?.commands).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'review' })]),
+    );
+
+    mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
+      skills: [
+        {
+          name: 'review',
+          description: 'Review',
+          argumentHint: '<path>',
+          status: 'ok',
+        },
+      ],
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(testState.latestChatEditorProps?.commands).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'review',
+          argumentHint: '<path>',
+          source: 'skill',
+        }),
+      ]),
+    );
   });
 
   it.each([404, 410])(
@@ -1286,6 +1461,407 @@ describe('App session callbacks', () => {
       vi.advanceTimersByTime(2000);
     });
     expect(sidebarTokens.at(-1)).not.toBe(tokenAfterSubmit);
+  });
+
+  it('does not suggest a new session for obvious follow-up prompts', async () => {
+    vi.useFakeTimers();
+    mockConnection.capabilities.features = ['session_generation'];
+    (
+      mockConnection as typeof mockConnection & {
+        tokenCount?: number;
+        contextWindow?: number;
+      }
+    ).tokenCount = 600;
+    (
+      mockConnection as typeof mockConnection & {
+        tokenCount?: number;
+        contextWindow?: number;
+      }
+    ).contextWindow = 1000;
+    testState.messages = Array.from({ length: 8 }, (_, index) => ({
+      id: `m-followup-${index}`,
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      content: `existing session topic ${index} about daemon generation review work`,
+      timestamp: index,
+    }));
+    testState.prompt = '顺手补个测试';
+
+    const { container } = renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onInputTextChange?.(testState.prompt);
+    });
+    await flush();
+    act(() => {
+      vi.advanceTimersByTime(701);
+    });
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="new-session-suggestion"]'),
+    ).toBeNull();
+    expect(mockSessionActions.generateSessionContent).not.toHaveBeenCalled();
+  });
+
+  it('suggests starting a new session for a new-topic prompt and auto-sends it in the fresh session', async () => {
+    vi.useFakeTimers();
+    mockConnection.capabilities.features = ['session_generation'];
+    (
+      mockConnection as typeof mockConnection & {
+        tokenCount?: number;
+        contextWindow?: number;
+      }
+    ).tokenCount = 600;
+    (
+      mockConnection as typeof mockConnection & {
+        tokenCount?: number;
+        contextWindow?: number;
+      }
+    ).contextWindow = 1000;
+    testState.messages = Array.from({ length: 8 }, (_, index) => ({
+      id: `m-${index}`,
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      content: `existing session topic ${index} about daemon generation review work`,
+      timestamp: index,
+    }));
+    const suggestedPrompt =
+      'Help me brainstorm Web Shell interaction ideas on top of this interface for a design doc';
+    testState.prompt = suggestedPrompt;
+    testState.promptImages = [{ data: 'abc', media_type: 'image/png' }];
+    mockSessionActions.clearSession.mockImplementation(async () => {
+      mockConnection.sessionId = undefined;
+    });
+    mockSessionActions.createSession.mockImplementation(async () => {
+      mockConnection.sessionId = 'session-created';
+      return { sessionId: 'session-created' };
+    });
+    mockSessionActions.generateSessionContent.mockImplementation(
+      async function* () {
+        yield {
+          type: 'delta',
+          requestId: 'req-1',
+          seq: 0,
+          text: JSON.stringify({
+            shouldSuggestNewSession: true,
+            confidence: 0.91,
+          }),
+        };
+        yield {
+          type: 'done',
+          requestId: 'req-1',
+          model: 'fast-model',
+          modelSource: 'fast',
+        };
+      },
+    );
+
+    const { container } = renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onInputTextChange?.(testState.prompt);
+    });
+    await flush();
+    act(() => {
+      vi.advanceTimersByTime(121);
+    });
+    await flush();
+    act(() => {
+      vi.advanceTimersByTime(701);
+    });
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="new-session-suggestion"]')
+        ?.textContent,
+    ).toContain('This looks like a new topic');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="new-session-suggestion-start"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1);
+    act(() => {
+      vi.runOnlyPendingTimers();
+    });
+    await flush();
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      suggestedPrompt,
+      expect.objectContaining({
+        images: [{ data: 'abc', media_type: 'image/png' }],
+      }),
+    );
+    expect(editorInsertText).not.toHaveBeenCalled();
+  });
+
+  it('waits for the current session to detach before auto-submitting the suggested new-session draft', async () => {
+    vi.useFakeTimers();
+    const clear = deferred<void>();
+    mockConnection.capabilities.features = ['session_generation'];
+    (
+      mockConnection as typeof mockConnection & {
+        tokenCount?: number;
+        contextWindow?: number;
+      }
+    ).tokenCount = 600;
+    (
+      mockConnection as typeof mockConnection & {
+        tokenCount?: number;
+        contextWindow?: number;
+      }
+    ).contextWindow = 1000;
+    testState.messages = Array.from({ length: 8 }, (_, index) => ({
+      id: `m-delayed-${index}`,
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      content: `existing session topic ${index} about daemon generation review work`,
+      timestamp: index,
+    }));
+    const delayedPrompt =
+      'Help me brainstorm Web Shell interaction ideas on top of this interface for a design doc';
+    testState.prompt = delayedPrompt;
+    mockSessionActions.clearSession.mockImplementation(() => {
+      mockConnection.sessionId = undefined;
+      return clear.promise;
+    });
+    mockSessionActions.generateSessionContent.mockImplementation(
+      async function* () {
+        yield {
+          type: 'delta',
+          requestId: 'req-2',
+          seq: 0,
+          text: JSON.stringify({
+            shouldSuggestNewSession: true,
+            confidence: 0.91,
+          }),
+        };
+        yield {
+          type: 'done',
+          requestId: 'req-2',
+          model: 'fast-model',
+          modelSource: 'fast',
+        };
+      },
+    );
+
+    const { container, rerender } = renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onInputTextChange?.(testState.prompt);
+    });
+    await flush();
+    act(() => {
+      vi.advanceTimersByTime(121);
+    });
+    await flush();
+    act(() => {
+      vi.advanceTimersByTime(701);
+    });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="new-session-suggestion-start"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1);
+    rerender();
+    await flush();
+    act(() => {
+      vi.runOnlyPendingTimers();
+    });
+    await flush();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+
+    await act(async () => clear.resolve());
+    act(() => {
+      vi.runOnlyPendingTimers();
+    });
+    await flush();
+
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      delayedPrompt,
+      expect.any(Object),
+    );
+  });
+
+  it('dismisses a stale new-session suggestion after the draft changes before acceptance', async () => {
+    vi.useFakeTimers();
+    mockConnection.capabilities.features = ['session_generation'];
+    (
+      mockConnection as typeof mockConnection & {
+        tokenCount?: number;
+        contextWindow?: number;
+      }
+    ).tokenCount = 600;
+    (
+      mockConnection as typeof mockConnection & {
+        tokenCount?: number;
+        contextWindow?: number;
+      }
+    ).contextWindow = 1000;
+    testState.messages = Array.from({ length: 8 }, (_, index) => ({
+      id: `m-stale-${index}`,
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      content: `existing session topic ${index} about daemon generation review work`,
+      timestamp: index,
+    }));
+    testState.prompt =
+      'Help me brainstorm Web Shell interaction ideas on top of this interface for a design doc';
+    mockSessionActions.generateSessionContent.mockImplementation(
+      async function* () {
+        yield {
+          type: 'delta',
+          requestId: 'req-stale',
+          seq: 0,
+          text: JSON.stringify({
+            shouldSuggestNewSession: true,
+            confidence: 0.91,
+          }),
+        };
+        yield {
+          type: 'done',
+          requestId: 'req-stale',
+          model: 'fast-model',
+          modelSource: 'fast',
+        };
+      },
+    );
+
+    const { container } = renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onInputTextChange?.(testState.prompt);
+    });
+    await flush();
+    act(() => {
+      vi.advanceTimersByTime(121);
+    });
+    await flush();
+    act(() => {
+      vi.advanceTimersByTime(701);
+    });
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="new-session-suggestion"]'),
+    ).not.toBeNull();
+
+    testState.prompt = '顺手补个测试并继续当前实现';
+    act(() => {
+      testState.latestChatEditorProps?.onInputTextChange?.(testState.prompt);
+    });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="new-session-suggestion-start"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-testid="new-session-suggestion"]'),
+    ).toBeNull();
+  });
+
+  it('cancels the pending new-session auto-submit when another session becomes active first', async () => {
+    vi.useFakeTimers();
+    const clear = deferred<void>();
+    mockConnection.capabilities.features = ['session_generation'];
+    (
+      mockConnection as typeof mockConnection & {
+        tokenCount?: number;
+        contextWindow?: number;
+      }
+    ).tokenCount = 600;
+    (
+      mockConnection as typeof mockConnection & {
+        tokenCount?: number;
+        contextWindow?: number;
+      }
+    ).contextWindow = 1000;
+    testState.messages = Array.from({ length: 8 }, (_, index) => ({
+      id: `m-switch-${index}`,
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      content: `existing session topic ${index} about daemon generation review work`,
+      timestamp: index,
+    }));
+    testState.prompt =
+      'Help me brainstorm Web Shell interaction ideas on top of this interface for a design doc';
+    mockSessionActions.clearSession.mockImplementation(() => clear.promise);
+    mockSessionActions.generateSessionContent.mockImplementation(
+      async function* () {
+        yield {
+          type: 'delta',
+          requestId: 'req-switch',
+          seq: 0,
+          text: JSON.stringify({
+            shouldSuggestNewSession: true,
+            confidence: 0.91,
+          }),
+        };
+        yield {
+          type: 'done',
+          requestId: 'req-switch',
+          model: 'fast-model',
+          modelSource: 'fast',
+        };
+      },
+    );
+
+    const { container, rerender } = renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onInputTextChange?.(testState.prompt);
+    });
+    await flush();
+    act(() => {
+      vi.advanceTimersByTime(121);
+    });
+    await flush();
+    act(() => {
+      vi.advanceTimersByTime(701);
+    });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="new-session-suggestion-start"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+
+    mockConnection.sessionId = 'session-other';
+    rerender();
+    await flush();
+
+    await act(async () => clear.resolve());
+    act(() => {
+      vi.runOnlyPendingTimers();
+    });
+    await flush();
+
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
   });
 
   it('keeps concurrent programmatic submissions behind session preparation', async () => {
@@ -1765,6 +2341,25 @@ describe('App session callbacks', () => {
     expect(editorFocus).toHaveBeenCalled();
   });
 
+  it.each(['/skills', '/skills detail', '/skills details'])(
+    'opens the Skill manager page with %s',
+    async (command) => {
+      const { container } = renderApp();
+      await flush();
+
+      testState.prompt = command;
+      await clickSubmit(container);
+      await flush();
+
+      expect(
+        container
+          .querySelector('[data-testid="inline-panel"]')
+          ?.getAttribute('aria-label'),
+      ).toBe('Skills');
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    },
+  );
+
   it('opens plugin management tabs from the sidebar', async () => {
     mockWorkspaceActions.loadMcpStatus.mockResolvedValue({
       initialized: true,
@@ -1791,9 +2386,21 @@ describe('App session callbacks', () => {
     expect(Array.from(tabs ?? []).map((tab) => tab.textContent)).toEqual([
       'Extensions',
       'MCP',
+      'Skills',
     ]);
     expect(extensionsTab?.getAttribute('aria-selected')).toBe('true');
     expect(document.activeElement).toBe(extensionsTab);
+
+    await act(async () => {
+      tabs?.[2]?.focus();
+      tabs?.[2]?.click();
+      await Promise.resolve();
+    });
+    expect(
+      panel
+        ?.querySelectorAll<HTMLButtonElement>('button[role="tab"]')[2]
+        ?.getAttribute('aria-selected'),
+    ).toBe('true');
   });
 
   it('only shows server startup progress during MCP discovery', async () => {

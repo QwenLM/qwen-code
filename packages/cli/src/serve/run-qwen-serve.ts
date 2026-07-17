@@ -3285,6 +3285,7 @@ export async function runQwenServe(
       statusProvider,
       workspaceProvidersStatusProvider,
       workspaceSkillsStatusProvider,
+      skillInstallEnv: runtimeEffectiveEnv,
       voiceEnv: runtimeEffectiveEnv,
       isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools: persistDisabledToolsFn,
@@ -3601,6 +3602,7 @@ export async function runQwenServe(
           }),
         workspaceSkillsStatusProvider:
           runtime.createWorkspaceSkillsStatusProvider(),
+        skillInstallEnv: secondaryEnv.effectiveEnv,
         voiceEnv: secondaryEnv.effectiveEnv,
         voiceSettingsScope: WORKSPACE_SETTING_SCOPE,
         isChannelLive: () => secondaryBridge.isChannelLive(),
@@ -3973,6 +3975,7 @@ export async function runQwenServe(
             }),
           workspaceSkillsStatusProvider:
             runtime.createWorkspaceSkillsStatusProvider(),
+          skillInstallEnv: wsEnv.effectiveEnv,
           voiceEnv: wsEnv.effectiveEnv,
           voiceSettingsScope: WORKSPACE_SETTING_SCOPE,
           isChannelLive: () => wsBridge.isChannelLive(),

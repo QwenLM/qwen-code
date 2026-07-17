@@ -164,7 +164,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 ['health', 'capabilities', 'session_create', 'session_scope_override',
  'session_load', 'session_resume', 'session_transcript',
  'unstable_session_resume',
- 'session_list', 'session_prompt', 'session_cancel', 'session_events',
+ 'session_list', 'session_info', 'session_prompt', 'session_cancel', 'session_events',
  'slow_client_warning', 'typed_event_schema',
  'session_set_model', 'client_identity', 'client_heartbeat',
  'session_permission_vote', 'permission_vote', 'workspace_mcp', 'workspace_skills',
@@ -232,6 +232,8 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 `session_lsp` advertises `GET /session/:id/lsp`, the read-only structured LSP status snapshot for daemon clients. Older daemons return `404`; pre-flight this tag before exposing remote LSP status.
 
 `session_status` advertises `GET /session/:id/status`, the live bridge summary for a single session by id. In addition to `clientCount` and `hasActivePrompt`, live sessions expose `isWaitingForPermission`, `isWaitingForUserQuestion`, `pendingInteractionCount`, and a retained `turnError` after a failed turn. The error clears when the next prompt actually starts. Both the single-session status response and workspace session lists include `turnError` and `pendingInteractions`: render-ready permission actions or `ask_user_question` questions plus the `requestId` and selectable options required by the existing permission vote routes. Each user question has an `answerKey`; vote with `answers`, for example `{ "0": "Polling" }`, keyed by that value. Persisted-only sessions omit runtime state because no runtime exists. Older daemons return `404`; pre-flight this tag before polling a single session's status instead of scanning the full session list.
+
+`session_info` advertises `GET /workspace/:id/session-info` and its `/workspaces/:workspace/session-info` twin. The response aggregates persisted active and archived session counts without hydrating list metadata. It is an explicit O(n) disk scan and must not be polled; clients should treat `truncated: true` as a lower-bound result.
 
 `session_approval_mode_control`, `workspace_tool_toggle`, `workspace_skill_toggle`, `workspace_init`, and `workspace_mcp_restart` advertise the mutation control routes documented below. They are strict-gated by the mutation gate (a daemon configured without a bearer token rejects them with 401 `token_required`). Older daemons return `404`; pre-flight each tag before exposing the corresponding affordance.
 
@@ -893,6 +895,7 @@ Capability tags:
 - `session_supported_commands` → `GET /session/:id/supported-commands`
 - `session_tasks` → `GET /session/:id/tasks`
 - `session_status` → `GET /session/:id/status`
+- `session_info` → `GET /workspace/:id/session-info` and `GET /workspaces/:workspace/session-info`
 - `session_transcript` → `GET /session/:id/transcript`
 - `workspace_persisted_transcript` → `GET /workspaces/:workspace/session/:id/transcript`
 - `workspace_session_export` → `GET /workspaces/:workspace/session/:id/export`
@@ -1820,6 +1823,25 @@ Same request shape as `/load`. Same response shape — `state` mirrors ACP's `Re
 Use `/load` when the client has no history rendered (cold reconnect, picker → open). Use `/resume` when the client already has the turns on screen and only needs the daemon-side handle back.
 
 > ⚠️ **Why is `unstable_session_resume` still advertised?** The daemon's HTTP route and `session_resume` capability are stable for v1, but the bridge still calls ACP's `connection.unstable_resumeSession`. The old tag remains only so SDKs that shipped before `session_resume` can keep working.
+
+### `GET /workspace/:id/session-info` and `GET /workspaces/:workspace/session-info`
+
+Return aggregate persisted session counts for the selected workspace without changing the paginated session-list path:
+
+```json
+{
+  "active": 450,
+  "archived": 30,
+  "total": 480,
+  "live": 2,
+  "expensive": true,
+  "cost": "disk_scan"
+}
+```
+
+`active`, `archived`, and `total` count local JSONL sessions. `live` is the matching in-memory bridge count and is omitted for a registered untrusted secondary workspace because that persisted-only read must not query live state. `expensive` is always `true` and `cost` is always `"disk_scan"`; clients must call this endpoint infrequently rather than poll it. If the scan reaches its safety limit or cannot classify every candidate file, the response adds `"truncated": true` and the persisted counts are lower bounds. Missing storage returns zero persisted counts. The plural route uses the same workspace selector and trust policy as the plural session catalog; an untrusted primary still returns `403 untrusted_workspace`.
+
+The TypeScript daemon SDK exposes the plural route through `workspaceById(...)` or `workspaceByCwd(...)`, followed by `getWorkspaceSessionInfo()`.
 
 ### `GET /workspace/:id/sessions` and `GET /workspaces/:workspace/sessions`
 

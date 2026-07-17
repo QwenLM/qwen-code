@@ -38,7 +38,10 @@ import {
 } from '../hooks/useComposerCore';
 import { AtMentionPanel } from './AtMentionPanel';
 import { cssUrlVar } from '../utils/cssUrlVar';
-import { getComposerTagIconUrl } from '../utils/composerTag';
+import {
+  getComposerTagIconUrl,
+  isBuiltinComposerTagIconUrl,
+} from '../utils/composerTag';
 import { isSafeImageSrc } from './messages/Markdown';
 import { ModeIcon } from './ModeIcon';
 import { planSlashSectionRows } from '../utils/slashSectionPlan';
@@ -106,6 +109,7 @@ interface ChatEditorProps {
     commitAccepted?: import('../hooks/useComposerCore').ComposerSubmitCommit,
     metadata?: ComposerSubmitMetadata,
   ) => boolean | void;
+  onInputTextChange?: (text: string) => void;
   onCycleMode?: () => void;
   onToggleShortcuts?: () => void;
   onCancel?: () => void;
@@ -1117,6 +1121,7 @@ export const ChatEditor = memo(
   forwardRef<EditorHandle, ChatEditorProps>(function ChatEditor(props, ref) {
     const {
       onSubmit,
+      onInputTextChange,
       onCycleMode,
       onToggleShortcuts,
       onCancel,
@@ -1173,6 +1178,7 @@ export const ChatEditor = memo(
 
     const core = useComposerCore({
       onSubmit,
+      onInputTextChange,
       onCycleMode,
       onToggleShortcuts,
       disabled,
@@ -1553,7 +1559,10 @@ export const ChatEditor = memo(
       const iconUrl =
         tag.icon ?? getComposerTagIconUrl(tag.kind, composerTagIcons);
       const safeIconUrl =
-        iconUrl && isSafeImageSrc(iconUrl) ? iconUrl : undefined;
+        iconUrl &&
+        (isBuiltinComposerTagIconUrl(iconUrl) || isSafeImageSrc(iconUrl))
+          ? iconUrl
+          : undefined;
       if (!tagLabel && !tagValue) {
         return <span className={styles.tagLabel}>{tag.id}</span>;
       }
@@ -1588,11 +1597,7 @@ export const ChatEditor = memo(
     const selectedWorkspace = workspaces?.find((entry) =>
       selectedWorkspaceCwd ? entry.cwd === selectedWorkspaceCwd : entry.primary,
     );
-    const selectedWorkspaceLabel = selectedWorkspace
-      ? `${selectedWorkspace.label}${
-          selectedWorkspace.primary ? ` · ${t('sidebar.workspacePrimary')}` : ''
-        }`
-      : '';
+    const selectedWorkspaceLabel = selectedWorkspace?.label ?? '';
     const workspaceSelectVisible = Boolean(
       workspaces && workspaces.length > 1 && onSelectWorkspace,
     );
@@ -2084,9 +2089,6 @@ export const ChatEditor = memo(
                             {workspaces.map((entry) => (
                               <SelectItem key={entry.id} value={entry.id}>
                                 {entry.label}
-                                {entry.primary
-                                  ? ` · ${t('sidebar.workspacePrimary')}`
-                                  : ''}
                               </SelectItem>
                             ))}
                           </SelectGroup>

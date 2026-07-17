@@ -159,9 +159,7 @@ export const DiffRenderer: React.FC<DiffRendererProps> = ({
       language,
       availableTerminalHeight,
       contentWidth,
-      theme,
-      settings,
-      tabWidth,
+      { theme, settings, tabWidth },
     );
   } else {
     renderedOutput = renderDiffContent(

@@ -11,6 +11,7 @@ import type {
   DaemonFileStat,
   DaemonScheduledTask,
   DaemonWorkspaceActions,
+  DaemonWorkspacePathSuggestions,
 } from './types.js';
 
 const AGENT_GENERATE_TIMEOUT_MS = 330_000;
@@ -289,6 +290,30 @@ export function createDaemonWorkspaceActions({
       return withActionTimeout(
         client.workspaceSkills(),
         'Load skills timed out',
+      );
+    },
+
+    async setWorkspaceSkillEnabled(skillName, enabled) {
+      const client = requireClient(getClient, 'Set skill enabled failed');
+      return withActionTimeout(
+        client.setWorkspaceSkillEnabled(skillName, enabled),
+        'Set skill enabled timed out',
+      );
+    },
+
+    async installWorkspaceSkill(request) {
+      const client = requireClient(getClient, 'Install skill failed');
+      return withActionTimeout(
+        client.installWorkspaceSkill(request),
+        'Install skill timed out',
+      );
+    },
+
+    async deleteWorkspaceSkill(skillName, scope) {
+      const client = requireClient(getClient, 'Delete skill failed');
+      return withActionTimeout(
+        client.deleteWorkspaceSkill(skillName, scope),
+        'Delete skill timed out',
       );
     },
 
@@ -795,6 +820,15 @@ export function createDaemonWorkspaceActions({
         client.addWorkspace(cwd, options),
         'Add workspace timed out',
       );
+    },
+
+    async suggestWorkspacePaths(prefix) {
+      const client = requireClient(getClient, 'Suggest workspace paths failed');
+      const result = await withActionTimeout(
+        client.workspacePathSuggestions(prefix),
+        'Suggest workspace paths timed out',
+      );
+      return result as DaemonWorkspacePathSuggestions;
     },
 
     async removeWorkspace(workspaceId, options) {

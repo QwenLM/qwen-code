@@ -1321,6 +1321,10 @@ describe('createDaemonWorkspaceService', () => {
       });
 
     it('uses the canonical skill name and refreshes every active session', async () => {
+      const invalidate = vi.fn();
+      const workspaceSkillsStatusProvider = Object.assign(vi.fn(), {
+        invalidate,
+      });
       const persistDisabledSkills = vi.fn().mockResolvedValue({
         changed: true,
         disabled: ['review'],
@@ -1333,6 +1337,7 @@ describe('createDaemonWorkspaceService', () => {
       const svc = createDaemonWorkspaceService(
         makeDeps({
           queryWorkspaceStatus: statusQuery(),
+          workspaceSkillsStatusProvider,
           persistDisabledSkills,
           invokeWorkspaceCommand,
           publishWorkspaceEvent,
@@ -1351,6 +1356,7 @@ describe('createDaemonWorkspaceService', () => {
         'review',
         false,
       );
+      expect(invalidate).toHaveBeenCalledWith('/workspace');
       expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
         'qwen/control/workspace/skills/refresh',
         { cwd: '/workspace' },
