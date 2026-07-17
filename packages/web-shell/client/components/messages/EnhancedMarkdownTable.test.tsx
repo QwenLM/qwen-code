@@ -996,6 +996,7 @@ describe('EnhancedMarkdownTable', () => {
     const dialog = cellDialog();
 
     expect(dialog).not.toBeNull();
+    expect(dialog!.getAttribute('tabindex')).toBe('-1');
     expect(document.activeElement).toBe(dialog);
     expect(document.activeElement).not.toBe(iconCloseButton);
   });

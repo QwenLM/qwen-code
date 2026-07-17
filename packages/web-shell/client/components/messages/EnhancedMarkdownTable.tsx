@@ -2758,6 +2758,7 @@ export function EnhancedTable({
               event.preventDefault();
               cellDialogRef.current?.focus();
             }}
+            tabIndex={-1}
           >
             <DialogClose asChild>
               <Button
