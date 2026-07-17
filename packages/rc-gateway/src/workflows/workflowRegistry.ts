@@ -4,7 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export type WorkflowStatus = 'running' | 'completed' | 'failed' | 'cancelled';
+export type WorkflowStatus =
+  | 'running'
+  | 'cancelling'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
 
 const TERMINAL: ReadonlySet<WorkflowStatus> = new Set([
   'completed',
@@ -87,5 +92,22 @@ export class WorkflowRunRegistry {
   isTerminal(runId: string): boolean {
     const run = this.runs.get(runId);
     return !run || TERMINAL.has(run.status);
+  }
+
+  /**
+   * Atomic CAS: only a run whose status is currently exactly 'running' can
+   * begin cancelling. Returns whether THIS caller won the transition, so
+   * concurrent/late `POST .../cancel` calls within the drain window (the run
+   * only reaches the terminal 'cancelled' status later, once the background
+   * finish() runs after in-flight sessions drain) can gate abort()/audit/SSE
+   * on the return value — mirroring agentRegistry.setStatus's CAS pattern.
+   * A run already 'cancelling' or terminal loses (returns false); the
+   * background finish() path is the only place that ever reaches 'cancelled'.
+   */
+  beginCancel(runId: string): boolean {
+    const run = this.runs.get(runId);
+    if (!run || run.status !== 'running') return false;
+    run.status = 'cancelling';
+    return true;
   }
 }

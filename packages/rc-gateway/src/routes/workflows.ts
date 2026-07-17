@@ -217,14 +217,23 @@ export function createCancelWorkflowRoute(
 ): RequestHandler {
   return (req, res) => {
     const run = deps.runRegistry.get(req.params.runId);
-    if (!run || deps.runRegistry.isTerminal(req.params.runId)) {
+    // Atomic terminal-guarded transition: two concurrent cancels (or a cancel
+    // repeated within the drain window before the background finish() runs)
+    // can both pass a plain isTerminal() pre-check. beginCancel is the single
+    // source of truth for "who won" — only the caller whose running->cancelling
+    // CAS actually landed aborts/audits/emits; every other caller (already
+    // cancelling, already terminal, or unknown run) gets 409, matching the
+    // agentRegistry.setStatus CAS pattern used for agent cancel.
+    const won = run ? deps.runRegistry.beginCancel(run.runId) : false;
+    if (!run || !won) {
       res
         .status(409)
         .json({ error: 'Workflow not running', code: 'workflow_not_running' });
       return;
     }
     // Abort fans to every in-flight spawn (SessionSpawner ends their sessions);
-    // the engine resolves `cancelled` and the background runner emits the frame.
+    // the engine resolves `cancelled` and the background runner's finish()
+    // performs the actual 'cancelling' -> 'cancelled' transition + SSE frame.
     run.controller.abort();
     void deps.audit?.record({
       action: 'workflow_cancelled',
