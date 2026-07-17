@@ -978,12 +978,20 @@ describe('qwen-autofix workflow', () => {
         /cp \.github\/scripts\/check-settings-schema\.sh "\$\{RUNNER_TEMP\}\/check-settings-schema\.sh"/g,
       ) ?? [],
     ).toHaveLength(2);
+    // In the issue-autofix job the staging must happen BEFORE the verify gate's
+    // `git checkout "${BRANCH}"` (first occurrence in the file is the issue
+    // job's): the agent's commits can touch .github/scripts, so a post-checkout
+    // copy would stage the agent's version of the gate instead of the trusted
+    // base's. indexOf resolves to the issue job's staging (first occurrence).
+    expect(
+      workflow.indexOf("- name: 'Stage trusted schema gate'"),
+    ).toBeGreaterThanOrEqual(0);
+    expect(
+      workflow.indexOf("- name: 'Stage trusted schema gate'"),
+    ).toBeLessThan(workflow.indexOf('git checkout "${BRANCH}"'));
     // In the review-address job the staging must happen BEFORE the branch switch
     // ("Prepare branch and feedback" exists only in that job; the job's staging
     // step is the last occurrence of the staging step name in the file).
-    expect(
-      workflow.lastIndexOf("- name: 'Stage trusted schema gate'"),
-    ).toBeGreaterThanOrEqual(0);
     expect(
       workflow.lastIndexOf("- name: 'Stage trusted schema gate'"),
     ).toBeLessThan(workflow.indexOf("- name: 'Prepare branch and feedback'"));
