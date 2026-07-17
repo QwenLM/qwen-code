@@ -94,6 +94,12 @@ IDs, so a list response can be used for deterministic follow-up operations.
 
 - `记住：默认使用 staging 环境` saves a new entry for the current chat or
   thread.
+- One explicit remember request can save several separate facts. For example,
+  `记住：默认使用 staging 环境；发布前运行测试；优先中文回复` creates entries
+  that you can manage independently. Exact duplicate facts are skipped and
+  reported without creating another entry. Requests containing credential-like
+  text are rejected; remove secrets and save the non-sensitive facts
+  separately.
 - `查看记忆` lists entries and their stable IDs. Use `查看第 2 页记忆` to view
   a later page, `查看记忆 <id>` to view one entry, or a natural filtered
   request such as `只看中文偏好` to list the matching entries.
@@ -130,10 +136,9 @@ Memory remains keyed to the current chat or thread. It is not injected into a
 `sessionScope: single` session, because that session is shared across the whole
 channel rather than scoped to one target.
 
-Channel memory does not automatically learn facts from normal conversation,
-extract multiple entries from one request, or accept `第一个` as confirmation
-for an ambiguous natural reference. Use a clear remember request and an exact
-entry ID when a natural reference is ambiguous.
+Channel memory does not automatically learn facts from normal conversation or
+accept `第一个` as confirmation for an ambiguous natural reference. Use a clear
+remember request and an exact entry ID when a natural reference is ambiguous.
 
 ### Token Security
 
