@@ -921,7 +921,12 @@ export const useGeminiStream = (
       debugLogger.debug('vision bridge: gate matched, running conversion');
       const fullTurnModel = config.getDefaultVisionBridgeModel();
       if (fullTurnModel?.agentCapable) {
-        const fullTurnParts = parts.map((part) => clampInlineMediaPart(part));
+        const fullTurnParts = (Array.isArray(parts) ? parts : [parts]).map(
+          (part) =>
+            typeof part === 'string'
+              ? { text: part }
+              : clampInlineMediaPart(part),
+        );
         if (!hasImageParts(fullTurnParts)) {
           return { parts: fullTurnParts, shouldProceed: true };
         }
