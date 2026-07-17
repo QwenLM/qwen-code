@@ -1513,6 +1513,25 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * Directory-name suggestions for an absolute path prefix, for flows that
+   * pick a path outside any registered workspace (e.g. "Add workspace").
+   */
+  async workspacePathSuggestions(prefix: string): Promise<unknown> {
+    const url = new URL(`${this.baseUrl}/workspace-path-suggestions`);
+    url.searchParams.set('prefix', prefix);
+    return await this.fetchWithTimeout(
+      url.toString(),
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace-path-suggestions');
+        }
+        return (await res.json()) as unknown;
+      },
+    );
+  }
+
   async glob(pattern: string): Promise<unknown> {
     const url = new URL(`${this.baseUrl}/glob`);
     url.searchParams.set('pattern', pattern);
