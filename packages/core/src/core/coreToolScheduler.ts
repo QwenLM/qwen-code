@@ -4764,7 +4764,9 @@ export class CoreToolScheduler {
           logToolCall(this.config, new ToolCallEvent(call));
         }
 
-        // Record tool results before notifying completion
+        // Recording preserves schema-bound recovery metadata; it does not
+        // authorize proxy calls until the result is accepted here or later
+        // survives into a resumed active API history.
         this.recordToolResults(completedCalls);
 
         const completionAccepted = this.onAllToolCallsComplete
@@ -4854,6 +4856,7 @@ export class CoreToolScheduler {
         resultDisplay: call.response.resultDisplay,
         error: call.response.error,
         errorType: call.response.errorType,
+        deferredToolPresentations: call.response.deferredToolPresentations,
       });
     }
   }

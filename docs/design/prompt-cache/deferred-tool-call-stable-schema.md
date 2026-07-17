@@ -421,16 +421,18 @@ Detailed behavior:
   state inside `tool_search.execute()`.
 - Commit presentation state only after the successful result containing the
   schema has been appended to active chat history. Cancellation, result delivery
-  failure, or history rollback must discard the pending metadata. At commit,
-  reject the metadata if the current schema fingerprint no longer matches the
-  displayed fingerprint.
+  failure, or history rollback must not unlock the live proxy. Pending metadata
+  may be persisted with the tool-result recording for resume, but it is not
+  authorization. At commit or resume restoration, reject the metadata if the
+  current schema fingerprint no longer matches the displayed fingerprint.
 - ACP/daemon stages `deferredToolPresentations` on the exact user message that
   carries the successful `tool_search` function response. It commits them only
   after that message enters active model history. Tool execution failure,
   cancellation, PostToolUse stop, delivery failure, or history rollback must
   not unlock the proxy.
 - Remove `setTools()` and its reveal/API-sync rollback. If result construction
-  or history commit fails, do not record the fingerprint.
+  fails, do not retain pending metadata; if delivery fails, do not commit it to
+  live presentation state.
 - Explicitly tell the model to use `deferred_tool_call` on a later turn.
 
 The same response cannot both present and invoke a new target. The scheduler
@@ -574,6 +576,10 @@ Resume handles two history formats:
   context as an orphaned user prompt. Restore this proxy state only when the
   warmed registry still contains both `tool_search` and `deferred_tool_call`;
   either tool alone is not a callable discovery/proxy capability.
+- Recorded `tool_search` history: restore schema-bound pending metadata only
+  when its matching successful function response remains in the final resumed
+  API history after compression, recovery, and retry cleanup. The registry
+  revalidates the current schema fingerprint before restoring authorization.
 - Old direct history: collect real deferred function-call names and pass them
   through `ToolRegistry.revealDeferredTool(name)` before building initial
   declarations. In that resumed chat, their declarations stay direct and

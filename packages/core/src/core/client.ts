@@ -69,6 +69,7 @@ import { DEFAULT_AUTO_SKILL_MAX_TURNS } from '../memory/skillReviewAgentPlanner.
 import { isProjectSkillPath } from '../skills/skill-paths.js';
 import { formatFunctionSchemaBlocks } from '../tools/function-schema-rendering.js';
 import { ToolNames } from '../tools/tool-names.js';
+import type { DeferredToolPresentation } from '../tools/tools.js';
 
 // Telemetry
 import {
@@ -110,6 +111,7 @@ import {
 import {
   buildApiHistoryFromConversation,
   replayUiTelemetryFromConversation,
+  type ConversationRecord,
 } from '../services/sessionService.js';
 import { reportError } from '../utils/errorReporting.js';
 import { getErrorMessage } from '../utils/errors.js';
@@ -144,6 +146,69 @@ import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
 
 const MAX_TURNS = 100;
 const MAX_RECENT_TOOL_NAMES_FOR_MEMORY = 20;
+
+/**
+ * Collects persisted schema presentations eligible for resume restoration.
+ * Eligibility requires the successful `tool_search` response to remain in the
+ * final model-facing history; the registry still validates each fingerprint
+ * before granting proxy authorization.
+ */
+function collectResumedDeferredToolPresentations(
+  conversation: ConversationRecord,
+  apiHistory: Content[],
+): DeferredToolPresentation[] {
+  const activeToolSearchResponseIds = new Set<string>();
+  for (const entry of apiHistory) {
+    for (const part of entry.parts ?? []) {
+      const response = part.functionResponse;
+      if (
+        response?.name === ToolNames.TOOL_SEARCH &&
+        typeof response.id === 'string'
+      ) {
+        activeToolSearchResponseIds.add(response.id);
+      }
+    }
+  }
+
+  const presentations: DeferredToolPresentation[] = [];
+  for (const record of conversation.messages) {
+    const result = record.toolCallResult;
+    const hasMatchingRecordedResponse = record.message?.parts?.some(
+      (part) =>
+        part.functionResponse?.name === ToolNames.TOOL_SEARCH &&
+        part.functionResponse.id === result?.callId,
+    );
+    // Results removed by compression or retry trimming are no longer in the
+    // model's context and must not recreate their presentation authorization.
+    if (
+      record.type !== 'tool_result' ||
+      result?.status !== 'success' ||
+      typeof result.callId !== 'string' ||
+      !hasMatchingRecordedResponse ||
+      !activeToolSearchResponseIds.has(result.callId)
+    ) {
+      continue;
+    }
+    const recordedPresentations: unknown = result.deferredToolPresentations;
+    if (!Array.isArray(recordedPresentations)) continue;
+    for (const presentation of recordedPresentations) {
+      if (
+        typeof presentation === 'object' &&
+        presentation !== null &&
+        'name' in presentation &&
+        typeof presentation.name === 'string' &&
+        'schemaFingerprint' in presentation &&
+        typeof presentation.schemaFingerprint === 'string'
+      ) {
+        presentations.push({
+          name: presentation.name,
+          schemaFingerprint: presentation.schemaFingerprint,
+        });
+      }
+    }
+  }
+  return presentations;
+}
 
 export enum SendMessageType {
   UserQuery = 'userQuery',
@@ -339,6 +404,14 @@ export class GeminiClient {
         resumedHistory,
         sessionStartSource ?? SessionStartSource.Resume,
       );
+      if (this.isDeferredToolProxyAvailable()) {
+        for (const presentation of collectResumedDeferredToolPresentations(
+          resumedSessionData.conversation,
+          this.getHistory(),
+        )) {
+          this.config.getToolRegistry().markProxySchemaPresented(presentation);
+        }
+      }
       const chat = this.getChat();
       if (resumeTokenCounts) {
         chat.seedResumeTokenCounts(

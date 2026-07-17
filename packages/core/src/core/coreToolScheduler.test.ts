@@ -64,6 +64,7 @@ import { WriteFileTool } from '../tools/write-file.js';
 import { ShellTool, ShellToolInvocation } from '../tools/shell.js';
 import type { ShellToolParams } from '../tools/shell.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
+import type { ChatRecordingService } from '../services/chatRecordingService.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
 
@@ -703,6 +704,7 @@ describe('CoreToolScheduler', () => {
     memoryMonitor?: { scheduleCheck: () => void };
     toolOutputBatchBudget?: number;
     presentedProxySchemas?: Set<string>;
+    chatRecordingService?: Pick<ChatRecordingService, 'recordToolResult'>;
   }) {
     const ensureTool = vi.fn(
       async (name: string) =>
@@ -797,6 +799,9 @@ describe('CoreToolScheduler', () => {
       } as unknown as Config,
       onAllToolCallsComplete,
       onToolCallsUpdate,
+      chatRecordingService: options.chatRecordingService as
+        | ChatRecordingService
+        | undefined,
       getPreferredEditor: () => 'vscode',
       onEditorClose: vi.fn(),
     });
@@ -1449,6 +1454,11 @@ describe('CoreToolScheduler', () => {
 
   it('commits deferred tool presentations after successful tool call finalization', async () => {
     const presentedProxySchemas = new Set<string>();
+    const recordToolResult = vi.fn();
+    const presentation = {
+      name: ToolNames.CRON_CREATE,
+      schemaFingerprint: 'schema',
+    };
     const toolsByName = new Map<string, MockTool>([
       [
         ToolNames.TOOL_SEARCH,
@@ -1457,9 +1467,7 @@ describe('CoreToolScheduler', () => {
           execute: vi.fn().mockResolvedValue({
             llmContent: '<functions>...</functions>',
             returnDisplay: 'Loaded 1 tool(s)',
-            deferredToolPresentations: [
-              { name: ToolNames.CRON_CREATE, schemaFingerprint: 'schema' },
-            ],
+            deferredToolPresentations: [presentation],
           }),
         }),
       ],
@@ -1471,6 +1479,7 @@ describe('CoreToolScheduler', () => {
       toolsByName,
       presentedProxySchemas,
       onAllToolCallsComplete,
+      chatRecordingService: { recordToolResult },
     });
 
     await scheduler.schedule(
@@ -1486,10 +1495,18 @@ describe('CoreToolScheduler', () => {
 
     expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
     expect(presentedProxySchemas.has(ToolNames.CRON_CREATE)).toBe(true);
+    expect(recordToolResult).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({
+        callId: 'tool-search-commit',
+        deferredToolPresentations: [presentation],
+      }),
+    );
   });
 
   it('does not commit deferred tool presentations when completion callback throws', async () => {
     const presentedProxySchemas = new Set<string>();
+    const recordToolResult = vi.fn();
     const toolsByName = new Map<string, MockTool>([
       [
         ToolNames.TOOL_SEARCH,
@@ -1510,6 +1527,7 @@ describe('CoreToolScheduler', () => {
       toolsByName,
       presentedProxySchemas,
       onAllToolCallsComplete,
+      chatRecordingService: { recordToolResult },
     });
 
     await scheduler.schedule(
@@ -1525,10 +1543,19 @@ describe('CoreToolScheduler', () => {
 
     expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
     expect(presentedProxySchemas.has(ToolNames.CRON_CREATE)).toBe(false);
+    expect(recordToolResult).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({
+        deferredToolPresentations: [
+          { name: ToolNames.CRON_CREATE, schemaFingerprint: 'schema' },
+        ],
+      }),
+    );
   });
 
   it('does not commit deferred tool presentations when the consumer declines them', async () => {
     const presentedProxySchemas = new Set<string>();
+    const recordToolResult = vi.fn();
     const toolsByName = new Map<string, MockTool>([
       [
         ToolNames.TOOL_SEARCH,
@@ -1549,6 +1576,7 @@ describe('CoreToolScheduler', () => {
       toolsByName,
       presentedProxySchemas,
       onAllToolCallsComplete,
+      chatRecordingService: { recordToolResult },
     });
 
     await scheduler.schedule(
@@ -1564,6 +1592,14 @@ describe('CoreToolScheduler', () => {
 
     expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
     expect(presentedProxySchemas.has(ToolNames.CRON_CREATE)).toBe(false);
+    expect(recordToolResult).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({
+        deferredToolPresentations: [
+          { name: ToolNames.CRON_CREATE, schemaFingerprint: 'schema' },
+        ],
+      }),
+    );
   });
 
   it('does not commit deferred tool presentations when the schema block is truncated', async () => {

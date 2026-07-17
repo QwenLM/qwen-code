@@ -780,6 +780,131 @@ describe('Gemini Client (client.ts)', () => {
       expect(resumedClient['recentCompletedToolNames']).toEqual(['read_file']);
     });
 
+    it('restores recorded tool-search presentations that remain in resumed API history', async () => {
+      const registry = vi.mocked(mockConfig.getToolRegistry)();
+      vi.mocked(registry.getTool).mockImplementation((name: string) =>
+        isDeferredProxyControlTool(name) ? ({} as never) : undefined,
+      );
+      vi.mocked(registry.markProxySchemaPresented).mockClear();
+      const presentation = {
+        name: 'cron_create',
+        schemaFingerprint: 'cron-schema',
+      };
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'resumed-session-id',
+          projectHash: 'project-hash',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [
+            {
+              type: 'assistant',
+              message: {
+                role: 'model',
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'tool-search-1',
+                      name: ToolNames.TOOL_SEARCH,
+                      args: { query: 'cron' },
+                    },
+                  },
+                ],
+              },
+            },
+            {
+              type: 'tool_result',
+              message: {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 'tool-search-1',
+                      name: ToolNames.TOOL_SEARCH,
+                      response: { output: '<functions>...</functions>' },
+                    },
+                  },
+                ],
+              },
+              toolCallResult: {
+                callId: 'tool-search-1',
+                status: 'success',
+                deferredToolPresentations: [presentation],
+              },
+            },
+          ],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: null,
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+
+      const resumedClient = new GeminiClient(mockConfig);
+      await resumedClient.initialize();
+
+      expect(registry.markProxySchemaPresented).toHaveBeenCalledWith(
+        presentation,
+      );
+    });
+
+    it('does not restore recorded tool-search presentations removed from resumed API history', async () => {
+      const registry = vi.mocked(mockConfig.getToolRegistry)();
+      vi.mocked(registry.getTool).mockImplementation((name: string) =>
+        isDeferredProxyControlTool(name) ? ({} as never) : undefined,
+      );
+      vi.mocked(registry.markProxySchemaPresented).mockClear();
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'resumed-session-id',
+          projectHash: 'project-hash',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [
+            {
+              type: 'tool_result',
+              message: {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 'tool-search-trimmed',
+                      name: ToolNames.TOOL_SEARCH,
+                      response: { output: '<functions>...</functions>' },
+                    },
+                  },
+                ],
+              },
+              toolCallResult: {
+                callId: 'tool-search-trimmed',
+                status: 'success',
+                deferredToolPresentations: [
+                  {
+                    name: 'cron_create',
+                    schemaFingerprint: 'cron-schema',
+                  },
+                ],
+              },
+            },
+            {
+              type: 'system',
+              subtype: 'chat_compression',
+              systemPayload: {
+                compressedHistory: [
+                  { role: 'user', parts: [{ text: 'compressed context' }] },
+                ],
+              },
+            },
+          ],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: null,
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+
+      const resumedClient = new GeminiClient(mockConfig);
+      await resumedClient.initialize();
+
+      expect(registry.markProxySchemaPresented).not.toHaveBeenCalled();
+    });
+
     it('uses Startup SessionStart source for non-resumed initialize without explicit source', async () => {
       const hookSystem = {
         fireSessionStartEvent: vi.fn().mockResolvedValue(
