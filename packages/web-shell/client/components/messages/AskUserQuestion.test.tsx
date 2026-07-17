@@ -50,10 +50,7 @@ afterEach(() => {
   container = null;
 });
 
-function render(keyboardActive?: boolean): void {
-  container = document.createElement('div');
-  document.body.appendChild(container);
-  root = createRoot(container);
+function rerender(keyboardActive?: boolean): void {
   act(() =>
     root!.render(
       <I18nProvider language="en">
@@ -65,6 +62,13 @@ function render(keyboardActive?: boolean): void {
       </I18nProvider>,
     ),
   );
+}
+
+function render(keyboardActive?: boolean): void {
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  rerender(keyboardActive);
 }
 
 function optionButtons(): HTMLButtonElement[] {
@@ -158,6 +162,22 @@ describe('AskUserQuestion accessibility', () => {
     pressKey(opts[2]!, 'Home');
     expect(document.activeElement).toBe(opts[0]);
     expect(opts[0]!.tabIndex).toBe(0);
+  });
+
+  it('restores the selected option when re-activated, not the safe default', () => {
+    // Mirrors the ToolApproval guard: a covering panel flips keyboardActive
+    // false then true; focus must return to the option the user had selected,
+    // not snap back to the default (which would silently change what Enter
+    // submits).
+    render(undefined); // keyboardActive=true (topmost)
+    const opts = optionButtons(); // [Red, Blue, "Other" trigger]
+    pressKey(opts[0]!, 'ArrowDown');
+    expect(document.activeElement).toBe(opts[1]);
+
+    rerender(false); // a covering panel opens
+    rerender(true); // it closes
+
+    expect(document.activeElement).toBe(opts[1]);
   });
 
   it('advances on rapid repeated ArrowDown without a re-render in between', () => {
