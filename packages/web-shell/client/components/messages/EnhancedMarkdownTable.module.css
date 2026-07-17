@@ -84,14 +84,11 @@
   color: var(--foreground);
   font: inherit;
   cursor: pointer;
+  background: var(--card);
 }
 
 .copyCheck {
   margin-right: 4px;
-}
-
-.copyButton {
-  background: var(--card);
 }
 
 .copyButton:hover {
