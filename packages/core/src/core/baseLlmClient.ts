@@ -14,6 +14,7 @@ import type {
   Tool,
   Schema,
 } from '@google/genai';
+import { FunctionCallingConfigMode } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type { ContentGenerator } from './contentGenerator.js';
 import { AuthType, createContentGenerator } from './contentGenerator.js';
@@ -259,6 +260,15 @@ export class BaseLlmClient {
             config: {
               ...requestConfig,
               tools,
+              // Force the model to call the respond_in_schema tool rather
+              // than free-texting. Without this, Anthropic-native and
+              // some OpenAI-compat providers default to tool_choice=auto
+              // and may skip the tool call entirely — especially
+              // adaptive-thinking models that consume the tiny output
+              // budget on thinking before producing any tool_use.
+              toolConfig: {
+                functionCallingConfig: { mode: FunctionCallingConfigMode.ANY },
+              },
             },
             contents,
           },

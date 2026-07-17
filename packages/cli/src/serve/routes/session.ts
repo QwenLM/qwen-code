@@ -74,6 +74,7 @@ import {
   parseSessionExportFormat,
   sessionExportFormatValues,
 } from '../server/session-export.js';
+import { setDaemonTelemetryWorkspace } from '../server/telemetry.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
 import { replayTranscriptRecordPage } from '../../acp-integration/session/history-replay-page.js';
 import { GENERATION_MAX_PROMPT_BYTES } from '../../acp-integration/generation.js';
@@ -445,6 +446,7 @@ export function registerSessionRoutes(
       return undefined;
     }
     if (workspaceRegistry.list().length === 1) {
+      setDaemonTelemetryWorkspace(res, workspaceRegistry.primary.workspaceCwd);
       return {
         runtime: workspaceRegistry.primary,
         workspaceCwd:
@@ -461,6 +463,7 @@ export function registerSessionRoutes(
       sendWorkspaceMismatch(res, key);
       return undefined;
     }
+    setDaemonTelemetryWorkspace(res, runtime.workspaceCwd);
     if (!runtime.primary && !runtime.trusted) {
       logSessionRoutingFailure('POST /session', 'untrusted_workspace', {
         workspaceId: runtime.workspaceId,
@@ -803,6 +806,7 @@ export function registerSessionRoutes(
       sendWorkspaceMismatch(res, key);
       return undefined;
     }
+    setDaemonTelemetryWorkspace(res, runtime.workspaceCwd);
     if (!runtime.primary && !runtime.trusted) {
       logSessionRoutingFailure(route, 'untrusted_workspace', {
         workspaceId: runtime.workspaceId,
@@ -936,6 +940,7 @@ export function registerSessionRoutes(
 
     if (workspaceRegistry.list().length === 1) {
       const runtime = workspaceRegistry.primary;
+      setDaemonTelemetryWorkspace(res, runtime.workspaceCwd);
       if (await activeInRuntime(runtime)) {
         return runtime;
       }
@@ -948,6 +953,7 @@ export function registerSessionRoutes(
       return undefined;
     }
     if (liveOwner.kind === 'found') {
+      setDaemonTelemetryWorkspace(res, liveOwner.runtime.workspaceCwd);
       if (
         !assertTrustedSessionOwner(res, route, sessionId, liveOwner.runtime)
       ) {
@@ -997,6 +1003,7 @@ export function registerSessionRoutes(
     }
     if (activeRuntimes.length === 1) {
       const runtime = activeRuntimes[0]!;
+      setDaemonTelemetryWorkspace(res, runtime.workspaceCwd);
       if (!assertTrustedSessionOwner(res, route, sessionId, runtime)) {
         return undefined;
       }
