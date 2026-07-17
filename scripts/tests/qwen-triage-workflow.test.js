@@ -124,6 +124,32 @@ describe('qwen-triage tmux workflow', () => {
     expect(checkStep).toContain('if [[ -z "${RESPONSE}"');
   });
 
+  it('notifies the author when a manual triage re-run posts no review', () => {
+    const notifyStep = step('Notify silent triage re-run');
+
+    expect(notifyStep).toContain("github.event_name == 'issue_comment'");
+    expect(notifyStep).toContain('github.event.issue.pull_request');
+    expect(notifyStep).toContain(
+      "startsWith(github.event.comment.body, '@qwen-code /triage')",
+    );
+    expect(notifyStep).toContain('--method GET');
+    expect(notifyStep).toContain('--paginate');
+    expect(notifyStep).toContain('any(.[][];');
+    expect(notifyStep).toContain('.user.login == $bot');
+    expect(notifyStep).toContain('.submitted_at != null');
+    expect(notifyStep).toContain('.submitted_at >= $since');
+    expect(notifyStep).not.toContain('.state == "APPROVED"');
+    expect(notifyStep).toContain('HAS_REVIEW=false');
+    expect(notifyStep).toContain(
+      'gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments"',
+    );
+    expect(notifyStep).toContain('<!-- qwen-triage stage=rerun-summary -->');
+    expect(notifyStep).toContain(
+      'Triage re-run completed without a new review.',
+    );
+    expect(notifyStep).not.toContain('-X PATCH');
+  });
+
   it('reports timeout and infra-error without claiming the flow was exercised', () => {
     const postStep = step('Post tmux result comment');
 

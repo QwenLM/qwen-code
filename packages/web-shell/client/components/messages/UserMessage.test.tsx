@@ -148,6 +148,30 @@ describe('UserMessage', () => {
     expect(container.textContent).toContain('browser and docs');
   });
 
+  it.each(['extension', 'file', 'mcp', 'skill'] as const)(
+    'renders the built-in %s icon for annotation chips',
+    (kind) => {
+      const serialized = `@${kind}:reference`;
+      const container = render(
+        <UserMessage
+          content={serialized}
+          inputAnnotations={[
+            referenceAnnotation(serialized, serialized, {
+              id: `${kind}:reference`,
+              kind,
+              value: kind,
+              serialized,
+            }),
+          ]}
+        />,
+      );
+
+      expect(
+        container.querySelector(`[title="${serialized}"] [aria-hidden="true"]`),
+      ).not.toBeNull();
+    },
+  );
+
   it('does not render inline email addresses as chips', () => {
     const container = render(<UserMessage content="mail me at a@b.test" />);
 

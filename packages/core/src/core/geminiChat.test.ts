@@ -1391,15 +1391,439 @@ describe('GeminiChat', async () => {
       });
     });
 
-    it('should succeed when there is finish reason and response text', async () => {
-      // Setup: Stream with both finish reason and text content
+    it('should retry semantically empty responses after a tool result', async () => {
+      vi.useFakeTimers();
+      try {
+        const recordAssistantTurn = vi.fn();
+        const chatWithRecording = new GeminiChat(
+          mockConfig,
+          config,
+          [],
+          {
+            recordAssistantTurn,
+            recordChatCompression: vi.fn(),
+          } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+          uiTelemetryService,
+        );
+        chatWithRecording.setHistory([
+          { role: 'user', parts: [{ text: 'inspect the project' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  args: { path: '/tmp/example' },
+                },
+              },
+            ],
+          },
+        ]);
+
+        const responses: GenerateContentResponse[][] = [
+          [stopResponse([{ thought: true, text: 'I should keep working.' }])],
+          [
+            stopResponse([
+              { thought: true, text: 'I should still keep working.' },
+              { text: '(empty content)' },
+            ]),
+          ],
+          [
+            {
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      { thought: true, text: 'One more attempt.' },
+                      { text: '(empty ' },
+                    ],
+                  },
+                },
+              ],
+            } as GenerateContentResponse,
+            stopResponse([{ text: 'content)' }]),
+          ],
+          [stopResponse([{ text: 'Finished the analysis.' }])],
+        ];
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () =>
+          (async function* () {
+            yield* responses.shift()!;
+          })(),
+        );
+
+        const stream = await chatWithRecording.sendMessageStream(
+          'test-model',
+          {
+            message: [
+              {
+                functionResponse: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  response: { output: 'file contents' },
+                },
+              },
+            ],
+          },
+          'prompt-id-tool-result-empty-response',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 15_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(4);
+        expect(
+          events.some((event) => event.type === StreamEventType.RETRY),
+        ).toBe(true);
+        const lastRetryIndex = events.findLastIndex(
+          (event) => event.type === StreamEventType.RETRY,
+        );
+        const finishIndex = events.findIndex(
+          (event) =>
+            event.type === StreamEventType.CHUNK &&
+            Boolean(event.value.candidates?.[0]?.finishReason),
+        );
+        expect(finishIndex).toBeGreaterThan(lastRetryIndex);
+        expect(
+          events
+            .slice(lastRetryIndex + 1)
+            .some(
+              (event) =>
+                event.type === StreamEventType.CHUNK &&
+                event.value.candidates?.[0]?.content?.parts?.some(
+                  (part) => part.text === '(empty content)',
+                ),
+            ),
+        ).toBe(false);
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(3);
+        expect(mockLogContentRetry).toHaveBeenLastCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            error_type: 'NO_TOOL_RESULT_PROGRESS',
+            model: 'test-model',
+          }),
+        );
+        expect(recordAssistantTurn).toHaveBeenCalledOnce();
+        expect(recordAssistantTurn).toHaveBeenCalledWith(
+          expect.objectContaining({
+            message: [{ text: 'Finished the analysis.' }],
+          }),
+        );
+        const history = chatWithRecording.getHistory();
+        expect(history).toHaveLength(4);
+        expect(history.at(-1)).toEqual({
+          role: 'model',
+          parts: [{ text: 'Finished the analysis.' }],
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should surface the last empty tool result continuation after retry exhaustion', async () => {
+      vi.useFakeTimers();
+      try {
+        chat.setHistory([
+          { role: 'user', parts: [{ text: 'inspect the project' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  args: { path: '/tmp/example' },
+                },
+              },
+            ],
+          },
+        ]);
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () =>
+          streamResponse(
+            stopResponse([{ thought: true, text: 'I should keep working.' }]),
+          ),
+        );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          {
+            message: [
+              {
+                functionResponse: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  response: { output: 'file contents' },
+                },
+              },
+            ],
+          },
+          'prompt-id-tool-result-empty-response-exhausted',
+        );
+        const collecting = (async () => {
+          for await (const _ of stream) {
+            // consume stream
+          }
+        })();
+        const resultPromise = collecting.then(
+          () => {
+            throw new Error('Expected stream to reject');
+          },
+          (error: unknown) => {
+            expect(error).toMatchObject({
+              message:
+                'Model stream ended after a tool result without visible progress.',
+              type: 'NO_TOOL_RESULT_PROGRESS',
+            });
+          },
+        );
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(35_000);
+        await resultPromise;
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(5);
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(4);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should not retry tool result continuations that make another tool call', async () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'inspect the project' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_read_file',
+                name: 'read_file',
+                args: { path: '/tmp/example' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamResponse(
+          stopResponse([
+            {
+              functionCall: {
+                id: 'call_list_files',
+                name: 'list_files',
+                args: { path: '/tmp' },
+              },
+            },
+          ]),
+        ),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        {
+          message: [
+            {
+              functionResponse: {
+                id: 'call_read_file',
+                name: 'read_file',
+                response: { output: 'file contents' },
+              },
+            },
+          ],
+        },
+        'prompt-id-tool-result-next-tool-call',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) events.push(event);
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+        false,
+      );
+      expect(
+        events.some(
+          (event) =>
+            event.type === StreamEventType.CHUNK &&
+            event.value.candidates?.[0]?.content?.parts?.some(
+              (part) => part.functionCall?.id === 'call_list_files',
+            ),
+        ),
+      ).toBe(true);
+    });
+
+    it('should escalate thought-only MAX_TOKENS responses after a tool result', async () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'inspect the project' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_read_file',
+                name: 'read_file',
+                args: { path: '/tmp/example' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      const responses = [
+        streamResponse({
+          candidates: [
+            {
+              content: {
+                parts: [{ thought: true, text: 'I need more tokens.' }],
+              },
+              finishReason: 'MAX_TOKENS',
+            },
+          ],
+        } as GenerateContentResponse),
+        streamResponse(stopResponse([{ text: 'Finished the analysis.' }])),
+      ];
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => responses.shift()!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-pro',
+        {
+          message: [
+            {
+              functionResponse: {
+                id: 'call_read_file',
+                name: 'read_file',
+                response: { output: 'file contents' },
+              },
+            },
+          ],
+        },
+        'prompt-id-tool-result-max-tokens',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) events.push(event);
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        2,
+      );
+      const calls = vi.mocked(mockContentGenerator.generateContentStream).mock
+        .calls;
+      expect(calls[1]![0].config?.maxOutputTokens).toBeGreaterThan(
+        calls[0]![0].config?.maxOutputTokens ?? 0,
+      );
+      expect(
+        events.some(
+          (event) =>
+            event.type === StreamEventType.RETRY &&
+            event.maxOutputTokensEscalated !== undefined,
+        ),
+      ).toBe(true);
+      expect(chat.getHistory().at(-1)).toEqual({
+        role: 'model',
+        parts: [{ text: 'Finished the analysis.' }],
+      });
+    });
+
+    it('should not escalate thought-only MAX_TOKENS responses when max tokens are user-set', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+          authType: AuthType.USE_GEMINI,
+          model: 'test-model',
+          samplingParams: { max_tokens: 1024 },
+        });
+        chat.setHistory([
+          { role: 'user', parts: [{ text: 'inspect the project' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  args: { path: '/tmp/example' },
+                },
+              },
+            ],
+          },
+        ]);
+
+        const responses = [
+          streamResponse({
+            candidates: [
+              {
+                content: {
+                  parts: [{ thought: true, text: 'I need more tokens.' }],
+                },
+                finishReason: 'MAX_TOKENS',
+              },
+            ],
+          } as GenerateContentResponse),
+          streamResponse(stopResponse([{ text: 'Finished the analysis.' }])),
+        ];
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => responses.shift()!);
+
+        const stream = await chat.sendMessageStream(
+          'gemini-pro',
+          {
+            message: [
+              {
+                functionResponse: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  response: { output: 'file contents' },
+                },
+              },
+            ],
+          },
+          'prompt-id-tool-result-user-max-tokens',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 5_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        expect(
+          events.some(
+            (event) =>
+              event.type === StreamEventType.RETRY &&
+              event.maxOutputTokensEscalated !== undefined,
+          ),
+        ).toBe(false);
+        expect(mockLogContentRetry).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            error_type: 'NO_TOOL_RESULT_PROGRESS_MAX_TOKENS',
+            model: 'gemini-pro',
+          }),
+        );
+        expect(chat.getHistory().at(-1)).toEqual({
+          role: 'model',
+          parts: [{ text: 'Finished the analysis.' }],
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should preserve (empty content) outside tool result continuations', async () => {
       const validStream = (async function* () {
         yield {
           candidates: [
             {
               content: {
                 role: 'model',
-                parts: [{ text: 'valid response' }],
+                parts: [{ text: '(empty content)' }],
               },
               finishReason: 'STOP',
             },
@@ -1425,6 +1849,10 @@ describe('GeminiChat', async () => {
           }
         })(),
       ).resolves.not.toThrow();
+      expect(chat.getHistory().at(-1)).toEqual({
+        role: 'model',
+        parts: [{ text: '(empty content)' }],
+      });
     });
 
     it('should not lose finish reason when last chunk only has usage metadata', async () => {

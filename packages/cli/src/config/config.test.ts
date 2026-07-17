@@ -1278,6 +1278,32 @@ describe('loadCliConfig', () => {
     expect(config.shouldAutoOpenArtifact()).toBe(false);
   });
 
+  it('should enable artifacts by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        artifactEnabled: true,
+      }),
+    );
+  });
+
+  it('should propagate artifact disable setting', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({ experimental: { artifact: false } }, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        artifactEnabled: false,
+      }),
+    );
+  });
+
   it('places session-injected (ACP/IDE) MCP servers at the top precedence tier', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
