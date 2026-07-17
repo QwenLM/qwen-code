@@ -54,14 +54,12 @@ function getInteractionModePrompt(mode: SystemPromptInteractionMode): {
     case 'headless':
       return {
         role: 'a non-interactive CLI agent',
-        questions:
-          "This is a non-interactive, single-turn run and no reply can be received after your response. Never ask the user a question, even if the user explicitly requests one. Do not call 'ask_user_question' or output a textual question. Make reasonable assumptions when safe and complete the task; if required information is unavailable, report the blocker as the final result.",
+        questions: `This is a non-interactive, single-turn run and no reply can be received after your response. Never ask the user a question, even if the user explicitly requests one. Do not call '${ToolNames.ASK_USER_QUESTION}' or output a textual question. Make reasonable assumptions when safe and complete the task; if required information is unavailable, report the blocker as the final result.`,
       };
     case 'acp':
       return {
         role: 'a CLI agent operating through an ACP host',
-        questions:
-          "Use 'ask_user_question' when clarification is necessary. The ACP host can relay the question and response.",
+        questions: `Use '${ToolNames.ASK_USER_QUESTION}' when clarification is necessary. The ACP host can relay the question and response.`,
       };
     case 'interactive':
       return getInteractiveInteractionModePrompt();
@@ -81,8 +79,7 @@ function getInteractiveInteractionModePrompt(): {
 } {
   return {
     role: 'an interactive CLI agent',
-    questions:
-      "Use 'ask_user_question' when you need clarification or want to validate assumptions. Never include time estimates in options.",
+    questions: `Use '${ToolNames.ASK_USER_QUESTION}' when you need clarification or want to validate assumptions. Never include time estimates in options.`,
   };
 }
 
