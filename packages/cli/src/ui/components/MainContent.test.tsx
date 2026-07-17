@@ -16,7 +16,7 @@ import {
 } from '../contexts/UIActionsContext.js';
 import { AppContext } from '../contexts/AppContext.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
-import { ToolCallStatus } from '../types.js';
+import { ToolCallStatus, StreamingState } from '../types.js';
 
 // Global compact mode was removed (#5666); type-based tool rendering no longer
 // consumes a compact-mode context.
@@ -26,12 +26,20 @@ const staticItemsSpy = vi.fn();
 const historyItemDisplayPropsSpy = vi.fn();
 const appHeaderSpy = vi.fn();
 const scrollableListPropsSpy = vi.fn();
+// Records every <Box> render's props so tests can assert layout props
+// (e.g. the pending-region maxHeight backstop) without coupling to ink's
+// Yoga internals.
+const boxPropsSpy = vi.fn();
 
 vi.mock('ink', async () => {
   const actual = await vi.importActual<typeof import('ink')>('ink');
 
   return {
     ...actual,
+    Box: (props: React.ComponentProps<typeof actual.Box>) => {
+      boxPropsSpy(props);
+      return <actual.Box {...props} />;
+    },
     Static: ({
       children,
       items,
@@ -881,5 +889,63 @@ describe('<MainContent />', () => {
       // The ref-based read keeps identity stable.
       expect(secondRenderItem).toBe(firstRenderItem);
     });
+  });
+
+  // #6809: the pending-region maxHeight backstop must stay ON while streaming
+  // (Responding) so streaming tables don't yank the viewport to the top
+  // (#6421), but drop in show-more mode once streaming has settled to a static
+  // confirmation (WaitingForConfirmation) so a tall diff renders every row.
+  it('gates the pending-region maxHeight backstop on streamingState (#6809)', () => {
+    const wrapperProps = () =>
+      boxPropsSpy.mock.calls
+        .map((c) => c[0])
+        .filter(
+          (p: { flexShrink?: number; overflow?: string }) =>
+            p.flexShrink === 0 && p.overflow === 'hidden',
+        );
+
+    boxPropsSpy.mockClear();
+    renderMainContent(
+      createUIState({
+        pendingHistoryItems: [{ type: 'gemini_content', text: 'x' }],
+        availableTerminalHeight: 5,
+        constrainHeight: false,
+        streamingState: StreamingState.Responding,
+      }),
+    );
+    expect(
+      wrapperProps().some((p: { maxHeight?: number }) => p.maxHeight === 5),
+    ).toBe(true);
+
+    boxPropsSpy.mockClear();
+    renderMainContent(
+      createUIState({
+        pendingHistoryItems: [{ type: 'gemini_content', text: 'x' }],
+        availableTerminalHeight: 5,
+        constrainHeight: false,
+        streamingState: StreamingState.WaitingForConfirmation,
+      }),
+    );
+    expect(
+      wrapperProps().some(
+        (p: { maxHeight?: number }) => p.maxHeight === undefined,
+      ),
+    ).toBe(true);
+
+    // Constrained mode (#6421): constrainHeight alone must engage the
+    // backstop even when not streaming, so streaming tables don't yank
+    // the viewport to the top.
+    boxPropsSpy.mockClear();
+    renderMainContent(
+      createUIState({
+        pendingHistoryItems: [{ type: 'gemini_content', text: 'x' }],
+        availableTerminalHeight: 5,
+        constrainHeight: true,
+        streamingState: StreamingState.Idle,
+      }),
+    );
+    expect(
+      wrapperProps().some((p: { maxHeight?: number }) => p.maxHeight === 5),
+    ).toBe(true);
   });
 });
