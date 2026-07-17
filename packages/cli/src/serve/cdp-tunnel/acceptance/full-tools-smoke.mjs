@@ -25,7 +25,9 @@ const child = spawn(command, ['--wsEndpoint', endpoint], {
 let stderr = '';
 let buffer = '';
 let nextId = 1;
+let childError;
 const responses = new Map();
+child.once('error', (error) => (childError = error));
 child.stderr.on('data', (chunk) => (stderr += chunk));
 child.stdout.on('data', (chunk) => {
   buffer += chunk;
@@ -47,6 +49,7 @@ const send = (message) => child.stdin.write(`${JSON.stringify(message)}\n`);
 const waitFor = async (id, timeoutMs = 30_000) => {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    if (childError) throw childError;
     if (responses.has(id)) return responses.get(id);
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
@@ -70,8 +73,12 @@ const waitUntil = async (read, predicate, timeoutMs = 5_000) => {
   const deadline = Date.now() + timeoutMs;
   let value;
   while (Date.now() < deadline) {
-    value = await read();
-    if (predicate(value)) return value;
+    try {
+      value = await read();
+      if (predicate(value)) return value;
+    } catch {
+      // Navigation can briefly invalidate a CDP read while polling.
+    }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   return value;
@@ -82,7 +89,9 @@ const verifyCurrentPage = async (expectedUrl) => {
   });
   let verifierBuffer = '';
   let verifierStderr = '';
+  let verifierError;
   const verifierResponses = new Map();
+  verifier.once('error', (error) => (verifierError = error));
   verifier.stderr.on('data', (chunk) => (verifierStderr += chunk));
   verifier.stdout.on('data', (chunk) => {
     verifierBuffer += chunk;
@@ -105,6 +114,7 @@ const verifyCurrentPage = async (expectedUrl) => {
     );
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
+      if (verifierError) throw verifierError;
       const response = verifierResponses.get(id);
       if (response) {
         if (response.error) throw new Error(JSON.stringify(response.error));
@@ -186,6 +196,7 @@ try {
     /uid=([^\s]+).*link "Open fixture target"/,
   )?.[1];
   checks.buttonClick = afterClick.includes('clicked');
+  checks.linkAppeared = Boolean(freshLinkUid);
 
   const consoleMessages = await waitUntil(
     async () => textOf(await call('list_console_messages')),

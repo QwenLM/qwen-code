@@ -78,6 +78,7 @@ export async function readZipEntries(zipPath) {
     zip.once('error', fail);
     zip.once('end', () => {
       settled = true;
+      zip.close();
       resolve(entries);
     });
     zip.on('entry', (entry) => {
@@ -154,9 +155,10 @@ async function main() {
   );
   const repoRoot = path.resolve(packageRoot, '../..');
   const roots = process.argv.slice(2);
+  const scansDefaultArtifacts = roots.length === 0;
   let metafilePaths;
   let zipPath;
-  if (roots.length === 0) {
+  if (scansDefaultArtifacts) {
     roots.push(
       path.join(packageRoot, 'dist/extension'),
       path.join(repoRoot, 'dist'),
@@ -189,7 +191,10 @@ async function main() {
     process.exitCode = 1;
     return;
   }
-  console.log(`ARTIFACT-SCAN: PASS (${roots.join(', ')})`);
+  const skipped = scansDefaultArtifacts
+    ? ''
+    : '; metafile and zip scans skipped';
+  console.log(`ARTIFACT-SCAN: PASS (${roots.join(', ')}${skipped})`);
 }
 
 if (fileURLToPath(import.meta.url) === process.argv[1]) {
