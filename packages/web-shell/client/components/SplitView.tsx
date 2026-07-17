@@ -489,6 +489,7 @@ export function SplitView({
                       onRightPanelOpen={onRightPanelOpen}
                       onPaneArtifactsChange={onPaneArtifactsChange}
                       messageTurnOutputs={messageTurnOutputs}
+                      restartSseOnPrompt={restartSseOnPrompt}
                     />
                   </DaemonSessionProvider>
                 </ErrorBoundary>

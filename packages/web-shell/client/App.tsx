@@ -4152,6 +4152,8 @@ export function App({
       if (
         shouldBlockComposerSubmit({
           connectionStatus: connectionRef.current.status,
+          hasSession: Boolean(connectionRef.current.sessionId),
+          restartSseOnPrompt: Boolean(restartSseOnPrompt),
         })
       ) {
         pushToast('warning', t('editor.connectionDisconnected'));
@@ -5011,6 +5013,7 @@ export function App({
       runVisibleRecap,
       runVisibleBtw,
       requireActiveSessionForLocalCommand,
+      restartSseOnPrompt,
       resumeChatBottomFollow,
       selectedLanguage,
       setPendingModel,
