@@ -6,7 +6,8 @@
 
 import type * as vscode from 'vscode';
 
-export type LogLevel = 'debug' | 'error' | 'info' | 'log' | 'warn';
+export const LOG_LEVELS = ['debug', 'error', 'info', 'log', 'warn'] as const;
+export type LogLevel = (typeof LOG_LEVELS)[number];
 
 type LogSink = (level: LogLevel, args: unknown[]) => void;
 
@@ -68,17 +69,7 @@ export function formatLogArgs(args: unknown[]): string {
 }
 
 export function isLogLevel(value: unknown): value is LogLevel {
-  return (
-    value === 'debug' ||
-    value === 'error' ||
-    value === 'info' ||
-    value === 'log' ||
-    value === 'warn'
-  );
-}
-
-function setLoggerSink(nextSink: LogSink): void {
-  sink = nextSink;
+  return LOG_LEVELS.includes(value as LogLevel);
 }
 
 export function resetLoggerSink(): void {
@@ -96,13 +87,9 @@ export const logger = {
 export function createLogger(
   outputChannel: vscode.OutputChannel,
   sanitize: (message: string) => string = (message) => message,
-) {
-  setLoggerSink((level, args) => {
+): void {
+  sink = (level, args) => {
     const label = level === 'log' ? 'INFO' : level.toUpperCase();
     outputChannel.appendLine(sanitize(`[${label}] ${formatLogArgs(args)}`));
-  });
-
-  return (...args: unknown[]) => {
-    logger.info(...args);
   };
 }

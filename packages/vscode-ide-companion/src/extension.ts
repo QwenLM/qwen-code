@@ -45,8 +45,6 @@ let ideServer: IDEServer;
 let outputChannel: vscode.OutputChannel;
 let chatProviderRegistry: ChatProviderRegistry<WebViewProvider> | null = null;
 
-let log: (message: string) => void = () => {};
-
 async function checkForUpdates(
   context: vscode.ExtensionContext,
   log: (message: string) => void,
@@ -115,10 +113,10 @@ async function checkForUpdates(
 
 export async function activate(context: vscode.ExtensionContext) {
   outputChannel = vscode.window.createOutputChannel('Qwen Code Companion');
-  log = createLogger(outputChannel, redactLogCredentials);
-  log('Extension activated');
+  createLogger(outputChannel, redactLogCredentials);
+  logger.info('Extension activated');
 
-  checkForUpdates(context, log);
+  checkForUpdates(context, logger.info);
 
   // Create and register readonly file system provider
   // The provider registers itself as a singleton in the constructor
@@ -131,7 +129,7 @@ export async function activate(context: vscode.ExtensionContext) {
     ),
     readonlyProvider,
   );
-  log('Readonly file system provider registered');
+  logger.info('Readonly file system provider registered');
 
   chatProviderRegistry = new ChatProviderRegistry(
     () => new WebViewProvider(context, context.extensionUri),
@@ -139,7 +137,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
   const diffContentProvider = new DiffContentProvider();
   const diffManager = new DiffManager(
-    log,
+    logger.info,
     diffContentProvider,
     // Delay when any chat surface has a pending permission drawer
     () =>
@@ -203,7 +201,7 @@ export async function activate(context: vscode.ExtensionContext) {
         await provider.restorePanel(webviewPanel);
         logger.log('[Extension] Panel restore completed');
 
-        log('WebView panel restored from serialization');
+        logger.info('WebView panel restored from serialization');
       },
     }),
   );
@@ -211,7 +209,7 @@ export async function activate(context: vscode.ExtensionContext) {
   // Register newly added commands via commands module
   registerNewCommands(
     context,
-    log,
+    logger.info,
     diffManager,
     () => chatProviderRegistry?.getEditorProviders() ?? [],
     createWebViewProvider,
@@ -302,12 +300,12 @@ export async function activate(context: vscode.ExtensionContext) {
     }),
   );
 
-  ideServer = new IDEServer(log, diffManager);
+  ideServer = new IDEServer(logger.info, diffManager);
   try {
     await ideServer.start(context);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    log(`Failed to start IDE server: ${message}`);
+    logger.info(`Failed to start IDE server: ${message}`);
   }
 
   const infoMessageEnabled = !HIDE_INSTALLATION_GREETING_IDES.has(
@@ -410,7 +408,7 @@ export async function activate(context: vscode.ExtensionContext) {
 }
 
 export async function deactivate(): Promise<void> {
-  log('Extension deactivated');
+  logger.info('Extension deactivated');
   try {
     if (ideServer) {
       await ideServer.stop();
@@ -419,7 +417,7 @@ export async function deactivate(): Promise<void> {
     chatProviderRegistry = null;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    log(`Failed to stop IDE server during deactivation: ${message}`);
+    logger.info(`Failed to stop IDE server during deactivation: ${message}`);
   } finally {
     if (outputChannel) {
       resetLoggerSink();

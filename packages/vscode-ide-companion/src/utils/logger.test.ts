@@ -43,9 +43,9 @@ describe('logger', () => {
 
   it('redacts credentials from the final rendered line', () => {
     const { appendLine, outputChannel } = createOutputChannel();
-    const log = createLogger(outputChannel, redactLogCredentials);
+    createLogger(outputChannel, redactLogCredentials);
 
-    log(
+    logger.info(
       'ACP stderr:',
       new Error('Authorization: Bearer live-token-1234567890'),
     );
