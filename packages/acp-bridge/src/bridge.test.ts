@@ -10748,6 +10748,79 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('stamps terminal_sequence with the active promptId', async () => {
+      let releasePrompt: (() => void) | undefined;
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent({
+          promptImpl: async () => {
+            await new Promise<void>((resolve) => {
+              releasePrompt = resolve;
+            });
+            return { stopReason: 'end_turn' };
+          },
+        });
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const terminalEvent = (async () => {
+        for await (const event of iter) {
+          if (event.type === 'terminal_sequence') return event;
+        }
+        throw new Error('terminal_sequence event not observed');
+      })();
+
+      const promptDone = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'keep the prompt active' }],
+        },
+        undefined,
+        { clientId: session.clientId, promptId: 'prompt-terminal' },
+      );
+
+      await vi.waitFor(() => {
+        expect(releasePrompt).toBeTypeOf('function');
+      });
+
+      void capturedConn!.extNotification(
+        'qwen/notify/session/terminal-sequence',
+        {
+          v: 1,
+          sessionId: session.sessionId,
+          terminalSequence: '\x07',
+        },
+      );
+
+      await expect(terminalEvent).resolves.toMatchObject({
+        type: 'terminal_sequence',
+        promptId: 'prompt-terminal',
+        data: { terminalSequence: '\x07' },
+      });
+
+      releasePrompt?.();
+      await promptDone;
+      abort.abort();
+      await bridge.shutdown();
+    });
+
     it('drops unknown extNotification methods, kinds, and missing sessionIds silently', async () => {
       let capturedConn: AgentSideConnection | undefined;
       const factory: ChannelFactory = async () => {
@@ -13428,6 +13501,83 @@ describe('createHttpAcpBridge — side-channel state layer (#4511)', () => {
       await bridge.shutdown();
     });
 
+    it('publishModelSwitched stamps the active promptId', async () => {
+      let releasePrompt: (() => void) | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent({
+          promptImpl: async () => {
+            await new Promise<void>((resolve) => {
+              releasePrompt = resolve;
+            });
+            return { stopReason: 'end_turn' };
+          },
+        });
+        const augmented = new Proxy(fakeAgent, {
+          get(target, prop) {
+            if (prop === 'unstable_setSessionModel') {
+              return async () => ({});
+            }
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            return (target as any)[prop];
+          },
+        });
+        new AgentSideConnection(() => augmented as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const modelEvent = (async () => {
+        for await (const event of iter) {
+          if (event.type === 'model_switched') return event;
+        }
+        throw new Error('model_switched event not observed');
+      })();
+
+      const promptDone = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'keep the prompt active' }],
+        },
+        undefined,
+        { clientId: session.clientId, promptId: 'prompt-model' },
+      );
+
+      await vi.waitFor(() => {
+        expect(releasePrompt).toBeTypeOf('function');
+      });
+
+      await bridge.setSessionModel(
+        session.sessionId,
+        { sessionId: session.sessionId, modelId: 'qwen-max' },
+        undefined,
+      );
+
+      await expect(modelEvent).resolves.toMatchObject({
+        type: 'model_switched',
+        promptId: 'prompt-model',
+        data: { modelId: 'qwen-max' },
+      });
+
+      releasePrompt?.();
+      await promptDone;
+      abort.abort();
+      await bridge.shutdown();
+    });
+
     it('publishApprovalModeChanged publishes approval_mode_changed on setSessionApprovalMode', async () => {
       const factory: ChannelFactory = async () => {
         const { clientStream, agentStream } = createInMemoryChannel();
@@ -13472,6 +13622,83 @@ describe('createHttpAcpBridge — side-channel state layer (#4511)', () => {
       expect((next.value?.data as { next: string }).next).toBe(
         ApprovalMode.YOLO,
       );
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('publishApprovalModeChanged stamps the active promptId', async () => {
+      let releasePrompt: (() => void) | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const agent = new FakeAgent({
+          promptImpl: async () => {
+            await new Promise<void>((resolve) => {
+              releasePrompt = resolve;
+            });
+            return { stopReason: 'end_turn' };
+          },
+          extMethodImpl: (method, params) => {
+            if (method === 'qwen/control/session/approval_mode') {
+              return Promise.resolve({
+                previous: 'default',
+                current: (params as { mode: string }).mode,
+              });
+            }
+            return Promise.resolve({});
+          },
+        });
+        new AgentSideConnection(() => agent as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const approvalEvent = (async () => {
+        for await (const event of iter) {
+          if (event.type === 'approval_mode_changed') return event;
+        }
+        throw new Error('approval_mode_changed event not observed');
+      })();
+
+      const promptDone = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'keep the prompt active' }],
+        },
+        undefined,
+        { clientId: session.clientId, promptId: 'prompt-approval' },
+      );
+
+      await vi.waitFor(() => {
+        expect(releasePrompt).toBeTypeOf('function');
+      });
+
+      await bridge.setSessionApprovalMode(
+        session.sessionId,
+        ApprovalMode.YOLO,
+        { persist: false },
+      );
+
+      await expect(approvalEvent).resolves.toMatchObject({
+        type: 'approval_mode_changed',
+        promptId: 'prompt-approval',
+        data: { next: ApprovalMode.YOLO },
+      });
+
+      releasePrompt?.();
+      await promptDone;
       abort.abort();
       await bridge.shutdown();
     });
