@@ -2101,7 +2101,7 @@ export async function loadCliConfig(
     cronEnabled: settings.experimental?.cron ?? true,
     cronRecurringMaxAgeDays: settings.experimental?.cronRecurringMaxAgeDays,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
-    artifactEnabled: settings.experimental?.artifact ?? false,
+    artifactEnabled: settings.experimental?.artifact ?? true,
     artifactAutoOpen: settings.artifact?.autoOpen ?? true,
     artifactPublisher: settings.artifact?.publisher ?? 'local',
     artifactHost: settings.artifact?.host
