@@ -454,14 +454,15 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // disclosure of what was never read.
   const notReviewedParts: string[] = [];
   if (missingReceipts.length > 0) {
+    // One block for both channels, so an edit cannot touch the disclosure and
+    // miss its repair (or vice versa) — the drift the rest of this file exists
+    // to prevent.
     remediation.push(
       'chunks nobody read: build each with `"${QWEN_CODE_CLI:-qwen}" review ' +
         'agent-prompt --plan <plan> --chunk <id> [--rules <rules file>]` — or ' +
         'the whole fan-out with `--roster` — and launch one agent per block, ' +
         'verbatim',
     );
-  }
-  if (missingReceipts.length > 0) {
     // Its own sentence, because its own cause. The clause below explains a gap
     // as a line too long to read, which is true of an *uncoverable* chunk and a
     // fabrication about one nobody receipted — the author would be told the diff

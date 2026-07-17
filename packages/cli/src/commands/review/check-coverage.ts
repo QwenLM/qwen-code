@@ -156,8 +156,13 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         // The label is for humans; the selector is for the rebuild command. A
         // label like `Test coverage matrix (whole-diff)` does not say
         // `--role test-matrix`, and a wrong guess costs a full-roster rerun.
+        // Includes built-but-never-launched roles, whose lighter fix is
+        // relaunching the printed prompt — the clause keeps an operator from
+        // hesitating over the heavier one: a rebuild is idempotent.
         (report.missingRoleSelectors.length > 0
-          ? `Exact selectors: ${report.missingRoleSelectors.join('; ')}\n`
+          ? `Exact selectors: ${report.missingRoleSelectors.join('; ')} ` +
+            `(rebuilding an already-built role is safe — the record is ` +
+            `overwritten with the same block)\n`
           : '') +
         // Where it looked, because "the builder never ran" and "the builder ran
         // against a different --plan" are indistinguishable from a missing file and

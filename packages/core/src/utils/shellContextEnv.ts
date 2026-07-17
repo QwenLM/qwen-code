@@ -106,14 +106,21 @@ export function getShellContextEnvVars(): Record<string, string> {
   // Passed down only when a shell could actually exec it. The variable predates
   // this mechanism with a SECOND meaning: the desktop app's tooling sets it to a
   // vendored `dist/cli.js` — a module path for `node <path>`, with no shebang —
-  // and a shell handed that would run the bundle as a shell script. A
-  // shebang-less script cannot be the exec'd entry under the POSIX shell the
-  // consumer requires anyway, so filtering it just restores the bare-`qwen`
-  // fallback for those hosts. Only script files are gated: a native binary needs
-  // no shebang, and this must not filter one.
+  // and a shell handed that would run the bundle as a shell script. Only script
+  // files are gated: a native binary needs no shebang, and this must not filter
+  // one.
+  //
+  // Filtering means writing an EMPTY STRING, not omitting the key — the same
+  // rule the agent/prompt IDs below already follow, and for the same reason:
+  // every spawn site composes the child env as `{...process.env, ...this}`, so
+  // a key omitted here arrives anyway, inherited through the spread. The first
+  // cut omitted, and on exactly the hosts the filter was written for the value
+  // leaked through and every `"${QWEN_CODE_CLI:-qwen}"` died on exit 126.
+  // Empty is safe for the consumer: the `:-` expansion falls back to `qwen` on
+  // unset AND on empty.
   const cliEntry = process.env['QWEN_CODE_CLI'];
-  if (cliEntry && !isShebangLessScript(cliEntry)) {
-    env['QWEN_CODE_CLI'] = cliEntry;
+  if (cliEntry) {
+    env['QWEN_CODE_CLI'] = isShebangLessScript(cliEntry) ? '' : cliEntry;
   }
 
   // For agent/prompt IDs: explicitly set empty string when no ALS context

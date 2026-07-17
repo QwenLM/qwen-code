@@ -85,27 +85,59 @@ describe('getShellContextEnvVars', () => {
     }
   });
 
-  it('drops a shebang-less .js — the desktop tooling sets one, and a shell cannot exec it', () => {
+  it('overwrites a shebang-less .js with an EMPTY string — omission would leak it through the spread', () => {
     // The variable predates this mechanism with a second meaning: the desktop
     // app's scripts set it to a vendored `dist/cli.js` — a module path meant for
     // `node <path>`, with no shebang. `"${QWEN_CODE_CLI:-qwen}"` executing that
-    // runs a JS bundle as a shell script. Filtering it restores the pre-existing
-    // bare-`qwen` fallback for those hosts; every real entry (the bin wrapper,
-    // dev.js, start.js, the standalone shim) carries a shebang and passes.
+    // runs a JS bundle as a shell script (exit 126). Filtering must WRITE `''`:
+    // every spawn site composes the child env as `{...process.env, ...vars}`,
+    // so a key merely omitted from the returned record arrives anyway, inherited
+    // through the spread — reproduced: exit 126 on exactly the hosts the filter
+    // was written for. The `:-` expansion falls back to `qwen` on empty.
     const dir = mkdtempSync(join(tmpdir(), 'cli-nosb-'));
     try {
       const bundle = join(dir, 'cli.js');
       writeFileSync(bundle, '"use strict";\nconsole.log("bundle");\n');
       process.env['QWEN_CODE_CLI'] = bundle;
-      expect('QWEN_CODE_CLI' in getShellContextEnvVars()).toBe(false);
+
+      const vars = getShellContextEnvVars();
+      expect(vars['QWEN_CODE_CLI']).toBe('');
+      // The contract, one spread up — the channel the omission bug lived in:
+      const childEnv = { ...process.env, ...vars };
+      expect(childEnv['QWEN_CODE_CLI']).toBe('');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('an unreadable entry is filtered through the same spread-safe channel', () => {
+    // The catch branch (`shebangless = true` on read failure) must not leak the
+    // inherited value either — a deleted or permission-blocked path is exactly
+    // as unusable as a shebang-less one.
+    process.env['QWEN_CODE_CLI'] = '/no/such/dir/cli.js';
+    const childEnv = { ...process.env, ...getShellContextEnvVars() };
+    expect(childEnv['QWEN_CODE_CLI']).toBe('');
+  });
+
+  it('a shebang-bearing entry still passes through the spread intact', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cli-sb-'));
+    try {
+      const entry = join(dir, 'entry.js');
+      writeFileSync(entry, '#!/usr/bin/env node\nconsole.log("hi");\n');
+      process.env['QWEN_CODE_CLI'] = entry;
+      const childEnv = { ...process.env, ...getShellContextEnvVars() };
+      expect(childEnv['QWEN_CODE_CLI']).toBe(entry);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
   it('omits QWEN_CODE_CLI when the host does not export one', () => {
-    // The skill falls back to a bare `qwen`, which is the pre-existing behaviour —
-    // an empty string here would shadow it with a command that is not one.
+    // Nothing to override: when the process env has no value, the spread at the
+    // spawn sites has nothing to leak either, so absence is correct here. (NOT
+    // because an empty string would shadow the fallback — the consumer is the
+    // colon form `${QWEN_CODE_CLI:-qwen}`, which falls back on unset AND empty.
+    // That mistaken comment is what produced the filter-by-omission bug below.)
     expect('QWEN_CODE_CLI' in getShellContextEnvVars()).toBe(false);
   });
 
