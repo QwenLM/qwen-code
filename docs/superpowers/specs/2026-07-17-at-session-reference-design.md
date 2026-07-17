@@ -2,7 +2,7 @@
 
 Date: 2026-07-17
 Branch: `lazzy/at-session-ref`
-Status: Proposed
+Status: Implemented
 
 ## 1. Goal
 
