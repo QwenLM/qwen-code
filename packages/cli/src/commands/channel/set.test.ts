@@ -100,4 +100,61 @@ describe('channel set command', () => {
     );
     expect(process.exit).toHaveBeenCalledWith(1);
   });
+
+  it('prints partial startup failures returned by a successful selection', async () => {
+    mockSetSelection.mockResolvedValueOnce({
+      changed: true,
+      replaced: false,
+      partial: true,
+      state: {
+        transition: 'idle',
+        workers: [
+          {
+            workspaceCwd: '/work',
+            state: 'running',
+            channels: ['telegram'],
+            startupFailures: [
+              {
+                channel: 'feishu',
+                phase: 'connect',
+                code: 'ECONNREFUSED',
+                message: 'connection refused',
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    await runHandler({ names: ['all'] });
+
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      '[Channel] Startup failure (workspace=/work, channel=feishu, phase=connect, code=ECONNREFUSED): connection refused',
+    );
+  });
+
+  it('prints structured startup failures from a 502 error body', async () => {
+    mockSetSelection.mockRejectedValueOnce(
+      Object.assign(new Error('worker failed'), {
+        body: {
+          code: 'channel_worker_start_failed',
+          startupFailures: [
+            {
+              workspaceCwd: '/work',
+              channel: 'telegram',
+              phase: 'connect',
+              message: 'invalid token',
+            },
+          ],
+        },
+      }),
+    );
+
+    await runHandler({ names: ['telegram'] });
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      '[Channel] Startup failure (workspace=/work, channel=telegram, phase=connect): invalid token',
+    );
+    expect(process.exit).toHaveBeenCalledWith(1);
+  });
 });

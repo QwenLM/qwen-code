@@ -471,6 +471,7 @@ export interface ServeAppDeps {
   workspaceRuntimeRemoval?: WorkspaceRuntimeRemovalController;
   primaryWorkspaceTrusted?: boolean;
   primaryRuntimeEnv?: WorkspaceRuntimeEnvMetadata;
+  daemonEnv?: Readonly<NodeJS.ProcessEnv>;
   voiceTranscriber?: WorkspaceVoiceRouteDeps['transcribe'];
   voiceCoordinator?: WorkspaceVoiceCoordinator;
 }
@@ -677,6 +678,15 @@ export function createServeApp(
       persistSettingAvailable: deps.persistSetting !== undefined,
       sessionArtifactsPersistenceAvailable:
         deps.sessionArtifactsPersistenceAvailable !== false,
+      sessionGenerationAvailable: () => {
+        const runtimes = workspaceRegistry.list();
+        return (
+          runtimes.length > 0 &&
+          runtimes.every(
+            (runtime) => runtime.bridge.generateSessionContent !== undefined,
+          )
+        );
+      },
       // Registry injection supplies the primary workspace service through the
       // runtime, so it has the same reload surface as legacy deps.workspace.
       reloadAvailable:
@@ -881,6 +891,9 @@ export function createServeApp(
   (app.locals as { workspaceRegistry?: WorkspaceRegistry }).workspaceRegistry =
     workspaceRegistry;
   const primaryRuntime = workspaceRegistry.primary;
+  const daemonEnv = deps.daemonEnv ?? process.env;
+  const primaryRuntimeEffectiveEnv =
+    getRuntimeEffectiveEnv(primaryRuntime.env) ?? daemonEnv;
   const voiceCoordinator =
     deps.voiceCoordinator ?? new WorkspaceVoiceCoordinator();
   const primaryBoundWorkspace = primaryRuntime.workspaceCwd;
@@ -934,7 +947,7 @@ export function createServeApp(
   const healthDemoRoutes = createHealthDemoRoutes({
     opts,
     getPort,
-    bridge: primaryBridge,
+    workspaceRegistry,
     getActiveSseCount,
     getRateLimiter: () => rateLimiter,
   });
@@ -1239,6 +1252,7 @@ export function createServeApp(
   registerWorkspaceSetupGithubRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
+    env: primaryRuntimeEffectiveEnv,
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
@@ -1667,6 +1681,7 @@ export function createServeApp(
   // route through the JSON error contract below.
   acpHandleRef.current = mountAcpHttp(app, primaryBridge, {
     boundWorkspace: primaryBoundWorkspace,
+    daemonEnv,
     // Phase 4 (issue #6378): pass the registry so `/workspaces/:workspace/acp`
     // mounts a per-runtime ACP dispatcher for each registered workspace.
     workspaceRegistry,

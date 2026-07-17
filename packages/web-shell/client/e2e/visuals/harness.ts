@@ -140,10 +140,46 @@ export async function captureScreenshot(
   name: string,
 ): Promise<void> {
   mkdirSync(SCREENSHOTS_DIR, { recursive: true });
+  await freezeLoopingAnimations(page);
   await page.screenshot({
     path: join(SCREENSHOTS_DIR, `${name}.png`),
     animations: 'disabled',
   });
+}
+
+/**
+ * Pin looping animations to their first frame before a capture. Playwright's
+ * `animations: 'disabled'` settles finite animations and is meant to reset
+ * infinite ones, but a GPU-composited transform loop — e.g. the sidebar's
+ * rotating activity spinner — is still captured mid-rotation at a random angle.
+ * That angle differs between the base and head render passes, so the view reads
+ * as "changed" against the 0.02% before/after threshold even when nothing did.
+ * Pausing the infinite Web Animations and rewinding them to time 0 pins them to
+ * a deterministic frame (verified: sidebar-attention drops from ~0.12% of pixels
+ * differing between identical renders to 0); a two-frame wait lets the compositor
+ * commit that frame before the capture reads it.
+ *
+ * Scope: this covers WAAPI and CSS `@keyframes` animations — everything
+ * `document.getAnimations()` reports. A spinner hand-rolled on a
+ * `requestAnimationFrame` loop instead would NOT be caught, and the flake would
+ * silently return; if a spinner reimplementation ever reintroduces it, this is
+ * the function to extend. `harness.spec.ts` pins the pause/rewind contract.
+ */
+export async function freezeLoopingAnimations(page: Page): Promise<void> {
+  await page.evaluate(
+    /* global document, requestAnimationFrame */
+    async () => {
+      for (const animation of document.getAnimations()) {
+        if (animation.effect?.getTiming().iterations === Infinity) {
+          animation.pause();
+          animation.currentTime = 0;
+        }
+      }
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      );
+    },
+  );
 }
 
 /**

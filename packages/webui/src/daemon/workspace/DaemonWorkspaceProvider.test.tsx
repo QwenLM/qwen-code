@@ -350,6 +350,7 @@ describe('DaemonWorkspaceProvider', () => {
 
     expect(actions).toBeDefined();
     expect(typeof actions?.loadMcpStatus).toBe('function');
+    expect(typeof actions?.reloadMcp).toBe('function');
     expect(typeof actions?.loadSkillsStatus).toBe('function');
     expect(typeof actions?.listAgents).toBe('function');
     expect(typeof actions?.globWorkspace).toBe('function');
@@ -731,6 +732,7 @@ describe('DaemonWorkspaceProvider', () => {
         group: 'all',
         cursor: 'cursor-1',
         pageSize: 10,
+        sourceType: 'default',
       });
       return null;
     }
@@ -747,6 +749,7 @@ describe('DaemonWorkspaceProvider', () => {
         cursor: 'cursor-1',
         view: 'organized',
         group: 'all',
+        sourceType: 'default',
       },
     );
     expect(result?.data).toEqual([session]);

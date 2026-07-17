@@ -26,6 +26,10 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
 }));
 
 import { daemonTelemetryMiddleware } from './telemetry.js';
+import {
+  getDeferredRuntimeRequestTiming,
+  setDeferredRuntimeRequestTiming,
+} from './request-helpers.js';
 
 function mockReq(method: string, path: string): Request {
   return { method, path, get: () => undefined } as unknown as Request;
@@ -40,6 +44,12 @@ function mockRes(statusCode: number): Response & EventEmitter {
 describe('daemonTelemetryMiddleware — recordRequest seam', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('has no deferred timing for ordinary requests', () => {
+    expect(getDeferredRuntimeRequestTiming(mockReq('GET', '/health'))).toBe(
+      undefined,
+    );
   });
 
   it('calls recordRequest with (durationMs, statusCode) once the response finishes on a matched route', () => {
@@ -69,6 +79,39 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     );
     res.emit('finish');
     expect(recordRequest).toHaveBeenCalledWith(expect.any(Number), 503);
+  });
+
+  it('includes deferred runtime wait in the request span', () => {
+    const req = mockReq('POST', '/session');
+    const startedAt = new Date(Date.now() - 25);
+    setDeferredRuntimeRequestTiming(req, {
+      startedAt,
+      path: 'joined',
+      waitMs: 24.5,
+    });
+    const res = mockRes(200);
+
+    daemonTelemetryMiddleware(() => '/ws')(
+      req,
+      res,
+      vi.fn() as unknown as NextFunction,
+    );
+    res.emit('finish');
+
+    expect(coreMocks.withDaemonRequestSpan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        startTime: startedAt,
+        deferredRuntimeWaitMs: 24.5,
+        deferredRuntimePath: 'joined',
+      }),
+      expect.any(Function),
+    );
+    expect(coreMocks.recordDaemonHttpRequest).toHaveBeenCalledWith(
+      expect.any(Number),
+      'POST /session',
+      200,
+      'joined',
+    );
   });
 
   it('fires exactly once even if both finish and close emit', () => {
@@ -155,6 +198,31 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
       expect.objectContaining({
         method: 'GET',
         route: 'GET /workspaces/:workspace/session/:id/export',
+        sessionId: 'session/1',
+        workspaceHash: 'hash:/workspace/secondary',
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('attributes archived workspace exports to the target workspace and session', () => {
+    const mw = daemonTelemetryMiddleware(() => '/workspace/secondary');
+    const res = mockRes(200);
+
+    mw(
+      mockReq(
+        'GET',
+        '/workspaces/ws-secondary/session/session%2F1/archive/export',
+      ),
+      res,
+      vi.fn() as unknown as NextFunction,
+    );
+    res.emit('finish');
+
+    expect(coreMocks.withDaemonRequestSpan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: 'GET',
+        route: 'GET /workspaces/:workspace/session/:id/archive/export',
         sessionId: 'session/1',
         workspaceHash: 'hash:/workspace/secondary',
       }),

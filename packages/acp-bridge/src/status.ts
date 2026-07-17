@@ -133,6 +133,8 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionBranch: 'qwen/control/session/branch',
   sessionForkAgent: 'qwen/control/session/fork_agent',
   sessionRecap: 'qwen/control/session/recap',
+  sessionGenerationStart: 'qwen/control/session/generation/start',
+  sessionGenerationCancel: 'qwen/control/session/generation/cancel',
   sessionBtw: 'qwen/control/session/btw',
   sessionShellHistory: 'qwen/control/session/shell_history',
   sessionLanguage: 'qwen/control/session/language',
@@ -144,6 +146,8 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionArtifactsPersist: 'qwen/control/session/artifacts/persist',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
   workspaceMcpManage: 'qwen/control/workspace/mcp/manage',
+  workspaceMcpInitialize: 'qwen/control/workspace/mcp/initialize',
+  workspaceMcpReload: 'qwen/control/workspace/mcp/reload',
   workspaceAgentGenerate: 'qwen/control/workspace/agents/generate',
   workspaceMemoryRememberAvailability:
     'qwen/control/workspace/memory/remember/availability',
@@ -222,7 +226,19 @@ export interface ServeWorkspaceMcpServerStatus extends ServeStatusCell {
   transport: ServeMcpTransport;
   disabled: boolean;
   hasOAuthTokens?: boolean;
+  requiresAuth?: boolean;
+  approvalState?: 'pending' | 'rejected';
+  authenticationState?: 'pending' | 'succeeded' | 'failed';
+  authenticationError?: string;
   source?: 'user' | 'project' | 'extension';
+  configOrigin?:
+    | 'user_settings'
+    | 'workspace_settings'
+    | 'project_mcp_json'
+    | 'system_settings'
+    | 'extension'
+    | 'runtime';
+  removable?: boolean;
   config?: {
     command?: string;
     args?: string[];
@@ -296,10 +312,10 @@ export interface ServeWorkspaceMcpServerStatus extends ServeStatusCell {
 export type ServeMcpBudgetMode = 'enforce' | 'warn' | 'off';
 
 /**
- * Workspace-level budget status cell. Surfaced as one entry in
- * `ServeWorkspaceMcpStatus.budgets[]`. The list shape (vs a single
- * `budget?` field) is forward-compat for a future change that may
- * add a `scope: 'pool'` cell alongside without a schema bump.
+ * MCP budget status cell. Surfaced as one entry in
+ * `ServeWorkspaceMcpStatus.budgets[]`. Daemons advertising
+ * `mcp_workspace_pool` emit workspace-scoped accounting; the legacy no-pool
+ * fallback emits session-scoped accounting.
  *
  * Consumers MUST tolerate additional entries with unrecognized
  * `scope` values — drop them rather than failing.
@@ -309,22 +325,13 @@ export interface ServeMcpBudgetStatusCell extends ServeStatusCell {
   /**
    * Identifies which accounting scope this cell describes.
    *
-   * **The budget feature v1 emits `'session'`** because each ACP session creates
-   * its own `Config`/`McpClientManager` via `acpAgent.newSessionConfig()`
-   * — so the budget caps live MCP clients **per session**, not
-   * per-workspace. The snapshot reflects the bootstrap session's
-   * view; concurrent sessions each enforce their own copy of the
-   * cap independently. See `qwen-serve-protocol.md` "The budget feature v1
-   * scope: per-session" for the operator-facing rationale.
+   * `'workspace'` means sessions inside the selected runtime share an MCP pool
+   * and budget. `'session'` is the legacy per-session manager used when
+   * `mcp_workspace_pool` is absent.
    *
-   * Future PRs:
-   *   - A future shared MCP pool may introduce a workspace-scoped
-   *     manager and will emit `'workspace'` (or `'pool'`) cells.
-   *   - The `string & {}` widening keeps IDE autocomplete + literal
-   *     narrowing for known scopes while allowing unknown scopes
-   *     through without a compile-time break — the protocol contract
-   *     is "consumers MUST tolerate additional scope values, drop
-   *     don't fail."
+   * The `string & {}` widening keeps IDE autocomplete + literal narrowing for
+   * known scopes while allowing unknown scopes through without a compile-time
+   * break. Consumers drop unrecognized scopes rather than failing.
    */
   scope: 'session' | 'workspace' | (string & {});
   /** Live (CONNECTED) MCP client count at snapshot time. */

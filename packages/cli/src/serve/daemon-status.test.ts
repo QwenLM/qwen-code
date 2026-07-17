@@ -355,6 +355,51 @@ describe('buildDaemonStatusResponse', () => {
     });
   });
 
+  it('preserves partial startup failures for multi-workspace workers', async () => {
+    const options = makeOptions({
+      channelWorkerSnapshot: {
+        enabled: false,
+        state: 'disabled',
+        channels: [],
+      },
+    });
+    options.workspaceRegistry = {
+      list: () => [{ bridge: options.bridge }, { bridge: options.bridge }],
+    } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
+    const secondary = {
+      enabled: true,
+      state: 'running' as const,
+      channels: ['telegram'],
+      requestedChannels: ['telegram', 'feishu'],
+      startupFailures: [
+        {
+          channel: 'feishu',
+          phase: 'connect' as const,
+          code: 'ECONNREFUSED',
+          message: 'connection refused',
+        },
+      ],
+      workspaceId: 'secondary',
+      workspaceCwd: '/work/secondary',
+      primary: false,
+    };
+    options.getChannelWorkerSnapshots = () => [secondary];
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.runtime.channelWorkers).toEqual([secondary]);
+    expect(response).toMatchObject({
+      status: 'warning',
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: 'channel_worker_partial_connect',
+          section: 'runtime.channelWorkers',
+          message: expect.stringContaining('/work/secondary'),
+        }),
+      ]),
+    });
+  });
+
   it('omits channelWorkers for single-workspace and empty multi-workspace snapshots', async () => {
     const single = makeOptions();
     single.getChannelWorkerSnapshots = () => [
@@ -454,6 +499,14 @@ describe('buildDaemonStatusResponse', () => {
           state: 'running',
           channels: ['telegram'],
           requestedChannels: ['telegram', 'feishu', 'dingtalk'],
+          startupFailures: [
+            {
+              channel: 'feishu',
+              phase: 'connect',
+              code: 'ECONNREFUSED',
+              message: 'connection refused',
+            },
+          ],
           pid: 1234,
           restartCount: 1,
           lastHeartbeatAt: '2026-07-01T01:00:10.000Z',
@@ -478,6 +531,14 @@ describe('buildDaemonStatusResponse', () => {
           state: 'running',
           channels: ['telegram'],
           requestedChannels: ['telegram', 'feishu', 'dingtalk'],
+          startupFailures: [
+            {
+              channel: 'feishu',
+              phase: 'connect',
+              code: 'ECONNREFUSED',
+              message: 'connection refused',
+            },
+          ],
           pid: 1234,
         },
       },

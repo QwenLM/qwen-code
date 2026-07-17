@@ -103,7 +103,7 @@ $BinaryName = "qwen-cua-driver.exe"
 
 # Baked-version constant — kept in lock-step with the latest published
 # cua-driver-rs-v* release tag by the CD workflow's bake-version step
-# (see .github/workflows/cd-rust-cua-driver.yml). The sentinel-block
+# (see .github/workflows/cd-cua-driver.yml). The sentinel-block
 # markers must stay byte-identical to the matching block in install.sh
 # so the CD `sed` command can update both files with one pattern.
 #
@@ -114,7 +114,7 @@ $BinaryName = "qwen-cua-driver.exe"
 # where the baked line hasn't been updated yet.
 #
 # ~~~ BAKED_VERSION: auto-updated by CD workflow after each release — do not edit ~~~
-$Script:CuaDriverRsBakedVersion = "0.7.1"
+$Script:CuaDriverRsBakedVersion = "0.7.2"
 # ~~~ END_BAKED_VERSION ~~~
 
 # ---------- Path resolution ------------------------------------------------

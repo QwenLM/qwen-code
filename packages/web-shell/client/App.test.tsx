@@ -45,6 +45,7 @@ const {
   mockSessionActions,
   mockWorkspace,
   mockWorkspaceActions,
+  mockMcp,
   mockStore,
   mockFollowup,
   testState,
@@ -110,6 +111,19 @@ const {
       loadMcpStatus: vi.fn().mockResolvedValue({ servers: [] }),
       loadMcpTools: vi.fn().mockResolvedValue([]),
       loadMcpResources: vi.fn().mockResolvedValue([]),
+    },
+    mockMcp: {
+      initialize: vi.fn().mockResolvedValue({ accepted: true }),
+      reloadConfig: vi.fn().mockResolvedValue({ accepted: true }),
+      reload: vi.fn(),
+      loadTools: vi.fn(),
+      loadResources: vi.fn(),
+      restartServer: vi.fn(),
+      manageServer: vi.fn(),
+      addServer: vi.fn(),
+      removeServer: vi.fn(),
+      loading: false,
+      error: undefined,
     },
     mockStore: {
       dispatch: vi.fn(),
@@ -178,6 +192,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useTranscriptStore: () => mockStore,
   useWorkspace: () => mockWorkspace,
   useWorkspaceActions: () => mockWorkspaceActions,
+  useMcp: () => mockMcp,
   useWorkspaceEventSignals: () => ({
     artifactsVersion: 0,
     extensionsVersion: 0,
@@ -391,6 +406,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
     WebShellSidebar: (props: {
       sessionListReloadToken?: number;
       collapsed?: boolean;
+      onOpenPlugins?: () => void;
       onOpenDaemonStatus?: () => void;
       onOpenSessions?: () => void;
       onOpenSplitView?: () => void;
@@ -423,6 +439,15 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
             onClick: () => props.onLoadSession?.('session-2'),
           },
           'load session',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'open-plugins',
+            type: 'button',
+            onClick: props.onOpenPlugins,
+          },
+          'plugins',
         ),
         React.createElement(
           'button',
@@ -621,6 +646,7 @@ vi.doMock('./components/extensions/ExtensionsManagerPage', async () => {
     ExtensionsManagerPage: (props: {
       onClose: () => void;
       initialFocusRef?: React.Ref<HTMLHeadingElement>;
+      embedded?: unknown;
     }) =>
       React.createElement(
         'div',
@@ -651,7 +677,6 @@ mockComponent(
   'ReleaseSessionDialog',
 );
 mockComponent('./components/dialogs/RewindDialog', 'RewindDialog');
-mockComponent('./components/dialogs/McpDialog', 'McpDialog');
 mockComponent('./components/messages/AgentsMessage', 'AgentsMessage');
 mockComponent('./components/messages/MemoryMessage', 'MemoryMessage');
 mockComponent('./components/messages/AuthMessage', 'AuthMessage');
@@ -826,6 +851,20 @@ beforeEach(() => {
   mockWorkspaceActions.loadMcpStatus.mockResolvedValue({ servers: [] });
   mockWorkspaceActions.loadMcpTools.mockResolvedValue([]);
   mockWorkspaceActions.loadMcpResources.mockResolvedValue([]);
+  mockMcp.initialize.mockClear();
+  mockMcp.initialize.mockResolvedValue({ accepted: true });
+  mockMcp.reloadConfig.mockClear();
+  mockMcp.reloadConfig.mockResolvedValue({ accepted: true });
+  mockMcp.reload.mockReset();
+  mockMcp.loadTools.mockReset();
+  mockMcp.loadResources.mockReset();
+  mockMcp.restartServer.mockReset();
+  mockMcp.restartServer.mockResolvedValue({
+    serverName: 'server',
+    restarted: true,
+    durationMs: 1,
+  });
+  mockMcp.manageServer.mockReset();
   vi.spyOn(console, 'warn').mockImplementation(() => {});
 });
 
@@ -1724,6 +1763,302 @@ describe('App session callbacks', () => {
       container.querySelector('[data-testid="extensions-manager-page"]'),
     ).toBeNull();
     expect(editorFocus).toHaveBeenCalled();
+  });
+
+  it('opens plugin management tabs from the sidebar', async () => {
+    mockWorkspaceActions.loadMcpStatus.mockResolvedValue({
+      initialized: true,
+      discoveryState: 'completed',
+      servers: [],
+    });
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-plugins"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    const panel = container.querySelector('[data-testid="inline-panel"]');
+    const extensionsTab =
+      panel?.querySelector<HTMLButtonElement>('button[role="tab"]');
+    const tabs =
+      panel?.querySelectorAll<HTMLButtonElement>('button[role="tab"]');
+    expect(panel?.getAttribute('aria-label')).toBe('Plugins');
+    expect(Array.from(tabs ?? []).map((tab) => tab.textContent)).toEqual([
+      'Extensions',
+      'MCP',
+    ]);
+    expect(extensionsTab?.getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(extensionsTab);
+  });
+
+  it('only shows server startup progress during MCP discovery', async () => {
+    mockWorkspaceActions.loadMcpStatus.mockResolvedValue({
+      initialized: true,
+      discoveryState: 'starting',
+      servers: [
+        {
+          name: 'filesystem',
+          source: 'project',
+          configOrigin: 'workspace_settings',
+          disabled: false,
+          mcpStatus: 'connecting',
+        },
+      ],
+    });
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/mcp';
+    await clickSubmit(container);
+    await flush();
+
+    expect(container.textContent).toContain(
+      'MCP servers are starting up (1 initializing)',
+    );
+    expect(container.textContent).not.toContain('Loading MCP tools...');
+    expect(
+      container.querySelector('[role="button"][aria-label="filesystem"]'),
+    ).toHaveProperty('tabIndex', 0);
+  });
+
+  it('shows server operations without duplicating tools and resources tabs', async () => {
+    mockWorkspaceActions.loadMcpStatus.mockResolvedValue({
+      initialized: true,
+      discoveryState: 'completed',
+      workspaceCwd: '/workspace',
+      servers: [
+        {
+          name: 'filesystem',
+          source: 'project',
+          configOrigin: 'workspace_settings',
+          disabled: false,
+          mcpStatus: 'disconnected',
+          resourceCount: 1,
+          removable: true,
+        },
+      ],
+    });
+    mockMcp.loadTools.mockResolvedValue({
+      serverName: 'filesystem',
+      tools: [{ name: 'read_file', description: 'Read a file' }],
+    });
+    mockMcp.loadResources.mockResolvedValue({
+      serverName: 'filesystem',
+      resources: [{ uri: 'file:///README.md', name: 'README' }],
+    });
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/mcp';
+    await clickSubmit(container);
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="filesystem"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="mcp-server-actions"]')
+        ?.dispatchEvent(
+          new MouseEvent('pointerdown', {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+          }),
+        );
+      await Promise.resolve();
+    });
+
+    expect(document.body.textContent).not.toContain('View tools');
+    expect(document.body.textContent).not.toContain('View resources');
+    expect(document.body.textContent).toContain('Reconnect');
+    expect(document.body.textContent).not.toContain('Authenticate');
+    expect(document.body.textContent).toContain('Disable');
+    expect(document.body.textContent).toContain('Delete');
+
+    await act(async () => {
+      document
+        .querySelector<HTMLElement>(
+          '[data-testid="mcp-server-action-reconnect"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(mockMcp.restartServer).toHaveBeenCalledWith('filesystem');
+  });
+
+  it('polls workspace MCP status until browser authentication completes', async () => {
+    vi.useFakeTimers();
+    const disconnectedServer = {
+      name: 'yuque',
+      source: 'project' as const,
+      configOrigin: 'workspace_settings' as const,
+      disabled: false,
+      mcpStatus: 'disconnected' as const,
+      requiresAuth: true,
+      resourceCount: 0,
+    };
+    mockWorkspaceActions.loadMcpStatus.mockResolvedValue({
+      initialized: true,
+      discoveryState: 'completed',
+      workspaceCwd: '/workspace',
+      servers: [disconnectedServer],
+    });
+    mockMcp.loadTools.mockResolvedValue({ serverName: 'yuque', tools: [] });
+    mockMcp.manageServer.mockResolvedValue({
+      serverName: 'yuque',
+      action: 'authenticate',
+      ok: true,
+      pending: true,
+      messages: ['Open the browser to authenticate.'],
+      authUrl: 'https://example.com/oauth',
+    });
+    mockMcp.reload
+      .mockResolvedValueOnce({
+        initialized: true,
+        discoveryState: 'completed',
+        workspaceCwd: '/workspace',
+        servers: [
+          { ...disconnectedServer, authenticationState: 'pending' as const },
+        ],
+      })
+      .mockResolvedValueOnce({
+        initialized: true,
+        discoveryState: 'completed',
+        workspaceCwd: '/workspace',
+        servers: [
+          {
+            ...disconnectedServer,
+            mcpStatus: 'connected' as const,
+            hasOAuthTokens: true,
+            authenticationState: 'succeeded' as const,
+          },
+        ],
+      });
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/mcp';
+    await clickSubmit(container);
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="yuque"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="mcp-server-actions"]')
+        ?.dispatchEvent(
+          new MouseEvent('pointerdown', {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+          }),
+        );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      document
+        .querySelector<HTMLElement>(
+          '[data-testid="mcp-server-action-authenticate"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain(
+      'Open the browser to authenticate.',
+    );
+    expect(mockMcp.reload).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    expect(mockMcp.reload).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain('Authenticating');
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    await flush();
+    expect(mockMcp.reload).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain('Authenticate complete.');
+  });
+
+  it('does not show MCP discovery progress', async () => {
+    mockWorkspaceActions.loadMcpStatus.mockResolvedValue({
+      initialized: true,
+      discoveryState: 'starting',
+      servers: [],
+    });
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/mcp';
+    await clickSubmit(container);
+    await flush();
+
+    expect(container.textContent).not.toContain('Loading MCP tools...');
+  });
+
+  it('does not initialize MCP discovery when it is already complete', async () => {
+    mockWorkspaceActions.loadMcpStatus.mockResolvedValue({
+      initialized: true,
+      discoveryState: 'completed',
+      servers: [],
+    });
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/mcp';
+    await clickSubmit(container);
+    await flush();
+
+    expect(mockMcp.initialize).not.toHaveBeenCalled();
+    expect(mockMcp.reloadConfig).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain('MCP tools are ready.');
+    expect(container.textContent).not.toContain('Loading MCP tools...');
+  });
+
+  it('does not show MCP discovery progress before or after completion', async () => {
+    vi.useFakeTimers();
+    mockWorkspaceActions.loadMcpStatus.mockResolvedValue({
+      initialized: true,
+      discoveryState: 'starting',
+      servers: [],
+    });
+    mockMcp.reload.mockResolvedValue({
+      initialized: true,
+      discoveryState: 'completed',
+      servers: [],
+    });
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/mcp';
+    await clickSubmit(container);
+    await flush();
+    expect(container.textContent).not.toContain('Loading MCP tools...');
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    await flush();
+
+    expect(container.textContent).not.toContain('Loading MCP tools...');
+    expect(container.textContent).not.toContain('MCP tools are ready.');
   });
 
   it('auto-closes an open panel when an AskUserQuestion approval becomes pending', async () => {
@@ -2861,6 +3196,105 @@ describe('App session callbacks', () => {
         await Promise.resolve();
       });
       expect(sidebar()?.getAttribute('data-collapsed')).toBe('false');
+    } finally {
+      window.history.replaceState(null, '', '/');
+    }
+  });
+
+  it('lands on the first pane, not an empty new chat, when a shrink closes a URL-driven split', async () => {
+    let large = true;
+    let changeHandler: ((event: { matches: boolean }) => void) | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        get matches() {
+          return query.includes('min-width') ? large : false;
+        },
+        media: query,
+        addEventListener: (
+          _type: string,
+          cb: (event: { matches: boolean }) => void,
+        ) => {
+          // Capture the isLargeScreen (1024px) query specifically — not the
+          // separate 1200px split-sidebar query — so flipping it drives the fold.
+          if (query.includes('1024')) changeHandler = cb;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+    // The single chat has no session of its own — the split was entered from a
+    // `?split=` deep link — so a naive close would strand on an empty new chat.
+    mockConnection.sessionId = undefined;
+    window.history.replaceState(null, '', '/?split=s1,s2');
+
+    try {
+      const { container } = renderApp();
+      await flush();
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).not.toBeNull();
+
+      await act(async () => {
+        large = false;
+        changeHandler?.({ matches: false });
+        await Promise.resolve();
+      });
+
+      // The split folds back to chat and re-attaches to the first pane's
+      // session instead of stranding the user on an empty new chat.
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).toBeNull();
+      expect(mockSessionActions.loadSession).toHaveBeenCalledWith('s1');
+    } finally {
+      window.history.replaceState(null, '', '/');
+    }
+  });
+
+  it('keeps the chat on its own session (does not re-point to the first pane) when a shrink closes the split', async () => {
+    let large = true;
+    let changeHandler: ((event: { matches: boolean }) => void) | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        get matches() {
+          return query.includes('min-width') ? large : false;
+        },
+        media: query,
+        addEventListener: (
+          _type: string,
+          cb: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('1024')) changeHandler = cb;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+    // This chat HAS a session of its own — folding must leave it (and its git
+    // branch / URL) untouched rather than re-pointing at the split's first pane.
+    mockConnection.sessionId = 'own-session';
+    window.history.replaceState(null, '', '/?split=s1,s2');
+
+    try {
+      const { container } = renderApp();
+      await flush();
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).not.toBeNull();
+      mockSessionActions.loadSession.mockClear();
+
+      await act(async () => {
+        large = false;
+        changeHandler?.({ matches: false });
+        await Promise.resolve();
+      });
+
+      // Folded back to chat, but the guard kept the existing session — no
+      // re-point to the first pane.
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).toBeNull();
+      expect(mockSessionActions.loadSession).not.toHaveBeenCalled();
     } finally {
       window.history.replaceState(null, '', '/');
     }

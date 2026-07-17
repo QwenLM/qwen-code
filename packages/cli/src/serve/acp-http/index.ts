@@ -202,6 +202,7 @@ function delay(ms: number): Promise<void> {
 function buildChromeDevToolsMcpRuntimeConfig(
   localPort: number | undefined,
   hostname: string | undefined,
+  env: Readonly<NodeJS.ProcessEnv>,
 ): Record<string, unknown> | undefined {
   if (
     localPort === undefined ||
@@ -210,7 +211,7 @@ function buildChromeDevToolsMcpRuntimeConfig(
   ) {
     return undefined;
   }
-  const command = resolveCdpMcpCommand(process.env);
+  const command = resolveCdpMcpCommand(env);
   if (!command) {
     writeStderrLine(
       `qwen serve: set ${QWEN_CDP_MCP_COMMAND_ENV} to enable browser automation MCP (no adapter is bundled)`,
@@ -361,6 +362,8 @@ const MAX_INFLIGHT_MCP_DISPATCH = 8;
 
 export interface MountAcpHttpOptions {
   boundWorkspace: string;
+  /** Process-level fallback for embedded mounts and parent-process runtimes. */
+  daemonEnv?: Readonly<NodeJS.ProcessEnv>;
   workspace: DaemonWorkspaceService;
   fsFactory?: WorkspaceFileSystemFactory;
   deviceFlowRegistry?: DeviceFlowRegistry;
@@ -546,6 +549,17 @@ export interface AcpHttpHandle {
   attachServer(server: import('node:http').Server): void;
 }
 
+function runtimeEffectiveEnv(
+  runtime: WorkspaceRuntime,
+  daemonEnv: Readonly<NodeJS.ProcessEnv>,
+): Readonly<NodeJS.ProcessEnv> {
+  if (runtime.env.mode === 'runtime-overlay') {
+    // An empty overlay must stay isolated instead of inheriting daemon values.
+    return runtime.env.effectiveEnv ?? {};
+  }
+  return runtime.env.effectiveEnv ?? daemonEnv;
+}
+
 /**
  * Mount the official ACP Streamable HTTP transport (RFD #721) on an
  * existing Express app, backed by the shared `HttpAcpBridge`. Additive:
@@ -566,6 +580,10 @@ export function mountAcpHttp(
   const enabled = opts.enabled ?? resolveAcpHttpEnabled();
   if (!enabled) return undefined;
 
+  const daemonEnv = opts.daemonEnv ?? process.env;
+  const primaryEnv = opts.workspaceRegistry
+    ? runtimeEffectiveEnv(opts.workspaceRegistry.primary, daemonEnv)
+    : daemonEnv;
   const path = opts.path ?? '/acp';
   const dispatcherRef: { current?: AcpDispatcher } = {};
   // Lifecycle gate: once `dispose()` runs, late/in-flight HTTP requests get a
@@ -680,6 +698,7 @@ export function mountAcpHttp(
     const runtimeConfig = buildChromeDevToolsMcpRuntimeConfig(
       localPort,
       opts.hostname,
+      daemonEnv,
     );
     if (!runtimeConfig) {
       cdpMcpTerminalSkipLogged = true;
@@ -747,6 +766,7 @@ export function mountAcpHttp(
   const dispatcher = new AcpDispatcher(
     bridge,
     opts.boundWorkspace,
+    primaryEnv,
     opts.workspace,
     opts.workspaceRememberLane,
     opts.fsFactory,
@@ -1201,6 +1221,7 @@ export function mountAcpHttp(
     const secondaryDispatcher = new AcpDispatcher(
       rt.bridge,
       rt.workspaceCwd,
+      runtimeEffectiveEnv(rt, daemonEnv),
       rt.workspaceService,
       workspaceRememberLane,
       rt.routeFileSystemFactory,

@@ -36,7 +36,7 @@ The complete registry lives in `packages/cli/src/serve/capabilities.ts`.
 }
 ```
 
-`workspaceCwd` is the canonical primary workspace path (see [`02-serve-runtime.md`](./02-serve-runtime.md)). When `multi_workspace_sessions` is advertised, `workspaces[]` lists every registered sessions-only runtime. `policy.permission` is the active mediator policy.
+`workspaceCwd` is the canonical primary workspace path (see [`02-serve-runtime.md`](./02-serve-runtime.md)). Current daemons use `workspaces[]` as the registered runtime catalog; `multi_workspace_sessions` indicates that more than one runtime is active. `policy.permission` is the active mediator policy.
 
 ### `ServeCapabilityDescriptor`
 
@@ -120,7 +120,7 @@ Workspace read-only snapshots: `workspace_mcp`, `workspace_skills`, `workspace_p
 
 Extension management: `extension_management_v2` adds the global `/extensions/*` catalog/mutation/operation contract and the workspace activation projection. It is separate from the published `workspace_extensions` compatibility surface and from `workspace_qualified_rest_core`.
 
-Workspace-qualified session reads: `workspace_persisted_transcript`, `workspace_session_export`. The export tag is separate from both `session_export` and `workspace_qualified_rest_core` because older daemons advertise those tags without the plural export route. Persisted transcript paging permits an untrusted secondary under its bounded read policy; full export remains trusted-only.
+Workspace-qualified session reads: `workspace_persisted_transcript`, `workspace_session_export`, `workspace_archived_session_export`. The active and archived export tags are independent from each other and from `session_export` and `workspace_qualified_rest_core`, so clients must pre-flight the exact storage state they intend to export. Persisted transcript paging permits an untrusted secondary under its bounded read policy; both full export paths remain trusted-only.
 
 Workspace mutation (Wave 4+): `workspace_memory`, `workspace_agents`, `workspace_agent_generate`, `workspace_tool_toggle`, **`workspace_settings`** (conditional), `workspace_permissions`, `workspace_init`, `workspace_github_setup`, `workspace_trust`, `workspace_mcp_restart`, `workspace_mcp_manage`, `workspace_file_read`, `workspace_file_bytes`, `workspace_file_write`, **`workspace_reload`** (conditional).
 

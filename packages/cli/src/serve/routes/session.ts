@@ -61,6 +61,7 @@ import {
 } from '../server/session-list.js';
 import {
   archiveDaemonSessions,
+  assertSessionArchived,
   assertSessionLoadable,
   deleteDaemonSessions,
   logSessionArchiveWarning,
@@ -74,6 +75,7 @@ import {
 } from '../server/session-export.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
 import { replayTranscriptRecordPage } from '../../acp-integration/session/history-replay-page.js';
+import { GENERATION_MAX_PROMPT_BYTES } from '../../acp-integration/generation.js';
 import { requireSessionRuntime } from './session-runtime.js';
 import {
   resolveWorkspaceRuntimeFromParam,
@@ -102,6 +104,66 @@ const WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
 const WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES = 64 * 1024;
 const TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR =
   'Transcript pagination state exceeds the safe limit';
+const GENERATION_HEARTBEAT_MS = 15_000;
+const PRIMARY_ONLY_LIVE_SESSION_ROUTES = [
+  'POST /session/:id/branch',
+  'POST /session/:id/fork',
+  'POST /session/:id/cd',
+] as const;
+type PrimaryOnlyLiveSessionRoute =
+  (typeof PRIMARY_ONLY_LIVE_SESSION_ROUTES)[number];
+
+function isPrimaryOnlyLiveSessionRoute(
+  route: string,
+): route is PrimaryOnlyLiveSessionRoute {
+  return (PRIMARY_ONLY_LIVE_SESSION_ROUTES as readonly string[]).includes(
+    route,
+  );
+}
+
+function formatGenerationSse(
+  event: string,
+  data: Record<string, unknown>,
+): string {
+  return `event: ${event}\ndata: ${JSON.stringify({ v: 1, ...data })}\n\n`;
+}
+
+function writeGenerationSseChunk(res: Response, chunk: string): Promise<void> {
+  if (res.destroyed) {
+    return Promise.reject(new Error('Generation SSE connection destroyed'));
+  }
+  const writable = res.write(chunk);
+  const flush = (res as Response & { flush?: () => void }).flush;
+  flush?.call(res);
+  if (writable) {
+    return res.destroyed
+      ? Promise.reject(new Error('Generation SSE connection destroyed'))
+      : Promise.resolve();
+  }
+  return new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      res.off('drain', onDrain);
+      res.off('close', onClose);
+      res.off('error', onError);
+    };
+    const onDrain = () => {
+      cleanup();
+      resolve();
+    };
+    const onClose = () => {
+      cleanup();
+      reject(new Error('Generation SSE connection closed'));
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    res.once('drain', onDrain);
+    res.once('close', onClose);
+    res.once('error', onError);
+    if (res.destroyed) onClose();
+  });
+}
 
 function isReadOnlyWorkspaceInspection(runtime: WorkspaceRuntime): boolean {
   return !runtime.primary && !runtime.trusted;
@@ -521,6 +583,7 @@ export function registerSessionRoutes(
       route: string;
       workspaceCwd: string;
       workspaceQualified?: boolean;
+      archiveState?: SessionArchiveState;
     },
   ): Promise<void> => {
     const sessionId = requireSessionId(req, res);
@@ -540,11 +603,16 @@ export function registerSessionRoutes(
       const result = await archiveCoordinator.runSharedMany(
         [sessionId],
         async () => {
-          await assertSessionLoadable(target.workspaceCwd, sessionId);
+          if (target.archiveState === 'archived') {
+            await assertSessionArchived(target.workspaceCwd, sessionId);
+          } else {
+            await assertSessionLoadable(target.workspaceCwd, sessionId);
+          }
           return exportSessionTranscript({
             workspaceCwd: target.workspaceCwd,
             sessionId,
             format,
+            archiveState: target.archiveState,
             config: { getChannel: () => 'daemon' },
           });
         },
@@ -783,12 +851,12 @@ export function registerSessionRoutes(
 
   const sendNonPrimarySessionRouteUnsupported = (
     res: Response,
-    route: string,
+    route: PrimaryOnlyLiveSessionRoute,
     sessionId: string,
     runtime: WorkspaceRuntime,
   ): void => {
     res.status(400).json({
-      error: `Route "${route}" is primary-only for non-primary workspace sessions in Phase 2a.`,
+      error: `Route "${route}" is only available for primary workspace sessions.`,
       code: 'non_primary_session_route_not_supported',
       sessionId,
       workspaceId: runtime.workspaceId,
@@ -1005,21 +1073,32 @@ export function registerSessionRoutes(
     return key;
   };
 
-  const withMutableSession =
-    (
-      route: string,
-      handler: (
-        req: Request,
-        res: Response,
-        sessionId: string,
-      ) => Promise<void> | void,
-    ): RequestHandler =>
-    async (req, res) => {
+  const withPrimaryOnlyMutableSession = (
+    route: string,
+    handler: (
+      req: Request,
+      res: Response,
+      sessionId: string,
+    ) => Promise<void> | void,
+  ): RequestHandler => {
+    if (!isPrimaryOnlyLiveSessionRoute(route)) {
+      throw new Error(`Unregistered primary-only session route: ${route}`);
+    }
+    return async (req, res) => {
       const sessionId = requireSessionId(req, res);
       if (sessionId === null) return;
       const runtime = resolveLiveSessionRuntime(sessionId, res, route);
       if (!runtime) return;
       if (!runtime.primary) {
+        logSessionRoutingFailure(
+          route,
+          'non_primary_session_route_not_supported',
+          {
+            sessionId,
+            workspaceId: runtime.workspaceId,
+            workspaceCwd: runtime.workspaceCwd,
+          },
+        );
         sendNonPrimarySessionRouteUnsupported(res, route, sessionId, runtime);
         return;
       }
@@ -1031,6 +1110,7 @@ export function registerSessionRoutes(
         sendBridgeError(res, err, { route, sessionId });
       }
     };
+  };
 
   app.post('/session', mutate(), async (req, res) => {
     const body = safeBody(req);
@@ -1275,7 +1355,7 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/branch',
     mutate(),
-    withMutableSession(
+    withPrimaryOnlyMutableSession(
       'POST /session/:id/branch',
       async (req, res, sessionId) => {
         const body = safeBody(req);
@@ -1317,7 +1397,7 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/fork',
     mutate(),
-    withMutableSession(
+    withPrimaryOnlyMutableSession(
       'POST /session/:id/fork',
       async (req, res, sessionId) => {
         const body = safeBody(req);
@@ -1344,29 +1424,32 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/cd',
     mutate(),
-    withMutableSession('POST /session/:id/cd', async (req, res, sessionId) => {
-      const body = safeBody(req);
-      const targetPath = body['path'];
-      if (
-        typeof targetPath !== 'string' ||
-        targetPath.length === 0 ||
-        !path.isAbsolute(targetPath)
-      ) {
-        res.status(400).json({
-          error: '`path` is required and must be an absolute path',
-          code: 'invalid_path',
-        });
-        return;
-      }
-      const clientId = parseClientIdHeader(req, res);
-      if (clientId === null) return;
-      const result = await bridge.changeSessionCwd(
-        sessionId,
-        { path: targetPath },
-        clientId !== undefined ? { clientId } : undefined,
-      );
-      res.status(200).json(result);
-    }),
+    withPrimaryOnlyMutableSession(
+      'POST /session/:id/cd',
+      async (req, res, sessionId) => {
+        const body = safeBody(req);
+        const targetPath = body['path'];
+        if (
+          typeof targetPath !== 'string' ||
+          targetPath.length === 0 ||
+          !path.isAbsolute(targetPath)
+        ) {
+          res.status(400).json({
+            error: '`path` is required and must be an absolute path',
+            code: 'invalid_path',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const result = await bridge.changeSessionCwd(
+          sessionId,
+          { path: targetPath },
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json(result);
+      },
+    ),
   );
 
   app.get('/session/:id/status', (req, res) => {
@@ -1405,6 +1488,21 @@ export function registerSessionRoutes(
       workspaceQualified: true,
     });
   });
+
+  app.get(
+    '/workspaces/:workspace/session/:id/archive/export',
+    async (req, res) => {
+      const route = 'GET /workspaces/:workspace/session/:id/archive/export';
+      const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+      if (!runtime) return;
+      await handleSessionExport(req, res, {
+        route,
+        workspaceCwd: runtime.workspaceCwd,
+        workspaceQualified: true,
+        archiveState: 'archived',
+      });
+    },
+  );
 
   app.get('/session/:id/transcript', async (req, res) => {
     const route = 'GET /session/:id/transcript';
@@ -1970,6 +2068,98 @@ export function registerSessionRoutes(
           daemonLog.info('prompt enqueued', { sessionId, promptId, clientId });
         }
         res.status(202).json({ promptId, lastEventId });
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/generate',
+    mutate(),
+    withOwnerReadSession(
+      'POST /session/:id/generate',
+      async (req, res, sessionId, runtime) => {
+        const body = safeBody(req);
+        const prompt = body['prompt'];
+        if (
+          typeof prompt !== 'string' ||
+          prompt.trim().length === 0 ||
+          Buffer.byteLength(prompt, 'utf8') > GENERATION_MAX_PROMPT_BYTES
+        ) {
+          res.status(400).json({
+            error: `\`prompt\` must be a non-empty string no larger than ${GENERATION_MAX_PROMPT_BYTES} UTF-8 bytes`,
+            code: 'invalid_prompt',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        if (!runtime.bridge.generateSessionContent) {
+          res.status(501).json({
+            error: 'Stateless generation is not supported by this bridge',
+            code: 'generation_not_supported',
+          });
+          return;
+        }
+
+        const abort = new AbortController();
+        let completed = false;
+        const onClose = () => {
+          if (!completed) abort.abort();
+        };
+        res.once('close', onClose);
+
+        const stream = runtime.bridge.generateSessionContent(
+          sessionId,
+          prompt,
+          abort.signal,
+          clientId !== undefined ? { clientId } : undefined,
+        );
+
+        res.status(200);
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        res.flushHeaders();
+
+        let writeChain = Promise.resolve();
+        const write = (chunk: string): Promise<void> => {
+          writeChain = writeChain.then(() =>
+            writeGenerationSseChunk(res, chunk),
+          );
+          return writeChain;
+        };
+        await write(': connected\n\n');
+        const heartbeat = setInterval(() => {
+          void write(': heartbeat\n\n').catch(() => abort.abort());
+        }, GENERATION_HEARTBEAT_MS);
+        heartbeat.unref();
+
+        try {
+          for await (const event of stream) {
+            await write(formatGenerationSse(event.type, event));
+          }
+        } catch (err) {
+          if (!abort.signal.aborted && !res.destroyed) {
+            daemonLog?.error(
+              'session generation failed',
+              err instanceof Error ? err : new Error(String(err)),
+              { sessionId, clientId },
+            );
+            await write(
+              formatGenerationSse('error', {
+                type: 'error',
+                code: 'generation_failed',
+                message: 'Generation failed',
+              }),
+            ).catch(() => undefined);
+          }
+        } finally {
+          completed = true;
+          clearInterval(heartbeat);
+          res.off('close', onClose);
+          if (!res.destroyed) res.end();
+        }
       },
     ),
   );
@@ -2646,13 +2836,6 @@ export function registerSessionRoutes(
           res.status(400).json({
             error: parsedSource.error,
             code: 'invalid_session_source',
-          });
-          return;
-        }
-        if (parsedSource.sourceType !== undefined && view === 'organized') {
-          res.status(400).json({
-            error: '`sourceType` is not supported with `view=organized`',
-            code: 'invalid_session_source_filter',
           });
           return;
         }
