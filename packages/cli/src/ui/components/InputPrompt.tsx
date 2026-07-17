@@ -1337,7 +1337,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       };
 
       // If the command is a perfect match, pressing enter should execute it.
-      if (completion.isPerfectMatch && keyMatchers[Command.RETURN](key)) {
+      // Use SUBMIT (which requires shift: false) instead of RETURN to avoid
+      // intercepting Shift+Enter as submit when the user wants a newline.
+      if (completion.isPerfectMatch && keyMatchers[Command.SUBMIT](key)) {
         if (
           showCompletionSuggestions &&
           exportCompletion.navigatedRef.current &&
