@@ -150,7 +150,24 @@ vi.mock('./turn', async (importOriginal) => {
 });
 
 vi.mock('../config/config.js');
-vi.mock('./prompts');
+// Mock the prompt builders (spied on below) but keep the pure
+// resolveInteractionMode helper real so client.ts resolves the actual
+// interaction mode from the config instead of receiving an automocked
+// undefined.
+vi.mock('./prompts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./prompts.js')>();
+  return {
+    ...actual,
+    getCustomSystemPrompt: vi.fn(),
+    getCoreSystemPrompt: vi.fn(),
+    getCompressionPrompt: vi.fn(),
+    getProjectSummaryPrompt: vi.fn(),
+    getPlanModeSystemReminder: vi.fn(),
+    getArenaSystemReminder: vi.fn(),
+    getInsightPrompt: vi.fn(),
+    resolvePathFromEnv: vi.fn(),
+  };
+});
 vi.mock('../models/content-generator-config.js', async (importOriginal) => {
   const actual =
     await importOriginal<

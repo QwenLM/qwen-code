@@ -22,6 +22,7 @@ import {
   DiscoveredMCPTool,
   uiTelemetryService,
   getCoreSystemPrompt,
+  resolveInteractionMode,
   DEFAULT_TOKEN_LIMIT,
   ToolNames,
   buildSkillLlmContent,
@@ -127,11 +128,7 @@ export async function collectContextData(
     undefined,
     modelName,
     undefined,
-    config.getExperimentalZedIntegration()
-      ? 'acp'
-      : config.isInteractive()
-        ? 'interactive'
-        : 'headless',
+    resolveInteractionMode(config),
   );
   const systemPromptTokens = estimateTokens(systemPromptText);
 

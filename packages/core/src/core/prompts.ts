@@ -18,6 +18,23 @@ const debugLogger = createDebugLogger('PROMPTS');
 
 export type SystemPromptInteractionMode = 'interactive' | 'headless' | 'acp';
 
+/**
+ * Resolve the system-prompt interaction mode from a config. Single source of
+ * truth for the ACP > interactive > headless precedence so callers that build
+ * the core system prompt (generation and `/context` token estimation) cannot
+ * drift apart. Uses a structural type to avoid a hard dependency on the full
+ * Config class.
+ */
+export function resolveInteractionMode(config: {
+  getExperimentalZedIntegration(): boolean;
+  isInteractive(): boolean;
+}): SystemPromptInteractionMode {
+  if (config.getExperimentalZedIntegration()) {
+    return 'acp';
+  }
+  return config.isInteractive() ? 'interactive' : 'headless';
+}
+
 function getInteractionModePrompt(mode: SystemPromptInteractionMode): {
   role: string;
   questions: string;
@@ -165,6 +182,12 @@ export function getCoreSystemPrompt(
   }
 
   const interaction = getInteractionModePrompt(interactionMode);
+  // A QWEN_SYSTEM_MD override replaces the base prompt verbatim and is
+  // intentionally not augmented with interaction-mode guidance: the override is
+  // a full, user-owned prompt, so injecting our mode wording would defeat the
+  // purpose of the override. Custom prompts are responsible for their own mode
+  // awareness (e.g. not instructing the model to ask questions in headless
+  // runs). `appendInstruction` below still applies in both branches.
   const basePrompt = systemMdEnabled
     ? fs.readFileSync(systemMdPath, 'utf8')
     : `
