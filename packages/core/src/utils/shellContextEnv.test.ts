@@ -32,12 +32,20 @@ describe('getShellContextEnvVars', () => {
   // from inside a qwen session inherits it — and the exact-equality assertion below
   // would fail on a variable the test never set.
   let originalCli: string | undefined;
+  // And QWEN_CODE_PROJECT_DIR, for the same reason again — the CLI exports it
+  // too, and the `.toEqual()` exact matches below fail on the inherited key.
+  // Reproduced: with it set, exactly the two exact-match tests fail. Restoring it
+  // here also cleans up after the per-session tests below, which assign it and
+  // used to leak the assignment into every later test in the file.
+  let originalProjectDir: string | undefined;
 
   beforeEach(() => {
     originalSessionId = process.env['QWEN_CODE_SESSION_ID'];
     delete process.env['QWEN_CODE_SESSION_ID'];
     originalCli = process.env['QWEN_CODE_CLI'];
     delete process.env['QWEN_CODE_CLI'];
+    originalProjectDir = process.env['QWEN_CODE_PROJECT_DIR'];
+    delete process.env['QWEN_CODE_PROJECT_DIR'];
   });
 
   afterEach(() => {
@@ -50,6 +58,11 @@ describe('getShellContextEnvVars', () => {
       process.env['QWEN_CODE_CLI'] = originalCli;
     } else {
       delete process.env['QWEN_CODE_CLI'];
+    }
+    if (originalProjectDir !== undefined) {
+      process.env['QWEN_CODE_PROJECT_DIR'] = originalProjectDir;
+    } else {
+      delete process.env['QWEN_CODE_PROJECT_DIR'];
     }
   });
 

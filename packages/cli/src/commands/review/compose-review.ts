@@ -269,6 +269,13 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
             'but none of them read the diff',
         );
       }
+      if (cov.unopenedAgents.length > 0) {
+        remediation.push(
+          'agents that never opened the diff: relaunch each with the same ' +
+            'printed prompt — the prompt already names the diff and its ranges; ' +
+            'the read is what proves the review happened',
+        );
+      }
       // The prompt was built in code and edited on the way to the agent. This caps
       // for the same reason the others do: what the agent was actually asked is not
       // what this skill's guarantees are written against.
@@ -279,16 +286,38 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       for (const label of cov.rewrittenPrompts) {
         unreviewed.push(label);
       }
+      if (cov.rewrittenPrompts.length > 0) {
+        remediation.push(
+          'rewritten launches: re-run `"${QWEN_CODE_CLI:-qwen}" review ' +
+            'agent-prompt` for each and pass its output unedited — copy it, ' +
+            'do not retype it',
+        );
+      }
       // A dimension nobody reviewed. This is exactly what `unreviewedDimensions`
       // has always meant, arrived at from the plan instead of from the orchestrator
       // noticing — which, on the run that never launched Agent 0, it did not.
       for (const label of cov.missingRoles) {
         unreviewed.push(label);
       }
+      if (cov.missingRoles.length > 0) {
+        remediation.push(
+          'missing briefs: build every required prompt in one call — ' +
+            '`"${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan <plan> ' +
+            '--roster` — and launch one agent per block it prints, verbatim; ' +
+            '`--role <n>` or `--chunk <id>` rebuilds a single one',
+        );
+      }
       // Launched, but never read the brief it was pointed at: it reviewed with no
       // dimension, no severity definitions and no project rules.
       for (const label of cov.unreadBriefs) {
         unreviewed.push(label);
+      }
+      if (cov.unreadBriefs.length > 0) {
+        remediation.push(
+          'unread briefs: relaunch each agent with the same printed prompt — ' +
+            'the agent must OPEN the brief file the prompt names; that read ' +
+            'is the receipt',
+        );
       }
     } catch (err) {
       // Two different failures, and they must not wear each other's message. A

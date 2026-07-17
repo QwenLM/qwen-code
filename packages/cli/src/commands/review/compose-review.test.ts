@@ -943,6 +943,35 @@ describe('coverage is recomputed, never accepted', () => {
     expect(r.remediation.join(' ')).toMatch(/do not relaunch the old prompt/);
   });
 
+  it('every coverage gap the body discloses has a FIX on the remediation channel', () => {
+    // The blind agents got one; the sibling categories did not, and a body
+    // disclosure with no repair command is how #7012's orchestrator ended at
+    // "the agents clearly did their job". Here the test-matrix brief was never
+    // built: the body says what cannot be certified, in the author's register,
+    // and the remediation names the roster call, in the operator's.
+    const p = plan({ step45: false });
+    transcript('a1', goodPrompt(1), { toolCalls: 3 });
+    transcript('a2', goodPrompt(2), { toolCalls: 2 });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    // recordMatrix(p) deliberately absent — the roster still requires it.
+    recordStep45(p);
+
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).not.toBe('APPROVE');
+    expect(r.body).toContain('brief never reached an agent');
+    expect(r.body).not.toMatch(/agent-prompt|--roster|--role/);
+    expect(r.remediation.join(' ')).toContain(
+      '"${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan <plan> --roster',
+    );
+  });
+
   it('caps when the transcripts cannot be read at all — and says so', () => {
     // A read-only HOME must not read as "every agent idled". It still caps, but
     // it names the infrastructure, not the agents. Env passed explicitly, like
