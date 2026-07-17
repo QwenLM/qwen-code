@@ -2111,6 +2111,46 @@ describe('startInteractiveUI', () => {
     );
   });
 
+  // Regression for #6776: the kitty keyboard flags are tracked per screen
+  // (main vs alternate). The protocol is enabled on the main screen before
+  // render, so the pop must be written after Ink unmounts — i.e. after the
+  // alternate screen (when enabled) has been left — or the main screen's
+  // flags survive the exit and the shell receives kitty escape codes.
+  it('disables the Kitty keyboard protocol only after Ink has unmounted', async () => {
+    const unmount = vi.fn();
+    const { render } = await import('ink');
+    vi.mocked(render).mockReturnValue({ unmount } as never);
+    const { disableKittyProtocol } = await import(
+      './ui/utils/kittyProtocolDetector.js'
+    );
+
+    await startInteractiveUI(
+      mockConfig,
+      mockSettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      {
+        authError: null,
+        themeError: null,
+        shouldOpenAuthDialog: false,
+        geminiMdFileCount: 0,
+      },
+    );
+
+    const { registerCleanup } = await import('./utils/cleanup.js');
+    const cleanupFn = vi.mocked(registerCleanup).mock.calls.at(-1)?.[0] as
+      | (() => Promise<void> | void)
+      | undefined;
+    expect(cleanupFn).toBeTypeOf('function');
+    await cleanupFn?.();
+
+    expect(unmount).toHaveBeenCalledTimes(1);
+    expect(disableKittyProtocol).toHaveBeenCalledTimes(1);
+    expect(
+      vi.mocked(disableKittyProtocol).mock.invocationCallOrder[0],
+    ).toBeGreaterThan(unmount.mock.invocationCallOrder[0]);
+  });
+
   describe('periodic memory-pressure check', () => {
     beforeEach(() => {
       vi.useFakeTimers();
