@@ -1377,6 +1377,60 @@ describe('LoggingContentGenerator', () => {
     expect(spanRecord.ended).toBe(true);
   });
 
+  it('does not retain every metadata-only streaming response for logging', async () => {
+    const contentResponse = createResponse('resp-content', 'model-stream', [
+      { text: 'Hello' },
+    ]);
+    const usageResponses = Array.from({ length: 1_000 }, (_, index) => {
+      const response = new GenerateContentResponse();
+      response.responseId = `resp-usage-${index}`;
+      response.modelVersion = 'model-stream';
+      response.candidates = [];
+      response.usageMetadata = {
+        totalTokenCount: index,
+      };
+      return response;
+    });
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          yield contentResponse;
+          yield* usageResponses;
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+    });
+    const consolidateSpy = vi.spyOn(
+      generator as unknown as {
+        consolidateGeminiResponsesForLogging: (
+          responses: GenerateContentResponse[],
+        ) => GenerateContentResponse | undefined;
+      },
+      'consolidateGeminiResponsesForLogging',
+    );
+
+    const stream = await generator.generateContentStream(
+      {
+        model: 'test-model',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters,
+      'prompt-metadata-only',
+    );
+    for await (const _response of stream) {
+      // Drain the stream.
+    }
+
+    expect(consolidateSpy).toHaveBeenCalledOnce();
+    expect(consolidateSpy.mock.calls[0]?.[0]).toEqual([
+      contentResponse,
+      usageResponses.at(-1),
+    ]);
+  });
+
   it('preserves stream success when response and OpenAI logging fail', async () => {
     vi.mocked(logApiResponse).mockImplementationOnce(() => {
       throw new Error('response-log-fail');
