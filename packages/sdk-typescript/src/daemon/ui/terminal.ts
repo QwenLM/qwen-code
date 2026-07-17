@@ -176,6 +176,8 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
         `${event.serverName} restart refused: ${event.reason}`,
         '33',
       );
+    case 'workspace.mcp.server_changed':
+      return terminalLine('mcp', `${event.serverName} ${event.action}`, '36');
     case 'workspace.extensions.changed':
       if (event.status === 'failed') {
         return terminalLine(

@@ -61,6 +61,8 @@ export interface ModelsConfigOptions {
   generationConfig?: Partial<ContentGeneratorConfig>;
   /** Source tracking for generation config */
   generationConfigSources?: ContentGeneratorConfigSources;
+  /** Exact initial registry baseUrl; null selects an implicit route. */
+  initialRegistryBaseUrl?: string | null;
   /** Callback when model changes require refresh */
   onModelChange?: OnModelChangeCallback;
 }
@@ -81,6 +83,7 @@ export class ModelsConfig {
 
   // Current selection state
   private currentAuthType: AuthType | undefined;
+  private currentRegistryBaseUrl: string | null | undefined;
 
   // Generation config state
   private _generationConfig: Partial<ContentGeneratorConfig>;
@@ -169,6 +172,17 @@ export class ModelsConfig {
 
     // Initialize selection state
     this.currentAuthType = options.initialAuthType;
+    const initialModelId = this._generationConfig.model;
+    if (this.currentAuthType && initialModelId) {
+      const initialModel = this.modelRegistry.getModel(
+        this.currentAuthType,
+        initialModelId,
+        options.initialRegistryBaseUrl,
+      );
+      if (initialModel) {
+        this.currentRegistryBaseUrl = initialModel.registryBaseUrl ?? null;
+      }
+    }
   }
 
   /**
@@ -185,6 +199,7 @@ export class ModelsConfig {
     requireCachedQwenCredentialsOnce: boolean;
     hasManualCredentials: boolean;
     activeRuntimeModelSnapshotId: string | undefined;
+    currentRegistryBaseUrl: string | null | undefined;
   } {
     return {
       currentAuthType: this.currentAuthType,
@@ -196,6 +211,7 @@ export class ModelsConfig {
       requireCachedQwenCredentialsOnce: this.requireCachedQwenCredentialsOnce,
       hasManualCredentials: this.hasManualCredentials,
       activeRuntimeModelSnapshotId: this.activeRuntimeModelSnapshotId,
+      currentRegistryBaseUrl: this.currentRegistryBaseUrl,
     };
   }
 
@@ -216,6 +232,7 @@ export class ModelsConfig {
       snapshot.requireCachedQwenCredentialsOnce;
     this.hasManualCredentials = snapshot.hasManualCredentials;
     this.activeRuntimeModelSnapshotId = snapshot.activeRuntimeModelSnapshotId;
+    this.currentRegistryBaseUrl = snapshot.currentRegistryBaseUrl;
   }
 
   /**
@@ -230,6 +247,10 @@ export class ModelsConfig {
    */
   getCurrentAuthType(): AuthType | undefined {
     return this.currentAuthType;
+  }
+
+  getCurrentRegistryBaseUrl(): string | null | undefined {
+    return this.currentRegistryBaseUrl;
   }
 
   /**
@@ -332,11 +353,14 @@ export class ModelsConfig {
   getModelDisplayName(modelId: string): string {
     if (!this.currentAuthType) return modelId;
     const resolved =
-      this.modelRegistry.getModel(
-        this.currentAuthType,
-        modelId,
-        this._generationConfig.baseUrl || undefined,
-      ) ?? this.modelRegistry.getModel(this.currentAuthType, modelId);
+      (this.currentRegistryBaseUrl !== undefined
+        ? this.modelRegistry.getModel(
+            this.currentAuthType,
+            modelId,
+            this.currentRegistryBaseUrl,
+          )
+        : undefined) ??
+      this.modelRegistry.getModel(this.currentAuthType, modelId);
     return resolved?.name ?? modelId;
   }
 
@@ -355,6 +379,7 @@ export class ModelsConfig {
       newModel === DEFAULT_QWEN_MODEL
     ) {
       this.strictModelProviderSelection = false;
+      this.currentRegistryBaseUrl = undefined;
       this._generationConfig.model = newModel;
       this.generationConfigSources['model'] = {
         kind: 'programmatic',
@@ -385,6 +410,7 @@ export class ModelsConfig {
     const rollbackSnapshot = this.createStateSnapshotForRollback();
     try {
       this.strictModelProviderSelection = false;
+      this.currentRegistryBaseUrl = undefined;
       this._generationConfig.model = newModel;
       this.generationConfigSources['model'] = {
         kind: 'programmatic',
@@ -488,7 +514,7 @@ export class ModelsConfig {
           ? (this.modelRegistry.getModel(
               authType,
               previousModelId,
-              rollbackSnapshot.generationConfig.baseUrl,
+              rollbackSnapshot.currentRegistryBaseUrl,
             ) ?? this.modelRegistry.getModel(authType, previousModelId))
           : undefined;
       const canReusePreviousApiKey =
@@ -658,6 +684,7 @@ export class ModelsConfig {
      */
     if (credentials.apiKey || credentials.baseUrl || credentials.model) {
       this.hasManualCredentials = true;
+      this.currentRegistryBaseUrl = undefined;
       this.clearProviderSourcedConfig();
     }
 
@@ -801,6 +828,7 @@ export class ModelsConfig {
    */
   private applyResolvedModelDefaults(model: ResolvedModelConfig): void {
     this.strictModelProviderSelection = true;
+    this.currentRegistryBaseUrl = model.registryBaseUrl ?? null;
     // We're explicitly applying modelProvider defaults now, so manual overrides
     // should no longer block syncAfterAuthRefresh from applying provider defaults.
     this.hasManualCredentials = false;
@@ -997,9 +1025,12 @@ export class ModelsConfig {
     // model provider switch; fall back to any model with the same id.
     const providerBaseUrl =
       providerBaseUrlOverride ??
-      (this.generationConfigSources['baseUrl']?.kind === 'modelProviders'
-        ? this._generationConfig.baseUrl
-        : undefined);
+      (previousAuthType === authType &&
+      this.currentRegistryBaseUrl !== undefined
+        ? this.currentRegistryBaseUrl
+        : this.generationConfigSources['baseUrl']?.kind === 'modelProviders'
+          ? this._generationConfig.baseUrl
+          : undefined);
     const resolved = modelId
       ? (this.modelRegistry.getModel(authType, modelId, providerBaseUrl) ??
         this.modelRegistry.getModel(authType, modelId))
@@ -1101,6 +1132,7 @@ export class ModelsConfig {
       (this.hasManualCredentials || hasExistingCredentials);
 
     if (shouldPreserveCredentials) {
+      this.currentRegistryBaseUrl = undefined;
       // Preserve existing credentials, just update authType and modelId if provided
       if (modelId) {
         this._generationConfig.model = modelId;
@@ -1127,6 +1159,7 @@ export class ModelsConfig {
     // Step 4: No default available - leave generationConfig incomplete
     // resolveContentGeneratorConfigWithSources will throw exceptions as expected
     if (modelId) {
+      this.currentRegistryBaseUrl = undefined;
       this._generationConfig.model = modelId;
       if (!this.generationConfigSources['model']) {
         this.generationConfigSources['model'] = {
@@ -1202,6 +1235,7 @@ export class ModelsConfig {
 
     this.runtimeModelSnapshots.set(snapshotId, snapshot);
     this.activeRuntimeModelSnapshotId = snapshotId;
+    this.currentRegistryBaseUrl = undefined;
 
     // Enforce per-authType limit
     this.cleanupOldRuntimeModelSnapshots();
@@ -1252,6 +1286,7 @@ export class ModelsConfig {
         runtimeModelSnapshot.authType !== this.currentAuthType;
       this.currentAuthType = runtimeModelSnapshot.authType;
       this.activeRuntimeModelSnapshotId = snapshotId;
+      this.currentRegistryBaseUrl = undefined;
 
       // Apply runtime configuration
       this.strictModelProviderSelection = false;

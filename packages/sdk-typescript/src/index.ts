@@ -227,6 +227,7 @@ export {
   type DaemonFollowupSuggestionEvent,
   type DaemonWorkspaceMcpServerStatus,
   type DaemonWorkspaceMcpStatus,
+  type DaemonWorkspaceMcpInitializeResult,
   type DaemonWorkspaceAcpStatusResult,
   type DaemonWorkspaceAcpPreheatResult,
   type DaemonWorkspaceProviderCurrent,

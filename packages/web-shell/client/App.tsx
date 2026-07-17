@@ -95,6 +95,7 @@ import { useIsLargeScreen } from './hooks/useIsLargeScreen';
 import { MAX_SPLIT_PANES, parseSplitSessionIds } from './utils/splitUrl';
 import { ScheduledTasksDialog } from './components/dialogs/ScheduledTasksDialog';
 import { ExtensionsManagerPage } from './components/extensions/ExtensionsManagerPage';
+import { PluginManagerPage } from './components/plugins/PluginManagerPage';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { isAskUserPermission } from './utils/askUserPermission';
 import { ToolApproval } from './components/messages/ToolApproval';
@@ -163,7 +164,7 @@ import {
   type StatusInfo,
 } from './components/messages/StatusMessage';
 import type { SerializedMcpStatusMessage } from './components/messages/McpStatusMessage';
-import { McpDialog } from './components/dialogs/McpDialog';
+import { McpManagerPage } from './components/mcp/McpManagerPage';
 import {
   GOAL_STATUS_ACTIVE_EVENT,
   parseGoalStatusMessage,
@@ -603,6 +604,7 @@ type SessionActionsWithCreate = {
   createSession: (options?: {
     workspaceCwd?: string;
     approvalMode?: string;
+    sourceType?: string;
   }) => Promise<{ sessionId: string }>;
   attachSession: () => Promise<void>;
   clearSession: () => Promise<void>;
@@ -2106,7 +2108,7 @@ export function App({
   // chat view (message list + composer), not as a modal overlay. Only one may be
   // active at a time; null means the normal chat view is shown.
   const [activePanel, setActivePanel] = useState<
-    'settings' | 'status' | 'sessions' | 'extensions' | null
+    'settings' | 'status' | 'sessions' | 'extensions' | 'mcp' | 'plugins' | null
   >(null);
   const closePanel = useCallback(() => setActivePanel(null), []);
   // The Settings/Status panel (activePanel) and the Scheduled Tasks page
@@ -2116,12 +2118,31 @@ export function App({
   // Status left the panel rendered behind the Scheduled Tasks overlay, looking
   // like the button did nothing.
   const openPanel = useCallback(
-    (panel: 'settings' | 'status' | 'sessions' | 'extensions') => {
+    (
+      panel:
+        | 'settings'
+        | 'status'
+        | 'sessions'
+        | 'extensions'
+        | 'mcp'
+        | 'plugins',
+    ) => {
       setMainView('chat');
       setActivePanel(panel);
     },
     [],
   );
+  const loadMcpManagerMessage = useCallback(async () => {
+    const status = await workspaceActions.loadMcpStatus();
+    setMcpDialogMessage({
+      status,
+      toolsByServer: {},
+      resourcesByServer: {},
+      showDescriptions: false,
+      showSchema: false,
+      showTips: false,
+    });
+  }, [workspaceActions]);
   const openScheduledTasks = useCallback(() => {
     setActivePanel(null);
     setMainView('scheduledTasks');
@@ -2270,6 +2291,18 @@ export function App({
       // split, or dropping back to that chat, is exactly what it was before.
       if (!externalSplitControlled) {
         splitFoldedByShrinkRef.current = true;
+        // …except when the chat has no session of its own — the common case
+        // when the split was entered from the Session Overview or a `?split=a,b`
+        // link. A bare fold would then strand the user on an empty "new chat",
+        // so land on the split's first (leftmost) pane instead. Guarded on the
+        // *empty* chat so it never re-points a chat that already has a session
+        // (which would wipe its git branch / change the session+URL it drops
+        // back to). Best-effort: a load failure (e.g. a non-primary-workspace
+        // pane the single connection can't own) just leaves the empty chat.
+        const firstPane = splitSessionIdsRef.current[0];
+        if (firstPane && !currentSessionIdRef.current) {
+          void sessionActions.loadSession(firstPane).catch(() => undefined);
+        }
       }
     }
   }, [
@@ -2278,6 +2311,7 @@ export function App({
     mainView,
     notifyControlledSplitClose,
     externalSplitControlled,
+    sessionActions,
   ]);
   // Land focus on the composer after a shrink-driven split close so keyboard
   // users aren't dropped onto <body> — but not when the chat now shows an
@@ -2293,6 +2327,7 @@ export function App({
   // closes, so keyboard users aren't stranded on an element that is hidden.
   const panelBackRef = useRef<HTMLButtonElement | null>(null);
   const panelHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  const pluginTabRef = useRef<HTMLButtonElement | null>(null);
   const prevActivePanelRef = useRef(activePanel);
   const prevApprovalOverlayRef = useRef(approvalOverlayActive);
   useEffect(() => {
@@ -2303,6 +2338,10 @@ export function App({
     if (activePanel) {
       if (activePanel === 'extensions') {
         panelHeadingRef.current?.focus();
+        return;
+      }
+      if (activePanel === 'plugins') {
+        pluginTabRef.current?.focus();
         return;
       }
       // Covers null→panel and panel→panel: the Back button lives outside the
@@ -4409,53 +4448,16 @@ export function App({
             const mcpArg = text.slice(match[0].length).trim().toLowerCase();
             workspaceActions
               .loadMcpStatus()
-              .then(async (status) => {
-                const toolsByServer: Record<
-                  string,
-                  Awaited<ReturnType<typeof workspaceActions.loadMcpTools>>
-                > = {};
-                const resourcesByServer: Record<
-                  string,
-                  Awaited<ReturnType<typeof workspaceActions.loadMcpResources>>
-                > = {};
-                await Promise.all(
-                  (status?.servers ?? []).map(async (server) => {
-                    // Tools and resources load in parallel; a failure in one
-                    // must not hide the other, and per-server failures still
-                    // let sibling servers render.
-                    await Promise.all([
-                      (async () => {
-                        try {
-                          toolsByServer[server.name] =
-                            await workspaceActions.loadMcpTools(server.name);
-                        } catch {
-                          // Allow partial failure — other servers still render
-                        }
-                      })(),
-                      (async () => {
-                        // Skip the round-trip for servers that advertise no
-                        // resources (or older daemons that omit the count).
-                        if (!server.resourceCount) return;
-                        try {
-                          resourcesByServer[server.name] =
-                            await workspaceActions.loadMcpResources(
-                              server.name,
-                            );
-                        } catch {
-                          // Allow partial failure — other servers still render
-                        }
-                      })(),
-                    ]);
-                  }),
-                );
+              .then((status) => {
                 setMcpDialogMessage({
                   status,
-                  toolsByServer,
-                  resourcesByServer,
+                  toolsByServer: {},
+                  resourcesByServer: {},
                   showDescriptions: mcpArg === 'desc',
                   showSchema: mcpArg === 'schema',
                   showTips: !mcpArg,
                 });
+                openPanel('mcp');
               })
               .catch((error: unknown) => {
                 reportError(error, 'Failed to load MCP status');
@@ -5750,18 +5752,6 @@ export function App({
               <ToolsDialog />
             </DialogShell>
           )}
-          {mcpDialogMessage && (
-            <DialogShell
-              title={t('mcp.manageServers')}
-              size="lg"
-              onClose={() => setMcpDialogMessage(null)}
-            >
-              <McpDialog
-                message={mcpDialogMessage}
-                onClose={() => setMcpDialogMessage(null)}
-              />
-            </DialogShell>
-          )}
           {tasksDialogMessage && (
             <DialogShell
               title={t('tasks.title')}
@@ -5973,6 +5963,10 @@ export function App({
                     closeMobileDrawer();
                     openPanel('settings');
                   }}
+                  onOpenPlugins={() => {
+                    closeMobileDrawer();
+                    openPanel('plugins');
+                  }}
                   onOpenDaemonStatus={() => {
                     closeMobileDrawer();
                     openPanel('status');
@@ -6006,6 +6000,11 @@ export function App({
                   onLoadSession={(sessionId, workspaceCwd) => {
                     setMainView('chat');
                     return loadSidebarSession(sessionId, workspaceCwd);
+                  }}
+                  onSelectCurrentSession={() => {
+                    closeMobileDrawer();
+                    setMainView('chat');
+                    closePanel();
                   }}
                   onError={reportError}
                   mobileOpen={mobileDrawerOpen}
@@ -6080,10 +6079,16 @@ export function App({
                         ? t('daemon.title')
                         : activePanel === 'extensions'
                           ? t('extensions.manage.title')
-                        : t('sessionsOverview.title')
+                          : activePanel === 'mcp'
+                            ? t('mcp.title')
+                            : activePanel === 'plugins'
+                              ? t('plugins.title')
+                              : t('sessionsOverview.title')
                   }
                 >
-                  {activePanel !== 'extensions' && (
+                  {activePanel !== 'extensions' &&
+                    activePanel !== 'mcp' &&
+                    activePanel !== 'plugins' && (
                     <div className={styles.panelHeader}>
                     <button
                       ref={panelBackRef}
@@ -6188,6 +6193,28 @@ export function App({
                       <ExtensionsManagerPage
                         onClose={closePanel}
                         initialFocusRef={panelHeadingRef}
+                      />
+                    ) : activePanel === 'mcp' && mcpDialogMessage ? (
+                      <McpManagerPage
+                        message={mcpDialogMessage}
+                        onClose={() => {
+                          setMcpDialogMessage(null);
+                          closePanel();
+                        }}
+                      />
+                    ) : activePanel === 'plugins' ? (
+                      <PluginManagerPage
+                        mcpMessage={mcpDialogMessage}
+                        loadMcpMessage={async () => {
+                          try {
+                            await loadMcpManagerMessage();
+                          } catch (error) {
+                            reportError(error, 'Failed to load MCP status');
+                            throw error;
+                          }
+                        }}
+                        onClose={closePanel}
+                        initialFocusRef={pluginTabRef}
                       />
                     ) : (
                       <SessionOverviewPanel

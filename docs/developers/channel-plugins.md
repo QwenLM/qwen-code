@@ -21,9 +21,9 @@ Migration note for existing TypeScript plugins: if your adapter constructor or f
 The same plugin adapter can be hosted by either channel runtime:
 
 - `qwen channel start [name]` is the standalone ACP-backed service. It still uses `AcpBridge` and remains the stable command for running channels outside a daemon.
-- `qwen serve --channel <name>` and repeatable `--channel` flags start an experimental daemon-managed channel worker. `--channel all` starts all configured channels. The worker is owned by `qwen serve`, connects to that daemon through the SDK, and passes adapters a `ChannelAgentBridge` facade backed by `DaemonChannelBridge`.
+- `qwen serve --channel <name>` and repeatable `--channel` flags start experimental daemon-managed channel workers. Named channels are grouped by owning workspace, with one worker per owning runtime. `--channel all` intentionally starts only the primary workspace's configured channels. Workers are owned by `qwen serve`, connect to that daemon through the SDK, and pass adapters a `ChannelAgentBridge` facade backed by `DaemonChannelBridge`.
 
-Daemon-managed channels inherit the daemon's lifecycle and status reporting. They are intentionally out-of-process so adapter or platform SDK failures do not crash the daemon. The daemon is still bound to one workspace, so every selected channel config must use a `cwd` that resolves to the daemon workspace.
+Daemon-managed channels inherit the daemon's lifecycle and status reporting. They are intentionally out-of-process so adapter or platform SDK failures do not crash the daemon. Every named channel must resolve to exactly one registered, trusted workspace; its worker receives that runtime's canonical cwd and environment overlay. A user/system channel with no cwd is ambiguous when several workspaces are registered, while a channel in a workspace-local settings file belongs to that workspace by default. `--channel all` remains primary-only and cannot be combined with named selections.
 
 ## The Plugin Object
 

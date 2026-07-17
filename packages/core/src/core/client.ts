@@ -1227,7 +1227,9 @@ export class GeminiClient {
     // Clear stale cache params on session reset to prevent cross-session leakage
     clearCacheSafeParams();
 
-    const profiler = createSessionStartProfiler(sessionStartSource);
+    const profiler = createSessionStartProfiler(sessionStartSource, {
+      sessionId: this.config.getSessionId(),
+    });
     let history: Content[] = [];
     let snapshotEntries: AvailableSkillEntry[] = [];
     let deferredReminderCount = 0;

@@ -95,6 +95,22 @@ export interface Brief {
    * design exists to spare it, because the brief is what the agent is told to obey.
    */
   acceptsChunk?: boolean;
+  /**
+   * May this role be launched `--role <r> --findings <file>`, folding a findings
+   * list into the prompt the command prints?
+   *
+   * The verifier rules on findings; the reverse auditor avoids re-reporting them.
+   * Both used to get their findings the same way: the command printed a launch
+   * block and the orchestrator hand-prepended the list above it. Dogfooded, that
+   * hand-assembly is where the prompt got paraphrased — the model added a round
+   * number, inserted its own summary, and truncated the line telling it the brief
+   * is authoritative — so the delivery check failed even though the agent opened
+   * its brief. With this flag the command folds the findings in and prints one
+   * block to paste, and there is no assembly step left to drift. The findings are
+   * NOT recorded (see runAgentPrompt): the record stays the findings-free launch
+   * block, so the per-shard/round key still matches by the add-only delivery rule.
+   */
+  acceptsFindings?: boolean;
   /** The agent-facing text. */
   brief: string;
 }
@@ -375,6 +391,7 @@ Report a **Critical** for each violation, and give **both** locations that toget
   verify: {
     reviewsCode: true,
     output: 'verdicts',
+    acceptsFindings: true,
     label: 'Verification agent',
     readsDiff: true,
     brief: `You are a **verification agent**. You do not look for new problems — you rule on the findings you were handed, listed in the message that launched you, each with a file, a line, an issue, and a **failure scenario**. The failure scenario is the finding's testable claim, and your verdict is the **result of tracing it through the real code**, not a plausibility vote on how the finding reads.
@@ -403,6 +420,7 @@ Return, for each finding, one verdict:
   'reverse-audit': {
     reviewsCode: true,
     acceptsChunk: true,
+    acceptsFindings: true,
     label: 'Reverse audit agent',
     readsDiff: true,
     brief: `You are a **reverse audit agent**. Prior agents have already reviewed this diff and their confirmed findings are listed in the message that launched you. Your job is not to re-report them — it is to find the **gaps**: the important issues no prior agent or round caught.

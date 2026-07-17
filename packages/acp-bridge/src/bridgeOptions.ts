@@ -246,8 +246,8 @@ export interface BridgeOptions {
    */
   maxPendingPromptsPerSession?: number;
   /**
-   * Absolute, **already-canonical** path this daemon is bound to (per
-   * 1 daemon = 1 workspace). `spawnOrAttach` calls whose
+   * Absolute, **already-canonical** path this bridge/runtime is bound to.
+   * `spawnOrAttach` calls whose
    * `workspaceCwd` doesn't canonicalize to this same value throw
    * `WorkspaceMismatchError` (route → 400 with code `workspace_mismatch`).
    *

@@ -549,6 +549,21 @@ describe('ChatEditor toolbar popovers', () => {
     expect(onSelectModel).toHaveBeenCalledWith('qwen-max');
   });
 
+  it('displays the model label instead of an opaque route id', () => {
+    const routeId = 'qwen-route:v1:abcdefghijklmnop';
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: routeId,
+      availableModels: [{ id: routeId, label: 'Provider One' }],
+    });
+
+    const button = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-model-button]',
+    );
+    expect(button?.textContent).toContain('Provider One');
+    expect(button?.textContent).not.toContain(routeId);
+  });
+
   it('switches between sibling toolbar popovers without dismissing the target', async () => {
     const container = renderChatEditor({
       visibleToolbarActions: ['approvalMode', 'model'],

@@ -358,8 +358,8 @@ export class MultiClientPermissionMediator implements PermissionMediator {
    * an identical line (the unanimity condition is the NORMAL
    * operating mode for M=2, not a rare edge); a busy session with
    * many tool calls would produce dozens of duplicate stderr lines
-   * within seconds. One emit per mediator (= per daemon lifetime
-   * since the bridge constructs one) is enough to make the
+   * within seconds. One emit per mediator (= per bridge/runtime lifetime
+   * since each bridge constructs one) is enough to make the
    * configuration visible without spam.
    */
   private unanimityBreadcrumbEmitted = false;

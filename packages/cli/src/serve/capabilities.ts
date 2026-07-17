@@ -275,8 +275,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Runtime GET/PUT/DELETE control for daemon-managed channel selection.
   // The route exists even when no selection was supplied at daemon boot.
   channel_control: { since: 'v1' },
-  // Multi-workspace sessions closed loop (issue #6378 Phase 2a). Advertised
-  // only when one daemon hosts more than one registered workspace runtime.
+  // Multi-workspace session routing. Advertised only when one daemon hosts
+  // more than one registered workspace runtime.
   multi_workspace_sessions: { since: 'v1' },
   // Singular session rewind routes resolve the owning live workspace runtime.
   multi_workspace_session_rewind: { since: 'v1' },

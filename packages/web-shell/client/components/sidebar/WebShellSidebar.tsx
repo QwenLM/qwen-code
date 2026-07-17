@@ -29,6 +29,7 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import {
   ActivityIcon,
+  BlocksIcon,
   CalendarClockIcon,
   ChevronDownIcon,
   ChevronRightIcon,
@@ -204,6 +205,7 @@ interface WebShellSidebarProps {
   collapsed: boolean;
   onCollapsedChange: (collapsed: boolean) => void;
   onOpenSettings: () => void;
+  onOpenPlugins: () => void;
   onOpenDaemonStatus: () => void;
   onOpenScheduledTasks: () => void;
   onOpenSessions: () => void;
@@ -221,6 +223,7 @@ interface WebShellSidebarProps {
     sessionId: string,
     workspaceCwd?: string,
   ) => Promise<void> | void;
+  onSelectCurrentSession?: () => void;
   onError: (error: unknown, fallback: string) => void;
   theme: WebShellTheme;
   onThemeChange: (theme: WebShellTheme) => void;
@@ -402,6 +405,7 @@ export function WebShellSidebar({
   collapsed,
   onCollapsedChange,
   onOpenSettings,
+  onOpenPlugins,
   onOpenDaemonStatus,
   onOpenScheduledTasks,
   onOpenSessions,
@@ -410,6 +414,7 @@ export function WebShellSidebar({
   canOpenSplitView,
   onNewSession,
   onLoadSession,
+  onSelectCurrentSession,
   onError,
   theme,
   onThemeChange,
@@ -644,6 +649,10 @@ export function WebShellSidebar({
   );
   const canExportSessions =
     connection.capabilities?.features?.includes('session_export') ?? false;
+  const canExportArchivedSessions =
+    connection.capabilities?.features?.includes(
+      'workspace_archived_session_export',
+    ) ?? false;
   const currentSessionIdentity = currentSessionId
     ? getSessionIdentity(currentSessionId, connection.workspaceCwd)
     : null;
@@ -734,6 +743,18 @@ export function WebShellSidebar({
       sessionArchiveEnabled,
       workspaceQualifiedRestCoreEnabled,
     ],
+  );
+  const getArchivedExportWorkspaceCwd = useCallback(
+    (session: DaemonSessionSummary) => {
+      const workspaceCwd = session.workspaceCwd || primaryWorkspaceCwd;
+      const sessionWorkspace = displayedWorkspaces.find(
+        (entry) => entry.cwd === workspaceCwd,
+      );
+      return canExportArchivedSessions && sessionWorkspace?.trusted === true
+        ? sessionWorkspace.cwd
+        : undefined;
+    },
+    [canExportArchivedSessions, displayedWorkspaces, primaryWorkspaceCwd],
   );
 
   useEffect(() => {
@@ -1377,12 +1398,11 @@ export function WebShellSidebar({
         sessionId,
         workspaceCwd || primaryWorkspaceCwd,
       );
-      if (
-        sessionIdentity === currentSessionIdentity ||
-        busySessionIdsRef.current.has(sessionIdentity)
-      ) {
+      if (sessionIdentity === currentSessionIdentity) {
+        onSelectCurrentSession?.();
         return;
       }
+      if (busySessionIdsRef.current.has(sessionIdentity)) return;
       setCompletedUnreadIds((current) => {
         if (!current.has(sessionIdentity)) return current;
         const next = new Set(current);
@@ -1406,6 +1426,7 @@ export function WebShellSidebar({
       currentSessionIdentity,
       onError,
       onLoadSession,
+      onSelectCurrentSession,
       primaryWorkspaceCwd,
       setSessionBusy,
       t,
@@ -1495,8 +1516,11 @@ export function WebShellSidebar({
     (session: DaemonSessionSummary) => {
       const sessionId = session.sessionId;
       const sessionIdentity = getIdentityForSession(session);
+      const archived = session.isArchived === true;
       if (
-        !canExportSessions ||
+        (archived
+          ? !getArchivedExportWorkspaceCwd(session)
+          : !canExportSessions) ||
         exportingSessionIdsRef.current.has(sessionIdentity)
       ) {
         return;
@@ -1504,7 +1528,16 @@ export function WebShellSidebar({
       setSessionExporting(sessionId, true, session.workspaceCwd);
       void (async () => {
         try {
-          const result = await exportSession(sessionId, 'html');
+          let result;
+          if (archived) {
+            const workspaceCwd = getArchivedExportWorkspaceCwd(session);
+            if (!workspaceCwd) return;
+            result = await workspace.client
+              .workspaceByCwd(workspaceCwd)
+              .exportArchivedSession(sessionId, { format: 'html' });
+          } else {
+            result = await exportSession(sessionId, 'html');
+          }
           const blob = new Blob([result.content], {
             type: result.mimeType || 'text/html',
           });
@@ -1529,10 +1562,12 @@ export function WebShellSidebar({
     [
       canExportSessions,
       exportSession,
+      getArchivedExportWorkspaceCwd,
       getIdentityForSession,
       onError,
       setSessionExporting,
       t,
+      workspace.client,
     ],
   );
 
@@ -2324,6 +2359,7 @@ export function WebShellSidebar({
       const stamp = session.updatedAt || session.createdAt;
       const time = stamp ? formatRelativeTime(stamp, t) : '';
       const busy = busySessionIds.has(sessionIdentity);
+      const exporting = exportingSessionIds.has(sessionIdentity);
       const completedUnread =
         !isCurrentSession(session) && completedUnreadIds.has(sessionIdentity);
       const details = (
@@ -2398,6 +2434,15 @@ export function WebShellSidebar({
                           {details}
                         </DropdownMenuSubContent>
                       </DropdownMenuSub>
+                      {getArchivedExportWorkspaceCwd(session) && (
+                        <DropdownMenuItem
+                          disabled={exporting}
+                          onSelect={() => handleExportSession(session)}
+                        >
+                          <DownloadIcon />
+                          {t('sidebar.export')}
+                        </DropdownMenuItem>
+                      )}
                       {canMutateSessionArchive(session) && (
                         <DropdownMenuItem
                           onSelect={() => handleUnarchive(session)}
@@ -2424,7 +2469,6 @@ export function WebShellSidebar({
 
       const isCurrent = isCurrentSession(session);
       const isEditing = isCurrent && editingSessionId === session.sessionId;
-      const exporting = exportingSessionIds.has(sessionIdentity);
       const needsUserInput =
         !session.isWaitingForPermission && session.isWaitingForUserQuestion;
       const attentionLabel = session.isWaitingForPermission
@@ -2685,6 +2729,7 @@ export function WebShellSidebar({
       editingName,
       editingSessionId,
       exportingSessionIds,
+      getArchivedExportWorkspaceCwd,
       getIdentityForSession,
       handleArchive,
       handleDeleteSession,
@@ -3305,6 +3350,18 @@ export function WebShellSidebar({
             </span>
             {!collapsed && <span>{t('sidebar.newTask')}</span>}
           </button>
+          <button
+            className={styles.pluginButton}
+            type="button"
+            title={t('sidebar.plugins')}
+            aria-label={t('sidebar.plugins')}
+            onClick={onOpenPlugins}
+          >
+            <span className={styles.navIcon}>
+              <BlocksIcon size={16} strokeWidth={1.2} />
+            </span>
+            {!collapsed && <span>{t('sidebar.plugins')}</span>}
+          </button>
           {footerItems.has('scheduledTasks') && (
             <button
               className={styles.pluginButton}
@@ -3423,11 +3480,6 @@ export function WebShellSidebar({
                             }
                             client={workspace.client}
                             reloadToken={workspaceSessionsReloadToken}
-                            primaryLabel={
-                              displayedWorkspaces.length > 1
-                                ? t('sidebar.workspacePrimary')
-                                : ''
-                            }
                             untrustedLabel={t('sidebar.workspaceUntrusted')}
                             readOnlyLabel={t('sidebar.workspaceReadOnly')}
                             trustToOpenLabel={t('sidebar.workspaceTrustToOpen')}
