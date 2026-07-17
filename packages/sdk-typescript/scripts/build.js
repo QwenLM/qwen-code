@@ -55,7 +55,8 @@ const rootDir = join(__dirname, '..');
 // Bumped from 154KB to 155KB after merging workspace skill-toggle APIs.
 // Bumped from 155KB to 160KB to accommodate recent growth and reduce churn
 // from repeated 1KB bumps as new daemon APIs are added.
-// Bumped from 160KB to 165KB for the Web Shell git-diff REST helpers
+// Bumped from 160KB to 161KB after merging upstream main.
+// Bumped from 161KB to 165KB for the Web Shell git-diff REST helpers
 // (workspaceGitDiff / workspaceGitDiffFile on both client classes).
 const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 165 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete

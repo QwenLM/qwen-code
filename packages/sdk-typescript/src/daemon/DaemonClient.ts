@@ -47,6 +47,7 @@ import type {
   DaemonSessionLspStatus,
   DaemonSessionListPage,
   DaemonSessionListPageOptions,
+  DaemonWorkspaceSessionInfo,
   DaemonSessionOrganizationResult,
   DaemonSessionOrganizationUpdate,
   DaemonSessionSummary,
@@ -124,6 +125,9 @@ import type {
   DaemonRuntimeMcpRemoveResult,
   DaemonToolToggleResult,
   DaemonSkillToggleResult,
+  DaemonSkillInstallRequest,
+  DaemonSkillMutationResult,
+  DaemonSkillScope,
   DaemonSessionArtifactInput,
   DaemonSessionArtifactMutationResult,
   DaemonSessionArtifactsEnvelope,
@@ -2766,6 +2770,26 @@ export class DaemonClient {
     );
   }
 
+  installWorkspaceSkill(
+    request: DaemonSkillInstallRequest,
+  ): Promise<DaemonSkillMutationResult> {
+    return this.jsonRequest('/workspace/skills/install', 'Skill', {
+      method: 'POST',
+      body: request,
+    });
+  }
+
+  deleteWorkspaceSkill(
+    skillName: string,
+    scope: DaemonSkillScope,
+  ): Promise<DaemonSkillMutationResult> {
+    return this.jsonRequest(
+      `/workspace/skills/${urlEncode(skillName)}?scope=${scope}`,
+      'Skill',
+      { method: 'DELETE' },
+    );
+  }
+
   async workspaceSettings(opts?: {
     clientId?: string;
   }): Promise<DaemonWorkspaceSettingsStatus> {
@@ -4332,6 +4356,10 @@ export class WorkspaceDaemonClient {
   ): Promise<DaemonSessionSummary[]> {
     const page = await this.listWorkspaceSessionsPage(options);
     return page.sessions;
+  }
+
+  getWorkspaceSessionInfo(): Promise<DaemonWorkspaceSessionInfo> {
+    return this.get('/session-info', 'GET /workspaces/:workspace/session-info');
   }
 
   /**

@@ -1597,11 +1597,7 @@ export const ChatEditor = memo(
     const selectedWorkspace = workspaces?.find((entry) =>
       selectedWorkspaceCwd ? entry.cwd === selectedWorkspaceCwd : entry.primary,
     );
-    const selectedWorkspaceLabel = selectedWorkspace
-      ? `${selectedWorkspace.label}${
-          selectedWorkspace.primary ? ` · ${t('sidebar.workspacePrimary')}` : ''
-        }`
-      : '';
+    const selectedWorkspaceLabel = selectedWorkspace?.label ?? '';
     const workspaceSelectVisible = Boolean(
       workspaces && workspaces.length > 1 && onSelectWorkspace,
     );
@@ -2093,9 +2089,6 @@ export const ChatEditor = memo(
                             {workspaces.map((entry) => (
                               <SelectItem key={entry.id} value={entry.id}>
                                 {entry.label}
-                                {entry.primary
-                                  ? ` · ${t('sidebar.workspacePrimary')}`
-                                  : ''}
                               </SelectItem>
                             ))}
                           </SelectGroup>

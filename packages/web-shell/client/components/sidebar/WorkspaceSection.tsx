@@ -54,7 +54,6 @@ interface WorkspaceSectionProps {
   renderHeader?: (expanded: boolean) => ReactNode;
   client: DaemonClient;
   reloadToken: number;
-  primaryLabel: string;
   untrustedLabel: string;
   readOnlyLabel: string;
   trustToOpenLabel: string;
@@ -95,7 +94,6 @@ export function WorkspaceSection({
   renderHeader,
   client,
   reloadToken,
-  primaryLabel,
   untrustedLabel,
   readOnlyLabel,
   trustToOpenLabel,
@@ -323,9 +321,6 @@ export function WorkspaceSection({
                 <span className={styles.name}>
                   {getWorkspaceName(workspace.cwd)}
                 </span>
-                {workspace.primary && primaryLabel && (
-                  <span className={styles.badge}>{primaryLabel}</span>
-                )}
               </span>
               {!workspace.trusted && (
                 <span className={styles.badge}>{untrustedLabel}</span>

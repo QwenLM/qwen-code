@@ -228,12 +228,14 @@ export {
 export { detectFromLoopback } from './server/request-helpers.js';
 export {
   InvalidCursorError,
+  getWorkspaceSessionInfoForResponse,
   listWorkspaceSessionsForResponse,
 } from './server/session-list.js';
 export type {
   ListWorkspaceSessionsOptions,
   ListWorkspaceSessionsReadOptions,
   ListWorkspaceSessionsResult,
+  WorkspaceSessionInfoResult,
 } from './server/session-list.js';
 export { getActiveSseCount } from './routes/sse-events.js';
 
@@ -834,6 +836,7 @@ export function createServeApp(
         primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {},
       ),
       workspaceSkillsStatusProvider: createWorkspaceSkillsStatusProvider(),
+      ...(primaryEffectiveEnv ? { skillInstallEnv: primaryEffectiveEnv } : {}),
       ...(primaryEffectiveEnv ? { voiceEnv: primaryEffectiveEnv } : {}),
       isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools:
