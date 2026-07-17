@@ -251,6 +251,16 @@ export async function main() {
   let argv = await parseArguments();
   profileCheckpoint('after_parse_arguments');
 
+  if (
+    (argv.acp || argv.experimentalAcp) &&
+    process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'] === '1'
+  ) {
+    delete process.env['ELECTRON_RUN_AS_NODE'];
+    if (process.env['QWEN_CODE_NO_RELAUNCH'] || process.env['SANDBOX']) {
+      delete process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'];
+    }
+  }
+
   if (isBareMode(argv.bare)) {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
   }

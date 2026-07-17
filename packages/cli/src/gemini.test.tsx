@@ -410,6 +410,80 @@ describe('gemini.tsx main function', () => {
     processExitSpy.mockRestore();
   });
 
+  it('removes Electron Node mode before the ACP relaunch', async () => {
+    vi.stubEnv('ELECTRON_RUN_AS_NODE', '1');
+    vi.stubEnv('QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE', '1');
+
+    const { parseArguments } = await import('./config/config.js');
+    const { loadSettings } = await import('./config/settings.js');
+    vi.mocked(parseArguments).mockResolvedValue({
+      acp: true,
+    } as unknown as CliArgs);
+    vi.mocked(loadSettings).mockImplementation(() => {
+      expect(process.env['ELECTRON_RUN_AS_NODE']).toBeUndefined();
+      expect(process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE']).toBe('1');
+      throw new Error('stop before relaunch');
+    });
+
+    try {
+      await expect(main()).rejects.toThrow('stop before relaunch');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it.each([
+    ['relaunched', 'QWEN_CODE_NO_RELAUNCH', 'true'],
+    ['sandboxed', 'SANDBOX', 'sandbox-exec'],
+  ])(
+    'scrubs Electron bootstrap env in the final %s ACP process',
+    async (_name, finalProcessKey, finalProcessValue) => {
+      vi.stubEnv('ELECTRON_RUN_AS_NODE', '1');
+      vi.stubEnv('QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE', '1');
+      vi.stubEnv(finalProcessKey, finalProcessValue);
+
+      const { parseArguments } = await import('./config/config.js');
+      const { loadSettings } = await import('./config/settings.js');
+      vi.mocked(parseArguments).mockResolvedValue({
+        acp: true,
+      } as unknown as CliArgs);
+      vi.mocked(loadSettings).mockImplementation(() => {
+        expect(process.env['ELECTRON_RUN_AS_NODE']).toBeUndefined();
+        expect(
+          process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'],
+        ).toBeUndefined();
+        throw new Error('stop after scrub');
+      });
+
+      try {
+        await expect(main()).rejects.toThrow('stop after scrub');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
+  it('preserves Electron Node mode outside managed ACP startup', async () => {
+    vi.stubEnv('ELECTRON_RUN_AS_NODE', '1');
+    vi.stubEnv('QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE', '1');
+    vi.stubEnv('QWEN_CODE_NO_RELAUNCH', 'true');
+
+    const { parseArguments } = await import('./config/config.js');
+    const { loadSettings } = await import('./config/settings.js');
+    vi.mocked(parseArguments).mockResolvedValue({} as CliArgs);
+    vi.mocked(loadSettings).mockImplementation(() => {
+      expect(process.env['ELECTRON_RUN_AS_NODE']).toBe('1');
+      expect(process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE']).toBe('1');
+      throw new Error('stop without scrub');
+    });
+
+    try {
+      await expect(main()).rejects.toThrow('stop without scrub');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('should skip full settings discovery in bare mode', async () => {
     const originalArgv = process.argv;
     process.argv = ['node', 'script.js', '--bare'];

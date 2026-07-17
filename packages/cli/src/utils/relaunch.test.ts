@@ -383,6 +383,34 @@ describe('relaunchAppInChildProcess', () => {
       expect(processExitSpy).toHaveBeenCalledWith(0);
     });
 
+    it('restores Electron Node mode for every managed ACP relaunch', async () => {
+      process.argv = ['/usr/bin/node', '/app/cli.js'];
+      process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'] = '1';
+      delete process.env['ELECTRON_RUN_AS_NODE'];
+
+      const firstChild = createMockChildProcess(0, false);
+      const secondChild = createMockChildProcess(0, false);
+      mockedSpawn
+        .mockReturnValueOnce(firstChild)
+        .mockReturnValueOnce(secondChild);
+
+      const promise = relaunchAppInChildProcess([], []);
+
+      firstChild.emit('close', RELAUNCH_EXIT_CODE);
+      await vi.waitFor(() => expect(mockedSpawn).toHaveBeenCalledTimes(2));
+
+      for (const call of mockedSpawn.mock.calls) {
+        const env = call[2]?.env;
+        expect(env?.['ELECTRON_RUN_AS_NODE']).toBe('1');
+        expect(env?.['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE']).toBe('1');
+        expect(env?.['QWEN_CODE_NO_RELAUNCH']).toBe('true');
+      }
+      expect(process.env['ELECTRON_RUN_AS_NODE']).toBeUndefined();
+
+      secondChild.emit('close', 0);
+      await expect(promise).rejects.toThrow('PROCESS_EXIT_CALLED');
+    });
+
     it('should handle null exit code from child process', async () => {
       process.argv = ['/usr/bin/node', '/app/cli.js'];
 
