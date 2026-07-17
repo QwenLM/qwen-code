@@ -957,39 +957,47 @@ describe('qwen-autofix workflow', () => {
       expect(step).toContain('npm run build');
       expect(step).toContain('npm run typecheck');
       expect(step).toContain('npm run lint');
-      // Mirror CI's freshness gate with regenerate + `git status --porcelain`
-      // (version-agnostic — the generator's --check was reverted from main by
-      // #7031, so it must NOT be relied on). Invisible to
-      // build/typecheck/lint/vitest, so it must be asserted explicitly.
-      expect(step).toContain('npm run generate:settings-schema');
-      // Must NOT rely on the generator's --check (reverted from main by #7031).
-      expect(step).not.toContain('generate:settings-schema -- --check');
-      // Guard a generator CRASH so set -e can't abort before outcome=failed is set.
-      expect(step).toContain('if ! npm run generate:settings-schema; then');
-      expect(step).toContain('Settings schema generator failed');
-      expect(step).toContain(
-        'packages/vscode-ide-companion/schemas/settings.schema.json',
-      );
-      expect(step).toContain('is out of date');
+      // The settings-schema freshness gate is extracted to a shared script so the
+      // two gates cannot drift; each verify step just invokes it.
+      expect(step).toContain('bash .github/scripts/check-settings-schema.sh');
       expect(step).toContain(
         'No package changes detected; skipping package tests.',
       );
       expect(step).not.toContain('Fix does not touch any package');
       expect(step).not.toContain('PR does not touch any package');
     }
-    // The review gate's schema freshness check is a STRUCTURAL guard: it must run
-    // BEFORE the no-op/unchanged return, so a stale-schema PR the agent wrongly
-    // no-ops fails (outcome=failed) instead of being reported as evaluated while
-    // CI stays red (the motivating bug).
+    // The shared script mirrors CI's freshness gate: regenerate + `git status
+    // --porcelain` (version-agnostic — the generator's --check was reverted from
+    // main by #7031 and must NOT be relied on), with a generator-crash guard, and
+    // writes outcome=failed so the caller reports a definite outcome.
+    const schemaScript = readFileSync(
+      '.github/scripts/check-settings-schema.sh',
+      'utf8',
+    );
+    expect(schemaScript).toContain('npm run generate:settings-schema');
+    expect(schemaScript).not.toContain('generate:settings-schema -- --check');
+    expect(schemaScript).toContain(
+      'if ! npm run generate:settings-schema; then',
+    );
+    expect(schemaScript).toContain(
+      'packages/vscode-ide-companion/schemas/settings.schema.json',
+    );
+    expect(schemaScript).toContain('is out of date');
+    expect(schemaScript).toContain('git status --porcelain');
+    expect(schemaScript).toContain('outcome=failed');
+    // The review gate's freshness check is a STRUCTURAL guard: the script call
+    // must run BEFORE the no-op/unchanged return, so a stale-schema PR the agent
+    // wrongly no-ops fails (outcome=failed) instead of being reported as evaluated
+    // while CI stays red (the motivating bug).
     const reviewVerifyGate = verificationGateSteps.find((s) =>
       s.includes('outcome=noop'),
     );
     expect(reviewVerifyGate).toBeTruthy();
     expect(
-      reviewVerifyGate.indexOf('npm run generate:settings-schema'),
+      reviewVerifyGate.indexOf('bash .github/scripts/check-settings-schema.sh'),
     ).toBeGreaterThanOrEqual(0);
     expect(
-      reviewVerifyGate.indexOf('npm run generate:settings-schema'),
+      reviewVerifyGate.indexOf('bash .github/scripts/check-settings-schema.sh'),
     ).toBeLessThan(reviewVerifyGate.indexOf('outcome=noop'));
   });
 
