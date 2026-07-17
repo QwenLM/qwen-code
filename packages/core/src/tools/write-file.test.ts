@@ -464,6 +464,22 @@ describe('WriteFileTool', () => {
       expect(result.artifacts).toBeUndefined();
     });
 
+    it('reminds for case-insensitive artifact extensions', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const filePath = path.join(rootDir, 'reports', 'dashboard.HTML');
+      const params = {
+        file_path: filePath,
+        content: '<!doctype html><html><body>Dashboard</body></html>',
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.llmContent).toContain('record_artifact');
+      expect(result.llmContent).toContain(
+        'workspacePath "reports/dashboard.HTML"',
+      );
+    });
+
     it('does not remind for ordinary source files', async () => {
       mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
       const filePath = path.join(rootDir, 'src', 'index.ts');
