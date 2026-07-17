@@ -236,6 +236,7 @@ function withLspDisabledConfig<T extends object>(
 describe('gemini.tsx main function', () => {
   let originalEnvGeminiSandbox: string | undefined;
   let originalEnvSandbox: string | undefined;
+  let originalEnvQwenSandboxImage: string | undefined;
   let originalEnvQwenCodeSimple: string | undefined;
   let initialUnhandledRejectionListeners: NodeJS.UnhandledRejectionListener[] =
     [];
@@ -249,9 +250,15 @@ describe('gemini.tsx main function', () => {
     // Store and clear sandbox-related env variables to ensure a consistent test environment
     originalEnvGeminiSandbox = process.env['QWEN_SANDBOX'];
     originalEnvSandbox = process.env['SANDBOX'];
+    // QWEN_SANDBOX_IMAGE selects the custom-image relaunch branch in main(),
+    // which skips the host-update capability computation; CI environments that
+    // export a resolved sandbox image (e.g. the autofix runner) would otherwise
+    // flip these tests' code path.
+    originalEnvQwenSandboxImage = process.env['QWEN_SANDBOX_IMAGE'];
     originalEnvQwenCodeSimple = process.env['QWEN_CODE_SIMPLE'];
     delete process.env['QWEN_SANDBOX'];
     delete process.env['SANDBOX'];
+    delete process.env['QWEN_SANDBOX_IMAGE'];
     delete process.env['QWEN_CODE_SIMPLE'];
 
     initialUnhandledRejectionListeners =
@@ -269,6 +276,11 @@ describe('gemini.tsx main function', () => {
       process.env['SANDBOX'] = originalEnvSandbox;
     } else {
       delete process.env['SANDBOX'];
+    }
+    if (originalEnvQwenSandboxImage !== undefined) {
+      process.env['QWEN_SANDBOX_IMAGE'] = originalEnvQwenSandboxImage;
+    } else {
+      delete process.env['QWEN_SANDBOX_IMAGE'];
     }
     if (originalEnvQwenCodeSimple !== undefined) {
       process.env['QWEN_CODE_SIMPLE'] = originalEnvQwenCodeSimple;
