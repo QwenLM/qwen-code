@@ -132,6 +132,10 @@ describe('ModelRegistry', () => {
       expect(gpt4?.description).toBe('Most capable GPT-4');
       expect(gpt4?.isVision).toBe(true);
       expect(gpt4?.authType).toBe(AuthType.USE_OPENAI);
+      expect(gpt4?.registryBaseUrl).toBe('https://api.openai.com/v1');
+      expect(
+        models.find((m) => m.id === 'gpt-3.5-turbo')?.registryBaseUrl,
+      ).toBeUndefined();
     });
   });
 
@@ -537,6 +541,10 @@ describe('ModelRegistry', () => {
       expect(models.length).toBe(2);
       expect(models[0].label).toBe('GPT-4 Direct');
       expect(models[1].label).toBe('GPT-4 Proxy');
+      expect(models.map((model) => model.registryBaseUrl)).toEqual([
+        'https://api.openai.com/v1',
+        'https://proxy.example.com/v1',
+      ]);
     });
 
     it('should retrieve model by id and baseUrl precisely', () => {

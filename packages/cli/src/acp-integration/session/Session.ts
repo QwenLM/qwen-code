@@ -193,7 +193,13 @@ import {
   MessageType,
   type HistoryItemGoalStatus,
 } from '../../ui/types.js';
-import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
+import {
+  ACP_ROUTE_ID_PREFIX,
+  buildAcpModelOptions,
+  getCurrentAcpModelId,
+  parseAcpModelOption,
+  resolveAcpModelOption,
+} from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -4111,7 +4117,17 @@ export class Session implements SessionContext {
       throw RequestError.invalidParams(undefined, 'modelId cannot be empty');
     }
 
-    const parsed = parseAcpModelOption(rawModelId);
+    const resolvedRoute = resolveAcpModelOption(
+      rawModelId,
+      this.config.getAllConfiguredModels(),
+    );
+    if (!resolvedRoute && rawModelId.startsWith(ACP_ROUTE_ID_PREFIX)) {
+      throw RequestError.invalidParams(
+        undefined,
+        `Unknown or stale model route: "${rawModelId}"`,
+      );
+    }
+    const parsed = resolvedRoute ?? parseAcpModelOption(rawModelId);
     const previousAuthType = this.config.getAuthType?.();
     const selectedAuthType = parsed.authType ?? previousAuthType;
 
@@ -4122,18 +4138,40 @@ export class Session implements SessionContext {
       );
     }
 
+    const requireCachedCredentials =
+      selectedAuthType !== previousAuthType &&
+      selectedAuthType === AuthType.QWEN_OAUTH;
+    const switchOptions =
+      resolvedRoute?.baseUrl !== undefined || requireCachedCredentials
+        ? {
+            ...(resolvedRoute?.baseUrl !== undefined
+              ? { baseUrl: resolvedRoute.baseUrl }
+              : {}),
+            ...(requireCachedCredentials
+              ? { requireCachedCredentials: true }
+              : {}),
+          }
+        : undefined;
     await this.config.switchModel(
       selectedAuthType,
       parsed.modelId,
-      selectedAuthType !== previousAuthType &&
-        selectedAuthType === AuthType.QWEN_OAUTH
-        ? { requireCachedCredentials: true }
-        : undefined,
+      switchOptions,
     );
 
     const after = this.config.getContentGeneratorConfig?.();
     const effectiveAuthType = after?.authType ?? selectedAuthType;
     const effectiveModelId = after?.model ?? parsed.modelId;
+    const activeRuntimeSnapshot = this.config.getActiveRuntimeModelSnapshot?.();
+    const currentAcpModelId = getCurrentAcpModelId(
+      buildAcpModelOptions(this.config.getAllConfiguredModels()),
+      activeRuntimeSnapshot?.id ?? effectiveModelId,
+      activeRuntimeSnapshot?.authType ?? effectiveAuthType,
+      activeRuntimeSnapshot
+        ? undefined
+        : resolvedRoute
+          ? resolvedRoute.registryBaseUrl
+          : this.config.getCurrentModelRegistryBaseUrl?.(),
+    );
 
     // Notify attached clients of an in-session model switch so a
     // `/model` slash command or plan-mode change reaches the bus (today only
@@ -4149,7 +4187,7 @@ export class Session implements SessionContext {
       .extNotification('qwen/notify/session/model-update', {
         v: 1,
         sessionId: this.sessionId,
-        currentModelId: effectiveModelId,
+        currentModelId: currentAcpModelId,
       })
       .catch((error) => {
         // Advisory only; a failed notification must not fail the model switch.
@@ -4158,17 +4196,22 @@ export class Session implements SessionContext {
 
     if (options.persistDefault ?? true) {
       const persistScope = getPersistScopeForModelSelection(this.settings);
-      this.settings.setValue(persistScope, 'model.name', parsed.modelId);
-      // Id-only switch: clear any baseUrl disambiguator left by a previous
-      // model-picker selection so the next launch resolves to this provider,
-      // not a stale one sharing the same model id. Empty-string tombstone so
-      // the clear overrides a lower-scope value on merge (undefined is dropped
-      // from JSON and would not override).
-      this.settings.setValue(persistScope, 'model.baseUrl', '');
+      this.settings.setValue(
+        persistScope,
+        'model.name',
+        resolvedRoute?.isRuntime ? resolvedRoute.modelId : effectiveModelId,
+      );
+      this.settings.setValue(
+        persistScope,
+        'model.baseUrl',
+        resolvedRoute && !resolvedRoute.isRuntime
+          ? (resolvedRoute.baseUrl ?? '')
+          : '',
+      );
       this.settings.setValue(
         persistScope,
         'security.auth.selectedType',
-        selectedAuthType,
+        effectiveAuthType,
       );
     }
 
@@ -4179,7 +4222,8 @@ export class Session implements SessionContext {
           modelId: effectiveModelId,
           baseUrl: after?.baseUrl ?? '(default)',
           apiKey: maskApiKeyForDisplay(after?.apiKey),
-          isRuntime: rawModelId.startsWith('$runtime|'),
+          isRuntime:
+            resolvedRoute?.isRuntime ?? rawModelId.startsWith('$runtime|'),
         },
       },
     };
@@ -4189,32 +4233,20 @@ export class Session implements SessionContext {
    * Sends a current_mode_update notification to the client.
    * Called after the agent switches modes (e.g., from exit_plan_mode tool).
    */
-  private async sendCurrentModeUpdateNotification(
-    outcome: ToolConfirmationOutcome,
-  ): Promise<void> {
-    // Determine the new mode based on the approval outcome
-    // This mirrors the logic in ExitPlanModeTool.onConfirm
-    let newModeId: ApprovalModeValue;
-    switch (outcome) {
-      case ToolConfirmationOutcome.ProceedAlways:
-        newModeId = 'auto-edit';
-        break;
-      case ToolConfirmationOutcome.RestorePrevious:
-        // onConfirm has already restored the mode; read the actual current mode
-        newModeId = this.config.getApprovalMode() as ApprovalModeValue;
-        break;
-      case ToolConfirmationOutcome.ProceedOnce:
-      default:
-        newModeId = 'default';
-        break;
-    }
-
+  private async sendCurrentModeUpdateNotification(): Promise<void> {
+    const newModeId = this.config.getApprovalMode() as ApprovalModeValue;
     const update: SessionUpdate = {
       sessionUpdate: 'current_mode_update',
       currentModeId: newModeId,
     };
 
-    await this.sendUpdate(update);
+    let legacyFrameSent = false;
+    try {
+      await this.sendUpdate(update);
+      legacyFrameSent = true;
+    } catch (error) {
+      debugLogger.debug('current_mode_update notification failed', error);
+    }
 
     // A2 (#4511): promote the mode change to the bridge side-channel so
     // it reaches `approval_mode_changed` on the SSE bus, matching the
@@ -4226,18 +4258,16 @@ export class Session implements SessionContext {
     // skip its compat dual-emit so the IDE companion sees exactly one
     // legacy frame for this change, not two. `setMode` omits the flag, so
     // its dual-emit still fires (it has no `sendUpdate`).
-    void this.client
-      .extNotification('qwen/notify/session/mode-update', {
+    try {
+      await this.client.extNotification('qwen/notify/session/mode-update', {
         v: 1,
         sessionId: this.sessionId,
         currentModeId: newModeId,
-        legacyFrameSent: true,
-      })
-      .catch((error) => {
-        // Advisory only; a failed notification must not fail the mode
-        // change. Matches the model-update extNotification in `setModel`.
-        debugLogger.debug('mode-update extNotification failed', error);
+        legacyFrameSent,
       });
+    } catch (error) {
+      debugLogger.debug('mode-update extNotification failed', error);
+    }
   }
 
   /**
@@ -4987,8 +5017,13 @@ export class Session implements SessionContext {
             toolName,
             toolParams,
           );
-          const { finalPermission, pmForcedAsk, pmCtx, denyMessage } =
-            flowResult;
+          const {
+            finalPermission,
+            pmForcedAsk,
+            pmCtx,
+            denyMessage,
+            requiresUserInteraction,
+          } = flowResult;
 
           // ---- L5: ApprovalMode overrides ----
           const isPlanMode = approvalMode === ApprovalMode.PLAN;
@@ -5036,6 +5071,7 @@ export class Session implements SessionContext {
           // existing manual-approval flow below.
           if (
             !autoModeAllowed &&
+            !requiresUserInteraction &&
             shouldRunAutoModeForCall(approvalMode, toolName)
           ) {
             const denialState = this.config.getAutoModeDenialState();
@@ -5144,7 +5180,12 @@ export class Session implements SessionContext {
 
           if (
             !autoModeAllowed &&
-            needsConfirmation(confirmationPermission, approvalMode, toolName)
+            needsConfirmation(
+              confirmationPermission,
+              approvalMode,
+              toolName,
+              requiresUserInteraction,
+            )
           ) {
             confirmationDetails =
               await invocation.getConfirmationDetails(abortSignal);
@@ -5182,7 +5223,10 @@ export class Session implements SessionContext {
                 String(approvalMode),
               );
 
-              if (hookResult.hasDecision) {
+              if (
+                hookResult.hasDecision &&
+                (!hookResult.shouldAllow || !requiresUserInteraction)
+              ) {
                 hookHandled = true;
                 if (hookResult.shouldAllow) {
                   if (hookResult.updatedInput) {
@@ -5212,6 +5256,7 @@ export class Session implements SessionContext {
             // AUTO_EDIT mode: auto-approve edit and info tools
             // (same as coreToolScheduler L5 — NOT delegated to the extension)
             if (
+              !requiresUserInteraction &&
               approvalMode === ApprovalMode.AUTO_EDIT &&
               (confirmationDetails.type === 'edit' ||
                 confirmationDetails.type === 'info')
@@ -5301,12 +5346,13 @@ export class Session implements SessionContext {
                   );
                 }
                 onStopAfterPermissionCancel?.();
-                return earlyErrorResponse(
-                  new Error(
-                    `Permission request failed for "${toolName}": ${this.#formatError(
+                const permissionFailureMessage = isExitPlanModeTool
+                  ? 'The host could not present plan-exit approval. Plan mode remains active; use the host mode selector or /plan exit to leave plan mode.'
+                  : `Permission request failed for "${toolName}": ${this.#formatError(
                       error,
-                    )}`,
-                  ),
+                    )}`;
+                return earlyErrorResponse(
+                  new Error(permissionFailureMessage),
                   toolName,
                   { stopAfterPermissionCancel: true },
                 );
@@ -5347,20 +5393,12 @@ export class Session implements SessionContext {
                 );
               }
 
-              // After exit_plan_mode confirmation, send current_mode_update
-              if (
-                isExitPlanModeTool &&
-                outcome !== ToolConfirmationOutcome.Cancel
-              ) {
-                await this.sendCurrentModeUpdateNotification(outcome);
-              }
-
               // After edit tool ProceedAlways, notify the client about mode change
               if (
                 confirmationDetails.type === 'edit' &&
                 outcome === ToolConfirmationOutcome.ProceedAlways
               ) {
-                await this.sendCurrentModeUpdateNotification(outcome);
+                await this.sendCurrentModeUpdateNotification();
               }
 
               switch (outcome) {
@@ -5520,21 +5558,14 @@ export class Session implements SessionContext {
           // Clean up event listeners
           cleanupAgentToolResources();
 
-          // enter_plan_mode and the AUTO/YOLO gate path of exit_plan_mode change the
-          // approval mode inside execute() without going through the user-confirmation
-          // branch above, so notify the client of the current mode explicitly.
-          // Only send when the mode actually changed (a gate "blocked" result keeps
-          // the mode at PLAN, and a redundant notification would be misleading).
+          // Plan lifecycle tools change mode atomically inside execute(). Notify
+          // only after successful execution and only when the actual mode changed.
           if (
             (isEnterPlanModeTool || isExitPlanModeTool) &&
-            !didRequestPermission &&
             !toolResult.error &&
             this.config.getApprovalMode() !== approvalMode
           ) {
-            await this.sendUpdate({
-              sessionUpdate: 'current_mode_update',
-              currentModeId: this.config.getApprovalMode() as ApprovalModeValue,
-            });
+            await this.sendCurrentModeUpdateNotification();
           }
 
           // Create response parts first (needed for emitResult and recordToolResult)

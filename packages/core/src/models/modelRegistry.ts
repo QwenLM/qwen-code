@@ -229,6 +229,9 @@ export class ModelRegistry {
       // always defined on `ResolvedModelConfig` — no fallback needed here.
       modalities: model.generationConfig.modalities,
       baseUrl: model.baseUrl,
+      ...(model.registryBaseUrl !== undefined
+        ? { registryBaseUrl: model.registryBaseUrl }
+        : {}),
       envKey: model.envKey,
       fastOnly: model.fastOnly,
       voiceOnly: model.voiceOnly,
@@ -245,14 +248,15 @@ export class ModelRegistry {
   getModel(
     authType: AuthType,
     modelId: string,
-    baseUrl?: string,
+    baseUrl?: string | null,
   ): ResolvedModelConfig | undefined {
     const models = this.modelsByAuthType.get(authType);
     if (!models) return undefined;
 
-    if (baseUrl) {
-      const exact = models.get(modelRegistryKey(modelId, baseUrl));
+    if (baseUrl !== undefined) {
+      const exact = models.get(modelRegistryKey(modelId, baseUrl ?? undefined));
       if (exact) return exact;
+      if (baseUrl === null) return undefined;
       const plain = models.get(modelId);
       return plain?.baseUrl === baseUrl ? plain : undefined;
     }
@@ -319,6 +323,7 @@ export class ModelRegistry {
       authType,
       name: config.name || config.id,
       baseUrl: config.baseUrl || this.getDefaultBaseUrl(authType),
+      ...(config.baseUrl ? { registryBaseUrl: config.baseUrl } : {}),
       generationConfig,
       capabilities: config.capabilities || {},
     };

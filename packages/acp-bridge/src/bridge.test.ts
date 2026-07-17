@@ -7493,7 +7493,12 @@ describe('createAcpSessionBridge', () => {
 
   describe('modelServiceId honored at session create', () => {
     /** Build a channel that records `unstable_setSessionModel` calls. */
-    function setup(opts: { setModelImpl?: () => Promise<unknown> } = {}) {
+    function setup(
+      opts: {
+        setModelImpl?: () => Promise<unknown>;
+        setModelResult?: Record<string, unknown>;
+      } = {},
+    ) {
       const setModelCalls: Array<{ sessionId: string; modelId: string }> = [];
       const factory: ChannelFactory = async () => {
         const { clientStream, agentStream } = createInMemoryChannel();
@@ -7507,7 +7512,7 @@ describe('createAcpSessionBridge', () => {
                   modelId: req.modelId,
                 });
                 if (opts.setModelImpl) await opts.setModelImpl();
-                return {};
+                return opts.setModelResult ?? {};
               };
             }
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -7530,15 +7535,19 @@ describe('createAcpSessionBridge', () => {
     }
 
     it('applies modelServiceId via unstable_setSessionModel after newSession', async () => {
-      const { bridge, setModelCalls } = setup();
+      const { bridge, setModelCalls } = setup({
+        setModelResult: {
+          _meta: { qwenModelSwitch: { modelId: 'qwen3-coder-canonical' } },
+        },
+      });
       const session = await bridge.spawnOrAttach({
         workspaceCwd: WS_A,
-        modelServiceId: 'qwen3-coder',
+        modelServiceId: 'qwen-route:v1:abcdefghijklmnop',
       });
       expect(session.attached).toBe(false);
       expect(setModelCalls).toHaveLength(1);
       expect(setModelCalls[0]?.sessionId).toBe(session.sessionId);
-      expect(setModelCalls[0]?.modelId).toBe('qwen3-coder');
+      expect(setModelCalls[0]?.modelId).toBe('qwen-route:v1:abcdefghijklmnop');
       const abort = new AbortController();
       const iter = bridge.subscribeEvents(session.sessionId, {
         signal: abort.signal,
@@ -7547,12 +7556,16 @@ describe('createAcpSessionBridge', () => {
       const it = iter[Symbol.asyncIterator]();
       const switched = await it.next();
       expect(switched.value?.type).toBe('model_switched');
+      expect(switched.value?.data).toEqual({
+        sessionId: session.sessionId,
+        modelId: 'qwen-route:v1:abcdefghijklmnop',
+      });
       const settingsChanged = await it.next();
       expect(settingsChanged.value?.type).toBe('settings_changed');
       expect(settingsChanged.value?.originatorClientId).toBe(session.clientId);
       expect(settingsChanged.value?.data).toEqual({
         key: 'model.name',
-        value: 'qwen3-coder',
+        value: 'qwen3-coder-canonical',
       });
       abort.abort();
       await bridge.shutdown();
@@ -9056,7 +9069,7 @@ describe('createAcpSessionBridge', () => {
 
   describe('setSessionModel', () => {
     /** Set up a channel where the agent records setSessionModel calls. */
-    async function setup() {
+    async function setup(response: Record<string, unknown> = {}) {
       const setModelCalls: Array<{ sessionId: string; modelId: string }> = [];
       const factory: ChannelFactory = async () => {
         const { clientStream, agentStream } = createInMemoryChannel();
@@ -9071,7 +9084,7 @@ describe('createAcpSessionBridge', () => {
                   sessionId: req.sessionId,
                   modelId: req.modelId,
                 });
-                return {};
+                return response;
               };
             }
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -9107,21 +9120,23 @@ describe('createAcpSessionBridge', () => {
     });
 
     it('publishes a model_switched event on success', async () => {
-      const { bridge, session } = await setup();
+      const { bridge, session } = await setup({
+        _meta: { qwenModelSwitch: { modelId: 'qwen3-coder' } },
+      });
       const abort = new AbortController();
       const iter = bridge.subscribeEvents(session.sessionId, {
         signal: abort.signal,
       });
       await bridge.setSessionModel(session.sessionId, {
         sessionId: session.sessionId,
-        modelId: 'qwen3-coder',
+        modelId: 'qwen-route:v1:opaque',
       });
       const it = iter[Symbol.asyncIterator]();
       const next = await it.next();
       expect(next.value?.type).toBe('model_switched');
       expect(next.value?.data).toEqual({
         sessionId: session.sessionId,
-        modelId: 'qwen3-coder',
+        modelId: 'qwen-route:v1:opaque',
       });
       const settingsChanged = await it.next();
       expect(settingsChanged.value?.type).toBe('settings_changed');

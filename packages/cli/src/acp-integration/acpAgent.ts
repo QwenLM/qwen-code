@@ -207,7 +207,8 @@ import {
   replayTranscriptRecordPage,
 } from './session/history-replay-page.js';
 import {
-  formatAcpModelId,
+  buildAcpModelOptions,
+  getCurrentAcpModelId,
   parseAcpBaseModelId,
   sanitizeProviderBaseUrl,
 } from '../utils/acpModelUtils.js';
@@ -4711,15 +4712,23 @@ class QwenAgent implements Agent {
         : (config.getModel() || '').trim();
       const hasCurrentModel = currentModelId.length > 0;
       const currentAuth = activeRuntimeSnapshot?.authType ?? currentAuthType;
-      const currentAcpModelId =
-        hasCurrentModel && currentAuth
-          ? formatAcpModelId(currentModelId, currentAuth)
-          : currentModelId || undefined;
+      const modelOptions = buildAcpModelOptions(
+        config.getAllConfiguredModels(),
+      );
+      const currentAcpModelId = hasCurrentModel
+        ? getCurrentAcpModelId(
+            modelOptions,
+            currentModelId,
+            currentAuth,
+            activeRuntimeSnapshot
+              ? undefined
+              : config.getCurrentModelRegistryBaseUrl?.(),
+          )
+        : undefined;
       const providers = new Map<string, ServeWorkspaceProviderStatus>();
 
-      for (const model of config
-        .getAllConfiguredModels()
-        .filter(isMainSelectableModel)) {
+      for (const option of modelOptions) {
+        const { model, effectiveModelId, modelId } = option;
         const authType = String(model.authType);
         let provider = providers.get(authType);
         if (!provider) {
@@ -4733,17 +4742,8 @@ class QwenAgent implements Agent {
           providers.set(authType, provider);
         }
 
-        const effectiveModelId =
-          model.isRuntimeModel && model.runtimeSnapshotId
-            ? model.runtimeSnapshotId
-            : model.id;
-        const modelId = formatAcpModelId(effectiveModelId, model.authType);
         const isCurrent =
-          currentAuth === model.authType &&
-          hasCurrentModel &&
-          (currentModelId === effectiveModelId ||
-            currentModelId === model.id ||
-            currentAcpModelId === modelId);
+          currentAuth === model.authType && currentAcpModelId === modelId;
         const providerModel: ServeWorkspaceProviderModel = {
           modelId,
           baseModelId: parseAcpBaseModelId(effectiveModelId),
@@ -9441,33 +9441,26 @@ class QwenAgent implements Agent {
       ''
     ).trim();
     const currentAuthType = config.getAuthType();
-    const allConfiguredModels = config
-      .getAllConfiguredModels()
-      .filter(isMainSelectableModel);
+    const modelOptions = buildAcpModelOptions(config.getAllConfiguredModels());
 
     const activeRuntimeSnapshot = config.getActiveRuntimeModelSnapshot?.();
-    const currentModelId = activeRuntimeSnapshot
-      ? formatAcpModelId(
-          activeRuntimeSnapshot.id,
-          activeRuntimeSnapshot.authType,
-        )
-      : this.formatCurrentModelId(rawCurrentModelId, currentAuthType);
+    const currentModelId = getCurrentAcpModelId(
+      modelOptions,
+      activeRuntimeSnapshot?.id ?? rawCurrentModelId,
+      activeRuntimeSnapshot?.authType ?? currentAuthType,
+      activeRuntimeSnapshot
+        ? undefined
+        : config.getCurrentModelRegistryBaseUrl?.(),
+    );
 
-    const mappedAvailableModels = allConfiguredModels.map((model) => {
-      const effectiveModelId =
-        model.isRuntimeModel && model.runtimeSnapshotId
-          ? model.runtimeSnapshotId
-          : model.id;
-
-      return {
-        modelId: formatAcpModelId(effectiveModelId, model.authType),
-        name: model.label,
-        description: model.description ?? null,
-        _meta: {
-          contextLimit: model.contextWindowSize ?? tokenLimit(model.id),
-        },
-      };
-    });
+    const mappedAvailableModels = modelOptions.map(({ model, modelId }) => ({
+      modelId,
+      name: model.label,
+      description: model.description ?? null,
+      _meta: {
+        contextLimit: model.contextWindowSize ?? tokenLimit(model.id),
+      },
+    }));
 
     return {
       currentModelId,
@@ -9492,19 +9485,19 @@ class QwenAgent implements Agent {
 
   private buildConfigOptions(config: Config): SessionConfigOption[] {
     const currentApprovalMode = config.getApprovalMode();
-    const allConfiguredModels = config
-      .getAllConfiguredModels()
-      .filter(isMainSelectableModel);
+    const modelOptions = buildAcpModelOptions(config.getAllConfiguredModels());
     const rawCurrentModelId = (config.getModel() || '').trim();
     const currentAuthType = config.getAuthType?.();
 
     const activeRuntimeSnapshot = config.getActiveRuntimeModelSnapshot?.();
-    const currentModelId = activeRuntimeSnapshot
-      ? formatAcpModelId(
-          activeRuntimeSnapshot.id,
-          activeRuntimeSnapshot.authType,
-        )
-      : this.formatCurrentModelId(rawCurrentModelId, currentAuthType);
+    const currentModelId = getCurrentAcpModelId(
+      modelOptions,
+      activeRuntimeSnapshot?.id ?? rawCurrentModelId,
+      activeRuntimeSnapshot?.authType ?? currentAuthType,
+      activeRuntimeSnapshot
+        ? undefined
+        : config.getCurrentModelRegistryBaseUrl?.(),
+    );
 
     const modeOptions = APPROVAL_MODES.map((mode) => ({
       value: mode,
@@ -9522,17 +9515,11 @@ class QwenAgent implements Agent {
       options: modeOptions,
     };
 
-    const modelOptions = allConfiguredModels.map((model) => {
-      const effectiveModelId =
-        model.isRuntimeModel && model.runtimeSnapshotId
-          ? model.runtimeSnapshotId
-          : model.id;
-      return {
-        value: formatAcpModelId(effectiveModelId, model.authType),
-        name: model.label,
-        description: model.description ?? '',
-      };
-    });
+    const configModelOptions = modelOptions.map(({ model, modelId }) => ({
+      value: modelId,
+      name: model.label,
+      description: model.description ?? '',
+    }));
 
     const modelConfigOption: SessionConfigOption = {
       id: 'model',
@@ -9541,26 +9528,11 @@ class QwenAgent implements Agent {
       category: 'model',
       type: 'select' as const,
       currentValue: currentModelId,
-      options: modelOptions,
+      options: configModelOptions,
     };
 
     return [modeConfigOption, modelConfigOption];
   }
-
-  private formatCurrentModelId(
-    baseModelId: string,
-    authType?: AuthType,
-  ): string {
-    if (!baseModelId) return baseModelId;
-    return authType ? formatAcpModelId(baseModelId, authType) : baseModelId;
-  }
-}
-
-function isMainSelectableModel(model: {
-  fastOnly?: boolean;
-  voiceOnly?: boolean;
-}): boolean {
-  return model.fastOnly !== true && model.voiceOnly !== true;
 }
 
 function diffSettingsKeys(

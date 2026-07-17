@@ -55,6 +55,7 @@ import {
 } from '../server/request-helpers.js';
 import {
   InvalidCursorError,
+  getWorkspaceSessionInfoForResponse,
   listLiveWorkspaceSessionsForResponse,
   listWorkspaceSessionsForResponse,
   parseSessionPageSizeQuery,
@@ -2927,6 +2928,43 @@ export function registerSessionRoutes(
   app.get(
     '/workspaces/:workspace/sessions',
     listWorkspaceSessionsHandler('workspace'),
+  );
+
+  const workspaceSessionInfoHandler =
+    (paramName: 'id' | 'workspace'): RequestHandler =>
+    async (req, res) => {
+      const route =
+        paramName === 'workspace'
+          ? 'GET /workspaces/:workspace/session-info'
+          : 'GET /workspace/:id/session-info';
+      const runtime = resolveRuntimeForCatalogRoute(req, res, paramName, route);
+      if (runtime === null) return;
+      const key = runtime.workspaceCwd;
+      try {
+        // Disk-scan aggregate: do not call this from hot paths / UI polls.
+        const info = await runWorkspaceInspectionWithLogPolicy(runtime, () =>
+          getWorkspaceSessionInfoForResponse(runtime.bridge, key, {
+            includeLive: !isReadOnlyWorkspaceInspection(runtime),
+          }),
+        );
+        res.status(200).json(info);
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: failed to read session-info for workspace ${safeLogValue(
+            key,
+          )}: ${safeLogValue(err instanceof Error ? err.message : String(err))}`,
+        );
+        res.status(500).json({
+          error: 'Failed to read session info',
+          code: 'session_info_failed',
+        });
+      }
+    };
+
+  app.get('/workspace/:id/session-info', workspaceSessionInfoHandler('id'));
+  app.get(
+    '/workspaces/:workspace/session-info',
+    workspaceSessionInfoHandler('workspace'),
   );
 
   app.post(
