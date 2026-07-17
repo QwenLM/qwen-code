@@ -20,6 +20,7 @@ import {
   type ChannelMemoryDocument,
   type ChannelMemoryEntry,
 } from './channel-memory-document.js';
+import { scanForSecrets } from './secret-scanner.js';
 
 export interface ChannelMemoryTarget {
   channelName: string;
@@ -77,6 +78,15 @@ interface Mutation<T> {
 
 function isMissingFile(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === 'ENOENT';
+}
+
+function assertNoChannelMemorySecrets(
+  content: string | readonly string[],
+): void {
+  const texts = typeof content === 'string' ? [content] : content;
+  if (texts.some((text) => scanForSecrets(text).length > 0)) {
+    throw new Error('Channel memory cannot store detected credentials');
+  }
 }
 
 async function releaseLock(release: () => Promise<void>): Promise<void> {
@@ -342,6 +352,7 @@ export async function addChannelMemoryEntries(
   if (texts.length > MAX_CHANNEL_MEMORY_ENTRIES_PER_REQUEST) {
     throw new Error('Channel memory accepts at most 10 entries per request');
   }
+  assertNoChannelMemorySecrets(texts);
 
   const filePath = getChannelMemoryFilePath(target);
   return mutateChannelMemory<AddChannelMemoryResult>(target, (document) => {
@@ -398,6 +409,7 @@ export async function updateChannelMemoryEntry(
   target: ChannelMemoryTarget,
   mutation: { id: string; text: string; expectedText?: string },
 ): Promise<UpdateChannelMemoryResult> {
+  assertNoChannelMemorySecrets(mutation.text);
   const filePath = getChannelMemoryFilePath(target);
   return mutateChannelMemory<UpdateChannelMemoryResult>(target, (document) => {
     const entry = document.entries.find(
