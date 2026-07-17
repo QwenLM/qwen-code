@@ -165,8 +165,10 @@ export class QwenConnectionHandler {
             '[QwenAgentManager] Session creation requires authentication; waiting for user-triggered login.',
           );
         } else {
-          logger.log(`\n⚠️ [SESSION FAILED] newSessionWithRetry threw error\n`);
-          logger.log(`[QwenAgentManager] Error details:`, sessionError);
+          logger.error(
+            `\n⚠️ [SESSION FAILED] newSessionWithRetry threw error\n`,
+          );
+          logger.error(`[QwenAgentManager] Error details:`, sessionError);
           throw sessionError;
         }
       }

@@ -64,7 +64,11 @@ export function initializeWebviewLogger(): void {
     });
   };
   for (const level of LOG_LEVELS) {
-    globalThis.console[level] = (...args: unknown[]) => postLog(level, args);
+    const original = globalThis.console[level].bind(globalThis.console);
+    globalThis.console[level] = (...args: unknown[]) => {
+      original(...args);
+      postLog(level, args);
+    };
   }
 }
 

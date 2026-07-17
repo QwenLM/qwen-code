@@ -21,6 +21,7 @@ describe('initializeWebviewLogger', () => {
       log: vi.fn(),
       warn: vi.fn(),
     });
+    const error = vi.mocked(console.error);
     vi.stubGlobal('acquireVsCodeApi', () => ({
       postMessage,
       getState: vi.fn(),
@@ -31,6 +32,7 @@ describe('initializeWebviewLogger', () => {
     initializeWebviewLogger();
     console.error('Bundled WebUI failure');
 
+    expect(error).toHaveBeenCalledWith('Bundled WebUI failure');
     expect(postMessage).toHaveBeenCalledWith({
       type: 'log',
       data: {

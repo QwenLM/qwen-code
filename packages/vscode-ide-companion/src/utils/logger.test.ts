@@ -7,7 +7,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type * as vscode from 'vscode';
 import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
-import { createLogger, logger, resetLoggerSink } from './logger.js';
+import { createLogger, isLogLevel, logger, resetLoggerSink } from './logger.js';
 
 function createOutputChannel() {
   const appendLine = vi.fn();
@@ -64,5 +64,27 @@ describe('logger', () => {
     logger.warn('late shutdown warning');
 
     expect(warn).toHaveBeenCalledWith('late shutdown warning');
+  });
+
+  it('guards log levels from webview messages', () => {
+    expect(isLogLevel('error')).toBe(true);
+    expect(isLogLevel('trace')).toBe(false);
+    expect(isLogLevel(undefined)).toBe(false);
+  });
+
+  it('falls back to console when the output channel write fails', () => {
+    const outputChannel = {
+      appendLine: vi.fn(() => {
+        throw new Error('disposed');
+      }),
+    } as unknown as vscode.OutputChannel;
+    const error = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+    createLogger(outputChannel);
+
+    logger.error('late failure');
+
+    expect(error).toHaveBeenCalledWith('late failure');
   });
 });
