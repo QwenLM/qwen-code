@@ -4160,6 +4160,10 @@ export class Config {
       const { WebFetchTool } = await import('../tools/web-fetch.js');
       return new WebFetchTool(this);
     });
+    await registerLazy(ToolNames.WORKFLOW, async () => {
+      const { WorkflowTool } = await import('../tools/workflow/workflow.js');
+      return new WorkflowTool(this);
+    });
     if (this.isLspEnabled() && this.getLspClient()) {
       await registerLazy(ToolNames.LSP, async () => {
         const { LspTool } = await import('../tools/lsp.js');
