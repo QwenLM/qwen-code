@@ -4200,7 +4200,11 @@ export function App({
           if (cmd === 'diff') {
             // Local intercept: open the working-tree Changes dialog instead of
             // forwarding `/diff` to the agent. Targets the current workspace.
-            if (gitDiffWorkspaceCwd) setDiffWorkspaceCwd(gitDiffWorkspaceCwd);
+            if (!gitDiffWorkspaceCwd) {
+              pushToast('info', t('localCommand.diffNoWorkspace'));
+              return true;
+            }
+            setDiffWorkspaceCwd(gitDiffWorkspaceCwd);
             return true;
           }
           if (cmd === 'tasks') {

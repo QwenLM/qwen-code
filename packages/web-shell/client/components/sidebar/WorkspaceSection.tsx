@@ -224,11 +224,13 @@ export function WorkspaceSection({
       gitPollFailed.current = false;
       setGitStatus(status);
     } catch (err) {
+      // Keep the last known status on a transient failure so a brief network
+      // or daemon blip doesn't blank the chip for a whole poll interval; log
+      // only on the success→failure transition.
       if (!gitPollFailed.current) {
         console.warn('[WorkspaceSection] git status poll failed:', err);
         gitPollFailed.current = true;
       }
-      setGitStatus(undefined);
     }
   }, [client, onOpenGitDiff, workspace.cwd, workspace.trusted]);
 

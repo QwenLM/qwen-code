@@ -105,7 +105,9 @@ export function GitBranchIndicator({
   const ariaLabel =
     phrases.length > 0
       ? `${t('git.currentBranch', { branch })} — ${phrases.join(', ')}`
-      : t('git.currentBranch', { branch });
+      : status?.computedAt !== undefined
+        ? `${t('git.currentBranch', { branch })} — ${t('git.clean')}`
+        : t('git.currentBranch', { branch });
 
   const tone = badgeTone(s);
 
@@ -194,7 +196,7 @@ export function GitBranchIndicator({
         <TooltipContent side="top">
           <div className={styles.gitBranchTooltip}>
             <div className={styles.gitBranchTooltipTitle}>
-              {s.detached ? t('git.detached') : branch}
+              {s.detached ? `${t('git.detached')} (${branch})` : branch}
             </div>
             {phrases.length > 0 ? (
               phrases.map((phrase) => (

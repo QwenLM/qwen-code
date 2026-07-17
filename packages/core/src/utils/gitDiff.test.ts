@@ -1717,4 +1717,27 @@ describe('getGitWorkingTreeStatus', () => {
     const status = await getGitWorkingTreeStatus(repo);
     expect(status).toMatchObject({ operation: 'cherry-pick' });
   });
+
+  it('detects an in-progress revert', async () => {
+    await fs.writeFile(path.join(repo, 'a.txt'), 'one\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'init');
+    const sha = (
+      await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repo })
+    ).stdout.trim();
+    await fs.writeFile(path.join(repo, '.git', 'REVERT_HEAD'), `${sha}\n`);
+
+    const status = await getGitWorkingTreeStatus(repo);
+    expect(status).toMatchObject({ operation: 'revert' });
+  });
+
+  it('detects an in-progress bisect', async () => {
+    await fs.writeFile(path.join(repo, 'a.txt'), 'one\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'init');
+    await fs.writeFile(path.join(repo, '.git', 'BISECT_LOG'), 'bisect\n');
+
+    const status = await getGitWorkingTreeStatus(repo);
+    expect(status).toMatchObject({ operation: 'bisect' });
+  });
 });

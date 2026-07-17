@@ -201,4 +201,31 @@ describe('GitDiffDialog', () => {
     expect(document.body.textContent).toContain('Untracked');
     expect(document.body.textContent).toContain('Binary');
   });
+
+  it('shows an error placeholder when the diff list fails to load', async () => {
+    workspaceGitDiff.mockRejectedValue(new Error('network down'));
+    mount();
+    await flush();
+
+    expect(document.body.textContent).toContain('Failed to load changes');
+  });
+
+  it('shows a per-file error when a file diff fails to load', async () => {
+    workspaceGitDiff.mockResolvedValue(diffPayload());
+    workspaceGitDiffFile.mockRejectedValue(new Error('file fetch failed'));
+    mount();
+    await flush();
+
+    const header = document.body.querySelector(
+      'button[aria-expanded="false"]',
+    ) as HTMLButtonElement;
+    expect(header).not.toBeNull();
+    await act(async () => {
+      header.click();
+    });
+    await flush();
+
+    expect(workspaceGitDiffFile).toHaveBeenCalledWith('src/a.ts');
+    expect(document.body.textContent).toContain('Failed to load this diff');
+  });
 });

@@ -1092,6 +1092,8 @@ const EN: Messages = {
   'language.usage': 'Usage: /language ui [en|zh-CN]',
   'localCommand.noSession':
     'No active session yet. Send your first message before using this command.',
+  'localCommand.diffNoWorkspace':
+    'No workspace is available yet to show changes for.',
   'local.agents': 'Manage subagents',
   'local.bug': 'Submit a bug report',
   'local.compress': 'Compress the context into a summary',
@@ -3122,6 +3124,7 @@ const ZH: Messages = {
   'language.usage': '用法：/language ui [en|zh-CN]',
   'localCommand.noSession':
     '当前还没有会话。请先发送第一条消息，再使用这个命令。',
+  'localCommand.diffNoWorkspace': '当前还没有可用于查看变更的工作区。',
   'local.agents': '管理智能体',
   'local.bug': '提交错误报告',
   'local.compress': '将上下文压缩为摘要',

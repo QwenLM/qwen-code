@@ -348,8 +348,10 @@ daemon 端只需把 `Map` 里对应文件的 hunk 数组序列化即可，前端
 / 公有构件，避免跨文件暴露内部函数：
 
 - `getGitWorkingTreeStatus(cwd): Promise<GitWorkingTreeStatus | null>`
-  - 复用 `findGitRoot` 判断是否仓库、`isInTransientGitState` 判断 transient
-    state（与 `fetchGitDiff` 一致），非仓库 / transient 返回 `null`。
+  - 复用 `findGitRoot` 判断是否仓库；非仓库 / git 失败返回 `null`。transient
+    state（merge/rebase/cherry-pick/…）期间仍返回状态，并通过 `operation`
+    字段标记操作类型（见上方"transient state 处理变更"），故不调用
+    `isInTransientGitState`。
   - 一次 `git --no-optional-locks status --porcelain=v1 --branch -z` 调用，
     解析 branch header（branch / detached / `...upstream` / `[ahead N, behind
 M]`）和 porcelain 行（统计 staged / unstaged / untracked）。解析逻辑可参考
