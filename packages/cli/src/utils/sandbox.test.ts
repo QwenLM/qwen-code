@@ -102,7 +102,7 @@ describe('resolveSeatbeltProfileFile', () => {
     ['managed ACP', '1', true],
     ['ordinary', undefined, false],
   ])(
-    'sets Electron Node mode only for a %s seatbelt re-exec',
+    'handles Electron Node mode for a %s seatbelt re-exec',
     async (_name, marker, expected) => {
       vi.stubEnv('QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE', marker ?? '');
       vi.spyOn(fs, 'existsSync').mockReturnValue(true);
