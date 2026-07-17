@@ -18,6 +18,7 @@ interface WorkspaceSessionProviderProps {
   workspaceCwd?: string;
   lockWorkspaceCwd?: string;
   clientId?: string;
+  extensionPairingCredential?: string;
   webShellProps: WebShellProps;
 }
 
@@ -27,6 +28,7 @@ export function WorkspaceSessionProvider({
   workspaceCwd,
   lockWorkspaceCwd,
   clientId,
+  extensionPairingCredential,
   webShellProps,
 }: WorkspaceSessionProviderProps) {
   const workspace = useWorkspace();
@@ -226,6 +228,9 @@ export function WorkspaceSessionProvider({
       sessionId={effectiveSessionId}
       workspaceCwd={targetWorkspace?.cwd}
       clientId={clientId}
+      createSessionRequest={
+        extensionPairingCredential ? { extensionPairingCredential } : undefined
+      }
       suppressOwnUserEcho
       maxBlocks={WEB_SHELL_MAX_TRANSCRIPT_BLOCKS}
     >

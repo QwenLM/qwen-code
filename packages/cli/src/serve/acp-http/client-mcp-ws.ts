@@ -118,6 +118,7 @@ export type ClientMcpHandleResult =
  */
 export class ClientMcpWsConnection {
   private readonly registrar: ClientMcpRegistrar;
+  private readonly inFlightRegistrations = new Map<string, Promise<void>>();
   private disposed = false;
 
   constructor(
@@ -212,22 +213,25 @@ export class ClientMcpWsConnection {
     // Advertise to the registrar BEFORE registering so the SDK discovery
     // handshake (which the provider triggers synchronously) can route frames.
     this.registrar.registerServer(server);
+    const registration = this.provider.registerClientMcpServer(
+      server,
+      this.registrar.sendSdkMcpMessage,
+    );
+    const settled = registration.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.inFlightRegistrations.set(server, settled);
     try {
-      const { toolCount } = await this.provider.registerClientMcpServer(
-        server,
-        this.registrar.sendSdkMcpMessage,
-      );
-      // The WS may have closed (dispose() ran) while we awaited the provider
-      // round-trip. dispose() snapshots its server set before this register
-      // resolves, so the provider would otherwise be left holding a zombie
-      // runtime MCP server. Re-check and tear it back down.
-      if (this.disposed) {
-        this.registrar.unregisterServer(server);
-        await this.provider.unregisterClientMcpServer(server);
+      const { toolCount } = await registration;
+      // Unregister/dispose remove the registrar entry first, then wait for this
+      // registration before removing the provider entry. Do not acknowledge a
+      // server that was cancelled while its discovery handshake was running.
+      if (this.disposed || !this.registrar.hasServer(server)) {
         return {
           kind: 'error',
           code: 'closed',
-          message: 'connection disposed during register',
+          message: 'connection closed during register',
         };
       }
       return { kind: 'registered', server, toolCount };
@@ -239,6 +243,10 @@ export class ClientMcpWsConnection {
         code: 'register_failed',
         message: err instanceof Error ? err.message : String(err),
       };
+    } finally {
+      if (this.inFlightRegistrations.get(server) === settled) {
+        this.inFlightRegistrations.delete(server);
+      }
     }
   }
 
@@ -258,6 +266,7 @@ export class ClientMcpWsConnection {
     const existed = this.registrar.unregisterServer(server);
     if (existed && this.provider) {
       try {
+        await this.inFlightRegistrations.get(server);
         await this.provider.unregisterClientMcpServer(server);
       } catch {
         // Best-effort teardown — the registrar already rejected pending.
@@ -315,9 +324,10 @@ export class ClientMcpWsConnection {
     this.registrar.close(reason);
     if (this.provider) {
       await Promise.allSettled(
-        servers.map((server) =>
-          this.provider!.unregisterClientMcpServer(server),
-        ),
+        servers.map(async (server) => {
+          await this.inFlightRegistrations.get(server);
+          await this.provider!.unregisterClientMcpServer(server);
+        }),
       );
     }
   }

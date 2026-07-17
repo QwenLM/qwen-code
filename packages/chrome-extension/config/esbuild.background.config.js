@@ -38,6 +38,7 @@ async function build() {
     target: ['chrome115'],
     minify: isProduction,
     sourcemap: !isProduction,
+    metafile: !isWatch,
     outdir: path.join(projectRoot, outDir),
     outbase: path.join(projectRoot, 'src'),
     logLevel: 'info',
@@ -47,7 +48,12 @@ async function build() {
     console.log('Watching background/content scripts...');
     await ctx.watch();
   } else {
-    await ctx.rebuild();
+    const result = await ctx.rebuild();
+    if (result.metafile) {
+      const metafilePath = path.join(projectRoot, 'dist/esbuild.json');
+      fs.mkdirSync(path.dirname(metafilePath), { recursive: true });
+      fs.writeFileSync(metafilePath, JSON.stringify(result.metafile, null, 2));
+    }
     await ctx.dispose();
     console.log('Background/content build complete!');
   }

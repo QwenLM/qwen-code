@@ -34,6 +34,13 @@ async function copyStatic(clean = false) {
   await fs.mkdir(targetDir, { recursive: true });
 
   await fs.cp(staticSrcDir, targetDir, { recursive: true });
+  const packageJson = JSON.parse(
+    await fs.readFile(path.join(projectRoot, 'package.json'), 'utf8'),
+  );
+  const manifestPath = path.join(targetDir, 'manifest.json');
+  const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
+  manifest.version = packageJson.version;
+  await fs.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   console.log(
     `Static assets synced -> ${path.relative(projectRoot, targetDir)}`,
   );

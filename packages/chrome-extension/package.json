@@ -32,8 +32,10 @@
     "build": "node scripts/sync-extension.js && node config/esbuild.background.config.js --production",
     "test": "vitest run --config vitest.config.ts",
     "test:ci": "vitest run --config vitest.config.ts",
+    "test:release": "npm run test:ci && npm run typecheck && npm run package",
+    "scan:artifacts": "node scripts/artifact-scan.js",
     "dev:chrome": "open -a 'Google Chrome' --args --load-extension=$PWD/dist/extension --auto-open-devtools-for-tabs",
-    "package": "npm run build && cd dist/extension && zip -r ../../chrome-extension.zip .",
+    "package": "npm run build && node scripts/package-extension.js && npm run scan:artifacts",
     "clean": "./scripts/clean.sh",
     "typecheck": "tsc --noEmit"
   },
@@ -42,6 +44,7 @@
   },
   "devDependencies": {
     "@types/chrome": "^0.1.32",
+    "archiver": "^7.0.1",
     "esbuild": "^0.25.3",
     "typescript": "^5.8.3"
   }

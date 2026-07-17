@@ -7,6 +7,7 @@ import { RootErrorFallback } from './components/RootErrorFallback';
 import { WorkspaceSessionProvider } from './components/WorkspaceSessionProvider';
 import {
   getDaemonBaseUrl,
+  getExtensionPairingCredential,
   getDaemonToken,
   removeDaemonTokenFromUrl,
   waitForDaemonTokenMessage,
@@ -116,7 +117,13 @@ function replaceStandaloneSessionUrl(
   window.history.replaceState(null, '', url);
 }
 
-function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
+function StandaloneApp({
+  daemonToken,
+  extensionPairingCredential,
+}: {
+  daemonToken?: string;
+  extensionPairingCredential?: string;
+}) {
   const [theme, setTheme] = useState<WebShellTheme>(() => getInitialTheme());
   const [language, setLanguage] = useState<WebShellLanguage>(() =>
     getInitialLanguage(),
@@ -165,6 +172,7 @@ function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
         <WorkspaceSessionProvider
           sessionId={sessionId}
           workspaceId={workspaceId}
+          extensionPairingCredential={extensionPairingCredential}
           webShellProps={{
             theme,
             onThemeChange: handleThemeChange,
@@ -183,11 +191,15 @@ function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
 
 async function main() {
   const daemonToken = getDaemonToken() ?? (await waitForDaemonTokenMessage());
+  const extensionPairingCredential = getExtensionPairingCredential();
   removeDaemonTokenFromUrl();
 
   ReactDOM.createRoot(document.getElementById('root')!).render(
     <React.StrictMode>
-      <StandaloneApp daemonToken={daemonToken} />
+      <StandaloneApp
+        daemonToken={daemonToken}
+        extensionPairingCredential={extensionPairingCredential}
+      />
     </React.StrictMode>,
   );
 }

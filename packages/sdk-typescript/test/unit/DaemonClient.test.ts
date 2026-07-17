@@ -1482,6 +1482,25 @@ describe('DaemonClient', () => {
       expect(JSON.parse(calls[0]!.body!)).toEqual({});
     });
 
+    it('forwards the Chrome extension pairing credential', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: false,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.createOrAttachSession({
+        extensionPairingCredential: 'paired-credential',
+      });
+
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        extensionPairingCredential: 'paired-credential',
+      });
+    });
+
     it('forwards empty-string workspaceCwd verbatim so the server can 400 it', async () => {
       // `workspaceCwd: ""` is a likely client-side bug shape. A
       // truthy-guard SDK would silently drop the field and let the
@@ -2146,12 +2165,16 @@ describe('DaemonClient', () => {
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       const session = await client.loadSession('s-1', {
         workspaceCwd: '/work/a',
+        extensionPairingCredential: 'paired-credential',
       });
 
       expect(session.state).toEqual({ configOptions: [] });
       expect(calls[0]?.url).toBe('http://daemon/session/s-1/load');
       expect(calls[0]?.method).toBe('POST');
-      expect(JSON.parse(calls[0]!.body!)).toEqual({ cwd: '/work/a' });
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        cwd: '/work/a',
+        extensionPairingCredential: 'paired-credential',
+      });
     });
 
     it('sends client identity headers on restore requests', async () => {

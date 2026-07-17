@@ -22,7 +22,7 @@ describe('ClientMcpSenderRegistry', () => {
   it('lookup routes to the registered sender; undefined for unknown server', async () => {
     const reg = new ClientMcpSenderRegistry();
     const sender = vi.fn(async () => msg(1));
-    reg.set('srv', sender, 'connA');
+    expect(reg.claim('srv', sender, 'connA')).toBe(true);
 
     expect(reg.serverNames()).toEqual(['srv']);
     expect(reg.lookup('other')).toBeUndefined();
@@ -33,31 +33,27 @@ describe('ClientMcpSenderRegistry', () => {
     expect(sender).toHaveBeenCalledWith('srv', msg(7));
   });
 
-  it('ownership-scoped delete: a stale owner cannot remove an entry a peer re-registered', () => {
+  it('rejects a duplicate name from another connection', () => {
     const reg = new ClientMcpSenderRegistry();
     const senderA = vi.fn(async () => msg(1));
     const senderB = vi.fn(async () => msg(2));
 
-    // A registers, then B re-registers the same name (last-writer-wins + takes
-    // ownership — the regression: A's later teardown must not delete B's entry).
-    reg.set('srv', senderA, 'connA');
-    reg.set('srv', senderB, 'connB');
-
-    reg.delete('srv', 'connA'); // A disconnects — must be a no-op now
-    expect(reg.serverNames()).toEqual(['srv']);
+    expect(reg.claim('srv', senderA, 'connA')).toBe(true);
+    expect(reg.claim('srv', senderB, 'connB')).toBe(false);
 
     reg.lookup('srv')!(msg(9));
-    expect(senderB).toHaveBeenCalledWith('srv', msg(9));
-    expect(senderA).not.toHaveBeenCalled();
+    expect(senderA).toHaveBeenCalledWith('srv', msg(9));
+    expect(senderB).not.toHaveBeenCalled();
 
-    reg.delete('srv', 'connB'); // the real owner removes it
+    reg.delete('srv', 'connB');
+    expect(reg.serverNames()).toEqual(['srv']);
+    reg.delete('srv', 'connA');
     expect(reg.serverNames()).toEqual([]);
-    expect(reg.lookup('srv')).toBeUndefined();
   });
 
   it('delete is idempotent and a no-op for an unknown name', () => {
     const reg = new ClientMcpSenderRegistry();
-    reg.set(
+    reg.claim(
       'srv',
       vi.fn(async () => msg(1)),
       'connA',
@@ -67,6 +63,23 @@ describe('ClientMcpSenderRegistry', () => {
     reg.delete('srv', 'connA'); // already gone -> no throw
     expect(reg.serverNames()).toEqual([]);
   });
+
+  it('exposes live registrations for ACP child recovery', () => {
+    const reg = new ClientMcpSenderRegistry();
+    reg.claim(
+      'qwen-browser-tools',
+      vi.fn(async () => msg(1)),
+      'extension-client',
+    );
+
+    expect(reg.runtimeRegistrations()).toEqual([
+      {
+        name: 'qwen-browser-tools',
+        config: { type: 'sdk', __clientMcpOverWs: true },
+        originatorClientId: 'extension-client',
+      },
+    ]);
+  });
 });
 
 describe('createClientMcpServerProvider', () => {
@@ -74,6 +87,7 @@ describe('createClientMcpServerProvider', () => {
     addResult: Awaited<ReturnType<ClientMcpBridge['addRuntimeMcpServer']>>,
   ) {
     return {
+      preheat: vi.fn(async () => {}),
       addRuntimeMcpServer: vi.fn(async () => addResult),
       removeRuntimeMcpServer: vi.fn(async () => ({})),
     } satisfies ClientMcpBridge;
@@ -114,6 +128,7 @@ describe('createClientMcpServerProvider', () => {
   it('rolls back the sender when bridge add throws', async () => {
     const registry = new ClientMcpSenderRegistry();
     const bridge = {
+      preheat: vi.fn(async () => {}),
       addRuntimeMcpServer: vi.fn(async () => {
         throw new Error('boom');
       }),
@@ -132,10 +147,59 @@ describe('createClientMcpServerProvider', () => {
     expect(bridge.removeRuntimeMcpServer).not.toHaveBeenCalled();
   });
 
+  it('preheats the ACP child before adding the runtime server', async () => {
+    const registry = new ClientMcpSenderRegistry();
+    const order: string[] = [];
+    const bridge = {
+      preheat: vi.fn(async () => {
+        order.push('preheat');
+      }),
+      addRuntimeMcpServer: vi.fn(async () => {
+        order.push('add');
+        return { toolCount: 1 };
+      }),
+      removeRuntimeMcpServer: vi.fn(async () => ({})),
+    } satisfies ClientMcpBridge;
+    const provider = createClientMcpServerProvider(registry, bridge, 'connA');
+
+    await provider.registerClientMcpServer(
+      'srv',
+      vi.fn(async () => msg(1)),
+    );
+
+    expect(order).toEqual(['preheat', 'add']);
+  });
+
+  it('rejects a name owned by another connection without mutating the child', async () => {
+    const registry = new ClientMcpSenderRegistry();
+    const bridge = setupBridge({ toolCount: 1 });
+    registry.claim(
+      'srv',
+      vi.fn(async () => msg(2)),
+      'connB',
+    );
+    const provider = createClientMcpServerProvider(registry, bridge, 'connA');
+
+    await expect(
+      provider.registerClientMcpServer(
+        'srv',
+        vi.fn(async () => msg(1)),
+      ),
+    ).rejects.toThrow(/already registered/);
+
+    expect(bridge.addRuntimeMcpServer).not.toHaveBeenCalled();
+    expect(registry.runtimeRegistrations()).toEqual([
+      expect.objectContaining({
+        name: 'srv',
+        originatorClientId: 'connB',
+      }),
+    ]);
+  });
+
   it('does not unregister a server now owned by another connection', async () => {
     const registry = new ClientMcpSenderRegistry();
     const bridge = setupBridge({ toolCount: 1 });
-    registry.set(
+    registry.claim(
       'srv',
       vi.fn(async () => msg(2)),
       'connB',

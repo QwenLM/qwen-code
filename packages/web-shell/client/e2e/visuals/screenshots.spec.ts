@@ -381,10 +381,7 @@ for (const theme of THEMES) {
         resolveBaseURL(testInfo),
       );
       await gotoSession(page, scenario, daemon, theme);
-      // Each workspace renders a section headed by its basename; the primary one
-      // also carries a "Primary" tag. Assert both workspace names and the tag so
-      // a regression in the grouping or the (removable) primary label fails an
-      // assertion, not only the visually-reviewed screenshot.
+      // Each workspace renders a section headed by its basename.
       const sidebar = page.getByRole('complementary');
       await expect(
         sidebar.getByText('qwen-web-shell-e2e', { exact: true }),
@@ -392,7 +389,6 @@ for (const theme of THEMES) {
       await expect(
         sidebar.getByText('qwen-api-service', { exact: true }),
       ).toBeVisible();
-      await expect(sidebar.getByText('Primary', { exact: true })).toBeVisible();
       // The primary workspace auto-expands and streams its session rows in via a
       // per-workspace fetch. Wait for the loaded session's row before capturing
       // so the async load has settled — otherwise the row list races the

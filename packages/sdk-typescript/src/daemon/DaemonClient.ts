@@ -448,6 +448,8 @@ export interface CreateSessionRequest {
   sourceType?: string;
   /** Optional source-specific identifier. Requires `sourceType`. */
   sourceId?: string;
+  /** Pairing credential used only to authorize Chrome extension sessions. */
+  extensionPairingCredential?: string;
 }
 
 export interface RestoreSessionRequest {
@@ -457,6 +459,8 @@ export interface RestoreSessionRequest {
    */
   workspaceCwd?: string;
   approvalMode?: string;
+  /** Pairing credential required when restoring a Chrome extension session. */
+  extensionPairingCredential?: string;
 }
 
 export interface PromptRequest {
@@ -1923,22 +1927,13 @@ export class DaemonClient {
         body: JSON.stringify({
           cwd: req.workspaceCwd,
           ...(req.modelServiceId ? { modelServiceId: req.modelServiceId } : {}),
-          // `!== undefined` (not truthy) so a buggy caller passing
-          // `sessionScope: '' | null` doesn't get the field silently
-          // erased on the wire — let the daemon's `400
-          // invalid_session_scope` surface the bug. Same shape the
-          // bridge's own validation uses (`httpAcpBridge.ts:
-          // spawnOrAttach`); SDK should be a transparent layer here.
-          ...(req.sessionScope !== undefined
-            ? { sessionScope: req.sessionScope }
-            : {}),
-          ...(req.approvalMode !== undefined
-            ? { approvalMode: req.approvalMode }
-            : {}),
-          ...(req.sourceType !== undefined
-            ? { sourceType: req.sourceType }
-            : {}),
-          ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
+          // JSON.stringify omits undefined while preserving malformed values
+          // such as null or '', so daemon validation still sees caller bugs.
+          sessionScope: req.sessionScope,
+          approvalMode: req.approvalMode,
+          sourceType: req.sourceType,
+          sourceId: req.sourceId,
+          extensionPairingCredential: req.extensionPairingCredential,
         }),
       },
       async (res) => {
@@ -2350,9 +2345,8 @@ export class DaemonClient {
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
         body: JSON.stringify({
           cwd: req.workspaceCwd,
-          ...(req.approvalMode !== undefined
-            ? { approvalMode: req.approvalMode }
-            : {}),
+          approvalMode: req.approvalMode,
+          extensionPairingCredential: req.extensionPairingCredential,
         }),
       },
       async (res) => {

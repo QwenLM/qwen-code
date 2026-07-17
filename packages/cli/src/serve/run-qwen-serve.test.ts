@@ -7,6 +7,7 @@
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+import { createHash, createHmac } from 'node:crypto';
 import { createServer } from 'node:http';
 import * as https from 'node:https';
 import type { AddressInfo } from 'node:net';
@@ -17,6 +18,7 @@ import {
   extractContextFilename,
   formatChannelWorkerDaemonUrl,
   InvalidPolicyConfigError,
+  OFFICIAL_QWEN_CHROME_EXTENSION_ORIGIN,
   createDisabledChannelWorkerSupervisor,
   resolveRuntimeStartupTimeoutMs,
   runQwenServe,
@@ -24,6 +26,10 @@ import {
   validatePolicyConfig,
   waitForRuntimeStartingForShutdown,
 } from './run-qwen-serve.js';
+import {
+  createExtensionPairingManager,
+  type ExtensionPairingManager,
+} from './extension-pairing.js';
 import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { isLoopbackBind } from './loopback-binds.js';
@@ -54,6 +60,71 @@ import {
   type WorkspaceRegistrationStore,
 } from './workspace-registration-store.js';
 import { getDeferredRuntimeRequestTiming } from './server/request-helpers.js';
+
+const PAIRING_CHALLENGE = 'A'.repeat(43);
+
+function pairingExchangeProof(
+  code: string,
+  direction: 'client' | 'server' | 'credential',
+  pairingNonce: string,
+  challenge: string,
+  credentialId?: string,
+): string {
+  const suffix = credentialId ? `:${credentialId}` : '';
+  return createHmac('sha256', createHash('sha256').update(code).digest())
+    .update(
+      `qwen-extension-pairing:${direction}:${pairingNonce}:${challenge}${suffix}`,
+    )
+    .digest('base64url');
+}
+
+function createPairingExchange(manager: ExtensionPairingManager) {
+  const status = manager.getStatus();
+  if (status.paired) throw new Error('expected unpaired pairing manager');
+  const code = manager.getDisplayCode();
+  return {
+    code,
+    pairingNonce: status.pairingNonce,
+    challenge: PAIRING_CHALLENGE,
+    request: {
+      pairingNonce: status.pairingNonce,
+      challenge: PAIRING_CHALLENGE,
+      clientProof: pairingExchangeProof(
+        code,
+        'client',
+        status.pairingNonce,
+        PAIRING_CHALLENGE,
+      ),
+    },
+  };
+}
+
+function finishPairing(
+  exchange: ReturnType<typeof createPairingExchange>,
+  response: { credentialId?: string; proof?: string },
+): string {
+  if (!response.credentialId || !response.proof) {
+    throw new Error('pairing response is incomplete');
+  }
+  const expectedProof = pairingExchangeProof(
+    exchange.code,
+    'server',
+    exchange.pairingNonce,
+    exchange.challenge,
+    response.credentialId,
+  );
+  if (response.proof !== expectedProof) {
+    throw new Error('daemon pairing proof is invalid');
+  }
+  const secret = pairingExchangeProof(
+    exchange.code,
+    'credential',
+    exchange.pairingNonce,
+    exchange.challenge,
+    response.credentialId,
+  );
+  return `${response.credentialId}.${secret}`;
+}
 
 const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
   limits: {
@@ -1792,7 +1863,7 @@ describe('runQwenServe runtime startup failures', () => {
 
   async function readBrowserMcpFeatureFlagsForEnv(
     raw: string | undefined,
-    origin = 'chrome-extension://qwen-test-extension',
+    origin: string | null = 'chrome-extension://qwen-test-extension',
     cdpMcpCommand?: string,
   ) {
     tmpDir = fs.realpathSync(
@@ -1827,7 +1898,7 @@ describe('runQwenServe runtime startup failures', () => {
         workspace: tmpDir,
         maxSessions: 1,
         serveWebShell: false,
-        allowOrigins: [origin],
+        allowOrigins: origin ? [origin] : undefined,
       },
       { resolveOnListen: true },
     );
@@ -1835,7 +1906,9 @@ describe('runQwenServe runtime startup failures', () => {
     try {
       await expect(handle.runtimeReady).rejects.toThrow('runtime boom');
       const capabilitiesRes = await fetch(`${handle.url}/capabilities`, {
-        headers: { Origin: origin },
+        headers: {
+          Origin: origin ?? OFFICIAL_QWEN_CHROME_EXTENSION_ORIGIN,
+        },
       });
       expect(capabilitiesRes.status).toBe(200);
       return ((await capabilitiesRes.json()) as { features: string[] })
@@ -1931,12 +2004,173 @@ describe('runQwenServe runtime startup failures', () => {
     },
   );
 
-  it('auto-enables only the CDP tunnel for Chrome extension origins when the env flag is unset', async () => {
+  it('enables reverse MCP by default and the CDP tunnel for explicit Chrome extension origins', async () => {
     const features = await readBrowserMcpFeatureFlagsForEnv(undefined);
 
     expect(features).toContain('cdp_tunnel_over_ws');
-    expect(features).not.toContain('client_mcp_over_ws');
+    expect(features).toContain('client_mcp_over_ws');
     expect(features).not.toContain('browser_automation_mcp');
+  });
+
+  it('allows the official Chrome extension with no serve flags', async () => {
+    const features = await readBrowserMcpFeatureFlagsForEnv(undefined, null);
+
+    expect(features).toContain('allow_origin');
+    expect(features).toContain('client_mcp_over_ws');
+    expect(features).not.toContain('cdp_tunnel_over_ws');
+  });
+
+  it('uses independent pairing auth without leaking the terminal code or weakening daemon auth', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-extension-pairing-')),
+    );
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() => {
+      throw new Error('runtime boom');
+    });
+    const extensionPairingManager = createExtensionPairingManager({
+      now: () => 1_000,
+      randomBytes: (size) => Buffer.alloc(size, 4),
+    });
+    const pairingExchange = createPairingExchange(extensionPairingManager);
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+        token: 'daemon-token',
+        extensionPairingManager,
+      },
+      { resolveOnListen: true },
+    );
+
+    try {
+      await expect(handle.runtimeReady).rejects.toThrow('runtime boom');
+      const statusRes = await fetch(`${handle.url}/extension/pairing`);
+      expect(statusRes.status).toBe(200);
+      const statusBody = await statusRes.json();
+      expect(statusBody).toMatchObject({
+        paired: false,
+        expiresAt: 601_000,
+        pairingNonce: pairingExchange.pairingNonce,
+      });
+      expect(statusBody).not.toHaveProperty('code');
+
+      const protectedRes = await fetch(`${handle.url}/capabilities`);
+      expect(protectedRes.status).toBe(401);
+
+      const wrongCodeRes = await fetch(
+        `${handle.url}/extension/pairing/confirm`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            ...pairingExchange.request,
+            clientProof: 'A'.repeat(43),
+          }),
+        },
+      );
+      expect(wrongCodeRes.status).toBe(401);
+
+      const confirmRes = await fetch(
+        `${handle.url}/extension/pairing/confirm`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(pairingExchange.request),
+        },
+      );
+      expect(confirmRes.status).toBe(200);
+      const confirmBody = (await confirmRes.json()) as {
+        credentialId?: string;
+        proof?: string;
+      };
+      const credential = finishPairing(pairingExchange, confirmBody);
+      expect(JSON.stringify(confirmBody)).not.toContain(
+        credential.split('.')[1],
+      );
+
+      const credentialId = confirmBody.credentialId;
+      const challenge = 'A'.repeat(43);
+      const verifyRes = await fetch(`${handle.url}/extension/pairing/verify`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ credentialId, challenge }),
+      });
+      expect(verifyRes.status).toBe(200);
+      const verifyBody = (await verifyRes.json()) as {
+        paired?: boolean;
+        proof?: string;
+      };
+      expect(verifyBody.paired).toBe(true);
+      expect(verifyBody.proof).toBe(
+        extensionPairingManager.createVerificationProof(
+          credentialId,
+          challenge,
+        ),
+      );
+      expect(JSON.stringify(verifyBody)).not.toContain(credential);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps extension pairing routes mounted after the runtime app is ready', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-extension-pairing-ready-')),
+    );
+    const extensionPairingManager = createExtensionPairingManager({
+      now: () => 1_000,
+      randomBytes: (size) => Buffer.alloc(size, 5),
+    });
+    const pairingExchange = createPairingExchange(extensionPairingManager);
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+        extensionPairingManager,
+      },
+      {
+        bridge: makeRuntimeBridge(),
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      const confirmRes = await fetch(
+        `${handle.url}/extension/pairing/confirm`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(pairingExchange.request),
+        },
+      );
+      expect(confirmRes.status).toBe(200);
+      const confirmBody = (await confirmRes.json()) as {
+        credentialId?: string;
+        proof?: string;
+      };
+      expect(finishPairing(pairingExchange, confirmBody)).toMatch(
+        /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/,
+      );
+    } finally {
+      await handle.close();
+    }
   });
 
   it('advertises browser automation MCP when the external CDP adapter command is set', async () => {
@@ -1948,12 +2182,23 @@ describe('runQwenServe runtime startup failures', () => {
 
     expect(features).toContain('cdp_tunnel_over_ws');
     expect(features).toContain('browser_automation_mcp');
-    expect(features).not.toContain('client_mcp_over_ws');
+    expect(features).toContain('client_mcp_over_ws');
+  });
+
+  it('enables the legacy CDP tunnel when its adapter command is explicitly configured', async () => {
+    const features = await readBrowserMcpFeatureFlagsForEnv(
+      undefined,
+      null,
+      '/opt/qwen-cdp-mcp-adapter',
+    );
+
+    expect(features).toContain('cdp_tunnel_over_ws');
+    expect(features).toContain('browser_automation_mcp');
   });
 
   it('does not advertise browser automation MCP without an active CDP tunnel', async () => {
     const features = await readBrowserMcpFeatureFlagsForEnv(
-      undefined,
+      '0',
       'https://example.com',
       '/opt/qwen-cdp-mcp-adapter',
     );
@@ -2919,13 +3164,13 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
-  it('keeps browser MCP features disabled for non-extension origins when the env flag is unset', async () => {
+  it('keeps the legacy CDP tunnel disabled for non-extension origins while reverse MCP stays available', async () => {
     const features = await readBrowserMcpFeatureFlagsForEnv(
       undefined,
       'https://example.com',
     );
 
-    expect(features).not.toContain('client_mcp_over_ws');
+    expect(features).toContain('client_mcp_over_ws');
     expect(features).not.toContain('cdp_tunnel_over_ws');
   });
 
@@ -4755,7 +5000,7 @@ describe('runQwenServe runtime startup failures', () => {
         policy: { permission: 'first-responder' },
         limits: { maxPendingPromptsPerSession: 5 },
       });
-      expect(capabilitiesBody.features).not.toContain('client_mcp_over_ws');
+      expect(capabilitiesBody.features).toContain('client_mcp_over_ws');
       expect(capabilitiesBody.features).not.toContain('cdp_tunnel_over_ws');
 
       const port = new URL(handle.url).port;
@@ -4804,7 +5049,7 @@ describe('runQwenServe runtime startup failures', () => {
       expect(sameOriginBody).toMatchObject({
         v: 1,
         detail: 'full',
-        security: { allowOriginMode: 'none' },
+        security: { allowOriginMode: 'specific' },
         limits: {
           maxSessions: 1,
           maxPendingPromptsPerSession: 5,
@@ -7875,8 +8120,8 @@ describe('runQwenServe startup observability', () => {
       expect(stderrWrites.join('')).toMatch(
         /qwen serve: startup timing: processToListenMs=\d+ runQwenServeToListenMs=\d+/,
       );
-      expect(stderrWrites.join('')).not.toContain(
-        'qwen serve: client-hosted MCP tools are accepted over the WebSocket without auth.',
+      expect(stderrWrites.join('')).toContain(
+        'qwen serve: client-hosted MCP tools require Chrome extension pairing.',
       );
 
       expect(await readStartup(handle)).toMatchObject({

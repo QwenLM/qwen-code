@@ -89,6 +89,34 @@ function deferred<T>(): {
 }
 
 describe('createAcpSessionBridge', () => {
+  it('restores client-hosted MCP servers when an ACP child starts', async () => {
+    const handle = makeChannel({
+      extMethodImpl: async () => ({ toolCount: 20 }),
+    });
+    const bridge = makeBridge({
+      channelFactory: vi.fn().mockResolvedValue(handle.channel),
+      clientMcpRuntimeRegistrations: () => [
+        {
+          name: 'qwen-browser-tools',
+          config: { type: 'sdk', __clientMcpOverWs: true },
+          originatorClientId: 'extension-client',
+        },
+      ],
+    });
+
+    await bridge.preheat();
+
+    expect(handle.agent.extMethodCalls).toContainEqual({
+      method: SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd,
+      params: {
+        name: 'qwen-browser-tools',
+        config: { type: 'sdk', __clientMcpOverWs: true },
+        originatorClientId: 'extension-client',
+      },
+    });
+    await bridge.shutdown();
+  });
+
   it('starts a workspace channel for MCP management without a session', async () => {
     const handle = makeChannel({
       extMethodImpl: async (method, params) => {

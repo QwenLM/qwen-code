@@ -1,40 +1,40 @@
 # Daemon-Direct Architecture (issue #5626)
 
 Revival of the Chrome extension on the `qwen serve` daemon, dropping Native
-Messaging. This doc is the concrete implementation spec for the two phases.
+Messaging and external browser-tool servers from the default path.
 
 ```
 ┌─ Chrome extension (pure web client) ──────────────┐
-│  Side panel (React, @qwen-code/webui)             │
-│    DaemonSessionProvider ── chat over HTTP+SSE ───┼──┐
+│  Side panel                                       │
+│    daemon discovery + framed Web Shell ───────────┼──┐
 │  Service worker                                   │  │
 │    browser-tools MCP server (over WS) ────────────┼─┐│
-│  Content scripts (DOM / a11y / network capture)   │ ││
+│    chrome.debugger CDP tools + event capture ──────┼─┘│
 └───────────────────────────────────────────────────┘ ││
                                                        ▼▼
                         qwen serve daemon (localhost:4170, loopback auth-free)
 ```
 
-## Phase 1 — chat (no daemon changes)
+## Chat and pairing
 
 The side panel is a daemon client. `@qwen-code/webui`'s `DaemonSessionProvider`
 ({ baseUrl, token? }) handles connect / session-create / SSE / reconnect /
 heartbeat. Loopback ⇒ `token` omitted, `workspaceCwd` omitted (daemon uses its
 bound workspace).
 
-- `src/daemon/config.ts` — `{ baseUrl, token? }`, default `http://127.0.0.1:4170`,
-  overridable via `chrome.storage.local`.
-- `src/daemon/discovery.ts` — `GET /health` probe; gate the chat on reachability,
-  otherwise show a "run `qwen serve`" hint.
-- Side panel renders transcript/streaming/permissions from the webui daemon hooks,
-  reusing the existing presentational components + `ChromePlatformProvider`.
+- `src/daemon/config.ts` stores the loopback base URL, optional daemon bearer,
+  and the paired extension credential in `chrome.storage.local`.
+- `src/daemon/discovery.ts` probes daemon health and verifies a pairing
+  challenge before the panel or service worker trusts that daemon.
+- The side panel frames the daemon Web Shell after discovery and pairing.
+- Pairing state is process-local in PR1, so restarting `qwen serve` requires a
+  fresh terminal code. First-use mutual HMAC proof keeps both the code and the
+  derived credential secret off the wire; later discovery also uses an HMAC
+  challenge so stored credentials are not sent to an unknown process.
 
-The native-messaging transport (`background/native-connection.ts`,
-`native-message-handler.ts`, `native-messaging.ts` wiring) is dropped; the
-browser-tool executors, catalog, router, network tools, and content scripts are
-kept for Phase 2.
+The native-messaging transport is not part of this path.
 
-## Phase 2 — browser tools (reverse channel; touches the daemon contract)
+## Browser tools — extension-hosted reverse MCP
 
 A browser extension cannot be a listening MCP server. The agent runs inside the
 daemon and must reach tools that execute in the extension. The mechanism already
@@ -64,31 +64,28 @@ agent MCP client → SdkControlClientTransport.send
   → daemon: resolve sendMcpMessage promise → agent gets the tool result
 ```
 
-### Daemon side (new — `packages/cli/src/serve`, public-contract surface)
+### Daemon side (`packages/cli/src/serve`, public-contract surface)
 
 1. WS message types on the serve transport: `mcp_register` (client advertises a
-   server name + tool catalog), `mcp_message` (bidirectional JSON-RPC with an
-   `id` for request/response correlation), `mcp_unregister`.
+   server name; tools are discovered through MCP), `mcp_message` (bidirectional
+   JSON-RPC with an `id` for request/response correlation), `mcp_unregister`.
 2. On `mcp_register`, register a runtime **SDK-type** MCP server for the session
    (reuse `addRuntimeMcpServer` + `isSdkMcpServerConfig`), wiring its
    `sendSdkMcpMessage` callback to push `mcp_message` frames down this client's WS
    and await the correlated response.
 3. Tear down on WS close / `mcp_unregister`.
-4. Gate behind a capability flag (`caps.features` += `client_mcp_over_ws`) until
-   the contract is settled — this is the open question raised in #5626.
+4. Advertise `client_mcp_over_ws`; paired extension clients work by default.
+   Operators can disable the channel with `QWEN_SERVE_CLIENT_MCP_OVER_WS=0` or
+   explicitly set it to `1` to permit legacy unpaired reverse MCP clients.
 
-### Extension side (reuses existing executors)
+### Extension side
 
-- `src/background/browser-tools-server.ts` (new): build an MCP `Server`
-  (`@modelcontextprotocol/sdk`) whose `tools/list` = the kept `tool-catalog.ts`
-  and `tools/call` dispatches via the existing `tool-router.ts` →
-  `browser-tool-executors.ts` / `browser-network-tools.ts`, formatting with
-  `mcp-tool-result.ts`. Connect it to a transport that sends/receives
-  `mcp_message` over the DaemonClient WS; register on connect.
-- MVP catalog (~6 tools, read-first): `chrome_read_page`, `chrome_screenshot`,
-  `chrome_console`, `chrome_navigate`, `chrome_click_element`, `chrome_fill_or_select`.
-  Write/navigate tools gated behind per-tool consent (security: browser origin
-  defaults to read-only).
+- `src/background/browser-mcp/server.ts` implements the small MCP JSON-RPC
+  surface needed by the daemon transport without bundling another server.
+- `src/background/browser-mcp/browser-tools.ts` owns the tool catalog and the
+  bounded Console/Network recorders.
+- `src/background/browser-mcp/debugger-session.ts` owns the active tab debugger
+  attachment and CDP command/event lifecycle.
 
 ## Daemon lifecycle (issue #5626 Q3)
 

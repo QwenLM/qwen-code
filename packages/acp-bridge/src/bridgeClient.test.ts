@@ -2429,6 +2429,7 @@ describe('BridgeClient — reverse tool channel (qwen/control/client_mcp/message
    */
   function makeClientWithRegistrar(
     registrar: ClientMcpRegistrar,
+    source?: { sourceType?: string; sourceId?: string },
   ): BridgeClient {
     const sender: ClientMcpMessageSender = (serverName: string) =>
       registrar.hasServer(serverName)
@@ -2436,7 +2437,10 @@ describe('BridgeClient — reverse tool channel (qwen/control/client_mcp/message
             registrar.sendSdkMcpMessage(serverName, payload as JSONRPCMessage)
         : undefined;
     return new BridgeClient(
-      (() => undefined) as never, // resolveEntry: client_mcp/message is sessionless
+      ((sessionId: string | undefined) =>
+        sessionId === 'extension-session'
+          ? ({ ...source } as never)
+          : undefined) as never,
       (() => undefined) as never, // resolvePendingRestoreEvents
       { request: thrower } as never,
       0,
@@ -2505,6 +2509,45 @@ describe('BridgeClient — reverse tool channel (qwen/control/client_mcp/message
     });
     expect(outbound).toHaveLength(1);
     expect((result as { payload?: unknown }).payload).toBeDefined();
+  });
+
+  it('only routes browser tool calls for paired extension sessions', async () => {
+    const outbound: ClientMcpFrame[] = [];
+    const registrar = new ClientMcpRegistrar({
+      sendFrame: (frame) => {
+        outbound.push(frame);
+      },
+    });
+    registrar.registerServer('qwen-browser-tools');
+
+    const denied = makeClientWithRegistrar(registrar)
+      .extMethod('qwen/control/client_mcp/message', {
+        server: 'qwen-browser-tools',
+        sessionId: 'extension-session',
+        payload: { jsonrpc: '2.0', id: 1, method: 'tools/call' },
+      })
+      .catch((error: unknown) => error);
+    await expect(denied).resolves.toMatchObject({ code: -32602 });
+    expect(outbound).toHaveLength(0);
+
+    const allowedClient = makeClientWithRegistrar(registrar, {
+      sourceType: 'default',
+      sourceId: 'chrome_extension',
+    });
+    const allowed = allowedClient.extMethod('qwen/control/client_mcp/message', {
+      server: 'qwen-browser-tools',
+      sessionId: 'extension-session',
+      payload: { jsonrpc: '2.0', id: 2, method: 'tools/call' },
+    });
+    await vi.waitFor(() => expect(outbound).toHaveLength(1));
+    registrar.resolveMessage(outbound[0]!.id, {
+      jsonrpc: '2.0',
+      id: 2,
+      result: { content: [] },
+    });
+    await expect(allowed).resolves.toMatchObject({
+      payload: { result: { content: [] } },
+    });
   });
 
   it('rejects (invalidParams) when the named server is not connected', async () => {

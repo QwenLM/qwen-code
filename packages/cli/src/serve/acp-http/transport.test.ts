@@ -3207,6 +3207,37 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     await sess.body?.cancel(); // release the long-lived SSE socket
   });
 
+  it('session/load rejects a persisted Chrome extension session', async () => {
+    await withRuntimeDir(async () => {
+      await writeStoredSession(
+        'extension-session',
+        'active',
+        undefined,
+        'default',
+        'chrome_extension',
+      );
+      const connId = await initialize();
+      const connStream = await openStream(connId);
+      const got = takeFrames(connStream, 1);
+      await new Promise((r) => setTimeout(r, 50));
+
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 21,
+        method: 'session/load',
+        params: { sessionId: 'extension-session' },
+      });
+
+      const [frame] = (await got) as Array<{
+        id: number;
+        error: { code: number; message: string };
+      }>;
+      expect(frame.id).toBe(21);
+      expect(frame.error.code).toBe(-32602);
+      expect(frame.error.message).toContain('paired extension');
+    });
+  });
+
   it('session/load reports partial replay status under qwen _meta', async () => {
     bridge.loadState = {
       replayed: true,
@@ -4496,6 +4527,28 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
     await new Promise((r) => setTimeout(r, 30));
     expect(bridge.lastSpawnScope).toBe('thread');
+  });
+
+  it('session/new rejects reserved Chrome extension source metadata', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 45,
+      method: 'session/new',
+      params: { sourceType: 'default', sourceId: 'chrome_extension' },
+    });
+
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: { code: number; message: string };
+    }>;
+    expect(frame.id).toBe(45);
+    expect(frame.error.code).toBe(-32602);
+    expect(frame.error.message).toContain('reserved session metadata');
   });
 
   it('session/prompt with empty prompt → INVALID_PARAMS', async () => {
@@ -8028,6 +8081,9 @@ describe('ACP WebSocket transport security', () => {
           ? {
               cdpTunnelOverWs: true,
               cdpTunnelRegistry: new CdpTunnelRegistry(),
+              verifyExtensionPairingCredential: (
+                credential: string | undefined,
+              ) => credential === 'paired',
             }
           : {}),
       });
@@ -8066,6 +8122,19 @@ describe('ACP WebSocket transport security', () => {
     });
   }
 
+  function wsConnectUrl(
+    url: string,
+  ): Promise<{ code: number; ws?: WebSocket }> {
+    return new Promise((resolve) => {
+      const ws = new WebSocket(url, { handshakeTimeout: 2000 });
+      ws.once('open', () => resolve({ code: 101, ws }));
+      ws.once('unexpected-response', (_req, res) => {
+        resolve({ code: res.statusCode ?? 0 });
+      });
+      ws.once('error', () => resolve({ code: 0 }));
+    });
+  }
+
   function wsConnectRaw(
     host: string,
     origin?: string,
@@ -8096,13 +8165,21 @@ describe('ACP WebSocket transport security', () => {
     });
   }
 
-  function initializeCdpBridge(ws: WebSocket, id = 1): Promise<unknown> {
+  function initializeCdpBridge(
+    ws: WebSocket,
+    id = 1,
+    extensionPairingCredential: string | undefined = 'paired',
+  ): Promise<unknown> {
     return sendRpc(ws, {
       jsonrpc: '2.0',
       id,
       method: 'initialize',
       params: {
-        clientInfo: { name: 'qwen-cdp-bridge', version: '1.0.0' },
+        clientInfo: {
+          name: 'qwen-cdp-bridge',
+          version: '1.0.0',
+          ...(extensionPairingCredential ? { extensionPairingCredential } : {}),
+        },
       },
     });
   }
@@ -8167,6 +8244,20 @@ describe('ACP WebSocket transport security', () => {
     await new Promise<void>((resolve) => ws.once('close', () => resolve()));
   });
 
+  it('requires pairing before a Chrome bridge can claim the CDP tunnel', async () => {
+    await startServer({ cdpTunnelOverWs: true });
+    const ws = await wsConnect();
+    const closed = new Promise<void>((resolve) =>
+      ws.once('close', () => resolve()),
+    );
+
+    await expect(initializeCdpBridge(ws, 1, '')).resolves.toMatchObject({
+      error: { message: 'Chrome extension is not paired with this daemon' },
+    });
+
+    await closed;
+  });
+
   it('treats a whitespace-only CDP MCP command as unset', async () => {
     process.env['QWEN_CDP_MCP_COMMAND'] = '   ';
     stdioMocks.writeStderrLine.mockClear();
@@ -8199,9 +8290,27 @@ describe('ACP WebSocket transport security', () => {
       command: process.execPath,
       args: expect.arrayContaining([
         '--wsEndpoint',
-        `ws://127.0.0.1:${port}/cdp`,
+        expect.stringMatching(
+          new RegExp(`^ws://127\\.0\\.0\\.1:${port}/cdp\\?access_token=`),
+        ),
       ]),
     });
+    const runtimeArgs = bridge.runtimeMcpAdds[0]?.config['args'];
+    const endpoint = Array.isArray(runtimeArgs)
+      ? runtimeArgs[runtimeArgs.indexOf('--wsEndpoint') + 1]
+      : undefined;
+    expect(endpoint).toEqual(expect.any(String));
+
+    const unpairedCdp = await wsConnectUrl(`ws://127.0.0.1:${port}/cdp`);
+    expect(unpairedCdp.code).toBe(401);
+    const pairedCdp = await wsConnectUrl(String(endpoint));
+    expect(pairedCdp.code).toBe(101);
+    const cdpSocket = pairedCdp.ws;
+    if (!cdpSocket) throw new Error('Expected an upgraded CDP connection');
+    cdpSocket.close();
+    await new Promise<void>((resolve) =>
+      cdpSocket.once('close', () => resolve()),
+    );
 
     ws.close();
     await new Promise<void>((resolve) => ws.once('close', () => resolve()));

@@ -146,18 +146,23 @@ describe('waitForDaemonTokenMessage', () => {
     });
   }
 
-  it('accepts a bearer token posted from a browser extension parent', async () => {
+  it('accepts daemon auth posted from a browser extension parent', async () => {
     mockFramedWindow();
     const mod = await import('./daemon');
     const token = mod.waitForDaemonTokenMessage(1000);
     window.dispatchEvent(
       new MessageEvent('message', {
-        data: { type: 'qwen-daemon-auth', token: 'posted-secret' },
+        data: {
+          type: 'qwen-daemon-auth',
+          token: 'posted-secret',
+          extensionPairingCredential: 'paired-credential',
+        },
         origin: 'chrome-extension://abcdefghijklmnop',
         source: window.parent,
       }),
     );
     await expect(token).resolves.toBe('posted-secret');
+    expect(mod.getExtensionPairingCredential()).toBe('paired-credential');
   });
 
   it('ignores bearer token messages from non-extension origins', async () => {
