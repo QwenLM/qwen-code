@@ -246,12 +246,15 @@ function DiffFileRow({
   // Guard the in-flight fetch so closing the dialog before it resolves doesn't
   // settle state on an unmounted row (matching DiffHunks / GitDiffDialog).
   const cancelledRef = useRef(false);
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    // Reset on mount: StrictMode replays mount→unmount→mount and the ref
+    // persists across the replay, so without this reset the flag would stick at
+    // true and suppress every post-fetch state update (row stuck on "Loading").
+    cancelledRef.current = false;
+    return () => {
       cancelledRef.current = true;
-    },
-    [],
-  );
+    };
+  }, []);
 
   const toggle = () => {
     const next = !open;

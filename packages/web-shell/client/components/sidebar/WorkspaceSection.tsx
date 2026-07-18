@@ -32,6 +32,16 @@ function getWorkspaceName(cwd: string): string {
   return parts.at(-1) ?? cwd;
 }
 
+// The cwd-qualified daemon route only accepts a workspace id or absolute path.
+// A synthetic fallback workspace (daemon reports no workspaces and the
+// connection has no cwd) carries a display name in `cwd`, which is neither, so
+// qualifying a request with it would only ever 400.
+function isAbsolutePath(cwd: string): boolean {
+  return (
+    cwd.startsWith('/') || cwd.startsWith('\\') || /^[a-zA-Z]:[\\/]/.test(cwd)
+  );
+}
+
 function getSessionLabel(session: DaemonSessionSummary): string {
   const displayName = session.displayName?.trim();
   return displayName || session.sessionId.slice(0, 8);
@@ -212,13 +222,17 @@ export function WorkspaceSection({
     searchQuery,
   ]);
 
+  // Undefined when `cwd` is not a real path (synthetic fallback workspace), so
+  // the poll — which qualifies the route with the cwd — is skipped entirely.
+  const gitPollCwd = isAbsolutePath(workspace.cwd) ? workspace.cwd : undefined;
+
   // Log a poll failure only on the success→failure transition, not on every
   // 60s/focus tick, so an unreachable workspace doesn't spam a long-lived tab.
   const gitPollFailed = useRef(false);
   const loadGitStatus = useCallback(async () => {
-    if (!onOpenGitDiff || !workspace.trusted) return;
+    if (!onOpenGitDiff || !workspace.trusted || !gitPollCwd) return;
     try {
-      const status = await client.workspaceByCwd(workspace.cwd).workspaceGit();
+      const status = await client.workspaceByCwd(gitPollCwd).workspaceGit();
       gitPollFailed.current = false;
       setGitStatus(status);
     } catch (err) {
@@ -230,7 +244,7 @@ export function WorkspaceSection({
         gitPollFailed.current = true;
       }
     }
-  }, [client, onOpenGitDiff, workspace.cwd, workspace.trusted]);
+  }, [client, gitPollCwd, onOpenGitDiff, workspace.trusted]);
 
   // The git chip lives in the always-visible folder header, so it polls
   // independently of session expansion: on mount/trust, on window focus, and on
@@ -238,7 +252,7 @@ export function WorkspaceSection({
   // per call, so the cadence stays gentle). Skipped entirely when no diff
   // handler is wired, since the chip — its only consumer — would not render.
   useEffect(() => {
-    if (!onOpenGitDiff || !workspace.trusted) {
+    if (!onOpenGitDiff || !workspace.trusted || !gitPollCwd) {
       setGitStatus(undefined);
       return;
     }
@@ -252,7 +266,13 @@ export function WorkspaceSection({
       window.removeEventListener('focus', onFocus);
       window.clearInterval(timer);
     };
-  }, [loadGitStatus, onOpenGitDiff, reloadToken, workspace.trusted]);
+  }, [
+    gitPollCwd,
+    loadGitStatus,
+    onOpenGitDiff,
+    reloadToken,
+    workspace.trusted,
+  ]);
 
   const visibleSessions = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();

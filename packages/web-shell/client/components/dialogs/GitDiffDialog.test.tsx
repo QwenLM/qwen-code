@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act } from 'react';
+import { act, StrictMode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
 
@@ -72,16 +72,17 @@ const { GitDiffDialog } = await import('./GitDiffDialog');
 let container: HTMLDivElement;
 let root: Root;
 
-function mount(workspaceCwd = '/repo') {
+function mount(workspaceCwd = '/repo', strict = false) {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
+  const dialog = (
+    <I18nProvider language="en">
+      <GitDiffDialog workspaceCwd={workspaceCwd} onClose={vi.fn()} />
+    </I18nProvider>
+  );
   act(() => {
-    root.render(
-      <I18nProvider language="en">
-        <GitDiffDialog workspaceCwd={workspaceCwd} onClose={vi.fn()} />
-      </I18nProvider>,
-    );
+    root.render(strict ? <StrictMode>{dialog}</StrictMode> : dialog);
   });
 }
 
@@ -184,6 +185,42 @@ describe('GitDiffDialog', () => {
     expect(document.body.textContent).toContain('const a = 2');
     expect(document.body.textContent).toContain('const b = 3');
     expect(document.body.textContent).toContain('const a = 1');
+  });
+
+  it('still loads a file diff under StrictMode (cancelled flag resets on remount)', async () => {
+    // StrictMode replays mount→unmount→mount and a ref persists across the
+    // replay, so the row's cancelled flag must reset on mount — otherwise the
+    // fetched hunks are dropped and the row sticks on "Loading changes…".
+    workspaceGitDiff.mockResolvedValue(diffPayload());
+    workspaceGitDiffFile.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      path: 'src/a.ts',
+      available: true,
+      hunks: [
+        {
+          oldStart: 1,
+          oldLines: 1,
+          newStart: 1,
+          newLines: 1,
+          lines: ['-const a = 1', '+const a = 2'],
+        },
+      ],
+    });
+    mount('/repo', true);
+    await flush();
+
+    const header = document.body.querySelector(
+      'button[aria-expanded="false"]',
+    ) as HTMLButtonElement;
+    expect(header).not.toBeNull();
+    await act(async () => {
+      header.click();
+    });
+    await flush();
+
+    expect(document.body.textContent).toContain('const a = 2');
+    expect(document.body.textContent).not.toContain('Loading changes…');
   });
 
   it('forwards the pre-rename oldPath when expanding a renamed file', async () => {

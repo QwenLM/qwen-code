@@ -164,6 +164,26 @@ describe('WorkspaceSection git chip', () => {
     expect(workspaceGit).not.toHaveBeenCalled();
   });
 
+  it('skips the git poll when the workspace cwd is not a real path', async () => {
+    // A synthetic fallback workspace carries a display name in `cwd`; polling
+    // would qualify the route with it and 400, so no request fires and the chip
+    // stays hidden.
+    workspaceGit.mockResolvedValue({
+      v: 2,
+      workspaceCwd: 'Project',
+      branch: 'main',
+    });
+
+    renderSection({
+      workspace: { ...trustedWorkspace, cwd: 'Project' },
+      onOpenGitDiff: vi.fn(),
+    });
+    await flush();
+
+    expect(workspaceGit).not.toHaveBeenCalled();
+    expect(gitChip()).toBeNull();
+  });
+
   it('hides the chip when the workspace is not a git repo (null branch)', async () => {
     workspaceGit.mockResolvedValue({
       v: 2,
