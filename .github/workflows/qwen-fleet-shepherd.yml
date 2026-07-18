@@ -255,14 +255,6 @@ jobs:
             # one (reruns stay with the Patrol either way).
             FAILED_TEST_URL="$(jq -r '[.statusCheckRollup[]? | select(.conclusion == "FAILURE") | select(.name | startswith("Test (")) | .detailsUrl][0] // ""' <<< "${ROW}")"
             BEHIND="$(gh api "repos/${REPO}/compare/main...${HEAD}" --jq '.behind_by // 0' 2> /dev/null || echo 0)"
-            # A failed marker read must NOT become empty history — empty
-            # MY_MARKS would defeat every dedup below and double-fire actions.
-            if ! gh api "repos/${REPO}/issues/${PR}/comments" --paginate > /tmp/ic.json 2> /dev/null; then
-              echo "⚠️ #${PR}: marker read failed; skipping this tick"
-              DASH_ROWS="${DASH_ROWS}| #${PR} | \`${HEAD:0:9}\` | marker read failed | deferred |\n"
-              continue
-            fi
-            MY_MARKS="$(jq -r --arg ab "${AUTOFIX_BOT}" '[.[] | select(.user.login == $ab) | .body] | join("\n")' /tmp/ic.json)"
 
             STATUS_NOTE='idle'
             ACTION_NOTE='—'
@@ -272,7 +264,23 @@ jobs:
             # marker for a failed dispatch would freeze the PR at this head.
             if [[ "${MERGEABLE}" == "CONFLICTING" ]]; then
               STATUS_NOTE='conflicting'
-              if [[ "${BUSY_OK}" != "true" ]]; then
+              # Markers are consumed ONLY by this lever, so the read lives
+              # here: non-conflicting PRs (the majority of the fleet) skip
+              # the paginated comments fetch entirely, and a failed read
+              # defers just this lever instead of dropping the PR from the
+              # dashboard and the other levers. Empty history must still
+              # never masquerade as "no markers" — hence MARKS_OK.
+              MARKS_OK=true
+              MY_MARKS=''
+              if ! gh api "repos/${REPO}/issues/${PR}/comments" --paginate > /tmp/ic.json 2> /dev/null; then
+                MARKS_OK=false
+              else
+                MY_MARKS="$(jq -r --arg ab "${AUTOFIX_BOT}" '[.[] | select(.user.login == $ab) | .body] | join("\n")' /tmp/ic.json)"
+              fi
+              if [[ "${MARKS_OK}" != "true" ]]; then
+                # Acting on unreadable history could double-fire the dispatch.
+                ACTION_NOTE='marker read failed — deferring dispatch'
+              elif [[ "${BUSY_OK}" != "true" ]]; then
                 # Runs or jobs read failed — busy-state is UNKNOWN, and a
                 # blind dispatch could stack onto a live address run.
                 ACTION_NOTE='busy-state unknown (runs or jobs read failed) — deferring dispatch'

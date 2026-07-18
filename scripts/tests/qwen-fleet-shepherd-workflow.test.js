@@ -136,8 +136,17 @@ describe('fleet shepherd workflow', () => {
     expect(workflow).toContain(
       'IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED")',
     );
-    // A failed marker read must skip the PR, never act on empty history.
-    expect(workflow).toContain('marker read failed; skipping this tick');
+    // Markers are consumed only by the conflict lever, so the paginated
+    // comments read lives inside the CONFLICTING branch: the majority of the
+    // fleet never fetches it, and a failed read defers just that lever
+    // (never acting on empty history) instead of dropping the PR from the
+    // dashboard and the other levers.
+    expect(workflow).toContain('marker read failed — deferring dispatch');
+    expect(workflow).toContain('MARKS_OK=false');
+    expect(workflow).not.toContain('marker read failed; skipping this tick');
+    expect(workflow).toMatch(
+      /if \[\[ "\$\{MERGEABLE\}" == "CONFLICTING" \]\]; then[\s\S]{0,900}gh api "repos\/\$\{REPO\}\/issues\/\$\{PR\}\/comments" --paginate/,
+    );
     // A failed fleet fetch skips the walk AND preserves the previous
     // dashboard body — never an empty-table overwrite.
     expect(workflow).toContain('fleet enumeration failed; skipping this tick');
