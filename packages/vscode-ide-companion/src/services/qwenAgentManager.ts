@@ -1087,8 +1087,8 @@ export class QwenAgentManager {
         cwdOverride,
       );
       logger.log(
-        '[QwenAgentManager] Session load succeeded. Response:',
-        response,
+        '[QwenAgentManager] Session load succeeded for session:',
+        sessionId,
       );
       this.applySessionStateFromResult(response);
       this.restoreBaselineSessionStateAfterLoad(response);
@@ -1268,10 +1268,11 @@ export class QwenAgentManager {
         let newSessionResult: unknown;
         // Try to create a new ACP session. If Qwen asks for auth, let it handle authentication.
         try {
-          newSessionResult = await this.connection.newSession(workingDir);
+          const createdSession = await this.connection.newSession(workingDir);
+          newSessionResult = createdSession;
           logger.log(
-            '[QwenAgentManager] newSession returned:',
-            newSessionResult,
+            '[QwenAgentManager] newSession returned session:',
+            createdSession.sessionId,
           );
         } catch (err) {
           const requiresAuth = isAuthenticationRequiredError(err);

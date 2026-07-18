@@ -8,6 +8,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 describe('initializeWebviewLogger', () => {
   afterEach(() => {
+    delete (
+      globalThis as typeof globalThis & {
+        __qwenWebviewLoggerInitialized?: boolean;
+      }
+    ).__qwenWebviewLoggerInitialized;
     vi.unstubAllGlobals();
     vi.resetModules();
   });
@@ -65,5 +70,28 @@ describe('initializeWebviewLogger', () => {
 
     expect(() => console.warn('late warning')).not.toThrow();
     expect(warn).toHaveBeenCalledWith('late warning');
+  });
+
+  it('does not stack console wrappers when initialized twice', async () => {
+    const postMessage = vi.fn();
+    vi.stubGlobal('console', {
+      debug: vi.fn(),
+      error: vi.fn(),
+      info: vi.fn(),
+      log: vi.fn(),
+      warn: vi.fn(),
+    });
+    vi.stubGlobal('acquireVsCodeApi', () => ({
+      postMessage,
+      getState: vi.fn(),
+      setState: vi.fn(),
+    }));
+    const { initializeWebviewLogger } = await import('./useVSCode.js');
+
+    initializeWebviewLogger();
+    initializeWebviewLogger();
+    console.log('only once');
+
+    expect(postMessage).toHaveBeenCalledTimes(1);
   });
 });

@@ -357,7 +357,10 @@ export class AcpConnection {
     ]);
 
     logger.log('[ACP] Initialize successful');
-    logger.log('[ACP] Initialization response:', initResponse);
+    logger.log(
+      '[ACP] Initialization response protocol:',
+      initResponse.protocolVersion,
+    );
     try {
       this.onInitialized(initResponse);
     } catch (err) {
@@ -526,7 +529,7 @@ export class AcpConnection {
         cwd,
         mcpServers: [],
       });
-      logger.log('[ACP] Session load succeeded. Response:', response);
+      logger.log('[ACP] Session load succeeded for session:', sessionId);
       this.sessionId = sessionId;
       return response;
     } catch (error) {

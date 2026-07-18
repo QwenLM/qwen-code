@@ -55,6 +55,13 @@ export function initializeWebviewLogger(): void {
   if (typeof acquireVsCodeApi === 'undefined') {
     return;
   }
+  const state = globalThis as typeof globalThis & {
+    __qwenWebviewLoggerInitialized?: boolean;
+  };
+  if (state.__qwenWebviewLoggerInitialized) {
+    return;
+  }
+  state.__qwenWebviewLoggerInitialized = true;
 
   const vscode = getVSCodeAPI();
   const postLog = (level: LogLevel, args: unknown[]) => {
