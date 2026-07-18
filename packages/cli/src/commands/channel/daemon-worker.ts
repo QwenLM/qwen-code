@@ -38,6 +38,11 @@ import {
   isChannelWebhookTaskMessage,
   type ChannelWebhookEnqueueErrorCode,
 } from '../../serve/channel-webhook-ipc.js';
+import {
+  isChannelDeliveryMessage,
+  type ChannelDeliveryErrorCode,
+  type ChannelDeliveryRequest,
+} from '../../serve/channel-delivery-ipc.js';
 import { sanitizeWorkerDiagnostic } from '../../serve/channel-worker-diagnostics.js';
 import {
   isChannelStartupReportAckMessage,
@@ -68,6 +73,7 @@ import { ObservedChannelContactStore } from './observed-contact-store.js';
 
 const SESSION_SHELL_COMMAND_FEATURE = 'session_shell_command';
 const MAX_ACTIVE_WEBHOOK_TASKS = 16;
+const MAX_ACTIVE_CHANNEL_DELIVERIES = 16;
 const WEBHOOK_TASK_SHUTDOWN_DRAIN_MS = 10_000;
 
 interface DaemonCapabilitiesLike {
@@ -131,6 +137,7 @@ interface ChannelDaemonWorkerReady {
 
 export interface ChannelDaemonWorkerHandle {
   readonly channels: string[];
+  deliverChannelMessage(request: ChannelDeliveryRequest): Promise<void>;
   validateWebhookTask(task: ChannelWebhookTask): void;
   runWebhookTask(
     task: ChannelWebhookTask,
@@ -597,6 +604,13 @@ export async function runChannelDaemonWorker(
 
     return {
       channels: connected,
+      async deliverChannelMessage(request: ChannelDeliveryRequest) {
+        const channel = channels.get(request.channelName);
+        if (!channel || !connected.includes(request.channelName)) {
+          throw new Error(`Channel "${request.channelName}" is not running.`);
+        }
+        await channel.deliverProactive(request.target, request.text);
+      },
       validateWebhookTask(task: ChannelWebhookTask): void {
         const channel = channels.get(task.channelName);
         if (!channel || !connected.includes(task.channelName)) {
@@ -815,8 +829,68 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
           // Supervisor will time out if the IPC channel is already closed.
         }
       };
+      const sendChannelDeliveryResult = (
+        id: string,
+        result:
+          | { ok: true }
+          | {
+              ok: false;
+              code: ChannelDeliveryErrorCode;
+              error: string;
+            },
+      ) => {
+        try {
+          process.send?.({
+            type: 'channel_delivery_result',
+            id,
+            ...result,
+          });
+        } catch {
+          // Supervisor will time out if the IPC channel is already closed.
+        }
+      };
       const activeWebhookTasks = new Map<string, Promise<void>>();
+      const activeChannelDeliveries = new Map<string, Promise<void>>();
       const onMessage = (message: unknown) => {
+        if (isChannelDeliveryMessage(message)) {
+          if (message.expiresAt <= Date.now()) {
+            sendChannelDeliveryResult(message.id, {
+              ok: false,
+              code: 'channel_delivery_timeout',
+              error: 'Channel delivery IPC timed out.',
+            });
+            return;
+          }
+          if (activeChannelDeliveries.size >= MAX_ACTIVE_CHANNEL_DELIVERIES) {
+            sendChannelDeliveryResult(message.id, {
+              ok: false,
+              code: 'channel_delivery_queue_full',
+              error: 'Channel delivery queue is full.',
+            });
+            return;
+          }
+          const deliveryId = message.id;
+          const deliveryPromise = handle
+            .deliverChannelMessage(message.request)
+            .then(() => {
+              sendChannelDeliveryResult(deliveryId, { ok: true });
+            })
+            .catch((err: unknown) => {
+              sendChannelDeliveryResult(deliveryId, {
+                ok: false,
+                code: classifyChannelDeliveryError(err),
+                error: sanitizeLogText(
+                  err instanceof Error ? err.message : String(err),
+                  512,
+                ),
+              });
+            })
+            .finally(() => {
+              activeChannelDeliveries.delete(deliveryId);
+            });
+          activeChannelDeliveries.set(deliveryId, deliveryPromise);
+          return;
+        }
         if (!isChannelWebhookTaskMessage(message)) return;
         if (message.expiresAt <= Date.now()) {
           sendWebhookTaskResult(message.id, {
@@ -904,6 +978,21 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
           clearHeartbeat();
           process.removeListener('message', onMessage);
           try {
+            if (activeChannelDeliveries.size > 0) {
+              writeStderrLine(
+                `[Channel] shutdown: draining ${activeChannelDeliveries.size} channel delivery task(s)...`,
+              );
+              await Promise.race([
+                Promise.allSettled(activeChannelDeliveries.values()),
+                new Promise<void>((resolve) => {
+                  const timer = setTimeout(
+                    resolve,
+                    WEBHOOK_TASK_SHUTDOWN_DRAIN_MS,
+                  );
+                  timer.unref();
+                }),
+              ]);
+            }
             if (activeWebhookTasks.size > 0) {
               writeStderrLine(
                 `[Channel] shutdown: draining ${activeWebhookTasks.size} webhook task(s)...`,
@@ -989,4 +1078,21 @@ function classifyWebhookTaskValidationError(
     return 'channel_worker_unavailable';
   }
   return 'channel_webhook_enqueue_failed';
+}
+
+function classifyChannelDeliveryError(
+  error: unknown,
+): ChannelDeliveryErrorCode {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/^Channel ".+" is not running\.$/u.test(message)) {
+    return 'channel_worker_unavailable';
+  }
+  if (
+    message.includes('does not own delivery target') ||
+    message.includes('does not support proactive delivery') ||
+    message.includes('does not support this proactive target')
+  ) {
+    return 'channel_delivery_invalid';
+  }
+  return 'channel_delivery_failed';
 }
