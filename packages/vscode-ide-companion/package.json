@@ -264,8 +264,7 @@
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
     "package": "vsce package --no-dependencies",
     "test": "vitest run",
-    "test:ci": "vitest run --coverage",
-    "validate:notices": "node ./scripts/validate-notices.js"
+    "test:ci": "vitest run --coverage"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",
