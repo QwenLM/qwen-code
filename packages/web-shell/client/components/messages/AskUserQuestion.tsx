@@ -301,23 +301,32 @@ export function AskUserQuestion({
   );
 
   // Pull focus to the current option (or the custom input while editing) when
-  // this question becomes the topmost one or a new request arrives. See
+  // this question becomes the topmost one, a new request arrives, or the user
+  // navigates to a different question (Previous/Next) — without this, focus
+  // would stay on the action button after a question change and every shortcut
+  // would be dead until the user tabbed back into the option group. See
   // ToolApproval's matching effect for the prev-flag reasoning.
   const prevKeyboardActiveRef = useRef(false);
   const prevRequestIdRef = useRef(request.id);
+  const prevCurrentIdxRef = useRef(currentIdx);
   const optionCountRef = useRef(current?.options.length ?? 0);
   optionCountRef.current = current?.options.length ?? 0;
   useEffect(() => {
     const wasActive = prevKeyboardActiveRef.current;
     const prevRequestId = prevRequestIdRef.current;
+    const prevCurrentIdx = prevCurrentIdxRef.current;
     prevKeyboardActiveRef.current = keyboardActive;
     prevRequestIdRef.current = request.id;
+    prevCurrentIdxRef.current = currentIdx;
     if (!keyboardActive) return;
-    if (wasActive && request.id === prevRequestId) return;
+    const becameActive = !wasActive;
+    const requestChanged = request.id !== prevRequestId;
+    const questionChanged = currentIdx !== prevCurrentIdx;
+    if (!becameActive && !requestChanged && !questionChanged) return;
     const idx = selectedIdxRef.current ?? 0;
     if (idx === optionCountRef.current) customRef.current?.focus();
     else optionRefs.current[idx]?.focus();
-  }, [keyboardActive, request.id]);
+  }, [keyboardActive, request.id, currentIdx]);
 
   if (questions.length === 0) return null;
 

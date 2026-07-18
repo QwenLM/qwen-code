@@ -58,6 +58,35 @@ const multiRequest: PermissionRequest = {
   },
 };
 
+const twoQuestionRequest: PermissionRequest = {
+  id: 'req-2q',
+  content: [],
+  options: [
+    { id: 'submit', label: 'Submit', kind: 'allow_once' },
+    { id: 'cancel', label: 'Cancel', kind: 'reject_once' },
+  ],
+  rawInput: {
+    questions: [
+      {
+        question: 'First question',
+        header: 'Q1',
+        options: [
+          { label: 'A1', description: '' },
+          { label: 'A2', description: '' },
+        ],
+      },
+      {
+        question: 'Second question',
+        header: 'Q2',
+        options: [
+          { label: 'B1', description: '' },
+          { label: 'B2', description: '' },
+        ],
+      },
+    ],
+  },
+};
+
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 let onConfirm: ReturnType<typeof vi.fn>;
@@ -326,6 +355,25 @@ describe('AskUserQuestion accessibility', () => {
     expect(document.activeElement).toBe(opts[1]);
 
     rerender(true, { ...request, id: 'req-2' });
+    expect(document.activeElement).toBe(optionButtons()[0]);
+  });
+
+  it('focuses the first option when navigating to the next question', () => {
+    render(undefined, twoQuestionRequest);
+    expect(document.activeElement).toBe(optionButtons()[0]);
+
+    // Click "next" to move to the second question.
+    const nextButton = Array.from(
+      container!.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((b) => b.textContent === 'next');
+    expect(nextButton).toBeTruthy();
+    act(() => {
+      nextButton!.click();
+    });
+
+    // Focus follows to the new question's first option — without this it would
+    // stay on the action button and every shortcut would be dead until the user
+    // tabbed back into the option group.
     expect(document.activeElement).toBe(optionButtons()[0]);
   });
 

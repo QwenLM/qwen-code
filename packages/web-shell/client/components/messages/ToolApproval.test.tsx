@@ -174,6 +174,18 @@ describe('ToolApproval accessibility', () => {
     expect(onConfirm).toHaveBeenCalledWith('req-1', 'proceed');
   });
 
+  it('confirms only once when two triggers fire (submittedRef guard)', () => {
+    render(undefined);
+    // Click an option, then fire Escape — the second trigger must be ignored so
+    // onConfirm isn't called twice with different option ids.
+    act(() => {
+      optionButtons()[1]!.click();
+    });
+    pressKey(optionButtons()[0]!, 'Escape');
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    expect(onConfirm).toHaveBeenCalledWith('req-1', 'proceed');
+  });
+
   it('confirms by digit shortcut, scoped to the panel', () => {
     render(undefined);
     // '2' picks the second ordered option (proceed). Dispatched on a button so
@@ -201,6 +213,19 @@ describe('ToolApproval accessibility', () => {
     pressKey(opts[1]!, 'ArrowUp');
     expect(document.activeElement).toBe(opts[0]);
     expect(opts[0]!.tabIndex).toBe(0);
+  });
+
+  it('moves focus with j/k vim-style shortcuts', () => {
+    render(undefined);
+    const opts = optionButtons();
+    expect(document.activeElement).toBe(opts[0]);
+
+    // k = up: from the first option wraps to the last.
+    pressKey(opts[0]!, 'k');
+    expect(document.activeElement).toBe(opts[1]);
+    // j = down: from the last option wraps to the first.
+    pressKey(opts[1]!, 'j');
+    expect(document.activeElement).toBe(opts[0]);
   });
 
   it('jumps to first/last option with Home/End', () => {
