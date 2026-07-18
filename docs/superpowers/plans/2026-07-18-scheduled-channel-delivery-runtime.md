@@ -20,6 +20,8 @@ Channel worker, and retry only that send after transient failure or restart.
 
 ### Task 1: Durable delivery outbox
 
+Status: implemented.
+
 Files:
 
 - Add `packages/core/src/services/scheduled-delivery-outbox.ts`
@@ -46,6 +48,8 @@ Verification:
 
 ### Task 2: Correlate a cron fire with its final answer
 
+Status: implemented with `firedAt` as the stable run identity.
+
 Files:
 
 - Modify `packages/core/src/services/cronScheduler.ts`
@@ -68,6 +72,8 @@ Verification:
   error/cancel does not enqueue.
 
 ### Task 3: Daemon outbox dispatcher
+
+Status: implemented.
 
 Files:
 
@@ -94,6 +100,10 @@ Verification:
   execution, restart recovery, workspace routing, and shutdown.
 
 ### Task 4: Capability and status projection
+
+Status: capability and public client types implemented; run-history delivery
+projection remains follow-up work. Selected-target admission remains off until
+#7109 supplies the observed-target provider.
 
 Files:
 

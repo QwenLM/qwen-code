@@ -1,8 +1,25 @@
 # Scheduled Channel Delivery for Durable Tasks
 
-Status: Approved direction; implementation staged on `main`
+Status: Implementation draft, based on `main`
 
 Related: [#7152](https://github.com/QwenLM/qwen-code/issues/7152), [#7109](https://github.com/QwenLM/qwen-code/pull/7109), [#7103](https://github.com/QwenLM/qwen-code/issues/7103)
+
+## Plain-language summary
+
+Think of a scheduled run as producing a parcel:
+
+1. the scheduler asks the Agent to do the work once;
+2. after the final answer is ready, it puts the answer and group address into a
+   durable workspace outbox;
+3. the daemon hands that parcel to the Channel worker that already knows how to
+   send messages to the IM platform;
+4. if sending fails temporarily, only the send is retried—the Agent work is not
+   run again.
+
+This does not use a public webhook. Webhooks are for outside events that start
+new Agent work; this path delivers work that has already finished. `/loop` in a
+daemon Channel writes the same durable task as other daemon clients, while
+standalone Channel keeps its existing local loop implementation.
 
 ## Problem
 
@@ -10,9 +27,9 @@ Daemon-managed durable scheduled tasks can run unattended and retain their own
 session history, but they cannot deliver a completed run to a selected IM
 conversation. Standalone Channel loops can already deliver to the chat where
 the loop was created, but that path has its own scheduler and store. A
-daemon-managed Channel currently receives neither that loop controller nor an
-equivalent daemon-backed controller, so `/loop` and selected-chat delivery do
-not yet share a working daemon path.
+daemon-managed Channel originally received neither that loop controller nor an
+equivalent daemon-backed controller, so `/loop` and selected-chat delivery did
+not share a working daemon path.
 
 #7109 adds a workspace-scoped API for recently observed users, groups, and
 topics. It intentionally stops at discovery. A client can present a destination
@@ -188,67 +205,38 @@ observation to remain fresh afterward.
 
 ## Run and delivery model
 
-Each scheduled fire receives a stable `runId`. The run context follows the
-prompt into the bound session so the daemon can correlate the terminal turn
-with its originating task and fire.
+The current implementation uses the scheduler's stable minute stamp as the
+fire identity. `deliveryId` is `${taskId}:${firedAt}`. The queued cron item
+carries the target snapshot, and the bound session captures only the final
+non-thought assistant text after all tool calls finish.
 
-The persisted run view distinguishes execution from delivery:
+A clean, non-cancelled completion with non-empty text creates one pending
+outbox record. A model error, cancellation, or empty answer creates none.
+Delivery retries read that record and never enqueue the prompt again.
 
-```ts
-interface ScheduledTaskRunDelivery {
-  status: 'pending' | 'sending' | 'succeeded' | 'failed' | 'skipped';
-  attempts: number;
-  lastAttemptAt?: number;
-  nextAttemptAt?: number;
-  lastError?: string;
-}
-
-interface ScheduledTaskRun {
-  runId: string;
-  executionStatus: 'queued' | 'running' | 'succeeded' | 'failed';
-  delivery?: ScheduledTaskRunDelivery;
-}
-```
-
-A successful Agent turn with a non-empty final response creates a pending
-delivery. An execution failure, cancellation, or empty final response marks
-delivery as skipped. Delivery failure never changes `executionStatus` from
-`succeeded` to `failed`.
-
-The run captures its delivery target when the fire starts:
-
-- editing a task target affects future runs only;
-- disabling a task stops future fires but does not cancel an already-running
-  fire or its delivery;
-- deleting a task cancels queued retries that have not started;
-- an in-flight platform request cannot be recalled.
+The target is copied when the fire is queued, so editing the task affects only
+later fires. Disabling or deleting a task stops later fires; already-created
+outbox work remains independent in this first implementation.
 
 ## Final-response correlation
 
-The scheduler must not mark a delivery-ready result at prompt enqueue time.
-Instead, it creates `runId`, attaches `{taskId, runId}` to the scheduled prompt
-dispatch, and records terminal state when the bound session turn completes.
-
-On successful completion, the daemon records a stable reference to the final
-assistant response in the persisted session transcript. A delivery retry reads
-the final response from that reference; it does not run the prompt again and
-does not ask the model to send anything.
-
-If the transcript entry cannot be recovered after a restart, the delivery is
-marked failed with a sanitized error. The scheduler must not reconstruct an
-answer by starting another Agent turn.
+The scheduler does not create delivery work at prompt enqueue time. The
+session waits for the final successful model turn, removes thought content,
+and writes the final text into the workspace outbox. This deliberately uses a
+bounded text snapshot instead of a transcript pointer: recovery does not need
+to reload or reinterpret a session transcript, and a retry cannot accidentally
+select a different answer.
 
 ### Durable delivery outbox
 
-Non-terminal deliveries live in a workspace-scoped outbox separate from the
-bounded task run-history ring. Each entry stores the delivery and target
-snapshots, transcript response reference, attempt state, and next retry time.
-It does not duplicate the response text.
+Deliveries live in `scheduled_deliveries.json` under the workspace runtime
+directory, separate from task history. Each record stores `deliveryId`,
+`taskId`, `firedAt`, target, bounded final text, attempts, lease, retry time,
+and sanitized error. Updates use a cross-process lock and atomic replacement.
 
-The outbox is authoritative while a delivery is pending or sending. Terminal
-status is copied into the task's bounded run history, then the outbox entry is
-removed. This prevents a frequent task from evicting a retryable delivery when
-its run-history ring reaches its cap.
+The outbox retains terminal records and prunes the oldest terminal entry when
+the 200-record cap is reached. A full outbox containing only non-terminal work
+fails closed rather than dropping a pending message.
 
 ## Internal delivery contract
 
@@ -257,13 +245,12 @@ The parent daemon sends a dedicated request to the Channel worker supervisor:
 ```ts
 interface ChannelDeliveryRequest {
   deliveryId: string;
-  taskId: string;
-  runId: string;
   channelName: string;
   target: {
-    kind: 'direct' | 'group';
+    channelName: string;
     chatId: string;
     threadId?: string;
+    isGroup?: boolean;
   };
   text: string;
 }
@@ -281,21 +268,15 @@ The public Channel-level method should wrap the existing protected
 `pushProactive()` behavior so adapter formatting, chunking, access-token
 handling, and platform-specific response validation remain in one place.
 
-If the Channel is enabled but its worker is not running, the supervisor starts
-it before delivery. An explicitly disabled or removed Channel is a
-permanent target failure and must not be resurrected implicitly.
+The dispatcher selects the exact workspace worker group. It does not fall back
+to a same-named Channel in another workspace.
 
 ## Retry and idempotency
 
-`deliveryId` is derived from `taskId`, `runId`, and a stable hash of the target.
-The daemon persists delivery state before the first send.
-
-The first version makes at most four attempts: the initial attempt followed by
-retries with base delays of 30 seconds, 2 minutes, and 10 minutes plus up to 20%
-jitter. Retries are limited to transient worker, network, rate-limit, and 5xx
-failures. Invalid targets, disabled Channels, unsupported target kinds,
-authentication failures, and platform-declared permanent recipient failures
-fail immediately.
+The daemon persists delivery state before the first send. The dispatcher makes
+at most five attempts. Retry delay doubles from one second and is capped at one
+minute. `channel_delivery_invalid` is permanent; worker unavailability,
+timeouts, queue pressure, and generic delivery failure are retried.
 
 Where a platform supports an idempotency key, the adapter should use
 `deliveryId`. Without platform support, a timeout after the remote platform
@@ -318,9 +299,10 @@ should require both this capability and
 The delivery capability can still be useful for an origin-chat flow when the
 picker capability is unavailable.
 
-Run history returns delivery status, attempt count, timestamps, and a sanitized
-error code/message. It does not return platform credentials or raw upstream
-response bodies.
+The task view already returns `delivery` and explicit `sessionBinding` while
+preserving `sessionId`. Delivery status is currently readable from the
+workspace outbox; projecting it into task run history is follow-up work and is
+not required for transport correctness.
 
 Capability negotiation, rather than daemon version checks, controls client
 behavior:
@@ -344,25 +326,19 @@ provider into that dependency is a small integration change.
 
 ## IM-originated task creation and compatibility
 
-The user-facing `channel_loop_create` tool remains the way a Channel user asks
-for a scheduled task in the current conversation.
+For daemon-managed Channels, `/loop add` resolves the current accepted Channel
+session, then writes a durable task with `sessionOwnership: 'shared'`, current
+chat delivery, and small creator metadata used by `/loop list/show/cancel`.
+Deletion or cancellation disables the task without closing the conversation.
 
-For daemon-managed Channels, its handler forwards creation to the parent daemon
-and persists a durable task with the accepted current-chat target. This makes
-the task visible through the daemon scheduled-task API and uses the same run
-and delivery state machine as a client-created task.
-
-`channel_loop_create` remains model-visible because it expresses the user's
-request to create or manage a schedule in the current conversation. The
-actual `channel_delivery` operation is different: it is daemon-to-worker
-control IPC, never a model tool, so a delivery retry cannot start another
-Agent turn or choose a different recipient.
+`ChannelLoopController.createForSession` is an optional compatibility seam.
+Standalone Channel keeps `ChannelLoopStore`; daemon Channel supplies a Durable
+Task-backed controller. The `channel_delivery` operation remains internal IPC,
+never a model tool, so a retry cannot start Agent work or choose a recipient.
 
 Standalone `qwen channel start` keeps the existing `ChannelLoopStore` and
-`ChannelLoopScheduler`. A daemon worker that advertises
-`scheduled_task_channel_delivery` uses only the unified durable path for new
-loops. An older daemon or worker keeps the old loop path. No creation request
-writes the same schedule to both stores.
+`ChannelLoopScheduler`. A daemon worker uses only the durable path when cron is
+enabled. No creation request writes the same schedule to both stores.
 
 ## End-to-end flow
 
@@ -376,7 +352,7 @@ accepted IM Envelope                 authenticated daemon client
              durable task + admitted target snapshot
                             |
                             v
-                 CronScheduler creates runId
+              CronScheduler stamps taskId + firedAt
                             |
                             v
              bound session completes final response
@@ -406,12 +382,12 @@ accepted IM Envelope                 authenticated daemon client
   platform error classification.
 - **Transient network/rate limit/5xx:** retry only delivery.
 - **Daemon restarts after Agent success:** recover delivery from the persisted
-  run and transcript reference.
+  outbox text snapshot.
 - **Daemon restarts during an ambiguous send:** retry according to adapter
   idempotency support and expose possible duplication when it cannot be ruled
   out.
-- **Task deleted:** cancel pending retries; do not attempt to recall an in-flight
-  or already-delivered message.
+- **Task deleted:** stop future fires. Existing outbox records continue in the
+  first version; explicit retry cancellation is follow-up work.
 
 ## Security and privacy
 
@@ -487,8 +463,8 @@ a second scheduler and is outside this design.
 2. Add the durable task field, admission dependency, session ownership, run
    correlation, and delivery state behind
    `scheduled_task_channel_delivery`.
-3. Forward daemon-managed `channel_loop_create` to the unified durable path,
-   admitting the accepted current-chat target without a second loop store.
+3. Back daemon-managed `/loop` creation with the unified durable path, admitting
+   the accepted current-chat target without a second loop store.
 4. When #7109 lands, connect its provider to target admission and enable the
    selected-target picker for authenticated daemon clients.
 5. Add Web Shell and daemon-aware CLI presentation while keeping standalone

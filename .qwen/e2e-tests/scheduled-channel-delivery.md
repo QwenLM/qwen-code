@@ -4,35 +4,34 @@
 
 Verify that a daemon-owned scheduled task can deliver an already-produced
 final response through the Channel worker without starting another Agent turn.
-The current implementation phase covers only the daemon-to-worker transport;
-task persistence, final-turn correlation, and UI target selection are added in
-later phases of the design.
+The implementation includes task persistence, `/loop` integration, final-turn
+capture, durable outbox recovery, and daemon-to-worker transport. Selecting an
+arbitrary observed group through Web Shell remains gated on #7109 integration.
 
 ## Baseline
 
-1. Run the globally installed `qwen serve` with one configured Channel.
-2. Confirm the current daemon scheduled-task API can create and run a task.
-3. Confirm the task result remains in its task session and is not proactively
-   sent to a selected IM conversation.
-4. Confirm daemon-managed Channel `/loop` is not yet backed by the durable task
-   API. Record this as the expected pre-change gap, not a test failure.
+1. Build current `main` plus this branch and start `qwen serve` with one
+   configured Channel and an isolated `QWEN_RUNTIME_DIR`.
+2. Confirm the Channel worker and workspace runtime are healthy.
+3. From an accepted IM conversation, create `/loop add` with a near-future cron.
+4. Confirm the task appears in the workspace scheduled-task API with a shared
+   session binding and the exact current-chat delivery target.
 
 ## Local transport verification
 
-1. Build the repository and start local `qwen serve` with the same Channel
-   configuration and an isolated `QWEN_RUNTIME_DIR`.
-2. Resolve a test conversation already accepted by the Channel configuration.
-3. Invoke the daemon's internal delivery test seam with a unique `deliveryId`,
-   the configured `channelName`, target snapshot, and fixed text.
-4. Verify exactly one message reaches the selected conversation with the
-   adapter's normal proactive formatting.
-5. Verify the parent request completes only after the adapter send completes.
-6. Verify no new Agent session, user prompt, webhook task, or model call is
-   created by delivery.
+1. Let the loop fire and record the Agent prompt count.
+2. Verify one outbox record is created only after a clean final answer.
+3. Verify exactly one message reaches the originating conversation using the
+   adapter's proactive formatting.
+4. Verify the worker acknowledgement occurs only after the adapter resolves.
+5. Verify delivery creates no new Agent session, prompt, webhook task, or model
+   call.
+6. Verify `/loop list`, `/loop show`, and `/loop cancel` operate on the durable
+   task while the shared conversation session remains available.
 
 ## Negative cases
 
-- Unknown or stopped worker returns `channel_worker_unavailable`.
+- Unknown or stopped worker retries as `channel_worker_unavailable`.
 - Mismatched Channel/target or unsupported target returns
   `channel_delivery_invalid` before a platform call.
 - Adapter/platform send failure returns `channel_delivery_failed` with a
@@ -42,20 +41,19 @@ later phases of the design.
 - Worker shutdown waits for an in-flight delivery only for the bounded drain
   window and never starts another Agent turn.
 
-## Later full-flow verification
+## Recovery and client compatibility
 
-After durable task integration lands:
-
-1. Create a task through IM `/loop`; verify it appears in the workspace
-   scheduled-task API and uses the original shared Channel session.
-2. Create a task through Web Shell/hosted BFF with an admitted observed target;
-   verify it uses an owned task session.
-3. Let both tasks fire and verify execution status and delivery status are
-   independent.
-4. Force a transient platform error; verify only delivery retries and the Agent
+1. Force a transient platform error; verify only delivery retries and the Agent
    prompt runs once.
-5. Restart the daemon after Agent completion but before delivery; verify outbox
-   recovery sends the stored final response reference.
+2. Restart the daemon after Agent completion but before delivery; verify outbox
+   recovery sends the stored final text.
+3. Verify Web Shell can read tasks containing additive `delivery` and
+   `sessionBinding` fields and still edits other fields without clearing them.
+4. After #7109 lands, wire its observed-target admission provider, create a task
+   through Web Shell/hosted BFF, and verify an owned task session delivers to
+   the selected group.
+5. Verify a hosted client uses the workspace-qualified REST route and owns no
+   local timer, task store, daemon token, or Channel credential.
 6. Stop the daemon before a deadline; verify the documented deployment
    boundary (no exact fire without an external wake-up) and catch-up behavior
    after restart.
