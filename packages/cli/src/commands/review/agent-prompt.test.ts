@@ -758,6 +758,159 @@ describe('--all-chunks — every auditor of a Step 5 round, in one call', () => 
   });
 });
 
+// The round label is the CLI's to print. Dogfooded on a 3A review: two
+// same-findings reverse-audit rounds shared one record, and the orchestrator —
+// wanting to tell its own launches apart — appended `(round N)` to the identity
+// line, the one line the delivery check anchors on. Both rounds read as
+// rewritten, and the review paid a repair round for a label.
+describe('--round — the CLI bakes the round into the identity line and the key', () => {
+  beforeEach(() => {
+    (writeStdoutLine as unknown as Mock).mockClear();
+  });
+
+  it('keys each round separately and prints the label inside the identity line', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ap-round-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN));
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '- **[Critical]** x.ts:1 — y');
+      const handler = agentPromptCommand.handler as (a: unknown) => void;
+      handler({ plan, role: 'reverse-audit', findings, round: 1 });
+      handler({ plan, role: 'reverse-audit', findings, round: 2 });
+
+      const recorded = readRecordedPrompts(plan);
+      const keys = [...recorded.keys()].sort();
+      // Two rounds, two receipts — same findings, same rules, and STILL two
+      // records, because sharing one is what pushed the orchestrator to
+      // hand-label the identity line.
+      expect(keys).toHaveLength(2);
+      expect(keys[0]).toMatch(/^reverse-audit--round-1--[0-9a-f]{12}$/);
+      expect(keys[1]).toMatch(/^reverse-audit--round-2--[0-9a-f]{12}$/);
+      for (const [n, key] of [
+        [1, keys[0]],
+        [2, keys[1]],
+      ] as const) {
+        const rec = recorded.get(key)!;
+        // The label lives INSIDE the identity line — exactly where the
+        // hand-edit used to put it — and the identity line stays first.
+        expect(rec.split('\n')[0]).toBe(
+          `You are review agent \`reverse-audit\` — Reverse audit agent (round ${n}).`,
+        );
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('carries the round through --all-chunks: every key and every identity line', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ap-round-batch-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN)); // chunks 13, 14, 15
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '- x');
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'reverse-audit',
+        'all-chunks': true,
+        findings,
+        round: 3,
+      });
+      const recorded = readRecordedPrompts(plan);
+      const keys = [...recorded.keys()].sort();
+      expect(keys).toHaveLength(3);
+      for (const c of [13, 14, 15]) {
+        const key = keys.find((k) =>
+          k.startsWith(`reverse-audit--chunk-${c}--round-3--`),
+        );
+        expect(key, `chunk ${c} key carries the round`).toBeDefined();
+        expect(recorded.get(key!)!.split('\n')[0]).toContain('(round 3).');
+      }
+      // Every printed block carries it too, not just the records.
+      const printed = (writeStdoutLine as unknown as Mock).mock
+        .calls[0][0] as string;
+      expect(printed.split('(round 3).')).toHaveLength(4);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('verify takes --round too — a re-verification round is its own receipt', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ap-round-verify-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN));
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '- **[Critical]** x.ts:1 — y');
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'verify',
+        findings,
+        round: 2,
+      });
+      const keys = [...readRecordedPrompts(plan).keys()];
+      expect(keys).toHaveLength(1);
+      expect(keys[0]).toMatch(/^verify--round-2--[0-9a-f]{12}$/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ['--roster', { roster: true }, /--roster builds every prompt/],
+    [
+      '--whole-diff',
+      { 'whole-diff': true },
+      /--whole-diff builds the diff-reading block alone/,
+    ],
+    ['a bare --chunk', { chunk: 13 }, /--round labels one round/],
+    ['nothing else', {}, /--round labels one round/],
+    [
+      'a role that runs once',
+      { role: '2' },
+      /--round labels one round of a findings role/,
+    ],
+  ])(
+    'refuses --round combined with %s — never silently dropped',
+    (_, extra, pattern) => {
+      // A dropped --round is a record keyed as a different launch: the round the
+      // caller believes it labelled matches no requirement downstream.
+      expect(() =>
+        (agentPromptCommand.handler as (a: unknown) => void)({
+          plan: '/nonexistent/plan.json',
+          round: 2,
+          ...extra,
+        }),
+      ).toThrow(pattern as RegExp);
+      expect(writeStdoutLine as unknown as Mock).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([[0], [-1], [1.5], [Number.NaN]])(
+    'refuses --round %s — rounds are 1-based integers',
+    (n) => {
+      const dir = mkdtempSync(join(tmpdir(), 'ap-round-bad-'));
+      try {
+        const plan = join(dir, 'plan.json');
+        writeFileSync(plan, JSON.stringify(PLAN));
+        const findings = join(dir, 'f.md');
+        writeFileSync(findings, '- x');
+        expect(() =>
+          (agentPromptCommand.handler as (a: unknown) => void)({
+            plan,
+            role: 'reverse-audit',
+            findings,
+            round: n,
+          }),
+        ).toThrow(/--round is a 1-based round number/);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
 describe('--roster — every prompt the plan requires, in one call', () => {
   beforeEach(() => {
     (writeStdoutLine as unknown as Mock).mockClear();
