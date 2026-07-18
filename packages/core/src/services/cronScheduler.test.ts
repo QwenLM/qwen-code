@@ -1268,6 +1268,26 @@ describe('CronScheduler', () => {
       });
     });
 
+    it('carries a durable task channel delivery snapshot into the fire', async () => {
+      const delivery = {
+        kind: 'channel' as const,
+        target: {
+          channelName: 'dingtalk',
+          chatId: 'group-42',
+          isGroup: true,
+        },
+      };
+      await writeCronTasks(tmpDir, [{ ...diskTask('deliver1'), delivery }]);
+      await scheduler.enableDurable('session-1');
+
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+      scheduler.tick(new Date(2025, 0, 15, 10, 30, 59));
+
+      expect(fired).toHaveLength(1);
+      expect(fired[0]!.delivery).toEqual(delivery);
+    });
+
     it('appends a scheduled run record on each recurring fire (newest last)', async () => {
       await writeCronTasks(tmpDir, [diskTask('rec1')]);
       await scheduler.enableDurable('session-1');

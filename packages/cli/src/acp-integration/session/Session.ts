@@ -40,6 +40,7 @@ import type {
   ToolArtifact,
   VisionBridgeResult,
   MemoryWriteCandidate,
+  CronTaskDelivery,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -149,6 +150,7 @@ import {
   splitImageParts,
   approxBase64Bytes,
   runWithRuntimeContentGenerator,
+  enqueueScheduledDelivery,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
@@ -755,12 +757,15 @@ interface CronFire {
    * calling `onFire` and writes the run record under the same value, so it
    * identifies this fire's entry in `runs[]`. */
   lastFiredAt?: number;
+  delivery?: CronTaskDelivery;
 }
 
 interface CronQueueItem {
   prompt: string;
   source: 'cron' | 'loop';
   taskId?: string;
+  firedAt?: number;
+  delivery?: CronTaskDelivery;
 }
 
 const MAX_NOTIFICATION_QUEUE = 20;
@@ -4104,6 +4109,8 @@ export class Session implements SessionContext {
         prompt: job.prompt,
         source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
         ...(job.id ? { taskId: job.id } : {}),
+        ...(job.lastFiredAt !== undefined ? { firedAt: job.lastFiredAt } : {}),
+        ...(job.delivery ? { delivery: job.delivery } : {}),
       });
       void this.#drainCronQueue();
     });
@@ -4252,6 +4259,8 @@ export class Session implements SessionContext {
         const promptId =
           this.config.getSessionId() + '########cron' + Date.now();
         let cronHadError = false;
+        let cronCompleted = false;
+        let finalAnswer = '';
         await withInteractionSpan(
           this.config,
           {
@@ -4444,6 +4453,7 @@ export class Session implements SessionContext {
                 const messageDisplay = this.#createMessageDisplayDispatcher(
                   ac.signal,
                 );
+                let turnAnswer = '';
 
                 let streamFailed = false;
                 try {
@@ -4467,6 +4477,7 @@ export class Session implements SessionContext {
                           part.thought,
                         );
                         if (!part.thought) {
+                          turnAnswer += part.text;
                           messageDisplay?.addChunk(part.text);
                         }
                       }
@@ -4551,6 +4562,10 @@ export class Session implements SessionContext {
                     await this.#preserveStoppedToolRun(toolRun, ac.signal);
                     return;
                   }
+                } else {
+                  // Tool-planning text from earlier model turns is not the
+                  // deliverable. Keep only the final no-tool turn.
+                  finalAnswer = turnAnswer;
                 }
               }
               if (this.todoStopGuard.needsStopInspection) {
@@ -4565,6 +4580,7 @@ export class Session implements SessionContext {
                   this.#stopCronAfterTokenLimit();
                 }
               }
+              cronCompleted = !ac.signal.aborted;
             } catch (error) {
               if (ac.signal.aborted) {
                 this.todoStopGuard.suspend();
@@ -4597,6 +4613,29 @@ export class Session implements SessionContext {
           () =>
             ac.signal.aborted ? 'cancelled' : cronHadError ? 'error' : 'ok',
         );
+        if (
+          cronCompleted &&
+          !cronHadError &&
+          item.delivery &&
+          item.taskId &&
+          item.firedAt !== undefined &&
+          finalAnswer.trim().length > 0
+        ) {
+          try {
+            await enqueueScheduledDelivery(this.config.getWorkingDir(), {
+              deliveryId: `${item.taskId}:${item.firedAt}`,
+              taskId: item.taskId,
+              firedAt: item.firedAt,
+              target: item.delivery.target,
+              text: finalAnswer,
+            });
+          } catch (error) {
+            debugLogger.error(
+              `Failed to persist scheduled Channel delivery ${item.taskId}:${item.firedAt}:`,
+              error,
+            );
+          }
+        }
       },
     );
   }

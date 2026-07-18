@@ -235,6 +235,20 @@ export type {
   CronTaskDelivery,
   CronTaskSessionOwnership,
 } from './services/cronTasksFile.js';
+export type {
+  ScheduledDeliveryStatus,
+  ScheduledDeliveryError,
+  ScheduledDeliveryRecord,
+  EnqueueScheduledDeliveryInput,
+  CompleteScheduledDeliveryInput,
+} from './services/scheduled-delivery-outbox.js';
+export {
+  getScheduledDeliveryOutboxPath,
+  readScheduledDeliveryOutbox,
+  enqueueScheduledDelivery,
+  claimScheduledDelivery,
+  completeScheduledDelivery,
+} from './services/scheduled-delivery-outbox.js';
 export {
   readCronTasks,
   updateCronTasks,

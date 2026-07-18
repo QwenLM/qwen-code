@@ -52,6 +52,7 @@ const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
 const debugLoggerDebugSpy = vi.hoisted(() => vi.fn());
 const runVisionBridgeSpy = vi.hoisted(() => vi.fn());
 const refreshMemoryAfterManagedWriteSpy = vi.hoisted(() => vi.fn());
+const enqueueScheduledDeliverySpy = vi.hoisted(() => vi.fn());
 const transcribeVoiceAudioSpy = vi.hoisted(() => vi.fn());
 // Records every LoopTickResolver construction's deps so a test can assert what
 // Session computed (e.g. the home confinement root) without a private-field peek.
@@ -72,6 +73,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     logPromptSuggestion: vi.fn(),
     runVisionBridge: runVisionBridgeSpy,
     refreshMemoryAfterManagedWrite: refreshMemoryAfterManagedWriteSpy,
+    enqueueScheduledDelivery: enqueueScheduledDeliverySpy,
     // Transparent recording wrapper: records the constructor deps, then behaves
     // exactly like the real resolver (subclass → instanceof + methods preserved).
     LoopTickResolver: class extends actual.LoopTickResolver {
@@ -439,6 +441,8 @@ describe('Session', () => {
     runVisionBridgeSpy.mockReset();
     refreshMemoryAfterManagedWriteSpy.mockReset();
     refreshMemoryAfterManagedWriteSpy.mockResolvedValue(false);
+    enqueueScheduledDeliverySpy.mockReset();
+    enqueueScheduledDeliverySpy.mockResolvedValue(undefined);
     transcribeVoiceAudioSpy.mockReset();
     currentModel = 'qwen3-code-plus';
     currentAuthType = AuthType.USE_OPENAI;
@@ -11554,7 +11558,13 @@ describe('Session', () => {
 
     describe('in-session cron MessageDisplay', () => {
       /** Mock scheduler that delivers exactly one in-session job through `start`. */
-      function schedulerFiring(job: { prompt: string }) {
+      function schedulerFiring(job: {
+        id?: string;
+        prompt: string;
+        cronExpr?: string;
+        lastFiredAt?: number;
+        delivery?: core.CronTaskDelivery;
+      }) {
         return {
           size: 1,
           hasPendingWork: true,
@@ -11617,6 +11627,100 @@ describe('Session', () => {
           displayed_text: 'cron result',
           is_final: true,
         });
+      });
+
+      it('enqueues the final cron answer for admitted Channel delivery', async () => {
+        const firedAt = 1_718_000_000_000;
+        const delivery: core.CronTaskDelivery = {
+          kind: 'channel',
+          target: {
+            channelName: 'dingtalk',
+            chatId: 'group-42',
+            isGroup: true,
+          },
+        };
+        const scheduler = schedulerFiring({
+          id: 'task-1',
+          prompt: 'nightly report',
+          cronExpr: '0 9 * * *',
+          lastFiredAt: firedAt,
+          delivery,
+        });
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    {
+                      content: {
+                        parts: [
+                          { text: 'internal', thought: true },
+                          { text: 'daily ' },
+                          { text: 'result' },
+                        ],
+                      },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        await vi.waitFor(() =>
+          expect(enqueueScheduledDeliverySpy).toHaveBeenCalledWith(
+            process.cwd(),
+            {
+              deliveryId: `task-1:${firedAt}`,
+              taskId: 'task-1',
+              firedAt,
+              target: delivery.target,
+              text: 'daily result',
+            },
+          ),
+        );
+      });
+
+      it('does not enqueue Channel delivery when the cron model stream fails', async () => {
+        const scheduler = schedulerFiring({
+          id: 'task-1',
+          prompt: 'nightly report',
+          cronExpr: '0 9 * * *',
+          lastFiredAt: 1_718_000_000_000,
+          delivery: {
+            kind: 'channel',
+            target: { channelName: 'dingtalk', chatId: 'group-42' },
+          },
+        });
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockRejectedValueOnce(new Error('model unavailable'));
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+        await vi.waitFor(() =>
+          expect(agentMessageChunks()).toContain(
+            '[cron error] model unavailable',
+          ),
+        );
+        expect(enqueueScheduledDeliverySpy).not.toHaveBeenCalled();
       });
 
       it('suppresses is_final for MessageDisplay when a cron fire is cancelled mid-stream', async () => {
