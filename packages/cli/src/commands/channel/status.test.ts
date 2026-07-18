@@ -106,6 +106,13 @@ describe('statusCommand', () => {
           state: 'running',
           channels: ['telegram'],
           pid: 42,
+          startupFailures: [
+            {
+              channel: 'feishu',
+              phase: 'connect',
+              message: 'connection refused',
+            },
+          ],
         },
       ],
     });
@@ -125,6 +132,9 @@ describe('statusCommand', () => {
     expect(mockReadServiceInfo).not.toHaveBeenCalled();
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining('enabled'),
+    );
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      '[Channel] Startup failure (workspace=/work, channel=feishu, phase=connect): connection refused',
     );
   });
 

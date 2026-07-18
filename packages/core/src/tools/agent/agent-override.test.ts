@@ -217,15 +217,13 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     );
   });
 
-  it('isolates child plan state from a parent that is already in plan mode', async () => {
+  it('isolates child approval-mode revisions from a parent in plan mode', async () => {
     const parent = await createParentWithRegistry();
     vi.spyOn(parent, 'isTrustedFolder').mockReturnValue(true);
     parent.setApprovalMode(ApprovalMode.YOLO);
-    parent.setApprovalMode(ApprovalMode.PLAN, { enteredByModel: true });
-
-    const parentGateState = parent.getPlanGateState();
+    parent.setApprovalMode(ApprovalMode.PLAN);
+    const parentRevision = parent.getApprovalModeRevision();
     expect(parent.getPrePlanMode()).toBe(ApprovalMode.YOLO);
-    expect(parentGateState?.enteredByModel).toBe(true);
 
     const { config: child } = await createApprovalModeOverride(
       parent,
@@ -233,21 +231,15 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     );
 
     expect(child.getPrePlanMode()).toBe(ApprovalMode.YOLO);
-    const childGateState = child.getPlanGateState();
-    expect(childGateState).not.toBe(parentGateState);
-    expect(childGateState?.lastFindings).not.toBe(
-      parentGateState?.lastFindings,
-    );
+    expect(child.getApprovalModeRevision()).toBe(0);
 
     child.setApprovalMode(ApprovalMode.DEFAULT);
     child.setApprovalMode(ApprovalMode.PLAN);
 
     expect(child.getApprovalMode()).toBe(ApprovalMode.PLAN);
-    expect(child.getPlanGateState()?.entryId).toBe(
-      (parentGateState?.entryId ?? 0) + 1,
-    );
+    expect(child.getApprovalModeRevision()).toBe(2);
     expect(parent.getApprovalMode()).toBe(ApprovalMode.PLAN);
-    expect(parent.getPlanGateState()).toBe(parentGateState);
+    expect(parent.getApprovalModeRevision()).toBe(parentRevision);
   });
 
   it('starts child AUTO denial state independent from the parent', async () => {

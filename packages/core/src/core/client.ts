@@ -10,6 +10,7 @@ import type {
   Content,
   GenerateContentConfig,
   GenerateContentResponse,
+  Part,
   PartListUnion,
   Tool,
 } from '@google/genai';
@@ -26,6 +27,7 @@ import {
   type MicrocompactMeta,
   type MicrocompactOptions,
 } from '../services/microcompaction/microcompact.js';
+import { slimCompactionInput } from '../services/compactionInputSlimming.js';
 import {
   activeGoalEquals,
   getActiveGoal,
@@ -47,6 +49,7 @@ import {
   getCoreSystemPrompt,
   getCustomSystemPrompt,
   getPlanModeSystemReminder,
+  resolveInteractionMode,
 } from './prompts.js';
 import {
   CompressionStatus,
@@ -142,6 +145,8 @@ const MAX_RECENT_TOOL_NAMES_FOR_MEMORY = 20;
 export enum SendMessageType {
   UserQuery = 'userQuery',
   ToolResult = 'toolResult',
+  /** User input appended at a sampling boundary within the active turn. */
+  Steer = 'steer',
   Retry = 'retry',
   Hook = 'hook',
   /** Cron-fired prompt. Behaves like UserQuery but skips UserPromptSubmit hook. */
@@ -159,6 +164,10 @@ export enum SendMessageType {
 
 export interface SendMessageOptions {
   type: SendMessageType;
+  /** Returns user input waiting to steer the active turn at a model boundary. */
+  getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
+  /** Steer lease already appended to this request, settled after history push. */
+  steerInput?: SteerInput;
   /** Track stop hook iterations to prevent infinite loops and display loop info */
   stopHookState?: {
     iterationCount: number;
@@ -168,6 +177,14 @@ export interface SendMessageOptions {
   notificationDisplayText?: string;
   /** Model override from skill execution. When present, overrides the session model for this turn. */
   modelOverride?: string;
+}
+
+export interface SteerInput {
+  parts: Part[];
+  /** Commits UI/recording side effects after the request accepts the input. */
+  accept: () => void;
+  /** Restores the input when the next model request never accepts it. */
+  restore: () => void;
 }
 
 const EMPTY_RELEVANT_AUTO_MEMORY_RESULT: RelevantAutoMemoryPromptResult = {
@@ -798,6 +815,7 @@ export class GeminiClient {
       userMemory,
       this.config.getModel(),
       appendSystemPrompt,
+      resolveInteractionMode(this.config),
     );
     return gitStatus ? base + '\n\n' + gitStatus : base;
   }
@@ -1227,7 +1245,9 @@ export class GeminiClient {
     // Clear stale cache params on session reset to prevent cross-session leakage
     clearCacheSafeParams();
 
-    const profiler = createSessionStartProfiler(sessionStartSource);
+    const profiler = createSessionStartProfiler(sessionStartSource, {
+      sessionId: this.config.getSessionId(),
+    });
     let history: Content[] = [];
     let snapshotEntries: AvailableSkillEntry[] = [];
     let deferredReminderCount = 0;
@@ -1827,6 +1847,25 @@ export class GeminiClient {
     const currentPushCount = () =>
       this.getChat().getUserContentPushCount?.() ?? 0;
 
+    const settleSteerInput = (
+      steerInput: SteerInput | undefined,
+      pushCountBefore: number,
+    ) => {
+      if (!steerInput) return;
+      try {
+        if (currentPushCount() > pushCountBefore) {
+          steerInput.accept();
+        } else {
+          steerInput.restore();
+        }
+      } catch (error) {
+        debugLogger.warn(`Failed to settle steer input: ${error}`);
+      }
+    };
+
+    const attachedSteerInput = options?.steerInput;
+    const attachedSteerPushCount = currentPushCount();
+
     const restoreStrippedRetryEntries = () => {
       if (strippedRetryEntries.length === 0) {
         return;
@@ -1876,6 +1915,7 @@ export class GeminiClient {
     const messageBus = this.config.getMessageBus();
     if (
       messageType !== SendMessageType.Retry &&
+      messageType !== SendMessageType.Steer &&
       messageType !== SendMessageType.Cron &&
       messageType !== SendMessageType.Notification &&
       // Teammate envelopes are machine-driven re-entries like Cron /
@@ -1916,6 +1956,7 @@ export class GeminiClient {
             originalPrompt: promptText,
           },
         };
+        settleSteerInput(attachedSteerInput, attachedSteerPushCount);
         return new Turn(this.getChat(), prompt_id);
       }
 
@@ -2150,6 +2191,32 @@ export class GeminiClient {
           endInteractionSpan('error', { errorMessage: 'max turns exhausted' });
         return new Turn(this.getChat(), prompt_id);
       }
+
+      const takeSteerInput = async (
+        nextTurnBudget: number,
+      ): Promise<SteerInput | undefined> => {
+        if (
+          nextTurnBudget <= 0 ||
+          !signal ||
+          signal.aborted ||
+          !options?.getSteerInput
+        ) {
+          return undefined;
+        }
+        const maxSessionTurns = this.config.getMaxSessionTurns();
+        if (maxSessionTurns > 0 && this.sessionTurnCount >= maxSessionTurns) {
+          return undefined;
+        }
+        const steerInput = await options.getSteerInput(signal);
+        if (!steerInput || steerInput.parts.length === 0) {
+          return undefined;
+        }
+        if (signal.aborted) {
+          steerInput.restore();
+          return undefined;
+        }
+        return steerInput;
+      };
 
       // Auto-compaction happens inside GeminiChat.sendMessageStream and surfaces
       // via the `compressed → ChatCompressed` bridge in turn.ts. Manual /compress
@@ -2545,6 +2612,34 @@ export class GeminiClient {
       // Track API completion time for thinking block idle cleanup
       this.lastApiCompletionTimestamp = Date.now();
 
+      if (!turn.pendingToolCalls.length) {
+        const steerTurnBudget = boundedTurns - 1;
+        const steerInput = await takeSteerInput(steerTurnBudget);
+        if (steerInput) {
+          const pushCountBefore = currentPushCount();
+          let steeredTurn: Turn;
+          try {
+            steeredTurn = yield* this.sendMessageStream(
+              steerInput.parts,
+              signal,
+              prompt_id,
+              {
+                ...options,
+                type: SendMessageType.Steer,
+                steerInput: undefined,
+              },
+              steerTurnBudget,
+            );
+          } finally {
+            settleSteerInput(steerInput, pushCountBefore);
+          }
+          if (isTopLevelInteraction)
+            endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
+          normalCompletion = true;
+          return steeredTurn;
+        }
+      }
+
       // Fire Stop hook through MessageBus (only if hooks are enabled and registered)
       // This must be done before any early returns to ensure hooks are always triggered
       if (
@@ -2700,23 +2795,34 @@ export class GeminiClient {
           // stopHookBlockingCap / MAX_GOAL_ITERATIONS.
           this.loopDetector.reset(prompt_id);
 
-          const continueRequest = [{ text: continueReason }];
           const activeGoal = getActiveGoal(this.config.getSessionId());
           const hookTurnBudget = activeGoal ? boundedTurns : boundedTurns - 1;
-          const hookTurn = yield* this.sendMessageStream(
-            continueRequest,
-            signal,
-            prompt_id,
-            {
-              type: SendMessageType.Hook,
-              modelOverride: options?.modelOverride,
-              stopHookState: {
-                iterationCount: currentIterationCount,
-                reasons: currentReasons,
+          const pendingSteer = await takeSteerInput(hookTurnBudget);
+          const continueRequest: Part[] = [{ text: continueReason }];
+          if (pendingSteer) {
+            continueRequest.push({ text: '\n\n' }, ...pendingSteer.parts);
+          }
+          const pushCountBefore = currentPushCount();
+          let hookTurn: Turn;
+          try {
+            hookTurn = yield* this.sendMessageStream(
+              continueRequest,
+              signal,
+              prompt_id,
+              {
+                type: SendMessageType.Hook,
+                modelOverride: options?.modelOverride,
+                getSteerInput: options?.getSteerInput,
+                stopHookState: {
+                  iterationCount: currentIterationCount,
+                  reasons: currentReasons,
+                },
               },
-            },
-            hookTurnBudget,
-          );
+              hookTurnBudget,
+            );
+          } finally {
+            settleSteerInput(pendingSteer, pushCountBefore);
+          }
           if (isTopLevelInteraction)
             endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
           // Preserve the pending prefetch: the inner Hook turn we just
@@ -2741,10 +2847,14 @@ export class GeminiClient {
         try {
           const chat = this.getChat();
           const maxHistoryForCache = 40;
-          const cachedHistory = this.getHistoryTailShallow(
+          const historyForCache = this.getHistoryTailShallow(
             maxHistoryForCache,
             true,
           );
+          const cachedHistory = slimCompactionInput(
+            historyForCache,
+            this.config.getEffectiveInputModalities(),
+          ).slimmedHistory;
           saveCacheSafeParams(
             chat.getGenerationConfig(),
             cachedHistory,
@@ -2778,14 +2888,30 @@ export class GeminiClient {
           ),
         );
         if (nextSpeakerCheck?.next_speaker === 'model') {
-          const nextRequest = [{ text: 'Please continue.' }];
-          const continueTurn = yield* this.sendMessageStream(
-            nextRequest,
-            signal,
-            prompt_id,
-            { ...options, type: SendMessageType.Hook },
-            boundedTurns - 1,
-          );
+          const continueTurnBudget = boundedTurns - 1;
+          const pendingSteer = await takeSteerInput(continueTurnBudget);
+          const nextRequest: Part[] = pendingSteer
+            ? pendingSteer.parts
+            : [{ text: 'Please continue.' }];
+          const pushCountBefore = currentPushCount();
+          let continueTurn: Turn;
+          try {
+            continueTurn = yield* this.sendMessageStream(
+              nextRequest,
+              signal,
+              prompt_id,
+              {
+                ...options,
+                type: pendingSteer
+                  ? SendMessageType.Steer
+                  : SendMessageType.Hook,
+                steerInput: undefined,
+              },
+              continueTurnBudget,
+            );
+          } finally {
+            settleSteerInput(pendingSteer, pushCountBefore);
+          }
           if (isTopLevelInteraction)
             endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
           // Preserve the pending prefetch: same reasoning as the
@@ -2818,6 +2944,7 @@ export class GeminiClient {
       normalCompletion = true;
       return turn;
     } finally {
+      settleSteerInput(attachedSteerInput, attachedSteerPushCount);
       restoreStrippedRetryEntries();
       // Belt-and-suspenders: close out the MessageDisplay dispatcher on any
       // exit the explicit finish() sites above didn't cover (an uncaught
@@ -2872,10 +2999,15 @@ export class GeminiClient {
       // the target model's provider.
       const {
         contentGenerator,
+        contentGeneratorConfig,
         retryAuthType,
         retryErrorCodes,
         model: requestModel,
       } = await this.config.getBaseLlmClient().resolveForModel(model);
+      const requestContents = slimCompactionInput(
+        contents,
+        contentGeneratorConfig?.modalities ?? {},
+      ).slimmedHistory;
 
       const apiCall = () => {
         currentAttemptModel = requestModel;
@@ -2884,7 +3016,7 @@ export class GeminiClient {
           {
             model: requestModel,
             config: requestConfig,
-            contents,
+            contents: requestContents,
           },
           promptId,
         );

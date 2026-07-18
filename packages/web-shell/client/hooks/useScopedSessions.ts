@@ -4,6 +4,7 @@ import type {
   DaemonSessionArchiveState,
   DaemonSessionSummary,
 } from '@qwen-code/sdk/daemon';
+import { WEB_SHELL_SESSION_SOURCE_TYPE } from '../constants/sessions';
 
 interface ScopedSessionsOptions {
   autoLoad?: boolean;
@@ -40,6 +41,7 @@ export function useScopedSessions(
     archiveState,
     view,
     group,
+    sourceType: WEB_SHELL_SESSION_SOURCE_TYPE,
   });
   const {
     reload: reloadPrimary,
@@ -64,7 +66,13 @@ export function useScopedSessions(
     try {
       const sessions = await workspace.client
         .workspaceByCwd(workspaceCwd)
-        .listWorkspaceSessions({ pageSize, archiveState, view, group });
+        .listWorkspaceSessions({
+          pageSize,
+          archiveState,
+          view,
+          group,
+          sourceType: WEB_SHELL_SESSION_SOURCE_TYPE,
+        });
       const scopedSessions = sessions.map((session) => ({
         ...session,
         workspaceCwd,

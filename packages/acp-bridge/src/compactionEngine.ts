@@ -65,6 +65,23 @@ interface ReplaySegment {
   turnCount: number;
 }
 
+function replayRecordId(event: BridgeEvent): string | undefined {
+  if (event.type !== 'session_update') return undefined;
+  const data = event.data;
+  if (!data || typeof data !== 'object' || Array.isArray(data))
+    return undefined;
+  const update = (data as Record<string, unknown>)['update'];
+  if (!update || typeof update !== 'object' || Array.isArray(update)) {
+    return undefined;
+  }
+  const meta = (update as Record<string, unknown>)['_meta'];
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) {
+    return undefined;
+  }
+  const recordId = (meta as Record<string, unknown>)['qwen.session.recordId'];
+  return typeof recordId === 'string' ? recordId : undefined;
+}
+
 export interface ReplayWindowEviction {
   droppedBytes: number;
   droppedEvents: number;
@@ -168,11 +185,29 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
   seedReplayEvents(events: BridgeEvent[]): void {
     if (this.closed) return;
     this.resetReplayWindow();
+    let recordEvents: BridgeEvent[] = [];
+    let recordId: string | undefined;
+    const flushRecord = () => {
+      this.addReplaySegment(recordEvents, 0);
+      recordEvents = [];
+      recordId = undefined;
+    };
     for (const event of events) {
       this.recordLastEventId(event);
       if (TRANSIENT_TYPES.has(event.type)) continue;
-      this.addReplaySegment([event], 0);
+      const nextRecordId = replayRecordId(event);
+      if (nextRecordId === undefined) {
+        flushRecord();
+        this.addReplaySegment([event], 0);
+        continue;
+      }
+      if (recordId !== undefined && recordId !== nextRecordId) {
+        flushRecord();
+      }
+      recordId = nextRecordId;
+      recordEvents.push(event);
     }
+    flushRecord();
     this.liveJournal = [];
     this.slots = [];
     this.toolSlotIndex.clear();
@@ -200,6 +235,10 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
 
     switch (updateType) {
       case 'agent_message_chunk': {
+        if (hasTodoStopGuardDiscreteMeta(data?.update?._meta)) {
+          this.slots.push({ kind: 'misc', event });
+          break;
+        }
         this.mergeTextSlot('text', event, data);
         break;
       }
@@ -508,6 +547,15 @@ function extractParentToolCallIdFromMeta(meta: unknown): string | undefined {
     return typeof val === 'string' && val.length > 0 ? val : undefined;
   }
   return undefined;
+}
+
+function hasTodoStopGuardDiscreteMeta(meta: unknown): boolean {
+  return (
+    typeof meta === 'object' &&
+    meta !== null &&
+    (meta as Record<string, unknown>)['qwenDiscreteMessage'] === true &&
+    (meta as Record<string, unknown>)['source'] === 'todo_stop_guard'
+  );
 }
 
 function mergeToolCallEvent(

@@ -26,6 +26,10 @@ import {
   type ConversationRecord,
 } from './sessionService.js';
 import {
+  SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+  SessionTranscriptTooLargeError,
+} from './session-transcript-reader.js';
+import {
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   stableSessionArtifactId,
 } from './session-artifact-persistence.js';
@@ -234,6 +238,100 @@ describe('SessionService', () => {
       expect(vi.mocked(jsonl.readLines).mock.calls[0][0]).toContain(
         '/chats/archive/',
       );
+    });
+
+    it('getSessionInfoCounts aggregates active and archived membership', async () => {
+      readdirSyncSpy.mockImplementation((dir: fs.PathLike) => {
+        if (dir.toString().endsWith(`${path.sep}archive`)) {
+          return [`${sessionIdB}.jsonl`] as unknown as Array<fs.Dirent<Buffer>>;
+        }
+        return [
+          `${sessionIdA}.jsonl`,
+          'archive',
+          'not-a-session.txt',
+        ] as unknown as Array<fs.Dirent<Buffer>>;
+      });
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes(sessionIdA)) return [recordA1];
+          if (filePath.includes(sessionIdB)) return [recordB1];
+          return [];
+        },
+      );
+
+      const result = await sessionService.getSessionInfoCounts();
+
+      expect(result).toEqual({
+        active: 1,
+        archived: 1,
+        total: 2,
+        truncated: false,
+      });
+      // Membership scan only needs the first record — never a deep read.
+      for (const [, lineLimit] of vi.mocked(jsonl.readLines).mock.calls) {
+        expect(lineLimit).toBe(1);
+      }
+    });
+
+    it('getSessionInfoCounts excludes sessions from other projects', async () => {
+      readdirSyncSpy.mockImplementation((dir: fs.PathLike) =>
+        dir.toString().endsWith(`${path.sep}archive`)
+          ? ([] as unknown as Array<fs.Dirent<Buffer>>)
+          : ([`${sessionIdA}.jsonl`] as unknown as Array<fs.Dirent<Buffer>>),
+      );
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        { ...recordA1, cwd: '/different/project' },
+      ]);
+      vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
+        cwd === '/test/project/root'
+          ? 'test-project-hash'
+          : 'other-project-hash',
+      );
+
+      await expect(sessionService.getSessionInfoCounts()).resolves.toEqual({
+        active: 0,
+        archived: 0,
+        total: 0,
+        truncated: false,
+      });
+    });
+
+    it('getSessionInfoCounts returns zeros when chats dirs are missing', async () => {
+      const error = new Error('ENOENT') as NodeJS.ErrnoException;
+      error.code = 'ENOENT';
+      readdirSyncSpy.mockImplementation(() => {
+        throw error;
+      });
+
+      await expect(sessionService.getSessionInfoCounts()).resolves.toEqual({
+        active: 0,
+        archived: 0,
+        total: 0,
+        truncated: false,
+      });
+    });
+
+    it('marks counts truncated when a candidate session cannot be read', async () => {
+      readdirSyncSpy.mockImplementation((dir: fs.PathLike) =>
+        dir.toString().endsWith(`${path.sep}archive`)
+          ? ([] as unknown as Array<fs.Dirent<Buffer>>)
+          : ([`${sessionIdA}.jsonl`, `${sessionIdB}.jsonl`] as unknown as Array<
+              fs.Dirent<Buffer>
+            >),
+      );
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes(sessionIdA)) return [recordA1];
+          throw new Error('unreadable');
+        },
+      );
+
+      await expect(sessionService.getSessionInfoCounts()).resolves.toEqual({
+        active: 1,
+        archived: 0,
+        total: 1,
+        truncated: true,
+      });
     });
 
     it('should extract prompt text from first record', async () => {
@@ -472,6 +570,85 @@ describe('SessionService', () => {
       expect(loaded?.conversation.messages[0].uuid).toBe('b1');
       expect(loaded?.conversation.messages[1].uuid).toBe('b2');
       expect(loaded?.lastCompletedUuid).toBe('b2');
+    });
+
+    it('reads archived sessions only through the explicit read-only method', async () => {
+      const now = Date.now();
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.read).mockResolvedValue([recordB1, recordB2]);
+
+      const loaded = await sessionService.loadArchivedSession(sessionIdB, {
+        maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+      });
+
+      expect(loaded?.conversation.messages).toHaveLength(2);
+      expect(vi.mocked(jsonl.read)).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdB}.jsonl`),
+      );
+      expect(statSyncSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('accepts an archived session exactly at the requested size limit', async () => {
+      statSyncSpy.mockReturnValue({
+        size: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.read).mockResolvedValue([recordB1, recordB2]);
+
+      await expect(
+        sessionService.loadArchivedSession(sessionIdB, {
+          maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+        }),
+      ).resolves.toBeDefined();
+    });
+
+    it('rejects an archived session above the requested size limit', async () => {
+      const snapshotSize = SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1;
+      statSyncSpy.mockReturnValue({
+        size: snapshotSize,
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+
+      const load = sessionService.loadArchivedSession(sessionIdB, {
+        maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+      });
+
+      await expect(load).rejects.toEqual(
+        new SessionTranscriptTooLargeError(
+          sessionIdB,
+          snapshotSize,
+          SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+        ),
+      );
+      expect(vi.mocked(jsonl.read)).not.toHaveBeenCalled();
+    });
+
+    it('rejects invalid archived session ids before accessing storage', async () => {
+      await expect(
+        sessionService.loadArchivedSession('../outside', {
+          maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+        }),
+      ).resolves.toBeUndefined();
+      expect(statSyncSpy).not.toHaveBeenCalled();
+      expect(vi.mocked(jsonl.read)).not.toHaveBeenCalled();
+    });
+
+    it('returns undefined when the archived file is missing at the size check', async () => {
+      statSyncSpy.mockImplementationOnce(() => {
+        throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+      });
+
+      await expect(
+        sessionService.loadArchivedSession(sessionIdB, {
+          maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+        }),
+      ).resolves.toBeUndefined();
+      expect(vi.mocked(jsonl.read)).not.toHaveBeenCalled();
     });
 
     it('loads artifact side records attached to the active branch', async () => {

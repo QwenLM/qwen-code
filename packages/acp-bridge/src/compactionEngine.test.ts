@@ -23,6 +23,21 @@ function makeTextChunk(id: number, text: string): BridgeEvent {
   };
 }
 
+function makeDiscreteTextChunk(
+  id: number,
+  text: string,
+  attempt: number,
+): BridgeEvent {
+  const event = makeTextChunk(id, text);
+  (event.data as { update: Record<string, unknown> }).update['_meta'] = {
+    source: 'todo_stop_guard',
+    qwenDiscreteMessage: true,
+    attempt,
+    maxAttempts: 2,
+  };
+  return event;
+}
+
 function makeThoughtChunk(id: number, text: string): BridgeEvent {
   return {
     id,
@@ -226,6 +241,41 @@ describe('TurnBoundaryCompactionEngine', () => {
       };
       expect(data.update.sessionUpdate).toBe('agent_thought_chunk');
       expect(data.update.content.text).toBe('Let me think...');
+    });
+
+    it('preserves discrete agent messages and their metadata', () => {
+      const engine = new TurnBoundaryCompactionEngine();
+      engine.ingest(makeTextChunk(1, 'Before'));
+      engine.ingest(makeDiscreteTextChunk(2, 'Guard one', 1));
+      engine.ingest(makeDiscreteTextChunk(3, 'Guard two', 2));
+      engine.ingest(makeDiscreteTextChunk(4, 'Guard exhausted', 2));
+      engine.ingest(makeTextChunk(5, 'After'));
+      engine.ingest(makeTurnComplete(6));
+
+      const events = engine.snapshot().compactedTurns;
+      expect(extractTexts(events)).toEqual([
+        'Before',
+        'Guard one',
+        'Guard two',
+        'Guard exhausted',
+        'After',
+      ]);
+      const guardEvents = events.filter((event) => {
+        const data = event.data as {
+          update?: { _meta?: Record<string, unknown> };
+        };
+        return data.update?._meta?.['source'] === 'todo_stop_guard';
+      });
+      expect(guardEvents).toHaveLength(3);
+      expect(
+        guardEvents.map((event) => {
+          const data = event.data as {
+            update: { _meta: Record<string, unknown> };
+          };
+          return data.update._meta['attempt'];
+        }),
+      ).toEqual([1, 2, 2]);
+      expect(guardEvents.map((event) => event.id)).toEqual([2, 3, 4]);
     });
 
     it('keeps user messages as-is', () => {
@@ -930,6 +980,39 @@ describe('EventBus + CompactionEngine integration', () => {
         'truncatedTurns'
       ],
     ).toBeUndefined();
+  });
+
+  it('seedReplayEvents evicts whole persisted records', () => {
+    const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 512 });
+    const bus = new EventBus(100, undefined, engine);
+    const update = (recordId: string, text: string) => ({
+      type: 'session_update' as const,
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `${text}-${'x'.repeat(600)}` },
+          _meta: { 'qwen.session.recordId': recordId },
+        },
+      },
+    });
+
+    bus.seedReplayEvents([
+      update('old-record', 'old-1'),
+      update('old-record', 'old-2'),
+      update('new-record', 'new-1'),
+      update('new-record', 'new-2'),
+    ]);
+
+    const snapshot = bus.snapshotReplay()!;
+    expect(snapshot.compactedTurns[0]?.type).toBe('history_truncated');
+    expect(extractTexts(snapshot.compactedTurns)).toEqual([
+      `new-1-${'x'.repeat(600)}`,
+      `new-2-${'x'.repeat(600)}`,
+    ]);
+    expect(snapshot.compactedTurns[0]?.data).toMatchObject({
+      truncatedEvents: 2,
+      retainedEvents: 2,
+    });
   });
 
   it('seedReplayEvents replaces prior replay and truncation state', () => {

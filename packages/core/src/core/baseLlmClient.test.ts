@@ -482,6 +482,47 @@ describe('BaseLlmClient', () => {
     });
   });
 
+  it('filters unsupported media from text and JSON side queries', async () => {
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      model: 'test-model',
+      authType: AuthType.USE_GEMINI,
+      modalities: { pdf: true },
+    });
+    const contents = [
+      {
+        role: 'user',
+        parts: [
+          { inlineData: { mimeType: 'image/png', data: 'image-bytes' } },
+          { inlineData: { mimeType: 'application/pdf', data: 'pdf-bytes' } },
+        ],
+      },
+    ];
+    mockGenerateContent
+      .mockResolvedValueOnce(createMockTextResponse('ok'))
+      .mockResolvedValueOnce(createMockResponseWithFunctionCall({ ok: true }));
+    vi.mocked(getFunctionCalls).mockReturnValue([
+      { name: 'respond_in_schema', args: { ok: true } },
+    ]);
+
+    await client.generateText({
+      contents,
+      model: 'test-model',
+      abortSignal: abortController.signal,
+    });
+    await client.generateJson({
+      contents,
+      schema: { type: 'object' },
+      model: 'test-model',
+      abortSignal: abortController.signal,
+    });
+
+    for (const [request] of mockGenerateContent.mock.calls) {
+      const sent = JSON.stringify(request.contents);
+      expect(sent).not.toContain('image-bytes');
+      expect(sent).toContain('pdf-bytes');
+    }
+  });
+
   describe('generateEmbedding', () => {
     const texts = ['hello world', 'goodbye world'];
     const testEmbeddingModel = 'test-embedding-model';
@@ -856,11 +897,17 @@ describe('BaseLlmClient', () => {
         return undefined;
       });
 
+      const targetConfig = {
+        model: fastModel,
+        authType: AuthType.USE_ANTHROPIC,
+      };
+      mockBuildAgentContentGeneratorConfig.mockReturnValue(targetConfig);
       const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
 
       const resolved = await c.resolveForModel(fastModel);
 
       expect(resolved.contentGenerator).toBe(fastContentGenerator);
+      expect(resolved.contentGeneratorConfig).toBe(targetConfig);
       expect(resolved.retryAuthType).toBe(AuthType.USE_ANTHROPIC);
       expect(mockBuildAgentContentGeneratorConfig).toHaveBeenCalledWith(
         crossProviderConfig,
@@ -871,6 +918,56 @@ describe('BaseLlmClient', () => {
         }),
       );
       expect(mockCreateContentGenerator).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not confuse a qualified cross-provider namesake with the primary', async () => {
+      vi.mocked(crossProviderConfig.getModel).mockReturnValue('shared-model');
+      getResolvedModel.mockImplementation((authType: string, model: string) =>
+        authType === AuthType.USE_ANTHROPIC && model === 'shared-model'
+          ? {
+              id: 'shared-model',
+              authType: AuthType.USE_ANTHROPIC,
+              baseUrl: '',
+            }
+          : undefined,
+      );
+
+      const resolved = await new BaseLlmClient(
+        mockContentGenerator,
+        crossProviderConfig,
+      ).resolveForModel('anthropic:shared-model', { failClosed: true });
+
+      expect(resolved.contentGenerator).toBe(fastContentGenerator);
+      expect(mockCreateContentGenerator).toHaveBeenCalledOnce();
+    });
+
+    it('keeps explicit vision capability on the resolved generator config', async () => {
+      getResolvedModel.mockImplementation((authType: string, model: string) =>
+        authType === AuthType.USE_ANTHROPIC && model === fastModel
+          ? {
+              id: fastModel,
+              authType: AuthType.USE_ANTHROPIC,
+              baseUrl: 'https://api.anthropic.com',
+              capabilities: { vision: true },
+            }
+          : undefined,
+      );
+      mockBuildAgentContentGeneratorConfig.mockReturnValue({
+        model: fastModel,
+        authType: AuthType.USE_ANTHROPIC,
+        modalities: {},
+      });
+
+      const resolved = await new BaseLlmClient(
+        mockContentGenerator,
+        crossProviderConfig,
+      ).resolveForModel(fastModel, { failClosed: true });
+
+      expect(resolved.contentGeneratorConfig.modalities?.image).toBe(true);
+      expect(mockCreateContentGenerator).toHaveBeenCalledWith(
+        expect.objectContaining({ modalities: { image: true } }),
+        crossProviderConfig,
+      );
     });
 
     it('resolves same-id model selectors by baseUrl when provided', async () => {
@@ -1092,6 +1189,20 @@ describe('BaseLlmClient', () => {
       const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
 
       await c.resolveForModel(fastModel);
+      await c.resolveForModel(fastModel);
+
+      expect(mockCreateContentGenerator).toHaveBeenCalledTimes(1);
+    });
+
+    it('shares a successful per-model generator across failClosed modes', async () => {
+      getResolvedModel.mockReturnValue({
+        authType: AuthType.USE_ANTHROPIC,
+        envKey: 'ANTHROPIC_API_KEY',
+      });
+
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      await c.resolveForModel(fastModel, { failClosed: true });
       await c.resolveForModel(fastModel);
 
       expect(mockCreateContentGenerator).toHaveBeenCalledTimes(1);

@@ -464,8 +464,7 @@ export class ContentGenerationPipeline {
    * 1. Convert OpenAI chunks to Gemini format while preserving original chunks
    * 2. Filter empty responses
    * 3. Handle chunk merging for providers that send finishReason and usageMetadata separately
-   * 4. Collect both formats for logging
-   * 5. Handle success/error logging
+   * 4. Handle success/error logging
    */
   private async *processStreamWithLogging(
     stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
@@ -473,8 +472,6 @@ export class ContentGenerationPipeline {
     request: GenerateContentParameters,
     userPromptId: string,
   ): AsyncGenerator<GenerateContentResponse> {
-    const collectedGeminiResponses: GenerateContentResponse[] = [];
-
     // State for handling chunk merging.
     // pendingFinishResponse holds a finish chunk waiting to be merged with
     // a subsequent usage-metadata chunk before yielding.
@@ -579,7 +576,6 @@ export class ContentGenerationPipeline {
               pending.usageMetadata = response.usageMetadata;
             }
           }
-          collectedGeminiResponses.push(response);
           continue;
         }
 
@@ -593,7 +589,7 @@ export class ContentGenerationPipeline {
 
         const shouldYield = this.handleChunkMerging(
           response,
-          collectedGeminiResponses,
+          pendingFinishResponse,
           (mergedResponse) => {
             pendingFinishResponse = mergedResponse;
           },
@@ -698,55 +694,44 @@ export class ContentGenerationPipeline {
    * finishReason and the most up-to-date usage information from any provider pattern.
    *
    * @param response Current Gemini response
-   * @param collectedGeminiResponses Array to collect responses for logging
+   * @param pendingFinishResponse Finish response currently held for merging
    * @param setPendingFinish Callback to set pending finish response
    * @returns true if the response should be yielded, false if it should be held for merging
    */
   private handleChunkMerging(
     response: GenerateContentResponse,
-    collectedGeminiResponses: GenerateContentResponse[],
+    pendingFinishResponse: GenerateContentResponse | null,
     setPendingFinish: (response: GenerateContentResponse) => void,
   ): boolean {
     const isFinishChunk = response.candidates?.[0]?.finishReason;
 
-    // Check if we have a pending finish response from previous chunks
-    const hasPendingFinish =
-      collectedGeminiResponses.length > 0 &&
-      collectedGeminiResponses[collectedGeminiResponses.length - 1]
-        .candidates?.[0]?.finishReason;
-
     if (isFinishChunk) {
-      if (hasPendingFinish) {
+      if (pendingFinishResponse) {
         // Duplicate finish chunk (e.g. from OpenRouter providers that send two
         // finish_reason chunks for tool calls). The first finish response owns
         // the candidates, including functionCall parts. Merge only usageMetadata
         // from later finish chunks.
-        const lastResponse =
-          collectedGeminiResponses[collectedGeminiResponses.length - 1];
         if (response.usageMetadata) {
-          lastResponse.usageMetadata = response.usageMetadata;
+          pendingFinishResponse.usageMetadata = response.usageMetadata;
         }
-        setPendingFinish(lastResponse);
+        setPendingFinish(pendingFinishResponse);
       } else {
         // This is a finish reason chunk
-        collectedGeminiResponses.push(response);
         setPendingFinish(response);
       }
       return false; // Don't yield yet, wait for potential subsequent chunks to merge
-    } else if (hasPendingFinish) {
+    } else if (pendingFinishResponse) {
       // We have a pending finish chunk, merge this chunk's data into it
-      const lastResponse =
-        collectedGeminiResponses[collectedGeminiResponses.length - 1];
       const mergedResponse = new GenerateContentResponse();
 
       // Keep the finish reason from the previous chunk
-      mergedResponse.candidates = lastResponse.candidates;
+      mergedResponse.candidates = pendingFinishResponse.candidates;
 
       // Merge usage metadata if this chunk has it
       if (response.usageMetadata) {
         mergedResponse.usageMetadata = response.usageMetadata;
       } else {
-        mergedResponse.usageMetadata = lastResponse.usageMetadata;
+        mergedResponse.usageMetadata = pendingFinishResponse.usageMetadata;
       }
 
       // Copy other essential properties from the current response
@@ -755,16 +740,11 @@ export class ContentGenerationPipeline {
       mergedResponse.modelVersion = response.modelVersion;
       mergedResponse.promptFeedback = response.promptFeedback;
 
-      // Update the collected responses with the merged response
-      collectedGeminiResponses[collectedGeminiResponses.length - 1] =
-        mergedResponse;
-
       setPendingFinish(mergedResponse);
       return true; // Yield the merged response
     }
 
-    // Normal chunk - collect and yield
-    collectedGeminiResponses.push(response);
+    // Normal chunk
     return true;
   }
 
@@ -806,6 +786,20 @@ export class ContentGenerationPipeline {
           request.config.tools,
           this.contentGeneratorConfig.schemaCompliance ?? 'auto',
         );
+
+      // Map Gemini-style toolConfig.functionCallingConfig.mode to OpenAI's
+      // tool_choice so structured side queries (e.g. the AUTO-mode
+      // classifier's respond_in_schema) can force the model to emit a tool
+      // call instead of free-texting. Without this, thinking-heavy models
+      // may consume the tiny output budget on reasoning and skip the tool.
+      const fcMode = request.config?.toolConfig?.functionCallingConfig?.mode;
+      if (fcMode === 'ANY') {
+        (baseRequest as unknown as Record<string, unknown>)['tool_choice'] =
+          'required';
+      } else if (fcMode === 'NONE') {
+        (baseRequest as unknown as Record<string, unknown>)['tool_choice'] =
+          'none';
+      }
     }
 
     // Let provider enhance the request (e.g., add metadata, cache control)

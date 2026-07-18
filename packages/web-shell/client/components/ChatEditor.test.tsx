@@ -138,6 +138,7 @@ afterEach(() => {
 });
 
 function renderChatEditor(props: {
+  composerTags?: WebShellComposerTag[];
   gitBranch?: string;
   workspaceName?: string;
   workspaceTitle?: string;
@@ -152,11 +153,15 @@ function renderChatEditor(props: {
   customization?: WebShellCustomization;
 }) {
   const {
+    composerTags,
     customization,
     renderComposerTagTooltip,
     onComposerTagClick,
     ...chatEditorProps
   } = props;
+  if (composerTags) {
+    mockComposerCoreState.composerTags = composerTags;
+  }
   const container = document.createElement('div');
   container.dataset.webShellRoot = '';
   const portalRoot = document.createElement('div');
@@ -193,6 +198,42 @@ function renderChatEditor(props: {
 
   return container;
 }
+
+describe('ChatEditor composer tag icons', () => {
+  it('renders built-in icons for top composer tags', () => {
+    const kinds = ['extension', 'file', 'mcp', 'skill'] as const;
+    const container = renderChatEditor({
+      visibleToolbarActions: [],
+      composerTags: kinds.map((kind) => ({
+        id: `${kind}:reference`,
+        kind,
+        value: kind,
+      })),
+    });
+
+    expect(
+      container.querySelectorAll('[style*="--composer-tag-icon-url"]'),
+    ).toHaveLength(kinds.length);
+  });
+
+  it('rejects unsafe custom icon URLs for top composer tags', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: [],
+      composerTags: [
+        {
+          id: 'custom:reference',
+          value: 'reference',
+          icon: 'javascript:alert(1)',
+        },
+      ],
+    });
+
+    expect(container.innerHTML).not.toContain('javascript:alert');
+    expect(
+      container.querySelector('[style*="--composer-tag-icon-url"]'),
+    ).toBeNull();
+  });
+});
 
 describe('ChatEditor git branch toolbar integration', () => {
   it('shows the git branch indicator when the branch action is visible', () => {
@@ -232,7 +273,12 @@ describe('ChatEditor workspace toolbar integration', () => {
     });
     const chip = container.querySelector('[aria-label="Workspace: api"]');
     expect(chip).not.toBeNull();
-    expect(chip?.getAttribute('title')).toBe('/work/api');
+    // The full cwd is surfaced via the hover tooltip (mirroring the git branch
+    // chip), not a native `title` attribute.
+    expect(chip?.getAttribute('data-web-shell-workspace-title')).toBe(
+      '/work/api',
+    );
+    expect(chip?.getAttribute('title')).toBeNull();
     expect(
       container.querySelector('[data-web-shell-workspace]'),
     ).not.toBeNull();
@@ -247,7 +293,7 @@ describe('ChatEditor workspace toolbar integration', () => {
     expect(
       container
         .querySelector('[data-web-shell-workspace]')
-        ?.getAttribute('title'),
+        ?.getAttribute('data-web-shell-workspace-title'),
     ).toBe('api');
   });
 
@@ -542,6 +588,21 @@ describe('ChatEditor toolbar popovers', () => {
     act(() => options[0]?.click());
 
     expect(onSelectModel).toHaveBeenCalledWith('qwen-max');
+  });
+
+  it('displays the model label instead of an opaque route id', () => {
+    const routeId = 'qwen-route:v1:abcdefghijklmnop';
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: routeId,
+      availableModels: [{ id: routeId, label: 'Provider One' }],
+    });
+
+    const button = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-model-button]',
+    );
+    expect(button?.textContent).toContain('Provider One');
+    expect(button?.textContent).not.toContain(routeId);
   });
 
   it('switches between sibling toolbar popovers without dismissing the target', async () => {

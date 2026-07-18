@@ -49,6 +49,26 @@ export interface ListWorkspaceSessionsResult {
   truncated?: boolean;
 }
 
+/**
+ * Aggregate session counts for `GET .../session-info`.
+ *
+ * `expensive` is always true: the persisted totals require a disk scan of
+ * local JSONL files and must not be polled in a tight loop.
+ */
+export interface WorkspaceSessionInfoResult {
+  active: number;
+  archived: number;
+  total: number;
+  live?: number;
+  expensive: true;
+  /**
+   * Stable machine-readable hint that this response came from a full disk
+   * scan. Clients should refresh infrequently / on demand only.
+   */
+  cost: 'disk_scan';
+  truncated?: boolean;
+}
+
 export interface ListWorkspaceSessionsReadOptions {
   /** Merge live bridge state into persisted summaries. */
   mergeLive?: boolean;
@@ -82,6 +102,8 @@ function parseSessionCursor(cursor: string): number | undefined {
 interface OrganizedCursor {
   group: string;
   archiveState: SessionArchiveState;
+  sourceType?: string;
+  sourceId?: string;
   last: OrganizedCursorKey;
 }
 
@@ -98,7 +120,12 @@ interface LiveSessionCursorKey {
 
 function parseOrganizedCursor(
   cursor: string,
-  expected: { group: string; archiveState: SessionArchiveState },
+  expected: {
+    group: string;
+    archiveState: SessionArchiveState;
+    sourceType?: string;
+    sourceId?: string;
+  },
 ): OrganizedCursorKey | undefined {
   if (cursor === '') return undefined;
   try {
@@ -118,7 +145,9 @@ function parseOrganizedCursor(
       typeof last.sessionId !== 'string' ||
       last.sessionId.length === 0 ||
       (parsed as OrganizedCursor).group !== expected.group ||
-      (parsed as OrganizedCursor).archiveState !== expected.archiveState
+      (parsed as OrganizedCursor).archiveState !== expected.archiveState ||
+      (parsed as OrganizedCursor).sourceType !== expected.sourceType ||
+      (parsed as OrganizedCursor).sourceId !== expected.sourceId
     ) {
       throw new Error('invalid organized cursor');
     }
@@ -132,9 +161,11 @@ function encodeOrganizedCursor(
   last: OrganizedCursorKey,
   group: string,
   archiveState: SessionArchiveState,
+  sourceType?: string,
+  sourceId?: string,
 ): string {
   return Buffer.from(
-    JSON.stringify({ group, archiveState, last }),
+    JSON.stringify({ group, archiveState, sourceType, sourceId, last }),
     'utf8',
   ).toString('base64url');
 }
@@ -173,6 +204,22 @@ interface SessionMetadataFilter {
   parentSessionId?: string;
   sourceType?: string;
   sourceId?: string;
+}
+
+function matchesSessionMetadataSource(
+  session: BridgeSessionSummary,
+  filter: Pick<SessionMetadataFilter, 'sourceType' | 'sourceId'>,
+): boolean {
+  const sourceTypeMatches =
+    filter.sourceType === undefined ||
+    session.sourceType === filter.sourceType ||
+    // Legacy sessions without source metadata belong to the default catalog.
+    (filter.sourceType === 'default' && session.sourceType === undefined);
+  return (
+    sourceTypeMatches &&
+    // sourceId remains exact; only the default source type has legacy fallback.
+    (filter.sourceId === undefined || session.sourceId === filter.sourceId)
+  );
 }
 
 function parseMetadataSessionCursor(
@@ -422,7 +469,12 @@ async function listOrganizedWorkspaceSessionsForResponse(
   }
   const cursorKey =
     options.cursor !== undefined
-      ? parseOrganizedCursor(options.cursor, { group, archiveState })
+      ? parseOrganizedCursor(options.cursor, {
+          group,
+          archiveState,
+          sourceType: options.sourceType,
+          sourceId: options.sourceId,
+        })
       : undefined;
   const isFirstPage = cursorKey === undefined;
   let liveMergeFailed = false;
@@ -484,6 +536,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
   }
 
   const filtered = [...bySessionId.values()].filter((session) => {
+    if (!matchesSessionMetadataSource(session, options)) return false;
     if (group === 'all') return true;
     if (group === 'pinned') return session.isPinned === true;
     if (group === 'ungrouped')
@@ -518,6 +571,8 @@ async function listOrganizedWorkspaceSessionsForResponse(
           getOrganizedCursorKey(activityTimeById, page[page.length - 1]!),
           group,
           archiveState,
+          options.sourceType,
+          options.sourceId,
         )
       : undefined;
   return {
@@ -586,9 +641,7 @@ async function listWorkspaceSessionsByMetadataForResponse(
       (session) =>
         (filter.parentSessionId === undefined ||
           session.parentSessionId === filter.parentSessionId) &&
-        (filter.sourceType === undefined ||
-          session.sourceType === filter.sourceType) &&
-        (filter.sourceId === undefined || session.sourceId === filter.sourceId),
+        matchesSessionMetadataSource(session, filter),
     )
     .sort((a, b) =>
       compareLiveSessionCursorKeys(
@@ -775,6 +828,32 @@ export function listLiveWorkspaceSessionsForResponse(
   return {
     sessions: page,
     ...(nextCursor !== undefined ? { nextCursor } : {}),
+  };
+}
+
+/**
+ * Scans local persisted session JSONL files for aggregate counts and merges
+ * the current in-memory live count from the bridge.
+ *
+ * This is an O(n) disk walk. Callers (and HTTP clients) must treat it as an
+ * infrequent / on-demand operator endpoint, not a polling source.
+ */
+export async function getWorkspaceSessionInfoForResponse(
+  bridge: AcpSessionBridge,
+  workspaceCwd: string,
+  options: { includeLive?: boolean } = {},
+): Promise<WorkspaceSessionInfoResult> {
+  const counts = await new SessionService(workspaceCwd).getSessionInfoCounts();
+  return {
+    active: counts.active,
+    archived: counts.archived,
+    total: counts.total,
+    ...(options.includeLive === false
+      ? {}
+      : { live: bridge.listWorkspaceSessions(workspaceCwd).length }),
+    expensive: true,
+    cost: 'disk_scan',
+    ...(counts.truncated ? { truncated: true } : {}),
   };
 }
 

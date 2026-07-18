@@ -11,6 +11,7 @@ import type {
   DaemonFileStat,
   DaemonScheduledTask,
   DaemonWorkspaceActions,
+  DaemonWorkspacePathSuggestions,
 } from './types.js';
 
 const AGENT_GENERATE_TIMEOUT_MS = 330_000;
@@ -159,6 +160,22 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async initializeMcp() {
+      const client = requireClient(getClient, 'Initialize MCP failed');
+      return withActionTimeout(
+        client.initializeWorkspaceMcp(),
+        'Initialize MCP timed out',
+      );
+    },
+
+    async reloadMcp() {
+      const client = requireClient(getClient, 'Reload MCP failed');
+      return withActionTimeout(
+        client.reloadWorkspaceMcp(),
+        'Reload MCP timed out',
+      );
+    },
+
     async loadMcpTools(serverName) {
       const client = requireClient(getClient, 'Load MCP tools failed');
       try {
@@ -234,6 +251,24 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async addRuntimeMcpServer(request) {
+      const client = requireClient(getClient, 'Add MCP server failed');
+      return withActionTimeout(
+        client.addRuntimeMcpServer(request),
+        'Add MCP server timed out',
+        5 * 60_000,
+      );
+    },
+
+    async removeRuntimeMcpServer(name) {
+      const client = requireClient(getClient, 'Remove MCP server failed');
+      return withActionTimeout(
+        client.removeRuntimeMcpServer(name),
+        'Remove MCP server timed out',
+        5 * 60_000,
+      );
+    },
+
     async loadDaemonStatus(detail) {
       const client = requireClient(getClient, 'Load daemon status failed');
       return withActionTimeout(
@@ -255,6 +290,30 @@ export function createDaemonWorkspaceActions({
       return withActionTimeout(
         client.workspaceSkills(),
         'Load skills timed out',
+      );
+    },
+
+    async setWorkspaceSkillEnabled(skillName, enabled) {
+      const client = requireClient(getClient, 'Set skill enabled failed');
+      return withActionTimeout(
+        client.setWorkspaceSkillEnabled(skillName, enabled),
+        'Set skill enabled timed out',
+      );
+    },
+
+    async installWorkspaceSkill(request) {
+      const client = requireClient(getClient, 'Install skill failed');
+      return withActionTimeout(
+        client.installWorkspaceSkill(request),
+        'Install skill timed out',
+      );
+    },
+
+    async deleteWorkspaceSkill(skillName, scope) {
+      const client = requireClient(getClient, 'Delete skill failed');
+      return withActionTimeout(
+        client.deleteWorkspaceSkill(skillName, scope),
+        'Delete skill timed out',
       );
     },
 
@@ -291,10 +350,13 @@ export function createDaemonWorkspaceActions({
       scope: 'workspace' | 'user',
       key: string,
       value: unknown,
+      options?: {
+        mcpServerMutation?: { operation: 'set' | 'remove'; name: string };
+      },
     ) {
       const client = requireClient(getClient, 'Set setting failed');
       return withActionTimeout(
-        client.setWorkspaceSetting(scope, key, value),
+        client.setWorkspaceSetting(scope, key, value, options),
         'Set setting timed out',
       );
     },
@@ -758,6 +820,15 @@ export function createDaemonWorkspaceActions({
         client.addWorkspace(cwd, options),
         'Add workspace timed out',
       );
+    },
+
+    async suggestWorkspacePaths(prefix) {
+      const client = requireClient(getClient, 'Suggest workspace paths failed');
+      const result = await withActionTimeout(
+        client.workspacePathSuggestions(prefix),
+        'Suggest workspace paths timed out',
+      );
+      return result as DaemonWorkspacePathSuggestions;
     },
 
     async removeWorkspace(workspaceId, options) {

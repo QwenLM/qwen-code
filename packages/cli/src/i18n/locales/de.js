@@ -587,7 +587,7 @@ export default {
   'Enables an extension.': 'Aktiviert eine Erweiterung.',
   'The name of the extension to enable.':
     'Der Name der zu aktivierenden Erweiterung.',
-  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
+  'The scope to enable the extension in. If not set, will be enabled in all scopes.':
     'Der Bereich, in dem die Erweiterung aktiviert werden soll. Wenn nicht gesetzt, wird sie in allen Bereichen aktiviert.',
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
     'Erweiterung "{{name}}" erfolgreich für Bereich "{{scope}}" aktiviert.',
@@ -598,7 +598,7 @@ export default {
   'Disables an extension.': 'Deaktiviert eine Erweiterung.',
   'The name of the extension to disable.':
     'Der Name der zu deaktivierenden Erweiterung.',
-  'The scope to disable the extenison in.':
+  'The scope to disable the extension in.':
     'Der Bereich, in dem die Erweiterung deaktiviert werden soll.',
   'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
     'Erweiterung "{{name}}" erfolgreich für Bereich "{{scope}}" deaktiviert.',

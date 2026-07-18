@@ -46,6 +46,7 @@ import {
   type RebuiltSessionArtifactSnapshot,
 } from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
+import { SessionTranscriptTooLargeError } from './session-transcript-reader.js';
 
 const debugLogger = createDebugLogger('SESSION');
 
@@ -137,6 +138,27 @@ export interface ListSessionsResult {
   nextCursor?: number;
   /** Whether there are more items after this page */
   hasMore: boolean;
+}
+
+/**
+ * Aggregate persisted-session counts for a workspace.
+ *
+ * Built by scanning local JSONL files. This is intentionally separate from
+ * {@link listSessions} so paginated list callers are not forced into a full
+ * disk walk.
+ */
+export interface SessionInfoCounts {
+  /** Persisted active (non-archived) sessions belonging to this project. */
+  active: number;
+  /** Persisted archived sessions belonging to this project. */
+  archived: number;
+  /** `active + archived`. */
+  total: number;
+  /**
+   * True when the scan could not classify every candidate session file, so
+   * counts may be lower than the true population.
+   */
+  truncated: boolean;
 }
 
 /**
@@ -996,6 +1018,86 @@ export class SessionService {
   }
 
   /**
+   * Counts persisted sessions for this project by scanning the active and
+   * archived chats directories.
+   *
+   * Same disk-walk shape as {@link findSessionTitlesByPrefix} /
+   * {@link findSessionsByTitle}: `readdir` the chats dir, cap at the
+   * file-processing safety limit, then read only the first JSONL record for
+   * project membership. Title/prompt/message hydration is skipped entirely.
+   *
+   * Still an O(n) disk walk — callers (and HTTP clients of
+   * `GET .../session-info`) must not poll this in a tight loop.
+   */
+  async getSessionInfoCounts(): Promise<SessionInfoCounts> {
+    const [active, archived] = await Promise.all([
+      this.countSessionsInState('active'),
+      this.countSessionsInState('archived'),
+    ]);
+    return {
+      active: active.count,
+      archived: archived.count,
+      total: active.count + archived.count,
+      truncated: active.truncated || archived.truncated,
+    };
+  }
+
+  private async countSessionsInState(
+    archiveState: SessionArchiveState,
+  ): Promise<{ count: number; truncated: boolean }> {
+    const chatsDir = this.getChatsDirForState(archiveState);
+    let fileNames: string[];
+    try {
+      fileNames = fs.readdirSync(chatsDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { count: 0, truncated: false };
+      }
+      throw error;
+    }
+
+    let count = 0;
+    let filesProcessed = 0;
+    let truncated = false;
+
+    for (const name of fileNames) {
+      if (!SESSION_FILE_PATTERN.test(name)) continue;
+      if (filesProcessed >= MAX_FILES_TO_PROCESS) {
+        truncated = true;
+        break;
+      }
+      filesProcessed++;
+
+      const filePath = path.join(chatsDir, name);
+      // Project filter only — same first-record membership check as
+      // findSessionTitlesByPrefix, without the title tail-read (every file
+      // is a candidate when counting).
+      try {
+        const records = await jsonl.readLines<ChatRecord>(filePath, 1);
+        if (records.length === 0) {
+          truncated = true;
+          continue;
+        }
+        const firstRecord = records[0]!;
+        if (
+          !(await this.sessionBelongsToCurrentProject(
+            firstRecord.sessionId,
+            firstRecord.cwd,
+          ))
+        ) {
+          continue;
+        }
+        count++;
+      } catch {
+        truncated = true;
+        continue;
+      }
+    }
+
+    return { count, truncated };
+  }
+
+  /**
    * Reads all records from a session file.
    */
   private async readAllRecords(filePath: string): Promise<ChatRecord[]> {
@@ -1120,8 +1222,49 @@ export class SessionService {
   async loadSession(
     sessionId: string,
   ): Promise<ResumedSessionData | undefined> {
-    const chatsDir = this.getChatsDir();
-    const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+    return this.loadSessionFromState(sessionId, 'active');
+  }
+
+  /**
+   * Reads an archived session without changing its archive state.
+   * Daemon load/resume paths must continue to use {@link loadSession}.
+   */
+  async loadArchivedSession(
+    sessionId: string,
+    options: { maxBytes: number },
+  ): Promise<ResumedSessionData | undefined> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
+      return undefined;
+    }
+    const filePath = this.getSessionFilePath(sessionId, 'archived');
+    let stats: fs.Stats;
+    try {
+      stats = fs.statSync(filePath);
+      if (stats.size > options.maxBytes) {
+        throw new SessionTranscriptTooLargeError(
+          sessionId,
+          stats.size,
+          options.maxBytes,
+        );
+      }
+    } catch (error) {
+      if (error instanceof SessionTranscriptTooLargeError) {
+        throw error;
+      }
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw error;
+      }
+      return undefined;
+    }
+    return this.loadSessionFromState(sessionId, 'archived', stats);
+  }
+
+  private async loadSessionFromState(
+    sessionId: string,
+    state: SessionArchiveState,
+    stats?: fs.Stats,
+  ): Promise<ResumedSessionData | undefined> {
+    const filePath = this.getSessionFilePath(sessionId, state);
 
     const records = await this.readAllRecords(filePath);
     if (records.length === 0) {
@@ -1166,7 +1309,7 @@ export class SessionService {
     }
 
     const lastMessage = messages[messages.length - 1];
-    const stats = fs.statSync(filePath);
+    stats ??= fs.statSync(filePath);
 
     const conversation: ConversationRecord = {
       sessionId: firstRecord.sessionId,

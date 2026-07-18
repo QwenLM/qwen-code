@@ -14,10 +14,17 @@
 use async_trait::async_trait;
 use cua_driver_core::{protocol::{ToolResult, Content}, tool::{Tool, ToolDef}};
 use serde_json::Value;
+use std::sync::Arc;
 
-use super::get_screen_size::main_screen_size;
+use super::{get_screen_size::main_screen_size, ToolState};
 
-pub struct GetDesktopStateTool;
+pub struct GetDesktopStateTool {
+    state: Arc<ToolState>,
+}
+
+impl GetDesktopStateTool {
+    pub fn new(state: Arc<ToolState>) -> Self { Self { state } }
+}
 
 static DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
 
@@ -52,16 +59,18 @@ impl Tool for GetDesktopStateTool {
     async fn invoke(&self, args: Value) -> ToolResult {
         use cua_driver_core::tool_args::ArgsExt;
 
-        // Gate on the global capture_scope (re-read from the persisted config,
-        // the same value set_config writes): a full-display capture is a
-        // desktop-scope operation, available only under capture_scope="desktop".
-        let scope = super::load_driver_config().capture_scope;
+        let session_id = args.opt_str("_session_id");
+        let scope = {
+            let cfg = self.state.config.read().unwrap();
+            self.state.session_config.effective_capture_scope(session_id.as_deref(), &cfg)
+        };
         if scope != "desktop" {
             return ToolResult::error(format!(
                 "get_desktop_state requires capture_scope=\"desktop\" (current scope is \
                  \"{scope}\"). Full-display capture is a desktop-scope operation; call \
-                 set_config with capture_scope=desktop first (it also enables window-less \
-                 screen-absolute click/scroll). For a single window, use \
+                 set_config with capture_scope=desktop first. Window-less screen-absolute \
+                 click additionally requires per-call scope=desktop; scroll remains \
+                 window-targeted. For a single window, use \
                  get_window_state(pid, window_id) instead."
             ))
             .with_structured(serde_json::json!({

@@ -5,7 +5,9 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
+import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import {
   parseRule,
   parseRules,
@@ -539,6 +541,14 @@ describe('resolvePathPattern', () => {
 describe('matchesPathPattern', () => {
   const projectRoot = '/project';
   const cwd = '/project';
+  const withTempRoot = (run: (root: string) => void): void => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
+    try {
+      run(root);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  };
 
   it('matches dotfiles (e.g. .env)', async () => {
     expect(matchesPathPattern('.env', '/project/.env', projectRoot, cwd)).toBe(
@@ -618,6 +628,203 @@ describe('matchesPathPattern', () => {
         cwd,
       ),
     ).toBe(false);
+  });
+
+  it('matches a path after resolving parent-directory traversal', () => {
+    withTempRoot((root) => {
+      const protectedDir = path.join(root, 'protected');
+      const nestedDir = path.join(root, 'workspace', 'nested');
+      fs.mkdirSync(protectedDir);
+      fs.mkdirSync(nestedDir, { recursive: true });
+
+      expect(
+        matchesPathPattern(
+          `/${path.basename(protectedDir)}/**`,
+          `${nestedDir}${path.sep}..${path.sep}..${path.sep}protected${path.sep}new.txt`,
+          root,
+          root,
+          'canonical',
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('matches the canonical target of a symlinked path', () => {
+    withTempRoot((root) => {
+      const protectedDir = path.join(root, 'protected');
+      const link = path.join(root, 'link');
+      fs.mkdirSync(protectedDir);
+      fs.writeFileSync(path.join(protectedDir, 'existing.txt'), 'protected');
+      fs.symlinkSync(protectedDir, link, 'dir');
+
+      expect(
+        matchesPathPattern(
+          '/protected/**',
+          path.join(link, 'existing.txt'),
+          root,
+          root,
+        ),
+      ).toBe(false);
+      expect(
+        matchesPathPattern(
+          '/protected/**',
+          path.join(link, 'existing.txt'),
+          root,
+          root,
+          'canonical',
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('canonicalizes through a file that causes ENOTDIR', () => {
+    withTempRoot((root) => {
+      const protectedDir = path.join(root, 'protected');
+      const link = path.join(root, 'link');
+      fs.mkdirSync(protectedDir);
+      fs.writeFileSync(path.join(protectedDir, 'config.json'), '{}');
+      fs.symlinkSync(protectedDir, link, 'dir');
+
+      expect(
+        matchesPathPattern(
+          '/protected/**',
+          path.join(link, 'config.json', 'nested.txt'),
+          root,
+          root,
+          'canonical',
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('canonicalizes a symlinked project root in restrictive rules', () => {
+    withTempRoot((root) => {
+      const realRoot = path.join(root, 'real');
+      const linkedRoot = path.join(root, 'linked');
+      const protectedDir = path.join(realRoot, 'protected');
+      fs.mkdirSync(protectedDir, { recursive: true });
+      fs.writeFileSync(path.join(protectedDir, 'file.txt'), 'protected');
+      fs.symlinkSync(realRoot, linkedRoot, 'dir');
+
+      expect(
+        matchesPathPattern(
+          '/protected/**',
+          path.join(protectedDir, 'file.txt'),
+          linkedRoot,
+          linkedRoot,
+          'canonical',
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('canonicalizes the nearest existing ancestor for a new path', () => {
+    withTempRoot((root) => {
+      const protectedDir = path.join(root, 'protected');
+      const link = path.join(root, 'link');
+      fs.mkdirSync(protectedDir);
+      fs.symlinkSync(protectedDir, link, 'dir');
+
+      expect(
+        matchesPathPattern(
+          '/protected/**',
+          path.join(link, 'new', 'file.txt'),
+          root,
+          root,
+          'canonical',
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('matches the target of a dangling symlink', () => {
+    withTempRoot((root) => {
+      const protectedDir = path.join(root, 'protected');
+      const target = path.join(protectedDir, 'new.txt');
+      const link = path.join(root, 'link.txt');
+      fs.mkdirSync(protectedDir);
+      fs.symlinkSync(target, link, 'file');
+
+      expect(
+        matchesPathPattern('/protected/**', link, root, root, 'canonical'),
+      ).toBe(true);
+    });
+  });
+
+  it('preserves traversal semantics in a dangling symlink target', () => {
+    withTempRoot((root) => {
+      const projectDir = path.join(root, 'project');
+      const outsideDir = path.join(root, 'outside');
+      fs.mkdirSync(projectDir);
+      fs.mkdirSync(path.join(outsideDir, 'dir'), { recursive: true });
+      fs.mkdirSync(path.join(outsideDir, 'safe'));
+
+      fs.symlinkSync(
+        path.join(outsideDir, 'dir'),
+        path.join(projectDir, 'inner'),
+        'dir',
+      );
+      const link = path.join(projectDir, 'link.txt');
+      fs.symlinkSync(
+        `inner${path.sep}..${path.sep}safe${path.sep}new.txt`,
+        link,
+      );
+
+      expect(
+        matchesPathPattern('/outside/safe/**', link, root, root, 'canonical'),
+      ).toBe(true);
+      expect(
+        matchesPathPattern('/project/safe/**', link, root, root, 'canonical'),
+      ).toBe(false);
+    });
+  });
+
+  it('resolves parent traversal after following a directory symlink', () => {
+    withTempRoot((root) => {
+      const projectDir = path.join(root, 'project');
+      const outsideDir = path.join(root, 'outside');
+      const outsideSafeDir = path.join(outsideDir, 'safe');
+      fs.mkdirSync(path.join(projectDir, 'safe'), { recursive: true });
+      fs.mkdirSync(path.join(outsideDir, 'dir'), { recursive: true });
+      fs.mkdirSync(outsideSafeDir);
+      fs.writeFileSync(path.join(outsideSafeDir, 'file.txt'), 'outside');
+
+      const link = path.join(projectDir, 'link');
+      fs.symlinkSync(path.join(outsideDir, 'dir'), link, 'dir');
+      const filePath = `${link}${path.sep}..${path.sep}safe${path.sep}file.txt`;
+
+      expect(
+        matchesPathPattern(
+          '/outside/safe/**',
+          filePath,
+          root,
+          root,
+          'canonical',
+        ),
+      ).toBe(true);
+      expect(
+        matchesPathPattern(
+          '/project/safe/**',
+          filePath,
+          root,
+          root,
+          'canonical',
+        ),
+      ).toBe(false);
+    });
+  });
+
+  it('preserves matching against the lexical symlink path', () => {
+    withTempRoot((root) => {
+      const protectedDir = path.join(root, 'protected');
+      const link = path.join(root, 'link');
+      fs.mkdirSync(protectedDir);
+      fs.symlinkSync(protectedDir, link, 'dir');
+
+      expect(
+        matchesPathPattern('/link/**', path.join(link, 'new.txt'), root, root),
+      ).toBe(true);
+    });
   });
 });
 
@@ -1856,6 +2063,53 @@ describe('PermissionManager', () => {
       ).toBe('deny');
     });
 
+    it('denies an equivalent path containing parent traversal', async () => {
+      expect(
+        await pm.evaluate({
+          toolName: 'edit',
+          filePath: '/project/work/../src/generated/code.ts',
+        }),
+      ).toBe('deny');
+    });
+
+    it('canonicalizes restrictive rules without widening allow rules', async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
+      try {
+        const protectedDir = path.join(root, 'protected');
+        const link = path.join(root, 'link');
+        fs.mkdirSync(protectedDir);
+        fs.writeFileSync(path.join(protectedDir, 'file.txt'), 'protected');
+        fs.symlinkSync(protectedDir, link, 'dir');
+        const filePath = path.join(link, 'file.txt');
+
+        const denyManager = new PermissionManager(
+          makeConfig({
+            permissionsDeny: ['Edit(/protected/**)'],
+            projectRoot: root,
+            cwd: root,
+          }),
+        );
+        denyManager.initialize();
+        expect(await denyManager.evaluate({ toolName: 'edit', filePath })).toBe(
+          'deny',
+        );
+
+        const allowManager = new PermissionManager(
+          makeConfig({
+            permissionsAllow: ['Edit(/protected/**)'],
+            projectRoot: root,
+            cwd: root,
+          }),
+        );
+        allowManager.initialize();
+        expect(
+          await allowManager.evaluate({ toolName: 'edit', filePath }),
+        ).toBe('default');
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    });
+
     it('allows reading in an allowed directory', async () => {
       expect(
         await pm.evaluate({
@@ -2221,6 +2475,33 @@ describe('PermissionManager', () => {
           command: 'git add file && git commit -m "msg"',
         }),
       ).toBe(true);
+    });
+
+    it('matches an ask rule through a symlinked path', () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
+      try {
+        const protectedDir = path.join(root, 'protected');
+        const link = path.join(root, 'link');
+        fs.mkdirSync(protectedDir);
+        fs.symlinkSync(protectedDir, link, 'dir');
+        pm = new PermissionManager(
+          makeConfig({
+            permissionsAsk: ['Edit(/protected/**)'],
+            projectRoot: root,
+            cwd: root,
+          }),
+        );
+        pm.initialize();
+
+        expect(
+          pm.hasMatchingAskRule({
+            toolName: 'edit',
+            filePath: path.join(link, 'file.txt'),
+          }),
+        ).toBe(true);
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
     });
   });
 });
@@ -2746,6 +3027,33 @@ describe('PermissionManager.findMatchingDenyRule', () => {
     // rule.raw preserves the original rule string as written in config
     expect(result).toBe('ShellTool');
   });
+
+  it('matches a deny rule through a symlinked path', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
+    try {
+      const protectedDir = path.join(root, 'protected');
+      const link = path.join(root, 'link');
+      fs.mkdirSync(protectedDir);
+      fs.symlinkSync(protectedDir, link, 'dir');
+      const pm = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['Edit(/protected/**)'],
+          projectRoot: root,
+          cwd: root,
+        }),
+      );
+      pm.initialize();
+
+      expect(
+        pm.findMatchingDenyRule({
+          toolName: 'edit',
+          filePath: path.join(link, 'file.txt'),
+        }),
+      ).toBe('Edit(/protected/**)');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 // ─── AUTO mode dangerous-rule stash ────────────────────────────────────
@@ -2982,6 +3290,42 @@ describe('PermissionManager — compound shell write attribution', () => {
         cwd: '/repo',
       }),
     ).toBe(false);
+  });
+
+  it('does not treat canonical-only allow matches as relevant', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
+    try {
+      const allowedDir = path.join(root, 'allowed');
+      const link = path.join(root, 'link');
+      fs.mkdirSync(allowedDir);
+      fs.writeFileSync(path.join(allowedDir, 'file.txt'), 'allowed');
+      fs.symlinkSync(allowedDir, link, 'dir');
+
+      const pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Edit(/allowed/**)'],
+          cwd: root,
+          projectRoot: root,
+        }),
+      );
+      pm.initialize();
+
+      expect(
+        pm.hasRelevantRules({
+          toolName: 'edit',
+          filePath: path.join(link, 'file.txt'),
+        }),
+      ).toBe(false);
+      expect(
+        pm.hasRelevantRules({
+          toolName: 'run_shell_command',
+          command: `echo allowed > ${path.join(link, 'file.txt')}`,
+          cwd: root,
+        }),
+      ).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('hasRelevantRules sees protected writes after sibling shell-wrapper segments', () => {

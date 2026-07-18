@@ -607,7 +607,7 @@ export default {
     'Inclua o nome da extensão para desinstalar como um argumento posicional.',
   'Enables an extension.': 'Ativa uma extensão.',
   'The name of the extension to enable.': 'O nome da extensão para ativar.',
-  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
+  'The scope to enable the extension in. If not set, will be enabled in all scopes.':
     'O escopo para ativar a extensão. Se não definido, será ativada em todos os escopos.',
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
     'Extensão "{{name}}" ativada com sucesso para o escopo "{{scope}}".',
@@ -617,7 +617,7 @@ export default {
     'Escopo inválido: {{scope}}. Use um de {{scopes}}.',
   'Disables an extension.': 'Desativa uma extensão.',
   'The name of the extension to disable.': 'O nome da extensão para desativar.',
-  'The scope to disable the extenison in.':
+  'The scope to disable the extension in.':
     'O escopo para desativar a extensão.',
   'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
     'Extensão "{{name}}" desativada com sucesso para o escopo "{{scope}}".',

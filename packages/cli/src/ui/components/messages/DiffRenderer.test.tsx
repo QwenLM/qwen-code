@@ -54,9 +54,7 @@ index 0000000..e69de29
       'python',
       undefined,
       80,
-      undefined,
-      mockSettings,
-      4,
+      { settings: mockSettings, tabWidth: 4 },
     );
   });
 
@@ -85,9 +83,7 @@ index 0000000..e69de29
       null,
       undefined,
       80,
-      undefined,
-      mockSettings,
-      4,
+      { settings: mockSettings, tabWidth: 4 },
     );
   });
 
@@ -115,9 +111,7 @@ index 0000000..e69de29
       null,
       undefined,
       80,
-      undefined,
-      mockSettings,
-      4,
+      { settings: mockSettings, tabWidth: 4 },
     );
   });
 

@@ -1035,7 +1035,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: false,
         description:
-          'Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled; for native text selection, hold Shift (or Option on macOS) while dragging.',
+          'Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled. Drag to select text in the viewport (double/triple click selects a word/line), copied on release. To use the terminal’s own selection instead, hold Shift (or Option on macOS) while dragging.',
         showInDialog: true,
       },
       showScrollbar: {
@@ -1474,7 +1474,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: DEFAULT_MAX_TOOL_CALLS_PER_TURN,
         description:
-          'Hard cap on tool calls within a single turn (one model turn plus its tool-result continuations; blocking Stop-hook continuations such as /goal iterations start a fresh budget). An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.',
+          'Per-turn tool-call cap (one model turn plus its tool-result continuations; blocking Stop-hook continuations such as /goal iterations start a fresh budget). When set explicitly, this value is a hard cap: the turn halts on the next tool call after it is reached (the released behavior). When left unset (default 100), the cap is adaptive: once the turn exceeds 100 it halts only when the model keeps repeating the same call (a stuck loop); a productive turn (diverse calls) continues up to a hard backstop of 1000, which always halts. The adaptive default applies to both the interactive TUI and non-interactive (-p / JSON / stream-JSON) core-client runs; the daemon/ACP path always treats the value as a hard cap. An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.',
         showInDialog: false,
       },
       skipStartupContext: {
@@ -2822,11 +2822,29 @@ const SETTINGS_SCHEMA = {
         default: undefined as number | undefined,
         minimum: 1,
         description:
-          'Global maximum number of background sub-agents that can run concurrently. Additional background agents wait in a queue until a slot is available. Per-model limits are not supported yet.',
+          'Global maximum number of background sub-agents that can run concurrently. Additional background agents wait in a queue until a slot is available. Use maxParallelAgentsByModel to cap a specific model below this global limit.',
         showInDialog: false,
         jsonSchemaOverride: {
           type: 'integer',
           minimum: 1,
+        },
+      },
+      maxParallelAgentsByModel: {
+        type: 'object',
+        label: 'Max Parallel Agents Per Model',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: undefined as Record<string, number> | undefined,
+        description:
+          'Per-model maximum number of background sub-agents that can run concurrently, keyed by model ID (e.g. { "qwen3-max": 2 }). Useful when a model has a lower concurrency capacity. Takes precedence over the global maxParallelAgents for the matched model; models not listed here fall back to the global limit.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.SHALLOW_MERGE,
+        jsonSchemaOverride: {
+          type: 'object',
+          additionalProperties: {
+            type: 'integer',
+            minimum: 1,
+          },
         },
       },
       displayMode: {
@@ -3152,6 +3170,16 @@ const SETTINGS_SCHEMA = {
           'Enable in-session cron/loop tools. When enabled, the model can create recurring prompts using cron_create, cron_list, and cron_delete tools. Can be disabled via QWEN_CODE_DISABLE_CRON=1 environment variable.',
         showInDialog: true,
       },
+      todoStopGuard: {
+        type: 'boolean',
+        label: 'Enable Daemon Todo Stop Guard',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Allow daemon and ACP sessions to continue an unfinished top-level Todo list for at most two consecutive primary-model calls without new user input. Mid-turn user input starts a fresh two-attempt stage. Disabled in safe, bare, and Approval plan modes.',
+        showInDialog: false,
+      },
       cronRecurringMaxAgeDays: {
         type: 'number',
         label: 'Recurring Cron Max Age (Days)',
@@ -3184,9 +3212,9 @@ const SETTINGS_SCHEMA = {
         label: 'Enable Artifacts',
         category: 'Experimental',
         requiresRestart: true,
-        default: false,
+        default: true,
         description:
-          'Enable the Artifact tool (experimental). When enabled, the model can publish a self-contained HTML page as an interactive Artifact and open it in the browser. Interactive, non-SDK sessions only. QWEN_CODE_ENABLE_ARTIFACT=1 enables the metadata-only record_artifact tool for non-SDK daemon sessions, and also enables the Artifact tool in interactive sessions. QWEN_CODE_DISABLE_ARTIFACT=1 hard-disables both.',
+          'Enable artifact tools. Enabled by default. In interactive, non-SDK sessions, the model can publish a self-contained HTML page as an interactive Artifact and open it in the browser. Non-SDK daemon sessions can use the metadata-only record_artifact tool. Set this to false or use QWEN_CODE_DISABLE_ARTIFACT=1 to disable both.',
         showInDialog: true,
       },
       emitToolUseSummaries: {
@@ -3209,7 +3237,7 @@ const SETTINGS_SCHEMA = {
     requiresRestart: true,
     default: {},
     description:
-      'Configuration for the experimental Artifact tool (enable it via experimental.artifact). Selects the publish backend and, for the host backend, the upload command and shareable URL template.',
+      'Configuration for artifact publishing. Selects the publish backend and, for the host backend, the upload command and shareable URL template.',
     showInDialog: false,
     properties: {
       autoOpen: {
