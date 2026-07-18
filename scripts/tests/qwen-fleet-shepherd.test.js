@@ -5,16 +5,13 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync(
   '.github/workflows/qwen-fleet-shepherd.yml',
   'utf8',
 );
-const flakes = readFileSync('.github/known-flakes.txt', 'utf8');
 
 describe('fleet shepherd workflow', () => {
   it('ticks on a schedule with a manual dry-run escape hatch', () => {
@@ -45,11 +42,6 @@ describe('fleet shepherd workflow', () => {
       '--json number,headRefName,headRefOid,mergeable,isCrossRepository,statusCheckRollup',
     );
     expect(workflow).not.toContain('gh pr view');
-    // Actions reads (run state, jobs, logs) ride the workflow token, whose
-    // actions scope is guaranteed, not the PAT.
-    expect(workflow).toContain(
-      'env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run view',
-    );
     // PAT identity is verified before any write.
     expect(workflow).toContain(
       "::error::CI_DEV_BOT_PAT authenticates as '${bot_actor:-unknown}'",
@@ -57,13 +49,10 @@ describe('fleet shepherd workflow', () => {
   });
 
   it('splits credentials by purpose', () => {
-    // Dispatches and reruns ride the workflow token (actions: write)…
+    // Dispatches ride the workflow token (actions: write)…
     expect(workflow).toContain("actions: 'write'");
     expect(workflow).toContain(
       'env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh workflow run qwen-autofix.yml',
-    );
-    expect(workflow).toContain(
-      'env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run rerun',
     );
     // …while comments, update-branch, and the dashboard use the bot PAT so
     // synced branches still trigger CI and writes carry the bot identity.
@@ -72,46 +61,46 @@ describe('fleet shepherd workflow', () => {
   });
 
   it('applies each lever idempotently with per-tick caps', () => {
-    // Conflict dispatch: once per conflicted head SHA, marker-deduped — and
-    // the marker is posted ONLY after a successful dispatch (a marker for a
-    // failed action would freeze the PR at that head forever).
+    // Conflict dispatch: once per conflicted head SHA, marker-deduped, gated
+    // on quiet checks (mirroring the autofix scan's own predicate so a
+    // dispatch is never wasted on a scan that will skip), and the marker is
+    // posted ONLY after a successful dispatch.
     expect(workflow).toContain(
       '<!-- fleet-shepherd conflict-dispatch sha=%s -->',
     );
     expect(workflow).toContain('-f pr_number="${PR}"');
+    expect(workflow).toContain('deferring conflict dispatch');
     expect(workflow).toContain('return "${rc}"');
     expect(workflow).toMatch(
       /if act "#\$\{PR\}: dispatch autofix for conflict resolution"/,
     );
-    expect(workflow).toMatch(
-      /if act "#\$\{PR\}: rerun failed jobs of \$\{RUN_ID\}/,
-    );
-    // Stale-base sync: threshold-gated and self-limiting (behind_by resets),
-    // and never while checks are in flight.
+    // Stale-base sync: threshold-gated, self-limiting (behind_by resets),
+    // never while checks are in flight, and a compare-and-swap on the head.
     expect(workflow).toContain("BEHIND_SYNC_THRESHOLD: '25'");
     expect(workflow).toContain(
       '"${BEHIND}" -ge "${BEHIND_SYNC_THRESHOLD}" && "${PENDING}" == "0"',
     );
-    // Sync is a compare-and-swap on the observed head.
     expect(workflow).toContain('-f expected_head_sha="${HEAD}"');
     // WAITING and REQUESTED are also not-yet-final check states.
     expect(workflow).toContain(
       'IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED")',
     );
-    // Flake rerun: only fully-concluded runs, capped attempts, and EVERY
-    // failing test must match the registry — one unknown failure aborts.
-    expect(workflow).toContain("RERUN_MAX_ATTEMPTS: '2'");
-    expect(workflow).toContain('<!-- fleet-shepherd rerun run=%s attempt=%s -->');
-    expect(workflow).toContain('"${RUN_STATE}" != "completed"');
-    expect(workflow).toContain('non-flake failure');
-    // Registry-error trichotomy: a broken pattern must BLOCK, never green-light.
-    expect(workflow).toContain('GATE_RC');
-    expect(workflow).toContain(
-      'flake registry has an invalid pattern — blocking reruns until fixed',
-    );
+    // A failed marker read must skip the PR, never act on empty history.
+    expect(workflow).toContain('marker read failed; skipping this tick');
     // Per-tick blast-radius caps.
     expect(workflow).toContain("MAX_SYNCS_PER_TICK: '3'");
     expect(workflow).toContain("MAX_DISPATCHES_PER_TICK: '2'");
+  });
+
+  it('leaves flaky-rerun ownership with the CI Failure Patrol', () => {
+    // Two scheduled rerun owners raced each other live; the shepherd only
+    // reports red CI and never reruns anything.
+    expect(workflow).toContain('NON-GOAL: rerunning flaky-failed CI');
+    expect(workflow).toContain('qwen-ci-flaky-rerun.yml');
+    expect(workflow).toContain('reruns owned by CI Failure Patrol');
+    expect(workflow).not.toContain('gh run rerun');
+    expect(workflow).not.toContain('known-flakes');
+    expect(workflow).not.toContain('RERUN_MAX_ATTEMPTS');
   });
 
   it('keeps the autofix scan alive when cron goes silent', () => {
@@ -122,126 +111,46 @@ describe('fleet shepherd workflow', () => {
     // The liveness signal counts SCHEDULE runs plus the shepherd's own
     // liveness dispatches (dashboard watermark) — a conflict dispatch is a
     // workflow_dispatch too and must NOT satisfy the watchdog.
-    expect(workflow).toContain(
-      "[.[] | select(.event == \"schedule\")] | first",
-    );
+    expect(workflow).toContain('[.[] | select(.event == "schedule")] | first');
     expect(workflow).toContain(
       '<!-- fleet-shepherd liveness-dispatched: ${LIVENESS_OUT} -->',
     );
     // One run-list call feeds both the age and the in-flight computation.
-    expect(workflow.match(/gh run list --repo "\$\{REPO\}" --workflow qwen-autofix\.yml/g) ?? []).toHaveLength(1);
+    expect(
+      workflow.match(
+        /gh run list --repo "\$\{REPO\}" --workflow qwen-autofix\.yml/g,
+      ) ?? [],
+    ).toHaveLength(1);
   });
 
   it('maintains one dashboard issue edited in place', () => {
     expect(workflow).toContain("DASHBOARD_TITLE: 'Fleet Shepherd Dashboard'");
     // gh --jq takes a single expression (no --arg support).
     expect(workflow).not.toContain('--jq --arg');
-    expect(workflow).toContain("--jq '.[0].number // \"\"'");
+    expect(workflow).toContain('--jq \'.[0].number // ""\'');
     expect(workflow).toContain('gh issue edit');
     expect(workflow).toContain('gh issue create');
     expect(workflow).toContain('do not edit by hand');
   });
 
-  it('gates reruns across ALL failed jobs, with the ids from the jobs API', () => {
-    // `gh run rerun --failed` reruns every failed job, so the gate must parse
-    // failing tests from every failed job's logs — not just the flagging one —
-    // and must not depend on parsing job ids out of a details URL at all.
-    expect(workflow).toContain(
-      '.jobs[] | select(.conclusion == "failure") | .databaseId',
-    );
-    expect(workflow).not.toContain("grep -oE '/job/[0-9]+'");
-    expect(workflow).toContain('across ALL the run\'s failed jobs');
-    expect(workflow).toContain(
-      'no failing tests parsed from any failed job',
-    );
-  });
-
-  it('behaviorally replays the log parser and the flake gate under bash', () => {
-    // Extract the EXACT pipelines from the workflow so this test fails if
-    // either drifts, then execute them on fixtures.
-    const parse = workflow.match(
-      /grep -oE 'FAIL\[\[:space:\]\]\+\[\^ \]\+\\\.test\\\.\[a-z\]\+' \| awk '\{print \$NF\}'/,
-    )?.[0];
-    expect(parse).toBeTruthy();
-    const innerFilter = workflow.match(
-      /grep -vE '\^\[\[:space:\]\]\*\(#\|\$\)' "\$\{FLAKE_FILE\}"/,
-    )?.[0];
-    expect(innerFilter).toBeTruthy();
-
-    // Parser: vitest failure lines → failing test file paths.
-    const log = [
-      ' ❯ some progress noise',
-      ' FAIL  src/utils/shell-ast-parser-lazy.test.ts > lazy runtime > loads',
-      'FAIL  src/services/cronScheduler.test.ts > durable ownership',
-      ' ✓ src/passing.test.ts (10 tests)',
-    ].join('\n');
-    const parsed = execFileSync('bash', ['-c', `${parse} | sort -u`], {
-      input: log,
-      encoding: 'utf8',
-    })
-      .trim()
-      .split('\n');
-    expect(parsed).toEqual([
-      'src/services/cronScheduler.test.ts',
-      'src/utils/shell-ast-parser-lazy.test.ts',
-    ]);
-
-    // Gate: every parsed test must match the committed registry; one unknown
-    // blocks; an empty parse never green-lights.
-    const gate = (fails) => {
-      const f = join(tmpdir(), `shepherd-gate-${process.pid}-${Math.random().toString(36).slice(2)}.txt`);
-      writeFileSync(f, fails.length ? fails.join('\n') + '\n' : '');
-      const script = [
-        `FLAKE_FILE='.github/known-flakes.txt';`,
-        `if [[ ! -s '${f}' ]]; then echo SKIP;`,
-        `elif grep -vE -f <(${innerFilter}) '${f}' > /dev/null; then echo BLOCK;`,
-        `else echo RERUN; fi`,
-      ].join(' ');
-      return execFileSync('bash', ['-c', script], { encoding: 'utf8' }).trim();
-    };
-    expect(gate(['src/utils/shell-ast-parser-lazy.test.ts'])).toBe('RERUN');
+  it('behaviorally proves act() gates follow-up markers on success', () => {
+    // Extract act() VERBATIM from the workflow (drift fails the test) and run
+    // it under bash: a failing primary action must return nonzero so the
+    // if-wrapper skips the marker; a succeeding one must return zero.
+    const act = workflow.match(/act\(\) \{[\s\S]*?\n {10}\}/)?.[0];
+    expect(act).toBeTruthy();
+    const script = (cmd) =>
+      [
+        'set -eo pipefail',
+        "DRY_RUN='false'",
+        act.replace(/\n {10,12}/g, '\n'),
+        `if act "primary" ${cmd}; then echo MARKER-POSTED; else echo MARKER-SKIPPED; fi`,
+      ].join('\n');
     expect(
-      gate([
-        'src/services/cronScheduler.test.ts',
-        'src/serve/workspace-registration-store.test.ts',
-      ]),
-    ).toBe('RERUN');
+      execFileSync('bash', ['-c', script('true')], { encoding: 'utf8' }),
+    ).toContain('MARKER-POSTED');
     expect(
-      gate(['src/utils/shell-ast-parser-lazy.test.ts', 'src/gemini.test.tsx']),
-    ).toBe('BLOCK');
-    expect(gate(['packages/x/brand-new.test.ts'])).toBe('BLOCK');
-    expect(gate([])).toBe('SKIP');
-
-    // Registry-error fail-safe: an invalid ERE in the registry makes grep exit
-    // ≥2 — the workflow's trichotomy must BLOCK, never green-light a rerun.
-    const badReg = join(
-      tmpdir(),
-      `shepherd-badreg-${process.pid}-${Math.random().toString(36).slice(2)}.txt`,
-    );
-    writeFileSync(badReg, 'broken(pattern\n');
-    const errScript = [
-      `GATE_RC=0;`,
-      `NON_FLAKE="$(grep -vE -f <(grep -vE '^[[:space:]]*(#|$)' '${badReg}') /dev/stdin 2>/dev/null)" || GATE_RC=$?;`,
-      `if [[ "\${GATE_RC}" -ge 2 ]]; then echo ERRBLOCK; elif [[ "\${GATE_RC}" -eq 0 ]]; then echo BLOCK; else echo RERUN; fi`,
-    ].join(' ');
-    const verdict = execFileSync('bash', ['-c', errScript], {
-      input: 'src/utils/shell-ast-parser-lazy.test.ts\n',
-      encoding: 'utf8',
-    }).trim();
-    expect(verdict).toBe('ERRBLOCK');
-  });
-
-  it('ships a non-empty flake registry of valid regexes', () => {
-    const lines = flakes
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => l && !l.startsWith('#'));
-    expect(lines.length).toBeGreaterThan(0);
-    for (const line of lines) {
-      // Every entry must compile as a regex and look like a test-file matcher,
-      // so a stray broad pattern cannot green-light rerunning real failures.
-      expect(() => new RegExp(line)).not.toThrow();
-      expect(line).toMatch(/test\\?\.(ts|tsx|js|mjs)/);
-    }
+      execFileSync('bash', ['-c', script('false')], { encoding: 'utf8' }),
+    ).toContain('MARKER-SKIPPED');
   });
 });
