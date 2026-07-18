@@ -103,6 +103,11 @@ jobs:
       # The old single shared cancel-in-progress group let ANY newer event kill
       # pending full scans while route jobs sat queued behind runner backlog —
       # observed as hours of scan starvation during review-event storms.
+      # Four cases: schedule → one shared cron group (newer tick supersedes);
+      # pull_request_review → per-PR; issues → per-issue (same-target events
+      # coalesce, unrelated targets never collide); anything else (dispatch)
+      # → unique per run_id, and cancel-in-progress false below means manual
+      # dispatches are never cancelled at all.
       group: "${{ github.event_name == 'schedule' && 'qwen-autofix-route-cron' || (github.event_name == 'pull_request_review' && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)) || (github.event_name == 'issues' && format('qwen-autofix-route-issue-{0}', github.event.issue.number)) || format('qwen-autofix-route-{0}', github.run_id) }}"
       cancel-in-progress: |-
         ${{ github.event_name != 'workflow_dispatch' }}
@@ -1040,7 +1045,11 @@ jobs:
               --jq '.jobs[] | select(.status != "completed") | .name | capture("^review-address \\((?<pr>[0-9]+),") | .pr' 2> /dev/null)
           done < <(
             for LIVE_STATUS in in_progress queued; do
-              # || true: one status query failing must not hide the other.
+              # || true: one status query failing must not hide the other. A
+              # DOUBLE failure yields an empty set — deliberately fail-open:
+              # this skip is an optimization, and the address-side live-marker
+              # revalidation is the correctness gate. If that revalidation is
+              # ever removed, this read must become fail-closed instead.
               gh run list --repo "${REPO}" --workflow qwen-autofix.yml \
                 --status "${LIVE_STATUS}" --limit 50 --json databaseId \
                 --jq '.[].databaseId' 2> /dev/null || true
