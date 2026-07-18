@@ -2947,6 +2947,11 @@
           "type": "boolean",
           "default": true
         },
+        "todoStopGuard": {
+          "description": "Allow daemon and ACP sessions to continue an unfinished top-level Todo list for at most two consecutive primary-model calls without new user input. Mid-turn user input starts a fresh two-attempt stage. Disabled in safe, bare, and Approval plan modes.",
+          "type": "boolean",
+          "default": false
+        },
         "cronRecurringMaxAgeDays": {
           "type": "number",
           "minimum": 0,

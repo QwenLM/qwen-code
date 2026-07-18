@@ -73,6 +73,10 @@ import {
   SESS_A,
 } from './internal/testUtils.js';
 import { SessionArtifactAuthorizationError } from './sessionArtifacts.js';
+import {
+  MID_TURN_QUEUE_DRAIN_METHOD,
+  TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
+} from './bridgeTypes.js';
 
 function deferred<T>(): {
   promise: Promise<T>;
@@ -6222,6 +6226,12 @@ describe('createAcpSessionBridge', () => {
           }
           return { stopReason: 'end_turn' } as PromptResponse;
         },
+        extMethodImpl: async (method) => {
+          if (method === TODO_STOP_GUARD_QUEUE_RELEASE_METHOD) {
+            throw new Error('release failed');
+          }
+          return {};
+        },
       });
       const bridge = makeBridge({
         channelFactory: async () => handle.channel,
@@ -6259,9 +6269,36 @@ describe('createAcpSessionBridge', () => {
       const queuedId = pending[1]?.promptId;
       expect(queuedId).toBe('prompt-removed');
 
-      const result = bridge.removePendingPrompt(session.sessionId, queuedId!);
-      expect(result.removed).toBe(true);
-      expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(1);
+      await expect(
+        handle.agentConnection.extMethod(MID_TURN_QUEUE_DRAIN_METHOD, {
+          sessionId: session.sessionId,
+          todoStopGuardWatchQueuedPrompt: true,
+        }),
+      ).resolves.toMatchObject({ hasQueuedPrompt: true });
+
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        const result = bridge.removePendingPrompt(session.sessionId, queuedId!);
+        expect(result.removed).toBe(true);
+        expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(1);
+        await vi.waitFor(() => {
+          expect(handle.agent.extMethodCalls).toContainEqual({
+            method: TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
+            params: { sessionId: session.sessionId },
+          });
+        });
+        await vi.waitFor(() => {
+          expect(stderrSpy).toHaveBeenCalledWith(
+            expect.stringContaining(
+              'Todo Stop Guard queued-prompt release failed',
+            ),
+          );
+        });
+      } finally {
+        stderrSpy.mockRestore();
+      }
 
       const again = bridge.removePendingPrompt(
         session.sessionId,
@@ -16057,13 +16094,16 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       'craft/drainMidTurnQueue',
       { sessionId: session.sessionId },
     );
-    expect(drained).toEqual({ messages: ['m1', 'm2'] });
+    expect(drained).toEqual({
+      messages: ['m1', 'm2'],
+      hasQueuedPrompt: false,
+    });
     // Spliced out, so the next batch's drain is empty.
     expect(
       await handle.agentConnection.extMethod('craft/drainMidTurnQueue', {
         sessionId: session.sessionId,
       }),
-    ).toEqual({ messages: [] });
+    ).toEqual({ messages: [], hasQueuedPrompt: false });
 
     release?.();
     await prompt;
@@ -16112,7 +16152,10 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     // line makes this return ['leftover'].)
     const t2 = send('t2');
     await new Promise((r) => setTimeout(r, 10));
-    expect(await drain()).toEqual({ messages: [] });
+    expect(await drain()).toEqual({
+      messages: [],
+      hasQueuedPrompt: false,
+    });
 
     releases[1]!();
     await t2;
@@ -16155,6 +16198,11 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     const p1 = send('p1', 'prompt-1');
     await new Promise((r) => setTimeout(r, 10));
     const p2 = send('p2', 'prompt-2'); // queued behind p1 ⇒ pendingPromptCount = 2
+    expect(
+      await handle.agentConnection.extMethod('craft/drainMidTurnQueue', {
+        sessionId: session.sessionId,
+      }),
+    ).toEqual({ messages: [], hasQueuedPrompt: true });
     expect(bridge.enqueueMidTurnMessage(session.sessionId, 'x')).toEqual({
       accepted: true,
     });
@@ -16166,7 +16214,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       await handle.agentConnection.extMethod('craft/drainMidTurnQueue', {
         sessionId: session.sessionId,
       }),
-    ).toEqual({ messages: ['x'] });
+    ).toEqual({ messages: ['x'], hasQueuedPrompt: false });
     expect((await injected).promptId).toBe('prompt-2');
 
     releases[1]!();
@@ -16326,7 +16374,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       'craft/drainMidTurnQueue',
       { sessionId: session.sessionId },
     );
-    expect(drained).toEqual({ messages: ['hi'] });
+    expect(drained).toEqual({ messages: ['hi'], hasQueuedPrompt: false });
 
     const it = iter[Symbol.asyncIterator]();
     const next = await it.next();
@@ -16405,7 +16453,10 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       'craft/drainMidTurnQueue',
       { sessionId: session.sessionId },
     );
-    expect(drained).toEqual({ messages: ['hello'] });
+    expect(drained).toEqual({
+      messages: ['hello'],
+      hasQueuedPrompt: false,
+    });
 
     release?.();
     await prompt;

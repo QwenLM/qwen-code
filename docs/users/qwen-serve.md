@@ -277,6 +277,42 @@ curl -X POST http://127.0.0.1:4170/session/$SESSION_ID/prompt \
 
 The `curl -N` from step 4 will print frames as they arrive.
 
+### Optional Todo Stop Guard
+
+Long-running daemon clients can opt into a bounded continuation when the
+current work chain successfully writes a top-level Todo list and then stops
+with items still pending or in progress. Add this to `settings.json` and
+restart the daemon:
+
+```json
+{
+  "experimental": {
+    "todoStopGuard": true
+  }
+}
+```
+
+The guard adds at most two consecutive primary-model calls without new user
+input. A mid-turn user message runs first and starts a fresh two-attempt stage;
+retry/continue and related background results retain the current stage's
+budget. Every call and the final exhaustion state appear as replayable
+`session_update` events with `_meta.source: "todo_stop_guard"`; the metadata
+includes the attempt and unfinished count but never Todo text. A queued full
+prompt also runs first, and existing permission/cancellation rules are
+unchanged.
+
+While an armed chain waits on related background work, unrelated cron/loop
+fires and old-task notifications are deferred. Recurring work is bounded and
+coalesced per task until the chain yields.
+
+The option defaults to `false`, requires restart, and is forced off in safe
+mode, bare mode, and Approval `plan` mode. It is in-memory only: loading Todo
+state from disk or restarting the daemon does not arm it. A new ordinary prompt
+must successfully run its own top-level `todo_write`; retry/continue and live
+client reattach keep the current in-memory work chain. Successfully changing
+the session working directory clears it so an old Todo cannot resume in a new
+workspace.
+
 ## Authentication
 
 For anything beyond loopback, you **must** pass a bearer token:
