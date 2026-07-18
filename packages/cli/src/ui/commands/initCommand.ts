@@ -40,31 +40,32 @@ export const initCommand: SlashCommand = {
     try {
       if (fs.existsSync(contextFilePath)) {
         // If file exists but is empty (or whitespace), continue to initialize
+        let existing = '';
         try {
-          const existing = fs.readFileSync(contextFilePath, 'utf8');
-          if (existing && existing.trim().length > 0) {
-            // File exists and has content - ask for confirmation to overwrite
-            if (!context.overwriteConfirmed) {
-              const [{ Text }, { default: React }] = await Promise.all([
-                import('ink'),
-                import('react'),
-              ]);
-              return {
-                type: 'confirm_action',
-                prompt: React.createElement(
-                  Text,
-                  null,
-                  `A ${contextFileName} file already exists in this directory. Do you want to regenerate it?`,
-                ),
-                originalInvocation: {
-                  raw: context.invocation?.raw || '/init',
-                },
-              };
-            }
-            // User confirmed overwrite, continue with regeneration
-          }
+          existing = fs.readFileSync(contextFilePath, 'utf8');
         } catch {
           // If we fail to read, conservatively proceed to (re)create the file
+        }
+        if (existing && existing.trim().length > 0) {
+          // File exists and has content - ask for confirmation to overwrite
+          if (!context.overwriteConfirmed) {
+            const [{ Text }, { default: React }] = await Promise.all([
+              import('ink'),
+              import('react'),
+            ]);
+            return {
+              type: 'confirm_action',
+              prompt: React.createElement(
+                Text,
+                null,
+                `A ${contextFileName} file already exists in this directory. Do you want to regenerate it?`,
+              ),
+              originalInvocation: {
+                raw: context.invocation?.raw || '/init',
+              },
+            };
+          }
+          // User confirmed overwrite, continue with regeneration
         }
       }
 

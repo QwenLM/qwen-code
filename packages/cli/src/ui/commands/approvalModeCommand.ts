@@ -73,6 +73,24 @@ export const approvalModeCommand: SlashCommand = {
     if (config) {
       try {
         priorMode = config.getApprovalMode();
+      } catch (e) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: (e as Error).message,
+        };
+      }
+    }
+
+    const autoModeNotices =
+      mode === ApprovalModeEnum.AUTO &&
+      priorMode !== ApprovalModeEnum.AUTO &&
+      config
+        ? await import('../hooks/useAutoAcceptIndicator.js')
+        : undefined;
+
+    if (config) {
+      try {
         config.setApprovalMode(mode);
       } catch (e) {
         return {
@@ -86,15 +104,8 @@ export const approvalModeCommand: SlashCommand = {
     // When the user switches INTO AUTO via this command (not just via
     // Shift+Tab), emit the same first-time-acknowledgement + stripped-rules
     // notices as the keyboard handler.
-    if (
-      mode === ApprovalModeEnum.AUTO &&
-      priorMode !== ApprovalModeEnum.AUTO &&
-      config
-    ) {
-      const { emitAutoModeEntryNotices } = await import(
-        '../hooks/useAutoAcceptIndicator.js'
-      );
-      emitAutoModeEntryNotices({
+    if (autoModeNotices && config) {
+      autoModeNotices.emitAutoModeEntryNotices({
         config,
         settings,
         addItem: context.ui.addItem,
