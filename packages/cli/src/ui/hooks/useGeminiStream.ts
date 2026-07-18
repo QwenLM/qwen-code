@@ -2659,8 +2659,18 @@ export const useGeminiStream = (
 
       const userMessageTimestamp = Date.now();
 
-      // Reset quota error flag when starting a new query (not a continuation)
-      if (!isTurnContinuation && !allowConcurrentBtwDuringResponse) {
+      // Reset quota error flag when starting a new query (not a continuation).
+      // Notifications (background agent/shell/monitor completions) are system
+      // events, not new user turns: they must not clear the user's model
+      // override or an in-flight retry countdown — clearing the override here
+      // silently reverted the session to the default model whenever a
+      // background agent finished, and a long history could then overflow the
+      // default model's smaller context window (#7114).
+      if (
+        !isTurnContinuation &&
+        submitType !== SendMessageType.Notification &&
+        !allowConcurrentBtwDuringResponse
+      ) {
         setModelSwitchedFromQuotaError(false);
         // Clear model override for new user turns. On retry, preserve a
         // skill-selected override so the same model is used again, but drop an
