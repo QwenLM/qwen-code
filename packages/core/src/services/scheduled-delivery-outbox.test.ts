@@ -68,6 +68,32 @@ describe('scheduledDeliveryOutbox', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'heals permissive permissions when a claim does not change the outbox',
+    async () => {
+      await enqueue();
+      await claimScheduledDelivery(workspace, {
+        now: 1718000002000,
+        leaseMs: 30_000,
+      });
+      await completeScheduledDelivery(workspace, {
+        deliveryId: 'task-1:1718000000000',
+        outcome: 'delivered',
+        now: 1718000003000,
+      });
+
+      const file = getScheduledDeliveryOutboxPath(workspace);
+      await fs.chmod(file, 0o644);
+      expect(
+        await claimScheduledDelivery(workspace, {
+          now: 1719000000000,
+          leaseMs: 30_000,
+        }),
+      ).toBeNull();
+      expect((await fs.stat(file)).mode & 0o777).toBe(0o600);
+    },
+  );
+
   it('rejects a conflicting reuse of a delivery id', async () => {
     await enqueue();
     await expect(enqueue({ text: 'different result' })).rejects.toThrow(

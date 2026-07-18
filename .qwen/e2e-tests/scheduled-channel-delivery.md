@@ -42,7 +42,7 @@ workspace outbox, and received a successful DingTalk group-send acknowledgement.
 - Task: `dz1vu8i2`
 - Delivery: `dz1vu8i2:1784391900000`
 - Marker: `QWEN-SCHED-E2E-20260719-0025-USER`
-- Target: `{ "type": "user", "id": "406850" }`
+- Target: `{ "type": "user", "id": "<redacted-user-id>" }`
 - Result: `delivered`, `attempts=1`
 
 The direct send used the stable DingTalk staff ID, not the inbound conversation
@@ -65,10 +65,11 @@ recipient was absent from DingTalk's invalid and rate-limited user lists.
 
 ## Automated regression evidence
 
-- Core scheduler/task/outbox: 194 tests passed.
+- Core scheduler/task/outbox: 195 tests passed.
 - ChannelBase: 495 tests passed.
 - DingTalk: 72 tests passed; Feishu: 76; WeCom: 135; Telegram: 15.
 - Session final-answer capture: 368 tests passed.
 - Focused CLI scheduled-delivery routes/IPC/worker/controller: 177 tests passed.
-- CLI daemon/worker/server regression group: 1,104 tests passed.
+- CLI daemon/worker/server regression group: 1,105 tests passed; one transient
+  parallel socket case passed on isolated retry.
 - CLI typecheck and serve fast-path bundle closure check passed.

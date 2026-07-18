@@ -201,6 +201,20 @@ async function readOutboxFile(
   return parsed;
 }
 
+async function hardenExistingOutboxPermissions(file: string): Promise<void> {
+  let stat: Awaited<ReturnType<typeof fs.lstat>>;
+  try {
+    stat = await fs.lstat(file);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new Error(`Invalid scheduled delivery outbox in ${file}.`);
+  }
+  await fs.chmod(file, 0o600);
+}
+
 export async function readScheduledDeliveryOutbox(
   projectRoot: string,
 ): Promise<ScheduledDeliveryRecord[]> {
@@ -224,6 +238,7 @@ async function mutateOutbox<T>(
     await fs.chmod(guard, 0o600);
     const release = await lockfile.lock(guard, LOCK_OPTIONS);
     try {
+      await hardenExistingOutboxPermissions(file);
       const current = await readOutboxFile(file);
       const next = mutate(current);
       if (next.records !== current) {
