@@ -32,11 +32,8 @@ describe('scheduledDeliveryOutbox', () => {
       deliveryId: 'task-1:1718000000000',
       taskId: 'task-1',
       firedAt: 1718000000000,
-      target: {
-        channelName: 'dingtalk',
-        chatId: 'group-42',
-        isGroup: true,
-      },
+      channelName: 'dingtalk',
+      target: { type: 'chat', id: 'group-42' },
       text: 'daily result',
       createdAt: 1718000001000,
       ...overrides,
@@ -49,6 +46,8 @@ describe('scheduledDeliveryOutbox', () => {
     expect(second).toEqual(first);
     expect(await readScheduledDeliveryOutbox(workspace)).toEqual([first]);
     expect(first).toMatchObject({
+      channelName: 'dingtalk',
+      target: { type: 'chat', id: 'group-42' },
       status: 'pending',
       attempts: 0,
       updatedAt: 1718000001000,
@@ -59,6 +58,21 @@ describe('scheduledDeliveryOutbox', () => {
     await enqueue();
     await expect(enqueue({ text: 'different result' })).rejects.toThrow(
       /conflicting delivery id/,
+    );
+    await expect(enqueue({ channelName: 'feishu' })).rejects.toThrow(
+      /conflicting delivery id/,
+    );
+  });
+
+  it.each([
+    { channelName: '' },
+    { target: { type: 'chat', id: '' } },
+    { target: { type: 'topic', id: 'topic-1' } },
+    { target: { type: 'chat', id: 'group-42', threadId: 'thread-7' } },
+    { target: { channelName: 'dingtalk', chatId: 'group-42', isGroup: true } },
+  ])('rejects malformed enqueue input %#', async (overrides) => {
+    await expect(enqueue(overrides)).rejects.toThrow(
+      /Invalid scheduled delivery enqueue input/,
     );
   });
 

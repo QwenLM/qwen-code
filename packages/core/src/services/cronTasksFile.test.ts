@@ -145,23 +145,25 @@ describe('cronTasksFile', () => {
       expect(result).toEqual([task]);
     });
 
-    it('round-trips channel delivery and explicit shared session ownership', async () => {
-      const task = makeTask({
-        sessionId: 'im-session-1',
-        sessionOwnership: 'shared',
-        delivery: {
-          kind: 'channel',
-          target: {
+    it.each([
+      { type: 'user' as const, id: 'staff-42' },
+      { type: 'chat' as const, id: 'group-42' },
+    ])(
+      'round-trips $type channel delivery and explicit shared session ownership',
+      async (target) => {
+        const task = makeTask({
+          sessionId: 'im-session-1',
+          sessionOwnership: 'shared',
+          delivery: {
+            kind: 'channel',
             channelName: 'dingtalk',
-            chatId: 'group-42',
-            threadId: 'thread-7',
-            isGroup: true,
+            target,
           },
-        },
-      });
-      await writeCronTasks(tmpDir, [task]);
-      expect(await readCronTasks(tmpDir)).toEqual([task]);
-    });
+        });
+        await writeCronTasks(tmpDir, [task]);
+        expect(await readCronTasks(tmpDir)).toEqual([task]);
+      },
+    );
 
     it('round-trips Channel /loop ownership metadata', async () => {
       const task = makeTask({
@@ -191,16 +193,39 @@ describe('cronTasksFile', () => {
     });
 
     it.each([
-      { kind: 'webhook', target: { channelName: 'dingtalk', chatId: 'g1' } },
-      { kind: 'channel', target: { channelName: '', chatId: 'g1' } },
-      { kind: 'channel', target: { channelName: 'dingtalk', chatId: '' } },
       {
-        kind: 'channel',
-        target: { channelName: 'dingtalk', chatId: 'g1', threadId: 7 },
+        kind: 'webhook',
+        channelName: 'dingtalk',
+        target: { type: 'chat', id: 'g1' },
       },
       {
         kind: 'channel',
-        target: { channelName: 'dingtalk', chatId: 'g1', isGroup: 'yes' },
+        channelName: '',
+        target: { type: 'chat', id: 'g1' },
+      },
+      {
+        kind: 'channel',
+        channelName: 'dingtalk',
+        target: { type: 'chat', id: '' },
+      },
+      {
+        kind: 'channel',
+        channelName: 'dingtalk',
+        target: { type: 'topic', id: 'topic-1' },
+      },
+      {
+        kind: 'channel',
+        channelName: 'dingtalk',
+        target: { type: 'chat', id: 'g1', threadId: 'thread-7' },
+      },
+      {
+        kind: 'channel',
+        channelName: 'dingtalk',
+        target: { type: 'user', id: 'u1', isGroup: false },
+      },
+      {
+        kind: 'channel',
+        target: { channelName: 'dingtalk', chatId: 'g1', isGroup: true },
       },
     ])('rejects malformed channel delivery %#', async (delivery) => {
       await seedTasksFile(

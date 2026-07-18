@@ -29,6 +29,7 @@ export interface ScheduledDeliveryRecord {
   deliveryId: string;
   taskId: string;
   firedAt: number;
+  channelName: string;
   target: CronTaskChannelTarget;
   text: string;
   status: ScheduledDeliveryStatus;
@@ -44,6 +45,7 @@ export interface EnqueueScheduledDeliveryInput {
   deliveryId: string;
   taskId: string;
   firedAt: number;
+  channelName: string;
   target: CronTaskChannelTarget;
   text: string;
   createdAt?: number;
@@ -123,12 +125,10 @@ function isValidTarget(value: unknown): value is CronTaskChannelTarget {
   if (typeof value !== 'object' || value === null) return false;
   const target = value as Record<string, unknown>;
   return (
-    isBoundedString(target['channelName'], MAX_TARGET_FIELD_LENGTH) &&
-    isBoundedString(target['chatId'], MAX_TARGET_FIELD_LENGTH) &&
-    (target['threadId'] === undefined ||
-      (typeof target['threadId'] === 'string' &&
-        target['threadId'].length <= MAX_TARGET_FIELD_LENGTH)) &&
-    (target['isGroup'] === undefined || typeof target['isGroup'] === 'boolean')
+    (target['type'] === 'user' || target['type'] === 'chat') &&
+    isBoundedString(target['id'], MAX_TARGET_FIELD_LENGTH) &&
+    target['id'].trim().length > 0 &&
+    Object.keys(target).every((key) => key === 'type' || key === 'id')
   );
 }
 
@@ -148,6 +148,8 @@ function isValidRecord(value: unknown): value is ScheduledDeliveryRecord {
     isBoundedString(record['deliveryId'], MAX_ID_LENGTH) &&
     isBoundedString(record['taskId'], MAX_ID_LENGTH) &&
     isFiniteNumber(record['firedAt']) &&
+    isBoundedString(record['channelName'], MAX_TARGET_FIELD_LENGTH) &&
+    (record['channelName'] as string).trim().length > 0 &&
     isValidTarget(record['target']) &&
     isBoundedString(record['text'], MAX_TEXT_LENGTH) &&
     (record['status'] === 'pending' ||
@@ -236,6 +238,7 @@ function sameEnqueue(
   return (
     record.taskId === input.taskId &&
     record.firedAt === input.firedAt &&
+    record.channelName === input.channelName &&
     record.text === input.text &&
     JSON.stringify(record.target) === JSON.stringify(input.target)
   );
@@ -250,6 +253,7 @@ export async function enqueueScheduledDelivery(
     deliveryId: input.deliveryId,
     taskId: input.taskId,
     firedAt: input.firedAt,
+    channelName: input.channelName,
     target: { ...input.target },
     text: input.text,
     status: 'pending',

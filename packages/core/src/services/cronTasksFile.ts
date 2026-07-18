@@ -62,12 +62,9 @@ export interface CronTaskRun {
 export const MAX_TASK_RUNS = 20;
 
 /** A daemon-managed Channel destination for a scheduled task result. */
-export interface CronTaskChannelTarget {
-  channelName: string;
-  chatId: string;
-  threadId?: string;
-  isGroup?: boolean;
-}
+export type CronTaskChannelTarget =
+  | { type: 'user'; id: string }
+  | { type: 'chat'; id: string };
 
 /**
  * Optional post-run delivery. Kept separate from the prompt/session binding:
@@ -76,6 +73,7 @@ export interface CronTaskChannelTarget {
  */
 export interface CronTaskDelivery {
   kind: 'channel';
+  channelName: string;
   target: CronTaskChannelTarget;
 }
 
@@ -457,18 +455,24 @@ function isValidRuns(value: unknown): value is CronTaskRun[] {
 function isValidDelivery(value: unknown): value is CronTaskDelivery {
   if (typeof value !== 'object' || value === null) return false;
   const delivery = value as Record<string, unknown>;
-  if (delivery['kind'] !== 'channel') return false;
+  if (
+    delivery['kind'] !== 'channel' ||
+    typeof delivery['channelName'] !== 'string' ||
+    delivery['channelName'].trim().length === 0 ||
+    !Object.keys(delivery).every(
+      (key) => key === 'kind' || key === 'channelName' || key === 'target',
+    )
+  ) {
+    return false;
+  }
   const rawTarget = delivery['target'];
   if (typeof rawTarget !== 'object' || rawTarget === null) return false;
   const target = rawTarget as Record<string, unknown>;
   return (
-    typeof target['channelName'] === 'string' &&
-    target['channelName'].length > 0 &&
-    typeof target['chatId'] === 'string' &&
-    target['chatId'].length > 0 &&
-    (target['threadId'] === undefined ||
-      typeof target['threadId'] === 'string') &&
-    (target['isGroup'] === undefined || typeof target['isGroup'] === 'boolean')
+    (target['type'] === 'user' || target['type'] === 'chat') &&
+    typeof target['id'] === 'string' &&
+    target['id'].trim().length > 0 &&
+    Object.keys(target).every((key) => key === 'type' || key === 'id')
   );
 }
 
