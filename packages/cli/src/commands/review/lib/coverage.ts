@@ -686,14 +686,20 @@ type GapText = Record<Exclude<Delivery, 'ok'>, GapEntry>;
  */
 const rebuildFix = (role: 'verify' | 'reverse-audit', noun: string): string =>
   `build the prompt with \`"\${QWEN_CODE_CLI:-qwen}" review agent-prompt ` +
-  `--plan <plan> --role ${role} --findings <file> [--rules <rules file>]\` ` +
+  `--plan <plan> --role ${role} --findings <file> [--rules <rules file>] ` +
+  `[--round <k>]\` ` +
   (role === 'reverse-audit'
     ? `(an early round with nothing confirmed passes an empty file; `
     : `(pass the shard's findings, never an empty file — a verifier that sees ` +
       `no findings verifies nothing; `) +
   `pass --rules whenever the review loaded any, or the rebuilt brief silently ` +
   `drops the project rules) and launch an agent with EXACTLY what it prints — ` +
-  `no ${noun} number, no summary of your own, no rewording`;
+  `no hand-added ${noun} number` +
+  // --round bakes in a ROUND number. Verify's noun is "shard", and a
+  // parenthetical claiming --round bakes it in would send the reader to the
+  // wrong flag — shards are already told apart by their findings digest.
+  (role === 'reverse-audit' ? ` (--round bakes it in)` : ``) +
+  `, no summary of your own, no rewording`;
 
 const REVERSE_AUDIT_GAP: GapText = {
   // Not "no auditor ran": a run that skipped the builder and hand-wrote the
