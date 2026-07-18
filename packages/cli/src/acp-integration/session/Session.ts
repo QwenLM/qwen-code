@@ -6599,7 +6599,9 @@ export class Session implements SessionContext {
                 const permissionFailureMessage = isExitPlanModeTool
                   ? 'The host could not present plan-exit approval. Plan mode remains active; use the host mode selector or /plan exit to leave plan mode.'
                   : planShellDecision.classification === 'unknown'
-                    ? planShellDecision.noApprovalMessage
+                    ? `Plan mode could not complete approval for this shell command: ${this.#formatError(
+                        error,
+                      )}. The command was not run; Plan mode remains active.`
                     : `Permission request failed for "${toolName}": ${this.#formatError(
                         error,
                       )}`;
