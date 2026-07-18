@@ -225,12 +225,14 @@ export {
 export { detectFromLoopback } from './server/request-helpers.js';
 export {
   InvalidCursorError,
+  getWorkspaceSessionInfoForResponse,
   listWorkspaceSessionsForResponse,
 } from './server/session-list.js';
 export type {
   ListWorkspaceSessionsOptions,
   ListWorkspaceSessionsReadOptions,
   ListWorkspaceSessionsResult,
+  WorkspaceSessionInfoResult,
 } from './server/session-list.js';
 export { getActiveSseCount } from './routes/sse-events.js';
 
@@ -831,6 +833,7 @@ export function createServeApp(
         primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {},
       ),
       workspaceSkillsStatusProvider: createWorkspaceSkillsStatusProvider(),
+      ...(primaryEffectiveEnv ? { skillInstallEnv: primaryEffectiveEnv } : {}),
       ...(primaryEffectiveEnv ? { voiceEnv: primaryEffectiveEnv } : {}),
       isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools:
@@ -1059,40 +1062,27 @@ export function createServeApp(
   });
 
   app.use(
-    daemonTelemetryMiddleware(
-      (req) => {
-        const match = req.path.match(/^\/workspaces\/([^/]+)/);
-        const rawSelector = match?.[1];
-        if (rawSelector) {
-          try {
-            const selector = decodeURIComponent(rawSelector);
-            const byId = workspaceRegistry.getByWorkspaceId(selector);
-            if (byId) return byId.workspaceCwd;
-            if (isPortableAbsolutePath(selector)) {
-              const runtime = resolveRegisteredWorkspaceRuntimeByPathSelector(
-                workspaceRegistry,
-                selector,
-              );
-              if (runtime) return runtime.workspaceCwd;
-            }
-          } catch {
-            return primaryBoundWorkspace;
-          }
-        }
-        return primaryBoundWorkspace;
-      },
-      deps.recordDaemonRequest,
-      (sessionId) => {
+    daemonTelemetryMiddleware((req) => {
+      const match = req.path.match(/^\/workspaces\/([^/]+)/);
+      const rawSelector = match?.[1];
+      if (rawSelector) {
         try {
-          const owner = workspaceRegistry.resolveLiveSessionOwner(sessionId);
-          return owner.kind === 'found'
-            ? owner.runtime.workspaceCwd
-            : undefined;
+          const selector = decodeURIComponent(rawSelector);
+          const byId = workspaceRegistry.getByWorkspaceId(selector);
+          if (byId) return byId.workspaceCwd;
+          if (isPortableAbsolutePath(selector)) {
+            const runtime = resolveRegisteredWorkspaceRuntimeByPathSelector(
+              workspaceRegistry,
+              selector,
+            );
+            if (runtime) return runtime.workspaceCwd;
+          }
         } catch {
-          return undefined;
+          return primaryBoundWorkspace;
         }
-      },
-    ),
+      }
+      return primaryBoundWorkspace;
+    }, deps.recordDaemonRequest),
   );
 
   const buildWorkspaceCtx = createBuildWorkspaceCtx(primaryBoundWorkspace);

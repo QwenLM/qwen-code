@@ -34,7 +34,7 @@ export const ScreenReaderAppLayout: React.FC = () => {
     uiState.stickyTodos !== null &&
     !uiState.dialogsVisible &&
     !uiState.isFeedbackDialogOpen &&
-    uiState.streamingState !== StreamingState.WaitingForConfirmation;
+    uiState.streamingState === StreamingState.Responding;
 
   return (
     <Box flexDirection="column" width="90%" height="100%">

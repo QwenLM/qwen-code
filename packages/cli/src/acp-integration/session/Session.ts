@@ -133,8 +133,11 @@ import {
   runVisionBridge,
   shouldRunVisionBridge,
   formatVisionBridgeNotice,
+  formatFullTurnVisionNotice,
+  getFullTurnVisionModelSelector,
   splitImageParts,
   approxBase64Bytes,
+  runWithRuntimeContentGenerator,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
@@ -1854,6 +1857,14 @@ export class Session implements SessionContext {
             const inputText = firstTextBlock?.text || '';
 
             let parts: Part[] | null;
+            let fullTurnModelOverride: string | undefined;
+            const onFullTurnModel = (model: string) => {
+              if (fullTurnModelOverride) {
+                return false;
+              }
+              fullTurnModelOverride = model;
+              return true;
+            };
 
             if (isContinue) {
               // Non-null here: the `none` case returned early above, and both
@@ -1871,6 +1882,8 @@ export class Session implements SessionContext {
               parts = await this.#processSlashCommandResult(
                 slashCommandResult,
                 params.prompt,
+                pendingSend.signal,
+                onFullTurnModel,
               );
 
               // If parts is null, the command was fully handled (e.g., /summary completed)
@@ -1885,7 +1898,7 @@ export class Session implements SessionContext {
               parts = await this.#resolvePrompt(
                 params.prompt,
                 pendingSend.signal,
-                { promptLast: true },
+                { promptLast: true, onFullTurnModel },
               );
             }
 
@@ -2039,6 +2052,7 @@ export class Session implements SessionContext {
                       promptId,
                       nextMessage?.parts ?? [],
                       pendingSend.signal,
+                      { modelOverride: fullTurnModelOverride },
                     );
                   if (!sendResult.responseStream) {
                     // Preserve the full message (not just functionResponse
@@ -2206,11 +2220,15 @@ export class Session implements SessionContext {
                 }
 
                 if (functionCalls.length > 0) {
-                  const toolRun = await this.runToolCalls(
-                    pendingSend.signal,
-                    promptId,
-                    functionCalls,
-                    toolLoopState,
+                  const toolRun = await this.#runWithFullTurnModel(
+                    fullTurnModelOverride,
+                    () =>
+                      this.runToolCalls(
+                        pendingSend.signal,
+                        promptId,
+                        functionCalls,
+                        toolLoopState,
+                      ),
                   );
                   if (toolRun.stopAfterPermissionCancel) {
                     await this.#preserveStoppedToolRun(
@@ -2222,6 +2240,7 @@ export class Session implements SessionContext {
                   nextMessage = await this.#buildNextMessageAfterToolRun(
                     toolRun,
                     pendingSend.signal,
+                    onFullTurnModel,
                   );
                   if (toolRun.loopDetected) {
                     await this.#preserveStoppedToolRun(
@@ -2245,6 +2264,7 @@ export class Session implements SessionContext {
                 promptId,
                 hooksEnabled,
                 messageBus,
+                fullTurnModelOverride,
               );
             } finally {
               logConversationFinishedEvent(
@@ -2280,10 +2300,18 @@ export class Session implements SessionContext {
     promptId: string,
     hooksEnabled: boolean,
     messageBus: MessageBus | undefined,
+    modelOverride?: string,
   ): Promise<{ stopReason: PromptResponse['stopReason'] }> {
     const stopHookBlockingCap = this.config.getStopHookBlockingCap();
     let stopHookIterationCount = 0;
     let stopHookReasons: string[] = [];
+    const onFullTurnModel = (model: string) => {
+      if (modelOverride) {
+        return false;
+      }
+      modelOverride = model;
+      return true;
+    };
 
     while (stopHookIterationCount < stopHookBlockingCap) {
       if (
@@ -2403,7 +2431,10 @@ export class Session implements SessionContext {
                 promptId + '_stop_hook_' + stopHookIterationCount,
                 nextMessage?.parts ?? [],
                 pendingSend.signal,
-                { skipCompression: stopHookIterationCount > 1 },
+                {
+                  skipCompression: stopHookIterationCount > 1,
+                  modelOverride,
+                },
               );
             if (!continueSendResult.responseStream) {
               this.#preserveUnsentMessageHistory(
@@ -2528,11 +2559,15 @@ export class Session implements SessionContext {
 
           // Process tool calls from the follow-up message
           if (functionCalls.length > 0) {
-            const toolRun = await this.runToolCalls(
-              pendingSend.signal,
-              promptId,
-              functionCalls,
-              toolLoopState,
+            const toolRun = await this.#runWithFullTurnModel(
+              modelOverride,
+              () =>
+                this.runToolCalls(
+                  pendingSend.signal,
+                  promptId,
+                  functionCalls,
+                  toolLoopState,
+                ),
             );
             if (toolRun.stopAfterPermissionCancel) {
               await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
@@ -2541,6 +2576,7 @@ export class Session implements SessionContext {
             nextMessage = await this.#buildNextMessageAfterToolRun(
               toolRun,
               pendingSend.signal,
+              onFullTurnModel,
             );
             if (toolRun.loopDetected) {
               await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
@@ -2571,6 +2607,19 @@ export class Session implements SessionContext {
 
   #getCurrentChat(): GeminiChat {
     return this.config.getGeminiClient()!.getChat();
+  }
+
+  async #runWithFullTurnModel<T>(
+    modelOverride: string | undefined,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    if (!modelOverride?.endsWith('\0')) {
+      return fn();
+    }
+    const runtimeView = await this.config
+      .getBaseLlmClient()
+      .resolveForModel(modelOverride.slice(0, -1), { failClosed: true });
+    return runWithRuntimeContentGenerator(runtimeView, fn);
   }
 
   /**
@@ -2614,12 +2663,12 @@ export class Session implements SessionContext {
     promptId: string,
     message: Part[],
     abortSignal: AbortSignal,
-    options: { skipCompression?: boolean } = {},
+    options: { skipCompression?: boolean; modelOverride?: string } = {},
   ): Promise<AutoCompressionSendResult> {
     const geminiClient = this.config.getGeminiClient()!;
     let compressionDiagnostic: string | null = null;
     let compressionInfo: ChatCompressionInfo | null = null;
-    if (!options.skipCompression) {
+    if (!options.skipCompression && !options.modelOverride) {
       try {
         const compressed = await geminiClient.tryCompressChat(
           promptId,
@@ -2697,7 +2746,7 @@ export class Session implements SessionContext {
     }
 
     const responseStream = await this.#getCurrentChat().sendMessageStream(
-      this.config.getModel(),
+      options.modelOverride ?? this.config.getModel(),
       {
         message,
         config: {
@@ -2762,6 +2811,7 @@ export class Session implements SessionContext {
   async #buildNextMessageAfterToolRun(
     toolRun: RunToolResult,
     abortSignal: AbortSignal,
+    onFullTurnModel?: (model: string) => boolean,
   ): Promise<Content | null> {
     if (toolRun.loopDetected) {
       debugLogger.debug('Stopping ACP turn after daemon loop detection.');
@@ -2775,7 +2825,7 @@ export class Session implements SessionContext {
     }
     const parts = [
       ...toolRun.parts,
-      ...(await this.#drainMidTurnUserMessages(abortSignal)),
+      ...(await this.#drainMidTurnUserMessages(abortSignal, onFullTurnModel)),
     ];
     return { role: 'user', parts };
   }
@@ -2886,7 +2936,10 @@ export class Session implements SessionContext {
     });
   }
 
-  async #drainMidTurnUserMessages(abortSignal: AbortSignal): Promise<Part[]> {
+  async #drainMidTurnUserMessages(
+    abortSignal: AbortSignal,
+    onFullTurnModel?: (model: string) => boolean,
+  ): Promise<Part[]> {
     // Flush anything recovered from a PRIOR timed-out drain first: the daemon
     // splices + SSE-publishes synchronously, so on a timeout the browser has
     // already deduped those messages — discarding the late response would lose
@@ -2895,7 +2948,7 @@ export class Session implements SessionContext {
     const recovered = this.#takeRecoveredMidTurnMessages();
 
     if (this.midTurnDrainUnavailable) {
-      return this.#buildMidTurnParts(recovered, abortSignal);
+      return this.#buildMidTurnParts(recovered, abortSignal, onFullTurnModel);
     }
 
     let drainPromise: ReturnType<AgentSideConnection['extMethod']> | undefined;
@@ -2920,6 +2973,7 @@ export class Session implements SessionContext {
       return this.#buildMidTurnParts(
         [...recovered, ...parseMidTurnDrainResponse(response)],
         abortSignal,
+        onFullTurnModel,
       );
     } catch (error) {
       // The ACP SDK rejects with the raw JSON-RPC error object
@@ -2970,7 +3024,7 @@ export class Session implements SessionContext {
       );
       // Even on a failed/timed-out drain, still inject anything recovered from
       // an EARLIER timeout so a transient stall never strands those messages.
-      return this.#buildMidTurnParts(recovered, abortSignal);
+      return this.#buildMidTurnParts(recovered, abortSignal, onFullTurnModel);
     }
   }
 
@@ -3036,6 +3090,7 @@ export class Session implements SessionContext {
   async #buildMidTurnParts(
     messages: DrainedMidTurnMessage[],
     abortSignal: AbortSignal,
+    onFullTurnModel?: (model: string) => boolean,
   ): Promise<Part[]> {
     const parts: Part[] = [];
     for (const message of messages) {
@@ -3049,7 +3104,10 @@ export class Session implements SessionContext {
             : await withTimeoutSignal(
                 abortSignal,
                 MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS,
-                (signal) => this.#resolvePrompt(message.content, signal),
+                (signal) =>
+                  this.#resolvePrompt(message.content, signal, {
+                    onFullTurnModel,
+                  }),
               );
       } catch (messageError) {
         if (abortSignal.aborted) return parts;
@@ -3207,7 +3265,6 @@ export class Session implements SessionContext {
         this.cronAbortController = ac;
         const promptId =
           this.config.getSessionId() + '########cron' + Date.now();
-
         let cronHadError = false;
         await withInteractionSpan(
           this.config,
@@ -3699,7 +3756,6 @@ export class Session implements SessionContext {
         this.notificationAbortController = ac;
         const promptId =
           this.config.getSessionId() + '########notification' + Date.now();
-
         try {
           await this.#emitBackgroundNotificationDisplay(item);
 
@@ -4209,32 +4265,20 @@ export class Session implements SessionContext {
    * Sends a current_mode_update notification to the client.
    * Called after the agent switches modes (e.g., from exit_plan_mode tool).
    */
-  private async sendCurrentModeUpdateNotification(
-    outcome: ToolConfirmationOutcome,
-  ): Promise<void> {
-    // Determine the new mode based on the approval outcome
-    // This mirrors the logic in ExitPlanModeTool.onConfirm
-    let newModeId: ApprovalModeValue;
-    switch (outcome) {
-      case ToolConfirmationOutcome.ProceedAlways:
-        newModeId = 'auto-edit';
-        break;
-      case ToolConfirmationOutcome.RestorePrevious:
-        // onConfirm has already restored the mode; read the actual current mode
-        newModeId = this.config.getApprovalMode() as ApprovalModeValue;
-        break;
-      case ToolConfirmationOutcome.ProceedOnce:
-      default:
-        newModeId = 'default';
-        break;
-    }
-
+  private async sendCurrentModeUpdateNotification(): Promise<void> {
+    const newModeId = this.config.getApprovalMode() as ApprovalModeValue;
     const update: SessionUpdate = {
       sessionUpdate: 'current_mode_update',
       currentModeId: newModeId,
     };
 
-    await this.sendUpdate(update);
+    let legacyFrameSent = false;
+    try {
+      await this.sendUpdate(update);
+      legacyFrameSent = true;
+    } catch (error) {
+      debugLogger.debug('current_mode_update notification failed', error);
+    }
 
     // A2 (#4511): promote the mode change to the bridge side-channel so
     // it reaches `approval_mode_changed` on the SSE bus, matching the
@@ -4246,18 +4290,16 @@ export class Session implements SessionContext {
     // skip its compat dual-emit so the IDE companion sees exactly one
     // legacy frame for this change, not two. `setMode` omits the flag, so
     // its dual-emit still fires (it has no `sendUpdate`).
-    void this.client
-      .extNotification('qwen/notify/session/mode-update', {
+    try {
+      await this.client.extNotification('qwen/notify/session/mode-update', {
         v: 1,
         sessionId: this.sessionId,
         currentModeId: newModeId,
-        legacyFrameSent: true,
-      })
-      .catch((error) => {
-        // Advisory only; a failed notification must not fail the mode
-        // change. Matches the model-update extNotification in `setModel`.
-        debugLogger.debug('mode-update extNotification failed', error);
+        legacyFrameSent,
       });
+    } catch (error) {
+      debugLogger.debug('mode-update extNotification failed', error);
+    }
   }
 
   /**
@@ -5007,8 +5049,13 @@ export class Session implements SessionContext {
             toolName,
             toolParams,
           );
-          const { finalPermission, pmForcedAsk, pmCtx, denyMessage } =
-            flowResult;
+          const {
+            finalPermission,
+            pmForcedAsk,
+            pmCtx,
+            denyMessage,
+            requiresUserInteraction,
+          } = flowResult;
 
           // ---- L5: ApprovalMode overrides ----
           const isPlanMode = approvalMode === ApprovalMode.PLAN;
@@ -5056,6 +5103,7 @@ export class Session implements SessionContext {
           // existing manual-approval flow below.
           if (
             !autoModeAllowed &&
+            !requiresUserInteraction &&
             shouldRunAutoModeForCall(approvalMode, toolName)
           ) {
             const denialState = this.config.getAutoModeDenialState();
@@ -5164,7 +5212,12 @@ export class Session implements SessionContext {
 
           if (
             !autoModeAllowed &&
-            needsConfirmation(confirmationPermission, approvalMode, toolName)
+            needsConfirmation(
+              confirmationPermission,
+              approvalMode,
+              toolName,
+              requiresUserInteraction,
+            )
           ) {
             confirmationDetails =
               await invocation.getConfirmationDetails(abortSignal);
@@ -5202,7 +5255,10 @@ export class Session implements SessionContext {
                 String(approvalMode),
               );
 
-              if (hookResult.hasDecision) {
+              if (
+                hookResult.hasDecision &&
+                (!hookResult.shouldAllow || !requiresUserInteraction)
+              ) {
                 hookHandled = true;
                 if (hookResult.shouldAllow) {
                   if (hookResult.updatedInput) {
@@ -5232,6 +5288,7 @@ export class Session implements SessionContext {
             // AUTO_EDIT mode: auto-approve edit and info tools
             // (same as coreToolScheduler L5 — NOT delegated to the extension)
             if (
+              !requiresUserInteraction &&
               approvalMode === ApprovalMode.AUTO_EDIT &&
               (confirmationDetails.type === 'edit' ||
                 confirmationDetails.type === 'info')
@@ -5321,12 +5378,13 @@ export class Session implements SessionContext {
                   );
                 }
                 onStopAfterPermissionCancel?.();
-                return earlyErrorResponse(
-                  new Error(
-                    `Permission request failed for "${toolName}": ${this.#formatError(
+                const permissionFailureMessage = isExitPlanModeTool
+                  ? 'The host could not present plan-exit approval. Plan mode remains active; use the host mode selector or /plan exit to leave plan mode.'
+                  : `Permission request failed for "${toolName}": ${this.#formatError(
                       error,
-                    )}`,
-                  ),
+                    )}`;
+                return earlyErrorResponse(
+                  new Error(permissionFailureMessage),
                   toolName,
                   { stopAfterPermissionCancel: true },
                 );
@@ -5367,20 +5425,12 @@ export class Session implements SessionContext {
                 );
               }
 
-              // After exit_plan_mode confirmation, send current_mode_update
-              if (
-                isExitPlanModeTool &&
-                outcome !== ToolConfirmationOutcome.Cancel
-              ) {
-                await this.sendCurrentModeUpdateNotification(outcome);
-              }
-
               // After edit tool ProceedAlways, notify the client about mode change
               if (
                 confirmationDetails.type === 'edit' &&
                 outcome === ToolConfirmationOutcome.ProceedAlways
               ) {
-                await this.sendCurrentModeUpdateNotification(outcome);
+                await this.sendCurrentModeUpdateNotification();
               }
 
               switch (outcome) {
@@ -5540,21 +5590,14 @@ export class Session implements SessionContext {
           // Clean up event listeners
           cleanupAgentToolResources();
 
-          // enter_plan_mode and the AUTO/YOLO gate path of exit_plan_mode change the
-          // approval mode inside execute() without going through the user-confirmation
-          // branch above, so notify the client of the current mode explicitly.
-          // Only send when the mode actually changed (a gate "blocked" result keeps
-          // the mode at PLAN, and a redundant notification would be misleading).
+          // Plan lifecycle tools change mode atomically inside execute(). Notify
+          // only after successful execution and only when the actual mode changed.
           if (
             (isEnterPlanModeTool || isExitPlanModeTool) &&
-            !didRequestPermission &&
             !toolResult.error &&
             this.config.getApprovalMode() !== approvalMode
           ) {
-            await this.sendUpdate({
-              sessionUpdate: 'current_mode_update',
-              currentModeId: this.config.getApprovalMode() as ApprovalModeValue,
-            });
+            await this.sendCurrentModeUpdateNotification();
           }
 
           // Create response parts first (needed for emitResult and recordToolResult)
@@ -5885,6 +5928,8 @@ export class Session implements SessionContext {
   async #processSlashCommandResult(
     result: NonInteractiveSlashCommandResult,
     originalPrompt: ContentBlock[],
+    abortSignal: AbortSignal,
+    onFullTurnModel: (model: string) => boolean,
   ): Promise<Part[] | null> {
     this.#emitGoalStatusItems(result);
 
@@ -5892,7 +5937,11 @@ export class Session implements SessionContext {
       case 'submit_prompt':
         // Command wants to submit a prompt to the model
         // Convert PartListUnion to Part[]
-        return normalizePartList(result.content);
+        return this.#applyBridgeConversionsIfNeeded(
+          normalizePartList(result.content),
+          abortSignal,
+          onFullTurnModel,
+        );
 
       case 'message': {
         if (result.messageType === 'error') {
@@ -5964,11 +6013,10 @@ export class Session implements SessionContext {
         // No command was found or executed, resolve the original prompt
         // through the standard path that handles all block types. promptLast
         // keeps the user's instruction prominent (matches the normal path).
-        return this.#resolvePrompt(
-          originalPrompt,
-          new AbortController().signal,
-          { promptLast: true },
-        );
+        return this.#resolvePrompt(originalPrompt, abortSignal, {
+          promptLast: true,
+          onFullTurnModel,
+        });
 
       default: {
         // Exhaustiveness check
@@ -5987,7 +6035,10 @@ export class Session implements SessionContext {
     // (see the assembly comment below). Only genuine user prompts pass this;
     // the mid-turn drain path leaves it false so its synthetic `@uri` marker
     // stays first and keeps carrying the "[User message received...]" prefix.
-    options: { promptLast?: boolean } = {},
+    options: {
+      promptLast?: boolean;
+      onFullTurnModel?: (model: string) => boolean;
+    } = {},
   ): Promise<Part[]> {
     const FILE_URI_SCHEME = 'file://';
 
@@ -6064,13 +6115,18 @@ export class Session implements SessionContext {
       extensionParts.length === 0 &&
       mcpServerParts.length === 0
     ) {
-      return this.#applyBridgeConversionsIfNeeded(parts, abortSignal);
+      return this.#applyBridgeConversionsIfNeeded(
+        parts,
+        abortSignal,
+        options.onFullTurnModel,
+      );
     }
 
     if (atPathCommandParts.length === 0 && embeddedContext.length === 0) {
       return this.#applyBridgeConversionsIfNeeded(
         [...parts, ...extensionParts, ...mcpServerParts],
         abortSignal,
+        options.onFullTurnModel,
       );
     }
 
@@ -6179,12 +6235,14 @@ export class Session implements SessionContext {
     return this.#applyBridgeConversionsIfNeeded(
       processedQueryParts,
       abortSignal,
+      options.onFullTurnModel,
     );
   }
 
   async #applyBridgeConversionsIfNeeded(
     originalParts: Part[],
     abortSignal: AbortSignal,
+    onFullTurnModel?: (model: string) => boolean,
   ): Promise<Part[]> {
     const parts = await this.#applyVoiceBridgeIfNeeded(
       originalParts,
@@ -6192,6 +6250,31 @@ export class Session implements SessionContext {
     );
     if (!hasImageParts(parts) || !shouldRunVisionBridge(this.config)) {
       return parts;
+    }
+
+    const fullTurnModel = this.config.getDefaultVisionBridgeModel();
+    if (onFullTurnModel && fullTurnModel?.agentCapable) {
+      const fullTurnParts = parts.map((part) => clampInlineMediaPart(part));
+      if (!hasImageParts(fullTurnParts)) {
+        return fullTurnParts;
+      }
+      const selected = onFullTurnModel(
+        getFullTurnVisionModelSelector(fullTurnModel),
+      );
+      if (selected) {
+        try {
+          await this.messageEmitter.emitAgentMessage(
+            formatFullTurnVisionNotice(fullTurnModel),
+          );
+        } catch (error) {
+          debugLogger.debug(
+            `full-turn vision: failed to emit notice; continuing error=${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
+      return fullTurnParts;
     }
 
     let bridgeResult: VisionBridgeResult;

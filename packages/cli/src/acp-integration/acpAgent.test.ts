@@ -219,6 +219,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     maxImagesPerTurn: 4,
   }),
   SESSION_TRANSCRIPT_MAX_LIMIT: 500,
+  SESSION_TRANSCRIPT_MAX_PAGE_BYTES: 4 * 1024 * 1024,
   InvalidSessionTranscriptCursorError: class InvalidSessionTranscriptCursorError extends Error {},
   SessionTranscriptSnapshotUnavailableError: class SessionTranscriptSnapshotUnavailableError extends Error {},
   SessionTranscriptTooLargeError: class SessionTranscriptTooLargeError extends Error {
@@ -228,6 +229,15 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
       readonly maxBytes: number,
     ) {
       super('Transcript snapshot is too large');
+    }
+  },
+  SessionTranscriptPageTooLargeError: class SessionTranscriptPageTooLargeError extends Error {
+    constructor(
+      readonly sessionId: string,
+      readonly pageBytes: number,
+      readonly maxBytes: number,
+    ) {
+      super('Transcript page is too large');
     }
   },
   encodeSessionTranscriptCursor: vi.fn((state: unknown) =>
@@ -741,6 +751,7 @@ import {
   InvalidSessionTranscriptCursorError,
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
+  SessionTranscriptPageTooLargeError,
   encodeSessionTranscriptCursor,
   unregisterGoalHook,
   getActiveGoal,
@@ -7424,10 +7435,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(readPage).toHaveBeenCalledWith(VALID_SESSION_ID, {
       cursor: 'cursor-1',
       limit: 2,
+      maxBytes: 4 * 1024 * 1024,
     });
     expect(readPage).toHaveBeenCalledWith(VALID_SESSION_ID, {
       cursor: 'cursor-2',
       limit: 2,
+      maxBytes: 4 * 1024 * 1024,
     });
     expect(result.events).toEqual([
       {
@@ -7745,7 +7758,42 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         maxBytes: 200,
       },
     });
-    expect(readPage).toHaveBeenCalledWith(VALID_SESSION_ID, {});
+    expect(readPage).toHaveBeenCalledWith(VALID_SESSION_ID, {
+      maxBytes: 4 * 1024 * 1024,
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/status/session/transcript maps oversized pages to structured errors', async () => {
+    const settings = makeCoreSettings();
+    const readPage = vi
+      .fn()
+      .mockRejectedValue(
+        new SessionTranscriptPageTooLargeError(VALID_SESSION_ID, 300, 200),
+      );
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+        sessionId: VALID_SESSION_ID,
+      }),
+    ).rejects.toMatchObject({
+      code: -32012,
+      data: {
+        errorKind: 'transcript_page_too_large',
+        sessionId: VALID_SESSION_ID,
+        pageBytes: 300,
+        maxBytes: 200,
+      },
+    });
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -11401,6 +11449,115 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       lastSessionMock!.installRewriter.mock.invocationCallOrder[0]!,
     ).toBeLessThan(
       lastSessionMock!.startCronScheduler.mock.invocationCallOrder[0]!,
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('loadSession limits bulk replay to complete recent turns', async () => {
+    const makeMessage = (
+      uuid: string,
+      parentUuid: string | null,
+      type: 'user' | 'assistant',
+    ) => ({
+      uuid,
+      parentUuid,
+      sessionId: 'persisted-1',
+      timestamp: '2026-07-16T00:00:00.000Z',
+      type,
+      cwd: '/tmp',
+      version: 'test',
+      message: { role: type === 'user' ? 'user' : 'model', parts: [] },
+    });
+    const messages = [
+      makeMessage('u1', null, 'user'),
+      makeMessage('a1', 'u1', 'assistant'),
+      makeMessage('u2', 'a1', 'user'),
+      makeMessage('a2', 'u2', 'assistant'),
+      makeMessage('u3', 'a2', 'user'),
+      makeMessage('a3', 'u3', 'assistant'),
+    ];
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: { messages },
+    });
+    mockHistoryReplay.mockImplementation(async (_context, history) => {
+      expect(history).toEqual(messages.slice(4));
+    });
+    const { agent, agentPromise } = await spawnAgent();
+
+    const response = (await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+      _meta: {
+        'qwen.session.loadReplayMode': 'bulk',
+        'qwen.session.loadReplayPageSize': 2,
+      },
+    })) as {
+      _meta?: Record<string, { hasMore?: boolean }>;
+    };
+
+    expect(response._meta?.['qwen.session.loadReplay']?.hasMore).toBe(true);
+    expect(lastSessionMock?.primeTurnFromHistory).toHaveBeenCalledWith(
+      messages,
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('loadSession keeps one long turn complete', async () => {
+    const makeMessage = (
+      uuid: string,
+      parentUuid: string | null,
+      type: 'user' | 'assistant' | 'tool_result',
+    ) => ({
+      uuid,
+      parentUuid,
+      sessionId: 'persisted-long-turn',
+      timestamp: '2026-07-16T00:00:00.000Z',
+      type,
+      cwd: '/tmp',
+      version: 'test',
+      message: {
+        role: type === 'assistant' ? ('model' as const) : ('user' as const),
+        parts: [],
+      },
+    });
+    const messages = [
+      makeMessage('u1', null, 'user'),
+      makeMessage('a-tool', 'u1', 'assistant'),
+      makeMessage('t1', 'a-tool', 'tool_result'),
+      makeMessage('a-final', 't1', 'assistant'),
+    ];
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: { messages },
+    });
+    mockHistoryReplay.mockImplementation(async (_context, history) => {
+      expect(history).toEqual(messages);
+    });
+    const { agent, agentPromise } = await spawnAgent();
+
+    const response = (await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-long-turn',
+      mcpServers: [],
+      _meta: {
+        'qwen.session.loadReplayMode': 'bulk',
+        'qwen.session.loadReplayPageSize': 2,
+      },
+    })) as {
+      _meta?: Record<string, { hasMore?: boolean }>;
+    };
+
+    expect(
+      response._meta?.['qwen.session.loadReplay']?.hasMore,
+    ).toBeUndefined();
+    expect(lastSessionMock?.primeTurnFromHistory).toHaveBeenCalledWith(
+      messages,
     );
 
     mockConnectionState.resolve();

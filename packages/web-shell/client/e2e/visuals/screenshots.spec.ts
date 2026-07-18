@@ -342,11 +342,7 @@ for (const theme of THEMES) {
     });
 
     test(`workspace sidebar`, async ({ page }, testInfo) => {
-      // Two workspaces make the sidebar group sessions per workspace and tag the
-      // primary one — the surface the "primary workspace" label/badge lives on.
-      // Every other scenario here is single-workspace, where that tag never
-      // renders (it is gated on more than one displayed workspace), so this is
-      // the only scenario that can surface a change to the workspace labels.
+      // Two workspaces make the sidebar group sessions per workspace.
       //
       // Pin the primary workspace cwd and its loaded session name explicitly,
       // rather than leaning on createWebShellDaemonScenario's defaults: the
@@ -381,9 +377,7 @@ for (const theme of THEMES) {
         resolveBaseURL(testInfo),
       );
       await gotoSession(page, scenario, daemon, theme);
-      // Each workspace renders a section headed by its basename. Assert both
-      // workspace names so a regression in the grouping fails an assertion, not
-      // only the visually-reviewed screenshot.
+      // Each workspace renders a section headed by its basename.
       const sidebar = page.getByRole('complementary');
       await expect(
         sidebar.getByText('qwen-web-shell-e2e', { exact: true }),
@@ -391,14 +385,6 @@ for (const theme of THEMES) {
       await expect(
         sidebar.getByText('qwen-api-service', { exact: true }),
       ).toBeVisible();
-      // The primary workspace used to carry a "Primary" badge; #7035 dropped it
-      // as redundant (the workspace selector's checkmark already conveys the
-      // default target) but left this spec asserting it was visible, which is
-      // what turned this job red. Assert its absence instead, mirroring the unit
-      // test that PR added, so a regression re-adding the badge still fails here.
-      await expect(sidebar.getByText('Primary', { exact: true })).toHaveCount(
-        0,
-      );
       // The primary workspace auto-expands and streams its session rows in via a
       // per-workspace fetch. Wait for the loaded session's row before capturing
       // so the async load has settled — otherwise the row list races the

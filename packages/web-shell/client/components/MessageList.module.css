@@ -29,6 +29,12 @@
   border-radius: 3px;
 }
 
+.historyStatus {
+  color: var(--muted-foreground);
+  text-align: center;
+  padding: 4px 0 12px;
+}
+
 .list > * {
   width: min(
     100%,

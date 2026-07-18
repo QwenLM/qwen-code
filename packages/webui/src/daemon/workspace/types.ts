@@ -55,6 +55,10 @@ import type {
   DaemonWorkspacePreflightStatus,
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillsStatus,
+  DaemonSkillToggleResult,
+  DaemonSkillInstallRequest,
+  DaemonSkillMutationResult,
+  DaemonSkillScope,
   DaemonWorkspaceToolsStatus,
   DaemonWorkspaceSettingsStatus,
   DaemonSettingUpdateResult,
@@ -288,6 +292,21 @@ export interface DaemonGoalList {
   droppedCount: number;
 }
 
+export interface DaemonWorkspacePathSuggestion {
+  name: string;
+  path: string;
+}
+
+export interface DaemonWorkspacePathSuggestions {
+  kind: 'workspace-path-suggestions';
+  /** Directory the suggestions were listed from. */
+  dir: string;
+  /** Path separator of the daemon host, for appending on accept. */
+  sep: string;
+  suggestions: DaemonWorkspacePathSuggestion[];
+  truncated: boolean;
+}
+
 export interface DaemonWorkspaceActions {
   // Sessions
   listSessions(
@@ -357,8 +376,19 @@ export interface DaemonWorkspaceActions {
     heatmapDays?: number;
   }): Promise<DaemonUsageDashboard>;
 
-  // Skills (read-only)
+  // Skills
   loadSkillsStatus(): Promise<DaemonWorkspaceSkillsStatus>;
+  setWorkspaceSkillEnabled(
+    skillName: string,
+    enabled: boolean,
+  ): Promise<DaemonSkillToggleResult>;
+  installWorkspaceSkill(
+    request: DaemonSkillInstallRequest,
+  ): Promise<DaemonSkillMutationResult>;
+  deleteWorkspaceSkill(
+    skillName: string,
+    scope: DaemonSkillScope,
+  ): Promise<DaemonSkillMutationResult>;
 
   // Extensions
   loadExtensionsStatus(): Promise<DaemonWorkspaceExtensionsStatus>;
@@ -515,6 +545,9 @@ export interface DaemonWorkspaceActions {
     cwd: string,
     options?: { persist?: boolean },
   ): Promise<DaemonAddWorkspaceResult>;
+  suggestWorkspacePaths(
+    prefix: string,
+  ): Promise<DaemonWorkspacePathSuggestions>;
   removeWorkspace(
     workspaceId: string,
     options?: { force?: boolean; timeoutMs?: number },

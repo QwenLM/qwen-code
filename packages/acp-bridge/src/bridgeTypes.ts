@@ -137,6 +137,8 @@ export interface BridgeRestoreSessionRequest {
   clientId?: string;
   /** Internal replay transport for `session/load`; defaults to bulk response. */
   historyReplay?: 'stream' | 'response';
+  /** Optional newest persisted-record page requested for response replay. */
+  historyPageSize?: number;
   approvalMode?: ApprovalMode;
   /**
    * Persisted parent lineage recovered from the transcript by the caller (the
@@ -154,12 +156,14 @@ export interface BridgeRestoreSessionRequest {
 
 export const LOAD_REPLAY_MODE_META_KEY = 'qwen.session.loadReplayMode';
 export const LOAD_REPLAY_META_KEY = 'qwen.session.loadReplay';
+export const LOAD_REPLAY_PAGE_SIZE_META_KEY = 'qwen.session.loadReplayPageSize';
 export const LOAD_REPLAY_BULK_MODE = 'bulk';
 export const LOAD_REPLAY_VERSION = 1 as const;
 
 export interface BridgeLoadReplayEnvelope {
   v: typeof LOAD_REPLAY_VERSION;
   updates: SessionUpdate[];
+  hasMore?: boolean;
   partial?: true;
   replayError?: string;
 }
@@ -185,6 +189,8 @@ export interface BridgeRestoredSession extends BridgeSession {
   compactedReplay?: BridgeEvent[];
   /** Raw events since last turn boundary (current incomplete turn). */
   liveJournal?: BridgeEvent[];
+  /** True when persisted records exist before the returned replay page. */
+  historyHasMore?: boolean;
   /** High-water mark event ID — client uses this as initial SSE cursor. */
   lastEventId?: number;
 }
@@ -192,6 +198,7 @@ export interface BridgeRestoredSession extends BridgeSession {
 export interface BridgeSessionTranscriptPageRequest {
   sessionId: string;
   cursor?: string;
+  beforeRecordId?: string;
   limit?: number;
 }
 
@@ -412,9 +419,10 @@ export interface BridgeClientRequestContext {
   fromLoopback?: boolean;
   /**
    * Caller-generated correlation id for non-blocking prompt mode.
-   * When present, the bridge stamps `turn_complete` / `turn_error` events
-   * with this id so the SDK's `prompt()` can match the SSE event to the
-   * pending HTTP 202 request.
+   * When present, the bridge stamps turn-scoped event envelopes with this id.
+   * The legacy `turn_complete.data.promptId` / `turn_error.data.promptId`
+   * fields remain populated so the SDK's `prompt()` can match the terminal
+   * SSE event to the pending HTTP 202 request.
    */
   promptId?: string;
   /**
@@ -1005,8 +1013,9 @@ export interface AcpSessionBridge {
      * Replay cursor + correlation id for an accepted continuation, mirroring
      * the `POST /session/:id/prompt` 202 body. Present only when `accepted` —
      * the continuation runs as a tracked async turn, so clients use `promptId`
-     * to correlate `turn_complete` / `turn_error` and `lastEventId` to replay
-     * events emitted before they (re)attach the SSE stream.
+     * to correlate turn-scoped events, including `turn_complete` /
+     * `turn_error`, while `lastEventId` resumes events emitted before they
+     * (re)attach the SSE stream.
      */
     promptId?: string;
     lastEventId?: number;

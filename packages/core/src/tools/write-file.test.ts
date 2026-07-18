@@ -75,6 +75,7 @@ const mockConfigInternal = {
   getFileReadCache: () => fileReadCache,
   getFileReadCacheDisabled: () => false,
   getFileHistoryService: () => mockFileHistoryService,
+  isRecordArtifactEnabled: vi.fn(() => false),
 };
 const mockConfig = mockConfigInternal as unknown as Config;
 
@@ -121,6 +122,7 @@ describe('WriteFileTool', () => {
     // Reset mocks before each test
     mockConfigInternal.getApprovalMode.mockReturnValue(ApprovalMode.DEFAULT);
     mockConfigInternal.setApprovalMode.mockClear();
+    mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(false);
   });
 
   afterEach(() => {
@@ -443,6 +445,65 @@ describe('WriteFileTool', () => {
       expect(display.fileDiff).toMatch(
         proposedContent.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&'),
       );
+    });
+
+    it('reminds the model to record artifact-like workspace files', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const filePath = path.join(rootDir, 'reports', 'weather.html');
+      const params = {
+        file_path: filePath,
+        content: '<!doctype html><html><body>Weather</body></html>',
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.llmContent).toContain('record_artifact');
+      expect(result.llmContent).toContain(
+        'workspacePath "reports/weather.html"',
+      );
+      expect(result.artifacts).toBeUndefined();
+    });
+
+    it('reminds for case-insensitive artifact extensions', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const filePath = path.join(rootDir, 'reports', 'dashboard.HTML');
+      const params = {
+        file_path: filePath,
+        content: '<!doctype html><html><body>Dashboard</body></html>',
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.llmContent).toContain('record_artifact');
+      expect(result.llmContent).toContain(
+        'workspacePath "reports/dashboard.HTML"',
+      );
+    });
+
+    it('does not remind for ordinary source files', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const filePath = path.join(rootDir, 'src', 'index.ts');
+      const params = {
+        file_path: filePath,
+        content: 'export const value = 1;\n',
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.llmContent).not.toContain('record_artifact');
+    });
+
+    it('does not remind for files outside the workspace', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const filePath = path.join(tempDir, 'outside.html');
+      const params = {
+        file_path: filePath,
+        content: '<!doctype html><html><body>Outside</body></html>',
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.llmContent).not.toContain('record_artifact');
     });
 
     // trackEdit is best-effort: a FileHistoryService failure (disk full,

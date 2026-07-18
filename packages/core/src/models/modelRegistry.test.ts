@@ -190,6 +190,32 @@ describe('ModelRegistry', () => {
       const model = registry.getModel(AuthType.USE_VERTEX_AI, 'some-model');
       expect(model).toBeUndefined();
     });
+
+    it('matches a plain registry key by its resolved default baseUrl', () => {
+      const registry = new ModelRegistry({
+        openai: [{ id: 'default-endpoint-model' }],
+      });
+      const unkeyed = registry.getModel(
+        AuthType.USE_OPENAI,
+        'default-endpoint-model',
+      );
+
+      expect(unkeyed?.baseUrl).toBeTruthy();
+      expect(
+        registry.getModel(
+          AuthType.USE_OPENAI,
+          'default-endpoint-model',
+          unkeyed?.baseUrl,
+        ),
+      ).toBe(unkeyed);
+      expect(
+        registry.getModel(
+          AuthType.USE_OPENAI,
+          'default-endpoint-model',
+          'https://wrong.example.com',
+        ),
+      ).toBeUndefined();
+    });
   });
 
   describe('modalities auto-fill', () => {
