@@ -45,6 +45,7 @@ export type ReviewMode =
 
 /** The plan, as far as the roster needs it. */
 export interface RosterPlan {
+  ownerRepo?: unknown;
   chunks?: Array<{ id?: unknown }>;
   files?: Array<{
     path?: unknown;
@@ -144,7 +145,15 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
   // `fetch-pr` writes the number as a STRING (`"6766"`), so accept a numeric
   // string as well as a number — checking `typeof === 'number'` alone would drop
   // Agent 0 from every real PR review.
-  if (mode === 'pr-worktree' && isPositivePrNumber(plan.prNumber)) add('0');
+  // Any mode, not just pr-worktree: a lightweight cross-repo plan now carries
+  // the PR identity too (plan-diff --pr/--repo, passed only when pr-context
+  // succeeded), and a review that fetched the PR's context owes the
+  // issue-fidelity pass regardless of whether it has a worktree. Both halves of
+  // the identity, because the brief builder needs both — requiring an agent
+  // nobody could build would wedge the run.
+  if (isPositivePrNumber(plan.prNumber) && typeof plan.ownerRepo === 'string') {
+    add('0');
+  }
 
   if (isTerritoryFanOut(plan)) {
     // Step 3B: one agent per territory, plus the agents no territory can see. A

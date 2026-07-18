@@ -51,6 +51,11 @@ export interface BridgeEvent {
   /** Frame payload — opaque JSON. */
   data: unknown;
   /**
+   * Identifier of the admitted prompt that produced this event, when the
+   * event belongs to a specific turn.
+   */
+  promptId?: string;
+  /**
    * Envelope metadata shared by SSE and load/replay responses.
    */
   _meta?: Record<string, unknown>;

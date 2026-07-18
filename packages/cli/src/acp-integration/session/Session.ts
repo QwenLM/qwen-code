@@ -133,8 +133,11 @@ import {
   runVisionBridge,
   shouldRunVisionBridge,
   formatVisionBridgeNotice,
+  formatFullTurnVisionNotice,
+  getFullTurnVisionModelSelector,
   splitImageParts,
   approxBase64Bytes,
+  runWithRuntimeContentGenerator,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
@@ -1822,6 +1825,14 @@ export class Session implements SessionContext {
             const inputText = firstTextBlock?.text || '';
 
             let parts: Part[] | null;
+            let fullTurnModelOverride: string | undefined;
+            const onFullTurnModel = (model: string) => {
+              if (fullTurnModelOverride) {
+                return false;
+              }
+              fullTurnModelOverride = model;
+              return true;
+            };
 
             if (isContinue) {
               // Non-null here: the `none` case returned early above, and both
@@ -1839,6 +1850,8 @@ export class Session implements SessionContext {
               parts = await this.#processSlashCommandResult(
                 slashCommandResult,
                 params.prompt,
+                pendingSend.signal,
+                onFullTurnModel,
               );
 
               // If parts is null, the command was fully handled (e.g., /summary completed)
@@ -1853,7 +1866,7 @@ export class Session implements SessionContext {
               parts = await this.#resolvePrompt(
                 params.prompt,
                 pendingSend.signal,
-                { promptLast: true },
+                { promptLast: true, onFullTurnModel },
               );
             }
 
@@ -2007,6 +2020,7 @@ export class Session implements SessionContext {
                       promptId,
                       nextMessage?.parts ?? [],
                       pendingSend.signal,
+                      { modelOverride: fullTurnModelOverride },
                     );
                   if (!sendResult.responseStream) {
                     // Preserve the full message (not just functionResponse
@@ -2174,11 +2188,15 @@ export class Session implements SessionContext {
                 }
 
                 if (functionCalls.length > 0) {
-                  const toolRun = await this.runToolCalls(
-                    pendingSend.signal,
-                    promptId,
-                    functionCalls,
-                    toolLoopState,
+                  const toolRun = await this.#runWithFullTurnModel(
+                    fullTurnModelOverride,
+                    () =>
+                      this.runToolCalls(
+                        pendingSend.signal,
+                        promptId,
+                        functionCalls,
+                        toolLoopState,
+                      ),
                   );
                   if (toolRun.stopAfterPermissionCancel) {
                     await this.#preserveStoppedToolRun(
@@ -2190,6 +2208,7 @@ export class Session implements SessionContext {
                   nextMessage = await this.#buildNextMessageAfterToolRun(
                     toolRun,
                     pendingSend.signal,
+                    onFullTurnModel,
                   );
                   if (toolRun.loopDetected) {
                     await this.#preserveStoppedToolRun(
@@ -2213,6 +2232,7 @@ export class Session implements SessionContext {
                 promptId,
                 hooksEnabled,
                 messageBus,
+                fullTurnModelOverride,
               );
             } finally {
               logConversationFinishedEvent(
@@ -2248,10 +2268,18 @@ export class Session implements SessionContext {
     promptId: string,
     hooksEnabled: boolean,
     messageBus: MessageBus | undefined,
+    modelOverride?: string,
   ): Promise<{ stopReason: PromptResponse['stopReason'] }> {
     const stopHookBlockingCap = this.config.getStopHookBlockingCap();
     let stopHookIterationCount = 0;
     let stopHookReasons: string[] = [];
+    const onFullTurnModel = (model: string) => {
+      if (modelOverride) {
+        return false;
+      }
+      modelOverride = model;
+      return true;
+    };
 
     while (stopHookIterationCount < stopHookBlockingCap) {
       if (
@@ -2371,7 +2399,10 @@ export class Session implements SessionContext {
                 promptId + '_stop_hook_' + stopHookIterationCount,
                 nextMessage?.parts ?? [],
                 pendingSend.signal,
-                { skipCompression: stopHookIterationCount > 1 },
+                {
+                  skipCompression: stopHookIterationCount > 1,
+                  modelOverride,
+                },
               );
             if (!continueSendResult.responseStream) {
               this.#preserveUnsentMessageHistory(
@@ -2496,11 +2527,15 @@ export class Session implements SessionContext {
 
           // Process tool calls from the follow-up message
           if (functionCalls.length > 0) {
-            const toolRun = await this.runToolCalls(
-              pendingSend.signal,
-              promptId,
-              functionCalls,
-              toolLoopState,
+            const toolRun = await this.#runWithFullTurnModel(
+              modelOverride,
+              () =>
+                this.runToolCalls(
+                  pendingSend.signal,
+                  promptId,
+                  functionCalls,
+                  toolLoopState,
+                ),
             );
             if (toolRun.stopAfterPermissionCancel) {
               await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
@@ -2509,6 +2544,7 @@ export class Session implements SessionContext {
             nextMessage = await this.#buildNextMessageAfterToolRun(
               toolRun,
               pendingSend.signal,
+              onFullTurnModel,
             );
             if (toolRun.loopDetected) {
               await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
@@ -2539,6 +2575,19 @@ export class Session implements SessionContext {
 
   #getCurrentChat(): GeminiChat {
     return this.config.getGeminiClient()!.getChat();
+  }
+
+  async #runWithFullTurnModel<T>(
+    modelOverride: string | undefined,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    if (!modelOverride?.endsWith('\0')) {
+      return fn();
+    }
+    const runtimeView = await this.config
+      .getBaseLlmClient()
+      .resolveForModel(modelOverride.slice(0, -1), { failClosed: true });
+    return runWithRuntimeContentGenerator(runtimeView, fn);
   }
 
   /**
@@ -2582,12 +2631,12 @@ export class Session implements SessionContext {
     promptId: string,
     message: Part[],
     abortSignal: AbortSignal,
-    options: { skipCompression?: boolean } = {},
+    options: { skipCompression?: boolean; modelOverride?: string } = {},
   ): Promise<AutoCompressionSendResult> {
     const geminiClient = this.config.getGeminiClient()!;
     let compressionDiagnostic: string | null = null;
     let compressionInfo: ChatCompressionInfo | null = null;
-    if (!options.skipCompression) {
+    if (!options.skipCompression && !options.modelOverride) {
       try {
         const compressed = await geminiClient.tryCompressChat(
           promptId,
@@ -2665,7 +2714,7 @@ export class Session implements SessionContext {
     }
 
     const responseStream = await this.#getCurrentChat().sendMessageStream(
-      this.config.getModel(),
+      options.modelOverride ?? this.config.getModel(),
       {
         message,
         config: {
@@ -2730,6 +2779,7 @@ export class Session implements SessionContext {
   async #buildNextMessageAfterToolRun(
     toolRun: RunToolResult,
     abortSignal: AbortSignal,
+    onFullTurnModel?: (model: string) => boolean,
   ): Promise<Content | null> {
     if (toolRun.loopDetected) {
       debugLogger.debug('Stopping ACP turn after daemon loop detection.');
@@ -2743,7 +2793,7 @@ export class Session implements SessionContext {
     }
     const parts = [
       ...toolRun.parts,
-      ...(await this.#drainMidTurnUserMessages(abortSignal)),
+      ...(await this.#drainMidTurnUserMessages(abortSignal, onFullTurnModel)),
     ];
     return { role: 'user', parts };
   }
@@ -2854,7 +2904,10 @@ export class Session implements SessionContext {
     });
   }
 
-  async #drainMidTurnUserMessages(abortSignal: AbortSignal): Promise<Part[]> {
+  async #drainMidTurnUserMessages(
+    abortSignal: AbortSignal,
+    onFullTurnModel?: (model: string) => boolean,
+  ): Promise<Part[]> {
     // Flush anything recovered from a PRIOR timed-out drain first: the daemon
     // splices + SSE-publishes synchronously, so on a timeout the browser has
     // already deduped those messages — discarding the late response would lose
@@ -2863,7 +2916,7 @@ export class Session implements SessionContext {
     const recovered = this.#takeRecoveredMidTurnMessages();
 
     if (this.midTurnDrainUnavailable) {
-      return this.#buildMidTurnParts(recovered, abortSignal);
+      return this.#buildMidTurnParts(recovered, abortSignal, onFullTurnModel);
     }
 
     let drainPromise: ReturnType<AgentSideConnection['extMethod']> | undefined;
@@ -2888,6 +2941,7 @@ export class Session implements SessionContext {
       return this.#buildMidTurnParts(
         [...recovered, ...parseMidTurnDrainResponse(response)],
         abortSignal,
+        onFullTurnModel,
       );
     } catch (error) {
       // The ACP SDK rejects with the raw JSON-RPC error object
@@ -2938,7 +2992,7 @@ export class Session implements SessionContext {
       );
       // Even on a failed/timed-out drain, still inject anything recovered from
       // an EARLIER timeout so a transient stall never strands those messages.
-      return this.#buildMidTurnParts(recovered, abortSignal);
+      return this.#buildMidTurnParts(recovered, abortSignal, onFullTurnModel);
     }
   }
 
@@ -3004,6 +3058,7 @@ export class Session implements SessionContext {
   async #buildMidTurnParts(
     messages: DrainedMidTurnMessage[],
     abortSignal: AbortSignal,
+    onFullTurnModel?: (model: string) => boolean,
   ): Promise<Part[]> {
     const parts: Part[] = [];
     for (const message of messages) {
@@ -3017,7 +3072,10 @@ export class Session implements SessionContext {
             : await withTimeoutSignal(
                 abortSignal,
                 MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS,
-                (signal) => this.#resolvePrompt(message.content, signal),
+                (signal) =>
+                  this.#resolvePrompt(message.content, signal, {
+                    onFullTurnModel,
+                  }),
               );
       } catch (messageError) {
         if (abortSignal.aborted) return parts;
@@ -3175,7 +3233,6 @@ export class Session implements SessionContext {
         this.cronAbortController = ac;
         const promptId =
           this.config.getSessionId() + '########cron' + Date.now();
-
         let cronHadError = false;
         await withInteractionSpan(
           this.config,
@@ -3667,7 +3724,6 @@ export class Session implements SessionContext {
         this.notificationAbortController = ac;
         const promptId =
           this.config.getSessionId() + '########notification' + Date.now();
-
         try {
           await this.#emitBackgroundNotificationDisplay(item);
 
@@ -5840,6 +5896,8 @@ export class Session implements SessionContext {
   async #processSlashCommandResult(
     result: NonInteractiveSlashCommandResult,
     originalPrompt: ContentBlock[],
+    abortSignal: AbortSignal,
+    onFullTurnModel: (model: string) => boolean,
   ): Promise<Part[] | null> {
     this.#emitGoalStatusItems(result);
 
@@ -5847,7 +5905,11 @@ export class Session implements SessionContext {
       case 'submit_prompt':
         // Command wants to submit a prompt to the model
         // Convert PartListUnion to Part[]
-        return normalizePartList(result.content);
+        return this.#applyBridgeConversionsIfNeeded(
+          normalizePartList(result.content),
+          abortSignal,
+          onFullTurnModel,
+        );
 
       case 'message': {
         if (result.messageType === 'error') {
@@ -5919,11 +5981,10 @@ export class Session implements SessionContext {
         // No command was found or executed, resolve the original prompt
         // through the standard path that handles all block types. promptLast
         // keeps the user's instruction prominent (matches the normal path).
-        return this.#resolvePrompt(
-          originalPrompt,
-          new AbortController().signal,
-          { promptLast: true },
-        );
+        return this.#resolvePrompt(originalPrompt, abortSignal, {
+          promptLast: true,
+          onFullTurnModel,
+        });
 
       default: {
         // Exhaustiveness check
@@ -5942,7 +6003,10 @@ export class Session implements SessionContext {
     // (see the assembly comment below). Only genuine user prompts pass this;
     // the mid-turn drain path leaves it false so its synthetic `@uri` marker
     // stays first and keeps carrying the "[User message received...]" prefix.
-    options: { promptLast?: boolean } = {},
+    options: {
+      promptLast?: boolean;
+      onFullTurnModel?: (model: string) => boolean;
+    } = {},
   ): Promise<Part[]> {
     const FILE_URI_SCHEME = 'file://';
 
@@ -6019,13 +6083,18 @@ export class Session implements SessionContext {
       extensionParts.length === 0 &&
       mcpServerParts.length === 0
     ) {
-      return this.#applyBridgeConversionsIfNeeded(parts, abortSignal);
+      return this.#applyBridgeConversionsIfNeeded(
+        parts,
+        abortSignal,
+        options.onFullTurnModel,
+      );
     }
 
     if (atPathCommandParts.length === 0 && embeddedContext.length === 0) {
       return this.#applyBridgeConversionsIfNeeded(
         [...parts, ...extensionParts, ...mcpServerParts],
         abortSignal,
+        options.onFullTurnModel,
       );
     }
 
@@ -6134,12 +6203,14 @@ export class Session implements SessionContext {
     return this.#applyBridgeConversionsIfNeeded(
       processedQueryParts,
       abortSignal,
+      options.onFullTurnModel,
     );
   }
 
   async #applyBridgeConversionsIfNeeded(
     originalParts: Part[],
     abortSignal: AbortSignal,
+    onFullTurnModel?: (model: string) => boolean,
   ): Promise<Part[]> {
     const parts = await this.#applyVoiceBridgeIfNeeded(
       originalParts,
@@ -6147,6 +6218,31 @@ export class Session implements SessionContext {
     );
     if (!hasImageParts(parts) || !shouldRunVisionBridge(this.config)) {
       return parts;
+    }
+
+    const fullTurnModel = this.config.getDefaultVisionBridgeModel();
+    if (onFullTurnModel && fullTurnModel?.agentCapable) {
+      const fullTurnParts = parts.map((part) => clampInlineMediaPart(part));
+      if (!hasImageParts(fullTurnParts)) {
+        return fullTurnParts;
+      }
+      const selected = onFullTurnModel(
+        getFullTurnVisionModelSelector(fullTurnModel),
+      );
+      if (selected) {
+        try {
+          await this.messageEmitter.emitAgentMessage(
+            formatFullTurnVisionNotice(fullTurnModel),
+          );
+        } catch (error) {
+          debugLogger.debug(
+            `full-turn vision: failed to emit notice; continuing error=${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
+      return fullTurnParts;
     }
 
     let bridgeResult: VisionBridgeResult;

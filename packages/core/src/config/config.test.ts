@@ -809,6 +809,42 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('agents.maxParallelAgentsByModel', () => {
+    it('configures a per-model background task concurrency cap', () => {
+      const config = new Config({
+        ...baseParams,
+        agents: {
+          maxParallelAgentsByModel: { 'weak-model': 1 },
+        },
+      });
+      const registry = config.getBackgroundTaskRegistry();
+
+      registry.register({
+        agentId: 'bg-1',
+        description: 'one',
+        model: 'weak-model',
+        isBackgrounded: true,
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        outputFile: '/tmp/bg-1.jsonl',
+      });
+
+      expect(() =>
+        registry.register({
+          agentId: 'bg-2',
+          description: 'two',
+          model: 'weak-model',
+          isBackgrounded: true,
+          status: 'running',
+          startTime: Date.now(),
+          abortController: new AbortController(),
+          outputFile: '/tmp/bg-2.jsonl',
+        }),
+      ).toThrow('for model "weak-model" (1) reached');
+    });
+  });
+
   describe('getTeamMemoryEnabled', () => {
     const prevEnv = process.env['QWEN_CODE_MEMORY_TEAM'];
     afterEach(() => {
@@ -1017,19 +1053,24 @@ describe('Server Config (config.ts)', () => {
       );
     };
 
-    it('honors an explicit visionModel even across providers', () => {
-      const config = new Config({ ...baseParams, visionModel: 'vl-anthropic' });
+    it('keeps a bare cross-provider namesake on its exact agent route', () => {
+      const config = new Config({ ...baseParams, visionModel: 'text-primary' });
       stubProvider(config, [
         {
-          id: 'vl-anthropic',
+          id: 'text-primary',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+        },
+        {
+          id: 'text-primary',
           authType: AuthType.USE_ANTHROPIC,
-          baseUrl: 'https://api.anthropic.com',
           isVision: true,
+          capabilities: { vision: true, agent: true },
         },
       ]);
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-anthropic',
-        baseUrl: 'https://api.anthropic.com',
+        id: 'anthropic:text-primary',
+        agentCapable: true,
       });
     });
 
@@ -1046,7 +1087,7 @@ describe('Server Config (config.ts)', () => {
       // 'ghost-model' isn't configured, so the explicit pin is ignored and the
       // same-provider candidate is auto-picked instead.
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
     });
@@ -1062,7 +1103,7 @@ describe('Server Config (config.ts)', () => {
         },
       ]);
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
     });
@@ -1119,6 +1160,39 @@ describe('Server Config (config.ts)', () => {
       });
     });
 
+    it.each([false, true])(
+      'honors an exact visionModel route with ignored fast-only namesakes (reversed=%s)',
+      (reversed) => {
+        const baseUrl = 'https://vision.example.com/v1';
+        const routeEntries = [
+          {
+            id: 'vision-agent',
+            authType: AuthType.USE_OPENAI,
+            baseUrl,
+            isVision: true,
+            capabilities: { vision: true, agent: true },
+          },
+          {
+            id: 'vision-agent',
+            authType: AuthType.USE_OPENAI,
+            baseUrl,
+            fastOnly: true,
+          },
+        ];
+        const config = new Config({
+          ...baseParams,
+          visionModel: `openai:vision-agent\0${baseUrl}`,
+        });
+        stubProvider(config, reversed ? routeEntries.reverse() : routeEntries);
+
+        expect(config.getDefaultVisionBridgeModel()).toEqual({
+          id: 'openai:vision-agent',
+          baseUrl,
+          agentCapable: true,
+        });
+      },
+    );
+
     it('falls back to auto-select when a legacy visionModel matches multiple endpoints', () => {
       const config = new Config({
         ...baseParams,
@@ -1145,7 +1219,7 @@ describe('Server Config (config.ts)', () => {
         },
       ]);
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
     });
@@ -1164,7 +1238,7 @@ describe('Server Config (config.ts)', () => {
       ]);
       expect(() => config.getDefaultVisionBridgeModel()).not.toThrow();
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
     });
@@ -1185,7 +1259,7 @@ describe('Server Config (config.ts)', () => {
       ]);
 
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
       expect(warn).toHaveBeenCalledWith(
@@ -1215,7 +1289,7 @@ describe('Server Config (config.ts)', () => {
         },
       ]);
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
     });
@@ -1238,20 +1312,20 @@ describe('Server Config (config.ts)', () => {
       ]);
       // Pinned first.
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-anthropic',
+        id: 'anthropic:vl-anthropic',
         baseUrl: 'https://api.anthropic.com',
       });
       // Cleared with '' — JSDoc promises a fall back to auto-select.
       config.setVisionModel('');
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
       // undefined clears too.
       config.setVisionModel('vl-anthropic');
       config.setVisionModel(undefined);
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
     });
@@ -5401,6 +5475,18 @@ describe('Server Config (config.ts)', () => {
     it('should use a custom maxToolCallsPerTurn if provided', () => {
       const config = new Config({ ...baseParams, maxToolCallsPerTurn: 42 });
       expect(config.getMaxToolCallsPerTurn()).toBe(42);
+    });
+
+    it('tracks whether maxToolCallsPerTurn was explicitly set', () => {
+      expect(
+        new Config({ ...baseParams }).isMaxToolCallsPerTurnExplicit(),
+      ).toBe(false);
+      expect(
+        new Config({
+          ...baseParams,
+          maxToolCallsPerTurn: 42,
+        }).isMaxToolCallsPerTurnExplicit(),
+      ).toBe(true);
     });
 
     it.each([0, -1])(

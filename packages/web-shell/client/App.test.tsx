@@ -202,6 +202,12 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   }),
   useStreamingState: () => testState.streamingState,
   useTranscriptBlocks: () => testState.blocks,
+  useTranscriptHistory: () => ({
+    hasMore: false,
+    loading: false,
+    capacityReached: false,
+    loadMore: vi.fn(),
+  }),
   useTranscriptStore: () => mockStore,
   useWorkspace: () => mockWorkspace,
   useWorkspaceActions: () => mockWorkspaceActions,
@@ -932,6 +938,21 @@ afterEach(() => {
 });
 
 describe('App session callbacks', () => {
+  it('submits through a disconnected session when prompt SSE restart is enabled', async () => {
+    mockConnection.status = 'disconnected';
+    renderApp({ restartSseOnPrompt: true });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('recover connection');
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'recover connection',
+      expect.objectContaining({ images: undefined }),
+    );
+  });
+
   it('reports the current workspace id and path', async () => {
     mockConnection.workspaceCwd = '/work/secondary';
     mockWorkspace.capabilities = {

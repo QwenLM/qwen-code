@@ -17,6 +17,7 @@ import { VimModeProvider } from '../contexts/VimModeContext.js';
 import { SettingsContext } from '../contexts/SettingsContext.js';
 import { KeypressProvider } from '../contexts/KeypressContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
+import { StreamingState } from '../types.js';
 
 vi.mock('../hooks/useTerminalSize.js');
 const useTerminalSizeMock = vi.mocked(useTerminalSize.useTerminalSize);
@@ -147,6 +148,18 @@ describe('<Footer />', () => {
   it('hides the "workflow active" indicator by default', () => {
     const { lastFrame } = renderWithWidth(120, createMockUIState());
     expect(lastFrame()).not.toContain('workflow active');
+  });
+
+  it('shows steer and queue shortcuts while the model is responding', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({
+        streamingState: StreamingState.Responding,
+        showAutoAcceptIndicator: ApprovalMode.DEFAULT,
+      }),
+    );
+
+    expect(lastFrame()).toContain('Enter to steer · Ctrl+Q to queue');
   });
 
   it('shows deferred IDE connection progress', () => {

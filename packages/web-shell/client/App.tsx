@@ -20,6 +20,7 @@ import {
   useSessionNotices,
   useStreamingState,
   useTranscriptBlocks,
+  useTranscriptHistory,
   useTranscriptStore,
   useWorkspace,
   useWorkspaceActions,
@@ -112,6 +113,7 @@ import {
   type WebShellSidebarFooterOptions,
   type WebShellSidebarLockedWorkspace,
 } from './components/sidebar/WebShellSidebar';
+import { isSidebarToggleShortcut } from './components/sidebar/sidebarToggleShortcut';
 import {
   getLocalCommands,
   localizeBuiltinDescriptions,
@@ -606,6 +608,7 @@ export interface WebShellProps {
 interface AppProps extends WebShellProps {
   lockedWorkspaceCwd?: string;
   lockedWorkspaceCapability?: DaemonWorkspaceCapability;
+  restartSseOnPrompt?: boolean;
 }
 
 type SessionActionsWithCreate = {
@@ -1043,6 +1046,7 @@ export function App({
   composerInputVersion,
   onSessionChange,
   onSubmitBefore,
+  restartSseOnPrompt,
   lockedWorkspaceCwd,
   lockedWorkspaceCapability,
 }: AppProps = {}) {
@@ -1143,6 +1147,33 @@ export function App({
     setSidebarCollapsed(collapsed);
     writeSidebarCollapsed(collapsed);
   }, []);
+
+  // #5074: Cmd+B / Ctrl+B toggles the session sidebar, matching the editor
+  // convention (VS Code et al.). It works while any element is focused —
+  // the composer has no bold formatting, so nothing competes for the
+  // binding. Phone-width layouts render the sidebar as a drawer, so the
+  // shortcut toggles that instead of the collapsed rail.
+  useEffect(() => {
+    if (!sidebarOptions.enabled) return undefined;
+    const onKey = (e: KeyboardEvent) => {
+      if (!isSidebarToggleShortcut(e)) return;
+      e.preventDefault();
+      if (window.matchMedia('(max-width: 760px)').matches) {
+        setMobileDrawerOpen((open) => {
+          if (open) setForceMobileDrawer(false);
+          return !open;
+        });
+        return;
+      }
+      setSidebarCollapsed((collapsed) => {
+        const next = !collapsed;
+        writeSidebarCollapsed(next);
+        return next;
+      });
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [sidebarOptions.enabled]);
   const customization = useMemo(
     () => ({
       composerTagIcons,
@@ -1194,6 +1225,7 @@ export function App({
   const store = useTranscriptStore();
   const blocks = useTranscriptBlocks();
   const connection = useConnection();
+  const transcriptHistory = useTranscriptHistory();
   const workspace = useWorkspace();
   const workspaces = useMemo(() => {
     const capabilityWorkspaces = workspace.capabilities?.workspaces ?? [];
@@ -4304,6 +4336,8 @@ export function App({
       if (
         shouldBlockComposerSubmit({
           connectionStatus: connectionRef.current.status,
+          hasSession: Boolean(connectionRef.current.sessionId),
+          restartSseOnPrompt: Boolean(restartSseOnPrompt),
         })
       ) {
         pushToast('warning', t('editor.connectionDisconnected'));
@@ -5163,6 +5197,7 @@ export function App({
       runVisibleRecap,
       runVisibleBtw,
       requireActiveSessionForLocalCommand,
+      restartSseOnPrompt,
       resumeChatBottomFollow,
       selectedLanguage,
       setPendingModel,
@@ -6566,6 +6601,7 @@ export function App({
                         onRightPanelOpen={handleTurnOutputOpen}
                         onPaneArtifactsChange={handlePaneArtifactsChange}
                         messageTurnOutputs={messageTurnOutputs}
+                        restartSseOnPrompt={restartSseOnPrompt}
                       />
                     </CompactModeContext.Provider>
                   </WebShellCustomizationProvider>
@@ -6646,6 +6682,12 @@ export function App({
                                 onShowContextDetail={handleShowContextDetail}
                                 loadingTranscript={connection.loadingTranscript}
                                 catchingUp={connection.catchingUp}
+                                hasOlderHistory={transcriptHistory.hasMore}
+                                loadingOlderHistory={transcriptHistory.loading}
+                                historyCapacityReached={
+                                  transcriptHistory.capacityReached
+                                }
+                                onLoadOlderHistory={transcriptHistory.loadMore}
                                 isResponding={streamingState !== 'idle'}
                                 activeTurnStartedAt={activeTurnStartedAt}
                                 workspaceCwd={connection.workspaceCwd || ''}
