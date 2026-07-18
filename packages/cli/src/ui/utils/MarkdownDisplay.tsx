@@ -55,6 +55,8 @@ interface MarkdownDisplayProps {
    * respects the same viewport budget the outer wrapper enforces. See #6867.
    */
   enforceHeightBudget?: boolean;
+  /** Override the truncation cue text. Defaults to the 'press e' hint. */
+  truncateCueText?: string;
 }
 
 export interface MarkdownSourceCopyIndexOffsets {
@@ -136,6 +138,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   textColor = theme.text.primary,
   sourceCopyIndexOffsets,
   enforceHeightBudget = false,
+  truncateCueText,
 }) => {
   const { renderMode } = useRenderMode();
   if (!text) return <></>;
@@ -815,7 +818,8 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         color={theme.text.secondary}
         wrap="truncate-end"
       >
-        {`... ${droppedSourceLines} more line${droppedSourceLines === 1 ? '' : 's'} not shown (press 'e' to expand) ...`}
+        {truncateCueText ??
+          `... ${droppedSourceLines} more line${droppedSourceLines === 1 ? '' : 's'} not shown (press 'e' to expand) ...`}
       </Text>,
     );
   }

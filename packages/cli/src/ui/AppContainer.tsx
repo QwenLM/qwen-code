@@ -3783,11 +3783,13 @@ export const AppContainer = (props: AppContainerProps) => {
       // 'e' doesn't interfere with typing during Idle or cause
       // unexplained layout changes during non-plan confirmations
       // (edit, exec, info, etc.). See #7001.
-      const isPlanConfirmation = pendingToolCalls.some(
+      // Read from the ref (NOT pendingToolCalls) so we don't re-bind
+      // the keypress handler on every tool-call status transition.
+      // See the Ctrl+B handler pattern at lines 3843–3846.
+      const isPlanConfirmation = pendingToolCallsRef.current.some(
         (tc) =>
           tc.status === 'awaiting_approval' &&
-          (tc as { confirmationDetails?: { type?: string } })
-            .confirmationDetails?.type === 'plan',
+          tc.confirmationDetails.type === 'plan',
       );
       if (
         key.sequence === 'e' &&
@@ -3803,13 +3805,16 @@ export const AppContainer = (props: AppContainerProps) => {
       }
 
       // Re-entry block: when constrainHeight is off, any key re-enables
-      // it — EXCEPT during WaitingForConfirmation, where only 'e'
-      // toggles (handled above). This prevents accidental collapse
-      // while the user scrolls the expanded plan. See #7001.
+      // it — EXCEPT during plan confirmations, where only 'e' toggles
+      // (handled above). This prevents accidental collapse while the
+      // user scrolls the expanded plan. See #7001.
       let enteringConstrainHeightMode = false;
       if (
         !constrainHeight &&
-        streamingState !== StreamingState.WaitingForConfirmation
+        !(
+          streamingState === StreamingState.WaitingForConfirmation &&
+          isPlanConfirmation
+        )
       ) {
         enteringConstrainHeightMode = true;
         setConstrainHeight(true);
@@ -3942,7 +3947,6 @@ export const AppContainer = (props: AppContainerProps) => {
       setThoughtExpanded,
       openTranscript,
       closeTranscript,
-      pendingToolCalls,
     ],
   );
 

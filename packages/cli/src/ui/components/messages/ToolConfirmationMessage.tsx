@@ -375,6 +375,9 @@ export const ToolConfirmationMessage: React.FC<
           // the streaming path uses so the body respects the viewport budget.
           // See #6867.
           enforceHeightBudget
+          truncateCueText={
+            compactMode ? `... more lines not shown ...` : undefined
+          }
         />
         {isPlanExpanded && (
           <Text color={theme.text.secondary}>{"Press 'e' to collapse"}</Text>
