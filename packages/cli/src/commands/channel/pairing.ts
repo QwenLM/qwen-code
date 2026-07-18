@@ -31,7 +31,9 @@ export const pairingListCommand: CommandModule<
     const pending = store.listPending();
 
     if (pending.length === 0) {
-      writeStdoutLine('No pending pairing requests.');
+      writeStdoutLine(
+        'No pending pairing requests in this workspace (pass --cwd <dir> if the channel runs elsewhere).',
+      );
       return;
     }
 

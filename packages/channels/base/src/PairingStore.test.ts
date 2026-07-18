@@ -155,6 +155,53 @@ describe('PairingStore workspace scoping (#7017)', () => {
       expect(legacy).toEqual(['legacy-sender']);
     });
 
+    it('does not resurrect senders revoked by deleting the scoped allowlist file', () => {
+      seedLegacy();
+      const store = new PairingStore('support-bot', workspaceA);
+      expect(store.isApproved('legacy-sender')).toBe(true);
+
+      // Operator "revokes" by deleting the scoped allowlist file. The scope
+      // directory itself remains, which marks the migration as done — the
+      // legacy allowlist must not be copied back in on the next start.
+      const scopedDir = path.join(
+        channelsRoot(),
+        getWorkspaceScopeDirName(workspaceA),
+      );
+      fs.rmSync(path.join(scopedDir, 'support-bot-allowlist.json'));
+
+      const reopened = new PairingStore('support-bot', workspaceA);
+      expect(reopened.isApproved('legacy-sender')).toBe(false);
+    });
+
+    it('does not absorb a legacy file that appears after the scope is in use', () => {
+      // Scope comes into existence with only a pending file in the legacy
+      // layout — the allowlist shows up later (e.g. written by an older
+      // version still running). An in-use scope must not import it.
+      fs.mkdirSync(channelsRoot(), { recursive: true });
+      fs.writeFileSync(
+        path.join(channelsRoot(), 'support-bot-pairing.json'),
+        JSON.stringify([
+          {
+            senderId: 'pending-sender',
+            senderName: 'Pending',
+            code: 'ABCDEFGH',
+            createdAt: Date.now(),
+          },
+        ]),
+      );
+      const store = new PairingStore('support-bot', workspaceA);
+      expect(store.listPending().map((r) => r.senderId)).toEqual([
+        'pending-sender',
+      ]);
+
+      fs.writeFileSync(
+        path.join(channelsRoot(), 'support-bot-allowlist.json'),
+        JSON.stringify(['late-legacy-sender']),
+      );
+      const reopened = new PairingStore('support-bot', workspaceA);
+      expect(reopened.isApproved('late-legacy-sender')).toBe(false);
+    });
+
     it('never overwrites existing scoped state with legacy content', () => {
       const store = new PairingStore('support-bot', workspaceA);
       const code = store.createRequest('scoped-sender', 'Scoped')!;

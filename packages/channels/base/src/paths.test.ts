@@ -1,7 +1,13 @@
 import { describe, it, expect, afterEach } from 'vitest';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { getGlobalQwenDir, resolvePath } from './paths.js';
+import {
+  canonicalizeWorkspacePath,
+  getGlobalQwenDir,
+  getWorkspaceScopeDirName,
+  resolvePath,
+} from './paths.js';
 
 describe('channels/base paths – getGlobalQwenDir', () => {
   const originalEnv = process.env['QWEN_HOME'];
@@ -66,5 +72,37 @@ describe('channels/base paths – resolvePath', () => {
 
   it('resolves relative paths against process.cwd', () => {
     expect(resolvePath('relative/dir')).toBe(path.resolve('relative/dir'));
+  });
+});
+
+describe('canonicalizeWorkspacePath', () => {
+  // Regression for the #7065 review finding: scope identity must follow the
+  // repo's workspace-canonicalization contract (realpath after resolve), so
+  // symlinked spellings of the same directory — e.g. macOS `/tmp/ws` vs
+  // `/private/tmp/ws` — address the same store from the worker and the CLI.
+  it('collapses a symlinked spelling to the same scope as the real path', () => {
+    const real = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'ws-'));
+    const link = `${real}-link`;
+    fs.symlinkSync(real, link);
+    try {
+      expect(canonicalizeWorkspacePath(link)).toBe(
+        canonicalizeWorkspacePath(real),
+      );
+      expect(getWorkspaceScopeDirName(link)).toBe(
+        getWorkspaceScopeDirName(real),
+      );
+    } finally {
+      fs.rmSync(link);
+      fs.rmSync(real, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the resolved spelling for a path that does not exist (ENOENT fallback)', () => {
+    const missing = path.join(os.tmpdir(), 'qwen-scope-missing', 'nested');
+    expect(canonicalizeWorkspacePath(missing)).toBe(resolvePath(missing));
+    // Still deterministic for scope naming.
+    expect(getWorkspaceScopeDirName(missing)).toBe(
+      getWorkspaceScopeDirName(missing),
+    );
   });
 });

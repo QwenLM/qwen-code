@@ -44,38 +44,56 @@ export class PairingStore {
   }
 
   /**
-   * One-time grandfathering of pre-scoping state: if this scoped store has no
-   * files yet but the legacy GLOBAL files exist, copy them in so senders that
-   * were already approved stay approved after upgrading.
+   * One-time grandfathering of pre-scoping state: the first time a scope
+   * directory would come into existence, copy the legacy GLOBAL files in so
+   * senders that were already approved stay approved after upgrading.
+   *
+   * Gated at the scope-DIRECTORY level, not per file: once the scoped
+   * directory exists — because this migration ran or because the workspace
+   * wrote any state of its own — legacy files are never consulted again. A
+   * per-file gate would let a legacy allowlist silently re-approve senders
+   * that an operator revoked by deleting the scoped allowlist file, and
+   * would let an in-use scope absorb a legacy file that appears later.
    *
    * Copy, not move: another workspace upgrading later must be able to
    * grandfather the same baseline, and an older qwen version running
    * concurrently still reads the global files. This is a snapshot — the
    * scoped stores diverge from each other immediately afterwards, so the
-   * ongoing cross-workspace sharing that motivated #7017 is not reintroduced,
-   * and a legacy file appearing later can never overwrite scoped state.
+   * ongoing cross-workspace sharing that motivated #7017 is not reintroduced.
+   *
+   * Revocation therefore means REMOVING ENTRIES from the scoped allowlist
+   * (and from the legacy global file, while it exists) — not deleting files.
    */
   private migrateLegacyState(channelsRoot: string, channelName: string): void {
-    const legacyPairs: Array<[string, string]> = [
-      [
-        path.join(channelsRoot, `${channelName}-pairing.json`),
-        this.pendingPath,
-      ],
-      [
-        path.join(channelsRoot, `${channelName}-allowlist.json`),
-        this.allowlistPath,
-      ],
-    ];
-    for (const [legacyPath, scopedPath] of legacyPairs) {
-      try {
-        if (!fs.existsSync(scopedPath) && fs.existsSync(legacyPath)) {
-          this.ensureDir();
-          fs.copyFileSync(legacyPath, scopedPath);
-        }
-      } catch {
-        // Best-effort: an unreadable legacy file must not prevent the channel
-        // from starting; the scoped store just starts empty.
+    try {
+      if (fs.existsSync(this.dir)) {
+        return;
       }
+      const legacyPairs: Array<[string, string]> = [
+        [
+          path.join(channelsRoot, `${channelName}-pairing.json`),
+          this.pendingPath,
+        ],
+        [
+          path.join(channelsRoot, `${channelName}-allowlist.json`),
+          this.allowlistPath,
+        ],
+      ];
+      const present = legacyPairs.filter(([legacyPath]) =>
+        fs.existsSync(legacyPath),
+      );
+      if (present.length === 0) {
+        return;
+      }
+      // Creating the directory is what marks the migration as done, even if
+      // only one of the two files existed.
+      this.ensureDir();
+      for (const [legacyPath, scopedPath] of present) {
+        fs.copyFileSync(legacyPath, scopedPath);
+      }
+    } catch {
+      // Best-effort: an unreadable legacy file must not prevent the channel
+      // from starting; the scoped store just starts empty.
     }
   }
 
