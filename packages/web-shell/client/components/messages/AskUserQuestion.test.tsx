@@ -149,6 +149,23 @@ describe('AskUserQuestion accessibility', () => {
     expect(opts[0]!.hasAttribute('aria-pressed')).toBe(false);
   });
 
+  it('arrow keys change the single-select answer, not just the highlight', () => {
+    // Radiogroup contract: arrow keys move focus AND selection. aria-checked
+    // must follow the option the user moved to, and Submit must send it — not
+    // the originally-checked default.
+    render(undefined);
+    const opts = optionButtons();
+    pressKey(opts[0]!, 'ArrowDown'); // Red -> Blue
+
+    expect(opts[1]!.getAttribute('aria-checked')).toBe('true');
+    expect(opts[0]!.getAttribute('aria-checked')).toBe('false');
+
+    act(() => {
+      submitButton()!.click();
+    });
+    expect(onConfirm).toHaveBeenCalledWith('req-1', 'submit', { '0': 'Blue' });
+  });
+
   it('names the expanded dialog with both the tool name and the question', () => {
     render(undefined);
     const panel = container!.querySelector('[data-web-shell-ask-panel]')!;
@@ -253,6 +270,20 @@ describe('AskUserQuestion accessibility', () => {
     rerender(true);
 
     expect(document.activeElement).toBe(opts[2]);
+  });
+
+  it('focuses the first option when a new question arrives while active', () => {
+    // Symmetric to the ToolApproval guard. The focus effect reads
+    // selectedIdxRef.current (written by a separate reset effect), so an
+    // effect-ordering refactor could silently break focus on new-question
+    // arrival — lock the behavior in.
+    render(undefined);
+    const opts = optionButtons();
+    pressKey(opts[0]!, 'ArrowDown');
+    expect(document.activeElement).toBe(opts[1]);
+
+    rerender(true, { ...request, id: 'req-2' });
+    expect(document.activeElement).toBe(optionButtons()[0]);
   });
 
   it('advances on rapid repeated ArrowDown without a re-render in between', () => {

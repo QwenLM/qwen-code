@@ -220,7 +220,13 @@ export function ToolApproval({
   );
 
   const focusOption = useCallback((index: number) => {
-    optionRefs.current[index]?.focus();
+    const target = optionRefs.current[index];
+    if (!target) return;
+    // A bare .focus() is a no-op when the option already has focus, so a new
+    // request that lands on the same index wouldn't re-announce for screen
+    // readers. Blur first to force a re-focus indication in that edge case.
+    if (document.activeElement === target) target.blur();
+    target.focus();
   }, []);
 
   // Pull focus to the safe-default option when this approval becomes the
@@ -396,7 +402,7 @@ export function ToolApproval({
               tabIndex={isSelected ? 0 : -1}
               role="radio"
               aria-checked={isSelected}
-              aria-keyshortcuts={String(i + 1)}
+              aria-keyshortcuts={i < 9 ? String(i + 1) : undefined}
               onClick={() => confirm(option.id)}
               onFocus={() => {
                 selectedRef.current = i;

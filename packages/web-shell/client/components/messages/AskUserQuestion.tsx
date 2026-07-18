@@ -225,10 +225,19 @@ export function AskUserQuestion({
       const next = (base + delta + total) % total;
       selectedIdxRef.current = next;
       setSelectedIdx(next);
-      if (next === current.options.length) customRef.current?.focus();
-      else optionRefs.current[next]?.focus();
+      if (next === current.options.length) {
+        customRef.current?.focus();
+      } else {
+        optionRefs.current[next]?.focus();
+        // Single-select radiogroup: arrow keys change the selection, not just
+        // the focus, so aria-checked (bound to `answers`) follows the option the
+        // user moved to and Submit sends that option. The "Other" row is
+        // excluded — arrowing to it focuses its trigger; the input opens on
+        // Enter, not on arrow.
+        if (!isMulti) handleSelectOption(next);
+      }
     },
-    [current],
+    [current, isMulti, handleSelectOption],
   );
 
   // Focus-scoped keyboard nav (fires only while focus is inside this question):
@@ -466,7 +475,7 @@ export function AskUserQuestion({
                       role={isMulti ? undefined : 'radio'}
                       aria-checked={isMulti ? undefined : isSelected}
                       aria-pressed={isMulti ? isSelected : undefined}
-                      aria-keyshortcuts={String(i + 1)}
+                      aria-keyshortcuts={i < 9 ? String(i + 1) : undefined}
                       onClick={() => chooseOption(i)}
                       onFocus={() => setSelectedIdx(i)}
                     >
@@ -543,7 +552,11 @@ export function AskUserQuestion({
                           role={isMulti ? undefined : 'radio'}
                           aria-checked={isMulti ? undefined : hasCustomValue}
                           aria-pressed={isMulti ? hasCustomValue : undefined}
-                          aria-keyshortcuts={String(current.options.length + 1)}
+                          aria-keyshortcuts={
+                            current.options.length < 9
+                              ? String(current.options.length + 1)
+                              : undefined
+                          }
                           onClick={() => chooseOption(current.options.length)}
                           onFocus={() => setSelectedIdx(current.options.length)}
                         >
