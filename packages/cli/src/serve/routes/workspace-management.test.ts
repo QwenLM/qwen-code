@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import express, { type Request, type Response } from 'express';
 import request from 'supertest';
 import {
@@ -18,7 +18,7 @@ import type {
 } from '../workspace-registry.js';
 import { tmpdir } from 'node:os';
 import { realpathSync } from 'node:fs';
-import { mkdtemp, rm, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   workspaceRegistrationId,
@@ -127,7 +127,11 @@ function createRemovalController(
     beginDrain: vi.fn(),
     cancelDrain: vi.fn(),
     completeDrain: vi.fn(),
-    getActivity: vi.fn(() => ({ pendingSessionStarts, channelWorkers: 0 })),
+    getActivity: vi.fn(() => ({
+      pendingSessionStarts,
+      channelWorkers: 0,
+      voiceSessions: 0,
+    })),
     disposeRuntime: vi.fn().mockResolvedValue(undefined),
   };
 }
@@ -600,12 +604,46 @@ describe('DELETE /workspaces/:workspace', () => {
     expect(deps.workspaceRegistry.beginDrain).not.toHaveBeenCalled();
   });
 
+  it('blocks non-force removal while a Voice operation is active', async () => {
+    const runtime = makeRuntime(REAL_DIR);
+    const runtimeRemoval = createRemovalController();
+    vi.mocked(runtimeRemoval.getActivity).mockReturnValue({
+      pendingSessionStarts: 0,
+      channelWorkers: 0,
+      voiceSessions: 1,
+    });
+    const { app, deps } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      runtimeRemoval,
+    });
+
+    const res = await request(app).delete(
+      `/workspaces/${encodeURIComponent(runtime.workspaceId)}`,
+    );
+
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({
+      code: 'workspace_busy',
+      activity: { voiceSessions: 1 },
+    });
+    expect(runtimeRemoval.beginDrain).not.toHaveBeenCalled();
+    expect(deps.workspaceRegistry.beginDrain).not.toHaveBeenCalled();
+  });
+
   it('rolls every gate back when the final frozen snapshot becomes busy', async () => {
     const runtime = makeRuntime(REAL_DIR);
     const runtimeRemoval = createRemovalController();
     vi.mocked(runtimeRemoval.getActivity)
-      .mockReturnValueOnce({ pendingSessionStarts: 0, channelWorkers: 0 })
-      .mockReturnValueOnce({ pendingSessionStarts: 1, channelWorkers: 0 });
+      .mockReturnValueOnce({
+        pendingSessionStarts: 0,
+        channelWorkers: 0,
+        voiceSessions: 0,
+      })
+      .mockReturnValueOnce({
+        pendingSessionStarts: 1,
+        channelWorkers: 0,
+        voiceSessions: 0,
+      });
     const acpHandle = {
       beginWorkspaceDrain: vi.fn(),
       cancelWorkspaceDrain: vi.fn(),
@@ -643,8 +681,16 @@ describe('DELETE /workspaces/:workspace', () => {
     const runtime = makeRuntime(REAL_DIR);
     const runtimeRemoval = createRemovalController();
     vi.mocked(runtimeRemoval.getActivity)
-      .mockReturnValueOnce({ pendingSessionStarts: 0, channelWorkers: 0 })
-      .mockReturnValueOnce({ pendingSessionStarts: 1, channelWorkers: 0 });
+      .mockReturnValueOnce({
+        pendingSessionStarts: 0,
+        channelWorkers: 0,
+        voiceSessions: 0,
+      })
+      .mockReturnValueOnce({
+        pendingSessionStarts: 1,
+        channelWorkers: 0,
+        voiceSessions: 0,
+      });
     vi.mocked(runtimeRemoval.cancelDrain).mockImplementation(() => {
       throw new Error('controller rollback failed');
     });
@@ -1379,5 +1425,102 @@ describe('persistent workspace registrations', () => {
     expect((await forgetResult).status).toBe(500);
     await seal;
     expect(sealed).toBe(true);
+  });
+});
+
+describe('GET /workspace-path-suggestions', () => {
+  let base: string;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    base = await mkdtemp(join(REAL_DIR, 'qwen-suggest-'));
+    await mkdir(join(base, 'alpha'));
+    await mkdir(join(base, 'alpine'));
+    await mkdir(join(base, 'beta'));
+    await mkdir(join(base, '.hidden'));
+    await writeFile(join(base, 'a-file.txt'), 'x');
+    await symlink(join(base, 'beta'), join(base, 'beta-link'));
+  });
+
+  afterEach(async () => {
+    await rm(base, { recursive: true, force: true });
+  });
+
+  it('lists only directories inside a prefix ending with a separator', async () => {
+    const { app } = createApp();
+    const res = await request(app)
+      .get('/workspace-path-suggestions')
+      .query({ prefix: `${base}/` });
+    expect(res.status).toBe(200);
+    expect(res.body.dir).toBe(base);
+    const names = res.body.suggestions.map((s: { name: string }) => s.name);
+    // Plain files are excluded; symlinked directories are navigable.
+    expect(names).toEqual(['alpha', 'alpine', 'beta', 'beta-link']);
+    expect(res.body.truncated).toBe(false);
+    for (const s of res.body.suggestions) {
+      expect(s.path).toBe(join(base, s.name));
+    }
+  });
+
+  it('filters by the case-insensitive final segment of the prefix', async () => {
+    const { app } = createApp();
+    const res = await request(app)
+      .get('/workspace-path-suggestions')
+      .query({ prefix: join(base, 'ALP') });
+    expect(res.status).toBe(200);
+    expect(res.body.dir).toBe(base);
+    const names = res.body.suggestions.map((s: { name: string }) => s.name);
+    expect(names).toEqual(['alpha', 'alpine']);
+  });
+
+  it('hides dot-directories unless the filter starts with a dot', async () => {
+    const { app } = createApp();
+    const withoutDot = await request(app)
+      .get('/workspace-path-suggestions')
+      .query({ prefix: `${base}/` });
+    expect(
+      withoutDot.body.suggestions.map((s: { name: string }) => s.name),
+    ).not.toContain('.hidden');
+
+    const withDot = await request(app)
+      .get('/workspace-path-suggestions')
+      .query({ prefix: join(base, '.hi') });
+    expect(
+      withDot.body.suggestions.map((s: { name: string }) => s.name),
+    ).toEqual(['.hidden']);
+  });
+
+  it('returns an empty list for a nonexistent directory', async () => {
+    const { app } = createApp();
+    const res = await request(app)
+      .get('/workspace-path-suggestions')
+      .query({ prefix: join(base, 'no-such-dir', 'x') });
+    expect(res.status).toBe(200);
+    expect(res.body.suggestions).toEqual([]);
+  });
+
+  it('rejects a relative prefix', async () => {
+    const { app } = createApp();
+    const res = await request(app)
+      .get('/workspace-path-suggestions')
+      .query({ prefix: 'relative/path' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_prefix');
+  });
+
+  it('rejects a missing prefix', async () => {
+    const { app } = createApp();
+    const res = await request(app).get('/workspace-path-suggestions');
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_prefix');
+  });
+
+  it('rejects an over-long prefix before touching the filesystem', async () => {
+    const { app } = createApp();
+    const res = await request(app)
+      .get('/workspace-path-suggestions')
+      .query({ prefix: '/' + 'x'.repeat(5000) });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_prefix');
   });
 });

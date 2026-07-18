@@ -1687,7 +1687,7 @@ export default {
     'アンインストールする拡張機能名を位置引数として指定してください。',
   'Enables an extension.': '拡張機能を有効にします。',
   'The name of the extension to enable.': '有効化する拡張機能の名前。',
-  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
+  'The scope to enable the extension in. If not set, will be enabled in all scopes.':
     '拡張機能を有効化するスコープ。未指定の場合はすべてのスコープで有効化されます。',
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
     'スコープ "{{scope}}" で拡張機能 "{{name}}" を正常に有効化しました。',
@@ -1697,7 +1697,7 @@ export default {
     '無効なスコープです: {{scope}}。{{scopes}} のいずれかを指定してください。',
   'Disables an extension.': '拡張機能を無効にします。',
   'The name of the extension to disable.': '無効化する拡張機能の名前。',
-  'The scope to disable the extenison in.': '拡張機能を無効化するスコープ。',
+  'The scope to disable the extension in.': '拡張機能を無効化するスコープ。',
   'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
     'スコープ "{{scope}}" で拡張機能 "{{name}}" を正常に無効化しました。',
   'Extension "{{name}}" successfully updated: {{oldVersion}} → {{newVersion}}.':
@@ -1952,6 +1952,16 @@ export default {
     'このスタンドアロンインストールを自動更新できません。以下から再インストールしてください：',
   'Manual update required. Please reinstall Qwen Code.':
     '手動更新が必要です。Qwen Codeを再インストールしてください。',
+  'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.':
+    'このセッションではカスタムサンドボックスイメージ {{image}} を使用しています。イメージを更新して Qwen Code を再起動してください。',
+  'Update Qwen Code on the host, then restart the sandbox.':
+    'ホスト上の Qwen Code を更新してから、サンドボックスを再起動してください。',
+  'The update will be installed after you exit this session.':
+    'このセッションを終了すると、更新が自動的にインストールされます。',
+  'Run /update to install the update on the host.':
+    '/update を実行してホストに更新をインストールしてください。',
+  'Run /update to install the update.':
+    '/update を実行して更新をインストールしてください。',
 
   // ============================================================================
   // reload-plugins command

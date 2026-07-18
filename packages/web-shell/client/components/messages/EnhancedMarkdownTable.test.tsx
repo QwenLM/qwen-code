@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { StrictMode, act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider, type WebShellLanguage } from '../../i18n';
+import { WebShellPortalRootContext } from '../../portalRoot';
 import { immediateClipboardWrite } from '../../test/reactHarness';
 import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
 
@@ -10,7 +11,11 @@ import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
-const mounted: Array<{ root: Root; container: HTMLElement }> = [];
+const mounted: Array<{
+  root: Root;
+  container: HTMLElement;
+  portalRoot?: HTMLElement;
+}> = [];
 const originalDocumentHidden = Object.getOwnPropertyDescriptor(
   document,
   'hidden',
@@ -19,9 +24,10 @@ const originalElementFromPoint = document.elementFromPoint;
 const COLUMN_DRAG_MIME = 'application/x-qwen-web-shell-table-column';
 
 afterEach(() => {
-  for (const { root, container } of mounted.splice(0)) {
+  for (const { root, container, portalRoot } of mounted.splice(0)) {
     act(() => root.unmount());
     container.remove();
+    portalRoot?.remove();
   }
   vi.restoreAllMocks();
   vi.useRealTimers();
@@ -47,18 +53,26 @@ function renderTableContent(
   fallback?: ReactNode,
 ): HTMLElement {
   const container = document.createElement('div');
+  const appRoot = document.createElement('div');
+  appRoot.dataset.webShellAppRoot = '';
+  const portalRoot = document.createElement('div');
+  portalRoot.dataset.webShellPortalRoot = '';
+  portalRoot.dataset.webShellShadcn = '';
   document.body.appendChild(container);
-  const root = createRoot(container);
+  container.append(appRoot, portalRoot);
+  const root = createRoot(appRoot);
   act(() => {
     root.render(
-      <I18nProvider language={language}>
-        <EnhancedMarkdownTable fallback={fallback}>
-          {children}
-        </EnhancedMarkdownTable>
-      </I18nProvider>,
+      <WebShellPortalRootContext.Provider value={portalRoot}>
+        <I18nProvider language={language}>
+          <EnhancedMarkdownTable fallback={fallback}>
+            {children}
+          </EnhancedMarkdownTable>
+        </I18nProvider>
+      </WebShellPortalRootContext.Provider>,
     );
   });
-  mounted.push({ root, container });
+  mounted.push({ root, container, portalRoot });
   return container;
 }
 
@@ -167,15 +181,13 @@ function inputValue(input: HTMLInputElement, value: string): void {
   });
 }
 
-function selectValue(select: HTMLSelectElement, value: string): void {
-  const setter = Object.getOwnPropertyDescriptor(
-    HTMLSelectElement.prototype,
-    'value',
-  )?.set;
-  act(() => {
-    setter?.call(select, value);
-    select.dispatchEvent(new Event('change', { bubbles: true }));
-  });
+function selectValue(trigger: HTMLElement, value: string): void {
+  click(trigger);
+  const option = document.querySelector<HTMLElement>(
+    `[role="option"][data-value="${value}"]`,
+  );
+  expect(option).not.toBeNull();
+  click(option!);
 }
 
 function rowTexts(container: HTMLElement): string[] {
@@ -447,8 +459,8 @@ describe('EnhancedMarkdownTable', () => {
     expect(search?.placeholder).toBe('Search filter values');
     expect(container.textContent).toContain('Select current results');
 
-    const beta = container.querySelector<HTMLInputElement>(
-      'input[name="markdown-table-filter-option-0-1"]',
+    const beta = container.querySelector<HTMLElement>(
+      '[data-name="markdown-table-filter-option-0-1"]',
     );
     expect(beta).not.toBeNull();
     click(beta!);
@@ -460,6 +472,46 @@ describe('EnhancedMarkdownTable', () => {
 
     expect(rowTexts(container)).toEqual(['Alpha|10', 'Gamma|30']);
     expect(container.textContent).toContain('2/3 rows');
+
+    dragCells(dataCell(container, 0, 1), dataCell(container, 1, 1));
+    expect(container.textContent).toContain('Selected 2');
+    expect(container.textContent).toContain('Numeric 2');
+    expect(container.textContent).toContain('Sum 40');
+    expect(container.textContent).toContain('Average 20');
+    expect(container.textContent).toContain('Min 10');
+    expect(container.textContent).toContain('Max 30');
+  });
+
+  it('mounts filter overlays in the Web Shell portal root', () => {
+    const container = renderTable();
+    const portalRoot = container.querySelector<HTMLElement>(
+      '[data-web-shell-portal-root]',
+    );
+    const appRoot = container.querySelector<HTMLElement>(
+      '[data-web-shell-app-root]',
+    );
+
+    click(button(container, 'Filter Team'));
+    const popover = portalRoot?.querySelector<HTMLElement>(
+      '[data-slot="popover-content"]',
+    );
+    expect(popover).not.toBeNull();
+    expect(appRoot?.contains(popover)).toBe(false);
+    expect(document.body.style.pointerEvents).not.toBe('none');
+
+    click(
+      container.querySelector<HTMLElement>(
+        '[data-name="markdown-table-text-operator-0"]',
+      )!,
+    );
+    const select = portalRoot?.querySelector<HTMLElement>(
+      '[data-slot="select-content"]',
+    );
+    expect(select).not.toBeNull();
+    expect(select?.className).toContain('web-shell-popover-z-index');
+    expect(select?.dataset.markdownTableFilterOwner).toBe(
+      popover?.dataset.markdownTableFilterOwner,
+    );
   });
 
   it('applies a custom number filter', () => {
@@ -486,8 +538,8 @@ describe('EnhancedMarkdownTable', () => {
 
     click(button(container, 'Filter Score'));
     selectValue(
-      container.querySelector<HTMLSelectElement>(
-        'select[name="markdown-table-number-operator-1"]',
+      container.querySelector<HTMLElement>(
+        '[data-name="markdown-table-number-operator-1"]',
       )!,
       operator,
     );
@@ -512,8 +564,8 @@ describe('EnhancedMarkdownTable', () => {
       ),
     ).toBe(document.activeElement);
     selectValue(
-      container.querySelector<HTMLSelectElement>(
-        'select[name="markdown-table-text-operator-0"]',
+      container.querySelector<HTMLElement>(
+        '[data-name="markdown-table-text-operator-0"]',
       )!,
       'equals',
     );
@@ -532,8 +584,8 @@ describe('EnhancedMarkdownTable', () => {
 
     click(button(container, 'Filter Team'));
     selectValue(
-      container.querySelector<HTMLSelectElement>(
-        'select[name="markdown-table-text-operator-0"]',
+      container.querySelector<HTMLElement>(
+        '[data-name="markdown-table-text-operator-0"]',
       )!,
       'startsWith',
     );
@@ -550,8 +602,8 @@ describe('EnhancedMarkdownTable', () => {
     click(textButton(container, 'Reset'));
     click(button(container, 'Filter Team'));
     selectValue(
-      container.querySelector<HTMLSelectElement>(
-        'select[name="markdown-table-text-operator-0"]',
+      container.querySelector<HTMLElement>(
+        '[data-name="markdown-table-text-operator-0"]',
       )!,
       'endsWith',
     );
@@ -568,8 +620,8 @@ describe('EnhancedMarkdownTable', () => {
     click(textButton(container, 'Reset'));
     click(button(container, 'Filter Team'));
     selectValue(
-      container.querySelector<HTMLSelectElement>(
-        'select[name="markdown-table-text-operator-0"]',
+      container.querySelector<HTMLElement>(
+        '[data-name="markdown-table-text-operator-0"]',
       )!,
       'notEquals',
     );
@@ -588,8 +640,8 @@ describe('EnhancedMarkdownTable', () => {
 
     click(button(container, 'Filter Score'));
     selectValue(
-      container.querySelector<HTMLSelectElement>(
-        'select[name="markdown-table-number-operator-1"]',
+      container.querySelector<HTMLElement>(
+        '[data-name="markdown-table-number-operator-1"]',
       )!,
       'between',
     );
@@ -743,6 +795,25 @@ describe('EnhancedMarkdownTable', () => {
     expect(dialog?.textContent).toContain('Alpha');
   });
 
+  it('mounts the cell value dialog in the Web Shell portal root', () => {
+    const container = renderTable();
+
+    doubleClick(dataCell(container, 0, 0));
+
+    const dialog = cellDialog();
+    const portalRoot = document.querySelector<HTMLElement>(
+      '[data-web-shell-portal-root]',
+    );
+    const appRoot = container.querySelector<HTMLElement>(
+      '[data-web-shell-app-root]',
+    );
+    expect(portalRoot?.contains(dialog)).toBe(true);
+    expect(appRoot?.contains(dialog)).toBe(false);
+    expect(portalRoot?.querySelector('[data-slot="dialog-overlay"]')).not.toBe(
+      null,
+    );
+  });
+
   it('copies the current cell value from the dialog', async () => {
     const writeText = mockClipboard();
     const container = renderTable();
@@ -880,10 +951,15 @@ describe('EnhancedMarkdownTable', () => {
     const container = renderTable();
 
     doubleClick(dataCell(container, 0, 0));
-    const backdrop = cellDialog()?.parentElement;
+    const backdrop = document.querySelector<HTMLElement>(
+      '[data-slot="dialog-overlay"]',
+    );
     expect(backdrop).not.toBeNull();
     act(() => {
+      backdrop!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
       backdrop!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      backdrop!.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      backdrop!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     expect(cellDialog()).toBeNull();
 
@@ -912,42 +988,17 @@ describe('EnhancedMarkdownTable', () => {
     expect(document.activeElement).toBe(scroller);
   });
 
-  it('traps focus inside the cell value dialog', () => {
+  it('focuses the cell value dialog instead of the close button', () => {
     const container = renderTable();
 
     doubleClick(dataCell(container, 0, 0));
     const iconCloseButton = button(document.body, 'Close');
-    const footerCloseButton = textButton(document.body, 'Close');
-
-    expect(document.activeElement).toBe(iconCloseButton);
-
-    act(() => {
-      document.dispatchEvent(
-        new KeyboardEvent('keydown', {
-          bubbles: true,
-          key: 'Tab',
-          shiftKey: true,
-        }),
-      );
-    });
-    expect(document.activeElement).toBe(footerCloseButton);
-
-    act(() => {
-      document.dispatchEvent(
-        new KeyboardEvent('keydown', { bubbles: true, key: 'Tab' }),
-      );
-    });
-    expect(document.activeElement).toBe(iconCloseButton);
-
     const dialog = cellDialog();
+
     expect(dialog).not.toBeNull();
-    act(() => {
-      dialog!.focus();
-      document.dispatchEvent(
-        new KeyboardEvent('keydown', { bubbles: true, key: 'Tab' }),
-      );
-    });
-    expect(document.activeElement).toBe(iconCloseButton);
+    expect(dialog!.getAttribute('tabindex')).toBe('-1');
+    expect(document.activeElement).toBe(dialog);
+    expect(document.activeElement).not.toBe(iconCloseButton);
   });
 
   it('keeps table Escape handling from running behind the cell dialog', () => {
@@ -976,14 +1027,14 @@ describe('EnhancedMarkdownTable', () => {
     const container = renderTable();
 
     dragCells(dataCell(container, 0, 0), dataCell(container, 0, 0));
-    expect(container.textContent).toContain('1 cell selected');
+    expect(container.textContent).toContain('Selected 1');
 
     click(button(container, 'View details for row 1'));
     expect(container.textContent).toContain('Row details');
 
     doubleClick(dataCell(container, 0, 0));
 
-    expect(container.textContent).not.toContain('1 cell selected');
+    expect(container.textContent).not.toContain('Selected 1');
     expect(container.textContent).not.toContain('Row details');
     expect(cellDialog()).not.toBeNull();
   });
@@ -1528,6 +1579,15 @@ describe('EnhancedMarkdownTable', () => {
     click(button(container, 'Filter Region'));
     click(textButton(container, 'Hide column'));
     dragCells(dataCell(container, 0, 0), dataCell(container, 1, 1));
+
+    expect(container.textContent).toContain('Selected 4');
+    expect(container.textContent).toContain('Non-empty 4');
+    expect(container.textContent).toContain('Numeric 2');
+    expect(container.textContent).toContain('Sum 12');
+    expect(container.textContent).toContain('Average 6');
+    expect(container.textContent).toContain('Min 2');
+    expect(container.textContent).toContain('Max 10');
+
     click(textButton(container, 'Copy TSV'));
 
     expect(writeText).toHaveBeenCalledWith(['10\tAlpha', '2\tBeta'].join('\n'));
@@ -1542,9 +1602,9 @@ describe('EnhancedMarkdownTable', () => {
     openColumnMenu(container, 'Team');
     click(textButton(container, 'Freeze first column'));
 
-    expect(container.querySelector('div')?.className).toContain(
-      'hasFrozenColumn',
-    );
+    expect(
+      container.querySelector<HTMLElement>('[class*="tableShell"]')?.className,
+    ).toContain('hasFrozenColumn');
     expect(container.textContent).not.toContain('Unfreeze first column');
     expect(container.querySelector('thead th')?.className).toContain(
       'stickyActionHeaderCell',
@@ -1688,7 +1748,7 @@ describe('EnhancedMarkdownTable', () => {
     click(textButton(container, 'Expand text'));
 
     expect(textButton(container, 'Collapse text')).toBeDefined();
-    expect(container.textContent).not.toContain('1 cell selected');
+    expect(container.textContent).not.toContain('Selected 1');
     expect(cell.querySelector<HTMLElement>('[title]')).toBeNull();
 
     click(textButton(container, 'Collapse text'));
@@ -1863,8 +1923,8 @@ describe('EnhancedMarkdownTable', () => {
 
     click(button(container, 'Filter Team'));
     selectValue(
-      container.querySelector<HTMLSelectElement>(
-        'select[name="markdown-table-text-operator-0"]',
+      container.querySelector<HTMLElement>(
+        '[data-name="markdown-table-text-operator-0"]',
       )!,
       'equals',
     );
@@ -1909,7 +1969,7 @@ describe('EnhancedMarkdownTable', () => {
 
   it('cycles display density from the toolbar', () => {
     const container = renderTable();
-    const shell = container.querySelector('div');
+    const shell = container.querySelector<HTMLElement>('[class*="tableShell"]');
     const teamHeader = button(container, 'Sort by Team').closest('th');
     expect(shell?.className).toContain('densityStandard');
     expect(textButton(container, 'Density: Standard')).toBeDefined();
@@ -1956,13 +2016,266 @@ describe('EnhancedMarkdownTable', () => {
     expect(textButton(container, 'Collapse text')).toBeDefined();
   });
 
+  it('shows statistics for a numeric selection', () => {
+    const container = renderTable();
+
+    dragCells(dataCell(container, 0, 1), dataCell(container, 2, 1));
+
+    expect(container.textContent).toContain('Selected 3');
+    expect(container.textContent).toContain('Non-empty 3');
+    expect(container.textContent).toContain('Numeric 3');
+    expect(container.textContent).toContain('Sum 42');
+    expect(container.textContent).toContain('Average 14');
+    expect(container.textContent).toContain('Min 2');
+    expect(container.textContent).toContain('Max 30');
+  });
+
+  it('clears a selection when updated rows no longer contain it', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const render = (rows: string[]) => {
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <EnhancedMarkdownTable>
+              <thead>
+                <tr>
+                  <th>Value</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((value) => (
+                  <tr key={value}>
+                    <td>{value}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </EnhancedMarkdownTable>
+          </I18nProvider>,
+        );
+      });
+    };
+    mounted.push({ root, container });
+
+    render(['10', '20', '30']);
+    dragCells(dataCell(container, 2, 0), dataCell(container, 2, 0));
+    expect(container.textContent).toContain('Selected 1');
+
+    render(['10']);
+
+    expect(container.textContent).not.toContain('Selected');
+    expect(container.textContent).not.toContain('Copy TSV');
+  });
+
+  it('uses numeric cells only for mixed-selection arithmetic', () => {
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Label</th>
+          <th>Value</th>
+          <th>Extra</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>Alpha</td>
+          <td>10</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>Beta</td>
+          <td>2</td>
+          <td>-4</td>
+        </tr>
+      </tbody>,
+    ]);
+
+    dragCells(dataCell(container, 0, 0), dataCell(container, 1, 2));
+
+    expect(container.textContent).toContain('Selected 6');
+    expect(container.textContent).toContain('Non-empty 5');
+    expect(container.textContent).toContain('Numeric 3');
+    expect(container.textContent).toContain('Sum 8');
+    expect(container.textContent).toContain('Average 2.666667');
+    expect(container.textContent).toContain('Min -4');
+    expect(container.textContent).toContain('Max 10');
+  });
+
+  it('hides arithmetic statistics when the selection has no numbers', () => {
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Value</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>Alpha</td>
+        </tr>
+        <tr>
+          <td></td>
+        </tr>
+      </tbody>,
+    ]);
+
+    dragCells(dataCell(container, 0, 0), dataCell(container, 1, 0));
+
+    expect(container.textContent).toContain('Selected 2');
+    expect(container.textContent).toContain('Non-empty 1');
+    expect(container.textContent).toContain('Numeric 0');
+    expect(container.textContent).not.toContain('Sum ');
+    expect(container.textContent).not.toContain('Average ');
+    expect(container.textContent).not.toContain('Min ');
+    expect(container.textContent).not.toContain('Max ');
+  });
+
+  it('preserves percent formatting for percent-only selections', () => {
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Ratio</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>40%</td>
+        </tr>
+        <tr>
+          <td>60%</td>
+        </tr>
+      </tbody>,
+    ]);
+
+    dragCells(dataCell(container, 0, 0), dataCell(container, 1, 0));
+
+    expect(container.textContent).toContain('Sum 100%');
+    expect(container.textContent).toContain('Average 50%');
+    expect(container.textContent).toContain('Min 40%');
+    expect(container.textContent).toContain('Max 60%');
+  });
+
+  it('preserves a shared currency symbol for currency-only selections', () => {
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Amount</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>$10</td>
+        </tr>
+        <tr>
+          <td>$20</td>
+        </tr>
+      </tbody>,
+    ]);
+
+    dragCells(dataCell(container, 0, 0), dataCell(container, 1, 0));
+
+    expect(container.textContent).toContain('Sum $30');
+    expect(container.textContent).toContain('Average $15');
+    expect(container.textContent).toContain('Min $10');
+    expect(container.textContent).toContain('Max $20');
+  });
+
+  it('formats negative currency statistics with one leading sign', () => {
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Amount</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>-$10</td>
+        </tr>
+        <tr>
+          <td>-$20</td>
+        </tr>
+      </tbody>,
+    ]);
+
+    dragCells(dataCell(container, 0, 0), dataCell(container, 1, 0));
+
+    expect(container.textContent).toContain('Sum -$30');
+    expect(container.textContent).toContain('Average -$15');
+    expect(container.textContent).toContain('Min -$20');
+    expect(container.textContent).toContain('Max -$10');
+    expect(container.textContent).not.toContain('--$');
+  });
+
+  it('uses plain number formatting for mixed currencies', () => {
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Amount</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>$10</td>
+        </tr>
+        <tr>
+          <td>€20</td>
+        </tr>
+      </tbody>,
+    ]);
+
+    dragCells(dataCell(container, 0, 0), dataCell(container, 1, 0));
+
+    expect(container.textContent).toContain('Sum 30');
+    expect(container.textContent).toContain('Average 15');
+    expect(container.textContent).not.toContain('Sum $');
+    expect(container.textContent).not.toContain('Sum €');
+  });
+
+  it('normalizes negative zero in selection statistics', () => {
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Value</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>-0</td>
+        </tr>
+      </tbody>,
+    ]);
+
+    dragCells(dataCell(container, 0, 0), dataCell(container, 0, 0));
+
+    expect(container.textContent).toContain('Sum 0');
+    expect(container.textContent).toContain('Average 0');
+    expect(container.textContent).toContain('Min 0');
+    expect(container.textContent).toContain('Max 0');
+    expect(container.textContent).not.toContain('Min -0');
+    expect(container.textContent).not.toContain('Max -0');
+  });
+
+  it('localizes selection statistics', () => {
+    const container = renderTable('zh-CN');
+
+    dragCells(dataCell(container, 0, 1), dataCell(container, 2, 1));
+
+    expect(container.textContent).toContain('已选 3');
+    expect(container.textContent).toContain('非空 3');
+    expect(container.textContent).toContain('数值 3');
+    expect(container.textContent).toContain('求和 42');
+    expect(container.textContent).toContain('平均 14');
+    expect(container.textContent).toContain('最小 2');
+    expect(container.textContent).toContain('最大 30');
+  });
+
   it('keeps selected cell classes visible on a frozen column', () => {
     const container = renderWideTable();
 
     freezeFirstColumn(container);
     dragCells(dataCell(container, 0, 0), dataCell(container, 1, 1));
 
-    expect(container.textContent).toContain('4 cells selected');
+    expect(container.textContent).toContain('Selected 4');
     expect(dataCell(container, 0, 0).className).toContain('frozenCell');
     expect(dataCell(container, 0, 0).className).toContain('selectedCell');
     expect(dataCell(container, 0, 1).className).toContain('selectedCell');
@@ -2139,8 +2452,8 @@ describe('EnhancedMarkdownTable', () => {
     expect(container.textContent).toContain('Copied!');
 
     click(button(container, 'Filter Team'));
-    const beta = container.querySelector<HTMLInputElement>(
-      'input[name="markdown-table-filter-option-0-1"]',
+    const beta = container.querySelector<HTMLElement>(
+      '[data-name="markdown-table-filter-option-0-1"]',
     );
     expect(beta).not.toBeNull();
     click(beta!);
@@ -2233,14 +2546,20 @@ describe('EnhancedMarkdownTable', () => {
 
   it('resets interactive state when table columns change', () => {
     const container = document.createElement('div');
+    const portalRoot = document.createElement('div');
+    portalRoot.dataset.webShellPortalRoot = '';
+    portalRoot.dataset.webShellShadcn = '';
     document.body.appendChild(container);
+    document.body.appendChild(portalRoot);
     const root = createRoot(container);
     const render = (children: ReactNode) => {
       act(() => {
         root.render(
-          <I18nProvider language="en">
-            <EnhancedMarkdownTable>{children}</EnhancedMarkdownTable>
-          </I18nProvider>,
+          <WebShellPortalRootContext.Provider value={portalRoot}>
+            <I18nProvider language="en">
+              <EnhancedMarkdownTable>{children}</EnhancedMarkdownTable>
+            </I18nProvider>
+          </WebShellPortalRootContext.Provider>,
         );
       });
     };
@@ -2260,7 +2579,7 @@ describe('EnhancedMarkdownTable', () => {
       </tbody>,
     ]);
     click(button(container, 'Filter Team'));
-    click(textButton(container, 'Hide column'));
+    click(textButton(portalRoot, 'Hide column'));
     expect(rowTexts(container)).toEqual(['10']);
 
     render([
@@ -2279,7 +2598,7 @@ describe('EnhancedMarkdownTable', () => {
     ]);
 
     expect(rowTexts(container)).toEqual(['Beta|20']);
-    mounted.push({ root, container });
+    mounted.push({ root, container, portalRoot });
   });
 
   it('clears hidden column filters and sort', () => {
@@ -2288,8 +2607,8 @@ describe('EnhancedMarkdownTable', () => {
     click(button(container, 'Sort by Team'));
     click(button(container, 'Sort by Team, ascending'));
     click(button(container, 'Filter Team'));
-    const beta = container.querySelector<HTMLInputElement>(
-      'input[name="markdown-table-filter-option-0-1"]',
+    const beta = container.querySelector<HTMLElement>(
+      '[data-name="markdown-table-filter-option-0-1"]',
     );
     expect(beta).not.toBeNull();
     click(beta!);
@@ -2437,7 +2756,7 @@ describe('EnhancedMarkdownTable', () => {
     expect(writeText).toHaveBeenCalledWith(['Alpha\t10', 'Beta\t2'].join('\n'));
   });
 
-  it('resets filter menu draft state when switching columns', () => {
+  it('resets filter menu draft state when switching columns', async () => {
     const container = renderWideTable();
 
     click(button(container, 'Filter Team'));
@@ -2448,10 +2767,44 @@ describe('EnhancedMarkdownTable', () => {
     inputValue(teamSearch!, 'Al');
 
     click(button(container, 'Filter Score'));
+    await act(async () => {
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => resolve()),
+      );
+    });
     const scoreSearch = container.querySelector<HTMLInputElement>(
       'input[name="markdown-table-option-search-2"]',
     );
     expect(scoreSearch?.value).toBe('');
+  });
+
+  it('lets an outside header action close the filter and run immediately', async () => {
+    const container = renderTable();
+
+    click(button(container, 'Filter Team'));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const scoreSort = button(container, 'Sort by Score');
+    act(() => {
+      scoreSort.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+    act(() => {
+      scoreSort.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+      );
+      scoreSort.dispatchEvent(
+        new MouseEvent('mouseup', { bubbles: true, button: 0 }),
+      );
+      scoreSort.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, button: 0 }),
+      );
+    });
+
+    expect(container.textContent).not.toContain('Custom filter');
+    expect(rowTexts(container)).toEqual(['Beta|2', 'Alpha|10', 'Gamma|30']);
   });
 
   it('closes the filter menu when clicking outside it', () => {
@@ -2495,7 +2848,7 @@ describe('EnhancedMarkdownTable', () => {
     expect(document.activeElement).toBe(filterButton);
   });
 
-  it('keeps Tab focus within the filter dialog', () => {
+  it('keeps focus within the filter popover', () => {
     const container = renderTable();
 
     click(button(container, 'Filter Team'));
@@ -2508,7 +2861,7 @@ describe('EnhancedMarkdownTable', () => {
     focusableElements[0]!.focus();
 
     act(() => {
-      document.dispatchEvent(
+      focusableElements[0]!.dispatchEvent(
         new KeyboardEvent('keydown', {
           bubbles: true,
           cancelable: true,
@@ -2523,13 +2876,13 @@ describe('EnhancedMarkdownTable', () => {
     );
   });
 
-  it('does not trap Tab when focus is outside the filter dialog', () => {
+  it('does not trap Tab when focus is outside the filter popover', () => {
     const container = renderTable();
     const outsideButton = document.createElement('button');
     document.body.appendChild(outsideButton);
 
     click(button(container, 'Filter Team'));
-    outsideButton.focus();
+    act(() => outsideButton.focus());
     const event = new KeyboardEvent('keydown', {
       bubbles: true,
       cancelable: true,
@@ -2549,9 +2902,21 @@ describe('EnhancedMarkdownTable', () => {
 
     click(button(container, 'Filter Team'));
     expect(container.textContent).toContain('Custom filter');
+    const filterMenu = container.querySelector<HTMLElement>(
+      '[data-markdown-table-filter-owner]',
+    );
     act(() => {
-      document.dispatchEvent(new Event('scroll'));
+      filterMenu!.dispatchEvent(new Event('scroll'));
     });
+    expect(container.textContent).toContain('Custom filter');
+
+    const unrelatedPopover = document.createElement('div');
+    unrelatedPopover.dataset.markdownTableFilterOwner = 'unrelated';
+    document.body.appendChild(unrelatedPopover);
+    act(() => {
+      unrelatedPopover.dispatchEvent(new Event('scroll'));
+    });
+    unrelatedPopover.remove();
 
     expect(container.textContent).not.toContain('Custom filter');
   });
@@ -2596,8 +2961,8 @@ describe('EnhancedMarkdownTable', () => {
 
     click(button(container, 'View details for row 2'));
     click(button(container, 'Filter Team'));
-    const beta = container.querySelector<HTMLInputElement>(
-      'input[name="markdown-table-filter-option-0-1"]',
+    const beta = container.querySelector<HTMLElement>(
+      '[data-name="markdown-table-filter-option-0-1"]',
     );
     expect(beta).not.toBeNull();
     click(beta!);

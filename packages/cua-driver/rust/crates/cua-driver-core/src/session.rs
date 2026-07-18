@@ -18,7 +18,7 @@
 //! `recording.rs` — a registry-free, platform-pluggable hook set with no
 //! reverse coupling from core into the platform crates.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -51,14 +51,33 @@ fn is_trackable(id: &str) -> bool {
 /// be idempotent because the overlay Remove + recording stop must run exactly
 /// once. Growth is bounded (one short string per ended session over the
 /// daemon's lifetime); eviction is a deliberate non-blocking follow-up.
-static ENDED_SESSIONS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static ENDED_SESSIONS: OnceLock<Mutex<HashMap<String, SessionEndReason>>> = OnceLock::new();
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionEndReason {
+    Explicit,
+    IdleTimeout,
+    ConnectionClosed,
+    Unknown,
+}
+
+impl SessionEndReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit_end",
+            Self::IdleTimeout => "idle_timeout",
+            Self::ConnectionClosed => "connection_closed",
+            Self::Unknown => "unknown",
+        }
+    }
+}
 
 fn hooks() -> &'static Mutex<Vec<SessionEndHook>> {
     SESSION_END_HOOKS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-fn ended_sessions() -> &'static Mutex<HashSet<String>> {
-    ENDED_SESSIONS.get_or_init(|| Mutex::new(HashSet::new()))
+fn ended_sessions() -> &'static Mutex<HashMap<String, SessionEndReason>> {
+    ENDED_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Register a callback invoked with the disconnecting `session_id` whenever a
@@ -78,14 +97,19 @@ pub fn register_session_end_hook(hook: impl Fn(&str) + Send + Sync + 'static) {
 /// stray legacy `session_end` (mixed-version rollout) so cursor-remove +
 /// recording-stop run exactly once. No-op when no hooks are registered.
 pub fn fire_session_end(session_id: &str) {
+    fire_session_end_with_reason(session_id, SessionEndReason::Unknown);
+}
+
+pub fn fire_session_end_with_reason(session_id: &str, reason: SessionEndReason) {
     // Mark-then-fan-out under a short critical section, releasing the lock
     // before running hooks (hooks may be slow / re-entrant and must not hold
     // the dedupe lock).
     {
         let mut ended = ended_sessions().lock().unwrap();
-        if !ended.insert(session_id.to_owned()) {
+        if ended.contains_key(session_id) {
             return; // already ended — idempotent no-op.
         }
+        ended.insert(session_id.to_owned(), reason);
     }
     for hook in hooks().lock().unwrap().iter() {
         hook(session_id);
@@ -96,7 +120,11 @@ pub fn fire_session_end(session_id: &str) {
 /// daemon-side authority for "this session is permanently gone"; the macOS
 /// overlay keeps its own render-side tombstone keyed on the same id.
 pub fn is_session_ended(session_id: &str) -> bool {
-    ended_sessions().lock().unwrap().contains(session_id)
+    ended_sessions().lock().unwrap().contains_key(session_id)
+}
+
+pub fn session_end_reason(session_id: &str) -> Option<SessionEndReason> {
+    ended_sessions().lock().unwrap().get(session_id).copied()
 }
 
 /// Revive a previously-ended session id by clearing its tombstone, so a fresh
@@ -113,7 +141,7 @@ pub fn revive_session(session_id: &str) -> bool {
     if !is_trackable(session_id) {
         return false;
     }
-    ended_sessions().lock().unwrap().remove(session_id)
+    ended_sessions().lock().unwrap().remove(session_id).is_some()
 }
 
 /// Record activity for an explicit session id, resetting its idle-TTL clock.
@@ -140,7 +168,7 @@ pub fn end_session(session_id: &str) {
         return;
     }
     activity().lock().unwrap().remove(session_id);
-    fire_session_end(session_id);
+    fire_session_end_with_reason(session_id, SessionEndReason::Explicit);
 }
 
 /// End every session whose last activity is older than `ttl`, returning the ids
@@ -159,7 +187,8 @@ pub fn evict_idle(ttl: Duration) -> Vec<String> {
             .collect()
     };
     for id in &stale {
-        end_session(id);
+        activity().lock().unwrap().remove(id);
+        fire_session_end_with_reason(id, SessionEndReason::IdleTimeout);
     }
     stale
 }
@@ -192,6 +221,7 @@ mod tests {
         assert!(!is_session_ended(sid));
         fire_session_end(sid);
         assert!(is_session_ended(sid));
+        assert_eq!(session_end_reason(sid), Some(SessionEndReason::Unknown));
         // Second + third fire for the same id must be no-ops.
         fire_session_end(sid);
         fire_session_end(sid);
@@ -212,6 +242,7 @@ mod tests {
         let evicted = evict_idle(Duration::ZERO);
         assert!(evicted.iter().any(|s| s == sid), "zero-TTL must evict a touched session");
         assert!(is_session_ended(sid), "evicted session is ended");
+        assert_eq!(session_end_reason(sid), Some(SessionEndReason::IdleTimeout));
     }
 
     #[test]
@@ -229,6 +260,7 @@ mod tests {
         touch_session(sid);
         end_session(sid);
         assert!(is_session_ended(sid));
+        assert_eq!(session_end_reason(sid), Some(SessionEndReason::Explicit));
         // Its TTL entry is gone, so a later sweep doesn't re-fire for it.
         assert!(!evict_idle(Duration::ZERO).iter().any(|s| s == sid));
     }

@@ -442,6 +442,8 @@ export default {
   'Manage existing subagents (view, edit, delete).':
     '管理現有子智能體（查看、編輯、刪除）',
   'Create a new subagent with guided setup.': '通過引導式設置創建新的子智能體',
+  'Create a reusable skill from a knowledge source (file, URL, conversation, or text).':
+    '從知識源（檔案、URL、對話或文字）建立可重複使用的技能。',
   Agents: '智能體',
   'Choose Action': '選擇操作',
   'Edit {{name}}': '編輯 {{name}}',
@@ -866,7 +868,7 @@ export default {
     '請將要卸載的擴展名稱作為位置參數。',
   'Enables an extension.': '啟用擴展。',
   'The name of the extension to enable.': '要啟用的擴展名稱。',
-  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
+  'The scope to enable the extension in. If not set, will be enabled in all scopes.':
     '啟用擴展的作用域。如果未設置，將在所有作用域中啟用。',
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
     '擴展 "{{name}}" 已在作用域 "{{scope}}" 中啟用。',
@@ -876,7 +878,7 @@ export default {
     '無效的作用域：{{scope}}。請使用 {{scopes}} 之一。',
   'Disables an extension.': '禁用擴展。',
   'The name of the extension to disable.': '要禁用的擴展名稱。',
-  'The scope to disable the extenison in.': '禁用擴展的作用域。',
+  'The scope to disable the extension in.': '禁用擴展的作用域。',
   'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
     '擴展 "{{name}}" 已在作用域 "{{scope}}" 中禁用。',
   'Extension "{{name}}" successfully updated: {{oldVersion}} → {{newVersion}}.':
@@ -1612,7 +1614,11 @@ export default {
   'Press Ctrl+C again to exit.': '再次按 Ctrl+C 退出',
   'Press Ctrl+D again to exit.': '再次按 Ctrl+D 退出',
   'Press Esc again to clear.': '再次按 Esc 清除',
-  'Press ↑ to edit queued messages': '按 ↑ 編輯排隊消息',
+  'Ctrl+Q to queue · ↑ to edit queued messages':
+    'Ctrl+Q 排到下一輪 · ↑ 編輯排隊消息',
+  'Enter to steer · Ctrl+Q to queue':
+    'Enter 追加到目前任務 · Ctrl+Q 排到下一輪',
+  'Queue message for the next turn': '將消息排到下一輪',
   'No MCP servers configured.': '未配置 MCP servers',
   '◌ MCP servers are starting up ({{count}} initializing)...':
     '◌ MCP servers 正在啟動（{{count}} 個正在初始化）...',
@@ -1824,6 +1830,7 @@ export default {
   'Press Ctrl+Y to retry': '按 Ctrl+Y 重試。',
   'No failed request to retry.': '沒有可重試的失敗請求。',
   'to retry last request': '重試上一次請求',
+  'to queue for the next turn': '排到下一輪',
   'API key cannot be empty.': 'API Key 不能為空。',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     '無效的 API Key，Coding Plan API Key 均以 "sk-sp-" 開頭，請檢查',
@@ -2226,6 +2233,15 @@ export default {
     '無法自動更新此獨立安裝。請從以下位址重新安裝：',
   'Manual update required. Please reinstall Qwen Code.':
     '需要手動更新。請重新安裝 Qwen Code。',
+  'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.':
+    '此工作階段使用自訂沙箱映像 {{image}}。請更新該映像並重新啟動 Qwen Code。',
+  'Update Qwen Code on the host, then restart the sandbox.':
+    '請在主機上更新 Qwen Code，然後重新啟動沙箱。',
+  'The update will be installed after you exit this session.':
+    '結束目前工作階段後將自動安裝更新。',
+  'Run /update to install the update on the host.':
+    '執行 /update 在主機上安裝更新。',
+  'Run /update to install the update.': '執行 /update 安裝更新。',
   '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
     '⚠️ 歷史記錄缺口：此處之前的會話記錄已遺失（儲存中斷），且無法找回。',
 

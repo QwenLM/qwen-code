@@ -270,7 +270,17 @@ function normalizeDirectoryPath(path: string): string {
 }
 
 function escapeGlobQuery(query: string): string {
-  return query.replace(/[\\*?[{\]}]/g, '\\$&');
+  return Array.from(query, (char) => {
+    if (/[a-z]/i.test(char)) {
+      return `[${char.toLowerCase()}${char.toUpperCase()}]`;
+    }
+    return /[\\*?[{\]}()!@+|]/.test(char) ? `\\${char}` : char;
+  }).join('');
+}
+
+function fileSearchGlobPattern(query: string): string {
+  const normalizedQuery = unescapeAtReferenceText(query).replace(/^\.\//, '');
+  return normalizedQuery ? `**/*${escapeGlobQuery(normalizedQuery)}*` : '**/*';
 }
 
 function matchesQuery(query: string, ...values: Array<string | undefined>) {
@@ -598,7 +608,7 @@ function createFileProvider(
       const actions = getActions();
       const currentDir = normalizeDirectoryPath(getCurrentDir());
       const listDirectory = actions?.listDirectory;
-      if (listDirectory) {
+      if (listDirectory && (!query || !actions?.globWorkspace)) {
         try {
           const { dirPath, entryQuery } = splitFileQuery(query, currentDir);
           const lowerQuery = entryQuery.toLowerCase();
@@ -661,7 +671,7 @@ function createFileProvider(
         return [];
       }
       try {
-        const pattern = query ? `${escapeGlobQuery(query)}*` : '**/*';
+        const pattern = fileSearchGlobPattern(query);
         const result = await getCached(getCache().globResults, pattern, () =>
           globWorkspace(pattern, { maxResults: ITEM_LIMIT, signal }),
         );
@@ -1038,6 +1048,9 @@ export function useAtMentionMenu({
       const actions = workspaceActionsRef.current;
       const cache = builtinCacheRef.current;
       if (providerId === FILE_PROVIDER_ID) {
+        if (query && actions?.globWorkspace) {
+          return cache.globResults.has(fileSearchGlobPattern(query));
+        }
         if (actions?.listDirectory) {
           const { dirPath } = splitFileQuery(
             query,
@@ -1045,7 +1058,7 @@ export function useAtMentionMenu({
           );
           return cache.directories.has(dirPath);
         }
-        const pattern = query ? `${escapeGlobQuery(query)}*` : '**/*';
+        const pattern = fileSearchGlobPattern(query);
         return (
           Boolean(actions?.globWorkspace) && cache.globResults.has(pattern)
         );

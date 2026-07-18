@@ -15,8 +15,17 @@ export interface WebShellWithProvidersProps extends WebShellProps {
   sessionId?: string;
   /** Registered daemon workspace id for the session. Undefined uses primary. */
   workspaceId?: string;
+  /** Registered daemon workspace path for the session. Takes precedence over workspaceId. */
+  workspaceCwd?: string;
+  /**
+   * Workspace path to lock this shell to. Missing paths are registered
+   * persistently before rendering. Takes precedence over workspaceCwd and workspaceId.
+   */
+  lockWorkspaceCwd?: string;
   /** Client identity to reuse when attaching to an externally created session. */
   clientId?: string;
+  /** Restart the SSE event stream after each accepted prompt. Disabled by default. */
+  restartSseOnPrompt?: boolean;
 }
 
 function resolveBaseUrl(baseUrl: string | undefined): string {
@@ -72,8 +81,17 @@ export function WebShell(props: WebShellProps) {
  * are available without extra setup.
  */
 export function WebShellWithProviders(props: WebShellWithProvidersProps) {
-  const { baseUrl, token, sessionId, workspaceId, clientId, ...webShellProps } =
-    props;
+  const {
+    baseUrl,
+    token,
+    sessionId,
+    workspaceId,
+    workspaceCwd,
+    lockWorkspaceCwd,
+    clientId,
+    restartSseOnPrompt,
+    ...webShellProps
+  } = props;
   const resolvedBaseUrl = resolveBaseUrl(baseUrl);
 
   return (
@@ -88,7 +106,10 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
         <WorkspaceSessionProvider
           sessionId={sessionId}
           workspaceId={workspaceId}
+          workspaceCwd={workspaceCwd}
+          lockWorkspaceCwd={lockWorkspaceCwd}
           clientId={clientId}
+          restartSseOnPrompt={restartSseOnPrompt}
           webShellProps={webShellProps}
         />
       </DaemonWorkspaceProvider>
@@ -113,6 +134,7 @@ export type {
   WebShellSidebarBranding,
   WebShellSidebarFooterItem,
   WebShellSidebarFooterOptions,
+  WebShellSidebarLockedWorkspace,
 } from './components/sidebar/WebShellSidebar';
 export type { WebShellLanguage } from './i18n';
 export type { WebShellTheme } from './themeContext';

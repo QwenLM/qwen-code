@@ -1,19 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   filterToolbarDropdownItems,
-  getToolbarDropdownGeometry,
-  getToolbarLabelVisibility,
+  getToolbarExpansionBudget,
+  getToolbarItemVisibility,
+  getToolbarItemVisibilityWithHysteresis,
   resolveToolbarModelLabel,
 } from './toolbarDropdown';
-
-const boundary = {
-  left: 100,
-  top: 80,
-  right: 500,
-  bottom: 680,
-  width: 400,
-  height: 600,
-};
 
 describe('toolbarDropdown', () => {
   it('filters by display label and stable model id', () => {
@@ -29,97 +21,31 @@ describe('toolbarDropdown', () => {
     expect(filterToolbarDropdownItems(items, '  ')).toEqual(items);
   });
 
-  it('clamps the right edge when the menu fits in the WebShell boundary', () => {
-    const geometry = getToolbarDropdownGeometry({
-      anchor: {
-        left: 450,
-        top: 600,
-        right: 478,
-        bottom: 628,
-        width: 28,
-        height: 28,
-      },
-      boundary,
-      viewportWidth: 800,
-      viewportHeight: 800,
-      preferredWidth: 360,
-      maxHeight: 300,
+  it('collapses items from left to right as width decreases', () => {
+    const items = [
+      { id: 'branch', expansionWidth: 100 },
+      { id: 'mode', expansionWidth: 64 },
+      { id: 'model', expansionWidth: 80 },
+    ];
+
+    expect(getToolbarItemVisibility({ availableWidth: 244, items })).toEqual({
+      branch: true,
+      mode: true,
+      model: true,
     });
-
-    expect(geometry.width).toBe(360);
-    expect(geometry.left).toBe(132);
-    expect(geometry.placement).toBe('above');
-    expect(geometry.maxHeight).toBe(300);
-  });
-
-  it('clamps the left edge and width to the visible boundary', () => {
-    const geometry = getToolbarDropdownGeometry({
-      anchor: {
-        left: 80,
-        top: 600,
-        right: 108,
-        bottom: 628,
-        width: 28,
-        height: 28,
-      },
-      boundary,
-      viewportWidth: 420,
-      viewportHeight: 800,
-      preferredWidth: 360,
+    expect(getToolbarItemVisibility({ availableWidth: 144, items })).toEqual({
+      branch: false,
+      mode: true,
+      model: true,
     });
-
-    expect(geometry.width).toBe(304);
-    expect(geometry.left).toBe(108);
-  });
-
-  it('uses the lower side only when it has more usable height', () => {
-    const geometry = getToolbarDropdownGeometry({
-      anchor: {
-        left: 160,
-        top: 120,
-        right: 188,
-        bottom: 148,
-        width: 28,
-        height: 28,
-      },
-      boundary,
-      viewportWidth: 800,
-      viewportHeight: 800,
-      preferredWidth: 300,
+    expect(getToolbarItemVisibility({ availableWidth: 80, items })).toEqual({
+      branch: false,
+      mode: false,
+      model: true,
     });
-
-    expect(geometry.placement).toBe('below');
-    expect(geometry.top).toBe(152);
   });
 
-  it('keeps the model label before the approval-mode label', () => {
-    expect(
-      getToolbarLabelVisibility({
-        availableWidth: 144,
-        modelLabelWidth: 80,
-        modeLabelWidth: 64,
-        modelLabelReady: true,
-      }),
-    ).toEqual({ showModelLabel: true, showModeLabel: true });
-    expect(
-      getToolbarLabelVisibility({
-        availableWidth: 80,
-        modelLabelWidth: 80,
-        modeLabelWidth: 64,
-        modelLabelReady: true,
-      }),
-    ).toEqual({ showModelLabel: true, showModeLabel: false });
-    expect(
-      getToolbarLabelVisibility({
-        availableWidth: 79,
-        modelLabelWidth: 80,
-        modeLabelWidth: 64,
-        modelLabelReady: true,
-      }),
-    ).toEqual({ showModelLabel: false, showModeLabel: false });
-  });
-
-  it('keeps both labels hidden while the initial model is pending', () => {
+  it('keeps pending items collapsed without consuming width', () => {
     const pending = resolveToolbarModelLabel({
       currentModelLabel: '',
       lastConfirmedModelLabel: '',
@@ -127,26 +53,60 @@ describe('toolbarDropdown', () => {
 
     expect(pending.modelLabelReady).toBe(false);
     expect(
-      getToolbarLabelVisibility({
-        availableWidth: 300,
-        modelLabelWidth: 0,
-        modeLabelWidth: 64,
-        modelLabelReady: pending.modelLabelReady,
+      getToolbarItemVisibility({
+        availableWidth: 64,
+        items: [
+          { id: 'mode', expansionWidth: 64 },
+          {
+            id: 'model',
+            expansionWidth: 80,
+            ready: pending.modelLabelReady,
+          },
+        ],
       }),
-    ).toEqual({ showModelLabel: false, showModeLabel: false });
+    ).toEqual({ mode: true, model: false });
   });
 
-  it('shows the approval-mode label when it is the only visible action', () => {
+  it('reserves toolbar render-prop widths before expanding built-in items', () => {
+    const base = {
+      toolbarWidth: 500,
+      leadingWidth: 360,
+      rightWidth: 80,
+      currentExpansionWidth: 240,
+      gap: 8,
+    };
+
+    expect(getToolbarExpansionBudget(base)).toBe(292);
     expect(
-      getToolbarLabelVisibility({
-        availableWidth: 64,
-        modelLabelWidth: 0,
-        modeLabelWidth: 64,
-        modelLabelReady: false,
-        modelActionVisible: false,
-        modeActionVisible: true,
+      getToolbarExpansionBudget({
+        ...base,
+        leadingWidth: base.leadingWidth + 50,
       }),
-    ).toEqual({ showModelLabel: false, showModeLabel: true });
+    ).toBe(242);
+    expect(
+      getToolbarExpansionBudget({
+        ...base,
+        rightWidth: base.rightWidth + 40,
+      }),
+    ).toBe(252);
+  });
+
+  it('does not oscillate when aggregate rounding changes the budget by one pixel', () => {
+    const items = [{ id: 'workspace', expansionWidth: 60 }];
+    let visibility = { workspace: false };
+    const states: boolean[] = [];
+
+    for (let index = 0; index < 4; index += 1) {
+      visibility = getToolbarItemVisibilityWithHysteresis({
+        availableWidth: visibility.workspace ? 60 : 61,
+        items,
+        currentVisibility: visibility,
+        expansionMargin: items.length,
+      });
+      states.push(visibility.workspace);
+    }
+
+    expect(states).toEqual([true, true, true, true]);
   });
 
   it('keeps the confirmed model through a transient empty update', () => {
@@ -160,14 +120,6 @@ describe('toolbarDropdown', () => {
     });
 
     expect(transientEmpty.modelLabel).toBe('Qwen 3.5 Plus');
-    expect(
-      getToolbarLabelVisibility({
-        availableWidth: 112,
-        modelLabelWidth: 112,
-        modeLabelWidth: 64,
-        modelLabelReady: transientEmpty.modelLabelReady,
-      }),
-    ).toEqual({ showModelLabel: true, showModeLabel: false });
   });
 
   it('uses an arriving replacement for the next measured layout', () => {
@@ -177,13 +129,5 @@ describe('toolbarDropdown', () => {
     });
 
     expect(replacement.modelLabel).toBe('GLM 5.2');
-    expect(
-      getToolbarLabelVisibility({
-        availableWidth: 128,
-        modelLabelWidth: 80,
-        modeLabelWidth: 64,
-        modelLabelReady: replacement.modelLabelReady,
-      }),
-    ).toEqual({ showModelLabel: true, showModeLabel: false });
   });
 });

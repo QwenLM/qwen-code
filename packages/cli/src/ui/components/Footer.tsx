@@ -26,6 +26,7 @@ import { GoalPill, useFooterGoalState } from './GoalPill.js';
 import { CronPill, useFooterCronTaskCount } from './CronPill.js';
 import { t } from '../../i18n/index.js';
 import { useKeypressContext } from '../contexts/KeypressContext.js';
+import { StreamingState } from '../types.js';
 
 import type { PasteProgress } from '../contexts/KeypressContext.js';
 
@@ -125,6 +126,10 @@ export const Footer: React.FC = () => {
       {t('IDE connection unavailable: {{message}}', {
         message: uiState.startupIdeConnectionStatus.message,
       })}
+    </Text>
+  ) : uiState.streamingState === StreamingState.Responding ? (
+    <Text color={theme.text.secondary}>
+      {t('Enter to steer · Ctrl+Q to queue')}
     </Text>
   ) : showAutoAcceptIndicator !== undefined ? (
     <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />

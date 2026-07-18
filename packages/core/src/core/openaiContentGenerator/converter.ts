@@ -28,6 +28,11 @@ import {
   convertSchema,
   type SchemaComplianceMode,
 } from '../../utils/schemaConverter.js';
+import {
+  setToolCallPreparations,
+  type ToolCallPreparation,
+} from '../tool-call-preparation.js';
+import { InvalidStreamError } from '../invalid-stream-error.js';
 
 const debugLogger = createDebugLogger('CONVERTER');
 const SPLIT_TOOL_MEDIA_TEXT = '(attached media from previous tool call)';
@@ -1086,6 +1091,85 @@ function hasThoughtPart(parts: Part[]): boolean {
   return parts.some((part) => part.thought === true);
 }
 
+const THINKING_TAG_PATTERN = /<\/?think(?:ing)?\s*>/i;
+const CLOSING_THINKING_TAG_PATTERN = /\n[^\S\r\n]*<\/think(?:ing)?[^\S\r\n]*>/i;
+const LEADING_CLOSING_THINKING_TAG_PATTERN =
+  /^[^\S\r\n]*<\/think(?:ing)?[^\S\r\n]*>/i;
+const LEADING_THINKING_TAG_PATTERN = /^\s*<\/?think(?:ing)?\s*>/i;
+const STANDALONE_CLOSING_THINKING_TAG_PATTERN =
+  /^\s*<\/(think|thinking)\s*>\s*$/i;
+const STANDALONE_OPENING_THINKING_TAG_PATTERN =
+  /^\s*<(think|thinking)\s*>\s*$/i;
+const MAX_THINKING_TAG_CANDIDATE_LENGTH = 128;
+
+function canBeStandaloneThinkingTagPrefix(text: string): boolean {
+  const candidate = text.trimStart().toLowerCase();
+  if (!candidate) return true;
+
+  return ['<think', '<thinking', '</think', '</thinking'].some((tag) => {
+    if (tag.startsWith(candidate)) return true;
+    if (!candidate.startsWith(tag)) return false;
+    return /^\s*(?:>\s*)?$/.test(candidate.slice(tag.length));
+  });
+}
+
+function classifyContentOnlyThinkingTagPrefix(
+  text: string,
+  streamFinished: boolean,
+): 'clean' | 'pending' | 'suspicious' | 'leaked' {
+  const candidate = text.trimStart().toLowerCase();
+  if (!candidate) return 'clean';
+
+  const consumeTag = (
+    value: string,
+    closing: boolean,
+  ): number | null | undefined => {
+    const match = LEADING_THINKING_TAG_PATTERN.exec(value)?.[0];
+    if (match) {
+      return match.trimStart().startsWith('</') === closing
+        ? match.length
+        : undefined;
+    }
+
+    if (!canBeStandaloneThinkingTagPrefix(value)) return undefined;
+    if (!value || value === '<') return null;
+    return closing === value.startsWith('</') ? null : undefined;
+  };
+
+  let rest = candidate;
+  for (const closing of [false, true, false]) {
+    const tagLength = consumeTag(rest, closing);
+    if (tagLength === null) return 'pending';
+    if (tagLength === undefined) return 'clean';
+    rest = rest.slice(tagLength).trimStart();
+  }
+
+  let depth = 1;
+  let hasNestedOpening = false;
+  for (;;) {
+    const nextTag = THINKING_TAG_PATTERN.exec(rest);
+    if (!nextTag) break;
+
+    const closing = nextTag[0].startsWith('</');
+    depth += closing ? -1 : 1;
+    if (depth === 0) return 'clean';
+    hasNestedOpening ||= !closing;
+    rest = rest.slice(nextTag.index + nextTag[0].length);
+  }
+
+  if (!hasNestedOpening) return 'pending';
+  return streamFinished ? 'leaked' : 'suspicious';
+}
+
+function throwProtocolTagLeak(requestContext: RequestContext): never {
+  requestContext.pendingThinkingTagCandidate = undefined;
+  requestContext.pendingUntrustedResponseParts = undefined;
+  throw new InvalidStreamError(
+    'Model response leaked thinking tags.',
+    'PROTOCOL_TAG_LEAK',
+  );
+}
+
 /**
  * Convert OpenAI response to Gemini format.
  */
@@ -1217,6 +1301,7 @@ export function convertOpenAIChunkToGemini(
 ): GenerateContentResponse {
   const choice = chunk.choices?.[0];
   const response = new GenerateContentResponse();
+  const preparations: ToolCallPreparation[] = [];
   const toolCallParser = requestContext.toolCallParser;
   if (!toolCallParser) {
     throw new Error(
@@ -1225,7 +1310,7 @@ export function convertOpenAIChunkToGemini(
   }
 
   if (choice) {
-    const parts: Part[] = [];
+    let parts: Part[] = [];
     let contentParts: Part[] = [];
 
     // Handle reasoning content (thoughts).
@@ -1285,6 +1370,12 @@ export function convertOpenAIChunkToGemini(
           cumulativeMode: false,
         }),
       );
+      if (normalizedReasoningText) {
+        requestContext.hasStructuredReasoningContent = true;
+        if (THINKING_TAG_PATTERN.test(normalizedReasoningText)) {
+          requestContext.hasThinkingTagInReasoning = true;
+        }
+      }
       if (
         normalizedReasoningText &&
         !requestContext.responseParsingOptions?.taggedThinkingTags
@@ -1347,35 +1438,229 @@ export function convertOpenAIChunkToGemini(
         const index = toolCall.index ?? 0;
 
         // Process the tool call chunk through the streaming parser
-        if (toolCall.function?.arguments) {
-          toolCallParser.addChunk(
-            index,
-            toolCall.function.arguments,
-            toolCall.id,
-            toolCall.function.name,
-          );
-        } else {
-          // Handle metadata-only chunks (id and/or name without arguments)
-          toolCallParser.addChunk(
-            index,
-            '', // Empty chunk for metadata-only updates
-            toolCall.id,
-            toolCall.function?.name,
-          );
+        const parseResult = toolCall.function?.arguments
+          ? toolCallParser.addChunk(
+              index,
+              toolCall.function.arguments,
+              toolCall.id,
+              toolCall.function.name,
+            )
+          : toolCallParser.addChunk(
+              index,
+              '', // Empty chunk for metadata-only updates
+              toolCall.id,
+              toolCall.function?.name,
+            );
+
+        const { id: callId, name: toolName } = toolCallParser.getToolCallMeta(
+          parseResult.actualIndex ?? index,
+        );
+        if (callId && toolName) {
+          const emitted = (requestContext.preparedToolCallIds ??= new Set());
+          if (!emitted.has(callId)) {
+            emitted.add(callId);
+            preparations.push({ callId, toolName });
+          }
         }
       }
     }
 
+    const getVisibleText = (part: Part): string =>
+      part.thought !== true && typeof part.text === 'string' ? part.text : '';
+    let visibleText = parts.map(getVisibleText).join('');
+
+    const pendingTagCandidate = requestContext.pendingThinkingTagCandidate;
+    const replayedTagPrefix =
+      !pendingTagCandidate?.closingTagName &&
+      /\S/.test(pendingTagCandidate?.text ?? '') &&
+      pendingTagCandidate?.text === visibleText;
+    const replayedClosingTag =
+      STANDALONE_CLOSING_THINKING_TAG_PATTERN.exec(
+        visibleText,
+      )?.[1]?.toLowerCase();
+    if (
+      replayedTagPrefix ||
+      (pendingTagCandidate?.closingTagName &&
+        pendingTagCandidate.closingTagName === replayedClosingTag)
+    ) {
+      parts = parts.filter((part) => !getVisibleText(part));
+      visibleText = '';
+    }
+    const combinedCandidateText =
+      (pendingTagCandidate?.text ?? '') + visibleText;
+    const hasStructuredReasoning =
+      requestContext.hasStructuredReasoningContent === true;
+    const detectContentOnlyThinkingTagLeaks =
+      requestContext.responseParsingOptions?.contentOnlyThinkingTagLeaks ===
+      true;
+    const contentOnlyThinkingState =
+      hasStructuredReasoning ||
+      requestContext.hasVisibleContent === true ||
+      !detectContentOnlyThinkingTagLeaks
+        ? 'clean'
+        : classifyContentOnlyThinkingTagPrefix(
+            combinedCandidateText,
+            Boolean(choice.finish_reason),
+          );
+    const canStartTagCandidate =
+      requestContext.hasVisibleContent !== true &&
+      visibleText.length > 0 &&
+      ((hasStructuredReasoning &&
+        canBeStandaloneThinkingTagPrefix(combinedCandidateText)) ||
+        contentOnlyThinkingState !== 'clean');
+
+    if (pendingTagCandidate || canStartTagCandidate) {
+      const closingTag = STANDALONE_CLOSING_THINKING_TAG_PATTERN.exec(
+        combinedCandidateText,
+      )?.[1]?.toLowerCase();
+      const closingTagName =
+        closingTag === 'think' || closingTag === 'thinking'
+          ? closingTag
+          : undefined;
+      const openingTag = STANDALONE_OPENING_THINKING_TAG_PATTERN.test(
+        combinedCandidateText,
+      );
+      const isPossibleTag =
+        canBeStandaloneThinkingTagPrefix(combinedCandidateText) ||
+        contentOnlyThinkingState === 'pending' ||
+        contentOnlyThinkingState === 'suspicious';
+      const finishedWhitespaceCandidate =
+        Boolean(choice.finish_reason) &&
+        !closingTagName &&
+        !/\S/.test(combinedCandidateText);
+      const releaseContentOnlyCandidate =
+        contentOnlyThinkingState === 'pending' &&
+        (Boolean(choice.finish_reason) ||
+          combinedCandidateText.trimStart().length >
+            MAX_THINKING_TAG_CANDIDATE_LENGTH);
+
+      if (contentOnlyThinkingState === 'leaked') {
+        throwProtocolTagLeak(requestContext);
+      }
+
+      if (openingTag && hasStructuredReasoning) {
+        throwProtocolTagLeak(requestContext);
+      }
+
+      if (pendingTagCandidate?.closingTagName && !closingTagName) {
+        throwProtocolTagLeak(requestContext);
+      }
+
+      if (finishedWhitespaceCandidate || releaseContentOnlyCandidate) {
+        parts = parts.filter((part) => !getVisibleText(part));
+        if (combinedCandidateText) {
+          parts.push({ text: combinedCandidateText });
+        }
+        visibleText = combinedCandidateText;
+        requestContext.pendingThinkingTagCandidate = undefined;
+      } else if (isPossibleTag) {
+        if (
+          !closingTagName &&
+          combinedCandidateText.trimStart().length >
+            MAX_THINKING_TAG_CANDIDATE_LENGTH
+        ) {
+          throwProtocolTagLeak(requestContext);
+        }
+        requestContext.pendingThinkingTagCandidate = closingTagName
+          ? { text: `</${closingTagName}>`, closingTagName }
+          : { text: combinedCandidateText };
+        parts = parts.filter((part) => !getVisibleText(part));
+        visibleText = '';
+
+        if (choice.finish_reason && !closingTagName) {
+          throwProtocolTagLeak(requestContext);
+        }
+      } else if (pendingTagCandidate) {
+        parts = parts.filter((part) => !getVisibleText(part));
+        parts.push({ text: combinedCandidateText });
+        visibleText = combinedCandidateText;
+        requestContext.pendingThinkingTagCandidate = undefined;
+      }
+    }
+
+    const leakedThinkingTag =
+      requestContext.hasStructuredReasoningContent === true &&
+      ((requestContext.hasVisibleContent !== true &&
+        LEADING_THINKING_TAG_PATTERN.test(visibleText)) ||
+        (requestContext.hasThinkingTagInReasoning === true &&
+          (CLOSING_THINKING_TAG_PATTERN.test(visibleText) ||
+            (requestContext.atVisibleLineStart === true &&
+              LEADING_CLOSING_THINKING_TAG_PATTERN.test(visibleText)))));
+
+    if (/\S/.test(visibleText)) {
+      requestContext.hasVisibleContent = true;
+    }
+    if (visibleText && requestContext.hasThinkingTagInReasoning === true) {
+      const lastLineBreak = visibleText.lastIndexOf('\n');
+      const lineSuffix = visibleText.slice(lastLineBreak + 1);
+      requestContext.atVisibleLineStart =
+        (lastLineBreak >= 0 || requestContext.atVisibleLineStart === true) &&
+        /^[^\S\r\n]*$/.test(lineSuffix);
+    }
+    if (leakedThinkingTag) {
+      throwProtocolTagLeak(requestContext);
+    }
+
+    const toolCallWithoutName = toolCallParser.hasNamelessToolCall();
+    const completedToolCalls = choice.finish_reason
+      ? toolCallParser.getCompletedToolCalls()
+      : [];
+    // Some providers report "stop" or "tool_calls" for JSON cut off by the
+    // token limit, so validate the parser state independently of finish_reason.
+    const toolCallsTruncated = choice.finish_reason
+      ? toolCallParser.hasIncompleteToolCalls()
+      : false;
+    if (
+      choice.finish_reason &&
+      requestContext.pendingThinkingTagCandidate?.closingTagName
+    ) {
+      if (
+        requestContext.hasThinkingTagInReasoning === true ||
+        choice.finish_reason !== 'tool_calls' ||
+        completedToolCalls.length === 0 ||
+        toolCallWithoutName ||
+        toolCallParser.hasConflictingToolCallIdentity() ||
+        toolCallsTruncated ||
+        toolCallParser.hasInvalidToolCallArguments()
+      ) {
+        throwProtocolTagLeak(requestContext);
+      }
+      requestContext.protocolTagSanitized = {
+        tagName: requestContext.pendingThinkingTagCandidate.closingTagName,
+        toolCallCount: completedToolCalls.length,
+      };
+      requestContext.pendingThinkingTagCandidate = undefined;
+    }
+
+    if (
+      choice.finish_reason &&
+      (toolCallParser.hasInvalidToolCallIndex() ||
+        toolCallWithoutName ||
+        (choice.finish_reason === 'tool_calls' &&
+          completedToolCalls.length === 0))
+    ) {
+      requestContext.pendingUntrustedResponseParts = undefined;
+      throw new InvalidStreamError(
+        'Model response contained a malformed tool call.',
+        'MALFORMED_TOOL_CALL',
+      );
+    }
+
+    const shouldHoldParts =
+      !choice.finish_reason &&
+      (toolCallWithoutName ||
+        requestContext.hasThinkingTagInReasoning === true ||
+        requestContext.pendingThinkingTagCandidate !== undefined);
+    if (shouldHoldParts) {
+      (requestContext.pendingUntrustedResponseParts ??= []).push(...parts);
+      parts.length = 0;
+    } else if (requestContext.pendingUntrustedResponseParts) {
+      parts = requestContext.pendingUntrustedResponseParts.concat(parts);
+      requestContext.pendingUntrustedResponseParts = undefined;
+    }
+
     // Only emit function calls when streaming is complete (finish_reason is present)
-    let toolCallsTruncated = false;
     if (choice.finish_reason) {
-      // Detect truncation the provider may not report correctly.
-      // Some providers (e.g. DashScope/Qwen) send "stop" or "tool_calls"
-      // even when output was cut off mid-JSON due to max_tokens.
-      toolCallsTruncated = toolCallParser.hasIncompleteToolCalls();
-
-      const completedToolCalls = toolCallParser.getCompletedToolCalls();
-
       for (const toolCall of completedToolCalls) {
         if (toolCall.name) {
           parts.push({
@@ -1462,6 +1747,10 @@ export function convertOpenAIChunkToGemini(
       totalTokenCount: totalTokens,
       cachedContentTokenCount: cachedTokens,
     };
+  }
+
+  if (preparations.length > 0) {
+    setToolCallPreparations(response, preparations);
   }
 
   return response;

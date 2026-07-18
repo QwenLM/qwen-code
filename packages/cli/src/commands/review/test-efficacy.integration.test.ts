@@ -68,6 +68,35 @@ function treeState(wt: string): string {
   );
 }
 
+/**
+ * A minimal same-repo PR: source `f` changes 1→2, with a reachable test that
+ * passes regardless (so a revert probe reads it as inert). Returns the shared
+ * worktree and base SHA, with the report already written to `report.json`.
+ */
+function scaffoldModifiedPr(): { wt: string; base: string } {
+  write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
+  write('packages/lib/src/f.ts', 'export const f = () => 1;\n');
+  const base = commitAll('base');
+  write('packages/lib/src/f.ts', 'export const f = () => 2;\n');
+  write(
+    'packages/lib/src/f.test.ts',
+    'import { f } from "./f.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof f).toBe("function"));\n',
+  );
+  commitAll('pr');
+  const wt = join(repo, 'wt');
+  git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
+  writeFileSync(
+    join(repo, 'report.json'),
+    JSON.stringify({
+      files: [
+        { path: 'packages/lib/src/f.ts', kind: 'source' },
+        { path: 'packages/lib/src/f.test.ts', kind: 'test' },
+      ],
+    }),
+  );
+  return { wt, base };
+}
+
 beforeEach(() => {
   repo = mkdtempSync(join(tmpdir(), 'efficacy-iso-'));
   outside = mkdtempSync(join(tmpdir(), 'efficacy-outside-'));
@@ -111,27 +140,7 @@ afterEach(() => {
 
 describe('test-efficacy probe isolation (#6832)', () => {
   it('probes in a disposable worktree and never mutates the shared one', async () => {
-    write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
-    write('packages/lib/src/f.ts', 'export const f = () => 1;\n');
-    const base = commitAll('base');
-    write('packages/lib/src/f.ts', 'export const f = () => 2;\n');
-    write(
-      'packages/lib/src/f.test.ts',
-      'import { f } from "./f.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof f).toBe("function"));\n',
-    );
-    commitAll('pr');
-
-    const wt = join(repo, 'wt');
-    git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
-    writeFileSync(
-      join(repo, 'report.json'),
-      JSON.stringify({
-        files: [
-          { path: 'packages/lib/src/f.ts', kind: 'source' },
-          { path: 'packages/lib/src/f.test.ts', kind: 'test' },
-        ],
-      }),
-    );
+    const { wt, base } = scaffoldModifiedPr();
 
     const before = treeState(wt);
     await runHandler({
@@ -213,6 +222,66 @@ describe('test-efficacy probe isolation (#6832)', () => {
     );
     // Shared tree untouched, probe tree discarded.
     expect(treeState(wt)).toBe(before);
+    expect(existsSync(join(repo, 'wt-probe'))).toBe(false);
+  });
+
+  it('sweeps a stale REGISTERED probe worktree left by a crashed run', async () => {
+    const { wt, base } = scaffoldModifiedPr();
+    // A prior probe crashed after `worktree add` but before its cleanup, leaving
+    // the probe tree registered. The pre-sweep must unregister and replace it,
+    // not fail `add` on the collision.
+    git(
+      repo,
+      'worktree',
+      'add',
+      '-q',
+      '--detach',
+      join(repo, 'wt-probe'),
+      'HEAD',
+    );
+    expect(existsSync(join(repo, 'wt-probe'))).toBe(true);
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    // The probe ran (a real verdict, not a "could not be created" inconclusive)
+    // and left the tree cleaned up.
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.findings.map((f: { file: string }) => f.file)).toContain(
+      'packages/lib/src/f.test.ts',
+    );
+    expect(existsSync(join(repo, 'wt-probe'))).toBe(false);
+  });
+
+  it('clears an UNREGISTERED non-empty leftover so the probe is not wedged', async () => {
+    const { wt, base } = scaffoldModifiedPr();
+    // A partial cleanup left a directory at the probe path that git no longer
+    // tracks as a worktree, and it is non-empty. `git worktree remove` cannot
+    // clear it ("not a working tree"), and without the rmSync fallback the next
+    // `git worktree add` fails "already exists" — wedging every probe as
+    // inconclusive until someone clears it by hand.
+    mkdirSync(join(repo, 'wt-probe', 'junk'), { recursive: true });
+    writeFileSync(join(repo, 'wt-probe', 'junk', 'f'), 'x');
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    const details = (out.probed as Array<{ detail?: string }>).map(
+      (p) => p.detail ?? '',
+    );
+    expect(details.join('\n')).not.toMatch(/could not be created/);
+    expect(out.findings.map((f: { file: string }) => f.file)).toContain(
+      'packages/lib/src/f.test.ts',
+    );
     expect(existsSync(join(repo, 'wt-probe'))).toBe(false);
   });
 });

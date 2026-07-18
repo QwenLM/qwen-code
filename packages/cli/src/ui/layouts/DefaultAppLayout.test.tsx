@@ -84,7 +84,7 @@ const baseUIState: Partial<UIState> = {
   terminalHeight: 24,
   staticExtraHeight: 0,
   constrainHeight: true,
-  streamingState: StreamingState.Idle,
+  streamingState: StreamingState.Responding,
   historyManager: {
     addItem: vi.fn(),
     history: [],
@@ -205,6 +205,22 @@ describe('DefaultAppLayout', () => {
     const { lastFrame } = renderLayout({
       ...baseUIState,
       streamingState: StreamingState.WaitingForConfirmation,
+    });
+
+    const output = lastFrame() ?? '';
+    expect(output).not.toContain('StickyTodoList');
+    expect(output).toContain('Composer');
+  });
+
+  it('does not render sticky todo list when agent is idle', () => {
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'main',
+      agents: new Map(),
+    });
+
+    const { lastFrame } = renderLayout({
+      ...baseUIState,
+      streamingState: StreamingState.Idle,
     });
 
     const output = lastFrame() ?? '';

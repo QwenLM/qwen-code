@@ -6,19 +6,29 @@
 
 import type React from 'react';
 import { Box, Text } from 'ink';
+import stringWidth from 'string-width';
+import wrapAnsi from 'wrap-ansi';
 import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import type { AnsiOutputDisplay } from '@qwen-code/qwen-code-core';
 import { ToolDisplayNames } from '@qwen-code/qwen-code-core';
 import { t } from '../../../i18n/index.js';
 import { SHELL_COMMAND_NAME } from '../../constants.js';
-import { ToolStatusIndicator } from '../shared/ToolStatusIndicator.js';
+import {
+  STATUS_INDICATOR_WIDTH,
+  ToolStatusIndicator,
+} from '../shared/ToolStatusIndicator.js';
 import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
+import { formatDuration } from '../../utils/formatters.js';
 
 interface CompactToolGroupDisplayProps {
   toolCalls: IndividualToolCallDisplay[];
   contentWidth: number;
 }
+
+const COMPACT_GROUP_HORIZONTAL_PADDING = 2;
+const ELAPSED_TIME_MARGIN_LEFT = 1;
+const EXECUTING_ELAPSED_TIME_RESERVED_LABEL = '99h 59m 59s';
 
 // Priority: Confirming > Executing > Error > Canceled > Pending > Success
 export function getOverallStatus(
@@ -60,6 +70,32 @@ function getShellTimeoutMs(
     return (display as AnsiOutputDisplay).timeoutMs;
   }
   return undefined;
+}
+
+function isToolGroupActive(status: ToolCallStatus): boolean {
+  return (
+    status === ToolCallStatus.Executing ||
+    status === ToolCallStatus.Pending ||
+    status === ToolCallStatus.Confirming
+  );
+}
+
+function getElapsedTimeReservedWidth(
+  tool: IndividualToolCallDisplay,
+  status: ToolCallStatus,
+): number {
+  if (status !== ToolCallStatus.Executing) return 0;
+
+  const timeoutMs = getShellTimeoutMs(tool);
+  let label = EXECUTING_ELAPSED_TIME_RESERVED_LABEL;
+  if (timeoutMs != null && timeoutMs > 0) {
+    const maxElapsedStr = formatDuration(timeoutMs, {
+      hideTrailingZeros: true,
+    });
+    label = `(${maxElapsedStr} · timeout ${maxElapsedStr})`;
+  }
+
+  return ELAPSED_TIME_MARGIN_LEFT + stringWidth(label);
 }
 
 type ToolCategory =
@@ -312,6 +348,31 @@ export function buildToolSummary(
   return parts.join(', ');
 }
 
+export function estimateCompactToolGroupHeight(
+  toolCalls: IndividualToolCallDisplay[],
+  contentWidth: number,
+): number {
+  if (toolCalls.length === 0) return 0;
+
+  const overallStatus = getOverallStatus(toolCalls);
+  const activeTool = getActiveTool(toolCalls);
+  const isActive = isToolGroupActive(overallStatus);
+  const summary = `${buildToolSummary(toolCalls, isActive)}${isActive ? '…' : ''}`;
+  const summaryWidth = Math.max(
+    1,
+    contentWidth -
+      COMPACT_GROUP_HORIZONTAL_PADDING -
+      STATUS_INDICATOR_WIDTH -
+      getElapsedTimeReservedWidth(activeTool, overallStatus),
+  );
+  const wrappedSummary = wrapAnsi(summary, summaryWidth, {
+    hard: true,
+    trim: false,
+  });
+
+  return Math.max(1, wrappedSummary.split('\n').length);
+}
+
 export const CompactToolGroupDisplay: React.FC<
   CompactToolGroupDisplayProps
 > = ({ toolCalls, contentWidth }) => {
@@ -319,17 +380,14 @@ export const CompactToolGroupDisplay: React.FC<
 
   const overallStatus = getOverallStatus(toolCalls);
   const activeTool = getActiveTool(toolCalls);
-  const isActive =
-    overallStatus === ToolCallStatus.Executing ||
-    overallStatus === ToolCallStatus.Pending ||
-    overallStatus === ToolCallStatus.Confirming;
+  const isActive = isToolGroupActive(overallStatus);
 
   return (
     <Box flexDirection="column" width={contentWidth} paddingX={1} gap={0}>
       <Box flexDirection="row">
         <ToolStatusIndicator status={overallStatus} name={activeTool.name} />
         <Box flexGrow={1}>
-          <Text wrap="truncate-end" bold>
+          <Text wrap="wrap" bold>
             {buildToolSummary(toolCalls, isActive)}
             {isActive && <Text key="ellipsis">…</Text>}
           </Text>

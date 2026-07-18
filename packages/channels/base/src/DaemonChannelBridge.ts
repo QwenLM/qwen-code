@@ -7,6 +7,7 @@ import type {
   AvailableCommand,
   BridgeSessionInfo,
   ChannelAgentBridge,
+  ChannelAgentBridgeSessionOptions,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
 import { readAvailableCommandAltNames } from './AcpBridge.js';
@@ -56,6 +57,8 @@ export interface DaemonChannelSessionFactoryRequest {
   sessionId?: string;
   sessionScope?: SessionScope;
   approvalMode?: string;
+  /** Channel instance name stamped as daemon `sourceId` (new sessions only). */
+  sourceId?: string;
 }
 
 export type DaemonChannelSessionFactory = (
@@ -253,7 +256,7 @@ export class DaemonChannelBridge
 
   async newSession(
     cwd: string,
-    options?: { approvalMode?: string },
+    options?: ChannelAgentBridgeSessionOptions,
     bindingToken?: object,
   ): Promise<string> {
     const lifecycleGeneration = this.lifecycleGeneration;
@@ -262,6 +265,7 @@ export class DaemonChannelBridge
       modelServiceId: this.options.modelServiceId,
       sessionScope: this.options.sessionScope ?? 'thread',
       ...(options?.approvalMode ? { approvalMode: options.approvalMode } : {}),
+      ...(options?.sourceId ? { sourceId: options.sourceId } : {}),
     });
     if (lifecycleGeneration !== this.lifecycleGeneration) {
       await this.rejectStaleSession(session);
@@ -273,7 +277,7 @@ export class DaemonChannelBridge
   async loadSession(
     sessionId: string,
     cwd: string,
-    options?: { approvalMode?: string },
+    options?: ChannelAgentBridgeSessionOptions,
     bindingToken?: object,
   ): Promise<string> {
     const lifecycleGeneration = this.lifecycleGeneration;
@@ -671,6 +675,22 @@ export class DaemonChannelBridge
       case 'tool_call_update': {
         const toolCallId = getString(update['toolCallId']);
         const kind = getString(update['kind']);
+        const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+        if (
+          !kind &&
+          toolCallId &&
+          getString(update['status']) === 'in_progress' &&
+          meta?.['shellProgress'] !== undefined
+        ) {
+          // Silent-shell liveness heartbeat: a kind-less in_progress frame
+          // carrying only the id, status, and _meta.shellProgress stats.
+          // Channels have no use for it — drop it without flagging the
+          // session as malformed. Gate on shellProgress (matching the
+          // qwen-agent and web-shell normalizer guards) so a genuinely
+          // malformed kind-less tool_call still reaches emitProtocolError
+          // below instead of being silently swallowed.
+          break;
+        }
         if (!toolCallId || !kind) {
           this.emitProtocolError(`Malformed daemon ${type} event`, update);
           break;

@@ -328,7 +328,10 @@ export class HistoryReplayer {
     await this.toolCallEmitter.emitResult({
       toolName,
       callId,
-      success: !result?.error,
+      success:
+        result?.status === undefined
+          ? !result?.error
+          : result.status === 'success' && !result.error,
       message: record.message.parts,
       resultDisplay: result?.resultDisplay,
       artifacts: result?.artifacts,
@@ -450,11 +453,6 @@ export class HistoryReplayer {
   }
 
   private setActiveRecordId(recordId: string | null, timestamp?: string): void {
-    const context = this.ctx as unknown as {
-      setActiveRecordId?: (id: string | null, timestamp?: string) => void;
-    };
-    if (typeof context.setActiveRecordId === 'function') {
-      context.setActiveRecordId(recordId, timestamp);
-    }
+    this.ctx.setActiveRecordId?.(recordId, timestamp);
   }
 }

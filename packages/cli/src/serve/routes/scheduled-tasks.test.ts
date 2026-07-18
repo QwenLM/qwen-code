@@ -38,6 +38,8 @@ interface StubBridge {
   spawnOrAttach(req: {
     workspaceCwd: string;
     sessionScope?: 'single' | 'thread';
+    sourceType?: string;
+    sourceId?: string;
   }): Promise<{ sessionId: string }>;
   closeSession(sessionId: string): Promise<unknown>;
   updateSessionMetadata(
@@ -46,6 +48,7 @@ interface StubBridge {
   ): unknown;
   spawned: string[];
   spawnScopes: Array<'single' | 'thread' | undefined>;
+  spawnSources: Array<{ sourceType?: string; sourceId?: string }>;
   closed: string[];
   named: Array<{ sessionId: string; displayName?: string }>;
   failNext: boolean;
@@ -56,6 +59,7 @@ function makeStubBridge(): StubBridge {
   const bridge: StubBridge = {
     spawned: [],
     spawnScopes: [],
+    spawnSources: [],
     closed: [],
     named: [],
     failNext: false,
@@ -67,6 +71,10 @@ function makeStubBridge(): StubBridge {
       const sessionId = `sess-${++seq}`;
       bridge.spawned.push(sessionId);
       bridge.spawnScopes.push(req.sessionScope);
+      bridge.spawnSources.push({
+        ...(req.sourceType !== undefined ? { sourceType: req.sourceType } : {}),
+        ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
+      });
       return { sessionId };
     },
     async closeSession(sessionId: string) {
@@ -161,6 +169,9 @@ describe('scheduled-tasks routes', () => {
     // The task carries the id of the session the bridge minted for it.
     expect(h.bridge.spawned).toHaveLength(1);
     expect(res.body.sessionId).toBe(h.bridge.spawned[0]);
+    expect(h.bridge.spawnSources).toEqual([
+      { sourceType: 'scheduled_task', sourceId: res.body.id },
+    ]);
     // And it's persisted on disk, not just in the response.
     const list = await request(h.app).get('/scheduled-tasks');
     expect(list.body.tasks[0].sessionId).toBe(h.bridge.spawned[0]);

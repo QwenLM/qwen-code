@@ -8,7 +8,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   DaemonSessionProvider,
   useConnection,
-  useSessions,
   type DaemonWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
@@ -23,14 +22,17 @@ import type {
 import {
   SESSION_LIST_PAGE_SIZE,
   SESSION_ORGANIZATION_FEATURE,
+  WEB_SHELL_HISTORY_PAGE_SIZE,
+  WEB_SHELL_MAX_TRANSCRIPT_BLOCKS,
 } from '../constants/sessions';
 import { useOtherWorkspaceSessions } from '../hooks/useOtherWorkspaceSessions';
+import { useScopedSessions } from '../hooks/useScopedSessions';
 import {
   hasMultipleWorkspaces,
-  isNonPrimaryWorkspaceSession,
   mergeSessionsById,
   workspaceBasename,
 } from '../utils/workspace';
+import { isEditableTarget } from '../utils/dom';
 import styles from './SplitView.module.css';
 
 const MAX_PANES = MAX_SPLIT_PANES;
@@ -62,6 +64,11 @@ export interface SplitViewProps {
    * offers a session that has since been removed or misses one just created.
    */
   sessionListReloadToken?: number;
+  includeOtherWorkspaces?: boolean;
+  /** Limit session discovery and pane attachment to this workspace. */
+  workspaceCwd?: string;
+  /** Restart each pane's SSE event stream after an accepted prompt. */
+  restartSseOnPrompt?: boolean;
 }
 
 /**
@@ -80,6 +87,9 @@ export function SplitView({
   onPaneArtifactsChange,
   messageTurnOutputs,
   sessionListReloadToken,
+  includeOtherWorkspaces = true,
+  workspaceCwd,
+  restartSseOnPrompt,
 }: SplitViewProps) {
   const { t } = useI18n();
   const connection = useConnection();
@@ -87,7 +97,7 @@ export function SplitView({
   const organizationEnabled =
     connection.capabilities?.features?.includes(SESSION_ORGANIZATION_FEATURE) ??
     false;
-  const { sessions, reload } = useSessions({
+  const { sessions, reload } = useScopedSessions(workspaceCwd, {
     autoLoad: true,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'active',
@@ -99,16 +109,16 @@ export function SplitView({
   // and a pane can attach to — sessions that aren't in the primary workspace.
   // Empty (a no-op) on a single-workspace daemon.
   const { sessions: otherSessions, reload: reloadOther } =
-    useOtherWorkspaceSessions();
+    useOtherWorkspaceSessions(includeOtherWorkspaces && !workspaceCwd);
   const allSessions = useMemo(
     () => mergeSessionsById(sessions, otherSessions),
     [sessions, otherSessions],
   );
-  const multiWorkspace = hasMultipleWorkspaces(connection.capabilities);
-  // The primary workspace cwd, for labeling picker items the same way the
-  // Session Overview labels its cards (primary → the localized tag, others →
-  // the workspace basename).
-  const primaryCwd = connection.capabilities?.workspaceCwd;
+  const multiWorkspace =
+    !workspaceCwd &&
+    includeOtherWorkspaces &&
+    hasMultipleWorkspaces(connection.capabilities);
+  const scopePanesByWorkspace = Boolean(workspaceCwd) || multiWorkspace;
   const sessionIdsControlled = sessionIds !== undefined;
   const normalizedSessionIds = useMemo(
     () =>
@@ -124,6 +134,10 @@ export function SplitView({
     return currentSessionId ? [currentSessionId] : [];
   });
   const [pickerOpen, setPickerOpen] = useState(false);
+  // Which pane, if any, is maximized to fill the whole split. Purely visual and
+  // ephemeral (not deep-linked via `?split=`, like the dialog fullscreen toggle
+  // it mirrors): the other panes stay mounted and streaming, just hidden.
+  const [maximizedPaneId, setMaximizedPaneId] = useState<string | null>(null);
   const addWrapRef = useRef<HTMLDivElement | null>(null);
   // A per-tab/per-mount nonce: two browser tabs opening the same split must not
   // register the same daemon client id, or suppressOwnUserEcho would treat one
@@ -165,9 +179,8 @@ export function SplitView({
     };
   }, [pickerOpen]);
 
-  // Refresh the list the moment the picker opens — `useSessions` only fetches on
-  // mount, so without this the picker would offer whatever was current when the
-  // split was first entered, missing sessions created since.
+  // Refresh the list the moment the picker opens so it includes sessions
+  // created since the split was first entered.
   useEffect(() => {
     if (pickerOpen) {
       void reload();
@@ -241,6 +254,9 @@ export function SplitView({
         return;
       }
       const next = [...currentPaneIds, sessionId];
+      // Reveal the freshly added pane rather than leaving it hidden behind a
+      // still-maximized one.
+      setMaximizedPaneId(null);
       if (sessionIdsControlled) {
         onPanesChange?.(next);
       } else {
@@ -284,11 +300,48 @@ export function SplitView({
     [onPanesChange, sessionIdsControlled],
   );
 
+  const toggleMaximize = useCallback((sessionId: string) => {
+    setMaximizedPaneId((current) => (current === sessionId ? null : sessionId));
+  }, []);
+
+  // Maximize only makes sense against another pane, so drop it whenever it no
+  // longer can hold: the maximized pane left the set (closed here, or removed by
+  // a controlled-mode sync), or the split shrank to a lone pane. Without the
+  // length guard a surviving maximized pane would keep a stale `maximizedPaneId`
+  // that silently re-hides the next pane a controlled parent adds back.
+  useEffect(() => {
+    if (
+      maximizedPaneId &&
+      (paneIds.length < 2 || !paneIds.includes(maximizedPaneId))
+    ) {
+      setMaximizedPaneId(null);
+    }
+  }, [paneIds, maximizedPaneId]);
+
+  // Escape restores the tiled layout, but only when the key is otherwise unused:
+  // defer to an open picker (its own Escape closes it first), and never steal
+  // Escape from the composer — it cancels the in-flight turn / closes its menus —
+  // or from an open dialog. `isEditableTarget` covers `.cm-editor` and dialog
+  // keyboard scopes, so a maximized pane's composer keeps its Escape.
+  useEffect(() => {
+    if (!maximizedPaneId) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      if (pickerOpen || isEditableTarget(event.target)) return;
+      setMaximizedPaneId(null);
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [maximizedPaneId, pickerOpen]);
+
   const available = useMemo(
     () => allSessions.filter((session) => !paneIds.includes(session.sessionId)),
     [allSessions, paneIds],
   );
   const canAdd = paneIds.length < MAX_PANES && available.length > 0;
+  // Only offer per-pane maximize once there's another pane to maximize against —
+  // a lone pane already fills the split.
+  const canMaximize = paneIds.length > 1;
 
   return (
     <div className={styles.split} data-testid="split-view">
@@ -344,12 +397,7 @@ export function SplitView({
                         className={styles.pickerItemWorkspace}
                         title={session.workspaceCwd}
                       >
-                        {isNonPrimaryWorkspaceSession(
-                          session.workspaceCwd,
-                          primaryCwd,
-                        )
-                          ? workspaceBasename(session.workspaceCwd)
-                          : t('sidebar.workspacePrimary')}
+                        {workspaceBasename(session.workspaceCwd)}
                       </span>
                     )}
                   </button>
@@ -366,15 +414,20 @@ export function SplitView({
         ) : (
           paneIds.map((sessionId) => {
             const paneWorkspaceCwd = workspaceCwdById.get(sessionId);
+            const isMaximized = maximizedPaneId === sessionId;
+            // When one pane is maximized, the rest stay mounted (their sessions
+            // keep streaming) but are hidden via CSS — a purely visual solo.
+            const isHidden = maximizedPaneId !== null && !isMaximized;
             return (
               <div
                 className={styles.paneSlot}
+                data-pane-hidden={isHidden ? '' : undefined}
                 // Include the resolved workspace in the key on a multi-workspace
                 // daemon so a pane whose workspace resolves only after mount (e.g.
                 // a `?split=` deep link) remounts under the right workspace rather
                 // than staying attached with the primary cwd.
                 key={
-                  multiWorkspace
+                  scopePanesByWorkspace
                     ? `${sessionId}:${paneWorkspaceCwd ?? ''}`
                     : sessionId
                 }
@@ -410,21 +463,35 @@ export function SplitView({
                     // to the primary cwd once the list resolves, needlessly
                     // re-attaching it. Undefined falls back to the provider's
                     // primary cwd, i.e. today's behavior.
-                    workspaceCwd={multiWorkspace ? paneWorkspaceCwd : undefined}
+                    workspaceCwd={
+                      scopePanesByWorkspace
+                        ? (paneWorkspaceCwd ?? workspaceCwd)
+                        : undefined
+                    }
                     // Distinct from the main view's client (and from any other
                     // tab's panes) for the same session, so the attachments don't
                     // collide on one client identity.
                     clientId={`split-pane:${instanceId}:${sessionId}`}
+                    historyPageSize={WEB_SHELL_HISTORY_PAGE_SIZE}
+                    maxBlocks={WEB_SHELL_MAX_TRANSCRIPT_BLOCKS}
                     suppressOwnUserEcho
+                    restartEventStreamOnPrompt={restartSseOnPrompt}
                   >
                     <ChatPane
                       title={titleById.get(sessionId)}
                       workspaceCwd={paneWorkspaceCwd}
                       onClose={() => removePane(sessionId)}
+                      onToggleMaximize={
+                        canMaximize
+                          ? () => toggleMaximize(sessionId)
+                          : undefined
+                      }
+                      isMaximized={isMaximized}
                       onError={onError}
                       onRightPanelOpen={onRightPanelOpen}
                       onPaneArtifactsChange={onPaneArtifactsChange}
                       messageTurnOutputs={messageTurnOutputs}
+                      restartSseOnPrompt={restartSseOnPrompt}
                     />
                   </DaemonSessionProvider>
                 </ErrorBoundary>

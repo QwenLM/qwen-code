@@ -1,0 +1,38 @@
+/**
+ * Per-workspace accent palette, mirrored from the sidebar session-group colors
+ * so the two surfaces speak the same color language. Each class only sets the
+ * `--ws-accent` custom property, which the consuming component reads to tint a
+ * dot, divider, or chip. Shared between the split-view pane header (ChatPane)
+ * and the composer workspace chip (WorkspaceIndicator) so a workspace looks the
+ * same in both places.
+ *
+ * Values come from shared theme tokens in App.module.css, kept in lockstep with
+ * the sidebar `.groupColor*` dots and overview `.color*` badges: red/orange/
+ * yellow/green resolve the theme-independent `--accent-red/orange/yellow/green`
+ * tokens, while blue/purple deliberately reuse the app's brand tokens
+ * `--agent-blue-500` / `--agent-purple-600` (which are theme-specific) — so a
+ * "blue" or "purple" workspace tracks the brand palette and shifts with it by
+ * design, matching how the sidebar and overview render those two.
+ *
+ * Class names deliberately match the `DaemonSessionGroupPresetColor` values so
+ * a consumer can select one with `accentStyles[color]`.
+ */
+
+.red {
+  --ws-accent: var(--accent-red);
+}
+.orange {
+  --ws-accent: var(--accent-orange);
+}
+.yellow {
+  --ws-accent: var(--accent-yellow);
+}
+.green {
+  --ws-accent: var(--accent-green);
+}
+.blue {
+  --ws-accent: var(--agent-blue-500);
+}
+.purple {
+  --ws-accent: var(--agent-purple-600);
+}

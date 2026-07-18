@@ -35,9 +35,10 @@ const { useOtherWorkspaceSessions } = await import(
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 let latest: ReturnType<typeof useOtherWorkspaceSessions>;
+let enabled = true;
 
 function Harness() {
-  latest = useOtherWorkspaceSessions();
+  latest = useOtherWorkspaceSessions(enabled);
   return null;
 }
 
@@ -70,6 +71,7 @@ function session(id: string, cwd: string): DaemonSessionSummary {
 }
 
 beforeEach(() => {
+  enabled = true;
   capabilities = {};
   listWorkspaceSessions = vi.fn(async () => []);
   client = { listWorkspaceSessions };
@@ -82,6 +84,19 @@ afterEach(() => {
 });
 
 describe('useOtherWorkspaceSessions', () => {
+  it('does not query other workspaces when disabled', async () => {
+    enabled = false;
+    capabilities = {
+      workspaces: [ws('/w', true, true), ws('/b', false, true)],
+    };
+
+    render();
+    await flush();
+
+    expect(latest.sessions).toEqual([]);
+    expect(listWorkspaceSessions).not.toHaveBeenCalled();
+  });
+
   it('returns [] and never queries the daemon without a workspaces list', async () => {
     render();
     await flush();
@@ -106,6 +121,7 @@ describe('useOtherWorkspaceSessions', () => {
     expect(listWorkspaceSessions).toHaveBeenCalledWith('/b', {
       pageSize: SESSION_LIST_PAGE_SIZE,
       archiveState: 'active',
+      sourceType: 'default',
     });
     expect(latest.sessions.map((s) => s.sessionId)).toEqual(['b1']);
   });

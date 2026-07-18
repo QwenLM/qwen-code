@@ -1,0 +1,158 @@
+name: 'Qwen CI Failure Patrol'
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: 'read'
+
+concurrency:
+  group: 'qwen-ci-flaky-rerun'
+  cancel-in-progress: false
+
+env:
+  ACTIVE_DAYS: '7'
+  MAX_CANDIDATES_PER_RUN: '5'
+  STALE_MINUTES: '30'
+  WORKDIR: '${{ github.workspace }}/.qwen/ci-flaky-rerun'
+
+jobs:
+  classify:
+    name: 'Classify stale PR failures'
+    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    permissions:
+      actions: 'read'
+      contents: 'read'
+      pull-requests: 'read'
+    outputs:
+      bot_login: '${{ steps.identity.outputs.bot_login }}'
+      target_found: '${{ steps.scan.outputs.target_found }}'
+      input_sha: '${{ steps.scan.outputs.input_sha }}'
+    steps:
+      - name: 'Resolve patrol identity'
+        id: 'identity'
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+        run: |-
+          bot_login="$(gh api user --jq .login)"
+          test -n "${bot_login}"
+          echo "bot_login=${bot_login}" >> "${GITHUB_OUTPUT}"
+
+      - name: 'Checkout trusted event commit'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'
+        with:
+          ref: '${{ github.sha }}'
+          persist-credentials: false
+
+      - name: 'Set up Node.js'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'
+        with:
+          node-version: '22'
+
+      - name: 'Scan stale PR failures'
+        id: 'scan'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+        run: |-
+          mkdir -p "${WORKDIR}"
+          node .github/scripts/ci-flaky-rerun.mjs scan \
+            --repo "${{ github.repository }}" \
+            --workdir "${WORKDIR}" \
+            --stale-minutes "${STALE_MINUTES}" \
+            --active-days "${ACTIVE_DAYS}" \
+            --max-candidates "${MAX_CANDIDATES_PER_RUN}" \
+            --trusted-marker-login "${{ steps.identity.outputs.bot_login }}" > "${WORKDIR}/scan.out"
+          grep -E '^(target_found|input_sha)=' "${WORKDIR}/scan.out" >> "${GITHUB_OUTPUT}"
+
+      - name: 'Classify with ci-flaky-patrol skill'
+        if: "${{ steps.scan.outputs.target_found == 'true' }}"
+        env:
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+        uses: 'QwenLM/qwen-code-action@6d08e91aa807257b9c8af60edb5bb6bb2d7d951f'
+        with:
+          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          qwen_cli_version: '0.19.9'
+          settings: |-
+            {
+              "tools": {
+                "sandbox": true,
+                "core": ["read_file", "write_file"]
+              }
+            }
+          prompt: |-
+            Use .qwen/skills/ci-flaky-patrol/SKILL.md.
+            Workdir: ${{ env.WORKDIR }}
+            Read ci-flaky-input.json and write ci-flaky-decisions.json.
+
+      - name: 'Validate patrol decisions'
+        if: "${{ steps.scan.outputs.target_found == 'true' }}"
+        run: 'test -s "${WORKDIR}/ci-flaky-decisions.json"'
+
+      - name: 'Upload patrol input and decisions'
+        if: "${{ steps.scan.outputs.target_found == 'true' }}"
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'
+        with:
+          name: 'ci-flaky-patrol-decisions'
+          path: |-
+            ${{ env.WORKDIR }}/ci-flaky-input.json
+            ${{ env.WORKDIR }}/ci-flaky-decisions.json
+          if-no-files-found: 'error'
+          retention-days: 1
+
+  act:
+    name: 'Act on classified PR failures'
+    needs: 'classify'
+    if: "${{ needs.classify.result == 'success' }}"
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    # GitHub writes use CI_BOT_PAT; keep the generated GITHUB_TOKEN read-only.
+    permissions:
+      actions: 'read'
+      contents: 'read'
+      pull-requests: 'read'
+    steps:
+      - name: 'Checkout trusted event commit'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'
+        with:
+          ref: '${{ github.sha }}'
+          persist-credentials: false
+
+      - name: 'Set up Node.js'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'
+        with:
+          node-version: '22'
+
+      - name: 'Download patrol decisions'
+        if: "${{ needs.classify.outputs.target_found == 'true' }}"
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c'
+        with:
+          name: 'ci-flaky-patrol-decisions'
+          path: '${{ env.WORKDIR }}'
+
+      - name: 'Act on patrol decisions'
+        if: "${{ needs.classify.outputs.target_found == 'true' }}"
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+        run: |-
+          node .github/scripts/ci-flaky-rerun.mjs act \
+            --repo "${{ github.repository }}" \
+            --workdir "${WORKDIR}" \
+            --input-sha "${{ needs.classify.outputs.input_sha }}" \
+            --trusted-marker-login "${{ needs.classify.outputs.bot_login }}"
+
+      - name: 'Reset successful failure state'
+        if: '${{ always() }}'
+        continue-on-error: true
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+        run: |-
+          node .github/scripts/ci-flaky-rerun.mjs reset \
+            --repo "${{ github.repository }}" \
+            --trusted-marker-login "${{ needs.classify.outputs.bot_login }}"

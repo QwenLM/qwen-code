@@ -18,9 +18,12 @@ import {
   SessionArchivedError,
   SessionArchivingError,
   SessionConflictError,
+  SessionNotArchivedError,
+  SessionNotFoundError,
 } from '../acp-session-bridge.js';
 import {
   archiveDaemonSessions,
+  assertSessionArchived,
   assertSessionLoadable,
   deleteDaemonSessions,
   SessionArchiveCoordinator,
@@ -87,6 +90,40 @@ describe('assertSessionLoadable', () => {
     } finally {
       fs.rmSync(otherWorkspace, { recursive: true, force: true });
     }
+  });
+});
+
+describe('assertSessionArchived', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    ['active', 'active', SessionNotArchivedError],
+    ['conflicting', 'conflict', SessionConflictError],
+    ['missing', undefined, SessionNotFoundError],
+  ] as const)('rejects %s sessions', async (_name, location, ErrorType) => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440070';
+    vi.spyOn(SessionService.prototype, 'getSessionLocation').mockResolvedValue(
+      location,
+    );
+
+    await expect(
+      assertSessionArchived('/workspace', sessionId),
+    ).rejects.toThrow(ErrorType);
+  });
+
+  it('accepts archived sessions', async () => {
+    vi.spyOn(SessionService.prototype, 'getSessionLocation').mockResolvedValue(
+      'archived',
+    );
+
+    await expect(
+      assertSessionArchived(
+        '/workspace',
+        '550e8400-e29b-41d4-a716-446655440071',
+      ),
+    ).resolves.toBeUndefined();
   });
 });
 

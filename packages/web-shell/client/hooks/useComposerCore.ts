@@ -3,6 +3,7 @@ import {
   useRef,
   useState,
   useCallback,
+  useMemo,
   type ReactNode,
 } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
@@ -68,6 +69,7 @@ import {
   createInputAnnotationsFromComposerTags,
   getComposerTagIconUrl,
   getComposerTagSerialized,
+  isBuiltinComposerTagIconUrl,
 } from '../utils/composerTag';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import { isSafeImageSrc } from '../components/messages/Markdown';
@@ -677,7 +679,10 @@ class ComposerTagWidget extends WidgetType {
     const tagLabel = this.tag.kind ? '' : rawTagLabel;
     const iconUrl = this.tag.iconUrl ?? getComposerTagIconUrl(this.tag.kind);
     const safeIconUrl =
-      iconUrl && isSafeImageSrc(iconUrl) ? iconUrl : undefined;
+      iconUrl &&
+      (isBuiltinComposerTagIconUrl(iconUrl) || isSafeImageSrc(iconUrl))
+        ? iconUrl
+        : undefined;
     let customContent: ReactNode | null | undefined;
     try {
       customContent = this.tag.renderContent?.({
@@ -1035,6 +1040,7 @@ export interface UseComposerCoreOptions {
     commitAccepted?: ComposerSubmitCommit,
     metadata?: ComposerSubmitMetadata,
   ) => boolean | void;
+  onInputTextChange?: (text: string) => void;
   onCycleMode?: () => void;
   onToggleShortcuts?: () => void;
   disabled?: boolean;
@@ -1184,6 +1190,7 @@ export function useComposerCore(
 ): UseComposerCoreReturn {
   const {
     onSubmit,
+    onInputTextChange,
     onCycleMode,
     onToggleShortcuts,
     disabled = false,
@@ -1218,6 +1225,8 @@ export function useComposerCore(
   const viewRef = useRef<EditorView | null>(null);
   const onSubmitRef = useRef(onSubmit);
   onSubmitRef.current = onSubmit;
+  const onInputTextChangeRef = useRef(onInputTextChange);
+  onInputTextChangeRef.current = onInputTextChange;
   const onCycleModeRef = useRef(onCycleMode);
   onCycleModeRef.current = onCycleMode;
   const onToggleShortcutsRef = useRef(onToggleShortcuts);
@@ -1254,20 +1263,18 @@ export function useComposerCore(
     workspaceActionsRef.current = {
       ...workspace.actions,
       async globWorkspace(pattern, options) {
-        if (options?.signal?.aborted) return { matches: [] };
-        const result = (await client.glob(pattern)) as { matches?: unknown[] };
-        if (options?.signal?.aborted) return { matches: [] };
+        options?.signal?.throwIfAborted();
+        const result = (await client.glob(pattern, {
+          maxResults: options?.maxResults,
+          signal: options?.signal,
+        })) as { matches?: unknown[] };
+        options?.signal?.throwIfAborted();
         const matches = Array.isArray(result.matches)
           ? result.matches.filter(
               (match): match is string => typeof match === 'string',
             )
           : [];
-        return {
-          matches:
-            options?.maxResults === undefined
-              ? matches
-              : matches.slice(0, options.maxResults),
-        };
+        return { matches };
       },
       async listDirectory(dirPath, options) {
         if (options?.signal?.aborted) {
@@ -2311,6 +2318,7 @@ export function useComposerCore(
         EditorView.updateListener.of((update) => {
           if (update.docChanged) {
             const text = update.state.doc.toString();
+            onInputTextChangeRef.current?.(text);
             const followup = followupStateRef.current;
             const followupCompletion = getFollowupCompletion(
               text,
@@ -2774,8 +2782,9 @@ export function useComposerCore(
             changes.push({ from, to, insert: '' });
           }
         });
+      if (changes.length === 0) return;
       view.dispatch({
-        ...(changes.length > 0 ? { changes } : {}),
+        changes,
         effects: removeInlineTagEffect.of({ predicate }),
         scrollIntoView: true,
       });
@@ -2869,9 +2878,12 @@ export function useComposerCore(
 
   const removeTopTag = useCallback(
     (id: string) => {
-      setComposerTags((current) =>
-        current.filter((tag) => tag.id !== id || tag.removable === false),
-      );
+      setComposerTags((current) => {
+        const next = current.filter(
+          (tag) => tag.id !== id || tag.removable === false,
+        );
+        return next.length === current.length ? current : next;
+      });
       removeInlineTags((tag) => tag.id === id && tag.removable !== false);
     },
     [removeInlineTags],
@@ -3133,22 +3145,38 @@ export function useComposerCore(
 
   // ---- Imperative handle ----
 
-  const handle: EditorHandle = {
-    clearText,
+  const restoreImages = useCallback((images: readonly PromptImage[]) => {
+    setPastedImages((prev) => [...prev, ...images]);
+  }, []);
+  const handle = useMemo<EditorHandle>(() => {
+    return {
+      clearText,
+      clear,
+      focus,
+      getText,
+      hasInput,
+      setText,
+      addTags,
+      removeTag: removeTopTag,
+      insertText,
+      retryLast,
+      restoreImages,
+      submit,
+    };
+  }, [
+    addTags,
     clear,
+    clearText,
     focus,
     getText,
     hasInput,
-    setText,
-    addTags,
-    removeTag: removeTopTag,
     insertText,
+    removeTopTag,
+    restoreImages,
     retryLast,
-    restoreImages: (images) => {
-      setPastedImages((prev) => [...prev, ...images]);
-    },
+    setText,
     submit,
-  };
+  ]);
 
   return {
     containerRef,

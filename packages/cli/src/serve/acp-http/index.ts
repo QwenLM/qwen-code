@@ -24,6 +24,7 @@ import type {
   WorkspaceRuntime,
 } from '../workspace-registry.js';
 import {
+  isPortableAbsolutePath,
   resolveManagedWorkspaceRuntimeFromParam,
   resolveManagedWorkspaceRuntimeByPathSelector,
 } from '../workspace-route-runtime.js';
@@ -100,9 +101,10 @@ function isActiveDrainCorrelation(
   );
 }
 
-/** Prefix/suffix of the Phase 4 workspace-qualified ACP WS path. */
-const PLURAL_ACP_WS_PREFIX = '/workspaces/';
+/** Prefix of workspace-qualified WebSocket routes. */
+const PLURAL_WS_PREFIX = '/workspaces/';
 const PLURAL_ACP_WS_SUFFIX = '/acp';
+const PLURAL_VOICE_WS_SUFFIX = '/voice/stream';
 
 /**
  * Extract the raw (undecoded, un-normalized) pathname from a request-target.
@@ -121,29 +123,29 @@ function rawRequestPathname(reqUrl: string | undefined): string {
 }
 
 /**
- * Match `/workspaces/<selector>/acp` (with an optional single trailing slash)
- * against a RAW request-target pathname and return the still-encoded selector,
- * or null when the shape does not match. Rejects empty selectors, extra path
- * segments (slash/backslash), and dot-segment traversal shapes -- including
- * percent-encoded variants -- so decoding afterwards can never reintroduce a
- * `/` or `..` that bypassed classification.
+ * Match `/workspaces/<selector><suffix>` (with an optional single trailing
+ * slash) against a RAW request-target pathname and return the still-encoded
+ * selector, or null when the shape does not match. Rejects empty selectors,
+ * extra path segments (slash/backslash), and dot-segment traversal shapes --
+ * including percent-encoded variants -- so decoding afterwards can never
+ * reintroduce a `/` or `..` that bypassed classification.
  */
-function pluralAcpRawSelector(rawPath: string): string | null {
+function pluralWorkspaceRawSelector(
+  rawPath: string,
+  suffix: string,
+): string | null {
   let p = rawPath;
-  if (p.endsWith(`${PLURAL_ACP_WS_SUFFIX}/`)) {
+  if (p.endsWith(`${suffix}/`)) {
     p = p.slice(0, -1);
   }
   if (
-    !p.startsWith(PLURAL_ACP_WS_PREFIX) ||
-    !p.endsWith(PLURAL_ACP_WS_SUFFIX) ||
-    p.length <= PLURAL_ACP_WS_PREFIX.length + PLURAL_ACP_WS_SUFFIX.length
+    !p.startsWith(PLURAL_WS_PREFIX) ||
+    !p.endsWith(suffix) ||
+    p.length <= PLURAL_WS_PREFIX.length + suffix.length
   ) {
     return null;
   }
-  const selector = p.slice(
-    PLURAL_ACP_WS_PREFIX.length,
-    p.length - PLURAL_ACP_WS_SUFFIX.length,
-  );
+  const selector = p.slice(PLURAL_WS_PREFIX.length, p.length - suffix.length);
   if (
     selector.length === 0 ||
     selector.includes('/') ||
@@ -200,6 +202,7 @@ function delay(ms: number): Promise<void> {
 function buildChromeDevToolsMcpRuntimeConfig(
   localPort: number | undefined,
   hostname: string | undefined,
+  env: Readonly<NodeJS.ProcessEnv>,
 ): Record<string, unknown> | undefined {
   if (
     localPort === undefined ||
@@ -208,7 +211,7 @@ function buildChromeDevToolsMcpRuntimeConfig(
   ) {
     return undefined;
   }
-  const command = resolveCdpMcpCommand(process.env);
+  const command = resolveCdpMcpCommand(env);
   if (!command) {
     writeStderrLine(
       `qwen serve: set ${QWEN_CDP_MCP_COMMAND_ENV} to enable browser automation MCP (no adapter is bundled)`,
@@ -359,6 +362,8 @@ const MAX_INFLIGHT_MCP_DISPATCH = 8;
 
 export interface MountAcpHttpOptions {
   boundWorkspace: string;
+  /** Process-level fallback for embedded mounts and parent-process runtimes. */
+  daemonEnv?: Readonly<NodeJS.ProcessEnv>;
   workspace: DaemonWorkspaceService;
   fsFactory?: WorkspaceFileSystemFactory;
   deviceFlowRegistry?: DeviceFlowRegistry;
@@ -436,6 +441,11 @@ export interface MountAcpHttpOptions {
    * upgrade listener's security checks. Matched paths skip the ACP init flow.
    */
   extraWsRoutes?: readonly ExtraWsRoute[];
+  workspaceVoiceConnection?: (
+    runtime: WorkspaceRuntime,
+    ws: WebSocket,
+    req: IncomingMessage,
+  ) => void;
 }
 
 /**
@@ -539,6 +549,17 @@ export interface AcpHttpHandle {
   attachServer(server: import('node:http').Server): void;
 }
 
+function runtimeEffectiveEnv(
+  runtime: WorkspaceRuntime,
+  daemonEnv: Readonly<NodeJS.ProcessEnv>,
+): Readonly<NodeJS.ProcessEnv> {
+  if (runtime.env.mode === 'runtime-overlay') {
+    // An empty overlay must stay isolated instead of inheriting daemon values.
+    return runtime.env.effectiveEnv ?? {};
+  }
+  return runtime.env.effectiveEnv ?? daemonEnv;
+}
+
 /**
  * Mount the official ACP Streamable HTTP transport (RFD #721) on an
  * existing Express app, backed by the shared `HttpAcpBridge`. Additive:
@@ -559,6 +580,10 @@ export function mountAcpHttp(
   const enabled = opts.enabled ?? resolveAcpHttpEnabled();
   if (!enabled) return undefined;
 
+  const daemonEnv = opts.daemonEnv ?? process.env;
+  const primaryEnv = opts.workspaceRegistry
+    ? runtimeEffectiveEnv(opts.workspaceRegistry.primary, daemonEnv)
+    : daemonEnv;
   const path = opts.path ?? '/acp';
   const dispatcherRef: { current?: AcpDispatcher } = {};
   // Lifecycle gate: once `dispose()` runs, late/in-flight HTTP requests get a
@@ -673,6 +698,7 @@ export function mountAcpHttp(
     const runtimeConfig = buildChromeDevToolsMcpRuntimeConfig(
       localPort,
       opts.hostname,
+      daemonEnv,
     );
     if (!runtimeConfig) {
       cdpMcpTerminalSkipLogged = true;
@@ -740,6 +766,7 @@ export function mountAcpHttp(
   const dispatcher = new AcpDispatcher(
     bridge,
     opts.boundWorkspace,
+    primaryEnv,
     opts.workspace,
     opts.workspaceRememberLane,
     opts.fsFactory,
@@ -1194,6 +1221,7 @@ export function mountAcpHttp(
     const secondaryDispatcher = new AcpDispatcher(
       rt.bridge,
       rt.workspaceCwd,
+      runtimeEffectiveEnv(rt, daemonEnv),
       rt.workspaceService,
       workspaceRememberLane,
       rt.routeFileSystemFactory,
@@ -1383,7 +1411,8 @@ export function mountAcpHttp(
       // rather than `url.pathname`. WHATWG URL normalizes dot-segments, so
       // `/workspaces/%2e%2e/acp` would collapse to `/acp` and silently bind to
       // the primary mount. `rawRequestPathname` keeps it un-normalized and
-      // `pluralAcpRawSelector` rejects traversal / backslash / empty selectors.
+      // `pluralWorkspaceRawSelector` rejects traversal / backslash / empty
+      // selectors for both ACP and Voice workspace-qualified routes.
       const rawPath = rawRequestPathname(req.url);
       const isCdpPath =
         opts.cdpTunnelOverWs === true &&
@@ -1393,10 +1422,20 @@ export function mountAcpHttp(
         (route) => route.path === rawPath,
       );
       const pluralRawSelector = workspaceQualifiedAcpEnabled
-        ? pluralAcpRawSelector(rawPath)
+        ? pluralWorkspaceRawSelector(rawPath, PLURAL_ACP_WS_SUFFIX)
         : null;
       const isPluralAcpShape = pluralRawSelector !== null;
-      if (rawPath !== path && !isCdpPath && !extraRoute && !isPluralAcpShape) {
+      const pluralVoiceRawSelector = opts.workspaceVoiceConnection
+        ? pluralWorkspaceRawSelector(rawPath, PLURAL_VOICE_WS_SUFFIX)
+        : null;
+      const isPluralVoiceShape = pluralVoiceRawSelector !== null;
+      if (
+        rawPath !== path &&
+        !isCdpPath &&
+        !extraRoute &&
+        !isPluralAcpShape &&
+        !isPluralVoiceShape
+      ) {
         logReject(`unknown-path ${logSafe(rawPath)}`);
         socket.destroy();
         return;
@@ -1504,6 +1543,48 @@ export function mountAcpHttp(
         return;
       }
 
+      if (isPluralVoiceShape) {
+        let selector: string;
+        try {
+          selector = decodeURIComponent(pluralVoiceRawSelector!);
+        } catch {
+          logReject('workspace-selector-decode-error');
+          socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+        const wsRegistry = opts.workspaceRegistry;
+        const runtime = wsRegistry
+          ? (wsRegistry.getManagedByWorkspaceId(selector) ??
+            (isPortableAbsolutePath(selector)
+              ? resolveManagedWorkspaceRuntimeByPathSelector(
+                  wsRegistry,
+                  selector,
+                )
+              : undefined))
+          : undefined;
+        if (!runtime) {
+          logReject(`workspace-mismatch ${logSafe(selector)}`);
+          socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+        if (!runtime.trusted) {
+          logReject(`untrusted-workspace ${runtime.workspaceId}`);
+          socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+        wss!.handleUpgrade(req, socket, head, (ws: WebSocket) => {
+          if (disposed) {
+            ws.close(1012, 'Server shutting down');
+            return;
+          }
+          opts.workspaceVoiceConnection!(runtime, ws, req);
+        });
+        return;
+      }
+
       // ── Phase 4: resolve the target ACP mount for this upgrade ──
       // Legacy `/acp` binds to the primary mount; `/workspaces/:workspace/acp`
       // resolves the registered runtime's mount. The shared security checks
@@ -1525,7 +1606,12 @@ export function mountAcpHttp(
         const wsRegistry = opts.workspaceRegistry;
         const rt = wsRegistry
           ? (wsRegistry.getManagedByWorkspaceId(selector) ??
-            resolveManagedWorkspaceRuntimeByPathSelector(wsRegistry, selector))
+            (isPortableAbsolutePath(selector)
+              ? resolveManagedWorkspaceRuntimeByPathSelector(
+                  wsRegistry,
+                  selector,
+                )
+              : undefined))
           : undefined;
         if (!rt) {
           logReject(`workspace-mismatch ${logSafe(selector)}`);

@@ -204,6 +204,17 @@ describe('QueryOptionsSchema', () => {
     expect(result.success).toBe(true);
   });
 
+  it('rejects fractional maxSessionTurns', () => {
+    const value = 0.5;
+    const result = QueryOptionsSchema.safeParse({ maxSessionTurns: value });
+    expect(result.success).toBe(false);
+  });
+
+  it('preserves negative maxSessionTurns values', () => {
+    const result = QueryOptionsSchema.safeParse({ maxSessionTurns: -42 });
+    expect(result.success).toBe(true);
+  });
+
   it('rejects agents with empty string values', () => {
     const result = QueryOptionsSchema.safeParse({
       agents: [{ name: '', description: 'test', systemPrompt: 'test' }],

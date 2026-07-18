@@ -274,6 +274,43 @@ describe('createDaemonWorkspaceService', () => {
       });
     });
 
+    it('forces qualified ACP Voice writes into the workspace scope', async () => {
+      await withIsolatedQwenHome(async () => {
+        const persistSettings = vi.fn(async () => {});
+        const svc = createDaemonWorkspaceService(
+          makeDeps({
+            persistSettings,
+            voiceSettingsScope: SettingScope.Workspace,
+            voiceEnv: {},
+          }),
+        );
+
+        await svc.setWorkspaceVoiceSettings(makeCtx(), {
+          enabled: false,
+          mode: 'tap',
+          language: 'english',
+        });
+
+        expect(persistSettings).toHaveBeenCalledWith('/workspace', [
+          {
+            scope: SettingScope.Workspace,
+            key: 'general.voice.mode',
+            value: 'tap',
+          },
+          {
+            scope: SettingScope.Workspace,
+            key: 'general.voice.language',
+            value: 'english',
+          },
+          {
+            scope: SettingScope.Workspace,
+            key: 'general.voice.enabled',
+            value: false,
+          },
+        ]);
+      });
+    });
+
     it('rejects invalid voice settings before persisting', async () => {
       await withIsolatedQwenHome(async () => {
         const persistSettings = vi.fn(async () => {});
@@ -296,7 +333,7 @@ describe('createDaemonWorkspaceService', () => {
       });
     });
 
-    it('does not publish fallback voice writes when a later write fails', async () => {
+    it('publishes committed fallback voice writes when a later write fails', async () => {
       await withIsolatedQwenHome(async () => {
         const persistSetting = vi.fn(
           async (
@@ -332,7 +369,16 @@ describe('createDaemonWorkspaceService', () => {
           cause: expect.objectContaining({ message: 'disk full' }),
         });
 
-        expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+        expect(publishWorkspaceEvent).toHaveBeenCalledOnce();
+        expect(publishWorkspaceEvent).toHaveBeenCalledWith({
+          type: 'settings_changed',
+          data: {
+            key: 'general.voice.mode',
+            value: 'tap',
+            scope: 'user',
+          },
+          originatorClientId: 'voice-client',
+        });
         expect(mockWriteStderrLine).toHaveBeenCalledWith(
           expect.stringContaining('partial persist error'),
         );
@@ -611,6 +657,42 @@ describe('createDaemonWorkspaceService', () => {
 
       expect(result.workspaceCwd).toBe('/my/ws');
       expect(result.initialized).toBe(false);
+      expect(result.servers).toEqual([]);
+    });
+
+    it('does not replay a stale MCP snapshot when the status provider is idle', async () => {
+      const liveStatus = {
+        v: 1 as const,
+        workspaceCwd: '/ws',
+        initialized: true,
+        discoveryState: 'completed' as const,
+        servers: [
+          {
+            kind: 'mcp_server' as const,
+            status: 'ok' as const,
+            name: 'docs',
+            mcpStatus: 'connected' as const,
+            transport: 'stdio' as const,
+            disabled: false,
+            hasOAuthTokens: false,
+          },
+        ],
+      };
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockResolvedValueOnce(liveStatus)
+        .mockImplementationOnce((_m: string, idle: () => unknown) =>
+          Promise.resolve(idle()),
+        );
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ queryWorkspaceStatus, boundWorkspace: '/ws' }),
+      );
+
+      await svc.getWorkspaceMcpStatus(makeCtx());
+      const result = await svc.getWorkspaceMcpStatus(makeCtx());
+
+      expect(result.initialized).toBe(false);
+      expect(result.discoveryState).toBe('not_started');
       expect(result.servers).toEqual([]);
     });
 
@@ -1239,6 +1321,10 @@ describe('createDaemonWorkspaceService', () => {
       });
 
     it('uses the canonical skill name and refreshes every active session', async () => {
+      const invalidate = vi.fn();
+      const workspaceSkillsStatusProvider = Object.assign(vi.fn(), {
+        invalidate,
+      });
       const persistDisabledSkills = vi.fn().mockResolvedValue({
         changed: true,
         disabled: ['review'],
@@ -1251,6 +1337,7 @@ describe('createDaemonWorkspaceService', () => {
       const svc = createDaemonWorkspaceService(
         makeDeps({
           queryWorkspaceStatus: statusQuery(),
+          workspaceSkillsStatusProvider,
           persistDisabledSkills,
           invokeWorkspaceCommand,
           publishWorkspaceEvent,
@@ -1269,6 +1356,7 @@ describe('createDaemonWorkspaceService', () => {
         'review',
         false,
       );
+      expect(invalidate).toHaveBeenCalledWith('/workspace');
       expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
         'qwen/control/workspace/skills/refresh',
         { cwd: '/workspace' },

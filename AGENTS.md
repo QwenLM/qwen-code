@@ -243,6 +243,15 @@ things a reviewer of _this_ codebase must check — not general advice.
   set by any caller is a dead switch (`options.foo ?? true` always takes the
   default). Decide severity at the read site; never explain an unpopulated field
   with author intent you cannot observe.
+- **Classify every added or changed daemon route by ownership.** Name whether it
+  is process-global, legacy-primary, selected-runtime, live-session-owner, or
+  persisted-workspace scoped, and verify every downstream consumer matches that
+  scope.
+- **Verify workspace-scoped routes stay inside the resolved runtime.** Check the
+  environment, bridge, service, filesystem, trust boundary, and failure paths.
+  Each unknown, untrusted, ambiguous, bootstrapping, draining, or removed state
+  must follow its declared failure semantics and must never fall back to the
+  primary runtime.
 - **Match the house style when judging.** ESM only; no `any`; no relative imports
   between packages; `kebab-case.ts` for `.ts` in `packages/core` and `packages/cli`,
   `PascalCase.tsx` for React components; tests collocated as `file.test.ts`.
@@ -288,6 +297,12 @@ applicable.
 - **Line wrapping**: do not hard-wrap the PR body at a fixed column width.
   GitHub renders single newlines as `<br>`, so a wrapped description displays
   as a narrow column. Write each paragraph or list item as one long line.
+- **Don't let review rounds balloon the PR.** Every accepted change widens the
+  diff and tends to trigger another round, so a PR can drift far past its
+  original intent. Once a PR has been through roughly **5 review rounds**, land
+  only Critical fixes — correctness, security, data loss, regressions — and
+  defer remaining Suggestions to a follow-up issue or PR. Record each deferral
+  in the PR thread so nothing is silently dropped.
 
 ## Project Directories
 

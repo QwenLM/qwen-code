@@ -13,6 +13,10 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import { FolderClosedIcon, FolderOpenIcon } from 'lucide-react';
 import { SESSION_LIST_PAGE_SIZE } from '../../constants/sessions';
+import {
+  readWorkspaceCollapsedGroupIds,
+  writeWorkspaceCollapsedGroupIds,
+} from './collapsedSessionSections';
 import { SessionGroupSection } from './SessionGroupSection';
 import styles from './WorkspaceSection.module.css';
 
@@ -44,10 +48,9 @@ function WorkspaceFolderIcon({ open }: { open: boolean }) {
 
 interface WorkspaceSectionProps {
   workspace: DaemonWorkspaceCapability;
+  renderHeader?: (expanded: boolean) => ReactNode;
   client: DaemonClient;
-  isActive: boolean;
   reloadToken: number;
-  primaryLabel: string;
   untrustedLabel: string;
   readOnlyLabel: string;
   trustToOpenLabel: string;
@@ -67,10 +70,7 @@ interface WorkspaceSectionProps {
    * type scale, hover actions (pin, archive, export, more…), and states —
    * instead of a bespoke, feature-poor row.
    */
-  renderSession: (
-    session: DaemonSessionSummary,
-    options?: { grouped?: boolean },
-  ) => ReactNode;
+  renderSession: (session: DaemonSessionSummary) => ReactNode;
   headerActions?: (visible: boolean) => ReactNode;
   onRenameGroup?: (group: DaemonSessionGroup, workspaceCwd: string) => void;
   onDeleteGroup?: (group: DaemonSessionGroup, workspaceCwd: string) => void;
@@ -82,10 +82,9 @@ interface WorkspaceSectionProps {
 
 export function WorkspaceSection({
   workspace,
+  renderHeader,
   client,
-  isActive,
   reloadToken,
-  primaryLabel,
   untrustedLabel,
   readOnlyLabel,
   trustToOpenLabel,
@@ -112,8 +111,8 @@ export function WorkspaceSection({
   const [groups, setGroups] = useState<DaemonSessionGroup[]>([]);
   const [loadError, setLoadError] = useState(false);
   const [internalExpanded, setInternalExpanded] = useState(false);
-  const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<string>>(
-    () => new Set(),
+  const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<string>>(() =>
+    readWorkspaceCollapsedGroupIds(workspace.id),
   );
   const [actionsVisible, setActionsVisible] = useState(false);
   const expanded = controlledExpanded ?? internalExpanded;
@@ -124,6 +123,12 @@ export function WorkspaceSection({
   useEffect(() => {
     if (controlledExpanded === undefined) setInternalExpanded(false);
   }, [controlledExpanded, workspace.id]);
+
+  // The render site keys this component by workspace id, so an id change
+  // always remounts and the lazy useState initializer re-reads storage.
+  useEffect(() => {
+    writeWorkspaceCollapsedGroupIds(workspace.id, collapsedGroupIds);
+  }, [collapsedGroupIds, workspace.id]);
 
   useEffect(() => {
     if (controlledExpanded === undefined && autoExpandKey) {
@@ -229,11 +234,7 @@ export function WorkspaceSection({
   return (
     <div className={styles.section}>
       <div
-        className={cx(
-          styles.headerRow,
-          isActive && styles.headerActive,
-          disabled && styles.headerDisabled,
-        )}
+        className={cx(styles.headerRow, disabled && styles.headerDisabled)}
         onMouseEnter={() => setActionsVisible(true)}
         onMouseLeave={() => setActionsVisible(false)}
         onFocus={() => setActionsVisible(true)}
@@ -254,21 +255,28 @@ export function WorkspaceSection({
             onExpandedChange?.(nextExpanded);
           }}
         >
-          <span className={cx(styles.chevron, expanded && styles.chevronOpen)}>
-            <WorkspaceFolderIcon open={expanded} />
-          </span>
-          <span className={styles.headerContent}>
-            <span className={styles.name}>
-              {getWorkspaceName(workspace.cwd)}
-            </span>
-            {workspace.primary && primaryLabel && (
-              <span className={styles.badge}>{primaryLabel}</span>
-            )}
-          </span>
-          {!workspace.trusted && (
-            <span className={styles.badge}>{untrustedLabel}</span>
+          {renderHeader ? (
+            renderHeader(expanded)
+          ) : (
+            <>
+              <span
+                className={cx(styles.chevron, expanded && styles.chevronOpen)}
+              >
+                <WorkspaceFolderIcon open={expanded} />
+              </span>
+              <span className={styles.headerContent}>
+                <span className={styles.name}>
+                  {getWorkspaceName(workspace.cwd)}
+                </span>
+              </span>
+              {!workspace.trusted && (
+                <span className={styles.badge}>{untrustedLabel}</span>
+              )}
+              {readOnly && (
+                <span className={styles.badge}>{readOnlyLabel}</span>
+              )}
+            </>
           )}
-          {readOnly && <span className={styles.badge}>{readOnlyLabel}</span>}
         </button>
         {headerActions?.(actionsVisible)}
       </div>
@@ -314,9 +322,7 @@ export function WorkspaceSection({
                     deleteLabel={deleteGroupLabel}
                     actionsDisabled={groupActionsDisabled}
                   >
-                    {sessions.map((session) =>
-                      renderSession(session, { grouped: true }),
-                    )}
+                    {sessions.map((session) => renderSession(session))}
                   </SessionGroupSection>
                 ))}
                 {groupedSessions.ungrouped.length > 0 && (
@@ -335,7 +341,7 @@ export function WorkspaceSection({
                     }}
                   >
                     {groupedSessions.ungrouped.map((session) =>
-                      renderSession(session, { grouped: true }),
+                      renderSession(session),
                     )}
                   </SessionGroupSection>
                 )}

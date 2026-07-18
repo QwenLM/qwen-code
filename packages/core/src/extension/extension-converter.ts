@@ -15,7 +15,10 @@ import {
   convertClaudePluginPackage,
   convertClaudePluginStandalone,
 } from './claude-converter.js';
-import type { ExtensionOriginSource } from '../config/config.js';
+import type {
+  ExtensionNetworkPolicy,
+  ExtensionOriginSource,
+} from '../config/config.js';
 
 export const SUPPORTED_EXTENSION_MANIFESTS = [
   EXTENSIONS_CONFIG_FILENAME,
@@ -27,7 +30,10 @@ export const SUPPORTED_EXTENSION_MANIFESTS = [
 export async function convertGeminiOrClaudeExtension(
   extensionDir: string,
   pluginName?: string,
+  networkPolicy?: ExtensionNetworkPolicy,
+  signal?: AbortSignal,
 ): Promise<{ extensionDir: string; originSource: ExtensionOriginSource }> {
+  signal?.throwIfAborted();
   let newExtensionDir = extensionDir;
   let originSource: ExtensionOriginSource = 'QwenCode';
   const configFilePath = path.join(
@@ -42,7 +48,12 @@ export async function convertGeminiOrClaudeExtension(
     originSource = 'Gemini';
   } else if (pluginName) {
     newExtensionDir = (
-      await convertClaudePluginPackage(extensionDir, pluginName)
+      await convertClaudePluginPackage(
+        extensionDir,
+        pluginName,
+        networkPolicy,
+        signal,
+      )
     ).convertedDir;
     originSource = 'Claude';
   } else if (
@@ -52,5 +63,6 @@ export async function convertGeminiOrClaudeExtension(
       .convertedDir;
     originSource = 'Claude';
   }
+  signal?.throwIfAborted();
   return { extensionDir: newExtensionDir, originSource };
 }

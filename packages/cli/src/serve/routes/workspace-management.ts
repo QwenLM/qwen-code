@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { stat } from 'node:fs/promises';
+import { readdir, stat } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
-import { isAbsolute, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import type { Application, Request, Response } from 'express';
 import { isWithinRoot } from '@qwen-code/qwen-code-core';
 import { MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';
@@ -33,6 +33,12 @@ import {
 // launcher), so an unbounded POST /workspaces would let an authenticated
 // client exhaust memory / file descriptors. Forgetting persistence does not
 // unload an active runtime, so this remains the runtime backpressure.
+
+// Cap on directory suggestions returned by GET /workspace-path-suggestions.
+// Autocomplete only needs the first screenful; anything more is wasted
+// readdir/stat work on huge directories.
+const MAX_PATH_SUGGESTIONS = 50;
+
 export interface WorkspaceManagementRouteDeps {
   workspaceRegistry: WorkspaceRegistry;
   mutate: (opts?: { strict?: boolean }) => import('express').RequestHandler;
@@ -50,6 +56,7 @@ export interface WorkspaceRemovalActivity {
   acpConnections: number;
   memoryTasks: number;
   channelWorkers: number;
+  voiceSessions: number;
 }
 
 export interface WorkspaceRuntimeRemovalController {
@@ -60,6 +67,7 @@ export interface WorkspaceRuntimeRemovalController {
   getActivity(runtime: WorkspaceRuntime): {
     pendingSessionStarts: number;
     channelWorkers: number;
+    voiceSessions: number;
   };
   disposeRuntime(
     runtime: WorkspaceRuntime,
@@ -109,6 +117,92 @@ export function registerWorkspaceManagementRoutes(
       code: 'daemon_shutting_down',
     });
   };
+
+  // Read-only directory suggestions for the "Add workspace" flow. The
+  // existing `GET /list` route resolves paths through a registered
+  // workspace's filesystem boundary, so it cannot browse a path that is
+  // not yet a workspace. This route fills that gap with a deliberately
+  // narrow surface: it reveals only the *names* of subdirectories (no
+  // files, no contents, no stat details) at an absolute prefix, capped at
+  // MAX_PATH_SUGGESTIONS entries. That is the same trust surface as
+  // `POST /workspaces`, which already lets an authenticated client stat
+  // and register any absolute directory path.
+  app.get(
+    '/workspace-path-suggestions',
+    async (req: Request, res: Response) => {
+      const prefixRaw = req.query['prefix'];
+      if (typeof prefixRaw !== 'string' || prefixRaw.trim().length === 0) {
+        res.status(400).json({
+          error: '`prefix` must be a non-empty string',
+          code: 'invalid_prefix',
+        });
+        return;
+      }
+      const prefix = prefixRaw;
+      if (prefix.length > MAX_WORKSPACE_PATH_LENGTH) {
+        res.status(400).json({
+          error: `\`prefix\` exceeds the ${MAX_WORKSPACE_PATH_LENGTH}-character limit`,
+          code: 'invalid_prefix',
+        });
+        return;
+      }
+      if (!isAbsolute(prefix)) {
+        res.status(400).json({
+          error: '`prefix` must be an absolute path',
+          code: 'invalid_prefix',
+        });
+        return;
+      }
+      // A prefix ending in a separator means "list inside this directory";
+      // otherwise the final segment is an in-progress name used as a filter.
+      const endsWithSep =
+        prefix.endsWith('/') ||
+        (process.platform === 'win32' && prefix.endsWith('\\'));
+      // join(x, '.') normalizes away the trailing separator while leaving a
+      // bare root ('/', 'C:\') intact.
+      const dir = endsWithSep ? join(prefix, '.') : dirname(prefix);
+      const filter = endsWithSep ? '' : basename(prefix);
+      const filterLower = filter.toLowerCase();
+      const suggestions: Array<{ name: string; path: string }> = [];
+      let truncated = false;
+      try {
+        const entries = await readdir(dir, { withFileTypes: true });
+        entries.sort((a, b) => a.name.localeCompare(b.name));
+        for (const entry of entries) {
+          // Hidden directories only surface once the user explicitly starts
+          // typing a dot — mirrors shell completion behavior.
+          if (entry.name.startsWith('.') && !filter.startsWith('.')) continue;
+          if (filter && !entry.name.toLowerCase().startsWith(filterLower)) {
+            continue;
+          }
+          let isDir = entry.isDirectory();
+          if (!isDir && entry.isSymbolicLink()) {
+            try {
+              isDir = (await stat(join(dir, entry.name))).isDirectory();
+            } catch {
+              continue; // broken symlink — not a navigable directory
+            }
+          }
+          if (!isDir) continue;
+          if (suggestions.length >= MAX_PATH_SUGGESTIONS) {
+            truncated = true;
+            break;
+          }
+          suggestions.push({ name: entry.name, path: join(dir, entry.name) });
+        }
+      } catch {
+        // Nonexistent / unreadable directory: an empty suggestion list is the
+        // correct autocomplete answer, not an error dialog.
+      }
+      res.status(200).json({
+        kind: 'workspace-path-suggestions',
+        dir,
+        sep,
+        suggestions,
+        truncated,
+      });
+    },
+  );
 
   app.post(
     '/workspaces',
@@ -492,6 +586,7 @@ export function registerWorkspaceManagementRoutes(
     const controllerActivity = runtimeRemoval?.getActivity(runtime) ?? {
       pendingSessionStarts: 0,
       channelWorkers: 0,
+      voiceSessions: 0,
     };
     const acpActivity = getAcpHandle?.()?.getWorkspaceActivity(
       runtime.workspaceId,
@@ -503,6 +598,7 @@ export function registerWorkspaceManagementRoutes(
       acpConnections: acpActivity.acpConnections,
       memoryTasks: acpActivity.memoryTasks,
       channelWorkers: controllerActivity.channelWorkers,
+      voiceSessions: controllerActivity.voiceSessions,
     };
   };
   const isBusy = (activity: WorkspaceRemovalActivity): boolean =>

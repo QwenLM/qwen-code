@@ -29,7 +29,13 @@ import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
 
+const setupGithubMock = vi.hoisted(() => vi.fn());
+
 vi.mock('../../utils/stdioHelpers.js', () => ({ writeStderrLine: vi.fn() }));
+vi.mock('../../services/setup-github.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../services/setup-github.js')>()),
+  setupGithub: setupGithubMock,
+}));
 
 const PARENT_ENV: WorkspaceRuntimeEnvMetadata = {
   mode: 'parent-process',
@@ -67,13 +73,14 @@ function makeRuntime(input: {
   primary: boolean;
   trusted: boolean;
   bridge: HttpAcpBridge;
+  env?: WorkspaceRuntimeEnvMetadata;
 }): WorkspaceRuntime {
   return {
     workspaceId: input.id,
     workspaceCwd: input.cwd,
     primary: input.primary,
     trusted: input.trusted,
-    env: PARENT_ENV,
+    env: input.env ?? PARENT_ENV,
     bridge: input.bridge,
     workspaceService: {} as unknown as DaemonWorkspaceService,
     routeFileSystemFactory: {
@@ -137,8 +144,20 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
   let secondaryBridge: HttpAcpBridge;
   let workspaceRegistry: ReturnType<typeof createWorkspaceRegistry>;
   let secondaryRuntime: WorkspaceRuntime;
+  let workspaceVoiceConnection: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
+    setupGithubMock.mockReset();
+    setupGithubMock.mockImplementation(async ({ cwd }: { cwd: string }) => ({
+      kind: 'github_setup',
+      workspaceCwd: cwd,
+      gitRepoRoot: cwd,
+      releaseTag: 'v1.2.3',
+      readmeUrl: 'https://example.test/readme',
+      workflows: [],
+      gitignore: { path: '.gitignore', status: 'unchanged' },
+      warnings: [],
+    }));
     primaryBridge = makeBridge();
     secondaryBridge = makeBridge();
     const untrustedBridge = makeBridge();
@@ -149,6 +168,13 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       primary: false,
       trusted: true,
       bridge: secondaryBridge,
+      env: {
+        mode: 'runtime-overlay',
+        overlayKeys: ['HTTPS_PROXY'],
+        effectiveEnv: {
+          HTTPS_PROXY: 'http://secondary-proxy.example:8080',
+        },
+      },
     });
     workspaceRegistry = createWorkspaceRegistry([
       makeRuntime({
@@ -157,6 +183,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
         primary: true,
         trusted: true,
         bridge: primaryBridge,
+        env: PARENT_ENV,
       }),
       secondaryRuntime,
       makeRuntime({
@@ -176,13 +203,24 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     });
     cdpRegistry = new CdpTunnelRegistry();
     checkRate = vi.fn().mockReturnValue(true);
+    workspaceVoiceConnection = vi.fn(
+      (runtime: WorkspaceRuntime, ws: WebSocket) => {
+        ws.send(JSON.stringify({ workspaceCwd: runtime.workspaceCwd }));
+        ws.close(1000, 'done');
+      },
+    );
 
     const app = express();
     app.use(express.json());
     handle = mountAcpHttp(app, primaryBridge, {
       boundWorkspace: '/ws',
       workspace: {} as unknown as DaemonWorkspaceService,
+      fsFactory: workspaceRegistry.primary.routeFileSystemFactory,
       enabled: true,
+      daemonEnv: {
+        ...process.env,
+        HTTPS_PROXY: 'http://primary-proxy.example:8080',
+      },
       workspaceRegistry,
       deviceFlowRegistry,
       cdpTunnelOverWs: true,
@@ -190,6 +228,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       checkRate,
       sessionShellCommandEnabled: true,
       workspaceRememberLane: new WorkspaceRememberTaskLane(primaryBridge),
+      workspaceVoiceConnection,
     });
 
     await new Promise<void>((resolve) => {
@@ -344,6 +383,61 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       expect.stringContaining(
         '/workspaces/secondary-id/acp connection established',
       ),
+    );
+  });
+
+  it('uses daemon env for parent-process setup-github without leaking into overlays', async () => {
+    const secondary = await sendWsRequest('/workspaces/secondary-id/acp', {
+      jsonrpc: '2.0',
+      id: 2,
+      method: '_qwen/workspace/setup-github',
+      params: { consent: true },
+    });
+    expect(secondary['result']).toMatchObject({ workspaceCwd: '/ws-b' });
+    expect(setupGithubMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cwd: '/ws-b',
+        proxy: 'http://secondary-proxy.example:8080',
+      }),
+    );
+
+    const primary = await sendWsRequest('/acp', {
+      jsonrpc: '2.0',
+      id: 3,
+      method: '_qwen/workspace/setup-github',
+      params: { consent: true },
+    });
+    expect(primary['result']).toMatchObject({ workspaceCwd: '/ws' });
+    expect(setupGithubMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cwd: '/ws',
+        proxy: 'http://primary-proxy.example:8080',
+      }),
+    );
+  });
+
+  it('keeps empty runtime overlays isolated from daemon env', async () => {
+    workspaceRegistry.add(
+      makeRuntime({
+        id: 'empty-overlay-id',
+        cwd: '/ws-empty',
+        primary: false,
+        trusted: true,
+        bridge: makeBridge(),
+        env: { mode: 'runtime-overlay', overlayKeys: [] },
+      }),
+    );
+
+    const response = await sendWsRequest('/workspaces/empty-overlay-id/acp', {
+      jsonrpc: '2.0',
+      id: 4,
+      method: '_qwen/workspace/setup-github',
+      params: { consent: true },
+    });
+
+    expect(response['result']).toMatchObject({ workspaceCwd: '/ws-empty' });
+    expect(setupGithubMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ cwd: '/ws-empty', proxy: undefined }),
     );
   });
 
@@ -674,6 +768,81 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     );
   });
 
+  it('routes workspace-qualified Voice WS by id and encoded cwd', async () => {
+    const connect = (selector: string) =>
+      new Promise<{ workspaceCwd?: string }>((resolve, reject) => {
+        const ws = new WebSocket(
+          `ws://127.0.0.1:${port}/workspaces/${selector}/voice/stream`,
+          { handshakeTimeout: 2000 },
+        );
+        ws.on('message', (data: WebSocket.RawData) => {
+          resolve(JSON.parse(data.toString()) as { workspaceCwd?: string });
+        });
+        ws.on('error', reject);
+      });
+
+    await expect(connect('secondary-id')).resolves.toEqual({
+      workspaceCwd: '/ws-b',
+    });
+    await expect(connect(encodeURIComponent('/ws-b'))).resolves.toEqual({
+      workspaceCwd: '/ws-b',
+    });
+    expect(workspaceVoiceConnection).toHaveBeenCalledTimes(2);
+    expect(workspaceVoiceConnection.mock.calls[0]?.[0]).toBe(secondaryRuntime);
+    expect(workspaceVoiceConnection.mock.calls[1]?.[0]).toBe(secondaryRuntime);
+  });
+
+  it('rejects unknown and untrusted workspace-qualified Voice WS upgrades', async () => {
+    const status = (selector: string) =>
+      new Promise<number>((resolve, reject) => {
+        const ws = new WebSocket(
+          `ws://127.0.0.1:${port}/workspaces/${selector}/voice/stream`,
+          { handshakeTimeout: 2000 },
+        );
+        ws.on('unexpected-response', (_req, response) => {
+          resolve(response.statusCode ?? 0);
+          ws.terminate();
+        });
+        ws.on('open', () => {
+          ws.close();
+          reject(new Error('rejected Voice WS upgrade should not open'));
+        });
+        ws.on('error', (err) =>
+          reject(
+            new Error(
+              `unexpected Voice WS error for ${selector}: ${err.message}`,
+            ),
+          ),
+        );
+      });
+
+    await expect(status('missing')).resolves.toBe(400);
+    await expect(status('untrusted-id')).resolves.toBe(403);
+    expect(workspaceVoiceConnection).not.toHaveBeenCalled();
+  });
+
+  it('rejects an encoded relative workspace-qualified Voice selector', async () => {
+    const relativeSelector = path.relative(process.cwd(), '/ws-b');
+    const status = await new Promise<number>((resolve, reject) => {
+      const ws = new WebSocket(
+        `ws://127.0.0.1:${port}/workspaces/${encodeURIComponent(relativeSelector)}/voice/stream`,
+        { handshakeTimeout: 2000 },
+      );
+      ws.on('unexpected-response', (_req, response) => {
+        resolve(response.statusCode ?? 0);
+        ws.terminate();
+      });
+      ws.on('open', () => {
+        ws.close();
+        reject(new Error('relative Voice WS selector should not open'));
+      });
+      ws.on('error', reject);
+    });
+
+    expect(status).toBe(400);
+    expect(workspaceVoiceConnection).not.toHaveBeenCalled();
+  });
+
   it('rejects a WS upgrade to an untrusted workspace', async () => {
     const status = await new Promise<number>((resolve, reject) => {
       const ws = new WebSocket(
@@ -688,9 +857,9 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
         ws.close();
         reject(new Error('untrusted WS upgrade should not open'));
       });
-      // Some ws versions surface a rejected upgrade as an error rather than
-      // `unexpected-response`; treat that as the expected 403.
-      ws.on('error', () => resolve(403));
+      ws.on('error', (err) =>
+        reject(new Error(`unexpected ACP WS error: ${err.message}`)),
+      );
     });
     expect(status).toBe(403);
   });
