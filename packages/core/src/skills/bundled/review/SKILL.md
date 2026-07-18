@@ -380,7 +380,7 @@ A check you perform silently is a check you skip, and this one has been skipped:
 
 ## Agent dimensions (used by 3A and 3B; reused inline by 3C)
 
-**Every agent MUST be an awaitable subagent: set `subagent_type: "general-purpose"` on every `agent` call.** Do NOT fork them — do not omit `subagent_type`, and never set `subagent_type: "fork"`. A fork runs fire-and-forget and its findings never come back to you, so the review would stall in Step 4 with nothing to aggregate. You need every agent's findings returned to you inline.
+**Every agent MUST return inline: set `subagent_type: "general-purpose"` and `run_in_background: false` on every `agent` call.** Do NOT fork them — never set `subagent_type: "fork"`. A fork runs fire-and-forget and its findings never come back to you, so the review would stall in Step 4 with nothing to aggregate. You need every agent's findings returned to you inline.
 
 **For same-repo PR reviews (worktree mode), every `agent` call MUST also set `working_dir: "<worktreePath>"`** — the `worktreePath` from the Step 1 fetch report (a repo-relative path like `.qwen/tmp/review-pr-<n>`; pass it through as-is). This sets each agent's working directory to the PR worktree, so its `git diff`, `grep_search`, file reads, and Agent 7's build/test **resolve against the PR's code, not the user's main checkout**. It is a deterministic, harness-level cwd pin — it does NOT depend on the agent remembering to `cd`, and it is what makes reviewing multiple PRs concurrently safe. (It pins the working directory; it is not a hard filesystem sandbox — an absolute path could still reach elsewhere — but normal review operations stay inside the worktree.) This rule applies to **every** agent the review workflow launches — not just the Step 3 dimension agents, but also the Step 4 verification agent and the Step 5 reverse-audit agents (both restated below). Do NOT set `working_dir` for **local-diff, file-path, or cross-repo lightweight** reviews — those have no worktree, so the agents run in the main project directory.
 
@@ -532,11 +532,14 @@ Write **the cumulative list of every confirmed finding so far** (Steps 3-4 plus 
   --findings <the cumulative findings file> \
   [--rules <the rules file from Step 2>]
 
-# Step 3B (large diff): one auditor PER CHUNK per round, launched together.
-"${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan <the plan report from Step 1> --role reverse-audit --chunk <id> \
+# Step 3B (large diff): one auditor PER CHUNK per round — ONE call builds them all.
+"${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan <the plan report from Step 1> --role reverse-audit --all-chunks \
   --findings <the cumulative findings file> \
-  [--rules <the rules file from Step 2>]
+  [--rules <the rules file from Step 2>] \
+  > .qwen/tmp/qwen-review-{target}-ra-round<k>.txt
 ```
+
+Redirect and `read_file` it paged, exactly as with `--roster`: one labelled block per chunk, numbered `auditor k of N`, closed by an `end of round` line — launch one agent per block, verbatim. **Never sample the builder's output** (`| head`, `| tail`, a truncated read): the text IS the deliverable, and a real run that sampled each build with `| head -5` never possessed the prompts, hand-reconstructed all ten launches, and had every one flagged rewritten — a full repair round spent recovering from a shortcut that saved nothing. To rebuild a single auditor after a gap: `--chunk <id>` in place of `--all-chunks`.
 
 **`--findings` is required for this role — the command refuses without it** (an early round with nothing confirmed yet passes an empty file; the command tells the auditor so). **Paste what it prints verbatim — the whole block. Do not prepend, append, reword, or add a round number** (track the round in your own notes, not in the prompt). A real run skipped `--findings`, hand-wrote the auditor's launch keeping only the brief pointer, and Step 6's check capped the verdict — the auditors had run and read their brief, but not one of them got the prompt the CLI built. The command records the exact block it prints — findings included, keyed per round's findings digest — so a launch that drops the confirmed list matches no record. It also gives each auditor its diff reads — the whole plan in 3A, one chunk's range in 3B (a Step 3B auditor handed the whole 5 800-line diff is the most context-starved agent in the pipeline, on exactly the PRs where the reverse audit matters most). In worktree mode its `working_dir` is the PR worktree.
 

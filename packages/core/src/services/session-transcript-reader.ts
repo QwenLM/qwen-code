@@ -16,6 +16,7 @@ import type { ChatRecord } from './chatRecordingService.js';
 import {
   aggregateTranscriptRecordFragments,
   isTranscriptConversationRecord,
+  type TranscriptRecordInput,
   validateTranscriptRecord,
   walkTranscriptUuidChain,
 } from '../utils/transcript-records.js';
@@ -116,7 +117,7 @@ interface RecordSegment {
 interface UuidIndexEntry {
   parentUuid: string | null;
   type: ChatRecord['type'];
-  subtype?: ChatRecord['subtype'];
+  subtype?: TranscriptRecordInput['subtype'];
   segments: RecordSegment[];
 }
 

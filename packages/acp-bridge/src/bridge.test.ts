@@ -57,6 +57,10 @@ import type { BridgeTelemetry } from './bridgeOptions.js';
 import { createInMemoryChannel } from './inMemoryChannel.js';
 import { EventBus, type BridgeEvent } from './eventBus.js';
 import {
+  CHANNEL_STARTUP_PROFILE_META_KEY,
+  CHANNEL_STARTUP_PROFILE_VERSION,
+} from './bridgeTypes.js';
+import {
   ApprovalMode,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   ShellExecutionService,
@@ -848,11 +852,25 @@ describe('createAcpSessionBridge', () => {
   });
 
   it('uses bridge telemetry for channel/session/prompt dispatch and prompt metadata injection', async () => {
-    const handle = makeChannel();
+    const handle = makeChannel({
+      initializeImpl: async () => ({
+        protocolVersion: PROTOCOL_VERSION,
+        _meta: {
+          [CHANNEL_STARTUP_PROFILE_META_KEY]: {
+            v: CHANNEL_STARTUP_PROFILE_VERSION,
+            complete: false,
+            processToResponseMs: 10,
+            phases: {},
+            config: {},
+          },
+        },
+      }),
+    });
     const operations: string[] = [];
     const events: string[] = [];
     const spanAttributes = new Map<string, Record<string, unknown>>();
     const eventAttributes = new Map<string, Record<string, unknown>>();
+    const activeSpanAttributes: Array<Record<string, unknown>> = [];
     const telemetry: BridgeTelemetry = {
       captureContext: () => {
         events.push('capture');
@@ -873,6 +891,9 @@ describe('createAcpSessionBridge', () => {
         } finally {
           events.push(`span:${operation}:end`);
         }
+      },
+      setActiveSpanAttributes(attributes) {
+        activeSpanAttributes.push(attributes);
       },
       event(name, attributes) {
         events.push(`event:${name}`);
@@ -924,6 +945,18 @@ describe('createAcpSessionBridge', () => {
         'prompt.dispatch',
       ]),
     );
+    expect(handle.agent.initializeCalls[0]!._meta).toEqual({
+      [CHANNEL_STARTUP_PROFILE_META_KEY]: {
+        v: CHANNEL_STARTUP_PROFILE_VERSION,
+      },
+    });
+    expect(activeSpanAttributes).toContainEqual(
+      expect.objectContaining({
+        'qwen-code.daemon.acp_startup.profile.version': 1,
+        'qwen-code.daemon.acp_startup.profile.complete': false,
+        'qwen-code.daemon.acp_startup.child.process_to_response_ms': 10,
+      }),
+    );
     expect(events.slice(-4)).toEqual([
       'run:true',
       'span:prompt.dispatch:start',
@@ -966,6 +999,42 @@ describe('createAcpSessionBridge', () => {
       'session.id': session.sessionId,
       'qwen-code.daemon.acp_channel.id': channelId,
     });
+  });
+
+  it('does not fail initialization when span enrichment throws', async () => {
+    const handle = makeChannel({
+      initializeImpl: async () => ({
+        protocolVersion: PROTOCOL_VERSION,
+        _meta: {
+          [CHANNEL_STARTUP_PROFILE_META_KEY]: {
+            v: CHANNEL_STARTUP_PROFILE_VERSION,
+            complete: false,
+            phases: {},
+            config: {},
+          },
+        },
+      }),
+    });
+    const telemetry: BridgeTelemetry = {
+      captureContext: () => undefined,
+      runWithContext: (_captured, fn) => fn(),
+      withSpan: (_operation, _attributes, fn) => fn(),
+      setActiveSpanAttributes() {
+        throw new Error('telemetry failed');
+      },
+      event() {},
+      injectPromptContext: (request) => request,
+    };
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      telemetry,
+    });
+
+    await expect(
+      bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).resolves.toMatchObject({ workspaceCwd: WS_A });
+
+    await bridge.shutdown();
   });
 
   it('profiles Session channel waits as joined or reused', async () => {

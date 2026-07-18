@@ -136,7 +136,7 @@ function buildPrompt(params: {
   ].join('\n');
 }
 
-function parseDecision(text: string): TopicShiftDecision | null {
+function tryParseDecision(text: string): TopicShiftDecision | null {
   try {
     const parsed = JSON.parse(text) as Partial<TopicShiftDecision>;
     if (typeof parsed.shouldSuggestNewSession !== 'boolean') return null;
@@ -148,6 +148,24 @@ function parseDecision(text: string): TopicShiftDecision | null {
   } catch {
     return null;
   }
+}
+
+function parseDecision(text: string): TopicShiftDecision | null {
+  const direct = tryParseDecision(text);
+  if (direct) return direct;
+  // Despite the JSON-only instruction, the model sometimes wraps a perfectly
+  // valid decision in prose or a code fence (observed live: prose preamble +
+  // bare JSON on ~1 of 3 runs). A bare JSON.parse throws and the warranted
+  // suggestion is silently dropped — a pure recall loss. Recover by slicing
+  // from the first '{' to the last '}' and re-parsing; anything still
+  // unparseable or mis-shaped stays null, so the gate remains fail-closed
+  // (the banner can only ever be under-shown, never mis-shown).
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start === -1 || end <= start) return null;
+  const sliced = text.slice(start, end + 1);
+  if (sliced === text) return null;
+  return tryParseDecision(sliced);
 }
 
 export function useNewSessionSuggestion({

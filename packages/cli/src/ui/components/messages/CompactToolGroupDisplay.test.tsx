@@ -17,11 +17,11 @@ import { ToolCallStatus } from '../../types.js';
 import type { IndividualToolCallDisplay } from '../../types.js';
 
 // ToolStatusIndicator pulls in GeminiRespondingSpinner which requires
-// StreamingContext; stub it out so we can test the elapsed/timeout
-// plumbing in isolation.
-vi.mock('../shared/ToolStatusIndicator.js', () => ({
+// StreamingContext; stub the component but keep the real constant so
+// height-estimation tests stay in sync with production.
+vi.mock('../shared/ToolStatusIndicator.js', async (importOriginal) => ({
+  ...(await importOriginal()),
   ToolStatusIndicator: () => <Text>•</Text>,
-  STATUS_INDICATOR_WIDTH: 2,
 }));
 
 const NOW = 1_700_000_000_000;
@@ -555,7 +555,7 @@ describe('estimateCompactToolGroupHeight', () => {
       description: '中文中文中文中文',
     });
 
-    expect(estimateCompactToolGroupHeight([tool], 12)).toBe(3);
+    expect(estimateCompactToolGroupHeight([tool], 12)).toBe(4);
   });
 });
 

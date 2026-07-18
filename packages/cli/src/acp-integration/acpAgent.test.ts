@@ -406,6 +406,12 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     updatedModelProviders: {},
   }),
   unregisterGoalHook: vi.fn(),
+  getActiveGoal: vi.fn(),
+  getLastGoalTerminal: vi.fn(),
+  // Reached through the real `ui/utils/restoreGoal.js` on the resume path.
+  registerGoalHook: vi.fn(),
+  setGoalTerminalObserver: vi.fn(),
+  setLastGoalTerminal: vi.fn(),
   uiTelemetryService: {
     removeSession: vi.fn(),
   },
@@ -719,8 +725,10 @@ vi.mock('../utils/languageUtils.js', () => ({
   getOutputLanguageFilePath: vi
     .fn()
     .mockReturnValue('/mock/.qwen/output-language.md'),
-  resolveOutputLanguage: vi.fn((v: string) => v),
-  isAutoLanguage: vi.fn(() => false),
+  resolveOutputLanguage: vi.fn((v: string | null | undefined) => v ?? 'auto'),
+  resolveOutputLanguageOrPreserveAuto: vi.fn(
+    (v: string | null | undefined) => v ?? 'auto',
+  ),
   OUTPUT_LANGUAGE_AUTO: 'auto',
 }));
 vi.mock('../i18n/index.js', async (importOriginal) => {
@@ -767,6 +775,8 @@ import {
   SessionTranscriptPageTooLargeError,
   encodeSessionTranscriptCursor,
   unregisterGoalHook,
+  getActiveGoal,
+  registerGoalHook,
   startEventLoopLagMonitor,
   registerAcpEventLoopLagGauge,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
@@ -788,13 +798,22 @@ import {
   SERVE_STATUS_EXT_METHODS,
   SERVE_CONTROL_EXT_METHODS,
 } from '@qwen-code/acp-bridge/status';
-import { TODO_STOP_GUARD_QUEUE_RELEASE_METHOD } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
 import {
+  resolveOutputLanguageOrPreserveAuto,
   updateOutputLanguageFile,
   writeOutputLanguageAndRegisterPath,
 } from '../utils/languageUtils.js';
 import { buildAuthMethods } from './authMethods.js';
+import {
+  CHANNEL_STARTUP_PROFILE_META_KEY,
+  CHANNEL_STARTUP_PROFILE_VERSION,
+  TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
+} from '@qwen-code/acp-bridge/bridgeTypes';
+import {
+  initializeAcpStartupProfiler,
+  resetAcpStartupProfilerForTesting,
+} from '../utils/acp-startup-profiler.js';
 
 describe('runAcpAgent shutdown cleanup', () => {
   let processExitSpy: MockInstance<typeof process.exit>;
@@ -810,6 +829,7 @@ describe('runAcpAgent shutdown cleanup', () => {
   const mockArgv = {} as CliArgs;
 
   beforeEach(() => {
+    resetAcpStartupProfilerForTesting();
     vi.clearAllMocks();
     mockMcpApprovals.getState.mockReturnValue('approved');
     mockMcpApprovals.setState.mockResolvedValue(undefined);
@@ -868,6 +888,7 @@ describe('runAcpAgent shutdown cleanup', () => {
   });
 
   afterEach(() => {
+    resetAcpStartupProfilerForTesting();
     processExitSpy.mockRestore();
     stdinDestroySpy.mockRestore();
     stdoutDestroySpy.mockRestore();
@@ -1476,6 +1497,44 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         },
       },
     });
+    expect(response).not.toHaveProperty('_meta');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('returns the startup profile only when initialize metadata requests v1', async () => {
+    initializeAcpStartupProfiler();
+    const mockSettings = {
+      merged: { mcpServers: {} },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const fakeConn = {
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    } as AgentSideConnectionLike;
+    const agent = capturedAgentFactory!(fakeConn) as AgentLike;
+
+    const response = (await agent.initialize({
+      clientCapabilities: {},
+      _meta: {
+        [CHANNEL_STARTUP_PROFILE_META_KEY]: {
+          v: CHANNEL_STARTUP_PROFILE_VERSION,
+        },
+      },
+    })) as Record<string, unknown>;
+
+    expect(response['_meta']).toMatchObject({
+      [CHANNEL_STARTUP_PROFILE_META_KEY]: {
+        v: CHANNEL_STARTUP_PROFILE_VERSION,
+        complete: false,
+        phases: expect.any(Object),
+        config: expect.any(Object),
+      },
+    });
+    expect(JSON.stringify(response['_meta']).length).toBeLessThan(2048);
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -1554,6 +1613,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
@@ -1812,6 +1872,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
     );
@@ -1966,6 +2027,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
@@ -2144,6 +2206,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
+        installGoalTerminalObserver: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
         emitGoalStatus: vi.fn(),
@@ -6182,6 +6245,128 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('reads a live session goal, including the judge verdict', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    vi.mocked(getActiveGoal).mockReturnValue({
+      condition: 'ship it',
+      iterations: 2,
+      setAt: 123,
+      tokensAtStart: 456,
+      hookId: 'goal-hook',
+      lastReason: 'one test still fails',
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionGoalGet, { sessionId }),
+    ).resolves.toEqual({
+      active: {
+        condition: 'ship it',
+        iterations: 2,
+        setAt: 123,
+        lastReason: 'one test still fails',
+      },
+    });
+    // tokensAtStart / hookId are internals and must not leak over the wire.
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('reports a null goal state when nothing is active', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    vi.mocked(getActiveGoal).mockReturnValue(undefined);
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionGoalGet, { sessionId }),
+    ).resolves.toEqual({ active: null });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rejects a goal read with a missing, empty or non-string sessionId', async () => {
+    await setupSessionMocks('11111111-1111-1111-1111-111111111111');
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    for (const params of [{}, { sessionId: '' }, { sessionId: 42 }]) {
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionGoalGet, params),
+      ).rejects.toThrow(/sessionId/i);
+    }
+    expect(getActiveGoal).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rejects a goal read for a session that is not resident', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionGoalGet, {
+        sessionId: 'not-a-live-session',
+      }),
+    ).rejects.toThrow();
+    expect(getActiveGoal).not.toHaveBeenCalledWith('not-a-live-session');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('newSession with SSE MCP server creates MCPServerConfig with url', async () => {
     await setupSessionMocks('session-sse');
 
@@ -9238,6 +9423,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
+        installGoalTerminalObserver: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
       } as unknown as InstanceType<typeof Session>;
@@ -10183,6 +10369,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
@@ -10743,6 +10930,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
           apiTimeMs: number;
         };
         installRewriter: ReturnType<typeof vi.fn>;
+        installGoalTerminalObserver: ReturnType<typeof vi.fn>;
         startCronScheduler: ReturnType<typeof vi.fn>;
         dispose: ReturnType<typeof vi.fn>;
       }
@@ -10830,6 +11018,11 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       }),
       getFileSystemService: vi.fn().mockReturnValue(undefined),
       setFileSystemService: vi.fn(),
+      // `goalRestoreBlockedBy` reads trust FIRST. Without this, resume threw
+      // `config.isTrustedFolder is not a function`, and the goal-gate tests
+      // below passed through `#restoreGoalOnResume`'s catch rather than the
+      // branch each one names.
+      isTrustedFolder: vi.fn().mockReturnValue(true),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
@@ -10886,6 +11079,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
           apiTimeMs: 11,
         },
         installRewriter: vi.fn(),
+        installGoalTerminalObserver: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
       };
@@ -10924,6 +11118,382 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       code: -32002,
       data: { uri: 'session:persisted-missing' },
     });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  /**
+   * A persisted `system` / `slash_command` record carrying goal cards — the only
+   * place a daemon transcript stores them.
+   */
+  function goalRecord(...outputHistoryItems: Array<Record<string, unknown>>) {
+    return {
+      uuid: 'goal-rec',
+      parentUuid: null,
+      sessionId: 'persisted-1',
+      timestamp: new Date(0).toISOString(),
+      type: 'system',
+      subtype: 'slash_command',
+      cwd: '/tmp',
+      version: '1.0.0',
+      systemPayload: {
+        phase: 'result',
+        rawCommand: '/goal',
+        outputHistoryItems,
+      },
+    };
+  }
+
+  /** Lets `restoreGoalFromHistory` past its trust / hook-policy gates. */
+  function allowGoalRestore(innerConfig: Record<string, unknown>) {
+    innerConfig['isTrustedFolder'] = vi.fn().mockReturnValue(true);
+    innerConfig['getDisableAllHooks'] = vi.fn().mockReturnValue(false);
+    innerConfig['getHookSystem'] = vi.fn().mockReturnValue({
+      addFunctionHook: vi.fn().mockReturnValue('hook-1'),
+      removeFunctionHook: vi.fn().mockReturnValue(true),
+    });
+  }
+
+  it('loadSession re-registers the goal hook when the transcript ends on an unsatisfied goal', async () => {
+    const innerConfig = bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: {
+        messages: [
+          goalRecord({
+            type: 'goal_status',
+            kind: 'set',
+            condition: 'ship it',
+            setAt: 5,
+          }),
+          goalRecord({
+            type: 'goal_status',
+            kind: 'checking',
+            condition: 'ship it',
+            iterations: 4,
+          }),
+        ],
+      },
+    });
+    allowGoalRestore(innerConfig as unknown as Record<string, unknown>);
+    const { agent, agentPromise } = await spawnAgent();
+
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+
+    expect(registerGoalHook).toHaveBeenCalledWith({
+      config: innerConfig,
+      sessionId: 'persisted-1',
+      condition: 'ship it',
+      tokensAtStart: 0,
+      // Carried across resume so MAX_GOAL_ITERATIONS stays a cross-resume cap.
+      initialIterations: 4,
+      // Taken from the `set` card two records back: the trailing `checking`
+      // card has no setAt, so without the back-scan the goal's elapsed time
+      // would restart on every load.
+      initialSetAt: 5,
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('loadSession does not revive a goal the transcript already recorded as achieved', async () => {
+    const innerConfig = bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: {
+        messages: [
+          goalRecord({
+            type: 'goal_status',
+            kind: 'set',
+            condition: 'ship it',
+            setAt: 5,
+          }),
+          goalRecord({
+            type: 'goal_status',
+            kind: 'achieved',
+            condition: 'ship it',
+            iterations: 4,
+            durationMs: 900,
+          }),
+        ],
+      },
+    });
+    allowGoalRestore(innerConfig as unknown as Record<string, unknown>);
+    const { agent, agentPromise } = await spawnAgent();
+
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+
+    expect(registerGoalHook).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('unstable_resumeSession also re-registers the goal hook', async () => {
+    const innerConfig = bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: {
+        messages: [
+          goalRecord({
+            type: 'goal_status',
+            kind: 'set',
+            condition: 'keep going',
+            setAt: 5,
+          }),
+        ],
+      },
+    });
+    allowGoalRestore(innerConfig as unknown as Record<string, unknown>);
+    const { agent, agentPromise } = await spawnAgent();
+
+    await agent.unstable_resumeSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+
+    expect(registerGoalHook).toHaveBeenCalledWith(
+      expect.objectContaining({
+        condition: 'keep going',
+        initialIterations: 0,
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('loadSession reinstalls the goal terminal observer after a restore', async () => {
+    // `registerGoalHook` calls `unregisterGoalHook`, which clears the session's
+    // goal-terminal observer. The ACP path passes no `addItem`, so nothing in
+    // `restoreGoalFromHistory` puts it back: a restored goal would then achieve
+    // or fail with no wire update and no persisted terminal card, and the next
+    // reload would revive a goal that already finished.
+    const innerConfig = bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: {
+        messages: [
+          goalRecord({
+            type: 'goal_status',
+            kind: 'set',
+            condition: 'ship it',
+            setAt: 5,
+          }),
+        ],
+      },
+    });
+    allowGoalRestore(innerConfig as unknown as Record<string, unknown>);
+    const { agent, agentPromise } = await spawnAgent();
+
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+
+    expect(registerGoalHook).toHaveBeenCalled();
+    expect(lastSessionMock!.installGoalTerminalObserver).toHaveBeenCalled();
+    // Order is the assertion: installing before the restore would be undone.
+    const installedAt =
+      lastSessionMock!.installGoalTerminalObserver.mock.invocationCallOrder.at(
+        -1,
+      )!;
+    const registeredAt = vi
+      .mocked(registerGoalHook)
+      .mock.invocationCallOrder.at(-1)!;
+    expect(installedAt).toBeGreaterThan(registeredAt);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('loadSession reinstalls the goal terminal observer even when there is no goal to restore', async () => {
+    // The no-goal branch still calls `unregisterGoalHook`, which clears the
+    // observer the Session constructor installed. A `/goal` set later in this
+    // session would otherwise have no terminal card path.
+    const innerConfig = bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: {
+        messages: [
+          goalRecord({
+            type: 'goal_status',
+            kind: 'achieved',
+            condition: 'ship it',
+            iterations: 1,
+            durationMs: 10,
+          }),
+        ],
+      },
+    });
+    allowGoalRestore(innerConfig as unknown as Record<string, unknown>);
+    const { agent, agentPromise } = await spawnAgent();
+
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+
+    expect(unregisterGoalHook).toHaveBeenCalled();
+    const installedAt =
+      lastSessionMock!.installGoalTerminalObserver.mock.invocationCallOrder.at(
+        -1,
+      )!;
+    const unregisteredAt = vi
+      .mocked(unregisterGoalHook)
+      .mock.invocationCallOrder.at(-1)!;
+    expect(installedAt).toBeGreaterThan(unregisteredAt);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('loadSession does not attempt a goal restore for an empty transcript', async () => {
+    const innerConfig = bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: { messages: [] },
+    });
+    allowGoalRestore(innerConfig as unknown as Record<string, unknown>);
+    const { agent, agentPromise } = await spawnAgent();
+
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+
+    // A brand-new session must not pay for a restore scan, and must not have
+    // its (absent) hook torn down by the no-goal branch either.
+    expect(registerGoalHook).not.toHaveBeenCalled();
+    expect(unregisterGoalHook).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('loadSession still completes when the goal restore throws', async () => {
+    // Restoring a goal is best-effort: it must never take the session down with
+    // it. `registerGoalHook` is the deepest thing #restoreGoalOnResume calls.
+    const innerConfig = bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: {
+        messages: [
+          goalRecord({
+            type: 'goal_status',
+            kind: 'set',
+            condition: 'ship it',
+            setAt: 5,
+          }),
+        ],
+      },
+    });
+    allowGoalRestore(innerConfig as unknown as Record<string, unknown>);
+    vi.mocked(registerGoalHook).mockImplementation(() => {
+      throw new Error('hook system exploded');
+    });
+    const { agent, agentPromise } = await spawnAgent();
+
+    const response = await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+
+    expect(registerGoalHook).toHaveBeenCalled();
+    expect(response).toMatchObject({
+      modes: expect.anything(),
+      models: expect.anything(),
+      configOptions: expect.anything(),
+    });
+    // The throw path is where the `finally` earns its keep: `registerGoalHook`
+    // clears the observer before exploding, so a session that survives the
+    // throw but loses its observer would go on to reach achieved/failed with
+    // nobody listening — no wire update, no persisted terminal card.
+    expect(lastSessionMock!.installGoalTerminalObserver).toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('reports a malformed condition exactly once on resume', async () => {
+    // Two producers could speak for this one event: `restoreGoalFromHistory`
+    // (which knows the condition is bad) and `#restoreGoalOnResume` (which
+    // knows the session). The env gates print one line; this must too.
+    const innerConfig = bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: {
+        messages: [
+          goalRecord({ type: 'goal_status', kind: 'set', condition: '' }),
+        ],
+      },
+    });
+    allowGoalRestore(innerConfig as unknown as Record<string, unknown>);
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true) as unknown as MockInstance;
+    const { agent, agentPromise } = await spawnAgent();
+
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+
+    const lines = stderr.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => /goal/i.test(l));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('the condition is empty');
+    expect(registerGoalHook).not.toHaveBeenCalled();
+    stderr.mockRestore();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('loadSession leaves the goal hook alone when hooks are disabled by policy', async () => {
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: {
+        messages: [
+          goalRecord({
+            type: 'goal_status',
+            kind: 'set',
+            condition: 'ship it',
+            setAt: 5,
+          }),
+        ],
+      },
+    });
+    // makeRestoreInnerConfig defaults to getDisableAllHooks() === true.
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true) as unknown as MockInstance;
+    const { agent, agentPromise } = await spawnAgent();
+
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+
+    expect(registerGoalHook).not.toHaveBeenCalled();
+    // `registerGoalHook` not being called is not enough on its own: anything
+    // that throws inside `#restoreGoalOnResume` skips it too, so a broken
+    // config mock would satisfy the assertion above while never reaching the
+    // hooks-disabled branch this test is named for. Pin the branch.
+    const written = stderr.mock.calls.map((c) => String(c[0])).join('');
+    expect(written).toContain('hooks-disabled');
+    expect(written).not.toContain('goal restore failed');
+    stderr.mockRestore();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -11410,6 +11980,9 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(resolveOutputLanguageOrPreserveAuto).mockImplementation(
+      (v: string | null | undefined) => v ?? 'auto',
+    );
     mockMcpApprovals.getState.mockReturnValue('approved');
     mockMcpApprovals.setState.mockResolvedValue(undefined);
     mockGetPendingGatedMcpServers.mockReset();
@@ -12330,6 +12903,7 @@ describe('sessionLanguage multi-session propagation', () => {
         getConfig: vi.fn().mockReturnValue(cfg),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
+        installGoalTerminalObserver: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
       };
@@ -12398,6 +12972,95 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
+  it('preserves auto output language when syncing across sessions', async () => {
+    const cfgA = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-a'),
+      getOutputLanguageFilePath: vi
+        .fn()
+        .mockReturnValue('/proj-a/.qwen/output-language.md'),
+    });
+    const cfgB = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-b'),
+      getOutputLanguageFilePath: vi
+        .fn()
+        .mockReturnValue('/proj-b/.qwen/output-language.md'),
+    });
+
+    const sessionConfigs = [cfgA, cfgB];
+    let sessionIdx = 0;
+
+    vi.mocked(loadSettings).mockReturnValue({
+      merged: { mcpServers: {} },
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings);
+
+    vi.mocked(loadCliConfig).mockImplementation(async () => {
+      const cfg = sessionConfigs[sessionIdx] ?? cfgB;
+      return cfg as unknown as Config;
+    });
+
+    vi.mocked(Session).mockImplementation(() => {
+      const cfg = sessionConfigs[sessionIdx] ?? cfgB;
+      const id = (cfg.getSessionId as ReturnType<typeof vi.fn>)();
+      const mock = {
+        getId: vi.fn().mockReturnValue(id),
+        getConfig: vi.fn().mockReturnValue(cfg),
+        sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+        installRewriter: vi.fn(),
+        startCronScheduler: vi.fn(),
+        dispose: vi.fn(),
+      };
+      sessionIdx++;
+      return mock as unknown as InstanceType<typeof Session>;
+    });
+
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      { merged: { mcpServers: {} } } as unknown as LoadedSettings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/proj-a', mcpServers: [] });
+    await agent.newSession({ cwd: '/proj-b', mcpServers: [] });
+
+    vi.mocked(resolveOutputLanguageOrPreserveAuto).mockClear();
+    vi.mocked(updateOutputLanguageFile).mockClear();
+    vi.mocked(writeOutputLanguageAndRegisterPath).mockClear();
+
+    const result = await agent.extMethod('qwen/control/session/language', {
+      sessionId: 's-a',
+      language: 'auto',
+      syncOutputLanguage: true,
+    });
+
+    expect(writeOutputLanguageAndRegisterPath).toHaveBeenCalledWith(
+      'auto',
+      cfgA,
+    );
+    expect(updateOutputLanguageFile).toHaveBeenCalledWith(
+      'auto',
+      '/proj-b/.qwen/output-language.md',
+    );
+    expect(resolveOutputLanguageOrPreserveAuto).toHaveBeenCalledWith('auto');
+    expect(result).toMatchObject({ outputLanguage: 'auto' });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('still refreshes sessions when a file write fails', async () => {
     const cfgOk = makeConfig({
       getSessionId: vi.fn().mockReturnValue('s-ok'),
@@ -12430,6 +13093,7 @@ describe('sessionLanguage multi-session propagation', () => {
         getConfig: vi.fn().mockReturnValue(cfg),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
+        installGoalTerminalObserver: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
       } as unknown as InstanceType<typeof Session>;
@@ -12520,6 +13184,7 @@ describe('sessionLanguage multi-session propagation', () => {
           isIdle: vi.fn().mockReturnValue(true),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
@@ -12724,6 +13389,7 @@ describe('sessionLanguage multi-session propagation', () => {
           getConfig: vi.fn().mockReturnValue(cfg),
           sendAvailableCommandsUpdate,
           installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
@@ -12802,6 +13468,7 @@ describe('sessionLanguage multi-session propagation', () => {
           getConfig: vi.fn().mockReturnValue(cfg),
           sendAvailableCommandsUpdate,
           installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,

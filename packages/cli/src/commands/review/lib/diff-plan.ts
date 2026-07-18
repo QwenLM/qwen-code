@@ -141,6 +141,25 @@ export interface DiffChunk {
   files: Array<{ path: string; newStart: number; newEnd: number }>;
 }
 
+/**
+ * Why these chunk ids cannot key a review — or null when they can.
+ *
+ * One definition for everything keyed by `chunk-<id>`: coverage refuses a plan
+ * whose ids it could never match (`readPlan`), and the prompt builder's batch
+ * mode must refuse the SAME plan before writing a brief, record or block —
+ * filtering there instead shrank the round, so `[13, "x", 15]` printed a
+ * complete-looking two-auditor round with one territory silently gone.
+ */
+export function chunkIdsProblem(ids: readonly unknown[]): string | null {
+  if (ids.some((id) => !Number.isSafeInteger(id) || (id as number) < 1)) {
+    return 'a chunk with no positive integer id';
+  }
+  if (new Set(ids).size !== ids.length) {
+    return 'duplicate chunk ids';
+  }
+  return null;
+}
+
 export interface DiffPlan {
   diffLines: number;
   diffChars: number;

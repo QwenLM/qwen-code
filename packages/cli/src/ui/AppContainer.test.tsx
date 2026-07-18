@@ -1654,7 +1654,7 @@ describe('AppContainer State Management', () => {
       expect(mockRemoveLastUserMessage).not.toHaveBeenCalled();
     });
 
-    it('does not auto-restore when the model produced meaningful content', async () => {
+    it('restores the prompt without rewinding when the model produced meaningful content', async () => {
       const mockSetText = vi.fn();
       const mockTruncateToItem = vi.fn();
       mockedUseTextBuffer.mockReturnValue({
@@ -1709,7 +1709,7 @@ describe('AppContainer State Management', () => {
       triggerCancel(cancelInfoFor('what time is it?'));
 
       expect(mockTruncateToItem).not.toHaveBeenCalled();
-      expect(mockSetText).not.toHaveBeenCalled();
+      expect(mockSetText).toHaveBeenCalledWith('what time is it?');
     });
 
     it('does not auto-restore when the sync pendingItem snapshot has meaningful content (closes stale-state race)', async () => {
@@ -1785,14 +1785,14 @@ describe('AppContainer State Management', () => {
       expect(mockRemoveLastUserMessage).not.toHaveBeenCalled();
     });
 
-    it('does not auto-restore when info.turnProducedMeaningfulContent is true (closes the flush-race)', async () => {
+    it('restores the prompt without rewinding when turnProducedMeaningfulContent is true', async () => {
       // Race scenario flagged in PR review: pre-cancel flush commits a
       // gemini_content via addItem and then a synthetic thought event
       // replaces pendingHistoryItem. AppContainer's historyRef.current
       // doesn't see the committed content yet (React hasn't
       // re-rendered), so the trailing-only-synthetic check would
       // otherwise pass. `info.turnProducedMeaningfulContent: true`
-      // must short-circuit auto-restore regardless.
+      // must preserve the output and restore only the prompt text.
       const mockSetText = vi.fn();
       const mockTruncateToItem = vi.fn();
       const mockRemoveLastUserMessage = vi.fn().mockResolvedValue(true);
@@ -1843,8 +1843,8 @@ describe('AppContainer State Management', () => {
       await Promise.resolve();
       await Promise.resolve();
 
-      // pendingItem is a (synthetic) thought, but turnProducedMeaningfulContent
-      // says content DID happen earlier — guard must bail.
+      // pendingItem is a synthetic thought, but meaningful content happened
+      // earlier. Preserve that output while restoring only the prompt text.
       triggerCancel({
         pendingItem: { type: 'gemini_thought', text: 'thinking…' },
         lastTurnUserItem: { id: 1, text: 'what time is it?' },
@@ -1852,7 +1852,7 @@ describe('AppContainer State Management', () => {
       });
 
       expect(mockTruncateToItem).not.toHaveBeenCalled();
-      expect(mockSetText).not.toHaveBeenCalled();
+      expect(mockSetText).toHaveBeenCalledWith('what time is it?');
       expect(mockRemoveLastUserMessage).not.toHaveBeenCalled();
     });
 
@@ -2126,7 +2126,10 @@ describe('AppContainer State Management', () => {
 
       // Matching lastTurnUserItem so the test reaches the
       // pending-tool-group bail path (the one the test name promises).
-      triggerCancel(cancelInfoFor('edit foo.ts'));
+      triggerCancel({
+        ...cancelInfoFor('edit foo.ts'),
+        turnProducedMeaningfulContent: true,
+      });
 
       expect(mockTruncateToItem).not.toHaveBeenCalled();
       expect(mockSetText).not.toHaveBeenCalled();

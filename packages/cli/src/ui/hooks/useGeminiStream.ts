@@ -1917,6 +1917,9 @@ export const useGeminiStream = (
           kind: 'checking',
           condition: activeGoal.condition,
           iterations: activeGoal.iterations,
+          // Carried so a transcript truncated past its `set` card can still
+          // restore the goal's original start time.
+          setAt: activeGoal.setAt,
           lastReason:
             activeGoal.lastReason ?? value.reasons[value.reasons.length - 1],
         };

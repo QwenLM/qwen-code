@@ -148,7 +148,14 @@ describe('history replay page', () => {
   it('replays backward pages without forward replay state', async () => {
     const replayPage = vi
       .spyOn(HistoryReplayer.prototype, 'replayPage')
-      .mockResolvedValueOnce({ pendingToolCalls: [] });
+      .mockResolvedValueOnce({
+        pendingToolCalls: [],
+        replay: {
+          v: 1,
+          pendingToolCalls: [],
+          cumulativeUsage: createReplayCumulativeUsage(),
+        },
+      });
     const encodeCursor = vi.fn(() => 'next-cursor');
 
     await replayTranscriptRecordPage({

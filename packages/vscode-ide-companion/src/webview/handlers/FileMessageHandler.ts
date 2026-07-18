@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { logger } from '../../utils/logger.js';
 import * as vscode from 'vscode';
 import { BaseMessageHandler } from './BaseMessageHandler.js';
 import { getFileName } from '../utils/webviewUtils.js';
@@ -96,7 +97,7 @@ export class FileMessageHandler extends BaseMessageHandler {
       return this.fileSearchInstances.get(rootPath) ?? null;
     } catch (error) {
       this.fileSearchInitializing.delete(rootPath);
-      console.error(
+      logger.error(
         '[FileMessageHandler] Failed to initialize file search:',
         error,
       );
@@ -117,7 +118,7 @@ export class FileMessageHandler extends BaseMessageHandler {
       // Already gone or never had a worker; nothing actionable here.
     });
     crawlCache.clear();
-    console.log(
+    logger.log(
       '[FileMessageHandler] Cleared file search cache, trigger:',
       rootPath,
     );
@@ -229,10 +230,7 @@ export class FileMessageHandler extends BaseMessageHandler {
         break;
 
       default:
-        console.warn(
-          '[FileMessageHandler] Unknown message type:',
-          message.type,
-        );
+        logger.warn('[FileMessageHandler] Unknown message type:', message.type);
         break;
     }
   }
@@ -264,7 +262,7 @@ export class FileMessageHandler extends BaseMessageHandler {
         });
       }
     } catch (error) {
-      console.error('[FileMessageHandler] Failed to attach file:', error);
+      logger.error('[FileMessageHandler] Failed to attach file:', error);
       const errorMsg = getErrorMessage(error);
       this.sendToWebView({
         type: 'error',
@@ -347,7 +345,7 @@ export class FileMessageHandler extends BaseMessageHandler {
         }
       }
     } catch (error) {
-      console.error(
+      logger.error(
         '[FileMessageHandler] Failed to show context picker:',
         error,
       );
@@ -367,7 +365,7 @@ export class FileMessageHandler extends BaseMessageHandler {
     requestId?: number,
   ): Promise<void> {
     try {
-      console.log('[FileMessageHandler] handleGetWorkspaceFiles start', {
+      logger.log('[FileMessageHandler] handleGetWorkspaceFiles start', {
         query,
         requestId,
       });
@@ -428,7 +426,7 @@ export class FileMessageHandler extends BaseMessageHandler {
 
       // Search or show recent files
       if (query) {
-        console.log(
+        logger.log(
           '[FileMessageHandler] Searching workspace files with fuzzy search for query',
           query,
         );
@@ -491,12 +489,12 @@ export class FileMessageHandler extends BaseMessageHandler {
             type: 'workspaceFiles',
             data: { files, query, requestId },
           });
-          console.log(
+          logger.log(
             '[FileMessageHandler] Sent initial workspaceFiles (open tabs/active)',
             files.length,
           );
         } catch (e) {
-          console.warn(
+          logger.warn(
             '[FileMessageHandler] Failed sending initial response',
             e,
           );
@@ -523,12 +521,12 @@ export class FileMessageHandler extends BaseMessageHandler {
         type: 'workspaceFiles',
         data: { files, query, requestId },
       });
-      console.log(
+      logger.log(
         '[FileMessageHandler] Sent final workspaceFiles',
         files.length,
       );
     } catch (error) {
-      console.error(
+      logger.error(
         '[FileMessageHandler] Failed to get workspace files:',
         error,
       );
@@ -545,18 +543,18 @@ export class FileMessageHandler extends BaseMessageHandler {
    */
   private async handleOpenFile(filePath?: string): Promise<void> {
     if (!filePath) {
-      console.warn('[FileMessageHandler] No path provided for openFile');
+      logger.warn('[FileMessageHandler] No path provided for openFile');
       return;
     }
 
     try {
-      console.log('[FileOperations] Opening file:', filePath);
+      logger.log('[FileOperations] Opening file:', filePath);
 
       // Parse file path, line number, and column number
       // Formats: path/to/file.ts, path/to/file.ts:123, path/to/file.ts:123:45
       const match = filePath.match(/^(.+?)(?::(\d+))?(?::(\d+))?$/);
       if (!match) {
-        console.warn('[FileOperations] Invalid file path format:', filePath);
+        logger.warn('[FileOperations] Invalid file path format:', filePath);
         return;
       }
 
@@ -592,9 +590,9 @@ export class FileMessageHandler extends BaseMessageHandler {
         );
       }
 
-      console.log('[FileOperations] File opened successfully:', absolutePath);
+      logger.log('[FileOperations] File opened successfully:', absolutePath);
     } catch (error) {
-      console.error('[FileMessageHandler] Failed to open file:', error);
+      logger.error('[FileMessageHandler] Failed to open file:', error);
       vscode.window.showErrorMessage(
         `Failed to open file: ${getErrorMessage(error)}`,
       );
@@ -608,7 +606,7 @@ export class FileMessageHandler extends BaseMessageHandler {
     data: Record<string, unknown> | undefined,
   ): Promise<void> {
     if (!data) {
-      console.warn('[FileMessageHandler] No data provided for openDiff');
+      logger.warn('[FileMessageHandler] No data provided for openDiff');
       return;
     }
 
@@ -619,7 +617,7 @@ export class FileMessageHandler extends BaseMessageHandler {
         newText: (data.newText as string) || '',
       });
     } catch (error) {
-      console.error('[FileMessageHandler] Failed to open diff:', error);
+      logger.error('[FileMessageHandler] Failed to open diff:', error);
       vscode.window.showErrorMessage(
         `Failed to open diff: ${getErrorMessage(error)}`,
       );
@@ -633,7 +631,7 @@ export class FileMessageHandler extends BaseMessageHandler {
     data: Record<string, unknown> | undefined,
   ): Promise<void> {
     if (!data) {
-      console.warn(
+      logger.warn(
         '[FileMessageHandler] No data provided for createAndOpenTempFile',
       );
       return;
@@ -647,7 +645,7 @@ export class FileMessageHandler extends BaseMessageHandler {
       const readonlyProvider = ReadonlyFileSystemProvider.getInstance();
       if (!readonlyProvider) {
         const errorMessage = 'Readonly file system provider not initialized';
-        console.error('[FileMessageHandler]', errorMessage);
+        logger.error('[FileMessageHandler]', errorMessage);
         this.sendToWebView({
           type: 'error',
           data: { message: errorMessage },
@@ -686,7 +684,7 @@ export class FileMessageHandler extends BaseMessageHandler {
           showOptions.viewColumn = existingViewColumn;
         }
         await vscode.window.showTextDocument(document, showOptions);
-        console.log(
+        logger.log(
           '[FileMessageHandler] Focused on existing readonly file:',
           uri.toString(),
           'in viewColumn:',
@@ -710,14 +708,14 @@ export class FileMessageHandler extends BaseMessageHandler {
         preserveFocus: false,
       });
 
-      console.log(
+      logger.log(
         '[FileMessageHandler] Created and opened readonly file:',
         uri.toString(),
         'in viewColumn:',
         targetViewColumn ?? 'Beside',
       );
     } catch (error) {
-      console.error(
+      logger.error(
         '[FileMessageHandler] Failed to create and open temporary file:',
         error,
       );

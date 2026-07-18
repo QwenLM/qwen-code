@@ -128,6 +128,24 @@ export interface TranscriptUsageMetadataInput {
   readonly cachedContentTokenCount?: unknown;
 }
 
+const TRANSCRIPT_GOAL_STATUS_KINDS = new Set([
+  'set',
+  'achieved',
+  'cleared',
+  'failed',
+  'aborted',
+  'checking',
+]);
+
+interface TranscriptGoalStatus {
+  readonly kind: string;
+  readonly condition: string;
+  readonly iterations?: number;
+  readonly setAt?: number;
+  readonly durationMs?: number;
+  readonly lastReason?: string;
+}
+
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -690,6 +708,27 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       ? payload['outputHistoryItems']
       : [];
     for (const item of items) {
+      const goalStatus = parseTranscriptGoalStatus(item);
+      if (goalStatus) {
+        if (goalStatus.condition.length === 0) {
+          this.report(
+            'malformed_part',
+            'Skipped replay of a goal card whose condition is empty.',
+            record.uuid,
+            'systemPayload.outputHistoryItems.goalStatus.condition',
+          );
+        } else if (goalStatus.kind !== 'checking') {
+          yield emit(
+            createTranscriptMessageUpdate({
+              role: 'assistant',
+              text: '',
+              ...meta,
+              extra: { goalStatus },
+            }),
+          );
+        }
+        continue;
+      }
       if (!isObjectRecord(item) || typeof item['text'] !== 'string') continue;
       yield emit(
         createTranscriptMessageUpdate({
@@ -819,6 +858,37 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       ...(path ? { path } : {}),
     });
   }
+}
+
+function parseTranscriptGoalStatus(
+  value: unknown,
+): TranscriptGoalStatus | undefined {
+  if (!isObjectRecord(value) || value['type'] !== 'goal_status') {
+    return undefined;
+  }
+  const kind = value['kind'];
+  const condition = value['condition'];
+  if (
+    typeof kind !== 'string' ||
+    !TRANSCRIPT_GOAL_STATUS_KINDS.has(kind) ||
+    typeof condition !== 'string'
+  ) {
+    return undefined;
+  }
+
+  const iterations = finiteNumber(value['iterations']);
+  const setAt = finiteNumber(value['setAt']);
+  const durationMs = finiteNumber(value['durationMs']);
+  const lastReason =
+    typeof value['lastReason'] === 'string' ? value['lastReason'] : undefined;
+  return {
+    kind,
+    condition,
+    ...(iterations !== undefined ? { iterations } : {}),
+    ...(setAt !== undefined ? { setAt } : {}),
+    ...(durationMs !== undefined ? { durationMs } : {}),
+    ...(lastReason !== undefined ? { lastReason } : {}),
+  };
 }
 
 function defaultToolResultContentPrefix(

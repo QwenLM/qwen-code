@@ -1002,6 +1002,38 @@ describe('DingtalkChannel unroutable-message logging', () => {
 });
 
 describe('DingtalkChannel parsed-message logging', () => {
+  it('forwards the inbound conversation title as the group name', () => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'group-name-m1',
+        conversationType: '2',
+        conversationId: 'cid123',
+        conversationTitle: 'Project Group',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        isInAtList: true,
+        text: { content: '@qwen-code hello' },
+      }),
+      headers: { messageId: 'group-name-m1' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+
+    expect(channel.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        chatId: 'cid123',
+        chatName: 'Project Group',
+        isGroup: true,
+      }),
+    );
+  });
+
   it('logs debug payloads when enabled for the channel', () => {
     const oldDebugPayload = process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
     process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = 'test-dingtalk';

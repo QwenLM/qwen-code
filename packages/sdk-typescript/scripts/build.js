@@ -54,8 +54,12 @@ const rootDir = join(__dirname, '..');
 // mutation, and operation-polling APIs (~2.3KB).
 // Bumped from 154KB to 155KB after merging workspace skill-toggle APIs.
 // Bumped from 155KB to 160KB to accommodate recent growth and reduce churn,
-// then to 164KB for the ChatRecord transcript projection in the default UI API.
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 164 * 1024;
+// from repeated 1KB bumps as new daemon APIs are added.
+// Bumped from 160KB to 161KB after merging upstream main.
+// Bumped from 161KB to 165KB for the Web Shell git-diff REST helpers
+// (workspaceGitDiff / workspaceGitDiffFile on both client classes) and the
+// ChatRecord transcript projection in the default UI API.
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 165 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
 // it's larger than the default barrel — but still budgeted so a future PR can't

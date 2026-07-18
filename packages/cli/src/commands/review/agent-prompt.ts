@@ -42,7 +42,11 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
-import { READ_FILE_CHAR_CAP, type DiffChunk } from './lib/diff-plan.js';
+import {
+  READ_FILE_CHAR_CAP,
+  chunkIdsProblem,
+  type DiffChunk,
+} from './lib/diff-plan.js';
 import { recordPrompt, writeBrief } from './lib/prompt-record.js';
 import { BRIEFS, type RoleId } from './lib/agent-briefs.js';
 import { pathRulesFor } from './lib/path-rules.js';
@@ -65,6 +69,8 @@ interface AgentPromptArgs {
   wholeDiff?: boolean;
   /** Build every prompt the plan's roster requires, in one call. */
   roster?: boolean;
+  /** With --role reverse-audit: build one block PER CHUNK, in one call. */
+  allChunks?: boolean;
   rules?: string;
   /**
    * A file of findings to fold into a verify/reverse-audit prompt, so the caller
@@ -1128,6 +1134,52 @@ function buildLaunch(
 }
 
 /**
+ * The digest that keys a findings role's record and brief: the identity of the
+ * launch material the key must tell apart — the findings list AND the effective
+ * project rules. Findings alone left the rules out of that identity: a round
+ * rebuilt with corrected rules kept its key, so the rebuilt brief landed at the
+ * SAME path a first-round agent had already opened, and the delivery check
+ * credited that old transcript with reading rules it never saw. A JSON tuple,
+ * not concatenation — `["ab",""]` and `["a","b"]` must not collide — and
+ * `null` for no-rules, so a rules-less build stays distinct from an empty file.
+ */
+function findingsDigest(content: string, rules: string | undefined): string {
+  return createHash('sha256')
+    .update(JSON.stringify([content, rules ?? null]))
+    .digest('hex')
+    .slice(0, 12);
+}
+
+/**
+ * Fold a findings section into a launch prompt, identity line FIRST.
+ *
+ * The first cut printed the findings above the whole block, which buried the
+ * role line mid-output — and the one hand-edit a real run made to a fully
+ * possessed prompt was exactly there: it dropped the identity line and wrote
+ * its own context sentence in that spot. With the identity at the top, a
+ * context wrap lands ABOVE it instead of replacing it, and the delivery check
+ * keeps its first anchor line.
+ */
+function foldFindings(role: RoleId, content: string, prompt: string): string {
+  const nl = prompt.indexOf('\n');
+  const identity = nl === -1 ? prompt : prompt.slice(0, nl);
+  // The split is anchored on line one BEING the identity line —
+  // `buildRoleLaunchPrompt` writes it first. If a future prompt shape moves
+  // it, refuse here rather than fold the findings under whatever line came
+  // first: that would silently rebuild the buried-identity layout this
+  // function exists to prevent.
+  if (!identity.startsWith('You are review agent `')) {
+    throw new Error(
+      'agent-prompt: foldFindings expected the launch prompt to open with ' +
+        `its identity line, got: "${identity.slice(0, 60)}". Keep the ` +
+        'identity line first in buildRoleLaunchPrompt, or update the fold.',
+    );
+  }
+  const rest = nl === -1 ? '' : prompt.slice(nl + 1);
+  return `${identity}\n\n${findingsSection(role, content)}\n${rest}`;
+}
+
+/**
  * The line above each roster block: who this launch is, in the reader's terms.
  *
  * The file part is PR-controlled (it is a path from the diff), and the separator
@@ -1200,6 +1252,74 @@ function runRoster(report: PlanReport, planPath: string, rules?: string): void {
   );
 }
 
+/**
+ * One block per chunk for a per-chunk findings role, in one call.
+ *
+ * The per-chunk form asked the orchestrator for one build-and-capture round
+ * trip per chunk per round, and a real run answered with `for i in 1..10; do
+ * agent-prompt … | head -5; done` — it SAMPLED each build instead of capturing
+ * it, never possessed the texts, and hand-reconstructed all ten launches; every
+ * one was flagged rewritten and the review paid a repair round. Same medicine
+ * as `--roster`: one call, labelled numbered blocks, an end marker, and nothing
+ * left to reconstruct.
+ */
+function runAllChunks(
+  report: PlanReport,
+  planPath: string,
+  role: RoleId,
+  findingsContent: string,
+  rules?: string,
+): void {
+  if (!Array.isArray(report.chunks) || report.chunks.length === 0) {
+    throw new Error('agent-prompt: the plan has no `chunks[]`.');
+  }
+  const chunks = report.chunks as DiffChunk[];
+  // The same refusal coverage makes (`readPlan`), made BEFORE any brief,
+  // record or block is written. Filtering the unusable ids out instead shrank
+  // the round: `[13, "x", 15]` printed a complete-looking two-auditor round
+  // with one territory silently gone, and a duplicated id resolved both blocks
+  // to the first matching chunk and keyed them to one record — the second
+  // territory never audited, under an end marker that says the round is whole.
+  const problem = chunkIdsProblem(chunks.map((c) => c?.id));
+  if (problem) {
+    throw new Error(
+      `agent-prompt: the plan has ${problem} — a round built from what ` +
+        'remains would look complete while a territory goes unaudited. ' +
+        'Re-run the Step 1 capture; do not hand-edit the plan.',
+    );
+  }
+  const digest = findingsDigest(findingsContent, rules);
+  const blocks = chunks.map((c, i) => {
+    const key = `${role}--chunk-${c.id}--${digest}`;
+    const { prompt } = buildLaunch(
+      report,
+      planPath,
+      { role, chunk: c.id, key },
+      rules,
+    );
+    const printed = foldFindings(role, findingsContent, prompt);
+    recordPrompt(planPath, key, printed);
+    return (
+      `───── auditor ${i + 1} of ${chunks.length} — chunk ${c.id} ─────\n\n` +
+      printed
+    );
+  });
+  writeStdoutLine(
+    [
+      `${chunks.length} auditors required this round — one per chunk. Launch ` +
+        `one agent per block below, passing its block VERBATIM — copy, do not ` +
+        `retype, and NEVER sample this output (no \`| head\`): the text IS the ` +
+        `deliverable, and a launch reconstructed from a sample matches no ` +
+        `record. Blocks are numbered \`auditor k of ${chunks.length}\` and the ` +
+        `output ends with an end-of-round line — if either is missing, the ` +
+        `output was truncated in transit; rebuild just the missing chunks with ` +
+        `--chunk <id>.`,
+      ...blocks,
+      `───── end of round — ${chunks.length} auditors ─────`,
+    ].join('\n\n'),
+  );
+}
+
 function runAgentPrompt(args: AgentPromptArgs): void {
   // Exactly one primary mode: a territory chunk, a named role, or the bare
   // whole-diff block. A call that named none used to fall through to the chunk
@@ -1218,17 +1338,25 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     // The roster IS the selection — the plan decides who runs, which is the point.
     // A --roster call that also names one agent is asking for two contradictory
     // scopes, and honouring either would silently drop the other.
-    if (hasChunk || hasRole || hasFile || hasFindings || hasWhole) {
+    if (
+      hasChunk ||
+      hasRole ||
+      hasFile ||
+      hasFindings ||
+      hasWhole ||
+      args.allChunks
+    ) {
       bad(
         '--roster builds every prompt the plan requires; it takes no --chunk, ' +
-          '--role, --file, --findings or --whole-diff. (Step 4/5 verify and ' +
-          'reverse-audit prompts are built per round, with --role and --findings.)',
+          '--role, --file, --findings, --whole-diff or --all-chunks. (Step 4/5 ' +
+          'verify and reverse-audit prompts are built per round, with --role ' +
+          'and --findings.)',
       );
     }
   } else if (hasWhole) {
-    if (hasChunk || hasRole || hasFile || hasFindings) {
+    if (hasChunk || hasRole || hasFile || hasFindings || args.allChunks) {
       bad(
-        '--whole-diff builds the diff-reading block alone; it takes no --chunk, --role, --file or --findings.',
+        '--whole-diff builds the diff-reading block alone; it takes no --chunk, --role, --file, --findings or --all-chunks.',
       );
     }
   } else if (hasRole) {
@@ -1238,6 +1366,23 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     // (`acceptsChunk`), not hardcoded here, so a new per-chunk role is a data change
     // in agent-briefs, not an edit to this guard — and the message names the set it
     // read, so it can never claim "only reverse-audit" while allowing another role.
+    if (args.allChunks) {
+      if (!BRIEFS[role]?.acceptsChunk || !BRIEFS[role]?.acceptsFindings) {
+        const ok = (Object.keys(BRIEFS) as RoleId[]).filter(
+          (r) => BRIEFS[r].acceptsChunk && BRIEFS[r].acceptsFindings,
+        );
+        bad(
+          `--all-chunks builds one block per chunk for a per-chunk findings ` +
+            `role (${ok.join(', ')}); role "${role}" does not take it.`,
+        );
+      }
+      if (hasChunk) {
+        bad(
+          '--all-chunks and --chunk contradict: one asks for every chunk, ' +
+            'the other for one. Pass exactly one of them.',
+        );
+      }
+    }
     if (hasChunk && !BRIEFS[role]?.acceptsChunk) {
       const chunkRoles = (Object.keys(BRIEFS) as RoleId[]).filter(
         (r) => BRIEFS[r].acceptsChunk,
@@ -1298,6 +1443,24 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       `--findings folds a findings list into a ` +
         `${findingRoles.map((r) => `--role ${r}`).join(' / ')} prompt; ` +
         'it needs one of those roles.',
+    );
+  } else if (args.allChunks) {
+    // --all-chunks with no role reached the batch gate as a no-op: the gate
+    // reads `allChunks && role && findings`, so `--chunk 13 --all-chunks`
+    // passed every guard, printed the single chunk block, and exited 0 with
+    // the batch silently dropped — an orchestrator that asked for a round
+    // walked away with one auditor and no error. Every mode combination is
+    // ruled on here, at the boundary, before any branch can quietly win.
+    if (hasChunk) {
+      bad(
+        '--all-chunks and --chunk contradict: one asks for every chunk, ' +
+          'the other for one. Pass exactly one of them.',
+      );
+    }
+    bad(
+      '--all-chunks builds one auditor block per chunk for a per-chunk ' +
+        'findings role; it needs --role <role> and --findings <file> ' +
+        '(--role reverse-audit for a Step 5 round).',
     );
   } else if (!hasChunk) {
     bad(
@@ -1384,6 +1547,17 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     }
   }
 
+  if (args.allChunks && args.role && findingsContent !== undefined) {
+    runAllChunks(
+      report,
+      args.plan,
+      args.role as RoleId,
+      findingsContent,
+      rules,
+    );
+    return;
+  }
+
   let prompt: string;
   let key: string;
   if (args.wholeDiff) {
@@ -1403,15 +1577,11 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     // and keeps the documented floor of one.
     let keyOverride: string | undefined;
     if (findingsContent !== undefined && args.role) {
-      const digest = createHash('sha256')
-        .update(findingsContent)
-        .digest('hex')
-        .slice(0, 12);
       const base =
         typeof args.chunk === 'number'
           ? `${args.role}--chunk-${args.chunk}`
           : args.role;
-      keyOverride = `${base}--${digest}`;
+      keyOverride = `${base}--${findingsDigest(findingsContent, rules)}`;
     }
     ({ key, prompt } = buildLaunch(
       report,
@@ -1432,7 +1602,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   // delivery can satisfy — the findings-free record was exactly that.
   const printed =
     findingsContent !== undefined && args.role
-      ? `${findingsSection(args.role as RoleId, findingsContent)}\n\n${prompt}`
+      ? foldFindings(args.role as RoleId, findingsContent, prompt)
       : prompt;
   recordPrompt(args.plan, key, printed);
   writeStdoutLine(printed);
@@ -1469,6 +1639,13 @@ export const agentPromptCommand: CommandModule = {
         describe:
           'The heavily-rewritten file an invariant agent owns (--role ' +
           'invariant-a|invariant-b|invariant-c)',
+      })
+      .option('all-chunks', {
+        type: 'boolean',
+        describe:
+          'With --role reverse-audit --findings: build one block per chunk ' +
+          'in one call, labelled and separated (Step 5, 3B). Never sample ' +
+          'the output; each block is pasted verbatim to its own agent.',
       })
       .option('roster', {
         type: 'boolean',
@@ -1508,6 +1685,7 @@ export const agentPromptCommand: CommandModule = {
       file: argv['file'] as string | undefined,
       wholeDiff: argv['whole-diff'] === true,
       roster: argv['roster'] === true,
+      allChunks: argv['all-chunks'] === true,
       rules: argv['rules'] as string | undefined,
       findings: argv['findings'] as string | undefined,
     });

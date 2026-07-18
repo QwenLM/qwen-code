@@ -67,6 +67,7 @@ import {
   subagentGenerator,
   redactUrlCredentials,
   computeUniqueBranchTitle,
+  getActiveGoal,
   unregisterGoalHook,
   ToolNames,
   FORK_SUBAGENT_TYPE,
@@ -217,9 +218,7 @@ import {
 } from '../utils/acpModelUtils.js';
 import {
   updateOutputLanguageFile,
-  resolveOutputLanguage,
-  isAutoLanguage,
-  OUTPUT_LANGUAGE_AUTO,
+  resolveOutputLanguageOrPreserveAuto,
   getOutputLanguageFilePath,
   writeOutputLanguageAndRegisterPath,
 } from '../utils/languageUtils.js';
@@ -283,6 +282,8 @@ import {
 } from '@qwen-code/acp-bridge/status';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
 import {
+  CHANNEL_STARTUP_PROFILE_META_KEY,
+  CHANNEL_STARTUP_PROFILE_VERSION,
   CLIENT_MCP_OVER_WS_CONFIG_FLAG,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_META_KEY,
@@ -293,6 +294,12 @@ import {
   type ClientMcpOverWsRuntimeConfig,
   type BridgeLoadReplayEnvelope,
 } from '@qwen-code/acp-bridge/bridgeTypes';
+import {
+  beginAcpBootstrapConfigProfiling,
+  buildAndFreezeAcpStartupProfile,
+  endAcpBootstrapConfigProfiling,
+  markAcpStartup,
+} from '../utils/acp-startup-profiler.js';
 import { isValidServerName } from '../serve/validate-server-name.js';
 import { MAX_REMEMBER_CONTENT_BYTES } from '../serve/workspace-memory-remember-constants.js';
 import { computeCpuPercent } from '../serve/daemon-metrics-ring.js';
@@ -301,6 +308,11 @@ import {
   formatContextUsageText,
 } from '../ui/commands/contextCommand.js';
 import type { HistoryItemContextUsage } from '../ui/types.js';
+import {
+  collectGoalStatusItemsFromRecords,
+  restoreGoalFromHistory,
+} from '../ui/utils/restoreGoal.js';
+import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
   executeGeneration,
   GENERATION_MAX_PROMPT_BYTES,
@@ -2546,16 +2558,21 @@ export async function runAcpAgent(
   const bootstrapClientMcpSender: SendSdkMcpMessage = (serverName, message) =>
     deliverClientMcpMessage(acpConnection, serverName, message);
 
-  await config.initialize({
-    skipGeminiInitialization: true,
-    // Bootstrap skips MCP discovery — each session runs its own
-    // pool-routed discovery, so bootstrap-level spawns would be
-    // redundant subprocess leaks (W119).
-    skipMcpDiscovery: true,
-    // Bind the workspace-level manager's SDK callback so a runtime-added
-    // client-hosted MCP server (#5626) round-trips over the parent WS.
-    sendSdkMcpMessage: bootstrapClientMcpSender,
-  });
+  beginAcpBootstrapConfigProfiling();
+  try {
+    await config.initialize({
+      skipGeminiInitialization: true,
+      // Bootstrap skips MCP discovery — each session runs its own
+      // pool-routed discovery, so bootstrap-level spawns would be
+      // redundant subprocess leaks (W119).
+      skipMcpDiscovery: true,
+      // Bind the workspace-level manager's SDK callback so a runtime-added
+      // client-hosted MCP server (#5626) round-trips over the parent WS.
+      sendSdkMcpMessage: bootstrapClientMcpSender,
+    });
+  } finally {
+    endAcpBootstrapConfigProfiling();
+  }
   const eventLoopMonitor = startEventLoopLagMonitor({
     onNewMaxStall: (maxMs) => {
       console.error(`[perf] acp agent event loop stall: max=${maxMs}ms`);
@@ -2564,6 +2581,7 @@ export async function runAcpAgent(
 
   let agentInstance: QwenAgent | undefined;
   let connection: AgentSideConnection;
+  markAcpStartup('transportSetupStart');
   try {
     const stdout = Writable.toWeb(process.stdout) as WritableStream;
     const stdin = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
@@ -2580,6 +2598,7 @@ export async function runAcpAgent(
       agentInstance = new QwenAgent(config, settings, argv, conn);
       return agentInstance;
     }, stream);
+    markAcpStartup('transportSetupEnd');
   } catch (err) {
     eventLoopMonitor.dispose();
     throw err;
@@ -3345,11 +3364,12 @@ class QwenAgent implements Agent {
   }
 
   async initialize(args: InitializeRequest): Promise<InitializeResponse> {
+    markAcpStartup('initializeHandlerStart');
     this.clientCapabilities = args.clientCapabilities;
     const authMethods = buildAuthMethods();
     const version = process.env['CLI_VERSION'] || process.version;
 
-    return {
+    const response: InitializeResponse = {
       protocolVersion: PROTOCOL_VERSION,
       agentInfo: {
         name: 'qwen-code',
@@ -3377,6 +3397,30 @@ class QwenAgent implements Agent {
         },
       },
     };
+    markAcpStartup('initializeHandlerEnd');
+    markAcpStartup('responseBuilt');
+    let startupProfile;
+    try {
+      startupProfile = buildAndFreezeAcpStartupProfile();
+    } catch {
+      startupProfile = undefined;
+    }
+    const requestedProfile = args._meta?.[CHANNEL_STARTUP_PROFILE_META_KEY];
+    const profileRequested =
+      requestedProfile !== null &&
+      typeof requestedProfile === 'object' &&
+      !Array.isArray(requestedProfile) &&
+      (requestedProfile as Record<string, unknown>)['v'] ===
+        CHANNEL_STARTUP_PROFILE_VERSION;
+
+    return profileRequested && startupProfile
+      ? {
+          ...response,
+          _meta: {
+            [CHANNEL_STARTUP_PROFILE_META_KEY]: startupProfile,
+          },
+        }
+      : response;
   }
 
   async authenticate({ methodId }: AuthenticateRequest): Promise<void> {
@@ -3516,6 +3560,8 @@ class QwenAgent implements Agent {
             records: replayPage.records,
             gaps: sessionData?.historyGaps,
             cumulativeUsage: replayUsage,
+            // A resume: the goal restore runs right after this.
+            supersedeUnrestorableGoal: true,
             logger: debugLogger,
           });
           replayUpdates = replay.updates;
@@ -3548,6 +3594,7 @@ class QwenAgent implements Agent {
     }
 
     await this.#restoreWorktreeOnResume(config, session);
+    this.#restoreGoalOnResume(config, session);
 
     const modesData = this.buildModesData(config);
     const availableModels = this.buildAvailableModels(config);
@@ -3608,6 +3655,7 @@ class QwenAgent implements Agent {
     );
 
     await this.#restoreWorktreeOnResume(config, session);
+    this.#restoreGoalOnResume(config, session);
 
     const modesData = this.buildModesData(config);
     const availableModels = this.buildAvailableModels(config);
@@ -3644,6 +3692,63 @@ class QwenAgent implements Agent {
       }
     } catch (error) {
       debugLogger.warn(`ACP worktree restore failed: ${error}`);
+    }
+  }
+
+  /**
+   * Re-registers the `/goal` Stop hook when a resumed transcript ends on an
+   * unsatisfied goal — the daemon counterpart of the TUI's resume restore.
+   * Without this the goal loop silently dies whenever a session is reloaded or
+   * `qwen serve` restarts, even though the transcript still shows it as active.
+   *
+   * The `addItem` bridge that `restoreGoalFromHistory` takes in the TUI is not
+   * used here — the daemon's terminal card goes out over the wire, not into an
+   * Ink history. But restore reaches `unregisterGoalHook` on every path,
+   * including the one where there was nothing to restore, and that clears the
+   * observer the `Session` constructor installed. So it is put back afterwards,
+   * unconditionally: without it a restored goal that later achieves or fails
+   * emits no terminal update and persists no terminal card, and the next reload
+   * revives a goal that already finished.
+   *
+   * Best-effort: a failed restore must not block session load.
+   */
+  #restoreGoalOnResume(config: Config, session: Session): void {
+    try {
+      const records = config.getResumedSessionData()?.conversation.messages;
+      if (!records?.length) return;
+      const restored = restoreGoalFromHistory(
+        collectGoalStatusItemsFromRecords(records),
+        config,
+      );
+      if (restored.restored) {
+        debugLogger.info(
+          `ACP goal restored sessionId=${config.getSessionId()} condition=${restored.condition}`,
+        );
+      } else if (
+        restored.blockedBy &&
+        restored.blockedBy !== 'condition-invalid'
+      ) {
+        // The transcript still holds an active goal card. `HistoryReplayer`
+        // supersedes it with a `cleared` card so the client does not show a
+        // goal that nothing is driving; say why on stderr.
+        //
+        // `condition-invalid` is excluded: `restoreGoalFromHistory` already
+        // wrote a line for it (it is the only caller that knows the condition
+        // is malformed). Logging here too would double-report the one case,
+        // while the env gates below report once.
+        writeStderrLineSafe(
+          `qwen: not restoring the active goal for session ${config.getSessionId()} (${restored.blockedBy}).`,
+        );
+      }
+    } catch (error) {
+      // Not debugLogger: it no-ops unless a debug session is active, and a
+      // failed restore is invisible from the outside — the transcript still
+      // shows the goal as active while no hook drives it.
+      writeStderrLineSafe(
+        `qwen: goal restore failed for session ${config.getSessionId()}: ${error}`,
+      );
+    } finally {
+      session.installGoalTerminalObserver();
     }
   }
 
@@ -7616,10 +7721,7 @@ class QwenAgent implements Agent {
         let refreshed = false;
 
         if (syncOutputLanguage) {
-          const resolved = resolveOutputLanguage(language);
-          const settingValue = isAutoLanguage(language)
-            ? OUTPUT_LANGUAGE_AUTO
-            : resolved;
+          const settingValue = resolveOutputLanguageOrPreserveAuto(language);
 
           let fileWriteOk = false;
           try {
@@ -7681,7 +7783,7 @@ class QwenAgent implements Agent {
             }
             refreshed = results.length === 0 || failedCount === 0;
           }
-          outputLanguage = fileWriteOk ? resolved : null;
+          outputLanguage = fileWriteOk ? settingValue : null;
         }
 
         return { language: resolvedLanguage, outputLanguage, refreshed };
@@ -8057,6 +8159,34 @@ class QwenAgent implements Agent {
         return {
           cleared: !!cleared,
           condition: cleared?.condition,
+        };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionGoalGet: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        // Throws when the session is not live. That is the honest answer: the
+        // goal store is in-memory, so a goal only exists — and only advances —
+        // while its session is resident.
+        this.sessionOrThrow(sessionId);
+        const active = getActiveGoal(sessionId);
+        return {
+          // Projected field by field: `ActiveGoal` also carries `hookId` and
+          // `tokensAtStart`, which are this process's business.
+          active: active
+            ? {
+                condition: active.condition,
+                iterations: active.iterations,
+                setAt: active.setAt,
+                ...(active.lastReason !== undefined
+                  ? { lastReason: active.lastReason }
+                  : {}),
+              }
+            : null,
         };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionContinue: {
