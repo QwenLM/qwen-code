@@ -197,6 +197,20 @@ describe('computeInitialTurnFromHistory', () => {
 });
 
 describe('isExistingFile', () => {
+  it('returns false when the path does not exist', () => {
+    expect(isExistingFile('/tmp/missing.png', () => false)).toBe(false);
+  });
+
+  it('returns false when the path is not a file', () => {
+    expect(
+      isExistingFile(
+        '/tmp/dir',
+        () => true,
+        () => ({ isFile: () => false }),
+      ),
+    ).toBe(false);
+  });
+
   it('returns false when stat fails after exists succeeds', () => {
     expect(
       isExistingFile(
