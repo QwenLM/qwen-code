@@ -40,6 +40,16 @@ describe('fleet shepherd workflow', () => {
     );
     expect(workflow).toContain('--author "${AUTOFIX_BOT}" --base main');
     expect(workflow).toContain('.isCrossRepository != true');
+    // One list call carries all per-PR metadata — no N+1 gh pr view loop.
+    expect(workflow).toContain(
+      '--json number,headRefName,headRefOid,mergeable,isCrossRepository,statusCheckRollup',
+    );
+    expect(workflow).not.toContain('gh pr view');
+    // Actions reads (run state, jobs, logs) ride the workflow token, whose
+    // actions scope is guaranteed, not the PAT.
+    expect(workflow).toContain(
+      'env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run view',
+    );
     // PAT identity is verified before any write.
     expect(workflow).toContain(
       "::error::CI_DEV_BOT_PAT authenticates as '${bot_actor:-unknown}'",
@@ -62,16 +72,31 @@ describe('fleet shepherd workflow', () => {
   });
 
   it('applies each lever idempotently with per-tick caps', () => {
-    // Conflict dispatch: once per conflicted head SHA, marker-deduped.
+    // Conflict dispatch: once per conflicted head SHA, marker-deduped — and
+    // the marker is posted ONLY after a successful dispatch (a marker for a
+    // failed action would freeze the PR at that head forever).
     expect(workflow).toContain(
       '<!-- fleet-shepherd conflict-dispatch sha=%s -->',
     );
     expect(workflow).toContain('-f pr_number="${PR}"');
+    expect(workflow).toContain('return "${rc}"');
+    expect(workflow).toMatch(
+      /if act "#\$\{PR\}: dispatch autofix for conflict resolution"/,
+    );
+    expect(workflow).toMatch(
+      /if act "#\$\{PR\}: rerun failed jobs of \$\{RUN_ID\}/,
+    );
     // Stale-base sync: threshold-gated and self-limiting (behind_by resets),
     // and never while checks are in flight.
     expect(workflow).toContain("BEHIND_SYNC_THRESHOLD: '25'");
     expect(workflow).toContain(
       '"${BEHIND}" -ge "${BEHIND_SYNC_THRESHOLD}" && "${PENDING}" == "0"',
+    );
+    // Sync is a compare-and-swap on the observed head.
+    expect(workflow).toContain('-f expected_head_sha="${HEAD}"');
+    // WAITING and REQUESTED are also not-yet-final check states.
+    expect(workflow).toContain(
+      'IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED")',
     );
     // Flake rerun: only fully-concluded runs, capped attempts, and EVERY
     // failing test must match the registry — one unknown failure aborts.
@@ -79,6 +104,11 @@ describe('fleet shepherd workflow', () => {
     expect(workflow).toContain('<!-- fleet-shepherd rerun run=%s attempt=%s -->');
     expect(workflow).toContain('"${RUN_STATE}" != "completed"');
     expect(workflow).toContain('non-flake failure');
+    // Registry-error trichotomy: a broken pattern must BLOCK, never green-light.
+    expect(workflow).toContain('GATE_RC');
+    expect(workflow).toContain(
+      'flake registry has an invalid pattern — blocking reruns until fixed',
+    );
     // Per-tick blast-radius caps.
     expect(workflow).toContain("MAX_SYNCS_PER_TICK: '3'");
     expect(workflow).toContain("MAX_DISPATCHES_PER_TICK: '2'");
@@ -89,10 +119,24 @@ describe('fleet shepherd workflow', () => {
     expect(workflow).toContain('-f phase=review');
     // Never stacks a liveness scan on top of an in-flight one.
     expect(workflow).toContain('"${SCAN_INFLIGHT}" == "0"');
+    // The liveness signal counts SCHEDULE runs plus the shepherd's own
+    // liveness dispatches (dashboard watermark) — a conflict dispatch is a
+    // workflow_dispatch too and must NOT satisfy the watchdog.
+    expect(workflow).toContain(
+      "[.[] | select(.event == \"schedule\")] | first",
+    );
+    expect(workflow).toContain(
+      '<!-- fleet-shepherd liveness-dispatched: ${LIVENESS_OUT} -->',
+    );
+    // One run-list call feeds both the age and the in-flight computation.
+    expect(workflow.match(/gh run list --repo "\$\{REPO\}" --workflow qwen-autofix\.yml/g) ?? []).toHaveLength(1);
   });
 
   it('maintains one dashboard issue edited in place', () => {
     expect(workflow).toContain("DASHBOARD_TITLE: 'Fleet Shepherd Dashboard'");
+    // gh --jq takes a single expression (no --arg support).
+    expect(workflow).not.toContain('--jq --arg');
+    expect(workflow).toContain("--jq '.[0].number // \"\"'");
     expect(workflow).toContain('gh issue edit');
     expect(workflow).toContain('gh issue create');
     expect(workflow).toContain('do not edit by hand');
@@ -167,6 +211,24 @@ describe('fleet shepherd workflow', () => {
     ).toBe('BLOCK');
     expect(gate(['packages/x/brand-new.test.ts'])).toBe('BLOCK');
     expect(gate([])).toBe('SKIP');
+
+    // Registry-error fail-safe: an invalid ERE in the registry makes grep exit
+    // ≥2 — the workflow's trichotomy must BLOCK, never green-light a rerun.
+    const badReg = join(
+      tmpdir(),
+      `shepherd-badreg-${process.pid}-${Math.random().toString(36).slice(2)}.txt`,
+    );
+    writeFileSync(badReg, 'broken(pattern\n');
+    const errScript = [
+      `GATE_RC=0;`,
+      `NON_FLAKE="$(grep -vE -f <(grep -vE '^[[:space:]]*(#|$)' '${badReg}') /dev/stdin 2>/dev/null)" || GATE_RC=$?;`,
+      `if [[ "\${GATE_RC}" -ge 2 ]]; then echo ERRBLOCK; elif [[ "\${GATE_RC}" -eq 0 ]]; then echo BLOCK; else echo RERUN; fi`,
+    ].join(' ');
+    const verdict = execFileSync('bash', ['-c', errScript], {
+      input: 'src/utils/shell-ast-parser-lazy.test.ts\n',
+      encoding: 'utf8',
+    }).trim();
+    expect(verdict).toBe('ERRBLOCK');
   });
 
   it('ships a non-empty flake registry of valid regexes', () => {

@@ -80,15 +80,24 @@ jobs:
           NOW_EPOCH="$(date -u +%s)"
 
           act() {
-            # act <description> <command...> — honors dry-run, never fails the tick.
-            local desc="$1"
+            # act <description> <command...> — honors dry-run and never aborts
+            # the tick (set -e safe via the if-wrapper at call sites), but DOES
+            # propagate the command's real exit status so callers can make
+            # follow-ups conditional: a dedup marker must never be posted for an
+            # action that failed, or the failure becomes permanent (every later
+            # tick sees the marker and skips while nothing was actually done).
+            local desc="$1" rc=0
             shift
             if [[ "${DRY_RUN}" == "true" ]]; then
               echo "🧪 DRY-RUN: ${desc}"
               return 0
             fi
             echo "▶ ${desc}"
-            "$@" || echo "::warning::action failed (${desc})"
+            "$@" || rc=$?
+            if [[ "${rc}" -ne 0 ]]; then
+              echo "::warning::action failed rc=${rc} (${desc})"
+            fi
+            return "${rc}"
           }
 
           # ---- identity: all PAT writes must be the bot -------------------
@@ -98,45 +107,66 @@ jobs:
             exit 1
           fi
 
+          # ---- dashboard lookup (also carries the liveness watermark) -----
+          # gh's --jq accepts a single expression only (no --arg), so match the
+          # exact title in the expression after an in:title search.
+          DASH_NUM="$(gh issue list --repo "${REPO}" --state open \
+            --search "in:title \"${DASHBOARD_TITLE}\"" \
+            --json number,title --jq '.[0].number // ""' 2> /dev/null || echo '')"
+          PREV_DASH=''
+          if [[ -n "${DASH_NUM}" ]]; then
+            PREV_DASH="$(gh issue view "${DASH_NUM}" --repo "${REPO}" --json body --jq '.body // ""' 2> /dev/null || echo '')"
+          fi
+          PREV_LIVENESS="$(grep -oE '<!-- fleet-shepherd liveness-dispatched: [^ ]+ -->' <<< "${PREV_DASH}" | grep -oE '[0-9T:Z-]{20}' | head -1 || true)"
+
           # ---- scan liveness watchdog -------------------------------------
           # GitHub cron is unreliable (observed 16h of silence on a */10
-          # schedule). If no full autofix scan ran recently and none is in
-          # flight, dispatch one unforced review scan.
-          LAST_SCAN="$(gh run list --repo "${REPO}" --workflow qwen-autofix.yml \
-            --limit 20 --json event,createdAt,status \
-            --jq '[.[] | select(.event == "schedule" or .event == "workflow_dispatch")] | first | .createdAt // ""' 2> /dev/null || echo '')"
-          SCAN_INFLIGHT="$(gh run list --repo "${REPO}" --workflow qwen-autofix.yml \
-            --limit 20 --json event,status \
-            --jq '[.[] | select((.event == "schedule" or .event == "workflow_dispatch") and .status != "completed")] | length' 2> /dev/null || echo 0)"
+          # schedule). Liveness counts only SCHEDULE runs plus the shepherd's
+          # own liveness dispatches (recorded in the dashboard body) — a
+          # conflict dispatch is also a workflow_dispatch event but is NOT a
+          # full scan, so it must not satisfy the watchdog. Reads use the
+          # workflow token: actions read/write is guaranteed there, while the
+          # PAT's actions scope is not.
+          env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run list --repo "${REPO}" --workflow qwen-autofix.yml \
+            --limit 20 --json event,createdAt,status > /tmp/scan-runs.json 2> /dev/null || echo '[]' > /tmp/scan-runs.json
+          LAST_SCHEDULE="$(jq -r '[.[] | select(.event == "schedule")] | first | .createdAt // ""' /tmp/scan-runs.json)"
+          SCAN_INFLIGHT="$(jq -r '[.[] | select((.event == "schedule" or .event == "workflow_dispatch") and .status != "completed")] | length' /tmp/scan-runs.json)"
+          LAST_SIGNAL="${LAST_SCHEDULE}"
+          if [[ -n "${PREV_LIVENESS}" && "${PREV_LIVENESS}" > "${LAST_SIGNAL}" ]]; then
+            LAST_SIGNAL="${PREV_LIVENESS}"
+          fi
           SCAN_AGE_MIN=99999
-          if [[ -n "${LAST_SCAN}" ]]; then
-            SCAN_AGE_MIN=$(( (NOW_EPOCH - $(date -u -d "${LAST_SCAN}" +%s)) / 60 ))
+          if [[ -n "${LAST_SIGNAL}" ]]; then
+            SCAN_AGE_MIN=$(( (NOW_EPOCH - $(date -u -d "${LAST_SIGNAL}" +%s)) / 60 ))
           fi
-          echo "🫀 last full scan: ${LAST_SCAN:-never} (${SCAN_AGE_MIN}m ago), in-flight: ${SCAN_INFLIGHT}"
+          LIVENESS_OUT="${PREV_LIVENESS}"
+          echo "🫀 last scan signal: ${LAST_SIGNAL:-never} (${SCAN_AGE_MIN}m ago), in-flight: ${SCAN_INFLIGHT}"
           if [[ "${SCAN_AGE_MIN}" -ge "${SCAN_LIVENESS_MINUTES}" && "${SCAN_INFLIGHT}" == "0" ]]; then
-            act "scan liveness: dispatch unforced review scan" \
-              env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh workflow run qwen-autofix.yml --repo "${REPO}" -f phase=review
+            if act "scan liveness: dispatch unforced review scan" \
+              env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh workflow run qwen-autofix.yml --repo "${REPO}" -f phase=review; then
+              LIVENESS_OUT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            fi
           fi
 
-          # ---- walk the bot fleet -----------------------------------------
+          # ---- walk the bot fleet (one list call carries all per-PR meta) --
           gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" --base main \
-            --limit 50 --json number,headRefName,isCrossRepository \
-            --jq '.[] | select(.isCrossRepository != true) | .number' > /tmp/fleet.txt || true
+            --limit 50 --json number,headRefName,headRefOid,mergeable,isCrossRepository,statusCheckRollup \
+            --jq '[.[] | select(.isCrossRepository != true)]' > /tmp/fleet.json 2> /dev/null || echo '[]' > /tmp/fleet.json
 
-          while IFS= read -r PR; do
-            [[ -z "${PR}" ]] && continue
-            META="$(gh pr view "${PR}" --repo "${REPO}" \
-              --json mergeable,headRefName,headRefOid,statusCheckRollup 2> /dev/null || echo '{}')"
-            BRANCH="$(jq -r '.headRefName // ""' <<< "${META}")"
-            HEAD="$(jq -r '.headRefOid // ""' <<< "${META}")"
-            MERGEABLE="$(jq -r '.mergeable // "UNKNOWN"' <<< "${META}")"
+          while IFS= read -r ROW; do
+            [[ -z "${ROW}" ]] && continue
+            PR="$(jq -r '.number' <<< "${ROW}")"
+            BRANCH="$(jq -r '.headRefName // ""' <<< "${ROW}")"
+            HEAD="$(jq -r '.headRefOid // ""' <<< "${ROW}")"
+            MERGEABLE="$(jq -r '.mergeable // "UNKNOWN"' <<< "${ROW}")"
             if [[ -z "${BRANCH}" || -z "${HEAD}" ]]; then
-              echo "⚠️ #${PR}: metadata fetch failed; skipping this tick"
-              DASH_ROWS="${DASH_ROWS}| #${PR} | ? | metadata fetch failed | — |\n"
+              echo "⚠️ #${PR}: incomplete metadata; skipping this tick"
+              DASH_ROWS="${DASH_ROWS}| #${PR} | ? | incomplete metadata | — |\n"
               continue
             fi
-            PENDING="$(jq -r '[.statusCheckRollup[]? | select((.status // "") | IN("QUEUED", "IN_PROGRESS", "PENDING"))] | length' <<< "${META}")"
-            FAILED_TEST_URL="$(jq -r '[.statusCheckRollup[]? | select(.conclusion == "FAILURE") | select(.name | startswith("Test (ubuntu")) | .detailsUrl][0] // ""' <<< "${META}")"
+            # WAITING and REQUESTED are also not-yet-final check states.
+            PENDING="$(jq -r '[.statusCheckRollup[]? | select((.status // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED"))] | length' <<< "${ROW}")"
+            FAILED_TEST_URL="$(jq -r '[.statusCheckRollup[]? | select(.conclusion == "FAILURE") | select(.name | startswith("Test (ubuntu")) | .detailsUrl][0] // ""' <<< "${ROW}")"
             BEHIND="$(gh api "repos/${REPO}/compare/main...${HEAD}" --jq '.behind_by // 0' 2> /dev/null || echo 0)"
             gh api "repos/${REPO}/issues/${PR}/comments" --paginate 2> /dev/null > /tmp/ic.json || echo '[]' > /tmp/ic.json
             MY_MARKS="$(jq -r --arg ab "${AUTOFIX_BOT}" '[.[] | select(.user.login == $ab) | .body] | join("\n")' /tmp/ic.json)"
@@ -145,29 +175,40 @@ jobs:
             ACTION_NOTE='—'
 
             # 1) conflict → dispatch the loop for this PR, once per head SHA.
+            # The dedup marker is posted ONLY when the dispatch succeeded — a
+            # marker for a failed dispatch would freeze the PR at this head.
             if [[ "${MERGEABLE}" == "CONFLICTING" ]]; then
               STATUS_NOTE='conflicting'
               if [[ "${MY_MARKS}" == *"<!-- fleet-shepherd conflict-dispatch sha=${HEAD} -->"* ]]; then
                 ACTION_NOTE='conflict dispatch already sent for this head'
               elif [[ "${DISPATCHES}" -lt "${MAX_DISPATCHES_PER_TICK}" ]]; then
-                act "#${PR}: dispatch autofix for conflict resolution" \
-                  env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh workflow run qwen-autofix.yml --repo "${REPO}" -f pr_number="${PR}"
-                act "#${PR}: post conflict notice" \
-                  gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🐑 Merge conflict with main detected — dispatched the autofix loop to resolve it. / 检测到与 main 的合并冲突，已触发 autofix 处理。\n\n<!-- fleet-shepherd conflict-dispatch sha=%s -->' "${HEAD}")"
-                DISPATCHES=$(( DISPATCHES + 1 ))
-                ACTION_NOTE='dispatched conflict resolution'
+                if act "#${PR}: dispatch autofix for conflict resolution" \
+                  env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh workflow run qwen-autofix.yml --repo "${REPO}" -f pr_number="${PR}"; then
+                  act "#${PR}: post conflict notice" \
+                    gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🐑 Merge conflict with main detected — dispatched the autofix loop to resolve it. / 检测到与 main 的合并冲突，已触发 autofix 处理。\n\n<!-- fleet-shepherd conflict-dispatch sha=%s -->' "${HEAD}")"
+                  DISPATCHES=$(( DISPATCHES + 1 ))
+                  ACTION_NOTE='dispatched conflict resolution'
+                else
+                  ACTION_NOTE='conflict dispatch FAILED — will retry next tick'
+                fi
               else
                 ACTION_NOTE='dispatch cap reached this tick'
               fi
 
             # 2) stale base → sync. Self-limiting: behind_by resets on sync.
+            # expected_head_sha makes the sync a compare-and-swap: if the loop
+            # pushed between our read and this call, GitHub rejects it and the
+            # next tick re-evaluates the fresh head.
             elif [[ "${MERGEABLE}" == "MERGEABLE" && "${BEHIND}" -ge "${BEHIND_SYNC_THRESHOLD}" && "${PENDING}" == "0" ]]; then
               STATUS_NOTE="behind by ${BEHIND}"
               if [[ "${SYNCS}" -lt "${MAX_SYNCS_PER_TICK}" ]]; then
-                act "#${PR}: update-branch (behind by ${BEHIND})" \
-                  gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" --silent
-                SYNCS=$(( SYNCS + 1 ))
-                ACTION_NOTE='synced with main'
+                if act "#${PR}: update-branch (behind by ${BEHIND})" \
+                  gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" -f expected_head_sha="${HEAD}" --silent; then
+                  SYNCS=$(( SYNCS + 1 ))
+                  ACTION_NOTE='synced with main'
+                else
+                  ACTION_NOTE='sync rejected (head moved?) — will retry next tick'
+                fi
               else
                 ACTION_NOTE='sync cap reached this tick'
               fi
@@ -182,10 +223,12 @@ jobs:
             # downstream of the test job) neither allow nor block on their own.
             elif [[ -n "${FAILED_TEST_URL}" && "${PENDING}" == "0" ]]; then
               STATUS_NOTE='ci red'
-              RUN_ID="$(grep -oE '/runs/[0-9]+' <<< "${FAILED_TEST_URL}" | grep -oE '[0-9]+' | head -1)"
-              RUN_STATE="$(gh run view "${RUN_ID}" --repo "${REPO}" --json status --jq '.status' 2> /dev/null || echo '')"
+              RUN_ID="$(grep -oE '/runs/[0-9]+' <<< "${FAILED_TEST_URL}" | grep -oE '[0-9]+' | head -1 || true)"
+              RUN_STATE="$(env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run view "${RUN_ID}" --repo "${REPO}" --json status --jq '.status' 2> /dev/null || echo '')"
               ATTEMPTS="$(grep -c "<!-- fleet-shepherd rerun run=${RUN_ID} " <<< "${MY_MARKS}" || true)"
-              if [[ "${RUN_STATE}" != "completed" ]]; then
+              if [[ -z "${RUN_ID}" ]]; then
+                ACTION_NOTE='could not extract run id from check URL — leaving alone'
+              elif [[ "${RUN_STATE}" != "completed" ]]; then
                 ACTION_NOTE='run not concluded yet'
               elif [[ "${ATTEMPTS}" -ge "${RERUN_MAX_ATTEMPTS}" ]]; then
                 ACTION_NOTE="rerun cap (${ATTEMPTS}/${RERUN_MAX_ATTEMPTS}) — needs a human"
@@ -193,21 +236,34 @@ jobs:
                 : > /tmp/fails.txt
                 while IFS= read -r JOB_ID; do
                   [[ -z "${JOB_ID}" ]] && continue
-                  gh api "repos/${REPO}/actions/jobs/${JOB_ID}/logs" 2> /dev/null \
+                  env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh api "repos/${REPO}/actions/jobs/${JOB_ID}/logs" 2> /dev/null \
                     | grep -oE 'FAIL[[:space:]]+[^ ]+\.test\.[a-z]+' | awk '{print $NF}' >> /tmp/fails.txt || true
-                done < <(gh run view "${RUN_ID}" --repo "${REPO}" --json jobs \
+                done < <(env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run view "${RUN_ID}" --repo "${REPO}" --json jobs \
                   --jq '.jobs[] | select(.conclusion == "failure") | .databaseId' 2> /dev/null)
                 sort -u /tmp/fails.txt -o /tmp/fails.txt
+                # Trichotomy on the registry filter: rc=0 → a non-flake failure
+                # exists (block); rc=1 → every failure matched (rerun); rc≥2 →
+                # registry/pattern ERROR — fail SAFE by blocking, never by
+                # rerunning on a broken registry.
+                GATE_RC=0
+                NON_FLAKE="$(grep -vE -f <(grep -vE '^[[:space:]]*(#|$)' "${FLAKE_FILE}") /tmp/fails.txt 2> /dev/null)" || GATE_RC=$?
                 if [[ ! -s /tmp/fails.txt ]]; then
                   ACTION_NOTE='no failing tests parsed from any failed job — leaving alone'
-                elif grep -vE -f <(grep -vE '^[[:space:]]*(#|$)' "${FLAKE_FILE}") /tmp/fails.txt > /dev/null; then
-                  ACTION_NOTE="non-flake failure ($(grep -vE -f <(grep -vE '^[[:space:]]*(#|$)' "${FLAKE_FILE}") /tmp/fails.txt | head -1)) — leaving for the loop"
+                elif [[ "${GATE_RC}" -ge 2 ]]; then
+                  ACTION_NOTE='flake registry has an invalid pattern — blocking reruns until fixed'
+                elif [[ "${GATE_RC}" -eq 0 ]]; then
+                  ACTION_NOTE="non-flake failure ($(head -1 <<< "${NON_FLAKE}")) — leaving for the loop"
                 else
-                  act "#${PR}: rerun failed jobs of ${RUN_ID} (all failures known-flaky)" \
-                    env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run rerun "${RUN_ID}" --repo "${REPO}" --failed
-                  act "#${PR}: record rerun attempt" \
-                    gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🐑 Test failures all match the known-flake registry — re-ran failed jobs. / 失败均命中已知 flaky 清单，已重跑失败任务。\n\n<!-- fleet-shepherd rerun run=%s attempt=%s -->' "${RUN_ID}" "$(( ATTEMPTS + 1 ))")"
-                  ACTION_NOTE="reran flaky run (attempt $(( ATTEMPTS + 1 )))"
+                  # Marker only after a successful rerun: a phantom marker would
+                  # burn the attempt budget without any rerun happening.
+                  if act "#${PR}: rerun failed jobs of ${RUN_ID} (all failures known-flaky)" \
+                    env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run rerun "${RUN_ID}" --repo "${REPO}" --failed; then
+                    act "#${PR}: record rerun attempt" \
+                      gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🐑 Test failures all match the known-flake registry — re-ran failed jobs. / 失败均命中已知 flaky 清单，已重跑失败任务。\n\n<!-- fleet-shepherd rerun run=%s attempt=%s -->' "${RUN_ID}" "$(( ATTEMPTS + 1 ))")"
+                    ACTION_NOTE="reran flaky run (attempt $(( ATTEMPTS + 1 )))"
+                  else
+                    ACTION_NOTE='rerun FAILED — will retry next tick'
+                  fi
                 fi
               fi
             elif [[ "${PENDING}" != "0" ]]; then
@@ -216,20 +272,22 @@ jobs:
 
             echo "🐑 #${PR} [${STATUS_NOTE}] → ${ACTION_NOTE}"
             DASH_ROWS="${DASH_ROWS}| #${PR} | \`${HEAD:0:9}\` | ${STATUS_NOTE} | ${ACTION_NOTE} |\n"
-          done < /tmp/fleet.txt
+          done < <(jq -c '.[]' /tmp/fleet.json)
 
           # ---- dashboard: one issue, edited in place ----------------------
           {
             echo "Auto-maintained by the Fleet Shepherd workflow — do not edit by hand."
             echo
-            echo "Last tick: $(date -u +%Y-%m-%dT%H:%M:%SZ) · full-scan age: ${SCAN_AGE_MIN}m · syncs: ${SYNCS} · dispatches: ${DISPATCHES}"
+            echo "Last tick: $(date -u +%Y-%m-%dT%H:%M:%SZ) · scan-signal age: ${SCAN_AGE_MIN}m · syncs: ${SYNCS} · dispatches: ${DISPATCHES}"
             echo
             echo '| PR | Head | State | Action this tick |'
             echo '| --- | --- | --- | --- |'
             printf '%b' "${DASH_ROWS}"
+            if [[ -n "${LIVENESS_OUT}" ]]; then
+              echo
+              echo "<!-- fleet-shepherd liveness-dispatched: ${LIVENESS_OUT} -->"
+            fi
           } > /tmp/dashboard.md
-          DASH_NUM="$(gh issue list --repo "${REPO}" --state open --search "in:title \"${DASHBOARD_TITLE}\"" \
-            --json number,title --jq --arg t "${DASHBOARD_TITLE}" '[.[] | select(.title == $t)] | first | .number // ""' 2> /dev/null || echo '')"
           if [[ -z "${DASH_NUM}" ]]; then
             act "create dashboard issue" \
               gh issue create --repo "${REPO}" --title "${DASHBOARD_TITLE}" --body-file /tmp/dashboard.md
