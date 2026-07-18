@@ -2009,6 +2009,7 @@ export async function runQwenServe(
   const workspaceInputs = rawWorkspaces.map((workspace) => ({
     raw: workspace,
     cwd: validateAndCanonicalizeWorkspace(workspace),
+    displayName: undefined as string | undefined,
     removable: false,
     registrationIds: [] as string[],
   }));
@@ -2075,6 +2076,7 @@ export async function runQwenServe(
       const stored = await workspaceRegistrationStore.read();
       for (const storedWorkspace of stored.workspaces) {
         const registrationId = workspaceRegistrationId(storedWorkspace);
+        const displayName = stored.displayNames?.[registrationId];
         let cwd: string;
         try {
           cwd = validateAndCanonicalizeWorkspace(storedWorkspace);
@@ -2091,6 +2093,7 @@ export async function runQwenServe(
         );
         if (existingInput) {
           existingInput.registrationIds.push(registrationId);
+          existingInput.displayName ??= displayName;
           continue;
         }
         const nested = workspaceInputs.some(
@@ -2117,6 +2120,7 @@ export async function runQwenServe(
         workspaceInputs.push({
           raw: storedWorkspace,
           cwd,
+          displayName,
           removable: true,
           registrationIds: [registrationId],
         });
@@ -3378,6 +3382,9 @@ export async function runQwenServe(
       {
         workspaceId: daemonWorkspaceHash,
         workspaceCwd: boundWorkspace,
+        ...(workspaceInputs[0]?.displayName
+          ? { displayName: workspaceInputs[0].displayName }
+          : {}),
         primary: true,
         trusted: trustedWorkspace,
         removable: false,
@@ -3672,6 +3679,9 @@ export async function runQwenServe(
       workspaceRuntimes.push({
         workspaceId: secondaryWorkspaceHash,
         workspaceCwd: workspaceInput.cwd,
+        ...(workspaceInput.displayName
+          ? { displayName: workspaceInput.displayName }
+          : {}),
         primary: false,
         trusted: secondaryTrusted,
         removable: workspaceInput.removable,

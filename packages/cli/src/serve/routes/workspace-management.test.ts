@@ -22,6 +22,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   workspaceRegistrationId,
+  WorkspaceRegistrationStoreCommittedError,
   WorkspaceRegistrationStoreLimitError,
   type WorkspaceRegistrationStore,
 } from '../workspace-registration-store.js';
@@ -223,6 +224,160 @@ describe('POST /workspaces', () => {
     expect(res.body).not.toHaveProperty('persisted');
   });
 
+  it('registers and persists an optional display name', async () => {
+    const add = vi.fn().mockResolvedValue(true);
+    const registry = createMockRegistry([makeRuntime('/some-other-dir')]);
+    const { app } = createApp({
+      workspaceRegistry: registry,
+      workspaceRegistrationStore: {
+        add,
+        read: vi.fn().mockResolvedValue({ workspaces: [] }),
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app).post('/workspaces').send({
+      cwd: REAL_DIR,
+      persist: true,
+      displayName: 'Qwen SDK',
+    });
+
+    expect(res.status).toBe(201);
+    expect(res.body.displayName).toBe('Qwen SDK');
+    expect(add).toHaveBeenCalledWith(REAL_DIR, 'Qwen SDK');
+    expect(registry.getByWorkspaceCwd(REAL_DIR)?.displayName).toBe('Qwen SDK');
+  });
+
+  it('restores the name of an inactive persisted registration', async () => {
+    const registrationId = workspaceRegistrationId(REAL_DIR);
+    const runtime = makeRuntime(REAL_DIR);
+    const add = vi.fn();
+    const registry = createMockRegistry([makeRuntime('/some-other-dir')]);
+    const { app } = createApp({
+      workspaceRegistry: registry,
+      createWorkspaceRuntime: vi.fn().mockResolvedValue(runtime),
+      workspaceRegistrationStore: {
+        add,
+        read: vi.fn().mockResolvedValue({
+          workspaces: [REAL_DIR],
+          displayNames: { [registrationId]: 'Persisted name' },
+        }),
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app)
+      .post('/workspaces')
+      .send({ cwd: REAL_DIR, persist: true });
+
+    expect(res.status).toBe(201);
+    expect(res.body.displayName).toBe('Persisted name');
+    expect(runtime.displayName).toBe('Persisted name');
+    expect(runtime.registrationIds).toEqual([registrationId]);
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it('clears the name of an inactive persisted registration', async () => {
+    const registrationId = workspaceRegistrationId(REAL_DIR);
+    const runtime = makeRuntime(REAL_DIR);
+    const setDisplayNameByIds = vi.fn().mockResolvedValue(true);
+    const { app } = createApp({
+      workspaceRegistry: createMockRegistry([makeRuntime('/some-other-dir')]),
+      createWorkspaceRuntime: vi.fn().mockResolvedValue(runtime),
+      workspaceRegistrationStore: {
+        read: vi.fn().mockResolvedValue({
+          workspaces: [REAL_DIR],
+          displayNames: { [registrationId]: 'Persisted name' },
+        }),
+        setDisplayNameByIds,
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app).post('/workspaces').send({
+      cwd: REAL_DIR,
+      persist: true,
+      displayName: '',
+    });
+
+    expect(res.status).toBe(201);
+    expect(res.body).not.toHaveProperty('displayName');
+    expect(runtime).not.toHaveProperty('displayName');
+    expect(setDisplayNameByIds).toHaveBeenCalledWith(
+      [registrationId],
+      undefined,
+    );
+  });
+
+  it.each([
+    { displayName: null },
+    { displayName: 'a'.repeat(257) },
+    { displayName: 'bad\u0000name' },
+  ])('rejects an invalid display name: $displayName', async (body) => {
+    const { app, deps } = createApp({
+      workspaceRegistry: createMockRegistry([makeRuntime('/some-other-dir')]),
+    });
+
+    const res = await request(app)
+      .post('/workspaces')
+      .send({ cwd: REAL_DIR, ...body });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_display_name');
+    expect(deps.createWorkspaceRuntime).not.toHaveBeenCalled();
+  });
+
+  it('updates a display name while promoting an existing workspace', async () => {
+    const runtime = makeRuntime(REAL_DIR, { displayName: 'Old name' });
+    const setDisplayNameByIds = vi.fn().mockResolvedValue(true);
+    const { app } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      workspaceRegistrationStore: {
+        add: vi.fn(),
+        read: vi.fn().mockResolvedValue({ workspaces: [REAL_DIR] }),
+        setDisplayNameByIds,
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app).post('/workspaces').send({
+      cwd: REAL_DIR,
+      persist: true,
+      displayName: 'Promoted name',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.displayName).toBe('Promoted name');
+    expect(setDisplayNameByIds).toHaveBeenCalledWith(
+      [workspaceRegistrationId(REAL_DIR)],
+      'Promoted name',
+    );
+    expect(runtime.displayName).toBe('Promoted name');
+  });
+
+  it('clears a concurrently persisted name while promoting', async () => {
+    const runtime = makeRuntime(REAL_DIR, { displayName: 'Process name' });
+    const setDisplayNameByIds = vi.fn().mockResolvedValue(true);
+    const { app } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      workspaceRegistrationStore: {
+        add: vi.fn().mockResolvedValue(false),
+        read: vi.fn().mockResolvedValue({ workspaces: [] }),
+        setDisplayNameByIds,
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app).post('/workspaces').send({
+      cwd: REAL_DIR,
+      persist: true,
+      displayName: '',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body).not.toHaveProperty('displayName');
+    expect(setDisplayNameByIds).toHaveBeenCalledWith(
+      [workspaceRegistrationId(REAL_DIR)],
+      undefined,
+    );
+    expect(runtime).not.toHaveProperty('displayName');
+  });
+
   it('does not double-count a runtime while its addition hook is pending', async () => {
     const firstDir = await mkdtemp(join(REAL_DIR, 'qws-capacity-a-'));
     const secondDir = await mkdtemp(join(REAL_DIR, 'qws-capacity-b-'));
@@ -298,6 +453,7 @@ describe('POST /workspaces', () => {
       workspaceRegistry: createMockRegistry([makeRuntime('/some-other-dir')]),
       workspaceRegistrationStore: {
         add,
+        read: vi.fn().mockResolvedValue({ workspaces: [] }),
       } as unknown as WorkspaceRegistrationStore,
     });
     const res = await request(app)
@@ -346,6 +502,49 @@ describe('POST /workspaces', () => {
     expect(res.status).toBe(200);
     expect(res.body.persisted).toBe(true);
     expect(add).not.toHaveBeenCalled();
+  });
+
+  it('updates a persisted symlink alias when promoting a process-local runtime', async () => {
+    const target = await mkdtemp(join(REAL_DIR, 'qws-promote-target-'));
+    const alias = `${target}-alias`;
+    await symlink(target, alias, 'dir');
+    try {
+      const aliasId = workspaceRegistrationId(alias);
+      const runtime = makeRuntime(target);
+      const add = vi.fn();
+      const setDisplayNameByIds = vi.fn().mockResolvedValue(true);
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([runtime]),
+        workspaceRegistrationStore: {
+          add,
+          read: vi.fn().mockResolvedValue({
+            workspaces: [alias],
+            displayNames: { [aliasId]: 'Old alias name' },
+          }),
+          setDisplayNameByIds,
+        } as unknown as WorkspaceRegistrationStore,
+      });
+
+      const res = await request(app).post('/workspaces').send({
+        cwd: target,
+        persist: true,
+        displayName: 'Updated alias name',
+      });
+
+      expect(res.status).toBe(200);
+      expect(add).not.toHaveBeenCalled();
+      expect(setDisplayNameByIds).toHaveBeenCalledWith(
+        [aliasId],
+        'Updated alias name',
+      );
+      expect(runtime.registrationIds).toEqual([aliasId]);
+      expect(runtime.displayName).toBe('Updated alias name');
+    } finally {
+      await Promise.all([
+        rm(alias, { force: true }),
+        rm(target, { recursive: true, force: true }),
+      ]);
+    }
   });
 
   it('promotes an existing workspace without a dynamic runtime factory', async () => {
@@ -452,6 +651,7 @@ describe('POST /workspaces', () => {
     const { app } = createApp({
       workspaceRegistry: registry,
       workspaceRegistrationStore: {
+        read: vi.fn().mockResolvedValue({ workspaces: [] }),
         add: vi.fn().mockRejectedValue(new Error('disk full')),
       } as unknown as WorkspaceRegistrationStore,
     });
@@ -498,6 +698,7 @@ describe('POST /workspaces', () => {
       createWorkspaceRuntime: vi.fn().mockResolvedValue(runtime),
       workspaceRegistrationStore: {
         add: vi.fn().mockResolvedValue(true),
+        read: vi.fn().mockResolvedValue({ workspaces: [] }),
         removeById,
       } as unknown as WorkspaceRegistrationStore,
     });
@@ -512,6 +713,156 @@ describe('POST /workspaces', () => {
       expect.stringMatching(/^[a-f0-9]{16}$/),
     );
     expect(runtime.bridge.shutdown).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('PATCH /workspaces/:workspace', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('sets and clears a display name by workspace id', async () => {
+    const runtime = makeRuntime(REAL_DIR, {
+      registrationIds: [workspaceRegistrationId(REAL_DIR)],
+    });
+    const setDisplayNameByIds = vi.fn().mockResolvedValue(true);
+    const { app } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      workspaceRegistrationStore: {
+        setDisplayNameByIds,
+      } as unknown as WorkspaceRegistrationStore,
+    });
+    const path = `/workspaces/${encodeURIComponent(runtime.workspaceId)}`;
+
+    const set = await request(app)
+      .patch(path)
+      .send({ displayName: 'SDK workspace' });
+    expect(set.status).toBe(200);
+    expect(set.body).toMatchObject({
+      id: runtime.workspaceId,
+      displayName: 'SDK workspace',
+    });
+    expect(setDisplayNameByIds).toHaveBeenLastCalledWith(
+      [workspaceRegistrationId(REAL_DIR)],
+      'SDK workspace',
+    );
+
+    const clear = await request(app)
+      .patch(`/workspaces/${encodeURIComponent(REAL_DIR)}`)
+      .send({ displayName: null });
+    expect(clear.status).toBe(200);
+    expect(clear.body).not.toHaveProperty('displayName');
+    expect(runtime).not.toHaveProperty('displayName');
+    expect(setDisplayNameByIds).toHaveBeenLastCalledWith(
+      [workspaceRegistrationId(REAL_DIR)],
+      undefined,
+    );
+  });
+
+  it('allows duplicate display names and clears with an empty string', async () => {
+    const first = makeRuntime('/workspace-a', { workspaceId: 'workspace-a' });
+    const second = makeRuntime('/workspace-b', { workspaceId: 'workspace-b' });
+    const { app } = createApp({
+      workspaceRegistry: createMockRegistry([first, second]),
+    });
+
+    for (const runtime of [first, second]) {
+      const res = await request(app)
+        .patch(`/workspaces/${runtime.workspaceId}`)
+        .send({ displayName: 'Shared name' });
+      expect(res.status).toBe(200);
+    }
+    expect(first.displayName).toBe('Shared name');
+    expect(second.displayName).toBe('Shared name');
+
+    const clear = await request(app)
+      .patch('/workspaces/workspace-a')
+      .send({ displayName: '' });
+    expect(clear.status).toBe(200);
+    expect(first).not.toHaveProperty('displayName');
+  });
+
+  it('does not access persistence for an ephemeral workspace', async () => {
+    const runtime = makeRuntime(REAL_DIR);
+    const setDisplayNameByIds = vi.fn();
+    const { app } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      workspaceRegistrationStore: {
+        setDisplayNameByIds,
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app)
+      .patch(`/workspaces/${encodeURIComponent(runtime.workspaceId)}`)
+      .send({ displayName: 'Process only' });
+
+    expect(res.status).toBe(200);
+    expect(runtime.displayName).toBe('Process only');
+    expect(setDisplayNameByIds).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {},
+    { displayName: 42 },
+    { displayName: 'a'.repeat(257) },
+    { displayName: 'bad\u007fname' },
+  ])('rejects invalid display-name updates: $displayName', async (body) => {
+    const runtime = makeRuntime(REAL_DIR);
+    const { app } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+    });
+
+    const res = await request(app)
+      .patch(`/workspaces/${encodeURIComponent(runtime.workspaceId)}`)
+      .send(body);
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_display_name');
+    expect(runtime).not.toHaveProperty('displayName');
+  });
+
+  it('does not change the runtime when persistence fails', async () => {
+    const runtime = makeRuntime(REAL_DIR, {
+      displayName: 'Original',
+      registrationIds: [workspaceRegistrationId(REAL_DIR)],
+    });
+    const { app } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      workspaceRegistrationStore: {
+        setDisplayNameByIds: vi.fn().mockRejectedValue(new Error('disk full')),
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app)
+      .patch(`/workspaces/${encodeURIComponent(runtime.workspaceId)}`)
+      .send({ displayName: 'Changed' });
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('workspace_registration_store_error');
+    expect(runtime.displayName).toBe('Original');
+  });
+
+  it('accepts a display-name write committed before a sync failure', async () => {
+    const runtime = makeRuntime(REAL_DIR, {
+      registrationIds: [workspaceRegistrationId(REAL_DIR)],
+    });
+    const { app } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      workspaceRegistrationStore: {
+        setDisplayNameByIds: vi
+          .fn()
+          .mockRejectedValue(
+            new WorkspaceRegistrationStoreCommittedError('sync failed'),
+          ),
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app)
+      .patch(`/workspaces/${encodeURIComponent(runtime.workspaceId)}`)
+      .send({ displayName: 'Committed' });
+
+    expect(res.status).toBe(200);
+    expect(runtime.displayName).toBe('Committed');
   });
 });
 
@@ -1090,6 +1441,10 @@ describe('persistent workspace registrations', () => {
       schemaVersion: 1,
       primaryWorkspace: '/primary',
       workspaces: [REAL_DIR, alias, '/currently-unavailable'],
+      displayNames: {
+        [workspaceRegistrationId(REAL_DIR)]: 'Canonical workspace',
+        [aliasId]: 'Alias workspace',
+      },
     });
     const { app } = createApp({
       workspaceRegistry: createMockRegistry([
@@ -1107,12 +1462,14 @@ describe('persistent workspace registrations', () => {
       expect.objectContaining({
         id: workspaceRegistrationId(REAL_DIR),
         cwd: REAL_DIR,
+        displayName: 'Canonical workspace',
         active: true,
         persisted: true,
       }),
       expect.objectContaining({
         id: aliasId,
         cwd: alias,
+        displayName: 'Alias workspace',
         active: true,
         persisted: true,
       }),
@@ -1147,6 +1504,7 @@ describe('persistent workspace registrations', () => {
       active: true,
       restartRequired: true,
     });
+    expect(active.registrationIds).toEqual([aliasId]);
 
     const aliasResult = await request(app).delete(
       `/workspace-registrations/${aliasId}`,
@@ -1157,6 +1515,7 @@ describe('persistent workspace registrations', () => {
       active: true,
       restartRequired: true,
     });
+    expect(active.registrationIds).toEqual([]);
   });
 
   it('does not require restart when forgetting an alias of a static runtime', async () => {
@@ -1248,8 +1607,9 @@ describe('persistent workspace registrations', () => {
 
   it('serializes forget and runtime removal for the same workspace', async () => {
     const registrationId = 'runtime-alias';
+    const remainingRegistrationId = 'runtime-alias-2';
     const runtime = makeRuntime(REAL_DIR, {
-      registrationIds: [registrationId],
+      registrationIds: [registrationId, remainingRegistrationId],
     });
     let finishForget!: () => void;
     const forgetting = new Promise<boolean>((resolve) => {
@@ -1292,7 +1652,7 @@ describe('persistent workspace registrations', () => {
     const removalResult = pendingRemoval.then((res) => res);
     await vi.waitFor(() => expect(removeByIds).toHaveBeenCalledOnce());
     const forgetWhileRemoving = await request(app).delete(
-      `/workspace-registrations/${registrationId}`,
+      `/workspace-registrations/${remainingRegistrationId}`,
     );
     expect(forgetWhileRemoving.status).toBe(409);
     expect(forgetWhileRemoving.body.code).toBe('workspace_removal_in_progress');

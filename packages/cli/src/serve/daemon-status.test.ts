@@ -146,6 +146,7 @@ describe('buildDaemonStatusResponse', () => {
         {
           workspaceId: 'secondary',
           workspaceCwd: '/work/secondary',
+          displayName: 'Secondary workspace',
           primary: false,
           trusted: true,
           bridge: secondaryBridge,
@@ -158,6 +159,21 @@ describe('buildDaemonStatusResponse', () => {
     expect(primarySnapshot).toHaveBeenCalledTimes(1);
     expect(secondarySnapshot).toHaveBeenCalledTimes(1);
     expect(response.runtime.sessions.active).toBe(3);
+    expect(response.workspaces).toEqual([
+      {
+        id: 'primary',
+        cwd: BASE_WORKSPACE,
+        primary: true,
+        trusted: true,
+      },
+      {
+        id: 'secondary',
+        cwd: '/work/secondary',
+        displayName: 'Secondary workspace',
+        primary: false,
+        trusted: true,
+      },
+    ]);
   });
 
   it('reports every runtime issue code from daemon counters', async () => {

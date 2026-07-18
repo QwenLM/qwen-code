@@ -253,6 +253,7 @@ export interface DaemonUpdateScheduledTaskRequest {
 export interface DaemonAddWorkspaceResult {
   id: string;
   cwd: string;
+  displayName?: string;
   primary: boolean;
   trusted: boolean;
   persisted?: boolean;
@@ -543,7 +544,7 @@ export interface DaemonWorkspaceActions {
   // Workspace management
   addWorkspace(
     cwd: string,
-    options?: { persist?: boolean },
+    options?: { persist?: boolean; displayName?: string },
   ): Promise<DaemonAddWorkspaceResult>;
   suggestWorkspacePaths(
     prefix: string,

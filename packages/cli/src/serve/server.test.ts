@@ -326,6 +326,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_extensions',
   'session_branch',
   'workspace_channel_observed_contacts',
+  'workspace_display_name',
   'workspace_qualified_rest_core',
   'extension_management_v2',
   'workspace_persisted_transcript',
@@ -377,6 +378,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_extensions' &&
       f !== 'session_branch' &&
       f !== 'workspace_channel_observed_contacts' &&
+      f !== 'workspace_display_name' &&
       f !== 'workspace_qualified_rest_core' &&
       f !== 'extension_management_v2' &&
       f !== 'workspace_persisted_transcript' &&
@@ -420,6 +422,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'multi_workspace_session_rewind',
   'multi_workspace_session_shell',
   'persistent_workspace_registration',
+  'workspace_display_name',
   'workspace_runtime_removal',
   'workspace_qualified_rest_core',
   'workspace_qualified_voice',

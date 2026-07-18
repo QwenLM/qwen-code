@@ -189,6 +189,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'session_branch', 'rate_limit', 'workspace_reload',
  'multi_workspace_sessions', 'multi_workspace_session_rewind',
  'multi_workspace_session_shell', 'persistent_workspace_registration',
+ 'workspace_display_name',
  'workspace_qualified_rest_core', 'workspace_qualified_voice',
  'extension_management_v2', 'workspace_persisted_transcript',
  'workspace_session_export', 'workspace_archived_session_export',
@@ -200,6 +201,8 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 `session_scope_override` is the negotiation handle for the per-request `sessionScope` field on `POST /session` (see below). Older daemons silently ignore the field, so SDK clients should pre-flight `caps.features` for this tag before sending it.
 
 `persistent_workspace_registration` advertises durable registration for workspaces added at runtime. `POST /workspaces` accepts `{ "cwd": "/absolute/path", "persist": true }`; success includes `persisted: true`. Registrations are scoped to the daemon's canonical primary workspace under the user's Qwen home and are restored on the next daemon start. Omitting `persist` preserves process-local registration. `GET /workspace-registrations` lists the stored desired set, and `DELETE /workspace-registrations/:id` forgets an entry for the next restart without hot-removing an active runtime.
+
+`workspace_display_name` advertises optional presentation metadata on registered workspaces. Names do not participate in lookup or routing: `id` and canonical `cwd` remain the only selectors, and duplicate names are allowed. The tag is unconditional because every registered runtime, including a single primary workspace, can carry a process-local name.
 
 `workspace_runtime_removal` advertises synchronous hot removal through `DELETE /workspaces/:workspace`. Capability workspace entries add optional `removable`; only rows with `removable: true` may be removed. Removal also forgets every persistent registration alias for the runtime, but never deletes files, settings, transcripts, or archives.
 
@@ -582,6 +585,11 @@ Response shape:
 }
 ```
 
+Multi-workspace responses also include top-level `workspaces[]` rows with
+`{ id, cwd, displayName?, primary, trusted }`. The optional display name is
+omitted when unset and remains presentation-only; status consumers must keep
+using `id` or `cwd` to correlate runtimes.
+
 `runtime.perf` is optional. When present, it reports daemon-process event loop
 lag, prompt FIFO queue wait samples, and daemon-child pipe byte counters only;
 ACP child event loop lag is not included in `/daemon/status`.
@@ -774,6 +782,7 @@ the daemon log path; `full` may include it for authenticated operators.
     {
       "id": "stable-secondary-workspace-id",
       "cwd": "/canonical/path/to/secondary-workspace",
+      "displayName": "Payments Production",
       "primary": false,
       "trusted": true
     }
@@ -789,16 +798,20 @@ Stable contract: when `v` increments the frame layout has changed in a backwards
 
 > **`workspaceCwd`** is the canonical absolute path for the daemon's primary workspace. Use it to omit `cwd` on `POST /session` (the route falls back to this primary path) and to keep old single-workspace clients compatible. Additive to v=1: pre-§02 v=1 daemons omit the field — clients that target older builds should null-check before consuming it.
 
-> **`workspaces[]`** lists every registered runtime. Newer single-workspace daemons include the primary runtime even when `multi_workspace_sessions` is absent so clients can discover the stable id required by workspace-qualified routes; older daemons may omit the array. Each entry is `{ id, cwd, primary, trusted, removable? }`. The first/primary workspace remains mirrored by `workspaceCwd`; new clients choose a non-primary runtime by passing that entry's `cwd` to `POST /session`. Untrusted workspaces are advertised for diagnostics but reject fresh session creation with `403 untrusted_workspace` until trust changes. `removable` is present on daemons that support runtime removal and is true only for process-dynamic or persistence-restored secondary runtimes.
+> **`workspaces[]`** lists every registered runtime. Newer single-workspace daemons include the primary runtime even when `multi_workspace_sessions` is absent so clients can discover the stable id required by workspace-qualified routes; older daemons may omit the array. Each entry is `{ id, cwd, displayName?, primary, trusted, removable? }`. `displayName` is presentation-only and omitted when unset. The first/primary workspace remains mirrored by `workspaceCwd`; new clients choose a non-primary runtime by passing that entry's `cwd` to `POST /session`. Untrusted workspaces are advertised for diagnostics but reject fresh session creation with `403 untrusted_workspace` until trust changes. `removable` is present on daemons that support runtime removal and is true only for process-dynamic or persistence-restored secondary runtimes.
 
 The workspace feature tags and `workspaces[]` are dynamic. Clients that add a workspace must fetch `/capabilities` again after the mutation completes; the daemon does not broadcast capability changes to clients that cached an earlier response. Forgetting persistence does not unload an active runtime, so that runtime remains advertised until restart.
 
 ### `POST /workspaces`
 
-Register an additional workspace runtime. The path must be an existing, accessible, absolute directory that does not duplicate or nest with another registered workspace. Registration is process-local unless the client sends `persist: true`; clients must pre-flight `persistent_workspace_registration` before requesting persistence.
+Register an additional workspace runtime. The path must be an existing, accessible, absolute directory that does not duplicate or nest with another registered workspace. Registration is process-local unless the client sends `persist: true`; clients must pre-flight `persistent_workspace_registration` before requesting persistence. When `workspace_display_name` is advertised, the request may also include an optional `displayName`.
 
 ```json
-{ "cwd": "/canonical/path/to/secondary-workspace", "persist": true }
+{
+  "cwd": "/canonical/path/to/secondary-workspace",
+  "persist": true,
+  "displayName": "Payments Production"
+}
 ```
 
 A newly created runtime returns `201`; promoting an already-active secondary workspace to persistent returns `200`. Persistent success includes `persisted: true`:
@@ -807,13 +820,38 @@ A newly created runtime returns `201`; promoting an already-active secondary wor
 {
   "id": "stable-workspace-id",
   "cwd": "/canonical/path/to/secondary-workspace",
+  "displayName": "Payments Production",
   "primary": false,
   "trusted": true,
   "persisted": true
 }
 ```
 
-Errors include `400 invalid_path` / `invalid_persist_flag` / `invalid_persist_target`, `409 workspace_exists` / `workspace_nested` / `workspace_limit_reached`, `500 workspace_registration_store_error` / `runtime_creation_failed`, and `501 persistence_not_available` / `not_implemented`.
+`displayName` must be a string no longer than 256 characters and cannot contain C0 (`U+0000`–`U+001F`) or DEL (`U+007F`) control characters. Duplicate display names are allowed. A name supplied with a process-local registration lasts only for that daemon process; `persist: true` stores it with the persistent registration so it can be restored after restart.
+
+Errors include `400 invalid_path` / `invalid_persist_flag` / `invalid_persist_target` / `invalid_display_name`, `409 workspace_exists` / `workspace_nested` / `workspace_limit_reached`, `500 workspace_registration_store_error` / `runtime_creation_failed`, and `501 persistence_not_available` / `not_implemented`.
+
+### `PATCH /workspaces/:workspace`
+
+Set or clear the selected registered runtime's display name. Pre-flight `workspace_display_name`. The selector resolves as an exact workspace id first and then as a URL-encoded canonical absolute cwd; display names are never selectors.
+
+```json
+{ "displayName": "Payments Production" }
+```
+
+`displayName` accepts a string or `null`. An empty string or `null` clears the name; the response omits `displayName` after a clear. String validation and duplicate-name behavior match `POST /workspaces`. For a persistently registered secondary runtime the update is committed to the registration store before the runtime changes; other workspaces update only for the lifetime of the process.
+
+```json
+{
+  "id": "stable-workspace-id",
+  "cwd": "/canonical/path/to/secondary-workspace",
+  "displayName": "Payments Production",
+  "primary": false,
+  "trusted": true
+}
+```
+
+Errors include `400 invalid_display_name` / `workspace_mismatch`, `409 workspace_registration_in_progress` / `workspace_removal_in_progress` / `workspace_update_in_progress`, `500 workspace_registration_store_error`, and `503 daemon_shutting_down`.
 
 ### `DELETE /workspaces/:workspace`
 
@@ -846,6 +884,7 @@ An immediately busy non-force request returns a fast pre-drain activity snapshot
 
 List the persisted desired workspace set for this primary workspace. Entries remain visible with `active: false` when a stored directory could not be restored during the current start.
 An entry remains `active: true` while its runtime is draining because the runtime still owns live resources until removal completes.
+Entries include optional `displayName` when the persistent registration has one.
 
 ```json
 {
@@ -855,6 +894,7 @@ An entry remains `active: true` while its runtime is draining because the runtim
     {
       "id": "stable-registration-id",
       "cwd": "/canonical/path/to/secondary-workspace",
+      "displayName": "Payments Production",
       "active": true,
       "persisted": true
     }

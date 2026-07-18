@@ -52,6 +52,7 @@ Method groups (every method takes an optional `clientId` to stamp `X-Qwen-Client
 | Events              | `subscribeEvents` (SSE generator), `subscribeEventsStream` (raw response)                                                                                                                                                                                                                                                                                                                                                                  |
 | Permissions         | `respondToPermission`, `respondToSessionPermission`                                                                                                                                                                                                                                                                                                                                                                                        |
 | Workspace snapshots | `getWorkspaceMcp`, `getWorkspaceSkills`, `getWorkspaceProviders`, `getWorkspaceEnv`, `getWorkspacePreflight`                                                                                                                                                                                                                                                                                                                               |
+| Workspace lifecycle | `addWorkspace`, `workspaceById`, `workspaceByCwd`; workspace-bound `setDisplayName` and `remove`                                                                                                                                                                                                                                                                                                                                           |
 | Workspace mutations | `writeWorkspaceMemory`, `readWorkspaceMemory`, `rememberWorkspaceMemory`, `getWorkspaceMemoryRememberTask`, `forgetWorkspaceMemory`, `getWorkspaceMemoryForgetTask`, `dreamWorkspaceMemory`, `getWorkspaceMemoryDreamTask`, `listWorkspaceAgents`, `getWorkspaceAgent`, `createWorkspaceAgent`, `updateWorkspaceAgent`, `deleteWorkspaceAgent`, `setWorkspaceToolEnabled`, `setWorkspaceSkillEnabled`, `restartMcpServer`, `initWorkspace` |
 | Files               | `readFile`, `readFileBytes`, `writeFile`, `editFile`, `listDirectory`, `globPaths`, `statPath`                                                                                                                                                                                                                                                                                                                                             |
 | Auth                | `startDeviceFlow`, `pollDeviceFlow`, `cancelDeviceFlow`, `getAuthStatus`                                                                                                                                                                                                                                                                                                                                                                   |
@@ -153,6 +154,20 @@ await client
 ```
 
 Pre-flight `capabilities.features.includes('workspace_skill_toggle')`. The typed `DaemonSkillToggleResult` reports the canonical `skillName`, whether disk state `changed`, activation state (`applied`, `deferred`, or `partial`), and refreshed/failed session counts. `DaemonWorkspaceSkillStatus.userInvocable` is an optional false-only field; absence means the skill is user-invocable.
+
+Workspace display names are optional presentation metadata. Pre-flight `capabilities.features.includes('workspace_display_name')`; workspace ids and canonical paths remain the only selectors, and duplicate display names are valid.
+
+```ts
+const workspace = await client.addWorkspace('/srv/repos/payments', {
+  persist: true,
+  displayName: 'Payments Production',
+});
+
+await client.workspaceById(workspace.id).setDisplayName('Payments Staging');
+await client.workspaceByCwd(workspace.cwd).setDisplayName(null);
+```
+
+`addWorkspace` accepts `displayName?: string` and returns it when set. `workspaceById(...)` and `workspaceByCwd(...)` return a `WorkspaceDaemonClient` whose `setDisplayName(displayName: string | null)` method updates the selected runtime; `null` or an empty string clears it. Names are limited to 256 characters and reject C0/DEL control characters. Only names attached to persistent registrations survive a daemon restart. `DaemonWorkspaceCapability.displayName` remains optional so the SDK continues to interoperate with older daemons.
 
 ## Workflow
 
