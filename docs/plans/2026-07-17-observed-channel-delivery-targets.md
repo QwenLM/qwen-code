@@ -31,7 +31,7 @@
 
 ## Task 2: Workspace relationship store
 
-**Files:** `packages/cli/src/commands/channel/observed-target-store.ts`, `observed-target-store.test.ts`, `daemon-worker.ts`, `daemon-worker.test.ts`
+**Files:** `packages/cli/src/commands/channel/observed-contact-store.ts`, `observed-contact-store.test.ts`, `daemon-worker.ts`, `daemon-worker.test.ts`
 
 - [x] Persist version 1 relationship observations with atomic mode-`0600` writes.
 - [x] Deduplicate by channel, user, group, and topic; refresh labels and timestamps.
@@ -42,7 +42,7 @@
 
 ## Task 3: Authenticated dynamic-observation API
 
-**Files:** `packages/cli/src/serve/routes/workspace-channel-targets.ts`, its test, `server.ts`, `server.test.ts`, `capabilities.ts`
+**Files:** `packages/cli/src/serve/routes/workspace-channel-observed-contacts.ts`, its test, `server.ts`, `server.test.ts`, `capabilities.ts`
 
 - [x] Add singular and qualified `/channel/observed-contacts` GET routes.
 - [x] Parse `freshWithinSeconds`, default to seven days, and reject invalid values.
@@ -67,4 +67,4 @@
 - [x] Run focused base, CLI store, daemon-worker, route, server, runtime, and webhook tests.
 - [x] Run `npm run build && npm run typecheck`.
 - [x] Audit the full diff twice, including untracked files.
-- [ ] Commit, push `feat/channel-observed-targets`, and update Draft PR #7109.
+- [x] Commit, push `feat/channel-observed-targets`, and update Draft PR #7109.

@@ -20,7 +20,7 @@ $QWEN_HOME/channels/daemon/<workspaceHash>/observed-contacts.json
 
 `QWEN_HOME` is process-level, but `<workspaceHash>` partitions data by canonical workspace path. The registry is not stored in the workspace checkout and is not shared as one process-global graph. Its directory uses mode `0700` where supported; the atomic JSON file uses mode `0600`.
 
-The registry stores at most 500 relationship observations. Each observation contains `channelName`, a user identity, an optional group identity, an optional topic identity, and `lastObservedAt`. The deduplication key is `[channelName, user.id, group?.id, topic?.id]`.
+The registry stores at most 500 relationship observations across all channels and conversations in the workspace. Each observation contains `channelName`, a user identity, an optional group identity, an optional topic identity, and `lastObservedAt`. The deduplication key is `[channelName, user.id, group?.id, topic?.id]`. A noisy conversation can therefore evict older observations from another conversation. Observations older than the maximum 365-day readable window are removed on the next accepted write.
 
 ## Observation boundary
 
@@ -120,7 +120,7 @@ Example:
 
 Responses use `Cache-Control: no-store`. The primary route reads only the primary workspace partition. The qualified route requires an exact registered, trusted runtime and never falls back to primary for unknown, untrusted, bootstrapping, draining, or removed workspaces.
 
-A missing registry returns an empty graph. Malformed data returns a sanitized `500` with code `channel_observed_contacts_unavailable`. Invalid freshness returns `400 invalid_freshness`.
+A missing registry returns an empty graph. Malformed data returns a sanitized `500` with code `channel_observed_contacts_unavailable`. Delete the workspace's `observed-contacts.json` file to reset a malformed or unsupported registry; accepted traffic recreates it. Invalid freshness returns `400 invalid_freshness`.
 
 Clients discover the route through the `workspace_channel_observed_contacts` serve capability. The route is read-only and is registered after daemon bearer authentication.
 

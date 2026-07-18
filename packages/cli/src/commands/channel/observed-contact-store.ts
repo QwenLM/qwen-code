@@ -15,7 +15,7 @@ const MAX_OBSERVATIONS = 500;
 const MAX_CHANNEL_NAME_LENGTH = 256;
 const MAX_LABEL_LENGTH = 256;
 const MAX_ID_LENGTH = 4096;
-const MAX_FRESH_WITHIN_SECONDS = 365 * 24 * 60 * 60;
+export const OBSERVED_CONTACT_MAX_FRESH_WITHIN_SECONDS = 365 * 24 * 60 * 60;
 
 interface PersistedObservedContact {
   channelName: string;
@@ -65,16 +65,27 @@ export class ObservedChannelContactStore {
     observation: ObservedChannelContactObservation,
   ): void {
     this.validateObservation(channelName, observation);
+    const observedAt = this.now();
     const next: PersistedObservedContact = {
       channelName,
-      user: { ...observation.user },
-      ...(observation.group ? { group: { ...observation.group } } : {}),
-      ...(observation.topic ? { topic: { ...observation.topic } } : {}),
-      lastObservedAt: this.now().toISOString(),
+      user: this.normalizeIdentity(observation.user),
+      ...(observation.group
+        ? { group: this.normalizeIdentity(observation.group) }
+        : {}),
+      ...(observation.topic
+        ? { topic: this.normalizeIdentity(observation.topic) }
+        : {}),
+      lastObservedAt: observedAt.toISOString(),
     };
     const key = this.observationKey(next);
+    const retentionCutoff =
+      observedAt.getTime() - OBSERVED_CONTACT_MAX_FRESH_WITHIN_SECONDS * 1000;
     const observations = this.readObservations()
-      .filter((candidate) => this.observationKey(candidate) !== key)
+      .filter(
+        (candidate) =>
+          Date.parse(candidate.lastObservedAt) >= retentionCutoff &&
+          this.observationKey(candidate) !== key,
+      )
       .concat(next)
       .sort((a, b) => b.lastObservedAt.localeCompare(a.lastObservedAt))
       .slice(0, this.maxObservations);
@@ -86,7 +97,7 @@ export class ObservedChannelContactStore {
     if (
       !Number.isInteger(freshWithinSeconds) ||
       freshWithinSeconds < 1 ||
-      freshWithinSeconds > MAX_FRESH_WITHIN_SECONDS
+      freshWithinSeconds > OBSERVED_CONTACT_MAX_FRESH_WITHIN_SECONDS
     ) {
       throw new Error('Invalid observed contact freshness.');
     }
@@ -281,8 +292,26 @@ export class ObservedChannelContactStore {
   private isIdentity(value: ObservedChannelIdentity): boolean {
     return (
       this.isBoundedString(value.id, MAX_ID_LENGTH) &&
-      this.isBoundedString(value.label, MAX_LABEL_LENGTH)
+      this.isBoundedString(value.label, MAX_ID_LENGTH)
     );
+  }
+
+  private normalizeIdentity(
+    value: ObservedChannelIdentity,
+  ): ObservedChannelIdentity {
+    return {
+      id: value.id,
+      label: this.truncateLabel(value.label),
+    };
+  }
+
+  private truncateLabel(value: string): string {
+    let result = '';
+    for (const character of value) {
+      if (result.length + character.length > MAX_LABEL_LENGTH) break;
+      result += character;
+    }
+    return result;
   }
 
   private observationKey(observation: PersistedObservedContact): string {

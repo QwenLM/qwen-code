@@ -179,7 +179,7 @@ vi.mock('./runtime.js', () => ({
   sessionsPath: mockSessionsPath,
 }));
 
-vi.mock('./observed-target-store.js', () => ({
+vi.mock('./observed-contact-store.js', () => ({
   ObservedChannelContactStore: mockObservedContactStore,
 }));
 

@@ -63,7 +63,7 @@ import {
   type ParsedChannel,
 } from './runtime.js';
 import { BridgeChannelMemoryIntentClassifier } from './memory-intent-classifier.js';
-import { ObservedChannelContactStore } from './observed-target-store.js';
+import { ObservedChannelContactStore } from './observed-contact-store.js';
 
 const SESSION_SHELL_COMMAND_FEATURE = 'session_shell_command';
 const MAX_ACTIVE_WEBHOOK_TASKS = 16;

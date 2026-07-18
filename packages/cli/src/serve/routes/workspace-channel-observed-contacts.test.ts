@@ -9,15 +9,15 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import express from 'express';
 import request from 'supertest';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { daemonObservedContactsPath } from '../../commands/channel/runtime.js';
-import { ObservedChannelContactStore } from '../../commands/channel/observed-target-store.js';
+import { ObservedChannelContactStore } from '../../commands/channel/observed-contact-store.js';
 import {
   createWorkspaceRegistry,
   type WorkspaceRegistry,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
-import { registerWorkspaceChannelObservedContactRoutes } from './workspace-channel-targets.js';
+import { registerWorkspaceChannelObservedContactRoutes } from './workspace-channel-observed-contacts.js';
 
 function runtime(
   workspaceId: string,
@@ -49,6 +49,7 @@ describe('workspace observed channel contact routes', () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
     else process.env['QWEN_HOME'] = previousQwenHome;
     await fsp.rm(qwenHome, { recursive: true, force: true });
@@ -158,7 +159,7 @@ describe('workspace observed channel contact routes', () => {
     expect(empty.body).toEqual({ users: [], groups: [] });
   });
 
-  it('validates freshness and defaults it to seven days', async () => {
+  it('validates freshness bounds and query shape', async () => {
     const primary = runtime('primary', '/work/main');
     const app = express();
     registerWorkspaceChannelObservedContactRoutes(app, {
@@ -169,13 +170,49 @@ describe('workspace observed channel contact routes', () => {
     const valid = await request(app).get(
       '/workspace/channel/observed-contacts?freshWithinSeconds=60',
     );
-    const invalid = await request(app).get(
+    const zero = await request(app).get(
       '/workspace/channel/observed-contacts?freshWithinSeconds=0',
+    );
+    const nonNumeric = await request(app).get(
+      '/workspace/channel/observed-contacts?freshWithinSeconds=recent',
+    );
+    const repeated = await request(app).get(
+      '/workspace/channel/observed-contacts?freshWithinSeconds=60&freshWithinSeconds=120',
+    );
+    const tooLarge = await request(app).get(
+      '/workspace/channel/observed-contacts?freshWithinSeconds=31536001',
     );
 
     expect(valid.status).toBe(200);
-    expect(invalid.status).toBe(400);
-    expect(invalid.body.code).toBe('invalid_freshness');
+    for (const invalid of [zero, nonNumeric, repeated, tooLarge]) {
+      expect(invalid.status).toBe(400);
+      expect(invalid.body.code).toBe('invalid_freshness');
+    }
+  });
+
+  it('defaults freshness to seven days', async () => {
+    const primary = runtime('primary', '/work/main');
+    new ObservedChannelContactStore(
+      daemonObservedContactsPath(primary.workspaceCwd),
+      { now: () => new Date(Date.now() - 8 * 24 * 60 * 60 * 1000) },
+    ).observe('telegram', {
+      user: { id: 'stale-default-user', label: 'Stale Default User' },
+    });
+    const app = express();
+    registerWorkspaceChannelObservedContactRoutes(app, {
+      primaryWorkspace: primary.workspaceCwd,
+      workspaceRegistry: registry([primary]),
+    });
+
+    const defaultWindow = await request(app).get(
+      '/workspace/channel/observed-contacts',
+    );
+    const widerWindow = await request(app).get(
+      '/workspace/channel/observed-contacts?freshWithinSeconds=777600',
+    );
+
+    expect(defaultWindow.body.users).toEqual([]);
+    expect(widerWindow.body.users[0]?.id).toBe('stale-default-user');
   });
 
   it('does not fall back for unknown or untrusted workspace selectors', async () => {
@@ -205,6 +242,9 @@ describe('workspace observed channel contact routes', () => {
     const filePath = daemonObservedContactsPath(primary.workspaceCwd);
     await fsp.mkdir(path.dirname(filePath), { recursive: true });
     await fsp.writeFile(filePath, '{invalid-json', 'utf8');
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
     const app = express();
     registerWorkspaceChannelObservedContactRoutes(app, {
       primaryWorkspace: primary.workspaceCwd,
@@ -221,5 +261,8 @@ describe('workspace observed channel contact routes', () => {
       code: 'channel_observed_contacts_unavailable',
     });
     expect(JSON.stringify(response.body)).not.toContain(filePath);
+    expect(stderr).toHaveBeenCalledWith(
+      'qwen serve: observed channel contacts unavailable.\n',
+    );
   });
 });

@@ -6,7 +6,10 @@
 
 import type { Application, Request, Response } from 'express';
 import { daemonObservedContactsPath } from '../../commands/channel/runtime.js';
-import { ObservedChannelContactStore } from '../../commands/channel/observed-target-store.js';
+import {
+  OBSERVED_CONTACT_MAX_FRESH_WITHIN_SECONDS,
+  ObservedChannelContactStore,
+} from '../../commands/channel/observed-contact-store.js';
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
@@ -19,7 +22,6 @@ interface RegisterWorkspaceChannelObservedContactRoutesDeps {
 }
 
 const DEFAULT_FRESH_WITHIN_SECONDS = 7 * 24 * 60 * 60;
-const MAX_FRESH_WITHIN_SECONDS = 365 * 24 * 60 * 60;
 
 function parseFreshWithinSeconds(req: Request): number | undefined {
   const raw = req.query['freshWithinSeconds'];
@@ -29,7 +31,7 @@ function parseFreshWithinSeconds(req: Request): number | undefined {
   if (
     !Number.isSafeInteger(value) ||
     value < 1 ||
-    value > MAX_FRESH_WITHIN_SECONDS
+    value > OBSERVED_CONTACT_MAX_FRESH_WITHIN_SECONDS
   ) {
     return undefined;
   }
@@ -42,7 +44,7 @@ function sendContacts(req: Request, res: Response, workspaceCwd: string): void {
   const freshWithinSeconds = parseFreshWithinSeconds(req);
   if (freshWithinSeconds === undefined) {
     res.status(400).json({
-      error: `freshWithinSeconds must be an integer from 1 to ${MAX_FRESH_WITHIN_SECONDS}.`,
+      error: `freshWithinSeconds must be an integer from 1 to ${OBSERVED_CONTACT_MAX_FRESH_WITHIN_SECONDS}.`,
       code: 'invalid_freshness',
     });
     return;
@@ -53,6 +55,9 @@ function sendContacts(req: Request, res: Response, workspaceCwd: string): void {
     );
     res.status(200).json(store.list({ freshWithinSeconds }));
   } catch {
+    process.stderr.write(
+      'qwen serve: observed channel contacts unavailable.\n',
+    );
     res.status(500).json({
       error: 'Observed channel contacts are unavailable.',
       code: 'channel_observed_contacts_unavailable',

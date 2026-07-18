@@ -379,6 +379,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_branch',
       'workspace_reload',
       'channel_control',
+      'workspace_channel_observed_contacts',
       'persistent_workspace_registration',
       'workspace_runtime_removal',
       'workspace_qualified_rest_core',
