@@ -51,6 +51,7 @@ import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { resolveProxyUrl } from './proxy.js';
 import {
   createChannel,
+  daemonObservedContactsPath,
   daemonSessionRoutesPath,
   loadChannelsConfig,
   loadChannelsFromExtensions,
@@ -62,6 +63,7 @@ import {
   type ParsedChannel,
 } from './runtime.js';
 import { BridgeChannelMemoryIntentClassifier } from './memory-intent-classifier.js';
+import { ObservedChannelContactStore } from './observed-contact-store.js';
 
 const SESSION_SHELL_COMMAND_FEATURE = 'session_shell_command';
 const MAX_ACTIVE_WEBHOOK_TASKS = 16;
@@ -420,6 +422,9 @@ export async function runChannelDaemonWorker(
   );
   validateChannelWorkspaces(parsed, daemonWorkspace);
   const modelServiceId = selectFirstModel(parsed, 'Daemon worker');
+  const observedContacts = new ObservedChannelContactStore(
+    daemonObservedContactsPath(daemonWorkspace),
+  );
 
   const bridge = new DaemonChannelBridge({
     cwd: daemonWorkspace,
@@ -498,6 +503,11 @@ export async function runChannelDaemonWorker(
               bridgeFacade,
               config.cwd,
             ),
+            observedContacts: {
+              observe: (channelName, observation) => {
+                observedContacts.observe(channelName, observation);
+              },
+            },
           }),
           startupSignal,
         ),
