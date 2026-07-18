@@ -608,8 +608,24 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain('<!-- takeover-ack engaged -->');
     expect(workflow).toContain('<!-- takeover-ack released -->');
     // Every takeover-flow comment is bilingual with COLLAPSED Chinese
-    // (project convention): engage ack, release ack, re-arm ack, cap pause.
-    expect(workflow.split('<summary>中文说明</summary>').length - 1).toBe(4);
+    // (project convention): engage ack, release ack, re-arm ack, cap pause,
+    // and the fork-refusal explanation.
+    expect(workflow.split('<summary>中文说明</summary>').length - 1).toBe(5);
+    // Fork PRs can never produce a red ack run or a stuck label: the
+    // unlabeled branch log-and-drops forks (fork pull_request events carry
+    // no secrets, so emitting the ack would fail the PAT identity check),
+    // and the command job — which DOES have secrets — refuses forks up
+    // front with an explanation instead of toggling the label.
+    expect(routeStep).toContain('takeover release ignored: PR is a fork');
+    expect(workflow).toContain('takeover command refused: PR #${PR} is a fork');
+    expect(workflow).toContain('<!-- takeover-ack fork-refused -->');
+    // Convention: every write verifies the PAT identity first — including
+    // the scan's cap notice (a foreign login would defeat the dedup and
+    // repost every scan).
+    expect(reviewScanJob).toContain('SCAN_BOT_ACTOR');
+    expect(reviewScanJob).toContain(
+      'cap-paused notice skipped: PAT authenticates as',
+    );
     expect(workflow).toMatch(
       /takeover-ack:[\s\S]*?CI_DEV_BOT_PAT identity[\s\S]*?gh pr comment "\$\{PR\}"/,
     );
@@ -692,7 +708,8 @@ describe('qwen-autofix workflow', () => {
     // message, marker, and cap gate uses it consistently.
     expect(reviewScanJob).toContain('max_rounds: $mr');
     expect(workflow).toContain("MAX_ROUNDS: '${{ matrix.target.max_rounds }}'");
-    // Replay the cap selection VERBATIM: takeover-labeled → 50, plain → 5.
+    // Replay the cap selection VERBATIM: takeover-labeled →
+    // TAKEOVER_MAX_ROUNDS (100), plain → the strict default (5).
     const capSelect = reviewScanJob.match(
       /(HAS_TAKEOVER="\$\(jq[\s\S]*?EFF_MAX_ROUNDS="\$\{TAKEOVER_MAX_ROUNDS\}")/,
     )?.[1];

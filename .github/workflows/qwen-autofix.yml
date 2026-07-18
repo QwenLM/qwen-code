@@ -128,6 +128,8 @@ jobs:
     # The issue_comment clause is a cheap expression-level prefilter: the
     # overwhelming majority of comments never start a job at all. The real
     # gates (exact body match, sender authorization) live in 'Decide phases'.
+    # Nuance: a body with LEADING whitespace dies here even though the decide
+    # branch would trim it — fail closed, command must start the comment.
     if: |-
       ${{ github.repository == 'QwenLM/qwen-code' && (github.event_name != 'issue_comment' || (github.event.issue.pull_request && startsWith(github.event.comment.body, '@qwen-code /takeover'))) }}
     runs-on: 'ubuntu-latest'
@@ -357,8 +359,16 @@ jobs:
                     echo "🧭 ${TAKEOVER_LABEL} applied by ${SENDER_LOGIN} on PR #${PR_NUMBER_EVENT} → review phase (takeover)"
                   fi
                 elif [[ "${EVENT_ACTION}" == 'unlabeled' ]]; then
-                  TAKEOVER_ACK='released'
-                  echo "🧭 ${TAKEOVER_LABEL} removed from PR #${PR_NUMBER_EVENT} by ${SENDER_LOGIN} → released"
+                  if [[ "${PR_HEAD_REPO}" != "${REPO}" ]]; then
+                    # Fork pull_request events carry no secrets: emitting the
+                    # ack here would start takeover-ack with an empty PAT and
+                    # fail its identity check — a red run for a label that
+                    # never engaged anything. Log and stop.
+                    echo "🧭 takeover release ignored: PR is a fork (${PR_HEAD_REPO} != ${REPO})"
+                  else
+                    TAKEOVER_ACK='released'
+                    echo "🧭 ${TAKEOVER_LABEL} removed from PR #${PR_NUMBER_EVENT} by ${SENDER_LOGIN} → released"
+                  fi
                 fi
               fi
               if [[ "${EVENT_NAME}" == 'issues' ]]; then
@@ -1148,11 +1158,20 @@ jobs:
           fi
           # Presence-aware toggle: adding a present label / removing an
           # absent one fires no event, so make the no-op explicit instead.
-          if ! HAS="$(gh pr view "${PR}" --repo "${REPO}" --json labels 2> /dev/null \
-            | jq -r --arg t "${TAKEOVER_LABEL}" '[.labels[].name] | index($t) != null')"; then
-            echo "::error::could not read labels of PR #${PR}"
+          # The same fetch carries isCrossRepository: fork PRs are refused UP
+          # FRONT — unlike the label path this job runs in issue_comment
+          # context WITH secrets, so it can explain itself, and refusing here
+          # keeps the label from ever sticking to a fork PR via the command.
+          if ! PR_INFO="$(gh pr view "${PR}" --repo "${REPO}" --json labels,isCrossRepository 2> /dev/null)"; then
+            echo "::error::could not read PR #${PR}"
             exit 1
           fi
+          if [[ "$(jq -r 'if has("isCrossRepository") then .isCrossRepository else true end' <<< "${PR_INFO}")" != "false" ]]; then
+            gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🚫 Takeover is not available for fork-based PRs. A maintainer can adopt this PR instead: snapshot the head into an in-repo branch, open a new PR (commit authorship is preserved), and take that over.\n\n<details>\n<summary>中文说明</summary>\n\n🚫 fork PR 暂不支持托管。维护者可改用领养方式：将 head 快照为本仓库分支并另开 PR（commit 署名保留），再对新 PR 执行接管。\n\n</details>\n\n<!-- takeover-ack fork-refused -->')"
+            echo "🧭 takeover command refused: PR #${PR} is a fork"
+            exit 0
+          fi
+          HAS="$(jq -r --arg t "${TAKEOVER_LABEL}" '[.labels[].name] | index($t) != null' <<< "${PR_INFO}")"
           if [[ "${CMD}" == 'add' ]]; then
             if [[ "${HAS}" == 'true' ]]; then
               # Already managed: repeating the command is the ROUND-COUNTER
@@ -1221,7 +1240,8 @@ jobs:
 
   # ===========================================================================
   # REVIEW PHASE (scan) — find one autofix PR with new, unaddressed feedback
-  # (or a base conflict) and emit it as a matrix. Cheap: GitHub API only.
+  # (or a base conflict) and emit it as a matrix. Cheap: GitHub API only —
+  # its single write is the identity-verified, once-per-window cap notice.
   # ===========================================================================
   review-scan:
     needs: 'route'
@@ -1439,7 +1459,16 @@ jobs:
                     | select((.body // "") | contains("<!-- takeover-cap-reached -->"))
                     | select((.created_at // "") > $rt) ] | length' "${WORKDIR}/ic.json")"
                 if [[ "${CAP_NOTICED}" == "0" ]]; then
-                  if ! gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '⏸️ Takeover paused: this PR reached its round cap (%s/%s). Comment `%s` to re-arm a fresh window and continue management, or `%s stop` to release.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ 托管已暂停：本 PR 达到轮次上限（%s/%s）。评论 `%s` 可重新武装、开启新窗口继续托管；或评论 `%s stop` 释放。\n\n</details>\n\n<!-- takeover-cap-reached -->' "${ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}" "${ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}")"; then
+                  # Convention: verify the PAT identity before ANY write. A
+                  # rotated PAT would post under a foreign login the dedup
+                  # (which counts AUTOFIX_BOT comments only) can never see —
+                  # reposting the notice every scan. Memoized per scan run.
+                  if [[ -z "${SCAN_BOT_ACTOR:-}" ]]; then
+                    SCAN_BOT_ACTOR="$(gh api user --jq '.login' 2> /dev/null || echo 'unknown')"
+                  fi
+                  if [[ "${SCAN_BOT_ACTOR}" != "${AUTOFIX_BOT}" ]]; then
+                    echo "::warning::cap-paused notice skipped: PAT authenticates as '${SCAN_BOT_ACTOR}', expected ${AUTOFIX_BOT}"
+                  elif ! gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '⏸️ Takeover paused: this PR reached its round cap (%s/%s). Comment `%s` to re-arm a fresh window and continue management, or `%s stop` to release.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ 托管已暂停：本 PR 达到轮次上限（%s/%s）。评论 `%s` 可重新武装、开启新窗口继续托管；或评论 `%s stop` 释放。\n\n</details>\n\n<!-- takeover-cap-reached -->' "${ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}" "${ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}")"; then
                     echo "::warning::cap-paused notice failed for #${PR}; will retry next scan"
                   fi
                 fi
@@ -1561,8 +1590,9 @@ jobs:
       ISSUE: '${{ matrix.target.issue }}'
       ROUND: '${{ matrix.target.round }}'
       WATERMARK: '${{ matrix.target.watermark }}'
-      # The scan computed the effective cap from the takeover label (50 for
-      # managed PRs, 5 otherwise); shadowing the workflow-level MAX_ROUNDS
+      # The scan computed the effective cap from the takeover label
+      # (TAKEOVER_MAX_ROUNDS for managed PRs, the strict default otherwise);
+      # shadowing the workflow-level MAX_ROUNDS
       # makes every round message, marker, and cap gate in this job use it.
       MAX_ROUNDS: '${{ matrix.target.max_rounds }}'
     steps:
