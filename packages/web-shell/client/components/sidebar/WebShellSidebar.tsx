@@ -52,6 +52,7 @@ import {
   SettingsIcon,
   SquarePenIcon,
   SunIcon,
+  TargetIcon,
 } from 'lucide-react';
 import { WebShellThemeId, type WebShellTheme } from '../../themeContext';
 import { useI18n } from '../../i18n';
@@ -123,6 +124,7 @@ export type WebShellSidebarFooterItem =
   | 'version'
   | 'theme'
   | 'scheduledTasks'
+  | 'goals'
   | 'sessionsOverview'
   | 'splitView'
   | 'daemonStatus'
@@ -153,6 +155,7 @@ const DEFAULT_FOOTER_ITEMS: readonly WebShellSidebarFooterItem[] = [
   'version',
   'theme',
   'scheduledTasks',
+  'goals',
   'sessionsOverview',
   'splitView',
   'daemonStatus',
@@ -208,6 +211,7 @@ interface WebShellSidebarProps {
   onOpenPlugins: () => void;
   onOpenDaemonStatus: () => void;
   onOpenScheduledTasks: () => void;
+  onOpenGoals: () => void;
   onOpenSessions: () => void;
   /**
    * Whether to offer the Session Overview entry point. Gated to large screens
@@ -235,6 +239,11 @@ interface WebShellSidebarProps {
    */
   selectedWorkspaceCwd?: string;
   onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
+  /**
+   * Open the working-tree Changes dialog for a workspace. Forwarded to each
+   * trusted workspace's folder header, where a live git chip fires it on click.
+   */
+  onOpenGitDiff?: (workspaceCwd: string) => void;
   workspaces?: DaemonWorkspaceCapability[];
   lockedWorkspaceCwd?: string;
   lockedWorkspace?: WebShellSidebarLockedWorkspace;
@@ -408,6 +417,7 @@ export function WebShellSidebar({
   onOpenPlugins,
   onOpenDaemonStatus,
   onOpenScheduledTasks,
+  onOpenGoals,
   onOpenSessions,
   canOpenSessionsOverview,
   onOpenSplitView,
@@ -422,6 +432,7 @@ export function WebShellSidebar({
   sessionListReloadToken,
   selectedWorkspaceCwd,
   onSelectWorkspace,
+  onOpenGitDiff,
   workspaces: providedWorkspaces,
   lockedWorkspaceCwd,
   lockedWorkspace: lockedWorkspaceOptions,
@@ -1189,6 +1200,11 @@ export function WebShellSidebar({
       }
     },
     [t, workspaceActions, workspace],
+  );
+
+  const handleSuggestWorkspacePaths = useCallback(
+    (prefix: string) => workspaceActions.suggestWorkspacePaths(prefix),
+    [workspaceActions],
   );
 
   const reconcileRemovedWorkspace = useCallback(
@@ -3376,6 +3392,20 @@ export function WebShellSidebar({
               {!collapsed && <span>{t('sidebar.scheduledTasks')}</span>}
             </button>
           )}
+          {footerItems.has('goals') && (
+            <button
+              className={styles.pluginButton}
+              type="button"
+              title={t('sidebar.goals')}
+              aria-label={t('sidebar.goals')}
+              onClick={onOpenGoals}
+            >
+              <span className={styles.navIcon}>
+                <TargetIcon size={16} strokeWidth={1.2} />
+              </span>
+              {!collapsed && <span>{t('sidebar.goals')}</span>}
+            </button>
+          )}
         </div>
         <div className={styles.body}>
           <div className={styles.sessionList}>
@@ -3480,11 +3510,6 @@ export function WebShellSidebar({
                             }
                             client={workspace.client}
                             reloadToken={workspaceSessionsReloadToken}
-                            primaryLabel={
-                              displayedWorkspaces.length > 1
-                                ? t('sidebar.workspacePrimary')
-                                : ''
-                            }
                             untrustedLabel={t('sidebar.workspaceUntrusted')}
                             readOnlyLabel={t('sidebar.workspaceReadOnly')}
                             trustToOpenLabel={t('sidebar.workspaceTrustToOpen')}
@@ -3498,6 +3523,7 @@ export function WebShellSidebar({
                             deleteGroupLabel={t('sidebar.groupDelete')}
                             groupActionsDisabled={groupBusy}
                             excludePinned
+                            onOpenGitDiff={onOpenGitDiff}
                             formatTime={(iso) => formatRelativeTime(iso, t)}
                             searchQuery={searchQuery}
                             expanded={ws.primary ? projectExpanded : undefined}
@@ -3773,6 +3799,7 @@ export function WebShellSidebar({
         <AddWorkspaceDialog
           onClose={() => setShowAddWorkspaceDialog(false)}
           onAdd={handleAddWorkspace}
+          onSuggest={handleSuggestWorkspacePaths}
         />
       )}
     </>

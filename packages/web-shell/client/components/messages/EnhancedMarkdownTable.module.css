@@ -77,39 +77,22 @@
   font-weight: 600;
 }
 
-.copyButton,
-.secondaryButton,
-.primaryButton {
+.copyButton {
   padding: 3px 8px;
   border: 1px solid var(--border);
   border-radius: 4px;
   color: var(--foreground);
   font: inherit;
   cursor: pointer;
+  background: var(--card);
 }
 
 .copyCheck {
   margin-right: 4px;
 }
 
-.copyButton,
-.secondaryButton {
-  background: var(--card);
-}
-
-.primaryButton {
-  border-color: var(--agent-blue-500);
-  background: var(--agent-blue-500);
-  color: var(--card);
-}
-
-.copyButton:hover,
-.secondaryButton:hover {
+.copyButton:hover {
   background: var(--subtle-bg-strong);
-}
-
-.primaryButton:hover {
-  filter: brightness(1.08);
 }
 
 .scroller {
@@ -284,22 +267,6 @@
   color: var(--agent-blue-500);
 }
 
-.filterMenu {
-  position: fixed;
-  z-index: 1000;
-  width: 300px;
-  max-width: min(320px, 80vw);
-  max-height: min(430px, calc(100vh - 16px));
-  overflow: auto;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--card);
-  box-shadow: 0 16px 36px rgb(0 0 0 / 34%);
-  color: var(--foreground);
-  font-size: 12px;
-  font-weight: 400;
-}
-
 .columnContextMenu {
   position: fixed;
   z-index: 1000;
@@ -329,131 +296,6 @@
 .columnContextMenuAction:focus-visible {
   background: var(--subtle-bg-strong);
   outline: none;
-}
-
-.filterMenuTitle {
-  padding: 9px 10px;
-  border-bottom: 1px solid var(--border);
-  color: var(--foreground);
-  font-weight: 700;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.filterMenuSection {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border);
-}
-
-.filterMenuAction {
-  width: 100%;
-  padding: 5px 7px;
-  border: none;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--foreground);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.filterMenuAction:hover,
-.activeAction {
-  background: var(--subtle-bg-strong);
-}
-
-.activeAction {
-  color: var(--agent-blue-500);
-  font-weight: 600;
-}
-
-.filterSearch,
-.conditionInput,
-.conditionSelect {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 5px 7px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--muted);
-  color: var(--foreground);
-  font: inherit;
-}
-
-.filterSearch::placeholder,
-.conditionInput::placeholder {
-  color: var(--muted-foreground);
-}
-
-.filterOptionList {
-  max-height: 170px;
-  overflow: auto;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--muted);
-}
-
-.filterOption {
-  display: flex;
-  gap: 7px;
-  align-items: center;
-  min-height: 26px;
-  padding: 3px 6px;
-  color: var(--foreground);
-  cursor: pointer;
-}
-
-.filterOption:hover {
-  background: var(--subtle-bg-strong);
-}
-
-.filterOption input {
-  flex: 0 0 auto;
-}
-
-.optionLabel {
-  min-width: 0;
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.optionCount {
-  margin-left: auto;
-  color: var(--muted-foreground);
-  font-variant-numeric: tabular-nums;
-}
-
-.optionLimitHint {
-  padding: 7px;
-  color: var(--muted-foreground);
-  text-align: center;
-}
-
-.conditionTitle {
-  color: var(--muted-foreground);
-  font-weight: 600;
-}
-
-.conditionInputs {
-  display: flex;
-  gap: 6px;
-}
-
-.filterFooter {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-  padding: 8px 10px;
-}
-
-.footerSpacer {
-  flex: 1 1 auto;
 }
 
 .cell {
@@ -649,141 +491,6 @@ tr:hover .frozenCell.selectedCell {
   white-space: pre-wrap;
 }
 
-.themeDark {
-  --background: #0d0d0d;
-  --foreground: #fafafa;
-  --muted-foreground: #808598;
-  --border: #2a2a2a;
-  --card: #161616;
-  --agent-blue-500: #6785ff;
-}
-
-.themeLight {
-  --background: #ffffff;
-  --foreground: #0a0a0b;
-  --muted-foreground: #a3a3a5;
-  --border: #e3e4e6;
-  --card: #ffffff;
-  --agent-blue-500: #0033ff;
-}
-
-.cellDialogBackdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 16px;
-  background: color-mix(in srgb, var(--background) 62%, transparent);
-}
-
-.cellDialog {
-  position: relative;
-  box-sizing: border-box;
-  display: flex;
-  flex-direction: column;
-  width: min(520px, calc(100vw - 32px));
-  min-height: 190px;
-  padding: 20px 24px 16px;
-  border: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
-  border-radius: 10px;
-  background: linear-gradient(
-    135deg,
-    color-mix(in srgb, var(--card) 96%, white 4%),
-    color-mix(in srgb, var(--card) 92%, black 8%)
-  );
-  box-shadow: 0 18px 56px rgb(0 0 0 / 38%);
-  color: var(--foreground);
-  font-size: 13px;
-}
-
-.cellDialogCloseIcon {
-  position: absolute;
-  top: 12px;
-  right: 14px;
-  display: grid;
-  width: 24px;
-  height: 24px;
-  place-items: center;
-  border: 0;
-  background: transparent;
-  color: var(--muted-foreground);
-  font: inherit;
-  font-size: 24px;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.cellDialogCloseIcon:hover {
-  color: var(--foreground);
-}
-
-.cellDialogTitle {
-  margin-bottom: 16px;
-  font-size: inherit;
-  font-weight: 800;
-  line-height: 1.2;
-}
-
-.cellDialogValue {
-  min-height: 100px;
-  max-height: min(32vh, 200px);
-  overflow: auto;
-  padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--background) 72%, transparent);
-  color: var(--foreground);
-  font: inherit;
-  font-weight: 600;
-  line-height: 1.45;
-  cursor: text;
-  user-select: text;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.cellDialogFooter {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-  align-items: center;
-  margin-top: auto;
-  padding-top: 20px;
-}
-
-.cellDialogActions {
-  display: flex;
-  gap: 12px;
-  align-items: center;
-}
-
-.cellDialogButton {
-  min-width: 64px;
-  padding: 6px 14px;
-  border: 0;
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--foreground) 12%, transparent);
-  color: var(--foreground);
-  font: inherit;
-  font-weight: 700;
-  cursor: pointer;
-}
-
-.cellDialogButton:hover {
-  background: color-mix(in srgb, var(--foreground) 18%, transparent);
-}
-
-.cellDialogPrimaryButton {
-  background: var(--agent-blue-500);
-  color: white;
-}
-
-.cellDialogPrimaryButton:hover {
-  background: color-mix(in srgb, var(--agent-blue-500) 86%, white 14%);
-}
-
 .emptyValue {
   color: var(--muted-foreground);
   font-style: italic;
@@ -794,35 +501,4 @@ tr:hover .frozenCell.selectedCell {
   color: var(--muted-foreground);
   font-size: 13px;
   text-align: center;
-}
-
-@media (max-width: 640px) {
-  .cellDialogBackdrop {
-    padding: 10px;
-  }
-
-  .cellDialog {
-    width: 100%;
-    min-height: 0;
-    padding: 20px 14px 14px;
-  }
-
-  .cellDialogTitle {
-    margin-bottom: 14px;
-  }
-
-  .cellDialogFooter {
-    flex-direction: column;
-    align-items: stretch;
-    padding-top: 18px;
-  }
-
-  .cellDialogActions {
-    justify-content: flex-end;
-  }
-
-  .cellDialogButton {
-    min-width: 0;
-    padding: 6px 12px;
-  }
 }

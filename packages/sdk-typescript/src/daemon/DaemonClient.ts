@@ -47,6 +47,7 @@ import type {
   DaemonSessionLspStatus,
   DaemonSessionListPage,
   DaemonSessionListPageOptions,
+  DaemonWorkspaceSessionInfo,
   DaemonSessionOrganizationResult,
   DaemonSessionOrganizationUpdate,
   DaemonSessionSummary,
@@ -69,6 +70,8 @@ import type {
   DaemonWorkspaceAgentsStatus,
   DaemonWorkspaceEnvStatus,
   DaemonWorkspaceGitStatus,
+  DaemonWorkspaceGitDiff,
+  DaemonWorkspaceGitDiffHunks,
   DaemonWorkspaceMcpStatus,
   DaemonWorkspaceMcpInitializeResult,
   DaemonWorkspaceMcpToolsStatus,
@@ -122,6 +125,9 @@ import type {
   DaemonRuntimeMcpRemoveResult,
   DaemonToolToggleResult,
   DaemonSkillToggleResult,
+  DaemonSkillInstallRequest,
+  DaemonSkillMutationResult,
+  DaemonSkillScope,
   DaemonSessionArtifactInput,
   DaemonSessionArtifactMutationResult,
   DaemonSessionArtifactsEnvelope,
@@ -300,6 +306,19 @@ const MCP_RESTART_DEFAULT_TIMEOUT_MS =
 const CLIENT_ID_HEADER = 'X-Qwen-Client-Id';
 const urlEncode = encodeURIComponent;
 
+function transcriptPageSuffix(
+  opts: DaemonSessionTranscriptPageOptions,
+): string {
+  const query = new URLSearchParams();
+  if (opts.cursor !== undefined) query.set('cursor', opts.cursor);
+  if (opts.beforeRecordId !== undefined) {
+    query.set('beforeRecordId', opts.beforeRecordId);
+  }
+  if (opts.limit !== undefined) query.set('limit', String(opts.limit));
+  const value = query.toString();
+  return value ? `?${value}` : '';
+}
+
 function normalizePermissionRuleInput(rule: string): string {
   const trimmed = rule.trim();
   if (!trimmed) {
@@ -453,6 +472,8 @@ export interface RestoreSessionRequest {
    */
   workspaceCwd?: string;
   approvalMode?: string;
+  /** Latest persisted records to include in the initial load replay. */
+  historyPageSize?: number;
 }
 
 export interface PromptRequest {
@@ -999,6 +1020,28 @@ export class DaemonClient {
     );
   }
 
+  async workspaceGitDiff(): Promise<DaemonWorkspaceGitDiff> {
+    return await this.jsonRequest<DaemonWorkspaceGitDiff>(
+      '/workspace/git/diff',
+      'GET /workspace/git/diff',
+      { mode: 'rest' },
+    );
+  }
+
+  async workspaceGitDiffFile(
+    path: string,
+    oldPath?: string,
+  ): Promise<DaemonWorkspaceGitDiffHunks> {
+    const query =
+      `/workspace/git/diff/file?path=${urlEncode(path)}` +
+      (oldPath != null ? `&oldPath=${urlEncode(oldPath)}` : '');
+    return await this.jsonRequest<DaemonWorkspaceGitDiffHunks>(
+      query,
+      'GET /workspace/git/diff/file',
+      { mode: 'rest' },
+    );
+  }
+
   async workspaceMcpTools(
     serverName: string,
   ): Promise<DaemonWorkspaceMcpToolsStatus> {
@@ -1489,6 +1532,25 @@ export class DaemonClient {
       { headers: this.headers() },
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, 'GET /list');
+        return (await res.json()) as unknown;
+      },
+    );
+  }
+
+  /**
+   * Directory-name suggestions for an absolute path prefix, for flows that
+   * pick a path outside any registered workspace (e.g. "Add workspace").
+   */
+  async workspacePathSuggestions(prefix: string): Promise<unknown> {
+    const url = new URL(`${this.baseUrl}/workspace-path-suggestions`);
+    url.searchParams.set('prefix', prefix);
+    return await this.fetchWithTimeout(
+      url.toString(),
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace-path-suggestions');
+        }
         return (await res.json()) as unknown;
       },
     );
@@ -2093,12 +2155,8 @@ export class DaemonClient {
     sessionId: string,
     opts: DaemonSessionTranscriptPageOptions = {},
   ): Promise<DaemonSessionTranscriptPage> {
-    const params = new URLSearchParams();
-    if (opts.cursor !== undefined) params.set('cursor', opts.cursor);
-    if (opts.limit !== undefined) params.set('limit', String(opts.limit));
-    const query = params.toString();
     return await this.jsonRequest<DaemonSessionTranscriptPage>(
-      `/session/${urlEncode(sessionId)}/transcript${query ? `?${query}` : ''}`,
+      `/session/${urlEncode(sessionId)}/transcript${transcriptPageSuffix(opts)}`,
       'GET /session/:id/transcript',
       {
         clientId: opts.clientId,
@@ -2348,6 +2406,9 @@ export class DaemonClient {
           cwd: req.workspaceCwd,
           ...(req.approvalMode !== undefined
             ? { approvalMode: req.approvalMode }
+            : {}),
+          ...(action === 'load' && req.historyPageSize !== undefined
+            ? { historyPageSize: req.historyPageSize }
             : {}),
         }),
       },
@@ -2743,6 +2804,26 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonSkillToggleResult;
       },
+    );
+  }
+
+  installWorkspaceSkill(
+    request: DaemonSkillInstallRequest,
+  ): Promise<DaemonSkillMutationResult> {
+    return this.jsonRequest('/workspace/skills/install', 'Skill', {
+      method: 'POST',
+      body: request,
+    });
+  }
+
+  deleteWorkspaceSkill(
+    skillName: string,
+    scope: DaemonSkillScope,
+  ): Promise<DaemonSkillMutationResult> {
+    return this.jsonRequest(
+      `/workspace/skills/${urlEncode(skillName)}?scope=${scope}`,
+      'Skill',
+      { method: 'DELETE' },
     );
   }
 
@@ -4127,6 +4208,30 @@ export class WorkspaceDaemonClient {
     );
   }
 
+  workspaceGitDiff(): Promise<DaemonWorkspaceGitDiff> {
+    return this.client.workspaceJsonRequest<DaemonWorkspaceGitDiff>(
+      this.workspaceSelector,
+      '/git/diff',
+      'GET /workspaces/:workspace/git/diff',
+      { mode: 'rest' },
+    );
+  }
+
+  workspaceGitDiffFile(
+    path: string,
+    oldPath?: string,
+  ): Promise<DaemonWorkspaceGitDiffHunks> {
+    const query =
+      `/git/diff/file?path=${urlEncode(path)}` +
+      (oldPath != null ? `&oldPath=${urlEncode(oldPath)}` : '');
+    return this.client.workspaceJsonRequest<DaemonWorkspaceGitDiffHunks>(
+      this.workspaceSelector,
+      query,
+      'GET /workspaces/:workspace/git/diff/file',
+      { mode: 'rest' },
+    );
+  }
+
   workspaceSkills(): Promise<DaemonWorkspaceSkillsStatus> {
     return this.get('/skills', 'GET /workspaces/:workspace/skills');
   }
@@ -4296,6 +4401,10 @@ export class WorkspaceDaemonClient {
     return page.sessions;
   }
 
+  getWorkspaceSessionInfo(): Promise<DaemonWorkspaceSessionInfo> {
+    return this.get('/session-info', 'GET /workspaces/:workspace/session-info');
+  }
+
   /**
    * Read one page from an active persisted session transcript in this
    * workspace.
@@ -4306,13 +4415,9 @@ export class WorkspaceDaemonClient {
     sessionId: string,
     opts: DaemonSessionTranscriptPageOptions = {},
   ): Promise<DaemonSessionTranscriptPage> {
-    const query = new URLSearchParams();
-    if (opts.cursor !== undefined) query.set('cursor', opts.cursor);
-    if (opts.limit !== undefined) query.set('limit', String(opts.limit));
-    const suffix = query.size > 0 ? `?${query.toString()}` : '';
     return this.client.workspaceJsonRequest<DaemonSessionTranscriptPage>(
       this.workspaceSelector,
-      `/session/${urlEncode(sessionId)}/transcript${suffix}`,
+      `/session/${urlEncode(sessionId)}/transcript${transcriptPageSuffix(opts)}`,
       'GET /workspaces/:workspace/session/:id/transcript',
       { clientId: opts.clientId, mode: 'rest' },
     );

@@ -466,6 +466,41 @@ describe('createDaemonSessionActions', () => {
     );
     expect(pendingSessionLoadRef.current).toBeUndefined();
   });
+
+  it('restarts the event stream after prompt admission', async () => {
+    const restartEventStream = vi.fn();
+    const session = createMockSession('session-a');
+    const { actions } = createActionsHarness({
+      restartEventStream,
+      session,
+    });
+
+    const prompt = actions.sendPrompt('hello');
+
+    await vi.waitFor(() => {
+      expect(restartEventStream).toHaveBeenCalledWith('session-a');
+    });
+    await actions.cancel();
+    await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+  });
+
+  it('does not restart the event stream when the admitted prompt is stale', async () => {
+    const restartEventStream = vi.fn();
+    const session = createMockSession('session-a');
+    const accepted = createDeferred<{ promptId: string }>();
+    session.submitPrompt.mockReturnValueOnce(accepted.promise);
+    const { actions, activePromptsRef } = createActionsHarness({
+      restartEventStream,
+      session,
+    });
+
+    const prompt = actions.sendPrompt('hello');
+    activePromptsRef.current.clear();
+    accepted.resolve({ promptId: 'prompt-1' });
+
+    await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+    expect(restartEventStream).not.toHaveBeenCalled();
+  });
 });
 
 function createActionsHarness(
@@ -476,6 +511,7 @@ function createActionsHarness(
     createDetachedSession?: ReturnType<typeof vi.fn>;
     manualSessionClearRef?: { current: boolean };
     pendingSessionLoadRef?: { current: PendingSessionLoad | undefined };
+    restartEventStream?: ReturnType<typeof vi.fn>;
     session?: ReturnType<typeof createMockSession>;
     setAttachSessionNonce?: ReturnType<typeof vi.fn>;
     setRestoreWorkspaceCwd?: ReturnType<typeof vi.fn>;
@@ -522,6 +558,7 @@ function createActionsHarness(
     getConnection: () => connection,
     hasSessionActivePrompt: () => false,
     resetCurrentSessionActivePrompt: vi.fn(),
+    restartEventStream: opts.restartEventStream ?? vi.fn(),
     addNotice: opts.addNotice ?? vi.fn(),
     setConnection: (update) => {
       connection = typeof update === 'function' ? update(connection) : update;
@@ -536,6 +573,7 @@ function createActionsHarness(
   });
   return {
     actions,
+    activePromptsRef,
     getConnection: () => connection,
     pendingSessionLoadRef,
     sessionRef,
@@ -553,7 +591,9 @@ function createMockSession(sessionId: string) {
       listWorkspaceSessions: vi.fn(),
       closeSession: vi.fn(),
     },
+    cancel: vi.fn(async () => undefined),
     detach: vi.fn(async () => undefined),
+    submitPrompt: vi.fn(async () => ({ promptId: 'prompt-1' })),
   };
 }
 

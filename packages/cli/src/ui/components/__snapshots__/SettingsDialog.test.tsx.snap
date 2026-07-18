@@ -11,7 +11,7 @@ exports[`SettingsDialog > Snapshot Tests > should render default state correctly
 │                                                                                                  │
 │ ● Tool Approval Mode                                                                        Auto │
 │   Language: UI                                                         Auto (detect from system) │
-│   Language: Model                                                                           auto │
+│   Language: Model                                                       Auto (follow user input) │
 │   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode                                                                                 false │
 │   Interactive Shell (PTY)                                                                   true │
@@ -36,7 +36,7 @@ exports[`SettingsDialog > Snapshot Tests > should render focused on scope select
 │                                                                                                  │
 │ ● Tool Approval Mode                                                                        Auto │
 │   Language: UI                                                         Auto (detect from system) │
-│   Language: Model                                                                           auto │
+│   Language: Model                                                       Auto (follow user input) │
 │   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode                                                                                 false │
 │   Interactive Shell (PTY)                                                                   true │
@@ -61,7 +61,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with accessibility sett
 │                                                                                                  │
 │ ● Tool Approval Mode                                                                        Auto │
 │   Language: UI                                                         Auto (detect from system) │
-│   Language: Model                                                                           auto │
+│   Language: Model                                                       Auto (follow user input) │
 │   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode                                                                                 true* │
 │   Interactive Shell (PTY)                                                                   true │
@@ -86,7 +86,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with all boolean settin
 │                                                                                                  │
 │ ● Tool Approval Mode                                                                        Auto │
 │   Language: UI                                                         Auto (detect from system) │
-│   Language: Model                                                                           auto │
+│   Language: Model                                                       Auto (follow user input) │
 │   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode                                                                                false* │
 │   Interactive Shell (PTY)                                                                   true │
@@ -111,7 +111,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with different scope se
 │                                                                                                  │
 │ ● Tool Approval Mode                                                                        Auto │
 │   Language: UI                                                         Auto (detect from system) │
-│   Language: Model                                                                           auto │
+│   Language: Model                                                       Auto (follow user input) │
 │   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode (Modified in System)                                                            false │
 │   Interactive Shell (PTY)                                                                   true │
@@ -136,7 +136,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with different scope se
 │                                                                                                  │
 │ ● Tool Approval Mode                                                                        Auto │
 │   Language: UI                                                         Auto (detect from system) │
-│   Language: Model                                                                           auto │
+│   Language: Model                                                       Auto (follow user input) │
 │   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode (Modified in Workspace)                                                         false │
 │   Interactive Shell (PTY)                                                                   true │
@@ -161,7 +161,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with file filtering set
 │                                                                                                  │
 │ ● Tool Approval Mode                                                                        Auto │
 │   Language: UI                                                         Auto (detect from system) │
-│   Language: Model                                                                           auto │
+│   Language: Model                                                       Auto (follow user input) │
 │   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode                                                                                 false │
 │   Interactive Shell (PTY)                                                                   true │
@@ -186,7 +186,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with mixed boolean and 
 │                                                                                                  │
 │ ● Tool Approval Mode                                                                        Auto │
 │   Language: UI                                                         Auto (detect from system) │
-│   Language: Model                                                                           auto │
+│   Language: Model                                                       Auto (follow user input) │
 │   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode                                                                                false* │
 │   Interactive Shell (PTY)                                                                   true │
@@ -211,7 +211,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with tools and security
 │                                                                                                  │
 │ ● Tool Approval Mode                                                                        Auto │
 │   Language: UI                                                         Auto (detect from system) │
-│   Language: Model                                                                           auto │
+│   Language: Model                                                       Auto (follow user input) │
 │   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode                                                                                 false │
 │   Interactive Shell (PTY)                                                                   true │
@@ -236,7 +236,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with various boolean se
 │                                                                                                  │
 │ ● Tool Approval Mode                                                                        Auto │
 │   Language: UI                                                         Auto (detect from system) │
-│   Language: Model                                                                           auto │
+│   Language: Model                                                       Auto (follow user input) │
 │   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode                                                                                 true* │
 │   Interactive Shell (PTY)                                                                   true │

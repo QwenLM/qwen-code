@@ -1,0 +1,159 @@
+.placeholder {
+  padding: 24px 12px;
+  text-align: center;
+  color: var(--muted-foreground);
+}
+
+.fileList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.file {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.fileHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  background: var(--subtle-bg);
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  color: inherit;
+}
+
+.fileHeader:hover {
+  background: var(--subtle-bg-strong);
+}
+
+.fileStats {
+  display: inline-flex;
+  gap: 6px;
+  flex-shrink: 0;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.statAdd {
+  color: var(--success-color);
+}
+
+.statDel {
+  color: var(--error-color);
+}
+
+.fileBinary {
+  color: var(--muted-foreground);
+}
+
+.filePath {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileOldPath {
+  color: var(--muted-foreground);
+}
+
+.fileTag {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.fileBody {
+  border-top: 1px solid var(--border);
+}
+
+.filePlaceholder {
+  padding: 12px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.hiddenNote {
+  padding: 4px 10px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.diffLines {
+  max-height: 480px;
+  overflow: auto;
+  font-size: 12px;
+}
+
+.diffLine {
+  display: flex;
+  min-height: 18px;
+  line-height: 18px;
+}
+
+.diffLineAdd {
+  background: var(--success-bg);
+}
+
+.diffLineDel {
+  background: var(--error-bg);
+}
+
+.diffLineContext {
+  background: transparent;
+}
+
+.diffLineMeta {
+  background: transparent;
+  color: var(--muted-foreground);
+  font-style: italic;
+}
+
+.diffOldNo,
+.diffNewNo {
+  width: 40px;
+  flex-shrink: 0;
+  text-align: right;
+  padding-right: 6px;
+  user-select: none;
+  color: var(--muted-foreground);
+  opacity: 0.6;
+  font-variant-numeric: tabular-nums;
+}
+
+.diffMarker {
+  width: 14px;
+  flex-shrink: 0;
+  text-align: center;
+  user-select: none;
+  color: var(--muted-foreground);
+}
+
+.diffLineAdd .diffMarker {
+  color: var(--success-color);
+}
+
+.diffLineDel .diffMarker {
+  color: var(--error-color);
+}
+
+.diffContent {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: pre;
+  overflow-x: auto;
+  padding-right: 8px;
+}

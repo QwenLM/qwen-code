@@ -11,7 +11,9 @@ import {
   getPlanModeSystemReminder,
   resolvePathFromEnv,
   getCompressionPrompt,
+  resolveInteractionMode,
 } from './prompts.js';
+import { InputFormat } from '../output/types.js';
 import { isGitRepository } from '../utils/gitUtils.js';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -64,7 +66,77 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).toContain(
       'genuinely safer alternative that does not accomplish the denied action',
     );
-    expect(prompt).toContain('stop and ask the user for explicit approval');
+    expect(prompt).toContain(
+      'request explicit approval only when the current interaction mode can receive it',
+    );
+  });
+
+  it.each([
+    [
+      'interactive',
+      'an interactive CLI agent',
+      "Use 'ask_user_question' when you need clarification",
+    ],
+    [
+      'headless',
+      'a non-interactive CLI agent',
+      'Never ask the user a question',
+    ],
+    [
+      'acp',
+      'a CLI agent operating through an ACP host',
+      'The ACP host can relay the question and response',
+    ],
+  ] as const)(
+    'aligns the system prompt with %s mode',
+    (mode, role, questionGuidance) => {
+      vi.stubEnv('SANDBOX', undefined);
+      const prompt = getCoreSystemPrompt(undefined, undefined, undefined, mode);
+
+      expect(prompt).toContain(`You are Qwen Code, ${role}`);
+      expect(prompt).toContain(questionGuidance);
+    },
+  );
+
+  it('does not tell headless runs to wait for user input', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    vi.mocked(isGitRepository).mockReturnValue(true);
+    const prompt = getCoreSystemPrompt(
+      undefined,
+      undefined,
+      undefined,
+      'headless',
+    );
+
+    expect(prompt).not.toContain('stop and ask the user for explicit approval');
+    expect(prompt).not.toContain('ask clarifying questions');
+    expect(prompt).not.toContain('If unsure, ask the user');
+    expect(prompt).not.toContain(
+      'ask for clarification or confirmation where needed',
+    );
+    expect(prompt).not.toMatch(/Use 'ask_user_question' when you need/);
+    expect(
+      prompt.lastIndexOf('This is a non-interactive, single-turn run'),
+    ).toBeGreaterThan(prompt.lastIndexOf('# Examples'));
+  });
+
+  it('instructs the model to preserve unrelated existing work', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    vi.mocked(isGitRepository).mockReturnValue(true);
+    const prompt = getCoreSystemPrompt();
+
+    expect(prompt).toContain(
+      'Treat existing or unexpected changes as user-owned',
+    );
+    expect(prompt).toContain(
+      'Do not modify, stage, commit, or revert unrelated changes',
+    );
+    expect(prompt).toContain(
+      'Stage only paths that belong to the requested change',
+    );
+    expect(prompt).toContain(
+      'Do not use broad staging commands such as `git add -A` when unrelated changes are present',
+    );
   });
 
   it('does not tell the model to enter plan mode without user opt-in', () => {
@@ -80,6 +152,40 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).not.toContain(
       'When the work requires a shared plan before execution, enter plan mode',
     );
+  });
+
+  it('uses todos selectively and keeps plans outcome-oriented', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt();
+
+    expect(prompt).toContain('complex, ambiguous, or multi-phase tasks');
+    expect(prompt).toContain('Do not use it for simple or single-step queries');
+    expect(prompt).toContain('unless the user explicitly asks for a plan');
+    expect(prompt).toContain('Keep it short and outcome-oriented');
+    expect(prompt).toContain(
+      'rather than one item per error, file, command, or minor edit',
+    );
+    expect(prompt).not.toContain('VERY frequently');
+    expect(prompt).not.toContain('EXTREMELY helpful');
+    expect(prompt).not.toContain('write 10 items to the todo list');
+  });
+
+  it('adapts final response detail to the request', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt();
+
+    expect(prompt).toContain(
+      'Final responses should be concise by default, but their shape and depth must match the request',
+    );
+    expect(prompt).toContain(
+      'For code reviews, explanations, investigations, or substantial changes',
+    );
+    expect(prompt).toContain(
+      'complex findings may require several paragraphs or sections',
+    );
+    expect(prompt).not.toContain('End-of-turn summary: one or two sentences');
+    expect(prompt).not.toContain('Nothing else.');
+    expect(prompt).not.toContain('fewer than 3 lines');
   });
 
   it('should return the base prompt when userMemory is empty string', () => {
@@ -721,5 +827,72 @@ describe('getCompressionPrompt', () => {
     expect(prompt).not.toMatch(
       /resume.*directly|continue the conversation from where it left off/i,
     );
+  });
+});
+
+describe('resolveInteractionMode', () => {
+  const makeConfig = (opts: {
+    zed?: boolean;
+    inputFormat?: string;
+    interactive?: boolean;
+  }) => ({
+    getExperimentalZedIntegration: () => opts.zed ?? false,
+    getInputFormat: () => opts.inputFormat ?? InputFormat.TEXT,
+    isInteractive: () => opts.interactive ?? false,
+  });
+
+  it("resolves the Zed integration to 'acp'", () => {
+    expect(resolveInteractionMode(makeConfig({ zed: true }))).toBe('acp');
+  });
+
+  it("resolves a stream-json session to 'acp' so the model may still ask questions", () => {
+    // Must match the runtime question/permission sites, which treat a
+    // stream-json session as ACP-capable (the host relays the question).
+    expect(
+      resolveInteractionMode(
+        makeConfig({ inputFormat: InputFormat.STREAM_JSON }),
+      ),
+    ).toBe('acp');
+  });
+
+  it("resolves an interactive text session to 'interactive'", () => {
+    expect(
+      resolveInteractionMode(
+        makeConfig({ inputFormat: InputFormat.TEXT, interactive: true }),
+      ),
+    ).toBe('interactive');
+  });
+
+  it("resolves a non-interactive text session to 'headless'", () => {
+    expect(
+      resolveInteractionMode(
+        makeConfig({ inputFormat: InputFormat.TEXT, interactive: false }),
+      ),
+    ).toBe('headless');
+  });
+
+  it("prefers 'acp' over 'interactive' for a stream-json session (ACP precedence)", () => {
+    expect(
+      resolveInteractionMode(
+        makeConfig({ inputFormat: InputFormat.STREAM_JSON, interactive: true }),
+      ),
+    ).toBe('acp');
+  });
+
+  it('treats a missing getInputFormat as a text session', () => {
+    // getInputFormat is optional on the structural type; its absence must not
+    // throw and must not resolve to 'acp'.
+    expect(
+      resolveInteractionMode({
+        getExperimentalZedIntegration: () => false,
+        isInteractive: () => true,
+      }),
+    ).toBe('interactive');
+    expect(
+      resolveInteractionMode({
+        getExperimentalZedIntegration: () => false,
+        isInteractive: () => false,
+      }),
+    ).toBe('headless');
   });
 });

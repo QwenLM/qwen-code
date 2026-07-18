@@ -288,6 +288,12 @@ jobs:
           rm -rf "${WORKDIR}"
           mkdir -p "${WORKDIR}"
 
+      # Same staging as the review-address job: the verify gate always runs the
+      # trusted checkout's copy of the schema gate, never a working-tree copy.
+      - name: 'Stage trusted schema gate'
+        run: |-
+          cp .github/scripts/check-settings-schema.sh "${RUNNER_TEMP}/check-settings-schema.sh"
+
       - name: 'Check bot credentials'
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
@@ -717,6 +723,7 @@ jobs:
                 "run_shell_command(npm run typecheck)",
                 "run_shell_command(npm run lint)",
                 "run_shell_command(npx vitest)",
+                "run_shell_command(npm run generate:settings-schema)",
                 "run_shell_command(pwd)"
               ],
               "tools": {
@@ -781,6 +788,16 @@ jobs:
           npm run build
           npm run typecheck
           npm run lint
+
+          # Settings-schema freshness gate, shared with the triage-and-address
+          # verify step so the two copies cannot drift (rationale + the
+          # generator crash guard live in the script). On failure it writes
+          # outcome=failed to GITHUB_OUTPUT and exits 1.
+          # Run the copy staged from the trusted base checkout: a PR branch
+          # that predates the script does not contain it (bash would exit 127
+          # and kill the gate with no outcome), and the gate logic must come
+          # from the trusted base, not the branch under verification.
+          bash "${RUNNER_TEMP}/check-settings-schema.sh"
 
           # Run changed/related tests for the packages this fix touches.
           # --changed follows the import graph so transitive breakage is caught.
@@ -979,46 +996,92 @@ jobs:
               "${WORKDIR}/bot-prs.json")"
           fi
 
+          # Pending-check staleness bound (invariant across candidate PRs, computed
+          # once): ignore a check stuck far past any legitimate runtime. The bound
+          # must sit ABOVE real check durations here — review-pr can take ~50m and
+          # review-address is capped at 120m — so an active run keeps blocking and
+          # is never aged out mid-flight (which would enqueue the PR against a live
+          # check and double-process the feedback).
+          PENDING_STALE_MIN=240
+          PENDING_CUTOFF="$(date -u -d "${PENDING_STALE_MIN} minutes ago" +%Y-%m-%dT%H:%M:%SZ)"
           TARGETS='[]'
           for PR in ${CANDIDATES}; do
-            BRANCH="$(gh pr view "${PR}" --repo "${REPO}" --json headRefName --jq '.headRefName')"
+            # One PR fetch for the branch name, check rollup, and creation time (the
+            # watermark floor below) — avoids extra round-trips per candidate PR.
+            PR_META="$(gh pr view "${PR}" --repo "${REPO}" \
+              --json headRefName,statusCheckRollup,createdAt 2> /dev/null || echo '{}')"
+            BRANCH="$(jq -r '.headRefName // ""' <<< "${PR_META}")"
+            if [[ -z "${BRANCH}" ]]; then
+              # Metadata fetch failed (transient API error / rate limit). Skip rather
+              # than fall through with an empty branch, which would make the address
+              # job fail at `git checkout -B "" origin/` and post a misleading "could
+              # not start evaluation" handoff. Retried on the next scan. (This also
+              # means CREATED_WM below is only reached with a populated PR_META.)
+              echo "⚠️ #${PR}: could not fetch PR metadata (API error); skipping until next scan"
+              continue
+            fi
             # Extract issue number: autofix/issue-<N> → N; otherwise use PR number.
             if [[ "${BRANCH}" == "${BRANCH_PREFIX}"* ]]; then
               ISSUE="${BRANCH#"${BRANCH_PREFIX}"}"
             else
               ISSUE="${PR}"
             fi
-            HEAD_SHA="$(gh api "repos/${REPO}/pulls/${PR}" --jq '.head.sha')"
-            CHECKS_JSON="$(gh pr view "${PR}" --repo "${REPO}" \
-              --json statusCheckRollup --jq '.statusCheckRollup // []' 2> /dev/null || echo '[]')"
-            HAS_PENDING_CHECKS="$(jq -r '
+            CHECKS_JSON="$(jq -c '.statusCheckRollup // []' <<< "${PR_META}")"
+            # startedAt is the only staleness clock: a check blocks only if it
+            # started within the bound; one with no startedAt (queued, not yet
+            # running) is not blocking (the next scan re-checks once it starts).
+            HAS_PENDING_CHECKS="$(jq -r --arg cut "${PENDING_CUTOFF}" '
               [ .[]
                 | select((.status // .state // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED"))
-                | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address")))) ]
+                | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
+                | select((.startedAt // $cut) > $cut) ]
               | length > 0
             ' <<< "${CHECKS_JSON}")"
             if [[ "${HAS_PENDING_CHECKS}" == "true" ]]; then
-              echo "⏳ #${PR}: PR has pending checks; skipping until the current verification finishes"
+              echo "⏳ #${PR}: active checks in flight; skipping until they finish (only checks stuck >${PENDING_STALE_MIN}m past their start are treated as dead and ignored)"
               continue
             fi
-            # Push watermark: the PR's last push. Feedback older than this was in
-            # front of the agent on a previous round.
-            PUSH_WM="$(gh api "repos/${REPO}/commits/${HEAD_SHA}" --jq '.commit.committer.date')"
+            # Pre-first-eval floor: the PR's IMMUTABLE creation time. Feedback
+            # cannot predate the PR, and unlike the head commit date this never
+            # advances when the branch is synced with main ("Update branch"/base
+            # merge), so an early base-sync merge cannot bury a comment made before
+            # the first eval. If the metadata query failed (empty), fall back to an
+            # EMPTY floor — over-inclusive (evaluates all feedback once, then the
+            # first eval writes a marker) but never buries. NEVER fall back to the
+            # mutable head commit date: a base-sync HEAD would recreate the burial.
+            CREATED_WM="$(jq -r '.createdAt // ""' <<< "${PR_META}")"
 
             gh api "repos/${REPO}/issues/${PR}/comments" --paginate > "${WORKDIR}/ic.json"
             # Eval markers the bot left after a previous evaluation carry the
             # newest feedback timestamp it already considered, plus the round.
             # Only our own comments are trusted, so a spoofed marker is ignored.
+            # NOTE: this regex is POSITIONAL — group .[0]=ts, .[2]=round — and must
+            # match the marker string emitted at every write site verbatim (search
+            # `autofix-eval ts=`: the push/report success, noop, and handoff steps).
+            # Inserting or reordering a field here or at any write site silently
+            # corrupts round tracking; keep the `ts= acted= round=` order in lockstep.
             MARKERS="$(jq -c --arg ab "${AUTOFIX_BOT}" '
               [ .[] | select((.user.login // "") == $ab) | (.body // "")
                 | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+) -->") ] | .[]
                 | {ts: .[0], round: (.[2] | tonumber)} ]' "${WORKDIR}/ic.json")"
             EVAL_WM="$(jq -r 'map(.ts) | max // ""' <<< "${MARKERS}")"
-            ROUND="$(jq -r '(sort_by(.ts) | last | .round) // 0' <<< "${MARKERS}")"
+            # Highest round across markers, not last-by-ts: a terminal handoff
+            # marker (round = MAX_ROUNDS) must make the scan skip regardless of its
+            # timestamp, and normal rounds increase monotonically anyway.
+            ROUND="$(jq -r 'map(.round) | max // 0' <<< "${MARKERS}")"
 
-            # Effective watermark = the later of the last push and the last eval.
-            EFF_WM="${PUSH_WM}"
-            if [[ -n "${EVAL_WM}" && "${EVAL_WM}" > "${EFF_WM}" ]]; then EFF_WM="${EVAL_WM}"; fi
+            # Effective watermark = what the agent has actually evaluated (its last
+            # eval marker's newest-feedback timestamp), NOT the last push. A bot
+            # fix always writes a marker, so a real fix advances this; a base-sync
+            # "Merge branch 'main'" push (or any commit that did not evaluate
+            # feedback) does NOT, so it can never bury unaddressed maintainer
+            # comments under the watermark. Before the first evaluation there is no
+            # marker, so fall back to the PR creation floor.
+            if [[ -n "${EVAL_WM}" ]]; then
+              EFF_WM="${EVAL_WM}"
+            else
+              EFF_WM="${CREATED_WM}"
+            fi
 
             if [[ "${ROUND}" -ge "${MAX_ROUNDS}" ]]; then
               echo "🚧 #${PR}: hit MAX_ROUNDS (${ROUND}/${MAX_ROUNDS}) — leaving for a human"
@@ -1042,21 +1105,21 @@ jobs:
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
                 | select((.state // "") | IN("CHANGES_REQUESTED", "COMMENTED")) ] | length' \
               "${WORKDIR}/rv.json")"
-            # /review posts Suggestion-level findings as inline comments prefixed
-            # `**[Suggestion]**`. They are recommendations, not blockers — keep them
-            # out of the autofix loop, exactly as the suggestion-summary comment they
-            # replaced always was. Anchored to the body start and paired with the
-            # /review footer so a human comment that merely quotes the prefix stays
-            # actionable. jq's `^` is string-anchored, so tolerate leading whitespace
-            # the review model may emit; `**[Critical]**` can never match either way.
-            QWEN_SUGGESTION_FILTER='^[[:space:]]*\*\*\[Suggestion\]\*\*'
+            # Per AGENTS.md's review policy, Suggestion-level findings ARE
+            # addressed during a PR's first ~5 review rounds; only past that are
+            # they deferred (with a recorded reason). The loop's MAX_ROUNDS cap is
+            # that same boundary — every round the loop actually runs is within
+            # the address-Suggestions window — so /review `**[Suggestion]**`
+            # inline comments count as actionable feedback here. The agent's
+            # triage still decides implement-vs-defer per finding and records the
+            # decision in its summary comment, and the MAX_ROUNDS handoff is the
+            # defer-to-a-human boundary.
             N_COMMENTS="$(jq --arg wm "${EFF_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
-              --argjson trust "${TRUSTED_ASSOC}" --arg sf "${QWEN_SUGGESTION_FILTER}" '
+              --argjson trust "${TRUSTED_ASSOC}" '
               [ .[]
                 | select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
-                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
-                | select((((.body // "") | test($sf)) and ((.body // "") | test("via Qwen Code /review"))) | not) ] | length' \
+                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb) ] | length' \
               "${WORKDIR}/rc.json")"
             # Issue-level PR comments are also actionable feedback. Exclude the
             # bot's own eval markers, and known non-actionable bot comments
@@ -1142,6 +1205,16 @@ jobs:
         run: |-
           rm -rf "${WORKDIR}"
           mkdir -p "${WORKDIR}"
+
+      # Stage the schema gate script from the TRUSTED BASE checkout before
+      # "Prepare branch and feedback" switches the working tree to the PR
+      # branch. The verify gate must run the trusted copy: a PR branch that
+      # predates this script does not contain it (bash exits 127 and the gate
+      # dies without an outcome), and an in-branch copy would let branch code
+      # define its own gate.
+      - name: 'Stage trusted schema gate'
+        run: |-
+          cp .github/scripts/check-settings-schema.sh "${RUNNER_TEMP}/check-settings-schema.sh"
 
       - name: 'Check runner environment'
         env:
@@ -1290,15 +1363,16 @@ jobs:
               "${WORKDIR}/rv.json"
             echo
             echo "## Inline comments"
-            # Mirrors the review-scan gate: /review `**[Suggestion]**` findings are
-            # recommendations, not blockers, so they never become autofix work.
+            # Mirrors the review-scan gate: per AGENTS.md, Suggestion-level
+            # findings are actionable within the first ~5 review rounds (the
+            # loop's whole operating range), so they are rendered for the agent
+            # to triage — implement if valuable, otherwise record the deferral.
             jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
-              --argjson trust "${TRUSTED_ASSOC}" --arg sf '^[[:space:]]*\*\*\[Suggestion\]\*\*' '
+              --argjson trust "${TRUSTED_ASSOC}" '
               .[]
               | select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
-              | select((((.body // "") | test($sf)) and ((.body // "") | test("via Qwen Code /review"))) | not)
               | "- \(.path // "?"):\(.line // "?") @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
               "${WORKDIR}/rc.json"
             echo
@@ -1319,7 +1393,7 @@ jobs:
               | select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
               | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
               | select((.completedAt // .updatedAt // "") > $wm)
-              | "- \((.workflowName // "external check") | gsub("[^A-Za-z0-9 _./()-]"; "") | .[0:80]): \(.conclusion // .state // "?")"' \
+              | "- \(((.name // .workflowName) // "external check") | gsub("[^A-Za-z0-9 _./()-]"; "") | .[0:80]): \(.conclusion // .state // "?")"' \
               "${WORKDIR}/checks.json"
           } > "${WORKDIR}/feedback.md"
           echo '--- feedback.md ---'
@@ -1327,6 +1401,12 @@ jobs:
 
       - name: 'Triage and address'
         id: 'address'
+        # Bound the agent well below the 120-minute job timeout so a runaway agent
+        # fails THIS step (not the whole job), leaving the always() verify and
+        # report steps time to run and post a handoff. A job-level timeout would
+        # cancel those steps too and leave the loop silent. 80 leaves ~40 minutes
+        # of headroom for setup (install/build) plus verify + report.
+        timeout-minutes: 80
         env:
           PR: '${{ env.PR }}'
           ISSUE: '${{ env.ISSUE }}'
@@ -1360,6 +1440,7 @@ jobs:
                 "run_shell_command(npm run typecheck)",
                 "run_shell_command(npm run lint)",
                 "run_shell_command(npx vitest)",
+                "run_shell_command(npm run generate:settings-schema)",
                 "run_shell_command(pwd)"
               ],
               "tools": {
@@ -1404,6 +1485,21 @@ jobs:
           fi
 
           git checkout "${BRANCH}"
+
+          # Settings-schema freshness is a STRUCTURAL guard, checked BEFORE the
+          # no-op/unchanged return: on a stale-schema PR the agent can wrongly
+          # write no-action.md, and without this the no-op path would report the
+          # feedback as evaluated (acted=false) while CI stays red — the exact bug
+          # this PR fixes. So it runs on EVERY path. The gate is shared with the
+          # issue-fix verify step (rationale + the generator crash guard live in
+          # the script); the write is on a tracked file compared by `git status`,
+          # not the commit-level no-op git-diff below, and it is restored on
+          # failure. On failure it writes outcome=failed and exits 1.
+          # Run the copy staged from the trusted base checkout: a PR branch
+          # that predates the script does not contain it (bash would exit 127
+          # and kill the gate with no outcome), and the gate logic must come
+          # from the trusted base, not the branch under verification.
+          bash "${RUNNER_TEMP}/check-settings-schema.sh"
 
           if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then
             # No new commit. That is only legitimate as a deliberate no-action.
@@ -1561,6 +1657,7 @@ jobs:
           DRY_RUN: '${{ needs.route.outputs.dry_run }}'
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           NEWEST: '${{ steps.prepare.outputs.newest }}'
+          JOB_STATUS: '${{ job.status }}'
         run: |-
           SUFFIX=''
           [[ "${DRY_RUN}" == "true" ]] && SUFFIX=' (dry-run, nothing pushed)'
@@ -1579,7 +1676,25 @@ jobs:
             done
           } >> "${GITHUB_STEP_SUMMARY}"
 
-          if [[ "${DRY_RUN}" != "true" && "${OUTCOME:-unknown}" == "failed" && -n "${NEWEST:-}" && -n "${GITHUB_TOKEN:-}" && -s "${WORKDIR}/handoff.md" ]]; then
+          # Leave a visible handoff + eval marker when the address did NOT publish a
+          # result — a verify failure, or an agent/infra crash or timeout before the
+          # verify gate ran. Without it the loop goes SILENT (no comment, no marker)
+          # and the next scan re-targets the same feedback forever.
+          #
+          # SUPPRESS entirely once "Push and report" already handled this run
+          # (OUTCOME fixed or noop). That step is also always()-gated and runs even
+          # if a LATER always() step (e.g. artifact upload) fails the job; without
+          # this guard, such a late failure would flip JOB_STATUS to failure and
+          # post a contradictory acted=false handoff on top of the published fix.
+          # (A genuine push failure leaves OUTCOME=fixed but writes no marker, so
+          # the next scan simply retries — it does not need a handoff here.)
+          POST_HANDOFF=false
+          if [[ "${DRY_RUN}" != "true" && -n "${GITHUB_TOKEN:-}" && "${OUTCOME:-unknown}" != "fixed" && "${OUTCOME:-unknown}" != "noop" ]]; then
+            if [[ "${OUTCOME:-unknown}" == "failed" || "${JOB_STATUS:-}" != "success" ]]; then
+              POST_HANDOFF=true
+            fi
+          fi
+          if [[ "${POST_HANDOFF}" == "true" ]]; then
             api_error_file="$(mktemp)"
             if ! bot_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login' 2>"${api_error_file}")"; then
               api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
@@ -1593,18 +1708,66 @@ jobs:
               echo "::error::CI_DEV_BOT_PAT authenticates as ${bot_actor}; expected ${AUTOFIX_BOT}."
               exit 1
             fi
+            # Attach the most actionable agent output. failure.md first (its
+            # diagnosis; run-agent.mjs wraps it in a generic handoff.md, so prefer
+            # failure.md). Then the agent's SUCCESS outputs: on the OUTCOME=failed
+            # path where the agent committed a fix but a post-agent verify gate then
+            # failed (most notably the schema-freshness gate), only
+            # address-summary.md/no-action.md exist and "Push and report" is
+            # skipped, so this handoff is their only route to the PR — otherwise the
+            # comment would wrongly say "crashed or timed out". Generic notice only
+            # if none exist.
+            DETAIL_FILE=''
+            for f in failure.md handoff.md address-summary.md no-action.md; do
+              if [[ -s "${WORKDIR}/${f}" ]]; then DETAIL_FILE="${WORKDIR}/${f}"; break; fi
+            done
+            # If feedback was actually read (prepare ran), stamp its newest ts so
+            # the watermark advances and the same feedback is not re-selected next
+            # scan. If the crash happened before prepare, NEWEST is empty and the
+            # watermark cannot advance — mark the round terminal (MAX_ROUNDS) so the
+            # scan's max-round guard skips this PR instead of re-handing-off every
+            # tick, without pretending the unread feedback was evaluated. The final
+            # sentinel guards a cascading API failure that left WATERMARK empty too:
+            # an empty ts= would not match the scan's `ts=([^ ]+)` regex, so the
+            # terminal marker would be ignored and the PR re-handed-off. A far-future
+            # ISO-8601 date is used (not a bare word) so it is both non-empty AND
+            # sorts above any real timestamp in EVAL_WM's max, belt-and-suspenders
+            # with the terminal round.
+            MARK_TS="${NEWEST:-${WATERMARK:-9999-12-31T23:59:59Z}}"
+            if [[ -n "${NEWEST:-}" ]]; then
+              MARK_ROUND="$(( ROUND + 1 ))"
+              HEADLINE="🤖 Could not address the latest feedback automatically (round ${MARK_ROUND}/${MAX_ROUNDS}). A human should take over this PR."
+            else
+              # Crashed/timed out before reading the feedback: mark terminal so the
+              # scan skips (it can't advance the watermark without a read), but say
+              # so plainly — do NOT imply MAX_ROUNDS attempts were made when zero
+              # rounds happened. Because the marker is terminal, the max-round guard
+              # skips this PR on EVERY future scan, including a forced dispatch, so
+              # the headline must state the real recovery (delete the marker) rather
+              # than promise a re-trigger that the guard would ignore.
+              MARK_ROUND="${MAX_ROUNDS}"
+              HEADLINE="🤖 AutoFix could not start evaluation — it crashed or timed out before reading the feedback, so no fix was attempted. This PR is now marked terminal and future scans (including forced dispatch) will skip it. To recover: delete this bot's terminal \`autofix-eval\` marker comment, then re-trigger if the failure looked transient."
+            fi
             {
-              echo "🤖 Could not address the latest review feedback automatically."
+              echo "${HEADLINE}"
               echo
-              echo "The feedback was evaluated, but AutoFix failed before producing a verified commit. A human should take over this PR."
+              if [[ -n "${DETAIL_FILE}" ]]; then
+                echo "**What I found before stopping:**"
+                # -c drops any partial multi-byte sequence a byte-level head -c may
+                # have split, so the comment body stays valid UTF-8. iconv -c still
+                # EXITS 1 when it discards a byte, which under this shell's
+                # `set -eo pipefail` would abort the step and skip the marker + gh
+                # pr comment below — the exact silent stall this block prevents — so
+                # `|| true` keeps the (already-emitted) cleaned text and continues.
+                head -c 1500 "${DETAIL_FILE}" | iconv -f utf-8 -t utf-8 -c | sed 's/<!--[^>]*-->//g' || true
+              else
+                echo "AutoFix failed before producing a verified commit (the run crashed or timed out before it could explain why)."
+              fi
               echo
-              echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
               echo
-              echo "**Failure:**"
-              head -c 1500 "${WORKDIR}/failure.md" | sed 's/<!--[^>]*-->//g'
+              echo "Run log: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
               echo
-              echo
-              echo "<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} -->"
+              echo "<!-- autofix-eval ts=${MARK_TS} acted=false round=${MARK_ROUND} -->"
             } > "${WORKDIR}/report.md"
             gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md" || echo "::warning::Failed to post handoff comment on PR #${PR}"
           fi

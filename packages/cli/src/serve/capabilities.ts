@@ -41,6 +41,13 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // the underlying ACP method from unstable_resumeSession to resumeSession.
   unstable_session_resume: { since: 'v1' },
   session_list: { since: 'v1' },
+  // Aggregate persisted session counts via
+  // `GET /workspace/:id/session-info` (and the plural
+  // `/workspaces/:workspace/session-info` twin). Performs a disk scan of
+  // local JSONL files — advertised so clients can discover it, but the
+  // response itself marks `expensive: true` / `cost: "disk_scan"` and
+  // must not be polled in a tight loop.
+  session_info: { since: 'v1' },
   session_source_metadata: { since: 'v1' },
   session_prompt: { since: 'v1' },
   session_cancel: { since: 'v1' },
@@ -98,6 +105,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_organization: { since: 'v1' },
   session_export: { since: 'v1' },
   session_transcript: { since: 'v1' },
+  session_transcript_pagination: { since: 'v1' },
   // Daemon supports the MCP client guardrail surface: an in-process
   // counter exposed on `GET /workspace/mcp`, a `--mcp-client-budget=N`
   // flag with `--mcp-budget-mode={enforce, warn, off}`, and a
@@ -145,6 +153,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // (`tools.disabled` is consulted at `Config` construction time).
   workspace_tool_toggle: { since: 'v1' },
   workspace_skill_toggle: { since: 'v1' },
+  workspace_skill_manage: { since: 'v1' },
   workspace_settings: { since: 'v1' },
   // `GET /workspace/permissions` is always available when this tag is
   // advertised. `POST /workspace/permissions` updates the active ACP
@@ -275,6 +284,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Runtime GET/PUT/DELETE control for daemon-managed channel selection.
   // The route exists even when no selection was supplied at daemon boot.
   channel_control: { since: 'v1' },
+  // Read-only workspace graph of recently observed channel contacts.
+  workspace_channel_observed_contacts: { since: 'v1' },
   // Multi-workspace session routing. Advertised only when one daemon hosts
   // more than one registered workspace runtime.
   multi_workspace_sessions: { since: 'v1' },

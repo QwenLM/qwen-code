@@ -320,6 +320,7 @@ interface Envelope {
   senderId: string; // stable, unique sender ID
   senderName: string; // display name
   chatId: string; // distinguishes DMs from groups
+  chatName?: string; // inbound group display name, when provided
   text: string; // message text (@mentions stripped)
   messageId?: string; // platform message ID
   threadId?: string; // for thread-scoped sessions

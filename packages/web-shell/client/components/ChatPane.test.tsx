@@ -68,6 +68,12 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   },
   useStreamingState: () => streamingStateValue,
   useTranscriptBlocks: () => [],
+  useTranscriptHistory: () => ({
+    hasMore: false,
+    loading: false,
+    capacityReached: false,
+    loadMore: vi.fn(),
+  }),
   useTranscriptStore: () => ({
     dispatch: transcriptDispatch,
   }),
@@ -492,6 +498,32 @@ describe('ChatPane', () => {
     expect(returned).toBe(false);
     expect(sendPrompt).not.toHaveBeenCalled();
     expect(enqueuePrompt).not.toHaveBeenCalled();
+  });
+
+  it('submits while disconnected when prompt SSE restart is enabled', () => {
+    connectionState.status = 'disconnected';
+    render({ restartSseOnPrompt: true });
+
+    act(() => {
+      latestOnSubmit!('hi');
+    });
+
+    expect(sendPrompt).toHaveBeenCalledWith(
+      'hi',
+      expect.objectContaining({ onAdmitted: expect.any(Function) }),
+    );
+  });
+
+  it('does not submit without a recoverable disconnected session', () => {
+    connectionState.status = 'disconnected';
+    connectionState.sessionId = undefined;
+    render({ restartSseOnPrompt: true });
+
+    act(() => {
+      latestOnSubmit!('hi');
+    });
+
+    expect(sendPrompt).not.toHaveBeenCalled();
   });
 
   it('reports an idle prompt failure to the pane error handler', async () => {

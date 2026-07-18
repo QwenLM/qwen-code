@@ -12,6 +12,7 @@ import type {
   ChannelTaskLifecycleEvent,
   DispatchMode,
   Envelope,
+  ObservedChannelContactObservation,
   SanitizedToolCallEvent,
   SessionTarget,
 } from './types.js';
@@ -118,6 +119,26 @@ type ResolvedChannelMemoryIntent =
   | { kind: 'natural_update'; id: string; text: string; expectedText: string }
   | { kind: 'natural_remove'; id: string; expectedText: string };
 
+type PendingChannelMemoryMutationInput =
+  | { kind: 'clear' }
+  | {
+      kind: 'update';
+      id: string;
+      expectedText: string;
+      proposedText: string;
+    }
+  | {
+      kind: 'remove';
+      id: string;
+      expectedText: string;
+    };
+
+type PendingChannelMemoryMutation = PendingChannelMemoryMutationInput & {
+  expiresAt: number;
+};
+
+type PendingChannelMemoryMutationKind = PendingChannelMemoryMutation['kind'];
+
 export interface ChannelBaseOptions {
   router?: SessionRouter;
   proxy?: string;
@@ -130,6 +151,12 @@ export interface ChannelBaseOptions {
   registerBridgeEvents?: boolean;
   groupHistoryPath?: string;
   loopController?: ChannelLoopController;
+  observedContacts?: {
+    observe(
+      channelName: string,
+      observation: ObservedChannelContactObservation,
+    ): void | Promise<void>;
+  };
 }
 
 export interface ChannelLoopController {
@@ -259,6 +286,8 @@ export abstract class ChannelBase {
   private readonly memoryIntentClassifier?: ChannelMemoryIntentClassifier;
   private groupHistory: GroupHistoryStore;
   private readonly loopController?: ChannelLoopController;
+  private readonly observedContacts?: ChannelBaseOptions['observedContacts'];
+  private readonly observedContactEnvelopes = new WeakSet<Envelope>();
   private instructedSessions: Set<string> = new Set();
   private commands: Map<string, CommandHandler> = new Map();
   /** Per-session promise chain to serialize prompt + send (followup mode). */
@@ -270,7 +299,14 @@ export abstract class ChannelBase {
    * so a cleared session can't be resurrected by an already-queued prompt.
    */
   private sessionGenerations: Map<string, number> = new Map();
-  private pendingClears: Map<string, number> = new Map();
+  private pendingChannelMemoryMutations = new Map<
+    string,
+    PendingChannelMemoryMutation
+  >();
+  private pendingChannelMemoryMutationDeliveries = new Map<
+    string,
+    PendingChannelMemoryMutationInput
+  >();
 
   /** Per-session active prompt tracking for dispatch modes. */
   private activePrompts: Map<string, ActivePrompt> = new Map();
@@ -445,6 +481,7 @@ export abstract class ChannelBase {
         ),
     );
     this.loopController = options?.loopController;
+    this.observedContacts = options?.observedContacts;
 
     this.groupGate = new GroupGate(config.groupPolicy, config.groups);
     this.dmGate = new DmGate(config.dmPolicy);
@@ -2825,10 +2862,114 @@ export abstract class ChannelBase {
     }
 
     if (intent.kind === 'clear_request') {
-      this.setPendingClear(this.clearPendingKey(envelope));
+      await this.deliverPendingChannelMemoryMutation(
+        envelope,
+        { kind: 'clear' },
+        'This clears channel memory for this chat. Say "确认清空记忆" or "confirm clear memory" to proceed.',
+      );
+      return;
+    }
+
+    if (intent.kind === 'update_confirm' || intent.kind === 'remove_confirm') {
+      const pending =
+        intent.kind === 'update_confirm'
+          ? this.takePendingChannelMemoryMutation(envelope, 'update')
+          : this.takePendingChannelMemoryMutation(envelope, 'remove');
+      if (!pending) {
+        await this.sendMessage(
+          envelope.chatId,
+          intent.kind === 'update_confirm'
+            ? 'No pending channel memory update. Start a new update request first.'
+            : 'No pending channel memory removal. Start a new removal request first.',
+        );
+        return;
+      }
+
+      const channelMemory = await this.getChannelMemory(envelope);
+      if (!channelMemory) return;
+      const isUpdate = pending.kind === 'update';
+      let changed: boolean;
+      try {
+        if (isUpdate) {
+          ({ changed } = await channelMemory.updateChannelMemoryEntry(
+            this.channelMemoryTarget(envelope),
+            {
+              id: pending.id,
+              text: pending.proposedText,
+              expectedText: pending.expectedText,
+            },
+          ));
+        } else {
+          ({ changed } = await channelMemory.removeChannelMemoryEntries(
+            this.channelMemoryTarget(envelope),
+            {
+              ids: [pending.id],
+              expectedTextById: { [pending.id]: pending.expectedText },
+            },
+          ));
+        }
+      } catch (error) {
+        const message = this.channelMemoryErrorMessage(error);
+        this.logChannelMemoryError(
+          isUpdate ? 'update' : 'remove',
+          envelope,
+          message,
+        );
+        await this.sendMessage(
+          envelope.chatId,
+          message === 'Channel memory entry changed'
+            ? 'That channel memory entry changed since it was selected. View channel memory and start the operation again.'
+            : `Failed to ${isUpdate ? 'update' : 'remove'} channel memory: ${this.channelMemoryUserErrorMessage()}`,
+        );
+        return;
+      }
+      if (!changed) {
+        await this.sendMessage(
+          envelope.chatId,
+          `No channel memory entry ${pending.id}.`,
+        );
+        return;
+      }
+      this.invalidateSessionContext(envelope);
       await this.sendMessage(
         envelope.chatId,
-        'This clears channel memory for this chat. Say "确认清空记忆" or "confirm clear memory" to proceed.',
+        `Channel memory ${pending.id} ${isUpdate ? 'updated' : 'removed'}.`,
+      );
+      return;
+    }
+
+    if (intent.kind === 'natural_update') {
+      await this.deliverPendingChannelMemoryMutation(
+        envelope,
+        {
+          kind: 'update',
+          id: intent.id,
+          expectedText: intent.expectedText,
+          proposedText: intent.text,
+        },
+        [
+          `Update channel memory ${intent.id}?`,
+          `Before: ${sanitizePromptText(intent.expectedText).trim()}`,
+          `After: ${sanitizePromptText(intent.text).trim()}`,
+          'Say "确认更新记忆" or "confirm memory update" within 60 seconds.',
+        ].join('\n'),
+      );
+      return;
+    }
+
+    if (intent.kind === 'natural_remove') {
+      await this.deliverPendingChannelMemoryMutation(
+        envelope,
+        {
+          kind: 'remove',
+          id: intent.id,
+          expectedText: intent.expectedText,
+        },
+        [
+          `Remove channel memory ${intent.id}?`,
+          sanitizePromptText(intent.expectedText).trim(),
+          'Say "确认删除记忆" or "confirm memory removal" within 60 seconds.',
+        ].join('\n'),
       );
       return;
     }
@@ -2847,7 +2988,7 @@ export abstract class ChannelBase {
       try {
         result = await channelMemory.addChannelMemoryEntries(
           this.channelMemoryTarget(envelope),
-          [intent.text],
+          intent.texts,
           envelope.senderId,
         );
       } catch (error) {
@@ -2866,9 +3007,11 @@ export abstract class ChannelBase {
         const ids = result.added.map((entry) => entry.id);
         await this.sendMessage(
           envelope.chatId,
-          ids.length === 1
-            ? `Channel memory ${ids[0]} saved.`
-            : `Channel memory saved: ${ids.join(', ')}.`,
+          result.duplicateIds.length > 0
+            ? `Channel memory saved: ${ids.join(', ')}. Skipped duplicates: ${result.duplicateIds.join(', ')}.`
+            : ids.length === 1
+              ? `Channel memory ${ids[0]} saved.`
+              : `Channel memory saved: ${ids.join(', ')}.`,
         );
       } else if (result.duplicateIds.length > 0) {
         await this.sendMessage(
@@ -2934,37 +3077,20 @@ export abstract class ChannelBase {
       return;
     }
 
-    if (
-      intent.kind === 'update' ||
-      intent.kind === 'remove' ||
-      intent.kind === 'natural_update' ||
-      intent.kind === 'natural_remove'
-    ) {
+    if (intent.kind === 'update' || intent.kind === 'remove') {
       let changed: boolean;
-      const isUpdate =
-        intent.kind === 'update' || intent.kind === 'natural_update';
+      const isUpdate = intent.kind === 'update';
       const id = intent.id;
       try {
         if (isUpdate) {
           ({ changed } = await channelMemory.updateChannelMemoryEntry(
             this.channelMemoryTarget(envelope),
-            intent.kind === 'natural_update'
-              ? {
-                  id: intent.id,
-                  text: intent.text,
-                  expectedText: intent.expectedText,
-                }
-              : { id: intent.id, text: intent.text },
+            { id: intent.id, text: intent.text },
           ));
         } else {
           ({ changed } = await channelMemory.removeChannelMemoryEntries(
             this.channelMemoryTarget(envelope),
-            intent.kind === 'natural_remove'
-              ? {
-                  ids: [intent.id],
-                  expectedTextById: { [intent.id]: intent.expectedText },
-                }
-              : { ids: [intent.id] },
+            { ids: [intent.id] },
           ));
         }
       } catch (error) {
@@ -2996,10 +3122,8 @@ export abstract class ChannelBase {
     }
 
     if (intent.kind === 'clear_confirm') {
-      const pendingKey = this.clearPendingKey(envelope);
-      const expiresAt = this.pendingClears.get(pendingKey);
-      this.pendingClears.delete(pendingKey);
-      if (expiresAt === undefined || expiresAt < Date.now()) {
+      const pending = this.takePendingChannelMemoryMutation(envelope, 'clear');
+      if (!pending) {
         await this.sendMessage(
           envelope.chatId,
           'No pending clear request. Say "清空记忆" first.',
@@ -3047,20 +3171,73 @@ export abstract class ChannelBase {
     );
   }
 
-  private clearPendingKey(envelope: Envelope): string {
-    return `${this.name}:${envelope.chatId}:${envelope.threadId ?? ''}:${
-      envelope.senderId ?? ''
-    }`;
+  private channelMemoryPendingKey(envelope: Envelope): string {
+    return JSON.stringify([
+      this.name,
+      envelope.chatId,
+      envelope.threadId ?? null,
+      envelope.senderId ?? null,
+    ]);
   }
 
-  private setPendingClear(key: string): void {
+  private async deliverPendingChannelMemoryMutation(
+    envelope: Envelope,
+    mutation: PendingChannelMemoryMutationInput,
+    message: string,
+  ): Promise<void> {
     const now = Date.now();
-    for (const [pendingKey, expiresAt] of this.pendingClears) {
-      if (expiresAt < now) {
-        this.pendingClears.delete(pendingKey);
+    for (const [pendingKey, pending] of this.pendingChannelMemoryMutations) {
+      if (pending.expiresAt < now) {
+        this.pendingChannelMemoryMutations.delete(pendingKey);
       }
     }
-    this.pendingClears.set(key, now + 60_000);
+    this.deletePendingChannelMemoryMutation(envelope);
+    const key = this.channelMemoryPendingKey(envelope);
+    this.pendingChannelMemoryMutationDeliveries.set(key, mutation);
+    try {
+      await this.sendMessage(envelope.chatId, message);
+    } catch (error) {
+      if (this.pendingChannelMemoryMutationDeliveries.get(key) === mutation) {
+        this.pendingChannelMemoryMutationDeliveries.delete(key);
+      }
+      throw error;
+    }
+    if (this.pendingChannelMemoryMutationDeliveries.get(key) !== mutation) {
+      return;
+    }
+    this.pendingChannelMemoryMutationDeliveries.delete(key);
+    this.pendingChannelMemoryMutations.set(key, {
+      ...mutation,
+      expiresAt: Date.now() + 60_000,
+    });
+  }
+
+  private takePendingChannelMemoryMutation<
+    K extends PendingChannelMemoryMutationKind,
+  >(
+    envelope: Envelope,
+    kind: K,
+  ): Extract<PendingChannelMemoryMutation, { kind: K }> | undefined {
+    const key = this.channelMemoryPendingKey(envelope);
+    const pending = this.pendingChannelMemoryMutations.get(key);
+    if (!pending) {
+      return undefined;
+    }
+    if (pending.expiresAt < Date.now()) {
+      this.pendingChannelMemoryMutations.delete(key);
+      return undefined;
+    }
+    if (pending.kind !== kind) {
+      return undefined;
+    }
+    this.pendingChannelMemoryMutations.delete(key);
+    return pending as Extract<PendingChannelMemoryMutation, { kind: K }>;
+  }
+
+  private deletePendingChannelMemoryMutation(envelope: Envelope): void {
+    const key = this.channelMemoryPendingKey(envelope);
+    this.pendingChannelMemoryMutations.delete(key);
+    this.pendingChannelMemoryMutationDeliveries.delete(key);
   }
 
   private async classifyChannelMemoryIntent(
@@ -3101,92 +3278,134 @@ export abstract class ChannelBase {
       return null;
     }
 
-    const confidence =
-      classified && typeof classified === 'object'
-        ? (classified as { confidence?: unknown }).confidence
-        : undefined;
-    if (
-      typeof confidence !== 'number' ||
-      !Number.isFinite(confidence) ||
-      confidence < 0 ||
-      confidence > 1 ||
-      confidence < CHANNEL_MEMORY_CLASSIFIER_MIN_CONFIDENCE
-    ) {
-      return null;
-    }
+    try {
+      if (typeof classified !== 'object' || classified === null) return null;
+      const result = classified as {
+        intent?: unknown;
+        memory?: unknown;
+        memories?: unknown;
+        targetIds?: unknown;
+        confidence?: unknown;
+      };
+      const confidence = result.confidence;
+      if (
+        typeof confidence !== 'number' ||
+        !Number.isFinite(confidence) ||
+        confidence < 0 ||
+        confidence > 1 ||
+        confidence < CHANNEL_MEMORY_CLASSIFIER_MIN_CONFIDENCE
+      ) {
+        return null;
+      }
 
-    const result = classified as {
-      intent?: unknown;
-      memory?: unknown;
-      targetIds?: unknown;
-    };
-    const targetIds = result.targetIds;
-    const entryById = new Map(entries.map((entry) => [entry.id, entry]));
-    const resolvedEntries =
-      targetIds === undefined
-        ? undefined
-        : Array.isArray(targetIds) &&
-            targetIds.every(
-              (id): id is string => typeof id === 'string' && entryById.has(id),
-            ) &&
-            new Set(targetIds).size === targetIds.length
-          ? this.entriesForChannelMemoryIds(entries, targetIds)
+      const intent = result.intent;
+      if (intent === 'remember') {
+        const hasMemory = Object.prototype.hasOwnProperty.call(
+          result,
+          'memory',
+        );
+        const hasMemories = Object.prototype.hasOwnProperty.call(
+          result,
+          'memories',
+        );
+        if (hasMemory === hasMemories) return null;
+
+        let texts: string[] = [];
+        if (hasMemory) {
+          const memory = result.memory;
+          texts = typeof memory === 'string' ? [memory.trim()] : [];
+        } else {
+          const memories = result.memories;
+          if (Array.isArray(memories)) {
+            const snapshot = Array.from(memories);
+            if (
+              snapshot.every(
+                (memory): memory is string => typeof memory === 'string',
+              )
+            ) {
+              texts = snapshot.map((memory) => memory.trim());
+            }
+          }
+        }
+        return texts.length >= 1 &&
+          texts.length <= 10 &&
+          texts.every((text) => text.length > 0)
+          ? { kind: 'remember', texts }
           : null;
+      }
+      if (intent === 'clear_all') return { kind: 'clear_request' };
+      if (
+        intent !== 'list' &&
+        intent !== 'inspect' &&
+        intent !== 'update' &&
+        intent !== 'remove'
+      ) {
+        return null;
+      }
 
-    if (result.intent === 'remember') {
-      const memory =
-        typeof result.memory === 'string' ? result.memory.trim() : '';
-      return memory ? { kind: 'remember', text: memory } : null;
-    }
-    if (result.intent === 'list') {
-      if (resolvedEntries === undefined) return { kind: 'list', page: 1 };
-      if (resolvedEntries === null) return null;
-      return resolvedEntries.length === 0
-        ? { kind: 'no_match' }
-        : {
-            kind: 'list_matches',
-            ids: resolvedEntries.map((entry) => entry.id),
-          };
-    }
-    if (result.intent === 'clear_all') {
-      return { kind: 'clear_request' };
-    }
+      const targetIds = result.targetIds;
+      if (intent === 'list' && targetIds === undefined) {
+        return { kind: 'list', page: 1 };
+      }
+      if (!Array.isArray(targetIds)) return null;
+      const targetIdSnapshot = Array.from(targetIds);
+      const entryById = new Map(entries.map((entry) => [entry.id, entry]));
+      if (
+        !targetIdSnapshot.every(
+          (id): id is string => typeof id === 'string' && entryById.has(id),
+        ) ||
+        new Set(targetIdSnapshot).size !== targetIdSnapshot.length
+      ) {
+        return null;
+      }
+      const resolvedEntries = this.entriesForChannelMemoryIds(
+        entries,
+        targetIdSnapshot,
+      );
+      if (intent === 'list') {
+        return resolvedEntries.length === 0
+          ? { kind: 'no_match' }
+          : {
+              kind: 'list_matches',
+              ids: resolvedEntries.map((entry) => entry.id),
+            };
+      }
+      if (resolvedEntries.length === 0) return { kind: 'no_match' };
+      if (resolvedEntries.length > 1) {
+        return {
+          kind: 'ambiguous',
+          ids: resolvedEntries.map((entry) => entry.id),
+        };
+      }
 
-    if (
-      result.intent !== 'inspect' &&
-      result.intent !== 'update' &&
-      result.intent !== 'remove'
-    ) {
+      const entry = resolvedEntries[0]!;
+      if (intent === 'inspect') return { kind: 'inspect', id: entry.id };
+      if (intent === 'remove') {
+        return {
+          kind: 'natural_remove',
+          id: entry.id,
+          expectedText: entry.text,
+        };
+      }
+      const memory = result.memory;
+      const text = typeof memory === 'string' ? memory.trim() : '';
+      return text
+        ? {
+            kind: 'natural_update',
+            id: entry.id,
+            text,
+            expectedText: entry.text,
+          }
+        : null;
+    } catch (error) {
+      process.stderr.write(
+        `[${this.name}] channel memory intent validation failed: ${sanitizeLogText(
+          this.channelMemoryErrorMessage(error),
+          200,
+        )}\n`,
+      );
       return null;
     }
-    if (resolvedEntries === null || resolvedEntries === undefined) return null;
-    if (resolvedEntries.length === 0) return { kind: 'no_match' };
-    if (resolvedEntries.length > 1) {
-      return {
-        kind: 'ambiguous',
-        ids: resolvedEntries.map((entry) => entry.id),
-      };
-    }
-
-    const entry = resolvedEntries[0]!;
-    if (result.intent === 'inspect') return { kind: 'inspect', id: entry.id };
-    if (result.intent === 'remove') {
-      return {
-        kind: 'natural_remove',
-        id: entry.id,
-        expectedText: entry.text,
-      };
-    }
-    const text = typeof result.memory === 'string' ? result.memory.trim() : '';
-    if (text) {
-      return {
-        kind: 'natural_update',
-        id: entry.id,
-        text,
-        expectedText: entry.text,
-      };
-    }
-    return null;
   }
 
   private channelMemoryErrorMessage(error: unknown): string {
@@ -3631,6 +3850,47 @@ export abstract class ChannelBase {
     await this.processInbound(envelope);
   }
 
+  private async recordObservedContact(envelope: Envelope): Promise<void> {
+    if (!this.observedContacts) return;
+    const sanitizedSenderName = envelope.senderName
+      ? sanitizeSenderName(envelope.senderName)
+      : '';
+    const userLabel =
+      sanitizedSenderName === 'unknown'
+        ? envelope.senderId
+        : sanitizedSenderName || envelope.senderId;
+    const sanitizedChatName = envelope.chatName
+      ? sanitizeSenderName(envelope.chatName)
+      : '';
+    const groupLabel =
+      sanitizedChatName === 'unknown'
+        ? envelope.chatId
+        : sanitizedChatName || envelope.chatId;
+    const observation: ObservedChannelContactObservation = {
+      user: { id: envelope.senderId, label: userLabel },
+      ...(envelope.isGroup
+        ? {
+            group: { id: envelope.chatId, label: groupLabel },
+            ...(envelope.threadId
+              ? {
+                  topic: {
+                    id: envelope.threadId,
+                    label: envelope.threadId,
+                  },
+                }
+              : {}),
+          }
+        : {}),
+    };
+    try {
+      await this.observedContacts.observe(this.name, observation);
+    } catch {
+      process.stderr.write(
+        `[Channel:${sanitizeLogText(this.name, 80)}] observed contact persistence failed.\n`,
+      );
+    }
+  }
+
   protected markPreflighted(envelope: Envelope): void {
     this.preflightedEnvelopes.add(envelope);
   }
@@ -3648,9 +3908,16 @@ export abstract class ChannelBase {
         'processInbound called without a successful preflightInbound check.',
       );
     }
+    if (this.observedContacts && !this.observedContactEnvelopes.has(envelope)) {
+      this.observedContactEnvelopes.add(envelope);
+      await this.recordObservedContact(envelope);
+    }
 
     let memoryIntent: ResolvedChannelMemoryIntent | null =
       parseChannelMemoryIntent(envelope.text);
+    if (memoryIntent?.kind === 'update' || memoryIntent?.kind === 'remove') {
+      this.deletePendingChannelMemoryMutation(envelope);
+    }
     if (
       !memoryIntent &&
       this.shouldClassifyChannelMemoryIntent(envelope.text)

@@ -169,7 +169,10 @@ export function sendBridgeError(
   if (err instanceof WorkspaceSkillNotToggleableError) {
     res.status(409).json({
       error: err.message,
-      code: 'skill_not_toggleable',
+      code:
+        err.reason === 'inactive_extension'
+          ? 'skill_inactive_extension'
+          : 'skill_not_toggleable',
       skillName: err.skillName,
       reason: err.reason,
       ...(err.lockedScope ? { lockedScope: err.lockedScope } : {}),
@@ -647,6 +650,23 @@ export function sendBridgeError(
           ...(d.sessionId ? { sessionId: d.sessionId } : {}),
           ...(typeof d.snapshotSize === 'number'
             ? { snapshotSize: d.snapshotSize }
+            : {}),
+          ...(typeof d.maxBytes === 'number' ? { maxBytes: d.maxBytes } : {}),
+        });
+        return;
+      }
+      if (kind === 'transcript_page_too_large') {
+        const d = data as {
+          sessionId?: string;
+          pageBytes?: number;
+          maxBytes?: number;
+        };
+        res.status(413).json({
+          error: errorMessage(err),
+          code: 'transcript_page_too_large',
+          ...(d.sessionId ? { sessionId: d.sessionId } : {}),
+          ...(typeof d.pageBytes === 'number'
+            ? { pageBytes: d.pageBytes }
             : {}),
           ...(typeof d.maxBytes === 'number' ? { maxBytes: d.maxBytes } : {}),
         });

@@ -137,6 +137,8 @@ export interface BridgeRestoreSessionRequest {
   clientId?: string;
   /** Internal replay transport for `session/load`; defaults to bulk response. */
   historyReplay?: 'stream' | 'response';
+  /** Optional newest persisted-record page requested for response replay. */
+  historyPageSize?: number;
   approvalMode?: ApprovalMode;
   /**
    * Persisted parent lineage recovered from the transcript by the caller (the
@@ -154,12 +156,49 @@ export interface BridgeRestoreSessionRequest {
 
 export const LOAD_REPLAY_MODE_META_KEY = 'qwen.session.loadReplayMode';
 export const LOAD_REPLAY_META_KEY = 'qwen.session.loadReplay';
+export const LOAD_REPLAY_PAGE_SIZE_META_KEY = 'qwen.session.loadReplayPageSize';
 export const LOAD_REPLAY_BULK_MODE = 'bulk';
 export const LOAD_REPLAY_VERSION = 1 as const;
+
+export const CHANNEL_STARTUP_PROFILE_META_KEY =
+  'qwen.daemon.channelStartupProfile';
+export const CHANNEL_STARTUP_PROFILE_VERSION = 1 as const;
+
+export interface ChannelStartupProfileV1 {
+  v: typeof CHANNEL_STARTUP_PROFILE_VERSION;
+  complete: boolean;
+  responseBuiltAtEpochMs?: number;
+  processToResponseMs?: number;
+  phases: {
+    processToProfilerReadyMs?: number;
+    geminiImportMs?: number;
+    argsParseMs?: number;
+    settingsLoadMs?: number;
+    configConstructionMs?: number;
+    appInitializationMs?: number;
+    acpImportMs?: number;
+    bootstrapConfigInitializationMs?: number;
+    transportSetupMs?: number;
+    initializeHandlerMs?: number;
+    unattributedMs?: number;
+  };
+  config: {
+    extensionsInitialMs?: number;
+    hooksMs?: number;
+    skillsMs?: number;
+    extensionsFinalMs?: number;
+    hierarchicalMemoryMs?: number;
+    toolRegistryMs?: number;
+    ripgrepProbeMs?: number;
+    toolWarmupMs?: number;
+    otherMs?: number;
+  };
+}
 
 export interface BridgeLoadReplayEnvelope {
   v: typeof LOAD_REPLAY_VERSION;
   updates: SessionUpdate[];
+  hasMore?: boolean;
   partial?: true;
   replayError?: string;
 }
@@ -185,6 +224,8 @@ export interface BridgeRestoredSession extends BridgeSession {
   compactedReplay?: BridgeEvent[];
   /** Raw events since last turn boundary (current incomplete turn). */
   liveJournal?: BridgeEvent[];
+  /** True when persisted records exist before the returned replay page. */
+  historyHasMore?: boolean;
   /** High-water mark event ID — client uses this as initial SSE cursor. */
   lastEventId?: number;
 }
@@ -192,6 +233,7 @@ export interface BridgeRestoredSession extends BridgeSession {
 export interface BridgeSessionTranscriptPageRequest {
   sessionId: string;
   cursor?: string;
+  beforeRecordId?: string;
   limit?: number;
 }
 
@@ -366,6 +408,24 @@ export interface BridgeSessionSummary {
   color?: SessionGroupPresetColor | null;
 }
 
+/**
+ * A session's live `/goal` state, as reported by the `qwen --acp` child.
+ *
+ * Only the active goal crosses the bridge. The child also caches the most
+ * recent goal that ended on its own, but nothing on this side reads it, so it
+ * is not part of the wire shape — add it back alongside the first consumer.
+ */
+export interface BridgeSessionGoal {
+  active: {
+    condition: string;
+    /** Judge turns completed so far; 0 before the first stop-hook evaluation. */
+    iterations: number;
+    setAt: number;
+    /** The judge's verdict on the most recent turn, when it has run. */
+    lastReason?: string;
+  } | null;
+}
+
 export interface SessionMetadataUpdate {
   displayName?: string;
 }
@@ -394,9 +454,10 @@ export interface BridgeClientRequestContext {
   fromLoopback?: boolean;
   /**
    * Caller-generated correlation id for non-blocking prompt mode.
-   * When present, the bridge stamps `turn_complete` / `turn_error` events
-   * with this id so the SDK's `prompt()` can match the SSE event to the
-   * pending HTTP 202 request.
+   * When present, the bridge stamps turn-scoped event envelopes with this id.
+   * The legacy `turn_complete.data.promptId` / `turn_error.data.promptId`
+   * fields remain populated so the SDK's `prompt()` can match the terminal
+   * SSE event to the pending HTTP 202 request.
    */
   promptId?: string;
   /**
@@ -441,9 +502,20 @@ export interface BridgeHeartbeatState {
  * silently desync them into a runtime `-32601 methodNotFound` (which would
  * latch the drain off for the session). The desktop ACP client answers the same
  * method from its own in-memory queue; in `qwen serve` the daemon answers it
- * from `SessionEntry.midTurnMessageQueue`.
+ * from `SessionEntry.midTurnMessageQueue`. Responses may also carry
+ * `hasQueuedPrompt` so an armed daemon Todo guard yields to complete FIFO
+ * prompts; older clients can omit it.
  */
 export const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
+
+/**
+ * Parent-to-agent request reporting that the daemon FIFO no longer contains the
+ * complete prompt an active Todo Stop Guard yielded to. The child clears the
+ * old guard instead of letting background work revive it or leaving unrelated
+ * automatic turns blocked forever.
+ */
+export const TODO_STOP_GUARD_QUEUE_RELEASE_METHOD =
+  'craft/todoStopGuardQueueReleased';
 
 /**
  * Reverse tool channel marker (issue #5626, Phase 2). The parent serve process
@@ -964,6 +1036,13 @@ export interface AcpSessionBridge {
   ): Promise<{ cleared: boolean; condition?: string }>;
 
   /**
+   * Read a live session's goal state. Throws `SessionNotFoundError` when the
+   * session is not resident — goals live in the child's memory, so a
+   * non-resident session has no goal to report.
+   */
+  getSessionGoal(sessionId: string): Promise<BridgeSessionGoal>;
+
+  /**
    * Resume a live session's unfinished previous turn — an interrupted prompt
    * (model never answered) or a turn left with dangling tool calls — without
    * injecting a synthetic "continue" user message. Idempotent no-op when the
@@ -980,8 +1059,9 @@ export interface AcpSessionBridge {
      * Replay cursor + correlation id for an accepted continuation, mirroring
      * the `POST /session/:id/prompt` 202 body. Present only when `accepted` —
      * the continuation runs as a tracked async turn, so clients use `promptId`
-     * to correlate `turn_complete` / `turn_error` and `lastEventId` to replay
-     * events emitted before they (re)attach the SSE stream.
+     * to correlate turn-scoped events, including `turn_complete` /
+     * `turn_error`, while `lastEventId` resumes events emitted before they
+     * (re)attach the SSE stream.
      */
     promptId?: string;
     lastEventId?: number;

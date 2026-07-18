@@ -125,10 +125,34 @@ The daemon also exposes read-only runtime snapshots for client UIs and
 operators: `GET /daemon/status`, `GET /workspace/mcp`,
 `GET /workspace/skills`, `GET /workspace/providers`, `GET /workspace/env`,
 `GET /workspace/preflight`,
+`GET /workspace/:id/session-info`,
 `GET /session/:id/status`, `GET /session/:id/context`,
 `GET /session/:id/supported-commands`, and
 `GET /session/:id/tasks`, `GET /session/:id/lsp`, and
 `GET /session/:id/transcript`.
+
+`GET /workspace/:id/session-info` (and the plural
+`GET /workspaces/:workspace/session-info` twin) returns aggregate session
+counts for a workspace: persisted `active` / `archived` / `total`, plus the
+current in-memory `live` count when live state is available. Registered
+untrusted secondary workspaces omit `live` because their catalog reads do not
+query the live bridge. The paginated `GET /workspace/:id/sessions` list does
+not include a total, so this is the dedicated surface for “how many sessions
+exist?” — useful when scheduled or recurring tasks leave a large local store.
+
+> ⚠️ **Disk scan — do not poll.** This endpoint walks local session JSONL
+> files under the workspace chats directory. Responses always include
+> `expensive: true` and `cost: "disk_scan"`. Call it infrequently (manual
+> refresh, operator tooling, occasional UI load) — never on a tight timer or
+> on every sidebar render. Prefer `GET /workspace/:id/sessions` for browsing
+> pages and `GET /daemon/status` for live in-memory session counts. A response
+> with `truncated: true` means the scan hit its safety limit or could not
+> classify every candidate file, so persisted counts are lower bounds.
+
+```bash
+curl http://127.0.0.1:4170/workspace/$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.getcwd(), safe=''))")/session-info
+# → {"active":450,"archived":30,"total":480,"live":2,"expensive":true,"cost":"disk_scan"}
+```
 
 `GET /session/:id/status` returns the live bridge summary for a single session:
 `sessionId`, `workspaceCwd`, `createdAt`, optional `displayName`, `clientCount`,
@@ -252,6 +276,42 @@ curl -X POST http://127.0.0.1:4170/session/$SESSION_ID/prompt \
 ```
 
 The `curl -N` from step 4 will print frames as they arrive.
+
+### Optional Todo Stop Guard
+
+Long-running daemon clients can opt into a bounded continuation when the
+current work chain successfully writes a top-level Todo list and then stops
+with items still pending or in progress. Add this to `settings.json` and
+restart the daemon:
+
+```json
+{
+  "experimental": {
+    "todoStopGuard": true
+  }
+}
+```
+
+The guard adds at most two consecutive primary-model calls without new user
+input. A mid-turn user message runs first and starts a fresh two-attempt stage;
+retry/continue and related background results retain the current stage's
+budget. Every call and the final exhaustion state appear as replayable
+`session_update` events with `_meta.source: "todo_stop_guard"`; the metadata
+includes the attempt and unfinished count but never Todo text. A queued full
+prompt also runs first, and existing permission/cancellation rules are
+unchanged.
+
+While an armed chain waits on related background work, unrelated cron/loop
+fires and old-task notifications are deferred. Recurring work is bounded and
+coalesced per task until the chain yields.
+
+The option defaults to `false`, requires restart, and is forced off in safe
+mode, bare mode, and Approval `plan` mode. It is in-memory only: loading Todo
+state from disk or restarting the daemon does not arm it. A new ordinary prompt
+must successfully run its own top-level `todo_write`; retry/continue and live
+client reattach keep the current in-memory work chain. Successfully changing
+the session working directory clears it so an old Todo cannot resume in a new
+workspace.
 
 ## Authentication
 

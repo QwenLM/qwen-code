@@ -4,13 +4,32 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { resolveBranchName, watchRepoBranch } from '@qwen-code/qwen-code-core';
+import {
+  getGitWorkingTreeStatus,
+  resolveBranchName,
+  watchRepoBranch,
+  type GitOperation,
+} from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
 
 export interface WorkspaceGitStatus {
-  v: 1;
+  v: 2;
   workspaceCwd: string;
   branch: string | null;
+  /** v2 enriched fields — absent when not a repo or git is unavailable. */
+  detached?: boolean;
+  staged?: number;
+  unstaged?: number;
+  untracked?: number;
+  conflicted?: number;
+  hasUpstream?: boolean;
+  ahead?: number;
+  behind?: number;
+  stashCount?: number;
+  /** In-progress operation (merge/rebase/cherry-pick/revert/bisect). */
+  operation?: GitOperation;
+  /** Epoch ms when the enriched fields were computed. */
+  computedAt?: number;
 }
 
 interface WorkspaceGitEntry {
@@ -26,7 +45,32 @@ export class WorkspaceGitState {
     bridge: AcpSessionBridge,
   ): Promise<WorkspaceGitStatus> {
     const entry = await this.getOrCreateEntry(workspaceCwd, bridge);
-    return { v: 1, workspaceCwd, branch: entry.branch ?? null };
+    // The watcher keeps `entry.branch` live between refreshes; the heavier
+    // working-tree summary is computed fresh per call (the client bounds how
+    // often it asks). A non-repo / git failure yields null → branch-only; a
+    // transient state (merge/rebase/…) still returns a summary with `operation`.
+    const status = await getGitWorkingTreeStatus(workspaceCwd).catch(
+      () => null,
+    );
+    if (!status) {
+      return { v: 2, workspaceCwd, branch: entry.branch ?? null };
+    }
+    return {
+      v: 2,
+      workspaceCwd,
+      branch: entry.branch ?? status.branch ?? null,
+      detached: status.detached,
+      staged: status.staged,
+      unstaged: status.unstaged,
+      untracked: status.untracked,
+      conflicted: status.conflicted,
+      hasUpstream: status.hasUpstream,
+      ahead: status.ahead,
+      behind: status.behind,
+      stashCount: status.stashCount,
+      ...(status.operation ? { operation: status.operation } : {}),
+      computedAt: Date.now(),
+    };
   }
 
   dispose(): void {

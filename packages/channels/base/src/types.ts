@@ -100,6 +100,7 @@ export interface Envelope {
   senderId: string;
   senderName: string;
   chatId: string;
+  chatName?: string;
   text: string;
   threadId?: string;
   /** Platform-specific message ID for response correlation. */
@@ -133,6 +134,40 @@ export interface SessionTarget {
   chatId: string;
   threadId?: string;
   isGroup?: boolean;
+}
+
+export interface ObservedChannelIdentity {
+  id: string;
+  label: string;
+}
+
+export interface ObservedChannelContactObservation {
+  user: ObservedChannelIdentity;
+  group?: ObservedChannelIdentity;
+  topic?: ObservedChannelIdentity;
+}
+
+export interface ObservedChannelContact extends ObservedChannelIdentity {
+  channelName: string;
+  lastObservedAt: string;
+}
+
+export interface ObservedChannelRelatedContact extends ObservedChannelIdentity {
+  lastObservedAt: string;
+}
+
+export interface ObservedChannelTopic extends ObservedChannelRelatedContact {
+  users: ObservedChannelRelatedContact[];
+}
+
+export interface ObservedChannelGroup extends ObservedChannelContact {
+  users: ObservedChannelRelatedContact[];
+  topics: ObservedChannelTopic[];
+}
+
+export interface ObservedChannelContactGraph {
+  users: ObservedChannelContact[];
+  groups: ObservedChannelGroup[];
 }
 
 export interface ChannelTaskLifecycleBase {
@@ -236,7 +271,18 @@ export interface ChannelMemoryCallbacks {
 }
 
 export type ChannelMemoryIntentClassifierResult =
-  | { intent: 'remember'; memory: string; confidence: number }
+  | {
+      intent: 'remember';
+      memory: string;
+      memories?: never;
+      confidence: number;
+    }
+  | {
+      intent: 'remember';
+      memory?: never;
+      memories: string[];
+      confidence: number;
+    }
   | { intent: 'list'; targetIds?: string[]; confidence: number }
   | { intent: 'inspect' | 'remove'; targetIds: string[]; confidence: number }
   | {

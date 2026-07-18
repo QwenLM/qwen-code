@@ -166,6 +166,7 @@ function renderSidebar(
     selectedWorkspaceCwd?: string;
     onSelectWorkspace?: (cwd: string | undefined) => void;
     onError?: (error: unknown, message: string) => void;
+    onOpenGoals?: () => void;
     lockedWorkspaceCwd?: string;
     lockedWorkspace?: {
       render?: (workspace: DaemonWorkspaceCapability) => ReactNode;
@@ -181,6 +182,7 @@ function renderSidebar(
           onOpenSettings={() => {}}
           onOpenDaemonStatus={() => {}}
           onOpenScheduledTasks={() => {}}
+          onOpenGoals={overrides.onOpenGoals ?? (() => {})}
           onOpenSessions={() => {}}
           onOpenSplitView={() => {}}
           onNewSession={() => false}
@@ -964,6 +966,35 @@ describe('WebShellSidebar non-primary archive', () => {
       });
       await archiveSessionsData.mock.results.at(-1)?.value;
     });
+  });
+});
+
+describe('WebShellSidebar goals entry', () => {
+  it('renders the Goals footer button and invokes onOpenGoals', () => {
+    const onOpenGoals = vi.fn();
+    renderSidebar({ onOpenGoals });
+    const button = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Goals"]',
+    );
+    expect(button).not.toBeNull();
+    click(button!);
+    expect(onOpenGoals).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('WebShellSidebar primary workspace header', () => {
+  it('does not tag the primary workspace with a redundant "Primary" badge', () => {
+    // Multi-workspace sidebar: the primary section used to append a "Primary"
+    // badge to its header. The workspace selector's checkmark already conveys
+    // the default target, so the badge was dropped. Assert it is gone while the
+    // primary workspace ('/tmp/project') still renders by its folder name — so
+    // a regression re-adding the badge would flip this red.
+    renderSidebar();
+    const primaryBadges = Array.from(container.querySelectorAll('span')).filter(
+      (el) => el.textContent === 'Primary',
+    );
+    expect(primaryBadges).toHaveLength(0);
+    expect(container.textContent).toContain('project');
   });
 });
 

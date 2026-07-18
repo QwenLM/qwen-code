@@ -18,6 +18,7 @@ import {
 } from 'vitest';
 import {
   escapePath,
+  formatDisplayPath,
   resolvePath,
   validatePath,
   resolveAndValidatePath,
@@ -708,6 +709,69 @@ describe('tildeifyPath', () => {
     const result = tildeifyPath(`/mnt/backup${homeDir}/data`);
     // Should not replace home dir in the middle
     expect(result).toBe(`/mnt/backup${homeDir}/data`);
+  });
+});
+
+describe('formatDisplayPath', () => {
+  const root = path.resolve(path.sep, 'projects', 'my-app');
+
+  it('renders project-internal paths relative to the root', () => {
+    const target = path.join(root, 'src', 'index.ts');
+    expect(formatDisplayPath(target, root)).toBe(path.join('src', 'index.ts'));
+  });
+
+  it('renders the project root itself as .', () => {
+    expect(formatDisplayPath(root, root)).toBe('.');
+  });
+
+  it('resolves relative input against the root before formatting', () => {
+    expect(formatDisplayPath(path.join('src', 'app'), root)).toBe(
+      path.join('src', 'app'),
+    );
+    expect(formatDisplayPath('.', root)).toBe('.');
+  });
+
+  it('keeps paths outside the project absolute', () => {
+    const outside = path.resolve(path.sep, 'other', 'place', 'file.txt');
+    expect(formatDisplayPath(outside, root)).toBe(outside);
+  });
+
+  it('shortens the home directory to ~ for paths outside the project', () => {
+    const homeDir = os.homedir();
+    const target = path.join(homeDir, 'elsewhere', 'file.txt');
+    expect(formatDisplayPath(target, root)).toBe(
+      `~${path.sep}elsewhere${path.sep}file.txt`,
+    );
+  });
+
+  it('does not tildeify project-internal paths when the project is under home', () => {
+    const homeRoot = path.join(os.homedir(), 'work', 'proj');
+    const target = path.join(homeRoot, 'src', 'main.ts');
+    expect(formatDisplayPath(target, homeRoot)).toBe(
+      path.join('src', 'main.ts'),
+    );
+  });
+
+  it('expands a tilde-prefixed input like other tool paths', () => {
+    expect(formatDisplayPath(path.join('~', 'data'), root)).toBe(
+      `~${path.sep}data`,
+    );
+  });
+
+  it('compresses overlong paths with shortenPath semantics', () => {
+    const target = path.join(
+      root,
+      'very',
+      'deeply',
+      'nested',
+      'directory',
+      'structure',
+      'file.ts',
+    );
+    const result = formatDisplayPath(target, root, 25);
+    expect(result.length).toBeLessThanOrEqual(25);
+    expect(result).toContain('...');
+    expect(result).toContain('file.ts');
   });
 });
 

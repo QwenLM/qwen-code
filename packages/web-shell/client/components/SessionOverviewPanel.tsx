@@ -447,9 +447,7 @@ function SessionOverviewPanelInner({
                   )}
                   title={card.workspaceCwd}
                 >
-                  {card.isNonPrimary
-                    ? workspaceBasename(card.workspaceCwd)
-                    : t('sidebar.workspacePrimary')}
+                  {workspaceBasename(card.workspaceCwd)}
                 </span>
               )}
               {card.model && (
