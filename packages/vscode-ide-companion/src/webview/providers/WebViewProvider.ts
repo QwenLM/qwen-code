@@ -1537,7 +1537,7 @@ export class WebViewProvider {
         this.agentManager.disconnect();
         logger.log('[WebViewProvider] Existing connection disconnected');
       } catch (_error) {
-        logger.log('[WebViewProvider] Error disconnecting:', _error);
+        logger.warn('[WebViewProvider] Error disconnecting:', _error);
       }
       this.agentInitialized = false;
     }

@@ -64,6 +64,7 @@ describe('logger', () => {
     logger.warn('late shutdown warning');
 
     expect(warn).toHaveBeenCalledWith('late shutdown warning');
+    warn.mockRestore();
   });
 
   it('guards log levels from webview messages', () => {

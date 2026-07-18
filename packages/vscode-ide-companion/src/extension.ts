@@ -305,7 +305,7 @@ export async function activate(context: vscode.ExtensionContext) {
     await ideServer.start(context);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    logger.info(`Failed to start IDE server: ${message}`);
+    logger.warn(`Failed to start IDE server: ${message}`);
   }
 
   const infoMessageEnabled = !HIDE_INSTALLATION_GREETING_IDES.has(
@@ -417,7 +417,7 @@ export async function deactivate(): Promise<void> {
     chatProviderRegistry = null;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    logger.info(`Failed to stop IDE server during deactivation: ${message}`);
+    logger.warn(`Failed to stop IDE server during deactivation: ${message}`);
   } finally {
     if (outputChannel) {
       resetLoggerSink();

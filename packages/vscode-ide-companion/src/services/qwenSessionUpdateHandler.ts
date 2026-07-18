@@ -241,7 +241,10 @@ export class QwenSessionUpdateHandler {
       }
 
       default:
-        logger.log('[QwenAgentManager] Unhandled session update type');
+        logger.log(
+          '[SessionUpdateHandler] Unhandled session update type:',
+          sessionUpdate,
+        );
         break;
     }
   }

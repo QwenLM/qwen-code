@@ -509,10 +509,6 @@ export class QwenAgentManager {
       const res: unknown = response;
       const items = extractSessionListItems(res);
 
-      logger.log(
-        '[QwenAgentManager] ACP session list item count:',
-        items.length,
-      );
       if (items.length > 0) {
         const sessions = items.map((item) => ({
           id: item.sessionId || item.id,
