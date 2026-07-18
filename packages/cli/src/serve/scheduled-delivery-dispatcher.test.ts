@@ -23,11 +23,8 @@ describe('scheduled delivery dispatcher', () => {
       deliveryId: 'task-1:1000',
       taskId: 'task-1',
       firedAt: 1000,
-      target: {
-        channelName: 'dingtalk',
-        chatId: 'group-42',
-        isGroup: true,
-      },
+      channelName: 'dingtalk',
+      target: { type: 'chat', id: 'group-42' },
       text: 'daily result',
       createdAt: 1001,
     });
@@ -51,11 +48,7 @@ describe('scheduled delivery dispatcher', () => {
     expect(deliver).toHaveBeenCalledWith(workspace, {
       deliveryId: 'task-1:1000',
       channelName: 'dingtalk',
-      target: {
-        channelName: 'dingtalk',
-        chatId: 'group-42',
-        isGroup: true,
-      },
+      target: { type: 'chat', id: 'group-42' },
       text: 'daily result',
     });
     expect(await readScheduledDeliveryOutbox(workspace)).toEqual([

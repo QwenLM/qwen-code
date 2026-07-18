@@ -102,6 +102,42 @@ describe('FeishuChannel', () => {
       expect(channel.supportsProactiveSend()).toBe(true);
     });
 
+    it('uses the sender open ID as the routable direct delivery target', async () => {
+      const channel = createChannel();
+      const handleInbound = vi.fn().mockResolvedValue(undefined);
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        handleInbound,
+      });
+      const onMessage = getPrivateMethod<(data: unknown) => void>(
+        channel,
+        'onMessage',
+      ).bind(channel);
+
+      onMessage({
+        message: {
+          message_id: 'direct-m1',
+          chat_id: 'oc_direct_chat',
+          chat_type: 'p2p',
+          message_type: 'text',
+          content: JSON.stringify({ text: 'hello' }),
+        },
+        sender: {
+          sender_id: { open_id: 'ou_sender' },
+          sender_type: 'user',
+        },
+      });
+
+      await vi.waitFor(() =>
+        expect(handleInbound).toHaveBeenCalledWith(
+          expect.objectContaining({
+            chatId: 'oc_direct_chat',
+            deliveryChatId: 'ou_sender',
+            isGroup: false,
+          }),
+        ),
+      );
+    });
+
     it('logs message debug payloads from the shared handler map', () => {
       const channel = createChannel();
       const logDebugPayload = vi.fn();

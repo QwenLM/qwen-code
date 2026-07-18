@@ -29,26 +29,26 @@ function sameTarget(
   return (
     task.delivery?.kind === 'channel' &&
     task.channelLoop !== undefined &&
-    deliveryTarget?.channelName === channelName &&
-    deliveryTarget.chatId === target.chatId &&
-    deliveryTarget.threadId === target.threadId &&
-    deliveryTarget.isGroup === target.isGroup &&
+    target.threadId === undefined &&
+    task.delivery.channelName === channelName &&
+    deliveryTarget?.type === (target.isGroup === true ? 'chat' : 'user') &&
+    deliveryTarget.id === target.chatId &&
     task.channelLoop.senderId === target.senderId
   );
 }
 
 function taskToLoop(task: DurableCronTask): ChannelLoop {
-  const target = task.delivery!.target;
+  const delivery = task.delivery!;
+  const target = delivery.target;
   const lastRun = task.runs?.at(-1);
   return {
     id: task.id,
-    channelName: target.channelName,
+    channelName: delivery.channelName,
     target: {
-      channelName: target.channelName,
+      channelName: delivery.channelName,
       senderId: task.channelLoop!.senderId,
-      chatId: target.chatId,
-      ...(target.threadId !== undefined ? { threadId: target.threadId } : {}),
-      ...(target.isGroup !== undefined ? { isGroup: target.isGroup } : {}),
+      chatId: target.id,
+      isGroup: target.type === 'chat',
     },
     cwd: '',
     cron: task.cron,
@@ -78,6 +78,11 @@ export function createDurableChannelLoopController(
     },
 
     async createForSession(input, maxEnabledLoops, sessionId) {
+      if (input.target.threadId !== undefined) {
+        throw new Error(
+          'Durable channel loops do not support threaded targets.',
+        );
+      }
       let created: DurableCronTask | undefined;
       await updateCronTasks(options.workspaceCwd, (tasks) => {
         const enabledForTarget = tasks.filter(
@@ -109,15 +114,10 @@ export function createDurableChannelLoopController(
           sessionOwnership: 'shared',
           delivery: {
             kind: 'channel',
+            channelName: input.channelName,
             target: {
-              channelName: input.channelName,
-              chatId: input.target.chatId,
-              ...(input.target.threadId !== undefined
-                ? { threadId: input.target.threadId }
-                : {}),
-              ...(input.target.isGroup !== undefined
-                ? { isGroup: input.target.isGroup }
-                : {}),
+              type: input.target.isGroup === true ? 'chat' : 'user',
+              id: input.target.chatId,
             },
           },
           channelLoop: {

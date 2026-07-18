@@ -17,7 +17,6 @@ describe('createDurableChannelLoopController', () => {
     channelName: 'dingtalk',
     senderId: 'user-1',
     chatId: 'group-42',
-    threadId: 'thread-7',
     isGroup: true,
   };
   const input: ChannelLoopInput = {
@@ -66,12 +65,8 @@ describe('createDurableChannelLoopController', () => {
         sessionOwnership: 'shared',
         delivery: {
           kind: 'channel',
-          target: {
-            channelName: 'dingtalk',
-            chatId: 'group-42',
-            threadId: 'thread-7',
-            isGroup: true,
-          },
+          channelName: 'dingtalk',
+          target: { type: 'chat', id: 'group-42' },
         },
         channelLoop: {
           senderId: 'user-1',
@@ -96,6 +91,47 @@ describe('createDurableChannelLoopController', () => {
 
     expect(results.filter(Boolean)).toHaveLength(1);
     expect(await readCronTasks(workspaceCwd)).toHaveLength(1);
+  });
+
+  it('persists a direct loop as a user target', async () => {
+    const controller = createDurableChannelLoopController({
+      workspaceCwd,
+      idFactory: () => 'loop0001',
+    });
+    const directTarget: SessionTarget = {
+      channelName: 'dingtalk',
+      senderId: 'user-1',
+      chatId: 'staff-1',
+      isGroup: false,
+    };
+
+    await controller.createForSession!(
+      { ...input, target: directTarget },
+      10,
+      'session-1',
+    );
+
+    expect(await readCronTasks(workspaceCwd)).toEqual([
+      expect.objectContaining({
+        delivery: {
+          kind: 'channel',
+          channelName: 'dingtalk',
+          target: { type: 'user', id: 'staff-1' },
+        },
+      }),
+    ]);
+  });
+
+  it('rejects threaded daemon loops instead of dropping the topic', async () => {
+    const controller = createDurableChannelLoopController({ workspaceCwd });
+
+    await expect(
+      controller.createForSession!(
+        { ...input, target: { ...target, threadId: 'thread-7' } },
+        10,
+        'session-1',
+      ),
+    ).rejects.toThrow(/threaded targets/);
   });
 
   it('lists and disables only loops owned by the exact channel target', async () => {

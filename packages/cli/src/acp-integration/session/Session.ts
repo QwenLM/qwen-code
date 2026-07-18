@@ -4662,6 +4662,7 @@ export class Session implements SessionContext {
               deliveryId: `${item.taskId}:${item.firedAt}`,
               taskId: item.taskId,
               firedAt: item.firedAt,
+              channelName: item.delivery.channelName,
               target: item.delivery.target,
               text: finalAnswer,
             });

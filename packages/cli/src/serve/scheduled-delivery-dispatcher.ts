@@ -147,7 +147,7 @@ function toDeliveryRequest(
 ): ChannelDeliveryRequest {
   return {
     deliveryId: record.deliveryId,
-    channelName: record.target.channelName,
+    channelName: record.channelName,
     target: record.target,
     text: record.text,
   };

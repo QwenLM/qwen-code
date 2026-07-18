@@ -11633,11 +11633,8 @@ describe('Session', () => {
         const firedAt = 1_718_000_000_000;
         const delivery: core.CronTaskDelivery = {
           kind: 'channel',
-          target: {
-            channelName: 'dingtalk',
-            chatId: 'group-42',
-            isGroup: true,
-          },
+          channelName: 'dingtalk',
+          target: { type: 'chat', id: 'group-42' },
         };
         const scheduler = schedulerFiring({
           id: 'task-1',
@@ -11685,6 +11682,7 @@ describe('Session', () => {
               deliveryId: `task-1:${firedAt}`,
               taskId: 'task-1',
               firedAt,
+              channelName: delivery.channelName,
               target: delivery.target,
               text: 'daily result',
             },
@@ -11700,7 +11698,8 @@ describe('Session', () => {
           lastFiredAt: 1_718_000_000_000,
           delivery: {
             kind: 'channel',
-            target: { channelName: 'dingtalk', chatId: 'group-42' },
+            channelName: 'dingtalk',
+            target: { type: 'chat', id: 'group-42' },
           },
         });
         mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
@@ -20002,7 +20001,8 @@ describe('Session', () => {
       const firedAt = 1_718_000_000_000;
       const delivery: core.CronTaskDelivery = {
         kind: 'channel',
-        target: { channelName: 'dingtalk', chatId: 'group-42' },
+        channelName: 'dingtalk',
+        target: { type: 'chat', id: 'group-42' },
       };
       const scheduler = {
         hasPendingWork: true,
@@ -20117,6 +20117,7 @@ describe('Session', () => {
             deliveryId: `guarded-task:${firedAt}`,
             taskId: 'guarded-task',
             firedAt,
+            channelName: delivery.channelName,
             target: delivery.target,
             text: 'terminal guarded answer',
           },
@@ -20128,7 +20129,8 @@ describe('Session', () => {
       const firedAt = 1_718_000_000_000;
       const delivery: core.CronTaskDelivery = {
         kind: 'channel',
-        target: { channelName: 'dingtalk', chatId: 'group-42' },
+        channelName: 'dingtalk',
+        target: { type: 'chat', id: 'group-42' },
       };
       const scheduler = {
         hasPendingWork: true,

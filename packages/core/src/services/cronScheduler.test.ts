@@ -1271,11 +1271,8 @@ describe('CronScheduler', () => {
     it('carries a durable task channel delivery snapshot into the fire', async () => {
       const delivery = {
         kind: 'channel' as const,
-        target: {
-          channelName: 'dingtalk',
-          chatId: 'group-42',
-          isGroup: true,
-        },
+        channelName: 'dingtalk',
+        target: { type: 'chat' as const, id: 'group-42' },
       };
       await writeCronTasks(tmpDir, [{ ...diskTask('deliver1'), delivery }]);
       await scheduler.enableDurable('session-1');
@@ -2169,7 +2166,8 @@ describe('CronScheduler', () => {
             lastFiredAt: history === 'never-fired' ? null : priorFireAt,
             delivery: {
               kind: 'channel',
-              target: { channelName: 'dingtalk', chatId: 'group-1' },
+              channelName: 'dingtalk',
+              target: { type: 'chat', id: 'group-1' },
             },
           },
         ]);

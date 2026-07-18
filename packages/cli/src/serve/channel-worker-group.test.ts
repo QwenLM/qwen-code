@@ -206,6 +206,35 @@ describe('createChannelWorkerGroup', () => {
     );
   });
 
+  it('does not fall back to another workspace for scheduled delivery', async () => {
+    const registry = fakeRegistry([
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false),
+    ]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['b'] } },
+        { workspaceCwd: SECONDARY, selection: { mode: 'names', names: ['a'] } },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+
+    await expect(
+      group.deliverChannelMessage(deliveryRequest, SECONDARY),
+    ).rejects.toMatchObject({ code: 'channel_worker_unavailable' });
+    expect(
+      recorded[0]!.supervisor.deliverChannelMessage,
+    ).not.toHaveBeenCalled();
+    expect(
+      recorded[1]!.supervisor.deliverChannelMessage,
+    ).not.toHaveBeenCalled();
+  });
+
   it('rejects channel delivery while the owning workspace is draining', async () => {
     const registry = fakeRegistry([
       fakeRuntime(PRIMARY, true),

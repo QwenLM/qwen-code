@@ -1992,6 +1992,7 @@ export class FeishuChannel extends ChannelBase {
         senderId,
         senderName: senderId,
         chatId,
+        ...(!isGroup && senderId ? { deliveryChatId: senderId } : {}),
         text: cleanText,
         messageId: msgId,
         threadId: msg.root_id || undefined,
