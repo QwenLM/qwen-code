@@ -311,7 +311,7 @@ export type PDFTextResult =
  */
 export async function extractPDFText(
   filePath: string,
-  options?: { firstPage?: number; lastPage?: number },
+  options?: { firstPage?: number; lastPage?: number; signal?: AbortSignal },
 ): Promise<PDFTextResult> {
   const available = await isPdftotextAvailable();
   if (!available) {
@@ -341,6 +341,9 @@ export async function extractPDFText(
         // past that is going to be truncated anyway, and capping the child
         // prevents unbounded memory use on pathological text-dense PDFs.
         maxBuffer: MAX_PDF_TEXT_OUTPUT_CHARS * 2,
+        // Caller cancellation kills the subprocess instead of blocking the
+        // tool invocation for up to the 30s timeout.
+        signal: options?.signal,
       });
 
     if (timedOut) {
