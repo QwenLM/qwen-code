@@ -82,14 +82,20 @@ export class PairingStore {
       const present = legacyPairs.filter(([legacyPath]) =>
         fs.existsSync(legacyPath),
       );
-      if (present.length === 0) {
-        return;
-      }
-      // Creating the directory is what marks the migration as done, even if
-      // only one of the two files existed.
+      // Creating the directory is what marks the migration as done — also
+      // when there was nothing to copy. Skipping the marker in that case
+      // would leave the gate open, and a legacy file written later by an
+      // older version still running concurrently would be absorbed into a
+      // scope that already went through this decision.
       this.ensureDir();
       for (const [legacyPath, scopedPath] of present) {
-        fs.copyFileSync(legacyPath, scopedPath);
+        // Copy via a temp file + atomic rename: a crash mid-copy must not
+        // leave a truncated scoped file behind the now-closed migration
+        // gate, and a concurrent first construction of the same scope
+        // cannot observe a half-written allowlist.
+        const tmpPath = `${scopedPath}.migrating`;
+        fs.copyFileSync(legacyPath, tmpPath);
+        fs.renameSync(tmpPath, scopedPath);
       }
     } catch {
       // Best-effort: an unreadable legacy file must not prevent the channel

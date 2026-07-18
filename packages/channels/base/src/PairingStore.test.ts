@@ -202,6 +202,32 @@ describe('PairingStore workspace scoping (#7017)', () => {
       expect(reopened.isApproved('late-legacy-sender')).toBe(false);
     });
 
+    it('closes the migration gate even when no legacy files existed at first startup', () => {
+      // Rolling upgrade: this workspace first runs on new code before any
+      // legacy state exists; an older version writes the global files later.
+      // The first construction must still mark the migration as done so the
+      // late legacy allowlist is not absorbed afterwards.
+      const first = new PairingStore('support-bot', workspaceA);
+      expect(first.isApproved('legacy-sender')).toBe(false);
+
+      seedLegacy();
+      const reopened = new PairingStore('support-bot', workspaceA);
+      expect(reopened.isApproved('legacy-sender')).toBe(false);
+      expect(reopened.listPending()).toEqual([]);
+    });
+
+    it('starts empty and does not throw when a legacy file is unreadable', () => {
+      // A directory masquerading as the legacy allowlist file makes
+      // copyFileSync throw — the constructor must stay best-effort.
+      fs.mkdirSync(path.join(channelsRoot(), 'support-bot-allowlist.json'), {
+        recursive: true,
+      });
+      const store = new PairingStore('support-bot', workspaceA);
+      expect(store.isApproved('anyone')).toBe(false);
+      const code = store.createRequest('new-sender', 'New')!;
+      expect(typeof code).toBe('string');
+    });
+
     it('never overwrites existing scoped state with legacy content', () => {
       const store = new PairingStore('support-bot', workspaceA);
       const code = store.createRequest('scoped-sender', 'Scoped')!;

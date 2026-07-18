@@ -23,10 +23,11 @@ export function resolvePath(dir: string): string {
             .filter(Boolean);
     resolved = path.join(os.homedir(), ...relativeSegments);
   }
-  if (!path.isAbsolute(resolved)) {
-    resolved = path.resolve(resolved);
-  }
-  return resolved;
+  // Always run through path.resolve: it is a no-op for an already-normal
+  // absolute path but strips trailing separators and collapses `..`/`.`
+  // segments, so equivalent spellings of a path that does not exist on disk
+  // (where the realpath step cannot help) still canonicalize identically.
+  return path.resolve(resolved);
 }
 
 /**
