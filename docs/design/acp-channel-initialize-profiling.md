@@ -51,6 +51,8 @@ Bootstrap Config initialization is split into initial extension refresh,
 hooks, skills, final extension refresh, hierarchical memory, tool registry,
 tool warmup, and residual time. The ripgrep probe is reported as a child of
 tool registry time and is not subtracted again when calculating residual time.
+Top-level unattributed time also includes the wait between transport setup and
+the initialize request reaching the child handler.
 
 All durations use `performance.now()` and are rounded to two decimal places.
 The response-build epoch uses `performance.timeOrigin` plus the response mark
