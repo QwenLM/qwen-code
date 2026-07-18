@@ -200,7 +200,7 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain('.[0:10] | map(. + {autofixTier: 1})');
   });
 
-  it('runs scheduled autofix as a 10-minute single-target worker', () => {
+  it('runs scheduled autofix as a 10-minute multi-target fan-out worker', () => {
     expect(workflow).toContain("cron: '*/10 * * * *'");
     expect(workflow).not.toContain("cron: '0 0,12 * * *'");
     expect(workflow).not.toContain("cron: '0 4,8,16,20 * * *'");
@@ -215,7 +215,49 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain('isCrossRepository');
     expect(reviewScanJob).toContain('not an open in-repo main-targeting PR');
     expect(reviewScanJob).toContain('.isCrossRepository != true');
-    expect(reviewScanJob).toContain('break # one PR per scheduled scan');
+    // Fan-out: one scan emits EVERY eligible PR (no single-target break). The
+    // address matrix's max-parallel bounds simultaneity and per-PR concurrency
+    // groups prevent duplicate same-PR runs; a single-target break starved
+    // older PRs for hours whenever cron ticks were sparse.
+    expect(reviewScanJob).not.toContain('break # one PR per scheduled scan');
+    expect(reviewScanJob).toContain('Fan out: emit EVERY eligible PR');
+    expect(workflow).toContain('max-parallel: 3');
+    // Pathological-backlog bound: the budget BREAKS the candidate loop (so it
+    // bounds runtime and API usage, not just matrix size), the deferral is
+    // LOGGED, and the next scan picks up the remainder.
+    expect(workflow).toContain("MAX_TARGETS_PER_SCAN: '10'");
+    expect(reviewScanJob).toContain(
+      'deferring the remaining candidates to the next scan',
+    );
+    expect(reviewScanJob).toMatch(
+      /target budget \(\$\{MAX_TARGETS_PER_SCAN\}\) reached[\s\S]{0,120}break/,
+    );
+    // Fanned-out matrices hold QUEUED jobs past a tick and schedule/dispatch
+    // runs never appear in the PR's checks — the scan must skip PRs whose
+    // review-address is already running or queued in any live autofix run.
+    expect(reviewScanJob).toContain(
+      'review-address already in flight or queued — skipping',
+    );
+    // The live-run listing filters status SERVER-side (in_progress + queued
+    // union): a client-side filter over the N newest runs loses a long-lived
+    // fanned-out run once cron traffic pushes it past the window, and its
+    // queued PRs silently stop looking busy.
+    expect(reviewScanJob).toContain('for LIVE_STATUS in in_progress queued');
+    expect(reviewScanJob).toContain('--status "${LIVE_STATUS}" --limit 50');
+    expect(reviewScanJob).not.toContain('--limit 15');
+    // The busy-set cannot see a sibling scan that has not yet emitted its
+    // matrix, so review-address REVALIDATES the watermark against LIVE
+    // markers before doing work: the per-PR address group serializes
+    // duplicates, so the later one reliably sees the first one's marker and
+    // discards itself — no agent run, no marker, no comment.
+    expect(prepareBranchAndFeedbackStep).toContain('LIVE_EVAL_WM');
+    expect(prepareBranchAndFeedbackStep).toContain('stale duplicate target');
+    expect(
+      workflow.split("steps.prepare.outputs.stale != 'true'").length - 1,
+    ).toBe(2);
+    expect(reviewScanJob).toContain(
+      'capture("^review-address \\\\((?<pr>[0-9]+),")',
+    );
     expect(reviewScanJob).toContain('statusCheckRollup');
     expect(reviewScanJob).toContain('HAS_PENDING_CHECKS');
     expect(reviewScanJob).toContain('N_FAILED_CHECKS');
@@ -256,6 +298,118 @@ describe('qwen-autofix workflow', () => {
     // A failed metadata fetch (empty branch) must skip the candidate, not fall
     // through to an address job that fails on `git checkout -B "" origin/`.
     expect(reviewScanJob).toContain('could not fetch PR metadata');
+  });
+
+  it('behaviorally replays the stale-duplicate revalidation, including the conflict-only transition', () => {
+    // Extract the stale-gate VERBATIM from 'Prepare branch and feedback'
+    // (drift fails the test) and replay it over fixture feedback files. The
+    // subtle case: a conflict-only duplicate. Both scans emit the PR with
+    // watermark W; the first serialized job resolves the conflict, and with
+    // no newer feedback its marker keeps ts=W while its ROUND advances — so
+    // a ts-only comparison misses it. The gate must also treat
+    // same-ts-but-newer-round (with the conflict now cleared) as stale.
+    const staleGate = prepareBranchAndFeedbackStep.match(
+      /(STALE='false'\n[\s\S]*?echo "stale=\$\{STALE\}" >> "\$\{GITHUB_OUTPUT\}")/,
+    )?.[1];
+    expect(staleGate).toBeTruthy();
+    const W = '2026-07-18T08:00:00Z';
+    const runStaleGate = ({ marks, conflict, round, reviews = [] }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-stale-'));
+      try {
+        writeFileSync(
+          join(dir, 'ic.json'),
+          JSON.stringify(
+            marks.map((m) => ({
+              user: { login: 'qwen-code-dev-bot' },
+              created_at: '2026-07-18T09:00:00Z',
+              body: `eval <!-- autofix-eval ts=${m.ts} acted=${m.acted ?? 'true'} round=${m.round} -->`,
+            })),
+          ),
+        );
+        writeFileSync(join(dir, 'rv.json'), JSON.stringify(reviews));
+        writeFileSync(join(dir, 'rc.json'), '[]');
+        writeFileSync(join(dir, 'checks.json'), '[]');
+        const out = join(dir, 'out.txt');
+        writeFileSync(out, '');
+        execFileSync('bash', ['-c', staleGate.replace(/\n {10}/g, '\n')], {
+          env: {
+            ...process.env,
+            WORKDIR: dir,
+            GITHUB_OUTPUT: out,
+            WATERMARK: W,
+            ROUND: String(round),
+            CONFLICT: conflict,
+            AUTOFIX_BOT: 'qwen-code-dev-bot',
+            REVIEW_BOT: 'qwen-code-ci-bot',
+            TRUSTED_ASSOC: '["OWNER","MEMBER","COLLABORATOR"]',
+          },
+          encoding: 'utf8',
+        });
+        return readFileSync(out, 'utf8').includes('stale=true');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    // Conflict-only duplicate: sibling resolved and marked round 3 at ts=W;
+    // our matrix says round 2, the conflict is now cleared → stale.
+    expect(
+      runStaleGate({
+        marks: [
+          { ts: W, round: 2 },
+          { ts: W, round: 3 },
+        ],
+        conflict: 'false',
+        round: 2,
+      }),
+    ).toBe(true);
+    // First job of a conflict round: round has not advanced → proceeds.
+    expect(
+      runStaleGate({
+        marks: [{ ts: W, round: 2 }],
+        conflict: 'false',
+        round: 2,
+      }),
+    ).toBe(false);
+    // A live conflict is always actionable, even past a sibling's marker.
+    expect(
+      runStaleGate({
+        marks: [
+          { ts: W, round: 2 },
+          { ts: W, round: 3 },
+        ],
+        conflict: 'true',
+        round: 2,
+      }),
+    ).toBe(false);
+    // ts-advanced duplicate (the original case): sibling evaluated through a
+    // newer live watermark and nothing newer exists → stale.
+    expect(
+      runStaleGate({
+        marks: [{ ts: '2026-07-18T08:30:00Z', round: 3 }],
+        conflict: 'false',
+        round: 2,
+      }),
+    ).toBe(true);
+    // Round advanced BUT trusted feedback arrived after the live watermark —
+    // the queued job has real work and must NOT discard itself.
+    expect(
+      runStaleGate({
+        marks: [
+          { ts: W, round: 2 },
+          { ts: W, round: 3 },
+        ],
+        conflict: 'false',
+        round: 2,
+        reviews: [
+          {
+            submitted_at: '2026-07-18T08:45:00Z',
+            user: { login: 'doudouOUC' },
+            author_association: 'MEMBER',
+            state: 'CHANGES_REQUESTED',
+          },
+        ],
+      }),
+    ).toBe(false);
   });
 
   it('falls back to existing issue backlog only when review has no target', () => {
@@ -303,8 +457,28 @@ describe('qwen-autofix workflow', () => {
       "ASSIGNEE_LOGIN: '${{ github.event.assignee.login }}'",
     );
     expect(workflow).toContain("permissions:\n      contents: 'read'");
-    expect(routeJob).toContain("group: 'qwen-autofix-route'");
-    expect(routeJob).toContain('cancel-in-progress: true');
+    // Route concurrency: cron ticks share one group and supersede each other,
+    // but dispatches and review/issue events get unique per-run groups — a
+    // shared cancel-in-progress group let any newer event kill pending full
+    // scans while route jobs sat queued behind runner backlog.
+    // Per-TARGET keys: cron ticks coalesce with each other; review events
+    // coalesce per PR (near-simultaneous reviews on one PR route once, without
+    // events on OTHER PRs cancelling this one); issue events per issue;
+    // dispatches unique and never cancelled.
+    expect(routeJob).toContain("'qwen-autofix-route-cron'");
+    expect(routeJob).toContain(
+      "format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)",
+    );
+    expect(routeJob).toContain(
+      "format('qwen-autofix-route-issue-{0}', github.event.issue.number)",
+    );
+    expect(routeJob).toContain(
+      "format('qwen-autofix-route-{0}', github.run_id)",
+    );
+    expect(routeJob).toContain(
+      "cancel-in-progress: |-\n        ${{ github.event_name != 'workflow_dispatch' }}",
+    );
+    expect(routeJob).not.toContain("group: 'qwen-autofix-route'");
     expect(workflow).toContain(
       'gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission"',
     );
@@ -487,10 +661,13 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       '.[3] | map(select((.conclusion // .state // "")',
     );
+    // Three sites: the NEWEST computation, the live-watermark revalidation,
+    // and the feedback rendering — all must share the same address-check
+    // carve-out.
     expect(
       prepareBranchAndFeedbackStep.match(/startswith\("review-address"\)/g) ??
         [],
-    ).toHaveLength(2);
+    ).toHaveLength(3);
     expect(prepareBranchAndFeedbackStep).toContain(
       'gsub("[^A-Za-z0-9 _./()-]"; "") | .[0:80]',
     );
@@ -1178,7 +1355,7 @@ describe('qwen-autofix workflow', () => {
     const reviewVerificationGateStep = verificationGateSteps[1];
 
     expect(reviewVerificationGateStep).toContain(
-      'if: |-\n          ${{ always() }}',
+      "if: |-\n          ${{ always() && steps.prepare.outputs.stale != 'true' }}",
     );
     expect(reviewVerificationGateStep).toContain('failure.md');
     expect(reviewVerificationGateStep).toContain('outcome=failed');
