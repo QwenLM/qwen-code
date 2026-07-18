@@ -353,6 +353,75 @@ describe('ChannelBase', () => {
     );
   }
 
+  describe('proactive delivery boundary', () => {
+    it('delivers through the adapter proactive path', async () => {
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+      ch.proactiveTargetSupported = true;
+
+      await ch.deliverProactive(
+        {
+          channelName: 'test-chan',
+          chatId: 'group-1',
+          isGroup: true,
+        },
+        'inspection result',
+      );
+
+      expect(ch.proactive).toEqual([
+        { chatId: 'group-1', text: 'inspection result' },
+      ]);
+      expect(ch.proactiveTargets).toEqual([
+        {
+          channelName: 'test-chan',
+          senderId: 'group-1',
+          chatId: 'group-1',
+          isGroup: true,
+        },
+      ]);
+    });
+
+    it('rejects a target owned by another channel', async () => {
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+      ch.proactiveTargetSupported = true;
+
+      await expect(
+        ch.deliverProactive(
+          { channelName: 'other', chatId: 'group-1', isGroup: true },
+          'inspection result',
+        ),
+      ).rejects.toThrow('does not own delivery target');
+      expect(ch.proactive).toEqual([]);
+    });
+
+    it('rejects delivery when the adapter has no proactive support', async () => {
+      const ch = createChannel();
+
+      await expect(
+        ch.deliverProactive(
+          { channelName: 'test-chan', chatId: 'group-1', isGroup: true },
+          'inspection result',
+        ),
+      ).rejects.toThrow('does not support proactive delivery');
+      expect(ch.proactive).toEqual([]);
+    });
+
+    it('rejects a proactive target unsupported by the adapter', async () => {
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+      ch.proactiveTargetSupported = false;
+
+      await expect(
+        ch.deliverProactive(
+          { channelName: 'test-chan', chatId: 'group-1', isGroup: true },
+          'inspection result',
+        ),
+      ).rejects.toThrow('does not support this proactive target');
+      expect(ch.proactive).toEqual([]);
+    });
+  });
+
   describe('gate integration', () => {
     it('silently drops group messages when groupPolicy=disabled', async () => {
       const ch = createChannel();

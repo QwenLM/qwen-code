@@ -5,6 +5,7 @@ import type {
   ChannelMemoryEntry,
   ChannelMemoryIntentClassifier,
   ChannelMemoryTarget,
+  ChannelProactiveTarget,
   ChannelRuntimeIdentity,
   ChannelRuntimeMemoryScope,
   ChannelTaskCancellationReason,
@@ -681,6 +682,33 @@ export abstract class ChannelBase {
 
   supportsProactiveSend(): boolean {
     return false;
+  }
+
+  async deliverProactive(
+    target: ChannelProactiveTarget,
+    text: string,
+  ): Promise<void> {
+    if (target.channelName !== this.name) {
+      throw new Error(`Channel "${this.name}" does not own delivery target.`);
+    }
+    if (!this.supportsProactiveSend()) {
+      throw new Error(
+        `Channel "${this.name}" does not support proactive delivery.`,
+      );
+    }
+    const sessionTarget: SessionTarget = {
+      channelName: target.channelName,
+      senderId: target.chatId,
+      chatId: target.chatId,
+      ...(target.threadId !== undefined ? { threadId: target.threadId } : {}),
+      ...(target.isGroup !== undefined ? { isGroup: target.isGroup } : {}),
+    };
+    if (!this.supportsProactiveTarget(sessionTarget)) {
+      throw new Error(
+        `Channel "${this.name}" does not support this proactive target.`,
+      );
+    }
+    await this.pushProactive(sessionTarget, text);
   }
 
   protected supportsProactiveTarget(target: SessionTarget): boolean {

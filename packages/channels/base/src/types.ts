@@ -170,6 +170,13 @@ export interface ObservedChannelContactGraph {
   groups: ObservedChannelGroup[];
 }
 
+export interface ChannelProactiveTarget {
+  channelName: string;
+  chatId: string;
+  threadId?: string;
+  isGroup?: boolean;
+}
+
 export interface ChannelTaskLifecycleBase {
   channelName: string;
   chatId: string;
