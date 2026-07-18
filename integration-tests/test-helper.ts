@@ -549,13 +549,13 @@ export class TestRig {
       attempts++;
       try {
         const result = predicate();
-        lastError = undefined;
         if (env['VERBOSE'] === 'true' && attempts % 5 === 0) {
           console.log(
             `Poll attempt ${attempts}: ${result ? 'success' : 'waiting...'}`,
           );
         }
         if (result) {
+          lastError = undefined;
           return true;
         }
       } catch (err) {
@@ -568,7 +568,8 @@ export class TestRig {
     }
     if (lastError) {
       console.log(
-        `Poll timed out after ${attempts} attempts. Last error: ${lastError}`,
+        `Poll timed out after ${attempts} attempts. Last error:`,
+        lastError,
       );
     } else if (env['VERBOSE'] === 'true') {
       console.log(`Poll timed out after ${attempts} attempts`);
