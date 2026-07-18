@@ -453,6 +453,30 @@ describe('WeComChannel', () => {
     expect(channel.supportsProactiveSend()).toBe(true);
   });
 
+  it('sends typed chat and user deliveries to the selected SDK target', async () => {
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    await channel.deliverProactive(
+      { channelName: 'bot', type: 'chat', id: 'group-42' },
+      'group result',
+    );
+    await channel.deliverProactive(
+      { channelName: 'bot', type: 'user', id: 'alice' },
+      'direct result',
+    );
+
+    expect(client.sendMessage).toHaveBeenNthCalledWith(1, 'group-42', {
+      msgtype: 'markdown',
+      markdown: { content: 'group result' },
+    });
+    expect(client.sendMessage).toHaveBeenNthCalledWith(2, 'alice', {
+      msgtype: 'markdown',
+      markdown: { content: 'direct result' },
+    });
+  });
+
   it('connects the official SDK with bot credentials', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')

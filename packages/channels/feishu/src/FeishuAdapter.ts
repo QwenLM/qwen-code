@@ -683,13 +683,19 @@ export class FeishuChannel extends ChannelBase {
     target: SessionTarget,
     text: string,
   ): Promise<void> {
-    await this.sendMessageInternal(target.chatId, text, true);
+    await this.sendMessageInternal(
+      target.chatId,
+      text,
+      true,
+      target.isGroup === false ? 'open_id' : 'chat_id',
+    );
   }
 
   private async sendMessageInternal(
     chatId: string,
     text: string,
     throwOnFailure: boolean,
+    receiveIdType: 'chat_id' | 'open_id' = 'chat_id',
   ): Promise<void> {
     let token = await this.getTenantAccessToken();
     if (!token) {
@@ -723,7 +729,7 @@ export class FeishuChannel extends ChannelBase {
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
           const resp = await fetch(
-            `${BASE_URL}/im/v1/messages?receive_id_type=chat_id`,
+            `${BASE_URL}/im/v1/messages?receive_id_type=${receiveIdType}`,
             {
               method: 'POST',
               headers: {

@@ -141,6 +141,33 @@ describe('TelegramChannel', () => {
     expect(channel.supportsProactiveSend()).toBe(true);
   });
 
+  it('sends typed chat and user deliveries without a topic option', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+
+    await channel.deliverProactive(
+      { channelName: 'telegram', type: 'chat', id: '-10042' },
+      'group result',
+    );
+    await channel.deliverProactive(
+      { channelName: 'telegram', type: 'user', id: '42' },
+      'direct result',
+    );
+
+    expect(bot.api.sendMessage).toHaveBeenNthCalledWith(
+      1,
+      '-10042',
+      expect.any(String),
+      { parse_mode: 'HTML' },
+    );
+    expect(bot.api.sendMessage).toHaveBeenNthCalledWith(
+      2,
+      '42',
+      expect.any(String),
+      { parse_mode: 'HTML' },
+    );
+  });
+
   it('clears active typing intervals on disconnect', () => {
     const clearIntervalSpy = vi.spyOn(global, 'clearInterval');
     const channel = createChannel();

@@ -1429,6 +1429,43 @@ describe('FeishuChannel', () => {
       );
       fetchSpy.mockRestore();
     });
+
+    it('maps typed chat and user deliveries to Feishu receive ID types', async () => {
+      const channel = createTestableChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }));
+
+      await channel.deliverProactive(
+        { channelName: 'test', type: 'chat', id: 'oc_group' },
+        'group result',
+      );
+      await channel.deliverProactive(
+        { channelName: 'test', type: 'user', id: 'ou_user' },
+        'direct result',
+      );
+
+      expect(fetchSpy.mock.calls[0]![0]).toBe(
+        'https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id',
+      );
+      expect(fetchSpy.mock.calls[0]![1]).toEqual(
+        expect.objectContaining({
+          body: expect.stringContaining('"receive_id":"oc_group"'),
+        }),
+      );
+      expect(fetchSpy.mock.calls[1]![0]).toBe(
+        'https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id',
+      );
+      expect(fetchSpy.mock.calls[1]![1]).toEqual(
+        expect.objectContaining({
+          body: expect.stringContaining('"receive_id":"ou_user"'),
+        }),
+      );
+    });
   });
 
   describe('onPromptEnd: error recovery branches', () => {
