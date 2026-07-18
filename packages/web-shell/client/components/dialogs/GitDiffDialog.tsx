@@ -85,20 +85,25 @@ async function buildRows(
     const oldCode = oldSide.join('\n');
     let newTokens: ThemedToken[][] | null = null;
     let oldTokens: ThemedToken[][] | null = null;
-    if (
-      highlighter &&
-      !isTooLargeToHighlight(newCode) &&
-      !isTooLargeToHighlight(oldCode)
-    ) {
+    if (highlighter) {
       // resolvedLang is a real Shiki language id here ('text' was filtered out
       // before the highlighter was loaded).
       const lang = resolvedLang as BundledLanguage;
-      try {
-        newTokens = highlighter.codeToTokens(newCode, { lang, theme }).tokens;
-        oldTokens = highlighter.codeToTokens(oldCode, { lang, theme }).tokens;
-      } catch {
-        newTokens = null;
-        oldTokens = null;
+      // Highlight each side independently so a small side keeps its tokens even
+      // when the other side exceeds the size cap.
+      if (!isTooLargeToHighlight(newCode)) {
+        try {
+          newTokens = highlighter.codeToTokens(newCode, { lang, theme }).tokens;
+        } catch {
+          newTokens = null;
+        }
+      }
+      if (!isTooLargeToHighlight(oldCode)) {
+        try {
+          oldTokens = highlighter.codeToTokens(oldCode, { lang, theme }).tokens;
+        } catch {
+          oldTokens = null;
+        }
       }
     }
 

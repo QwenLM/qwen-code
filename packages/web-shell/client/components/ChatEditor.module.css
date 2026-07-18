@@ -958,6 +958,10 @@
   border: 0;
   background: transparent;
   cursor: pointer;
+  font: inherit;
+  color: inherit;
+  padding: 0;
+  margin: 0;
 }
 
 .gitBranchChipButton:hover {
