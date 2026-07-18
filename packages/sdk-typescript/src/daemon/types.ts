@@ -729,6 +729,28 @@ export interface DaemonApprovalModeResult {
 }
 
 /**
+ * Body of `POST /session/:id/rewind`. `toTurn` is a 0-indexed user-turn
+ * number (turn 0 = state before any user turn) — the SAME definition of
+ * "turn N" the daemon's ACP `rewindSession` uses for `targetTurnIndex`
+ * (they are sent through verbatim, no remapping).
+ */
+export interface RewindSessionRequest {
+  toTurn: number;
+}
+
+/**
+ * Result body of `POST /session/:id/rewind`. Mirrors the daemon's ACP
+ * `rewindSession` response fields exactly (`targetTurnIndex`,
+ * `apiTruncateIndex`); the daemon's `historyBeforeRewind` field is
+ * deliberately NOT part of this type — it carries full message content and
+ * must never cross the SDK boundary to a remote caller.
+ */
+export interface DaemonRewindResult {
+  targetTurnIndex: number;
+  apiTruncateIndex: number;
+}
+
+/**
  * #4175 Wave 4 PR 17. Result body of `POST /workspace/tools/:name/
  * enable`. The `enabled` flag echoes the requested state; daemon
  * always succeeds when the bridge has a `persistDisabledTools` hook

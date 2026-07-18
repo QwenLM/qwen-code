@@ -1270,6 +1270,39 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('rewindSession', () => {
+    it('POSTs toTurn and returns the typed result', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { targetTurnIndex: 3, apiTruncateIndex: 12 }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.rewindSession('s-1', { toTurn: 3 });
+      expect(result).toEqual({ targetTurnIndex: 3, apiTruncateIndex: 12 });
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/rewind');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ toTurn: 3 });
+    });
+
+    it('sends client identity header on rewind', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { targetTurnIndex: 0, apiTruncateIndex: 0 }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.rewindSession('s-1', { toTurn: 0 }, 'client-1');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('throws a DaemonHttpError on a non-2xx response', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(409, { error: 'rewind_not_applicable' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.rewindSession('s-1', { toTurn: 99 }),
+      ).rejects.toMatchObject({ status: 409 });
+    });
+  });
+
   describe('setWorkspaceToolEnabled (#4175 Wave 4 PR 17)', () => {
     it('POSTs the enabled flag and URL-encodes the tool name', async () => {
       const { fetch, calls } = recordingFetch(() =>

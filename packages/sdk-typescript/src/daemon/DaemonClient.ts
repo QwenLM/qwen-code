@@ -41,6 +41,8 @@ import type {
   PermissionResponse,
   PromptContentBlock,
   PromptResult,
+  RewindSessionRequest,
+  DaemonRewindResult,
   SetModelResult,
   SessionMetadataResult,
   DaemonApprovalMode,
@@ -1022,6 +1024,40 @@ export class DaemonClient {
           throw await this.failOnError(res, 'POST /session/:id/model');
         }
         return (await res.json()) as SetModelResult;
+      },
+    );
+  }
+
+  /**
+   * Proxy the daemon's ACP `rewindSession` method (destructive: truncates
+   * the session's history to before the Nth user turn, strips thoughts,
+   * and recomputes the API truncation index). `toTurn` is forwarded
+   * unchanged as the ACP request's `targetTurnIndex` — the daemon defines
+   * what "turn N" means for its own history.
+   *
+   * NOTE: as of this writing the daemon's HTTP↔ACP bridge
+   * (`packages/cli/src/serve/server.ts`) does not yet expose this route —
+   * only the underlying ACP JSON-RPC method exists. A production daemon
+   * without the route responds 404, surfaced here as a `DaemonHttpError`
+   * with `status: 404`.
+   */
+  async rewindSession(
+    sessionId: string,
+    req: RewindSessionRequest,
+    clientId?: string,
+  ): Promise<DaemonRewindResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/rewind`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ toTurn: req.toTurn }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/rewind');
+        }
+        return (await res.json()) as DaemonRewindResult;
       },
     );
   }
