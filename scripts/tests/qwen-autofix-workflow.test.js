@@ -236,6 +236,18 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain(
       'review-address already in flight or queued — skipping',
     );
+    // The busy-set cannot see a sibling scan that has not yet emitted its
+    // matrix, so review-address REVALIDATES the watermark against LIVE
+    // markers before doing work: the per-PR address group serializes
+    // duplicates, so the later one reliably sees the first one's marker and
+    // discards itself — no agent run, no marker, no comment.
+    expect(prepareBranchAndFeedbackStep).toContain('LIVE_EVAL_WM');
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'stale duplicate target',
+    );
+    expect(
+      workflow.split("steps.prepare.outputs.stale != 'true'").length - 1,
+    ).toBe(2);
     expect(reviewScanJob).toContain(
       'capture("^review-address \\\\((?<pr>[0-9]+),")',
     );
@@ -514,10 +526,13 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       '.[3] | map(select((.conclusion // .state // "")',
     );
+    // Three sites: the NEWEST computation, the live-watermark revalidation,
+    // and the feedback rendering — all must share the same address-check
+    // carve-out.
     expect(
       prepareBranchAndFeedbackStep.match(/startswith\("review-address"\)/g) ??
         [],
-    ).toHaveLength(2);
+    ).toHaveLength(3);
     expect(prepareBranchAndFeedbackStep).toContain(
       'gsub("[^A-Za-z0-9 _./()-]"; "") | .[0:80]',
     );
@@ -1199,7 +1214,7 @@ describe('qwen-autofix workflow', () => {
     const reviewVerificationGateStep = verificationGateSteps[1];
 
     expect(reviewVerificationGateStep).toContain(
-      'if: |-\n          ${{ always() }}',
+      "if: |-\n          ${{ always() && steps.prepare.outputs.stale != 'true' }}",
     );
     expect(reviewVerificationGateStep).toContain('failure.md');
     expect(reviewVerificationGateStep).toContain('outcome=failed');

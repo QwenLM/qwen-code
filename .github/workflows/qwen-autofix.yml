@@ -1395,6 +1395,47 @@ jobs:
           [[ -z "${NEWEST}" ]] && NEWEST="${WATERMARK}"
           echo "newest=${NEWEST}" >> "${GITHUB_OUTPUT}"
 
+          # Live-watermark revalidation: two near-simultaneous triggers for the
+          # SAME PR can both pass their (per-target, route-level) gates and both
+          # scan before either has emitted a matrix job, so both emit this PR
+          # with the same stale watermark. The per-PR address concurrency group
+          # QUEUES the duplicate rather than discarding it — but that queueing
+          # is exactly what makes this check sound: address jobs for one PR run
+          # strictly one at a time, so by the time the duplicate runs here, the
+          # first job's eval marker is posted and visible. Recompute the
+          # watermark from LIVE markers; if nothing is newer and there is no
+          # conflict, this run is a stale duplicate and discards itself.
+          STALE='false'
+          LIVE_EVAL_WM="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+            [ .[] | select((.user.login // "") == $ab) | (.body // "")
+              | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+) -->") ] | .[]
+              | .[0] ] | max // ""' "${WORKDIR}/ic.json")"
+          if [[ -n "${LIVE_EVAL_WM}" && "${LIVE_EVAL_WM}" > "${WATERMARK}" && "${CONFLICT}" != "true" ]]; then
+            LIVE_NEW="$(jq -rs \
+              --arg wm "${LIVE_EVAL_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
+              --argjson trust "${TRUSTED_ASSOC}" '
+              ((.[0] | map(select((.submitted_at // "") > $wm)
+                | select((.user.login // "") != $ab)
+                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+                | select((.state // "") | IN("CHANGES_REQUESTED", "COMMENTED"))) | length)
+              + (.[1] | map(select((.created_at // "") > $wm)
+                | select((.user.login // "") != $ab)
+                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)) | length)
+              + (.[2] | map(select((.created_at // "") > $wm)
+                | select((.user.login // "") != $ab)
+                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+                | select((.body // "") | test("<!-- (autofix-eval|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)) | length)
+              + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
+                | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
+                | select((.completedAt // .updatedAt // "") > $wm)) | length)' \
+              "${WORKDIR}/rv.json" "${WORKDIR}/rc.json" "${WORKDIR}/ic.json" "${WORKDIR}/checks.json")"
+            if [[ "${LIVE_NEW}" == "0" ]]; then
+              STALE='true'
+              echo "🫥 stale duplicate target: a sibling run already evaluated through ${LIVE_EVAL_WM} and nothing is newer — discarding without action or marker"
+            fi
+          fi
+          echo "stale=${STALE}" >> "${GITHUB_OUTPUT}"
+
           # Render the actionable feedback into one prompt-ready file.
           {
             ISSUE_REF=""
@@ -1454,6 +1495,10 @@ jobs:
 
       - name: 'Triage and address'
         id: 'address'
+        # Skipped entirely for a stale duplicate target (see the live-watermark
+        # revalidation in prepare) — no agent run, no marker, no comment.
+        if: |-
+          ${{ steps.prepare.outputs.stale != 'true' }}
         # Bound the agent well below the 120-minute job timeout so a runaway agent
         # fails THIS step (not the whole job), leaving the always() verify and
         # report steps time to run and post a handoff. A job-level timeout would
@@ -1520,7 +1565,7 @@ jobs:
       - name: 'Verification gate'
         id: 'verify'
         if: |-
-          ${{ always() }}
+          ${{ always() && steps.prepare.outputs.stale != 'true' }}
         run: |-
           if [[ -f "${WORKDIR}/failure.md" && -n "$(git status --porcelain)" ]]; then
             echo "❌ Agent wrote failure.md after leaving a dirty workspace:"
