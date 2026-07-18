@@ -1078,6 +1078,8 @@ export class ArenaManager {
             systemPrompt: getCoreSystemPrompt(
               this.config.getUserMemory(),
               model.modelId,
+              undefined,
+              'headless',
             ),
           },
           modelConfig: { model: model.modelId },

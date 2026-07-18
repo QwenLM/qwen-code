@@ -49,6 +49,7 @@ import {
   getCoreSystemPrompt,
   getCustomSystemPrompt,
   getPlanModeSystemReminder,
+  resolveInteractionMode,
 } from './prompts.js';
 import {
   CompressionStatus,
@@ -814,6 +815,7 @@ export class GeminiClient {
       userMemory,
       this.config.getModel(),
       appendSystemPrompt,
+      resolveInteractionMode(this.config),
     );
     return gitStatus ? base + '\n\n' + gitStatus : base;
   }
