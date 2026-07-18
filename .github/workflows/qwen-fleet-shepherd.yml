@@ -195,10 +195,20 @@ jobs:
               elif [[ "${DISPATCHES}" -lt "${MAX_DISPATCHES_PER_TICK}" ]]; then
                 if act "#${PR}: dispatch autofix for conflict resolution" \
                   env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh workflow run qwen-autofix.yml --repo "${REPO}" -f pr_number="${PR}"; then
-                  act "#${PR}: post conflict notice" \
-                    gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🐑 Merge conflict with main detected — dispatched the autofix loop to resolve it. / 检测到与 main 的合并冲突，已触发 autofix 处理。\n\n<!-- fleet-shepherd conflict-dispatch sha=%s -->' "${HEAD}")"
+                  # The dispatch HAPPENED, so it counts against the per-tick
+                  # budget regardless of the marker's fate (counting only on
+                  # marker success would let a marker outage overspend the cap).
                   DISPATCHES=$(( DISPATCHES + 1 ))
-                  ACTION_NOTE='dispatched conflict resolution'
+                  if act "#${PR}: post conflict notice" \
+                    gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🐑 Merge conflict with main detected — dispatched the autofix loop to resolve it. / 检测到与 main 的合并冲突，已触发 autofix 处理。\n\n<!-- fleet-shepherd conflict-dispatch sha=%s -->' "${HEAD}")"; then
+                    ACTION_NOTE='dispatched conflict resolution'
+                  else
+                    # Without the marker the next tick may re-dispatch; that
+                    # duplicate is deduped downstream (the autofix scan skips
+                    # busy PRs and nothing-new targets), so annotate honestly
+                    # rather than fake a marker.
+                    ACTION_NOTE='dispatched; marker post failed — downstream dedup will absorb a retry'
+                  fi
                 else
                   ACTION_NOTE='conflict dispatch FAILED — will retry next tick'
                 fi

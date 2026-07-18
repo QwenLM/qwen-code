@@ -74,6 +74,14 @@ describe('fleet shepherd workflow', () => {
     expect(workflow).toMatch(
       /if act "#\$\{PR\}: dispatch autofix for conflict resolution"/,
     );
+    // The dispatch counts against the budget the moment it happens; a marker
+    // outage only changes the note (downstream dedup absorbs a retry).
+    expect(workflow).toMatch(
+      /DISPATCHES=\$\(\( DISPATCHES \+ 1 \)\)[\s\S]{0,400}if act "#\$\{PR\}: post conflict notice"/,
+    );
+    expect(workflow).toContain(
+      'marker post failed — downstream dedup will absorb a retry',
+    );
     // Stale-base sync: threshold-gated, self-limiting (behind_by resets),
     // never while checks are in flight, and a compare-and-swap on the head.
     expect(workflow).toContain("BEHIND_SYNC_THRESHOLD: '25'");
@@ -152,5 +160,16 @@ describe('fleet shepherd workflow', () => {
     expect(
       execFileSync('bash', ['-c', script('false')], { encoding: 'utf8' }),
     ).toContain('MARKER-SKIPPED');
+    // Dry-run must return 0 WITHOUT executing the command: `false` as the
+    // primary would fail if executed, so DRY-OK proves the branch short-circuits.
+    const dryScript = [
+      'set -eo pipefail',
+      "DRY_RUN='true'",
+      act.replace(/\n {10,12}/g, '\n'),
+      'if act "primary" false; then echo DRY-OK; else echo DRY-FAIL; fi',
+    ].join('\n');
+    expect(
+      execFileSync('bash', ['-c', dryScript], { encoding: 'utf8' }),
+    ).toContain('DRY-OK');
   });
 });
