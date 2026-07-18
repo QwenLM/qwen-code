@@ -2756,7 +2756,7 @@ describe('EnhancedMarkdownTable', () => {
     expect(writeText).toHaveBeenCalledWith(['Alpha\t10', 'Beta\t2'].join('\n'));
   });
 
-  it('resets filter menu draft state when switching columns', () => {
+  it('resets filter menu draft state when switching columns', async () => {
     const container = renderWideTable();
 
     click(button(container, 'Filter Team'));
@@ -2767,6 +2767,11 @@ describe('EnhancedMarkdownTable', () => {
     inputValue(teamSearch!, 'Al');
 
     click(button(container, 'Filter Score'));
+    await act(async () => {
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => resolve()),
+      );
+    });
     const scoreSearch = container.querySelector<HTMLInputElement>(
       'input[name="markdown-table-option-search-2"]',
     );

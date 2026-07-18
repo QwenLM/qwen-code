@@ -1270,6 +1270,14 @@ function ColumnFilterMenu({
       align="end"
       sideOffset={2}
       collisionPadding={6}
+      onCloseAutoFocus={(event) => {
+        if (
+          document.activeElement &&
+          document.activeElement !== document.body
+        ) {
+          event.preventDefault();
+        }
+      }}
       className="max-h-[min(430px,calc(100vh-16px))] w-[300px] max-w-[80vw] gap-0 overflow-auto p-0 text-xs"
       role="dialog"
       aria-labelledby={`${id}-title`}
