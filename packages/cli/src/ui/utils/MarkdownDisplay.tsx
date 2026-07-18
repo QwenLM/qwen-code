@@ -55,7 +55,7 @@ interface MarkdownDisplayProps {
    * respects the same viewport budget the outer wrapper enforces. See #6867.
    */
   enforceHeightBudget?: boolean;
-  /** Override the truncation cue text. Defaults to the 'press e' hint. */
+  /** Override the truncation cue text. Defaults to a generic "N more lines not shown" message. */
   truncateCueText?: string;
 }
 

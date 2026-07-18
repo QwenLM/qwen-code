@@ -3792,7 +3792,7 @@ export const AppContainer = (props: AppContainerProps) => {
           tc.confirmationDetails.type === 'plan',
       );
       if (
-        key.sequence === 'e' &&
+        key.name === 'e' &&
         !key.ctrl &&
         !key.meta &&
         !key.shift &&
