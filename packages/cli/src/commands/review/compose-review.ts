@@ -681,8 +681,14 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   //    above.)
   if (suggestionsInline > 0) clauses.push('Suggestions are inline.');
   if (suggestionsDiscarded > 0) {
+    // Self-contained: this lands in the posted body, and "see the terminal
+    // output" pointed the PR author at a terminal only the operator has —
+    // eight hours of real bot reviews carried that dead reference on five
+    // different pull requests.
     clauses.push(
-      `${suggestionsDiscarded} Suggestion-level finding(s) could not be anchored to the diff; see the terminal output.`,
+      `${suggestionsDiscarded} Suggestion-level finding(s) could not be ` +
+        `anchored to a changed line and were dropped; nothing further to act ` +
+        `on here.`,
     );
   }
 

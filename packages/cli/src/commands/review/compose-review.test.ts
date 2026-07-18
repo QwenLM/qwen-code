@@ -421,9 +421,12 @@ describe('composeReview — 422 recovery (round-7 Critical #1 & round-6: verdict
     // Before the 422: S=2. After dropping both anchors: recompose.
     const r = composeReview(base({ suggestionsDiscarded: 2 }));
     expect(r.event).toBe('COMMENT');
+    // Self-contained for the PR author — the old text said "see the terminal
+    // output", a terminal only the operator has.
     expect(r.body).toContain(
-      '2 Suggestion-level finding(s) could not be anchored to the diff; see the terminal output.',
+      '2 Suggestion-level finding(s) could not be anchored to a changed line and were dropped; nothing further to act on here.',
     );
+    expect(r.body).not.toContain('terminal output');
     // Nothing is inline — the body must not claim otherwise while the
     // discarded sentence says the opposite (round-9: `s` included discarded).
     expect(r.body).not.toContain('Suggestions are inline.');
