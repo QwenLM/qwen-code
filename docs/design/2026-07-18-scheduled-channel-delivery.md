@@ -327,6 +327,40 @@ field. An older client can ignore additive response fields. If a stale client
 sends `delivery` to a daemon that cannot validate it, the daemon returns a
 typed error and never silently drops the target.
 
+### Web Shell destination picker
+
+The Scheduled Tasks create/edit form exposes one optional searchable
+combobox for the delivery destination. It flattens the selected workspace's
+fresh observed-contact graph into three explicit target kinds:
+
+- a direct user with a routable `chatId` becomes
+  `{ channelName, chatId, isGroup: false }`;
+- a group becomes `{ channelName, chatId: group.id, isGroup: true }`;
+- a group topic becomes
+  `{ channelName, chatId: group.id, threadId: topic.id, isGroup: true }`.
+
+The input searches channel name, display label, chat/group ID, and topic ID.
+The user may select a result or paste an exact ID, but the value must resolve
+to one item in the fresh observed-contact response before it can be submitted.
+Typing an arbitrary unobserved platform ID never creates a route. The daemon's
+create/update admission check remains authoritative and repeats the same exact
+workspace-scoped validation.
+
+The form loads contacts when it opens and whenever its workspace changes.
+Only the current form workspace is queried; a secondary workspace failure does
+not fall back to the primary workspace. The picker is hidden unless the daemon
+advertises both `scheduled_task_channel_delivery` and
+`workspace_channel_observed_contacts`.
+
+Delivery is optional. Creating with no selection omits `delivery`. Editing
+preselects the existing target, and an unchanged target is omitted from PATCH
+so an older observation that has since expired remains attached to the task.
+If that target is no longer in the fresh graph, the form shows its stored IDs
+as a saved-but-not-currently-observed value; the user can preserve it, clear it
+with `delivery: null`, or replace it with a fresh selection. Task cards show
+the resolved label and target kind when available and fall back to the stored
+IDs.
+
 The implementation is based on `main`, including the merged #7109 observed
 contact registry. The production daemon wires that registry through a narrow
 target-admission dependency and accepts only an exact workspace-scoped match
@@ -479,9 +513,8 @@ a second scheduler and is outside this design.
    the accepted current-chat target without a second loop store.
 4. Connect #7109's merged observed-contact provider to target admission and
    expose the capability to authenticated daemon clients.
-5. Add Web Shell and daemon-aware CLI presentation while keeping standalone
-   local cron/loop behavior unchanged. That presentation work is not part of
-   the current runtime PR.
+5. Add the Web Shell observed-target combobox and daemon-aware client contract
+   while keeping standalone local cron/loop behavior unchanged.
 6. Add an optional hosting wake-up integration only for deployments that stop
    daemons between deadlines.
 
