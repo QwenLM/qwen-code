@@ -163,6 +163,12 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     CONNECTING: 'connecting',
     CONNECTED: 'connected',
   },
+  Storage: {
+    getRuntimeBaseDir: vi.fn(() => '/tmp/qwen-runtime'),
+    runWithRuntimeBaseDir: vi.fn(
+      <T>(_dir: string, _cwd: string | undefined, fn: () => T): T => fn(),
+    ),
+  },
   McpTransportPool: vi.fn().mockImplementation(() => ({
     acquire: vi.fn(),
     release: vi.fn(),

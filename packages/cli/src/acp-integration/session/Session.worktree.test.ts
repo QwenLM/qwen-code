@@ -98,6 +98,9 @@ describe('Session.pendingWorktreeNotice', () => {
     };
 
     mockConfig = {
+      storage: {
+        getRuntimeBaseDir: vi.fn().mockReturnValue('/tmp/qwen-runtime'),
+      },
       setApprovalMode: vi.fn(),
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       switchModel: vi.fn(),

@@ -220,6 +220,7 @@ describe('special session resolver telemetry publication', () => {
     expect(archiveMocks.assertSessionLoadable).toHaveBeenCalledWith(
       secondaryCwd,
       'secondary-session',
+      undefined,
     );
     expect(telemetryMocks.setDaemonTelemetryWorkspace).toHaveBeenCalledTimes(1);
     expect(telemetryMocks.setDaemonTelemetryWorkspace).toHaveBeenCalledWith(
@@ -255,10 +256,12 @@ describe('special session resolver telemetry publication', () => {
     expect(archiveMocks.assertSessionLoadable).toHaveBeenCalledWith(
       primaryCwd,
       'stored-secondary',
+      undefined,
     );
     expect(archiveMocks.assertSessionLoadable).toHaveBeenCalledWith(
       secondaryCwd,
       'stored-secondary',
+      undefined,
     );
     expect(telemetryMocks.setDaemonTelemetryWorkspace).toHaveBeenCalledTimes(1);
     expect(telemetryMocks.setDaemonTelemetryWorkspace).toHaveBeenCalledWith(
