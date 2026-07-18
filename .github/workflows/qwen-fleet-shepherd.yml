@@ -5,7 +5,8 @@ name: 'Fleet Shepherd'
 # unblocks each one — all levers were validated by hand before automation:
 #
 #   • conflict         → dispatch the autofix loop for that PR (its --conflict
-#                        path merges base and resolves), once per head SHA
+#                        path merges base and resolves), once per head SHA and
+#                        never while an address run is already live or queued
 #   • stale base       → update-branch when far behind main (fresh CI signal +
 #                        propagates workflow/skill fixes; self-limiting since
 #                        behind_by resets to 0 after the sync)
@@ -23,11 +24,13 @@ name: 'Fleet Shepherd'
 #
 # Safety rails: bot-authored main-targeting in-repo PRs only; per-action
 # markers make every write idempotent; per-tick action caps bound blast
-# radius; DRY-RUN via dispatch input; global kill switch via the
-# FLEET_SHEPHERD_DISABLED repository variable. Dispatches and reruns use the
-# workflow's own token (actions: write); comments, update-branch, and the
-# dashboard use CI_DEV_BOT_PAT so synced branches still trigger CI and all
-# writes carry the bot identity.
+# radius; every remote read fails CLOSED (an unreadable snapshot skips the
+# levers it feeds — it never masquerades as empty state); DRY-RUN via
+# dispatch input; global kill switch via the FLEET_SHEPHERD_DISABLED
+# repository variable. Dispatches use the workflow's own token
+# (actions: write); comments, update-branch, and the dashboard use
+# CI_DEV_BOT_PAT so synced branches still trigger CI and all writes carry
+# the bot identity.
 on:
   schedule:
     - cron: '*/15 * * * *'
@@ -135,10 +138,30 @@ jobs:
           # full scan, so it must not satisfy the watchdog. Reads use the
           # workflow token: actions read/write is guaranteed there, while the
           # PAT's actions scope is not.
-          env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run list --repo "${REPO}" --workflow qwen-autofix.yml \
-            --limit 50 --json event,createdAt,status > /tmp/scan-runs.json 2> /dev/null || echo '[]' > /tmp/scan-runs.json
-          LAST_SCHEDULE="$(jq -r '[.[] | select(.event == "schedule")] | first | .createdAt // ""' /tmp/scan-runs.json)"
-          SCAN_INFLIGHT="$(jq -r '[.[] | select((.event == "schedule" or .event == "workflow_dispatch") and .status != "completed")] | length' /tmp/scan-runs.json)"
+          # A FAILED snapshot read is UNKNOWN, not an empty repo: acting on
+          # '[]' would both zero the in-flight count and blank the schedule
+          # signal, dispatching a duplicate scan on top of a running one. Skip
+          # the lever for the tick instead (same fail-closed rule as the other
+          # reads).
+          SCAN_RUNS_OK=true
+          if ! env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run list --repo "${REPO}" --workflow qwen-autofix.yml \
+            --limit 50 --json event,createdAt,status,databaseId > /tmp/scan-runs.json 2> /dev/null; then
+            SCAN_RUNS_OK=false
+            echo "::warning::autofix run-list read failed; liveness lever and conflict dispatches skipped this tick"
+          fi
+          LAST_SCHEDULE="$(jq -r '[.[] | select(.event == "schedule")] | first | .createdAt // ""' /tmp/scan-runs.json 2> /dev/null || echo '')"
+          # In-flight counts SCHEDULE runs plus dispatches that ARE ours (their
+          # createdAt is within a couple of minutes of our recorded liveness
+          # watermark). A forced conflict dispatch can hold a run in progress
+          # through a two-hour address job — counting those would starve the
+          # watchdog and stop full scans indefinitely.
+          SCAN_INFLIGHT="$(jq -r --arg lv "${PREV_LIVENESS}" '
+            [ .[] | select(.status != "completed")
+              | select(
+                  (.event == "schedule")
+                  or (.event == "workflow_dispatch" and $lv != ""
+                      and ((((.createdAt | fromdateiso8601) - ($lv | fromdateiso8601)) | fabs) < 180)) ) ]
+            | length' /tmp/scan-runs.json 2> /dev/null || echo 0)"
           LAST_SIGNAL="${LAST_SCHEDULE}"
           if [[ -n "${PREV_LIVENESS}" && "${PREV_LIVENESS}" > "${LAST_SIGNAL}" ]]; then
             LAST_SIGNAL="${PREV_LIVENESS}"
@@ -148,13 +171,32 @@ jobs:
             SCAN_AGE_MIN=$(( (NOW_EPOCH - $(date -u -d "${LAST_SIGNAL}" +%s)) / 60 ))
           fi
           LIVENESS_OUT="${PREV_LIVENESS}"
-          echo "🫀 last scan signal: ${LAST_SIGNAL:-never} (${SCAN_AGE_MIN}m ago), in-flight: ${SCAN_INFLIGHT}"
-          if [[ "${SCAN_AGE_MIN}" -ge "${SCAN_LIVENESS_MINUTES}" && "${SCAN_INFLIGHT}" == "0" ]]; then
+          echo "🫀 last scan signal: ${LAST_SIGNAL:-never} (${SCAN_AGE_MIN}m ago), liveness-relevant in-flight: ${SCAN_INFLIGHT}, snapshot ok: ${SCAN_RUNS_OK}"
+          if [[ "${SCAN_RUNS_OK}" == "true" && "${SCAN_AGE_MIN}" -ge "${SCAN_LIVENESS_MINUTES}" && "${SCAN_INFLIGHT}" == "0" ]]; then
             if act "scan liveness: dispatch unforced review scan" \
               env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh workflow run qwen-autofix.yml --repo "${REPO}" -f phase=review; then
               LIVENESS_OUT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             fi
           fi
+
+          # Busy-set for the conflict lever, built HERE so the shepherd does
+          # not depend on any unmerged autofix-side dedup: a PR whose
+          # review-address job is running or queued in a live autofix run must
+          # not be dispatched again (also what makes the dispatch-succeeded /
+          # marker-failed retry idempotent on current main). Schedule/dispatch
+          # matrix jobs never appear in the PR's check rollup, so this is the
+          # only way to see them. On a failed snapshot the set stays empty and
+          # SCAN_RUNS_OK already defers every conflict dispatch below.
+          SHEP_BUSY=' '
+          while IFS= read -r LIVE_RUN; do
+            [[ -z "${LIVE_RUN}" ]] && continue
+            while IFS= read -r BUSY; do
+              [[ -n "${BUSY}" ]] && SHEP_BUSY="${SHEP_BUSY}${BUSY} "
+            done < <(env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run view "${LIVE_RUN}" --repo "${REPO}" --json jobs \
+              --jq '.jobs[] | select(.status != "completed") | .name | capture("^review-address \\((?<pr>[0-9]+),") | .pr' 2> /dev/null)
+          done < <(jq -r '.[] | select(.status != "completed") | .databaseId' /tmp/scan-runs.json 2> /dev/null)
+          [[ "${SHEP_BUSY}" != ' ' ]] && echo "🚧 review-address in flight/queued for PR(s):${SHEP_BUSY}"
+
 
           # ---- walk the bot fleet (one list call carries all per-PR meta) --
           if ! gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" --base main \
@@ -199,7 +241,15 @@ jobs:
             # marker for a failed dispatch would freeze the PR at this head.
             if [[ "${MERGEABLE}" == "CONFLICTING" ]]; then
               STATUS_NOTE='conflicting'
-              if [[ "${PENDING}" != "0" ]]; then
+              if [[ "${SCAN_RUNS_OK}" != "true" ]]; then
+                # Without the run snapshot the busy-state is UNKNOWN — a blind
+                # dispatch could stack onto a live address run, so defer.
+                ACTION_NOTE='run snapshot unavailable — busy-state unknown, deferring dispatch'
+              elif [[ "${SHEP_BUSY}" == *" ${PR} "* ]]; then
+                # An address run for this PR is already live or queued — a
+                # second dispatch would only stack a duplicate behind it.
+                ACTION_NOTE='review-address already in flight — deferring dispatch'
+              elif [[ "${PENDING}" != "0" ]]; then
                 # Mirror the consumer: the autofix scan skips a PR with checks
                 # in flight, so dispatching now would waste the dispatch AND
                 # plant a dedup marker for a scan that never ran.
@@ -217,11 +267,12 @@ jobs:
                     gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🐑 Merge conflict with main detected — dispatched the autofix loop to resolve it. / 检测到与 main 的合并冲突，已触发 autofix 处理。\n\n<!-- fleet-shepherd conflict-dispatch sha=%s -->' "${HEAD}")"; then
                     ACTION_NOTE='dispatched conflict resolution'
                   else
-                    # Without the marker the next tick may re-dispatch; that
-                    # duplicate is deduped downstream (the autofix scan skips
-                    # busy PRs and nothing-new targets), so annotate honestly
-                    # rather than fake a marker.
-                    ACTION_NOTE='dispatched; marker post failed — downstream dedup will absorb a retry'
+                    # Without the marker the next tick may re-dispatch. The
+                    # shepherd's OWN busy-set defers while the dispatched run
+                    # is live or queued, and once it completes a
+                    # still-conflicting PR SHOULD be retried — so annotate
+                    # honestly rather than fake a marker.
+                    ACTION_NOTE='dispatched; marker post failed — busy-set defers duplicates while the run lives'
                   fi
                 else
                   ACTION_NOTE='conflict dispatch FAILED — will retry next tick'

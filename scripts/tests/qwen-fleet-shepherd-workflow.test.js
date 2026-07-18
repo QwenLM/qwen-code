@@ -81,12 +81,30 @@ describe('fleet shepherd workflow', () => {
       /if act "#\$\{PR\}: dispatch autofix for conflict resolution"/,
     );
     // The dispatch counts against the budget the moment it happens; a marker
-    // outage only changes the note (downstream dedup absorbs a retry).
+    // outage only changes the note (the busy-set below absorbs a retry).
     expect(workflow).toMatch(
       /DISPATCHES=\$\(\( DISPATCHES \+ 1 \)\)[\s\S]{0,400}if act "#\$\{PR\}: post conflict notice"/,
     );
     expect(workflow).toContain(
-      'marker post failed — downstream dedup will absorb a retry',
+      'marker post failed — busy-set defers duplicates while the run lives',
+    );
+    // The shepherd builds its OWN busy-set from live autofix runs' matrix
+    // jobs (schedule/dispatch runs never surface in a PR's check rollup), so
+    // marker-failure retry idempotency does not lean on any autofix-side
+    // dedup that may not be merged: a PR with a review-address job running or
+    // queued is deferred, and an unreadable run snapshot defers every
+    // conflict dispatch because busy-state is then UNKNOWN.
+    expect(workflow).toContain(
+      'capture("^review-address \\\\((?<pr>[0-9]+),") | .pr',
+    );
+    expect(workflow).toMatch(
+      /if \[\[ "\$\{SCAN_RUNS_OK\}" != "true" \]\]; then[\s\S]{0,300}elif \[\[ "\$\{SHEP_BUSY\}" == \*" \$\{PR\} "\* \]\]; then/,
+    );
+    expect(workflow).toContain(
+      'review-address already in flight — deferring dispatch',
+    );
+    expect(workflow).toContain(
+      'run snapshot unavailable — busy-state unknown, deferring dispatch',
     );
     // Stale-base sync: threshold-gated, self-limiting (behind_by resets),
     // never while checks are in flight, and a compare-and-swap on the head.
@@ -103,9 +121,7 @@ describe('fleet shepherd workflow', () => {
     expect(workflow).toContain('marker read failed; skipping this tick');
     // A failed fleet fetch skips the walk AND preserves the previous
     // dashboard body — never an empty-table overwrite.
-    expect(workflow).toContain(
-      'fleet enumeration failed; skipping this tick',
-    );
+    expect(workflow).toContain('fleet enumeration failed; skipping this tick');
     // Per-tick blast-radius caps.
     expect(workflow).toContain("MAX_SYNCS_PER_TICK: '3'");
     expect(workflow).toContain("MAX_CONFLICT_DISPATCHES_PER_TICK: '2'");
@@ -134,14 +150,73 @@ describe('fleet shepherd workflow', () => {
     expect(workflow).toContain(
       '<!-- fleet-shepherd liveness-dispatched: ${LIVENESS_OUT} -->',
     );
-    // A wide window so event storms can't push schedule runs out of view.
-    expect(workflow).toContain('--limit 50 --json event,createdAt,status');
-    // One run-list call feeds both the age and the in-flight computation.
+    // A wide window so event storms can't push schedule runs out of view;
+    // databaseId feeds the busy-set walk over the same snapshot.
+    expect(workflow).toContain(
+      '--limit 50 --json event,createdAt,status,databaseId',
+    );
+    // One run-list call feeds the age, in-flight, and busy-set computations.
     expect(
       workflow.match(
         /gh run list --repo "\$\{REPO\}" --workflow qwen-autofix\.yml/g,
       ) ?? [],
     ).toHaveLength(1);
+    // A FAILED snapshot read is UNKNOWN, not an empty repo: no '[]' fallback
+    // (which would zero in-flight AND blank the schedule signal, stacking a
+    // duplicate scan); instead the lever is gated off for the tick.
+    expect(workflow).not.toContain("echo '[]' > /tmp/scan-runs.json");
+    expect(workflow).toContain(
+      'run-list read failed; liveness lever and conflict dispatches skipped',
+    );
+    expect(workflow).toContain(
+      '"${SCAN_RUNS_OK}" == "true" && "${SCAN_AGE_MIN}" -ge "${SCAN_LIVENESS_MINUTES}"',
+    );
+  });
+
+  it('behaviorally proves in-flight counting ignores foreign dispatches', () => {
+    // Extract the SCAN_INFLIGHT jq program VERBATIM from the workflow (drift
+    // fails the test) and replay it: an in-progress SCHEDULE run or a
+    // dispatch created within the window of OUR liveness watermark blocks
+    // the watchdog, while a forced conflict dispatch (createdAt far from the
+    // watermark — those runs can live for two hours) must NOT starve it.
+    const jqProgram = workflow
+      .match(
+        /SCAN_INFLIGHT="\$\(jq -r --arg lv "\$\{PREV_LIVENESS\}" '([\s\S]*?)' \/tmp\/scan-runs\.json/,
+      )?.[1]
+      ?.replace(/\n {12}/g, '\n');
+    expect(jqProgram).toBeTruthy();
+    const count = (runs, lv) =>
+      execFileSync('jq', ['-r', '--arg', 'lv', lv, jqProgram], {
+        encoding: 'utf8',
+        input: JSON.stringify(runs),
+      }).trim();
+    const LV = '2026-07-18T08:00:00Z';
+    const run = (event, createdAt, status = 'in_progress') => ({
+      event,
+      createdAt,
+      status,
+    });
+    // Live schedule run → counted (no stacking).
+    expect(count([run('schedule', '2026-07-18T07:59:00Z')], LV)).toBe('1');
+    // Completed schedule run → not counted.
+    expect(
+      count([run('schedule', '2026-07-18T07:59:00Z', 'completed')], LV),
+    ).toBe('0');
+    // Our own liveness dispatch (created just before the watermark was
+    // stamped) → counted.
+    expect(count([run('workflow_dispatch', '2026-07-18T07:59:30Z')], LV)).toBe(
+      '1',
+    );
+    // Foreign forced dispatch (conflict resolution, created 40m earlier,
+    // still running) → NOT counted: it must not satisfy or starve the
+    // watchdog.
+    expect(count([run('workflow_dispatch', '2026-07-18T07:20:00Z')], LV)).toBe(
+      '0',
+    );
+    // No watermark recorded yet → no dispatch is attributable to us.
+    expect(count([run('workflow_dispatch', '2026-07-18T07:59:30Z')], '')).toBe(
+      '0',
+    );
   });
 
   it('maintains one dashboard issue edited in place', () => {
@@ -150,7 +225,7 @@ describe('fleet shepherd workflow', () => {
     // based — a bystander issue containing the title must never be hijacked);
     // gh's own --jq has no --arg, so the JSON is piped to standalone jq.
     expect(workflow).not.toContain('--jq --arg');
-    expect(workflow).toContain("map(select(.title == $t)) | .[0].number");
+    expect(workflow).toContain('map(select(.title == $t)) | .[0].number');
     // A FAILED lookup is not "not found" — never create-on-failure.
     expect(workflow).toContain(
       'dashboard lookup failed; dashboard update skipped this tick',
