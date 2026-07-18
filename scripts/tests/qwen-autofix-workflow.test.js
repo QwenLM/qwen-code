@@ -222,11 +222,23 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).not.toContain('break # one PR per scheduled scan');
     expect(reviewScanJob).toContain('Fan out: emit EVERY eligible PR');
     expect(workflow).toContain("max-parallel: 3");
-    // Pathological-backlog bound: targets per scan are capped, the excess is
-    // LOGGED and deferred to the next scan (never a silent cap).
+    // Pathological-backlog bound: the budget BREAKS the candidate loop (so it
+    // bounds runtime and API usage, not just matrix size), the deferral is
+    // LOGGED, and the next scan picks up the remainder.
     expect(workflow).toContain("MAX_TARGETS_PER_SCAN: '10'");
-    expect(reviewScanJob).toContain('deferring the rest to the next scan');
-    expect(reviewScanJob).toContain(".[0:$n]");
+    expect(reviewScanJob).toContain(
+      'deferring the remaining candidates to the next scan',
+    );
+    expect(reviewScanJob).toMatch(/target budget \(\$\{MAX_TARGETS_PER_SCAN\}\) reached[\s\S]{0,120}break/);
+    // Fanned-out matrices hold QUEUED jobs past a tick and schedule/dispatch
+    // runs never appear in the PR's checks — the scan must skip PRs whose
+    // review-address is already running or queued in any live autofix run.
+    expect(reviewScanJob).toContain(
+      'review-address already in flight or queued — skipping',
+    );
+    expect(reviewScanJob).toContain(
+      'capture("^review-address \\\\((?<pr>[0-9]+),")',
+    );
     expect(reviewScanJob).toContain('statusCheckRollup');
     expect(reviewScanJob).toContain('HAS_PENDING_CHECKS');
     expect(reviewScanJob).toContain('N_FAILED_CHECKS');
@@ -318,11 +330,22 @@ describe('qwen-autofix workflow', () => {
     // but dispatches and review/issue events get unique per-run groups — a
     // shared cancel-in-progress group let any newer event kill pending full
     // scans while route jobs sat queued behind runner backlog.
+    // Per-TARGET keys: cron ticks coalesce with each other; review events
+    // coalesce per PR (near-simultaneous reviews on one PR route once, without
+    // events on OTHER PRs cancelling this one); issue events per issue;
+    // dispatches unique and never cancelled.
+    expect(routeJob).toContain("'qwen-autofix-route-cron'");
     expect(routeJob).toContain(
-      "group: \"${{ github.event_name == 'schedule' && 'qwen-autofix-route-cron' || format('qwen-autofix-route-{0}', github.run_id) }}\"",
+      "format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)",
     );
     expect(routeJob).toContain(
-      "cancel-in-progress: |-\n        ${{ github.event_name == 'schedule' }}",
+      "format('qwen-autofix-route-issue-{0}', github.event.issue.number)",
+    );
+    expect(routeJob).toContain(
+      "format('qwen-autofix-route-{0}', github.run_id)",
+    );
+    expect(routeJob).toContain(
+      "cancel-in-progress: |-\n        ${{ github.event_name != 'workflow_dispatch' }}",
     );
     expect(routeJob).not.toContain("group: 'qwen-autofix-route'");
     expect(workflow).toContain(

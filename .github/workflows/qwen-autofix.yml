@@ -93,15 +93,19 @@ jobs:
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     concurrency:
-      # Cron ticks dedupe among themselves (a newer tick supersedes a queued
-      # one). Dispatches and review/issue events each route independently:
-      # under runner backlog a route job can sit QUEUED for minutes, and the
-      # old shared cancel-in-progress group let any newer event kill pending
-      # full scans — observed as hours of scan starvation during review-event
-      # storms. Route is a seconds-long job, so unique groups cost nothing.
-      group: "${{ github.event_name == 'schedule' && 'qwen-autofix-route-cron' || format('qwen-autofix-route-{0}', github.run_id) }}"
+      # Concurrency is keyed by TARGET, not shared and not fully unique:
+      #   • cron ticks share one group (a newer tick supersedes a queued one)
+      #   • review events coalesce PER PR (two reviews on the same PR seconds
+      #     apart route once — the old shared group's one useful side effect,
+      #     kept, without letting events on OTHER PRs cancel this one)
+      #   • issue events coalesce PER issue
+      #   • dispatches are unique per run and are never cancelled
+      # The old single shared cancel-in-progress group let ANY newer event kill
+      # pending full scans while route jobs sat queued behind runner backlog —
+      # observed as hours of scan starvation during review-event storms.
+      group: "${{ github.event_name == 'schedule' && 'qwen-autofix-route-cron' || (github.event_name == 'pull_request_review' && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)) || (github.event_name == 'issues' && format('qwen-autofix-route-issue-{0}', github.event.issue.number)) || format('qwen-autofix-route-{0}', github.run_id) }}"
       cancel-in-progress: |-
-        ${{ github.event_name == 'schedule' }}
+        ${{ github.event_name != 'workflow_dispatch' }}
     permissions:
       contents: 'read'
     outputs:
@@ -1014,8 +1018,33 @@ jobs:
           # check and double-process the feedback).
           PENDING_STALE_MIN=240
           PENDING_CUTOFF="$(date -u -d "${PENDING_STALE_MIN} minutes ago" +%Y-%m-%dT%H:%M:%SZ)"
+
+          # PRs whose review-address is already RUNNING OR QUEUED in any live
+          # autofix run must not be re-targeted. Schedule/dispatch runs execute
+          # against main's SHA, so their matrix jobs never appear in the PR's
+          # statusCheckRollup — and a fanned-out matrix holds queued jobs well
+          # past a 10-minute tick, so without this the next scan re-emits the
+          # same PRs and the per-PR address groups accumulate duplicates that
+          # later replay stale watermarks. One runs-list plus one jobs-view per
+          # live run is cheap (there are at most a few).
+          BUSY_PRS=' '
+          while IFS= read -r LIVE_RUN; do
+            [[ -z "${LIVE_RUN}" ]] && continue
+            while IFS= read -r BUSY; do
+              [[ -n "${BUSY}" ]] && BUSY_PRS="${BUSY_PRS}${BUSY} "
+            done < <(gh run view "${LIVE_RUN}" --repo "${REPO}" --json jobs \
+              --jq '.jobs[] | select(.status != "completed") | .name | capture("^review-address \\((?<pr>[0-9]+),") | .pr' 2> /dev/null)
+          done < <(gh run list --repo "${REPO}" --workflow qwen-autofix.yml \
+            --limit 15 --json databaseId,status \
+            --jq '.[] | select(.status != "completed") | .databaseId' 2> /dev/null)
+          [[ "${BUSY_PRS}" != ' ' ]] && echo "🚧 address in flight/queued for PR(s):${BUSY_PRS}"
+
           TARGETS='[]'
           for PR in ${CANDIDATES}; do
+            if [[ "${BUSY_PRS}" == *" ${PR} "* ]]; then
+              echo "⏳ #${PR}: review-address already in flight or queued — skipping"
+              continue
+            fi
             # One PR fetch for the branch name, check rollup, and creation time (the
             # watermark floor below) — avoids extra round-trips per candidate PR.
             PR_META="$(gh pr view "${PR}" --repo "${REPO}" \
@@ -1162,22 +1191,23 @@ jobs:
               --arg round "${ROUND}" --arg wm "${EFF_WM}" \
               '. + [{pr: $pr, branch: $branch, issue: $issue, round: $round, watermark: $wm}]' \
               <<< "${TARGETS}")"
-            # Fan out: emit EVERY eligible PR. The address matrix bounds
-            # simultaneity (max-parallel) and the per-PR concurrency groups
-            # prevent duplicate same-PR runs, so one scan drains the whole
-            # backlog instead of serving a single newest-first target per tick
-            # (which starved older PRs for hours when cron ticks were sparse).
+            # Fan out: emit EVERY eligible PR up to the per-scan budget. The
+            # address matrix bounds simultaneity (max-parallel) and the per-PR
+            # concurrency groups plus the busy-PR skip above prevent duplicate
+            # same-PR runs, so one scan drains the whole backlog instead of
+            # serving a single newest-first target per tick (which starved
+            # older PRs for hours when cron ticks were sparse). The budget
+            # break bounds this loop's RUNTIME and API usage too — each
+            # candidate costs several serial API reads, so scanning past a
+            # full budget would spend hundreds of calls for nothing. Never a
+            # silent cap: the deferral is logged and the next scan picks up
+            # the remainder (their signals persist).
+            if [[ "$(jq 'length' <<< "${TARGETS}")" -ge "${MAX_TARGETS_PER_SCAN}" ]]; then
+              echo "⚠️ target budget (${MAX_TARGETS_PER_SCAN}) reached; deferring the remaining candidates to the next scan"
+              break
+            fi
           done
 
-          # Defense-in-depth bound on a pathological backlog: cap the targets
-          # emitted per scan so both the address matrix size and this job's
-          # runtime stay bounded. Never a silent cap — log what was deferred;
-          # the next scan picks up the remainder (their signals persist).
-          TOTAL="$(jq 'length' <<< "${TARGETS}")"
-          if [[ "${TOTAL}" -gt "${MAX_TARGETS_PER_SCAN}" ]]; then
-            echo "⚠️ ${TOTAL} eligible PRs; emitting the first ${MAX_TARGETS_PER_SCAN}, deferring the rest to the next scan"
-            TARGETS="$(jq -c --argjson n "${MAX_TARGETS_PER_SCAN}" '.[0:$n]' <<< "${TARGETS}")"
-          fi
           COUNT="$(jq 'length' <<< "${TARGETS}")"
           echo "📋 ${COUNT} PR(s) to process"
           echo "targets=${TARGETS}" >> "${GITHUB_OUTPUT}"
