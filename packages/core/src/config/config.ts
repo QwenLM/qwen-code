@@ -157,6 +157,7 @@ import {
   type PostToolBatchToolCall,
 } from '../hooks/types.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
+import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
 
 // Utils
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
@@ -2336,6 +2337,7 @@ export class Config {
             // Execute the appropriate hook based on eventName
             let result;
             let stopHookCount: number | undefined;
+            let hasNonGoalBlockingStopHook: boolean | undefined;
             const input = request.input || {};
             const signal = request.signal;
             switch (request.eventName) {
@@ -2370,6 +2372,20 @@ export class Config {
                   ? createHookOutput('Stop', stopResult.finalOutput)
                   : undefined;
                 stopHookCount = stopResult.allOutputs.length;
+                const goalHookId =
+                  stopResult.finalOutput?.hookSpecificOutput?.[
+                    GOAL_HOOK_ID_OUTPUT_KEY
+                  ];
+                if (typeof goalHookId === 'string') {
+                  hasNonGoalBlockingStopHook = stopResult.allOutputs.some(
+                    (output) =>
+                      output.hookSpecificOutput?.[GOAL_HOOK_ID_OUTPUT_KEY] !==
+                        goalHookId &&
+                      (output.decision === 'block' ||
+                        output.decision === 'deny' ||
+                        output.continue === false),
+                  );
+                }
                 break;
               }
               case 'MessageDisplay': {
@@ -2498,6 +2514,7 @@ export class Config {
               output: result,
               // Include stop hook count for Stop events
               stopHookCount,
+              hasNonGoalBlockingStopHook,
             } as HookExecutionResponse);
           } catch (error) {
             this.debugLogger.warn(`Hook execution failed: ${error}`);

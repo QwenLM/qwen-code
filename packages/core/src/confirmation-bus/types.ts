@@ -121,6 +121,8 @@ export interface HookExecutionResponse {
   error?: Error;
   /** Number of stop hooks that were executed */
   stopHookCount?: number;
+  /** Whether a blocking Stop output came from outside the active goal hook. */
+  hasNonGoalBlockingStopHook?: boolean;
 }
 
 export type Message =

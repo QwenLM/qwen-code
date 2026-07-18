@@ -162,7 +162,10 @@ interface PendingDuplicateToolResponses {
 interface ResolvedSteerMessages {
   parts: Part[];
   accept: () => void;
+  restoreMessages: string[];
 }
+
+const GOAL_COMMAND_RE = /^\/goal(?:\s|$)/;
 
 /**
  * Pull the assistant's most recent visible text from the UI history. Used as
@@ -2395,19 +2398,46 @@ export const useGeminiStream = (
     async (
       messages: string[],
       signal: AbortSignal,
-    ): Promise<ResolvedSteerMessages | undefined> => {
-      const resolvedMessages: Part[] = [];
+    ): Promise<ResolvedSteerMessages> => {
+      const resolvedSegments: Part[][] = [];
       const resolvedForRecording: Array<{
         message: string;
         parts: Part[];
         sideEffects: Array<() => void>;
       }> = [];
+      const restoreMessages: string[] = [];
+      let pendingGoalSegmentIndex: number | undefined;
       const timestamp = Date.now();
 
       for (let index = 0; index < messages.length; index += 1) {
-        if (signal.aborted) break;
+        if (signal.aborted) {
+          restoreMessages.push(...messages.slice(index));
+          break;
+        }
 
         const message = messages[index];
+        if (GOAL_COMMAND_RE.test(message)) {
+          const activeGoalBeforeCommand = getActiveGoal(config.getSessionId());
+          const result = await handleSlashCommand(message);
+          const activeGoalAfterCommand = getActiveGoal(config.getSessionId());
+          if (result && result.type === 'submit_prompt') {
+            if (pendingGoalSegmentIndex !== undefined) {
+              resolvedSegments[pendingGoalSegmentIndex] = [];
+            }
+            pendingGoalSegmentIndex = resolvedSegments.length;
+            resolvedSegments.push(normalizePartList(result.content));
+          } else if (
+            activeGoalBeforeCommand?.hookId !== activeGoalAfterCommand?.hookId
+          ) {
+            if (pendingGoalSegmentIndex !== undefined) {
+              resolvedSegments[pendingGoalSegmentIndex] = [];
+              pendingGoalSegmentIndex = undefined;
+            }
+          }
+          continue;
+        }
+
+        restoreMessages.push(message);
         const sideEffects: Array<() => void> = [];
         let resolvedQuery: PartListUnion = [{ text: message }];
         if (isAtCommand(message)) {
@@ -2509,10 +2539,7 @@ export const useGeminiStream = (
           );
         }
 
-        if (resolvedMessages.length > 0 && messageParts.length > 0) {
-          resolvedMessages.push({ text: '\n\n' });
-        }
-        resolvedMessages.push(...messageParts);
+        resolvedSegments.push(messageParts);
         resolvedForRecording.push({
           message,
           parts: messageParts,
@@ -2520,9 +2547,18 @@ export const useGeminiStream = (
         });
       }
 
-      if (signal.aborted) return undefined;
+      const resolvedMessages: Part[] = [];
+      for (const segment of resolvedSegments) {
+        if (segment.length === 0) continue;
+        if (resolvedMessages.length > 0) {
+          resolvedMessages.push({ text: '\n\n' });
+        }
+        resolvedMessages.push(...segment);
+      }
+
       return {
         parts: resolvedMessages,
+        restoreMessages,
         accept: () => {
           for (const { message, parts, sideEffects } of resolvedForRecording) {
             for (const sideEffect of sideEffects) sideEffect();
@@ -2537,7 +2573,13 @@ export const useGeminiStream = (
         },
       };
     },
-    [addItem, applyVisionBridgeIfNeeded, config, onDebugMessage],
+    [
+      addItem,
+      applyVisionBridgeIfNeeded,
+      config,
+      handleSlashCommand,
+      onDebugMessage,
+    ],
   );
 
   const resolveDrainedSteerMessages = useCallback(
@@ -2548,10 +2590,12 @@ export const useGeminiStream = (
       try {
         const resolved = await resolveSteeredMessages(messages, signal);
         if (signal.aborted) {
-          midTurnRestoreRef?.current?.(messages);
+          if (resolved.restoreMessages.length > 0) {
+            midTurnRestoreRef?.current?.(resolved.restoreMessages);
+          }
           return undefined;
         }
-        if (!resolved || resolved.parts.length === 0) return undefined;
+        if (resolved.parts.length === 0) return undefined;
         let settled = false;
         return {
           parts: resolved.parts,
@@ -2563,7 +2607,9 @@ export const useGeminiStream = (
           restore: () => {
             if (settled) return;
             settled = true;
-            midTurnRestoreRef?.current?.(messages);
+            if (resolved.restoreMessages.length > 0) {
+              midTurnRestoreRef?.current?.(resolved.restoreMessages);
+            }
           },
         };
       } catch (error) {

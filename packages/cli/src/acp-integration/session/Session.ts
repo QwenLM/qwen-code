@@ -94,6 +94,7 @@ import {
   needsConfirmation,
   isPlanModeBlocked,
   abortGoalForStopHookCap,
+  getStopHookContinuationReason,
   formatStopHookBlockingCapWarning,
   applyAutoModeDecision,
   evaluateAutoMode,
@@ -2847,7 +2848,7 @@ export class Session implements SessionContext {
           stopOutput?.isBlockingDecision() ||
           stopOutput?.shouldStopExecution()
         ) {
-          externalReason = stopOutput.getEffectiveReason();
+          externalReason = getStopHookContinuationReason(stopOutput);
           stopHookIterationCount++;
           stopHookReasons = [...stopHookReasons, externalReason];
           stopHookCount = response.stopHookCount ?? 1;
