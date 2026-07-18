@@ -159,7 +159,11 @@ jobs:
           # createdAt is within a couple of minutes of our recorded liveness
           # watermark). A forced conflict dispatch can hold a run in progress
           # through a two-hour address job — counting those would starve the
-          # watchdog and stop full scans indefinitely.
+          # watchdog and stop full scans indefinitely. First-tick edge: with
+          # no watermark yet, a manual dispatch already in flight is not
+          # counted and one duplicate scan may be dispatched; the scan's own
+          # busy/nothing-new gates absorb it, and every later tick has the
+          # watermark.
           SCAN_INFLIGHT="$(jq -r --arg lv "${PREV_LIVENESS}" '
             [ .[] | select(.status != "completed")
               | select(
@@ -227,7 +231,10 @@ jobs:
             fi
             # WAITING and REQUESTED are also not-yet-final check states.
             PENDING="$(jq -r '[.statusCheckRollup[]? | select((.status // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED"))] | length' <<< "${ROW}")"
-            FAILED_TEST_URL="$(jq -r '[.statusCheckRollup[]? | select(.conclusion == "FAILURE") | select(.name | startswith("Test (ubuntu")) | .detailsUrl][0] // ""' <<< "${ROW}")"
+            # Platform-blind on purpose: the dashboard is a health VIEW, and
+            # a Windows- or macOS-only regression is just as red as an Ubuntu
+            # one (reruns stay with the Patrol either way).
+            FAILED_TEST_URL="$(jq -r '[.statusCheckRollup[]? | select(.conclusion == "FAILURE") | select(.name | startswith("Test (")) | .detailsUrl][0] // ""' <<< "${ROW}")"
             BEHIND="$(gh api "repos/${REPO}/compare/main...${HEAD}" --jq '.behind_by // 0' 2> /dev/null || echo 0)"
             # A failed marker read must NOT become empty history — empty
             # MY_MARKS would defeat every dedup below and double-fire actions.

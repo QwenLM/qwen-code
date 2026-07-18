@@ -237,6 +237,10 @@ describe('fleet shepherd workflow', () => {
     expect(workflow).toContain('gh issue edit');
     expect(workflow).toContain('gh issue create');
     expect(workflow).toContain('do not edit by hand');
+    // CI-red detection is platform-blind: a Windows- or macOS-only failure
+    // is just as red on the health view as an Ubuntu one.
+    expect(workflow).toContain('startswith("Test (")');
+    expect(workflow).not.toContain('Test (ubuntu');
     // act() propagates exit codes, so EVERY call site must be if-wrapped or a
     // failure aborts the tick under set -e — including the dashboard writes.
     expect(workflow).toMatch(/if ! act "create dashboard issue"/);
