@@ -53,7 +53,12 @@ import {
   skillArgsPath,
   currentSessionId,
 } from '../../services/skill-args-file.js';
-import { countInlineFindings } from './lib/inline-counts.js';
+import {
+  CRITICAL_PREFIX,
+  SUGGESTION_PREFIX,
+  countInlineFindings,
+  severityOf,
+} from './lib/inline-counts.js';
 
 /**
  * Where the CLI records a skill's invocation arguments, verbatim, before the
@@ -340,6 +345,20 @@ function inconsistencies(payload: ReviewPayload, event: string): string[] {
     const at = `comments[${i}]`;
     if (!c.path) problems.push(`${at} has no \`path\``);
     if (!c.body) problems.push(`${at} has no \`body\` — an empty comment`);
+
+    // The verdict above was counted from these markers, so a body carrying
+    // neither weighed nothing in it. Step 6 already refuses unmarked drafts,
+    // but the skill's own re-compose instruction expects the comment set to
+    // churn after Step 6 — and a marker lost in that churn reaches exactly
+    // this boundary, the one that posts. A blocker that weighs nothing
+    // approves the review it should block.
+    if (c.body && severityOf(c) === null) {
+      problems.push(
+        `${at} opens with neither ${CRITICAL_PREFIX} nor ` +
+          `${SUGGESTION_PREFIX} — the verdict counts comments by their ` +
+          `severity marker, and an unmarked one weighs nothing in it`,
+      );
+    }
 
     if (!isDiffLine(c.line)) {
       problems.push(

@@ -26,6 +26,23 @@ export interface DraftedComment {
   body?: unknown;
 }
 
+/**
+ * Which severity marker a drafted comment opens with — or null for neither.
+ *
+ * The ONE statement of the predicate. The counter and the unmarked-scan each
+ * restated it at first, and drift between restatements is exactly the
+ * bug-class this file's header describes; every caller classifies through
+ * here so the two can never disagree about what "marked" means.
+ */
+export function severityOf(
+  c: DraftedComment,
+): 'critical' | 'suggestion' | null {
+  const body = typeof c?.body === 'string' ? c.body.trimStart() : '';
+  if (body.startsWith(CRITICAL_PREFIX)) return 'critical';
+  if (body.startsWith(SUGGESTION_PREFIX)) return 'suggestion';
+  return null;
+}
+
 /** How many drafted comments open with each severity marker. */
 export function countInlineFindings(comments: readonly DraftedComment[]): {
   criticalsInline: number;
@@ -34,9 +51,9 @@ export function countInlineFindings(comments: readonly DraftedComment[]): {
   let criticalsInline = 0;
   let suggestionsInline = 0;
   for (const c of comments) {
-    const body = typeof c?.body === 'string' ? c.body.trimStart() : '';
-    if (body.startsWith(CRITICAL_PREFIX)) criticalsInline++;
-    else if (body.startsWith(SUGGESTION_PREFIX)) suggestionsInline++;
+    const severity = severityOf(c);
+    if (severity === 'critical') criticalsInline++;
+    else if (severity === 'suggestion') suggestionsInline++;
   }
   return { criticalsInline, suggestionsInline };
 }
@@ -46,22 +63,18 @@ export function countInlineFindings(comments: readonly DraftedComment[]): {
  *
  * `countInlineFindings` counts such a comment as nothing at all — which for a
  * verdict computation means a blocker written without its marker weighs zero.
- * The composer refuses these outright instead: at Step 6 the draft is still
- * cheap to fix, and a marker-less body is either a drafting mistake or a
- * finding trying to weigh less than it is.
+ * Both boundaries refuse these outright instead: `compose-review` because
+ * Step 6 is where the draft is still cheap to fix, and `submit` because the
+ * skill's own re-compose instruction expects the set to churn after Step 6 —
+ * a marker lost in that churn would otherwise reach the one boundary that
+ * actually posts, and weigh zero there.
  */
 export function unmarkedComments(
   comments: readonly DraftedComment[],
 ): number[] {
   const out: number[] = [];
   comments.forEach((c, i) => {
-    const body = typeof c?.body === 'string' ? c.body.trimStart() : '';
-    if (
-      !body.startsWith(CRITICAL_PREFIX) &&
-      !body.startsWith(SUGGESTION_PREFIX)
-    ) {
-      out.push(i);
-    }
+    if (severityOf(c) === null) out.push(i);
   });
   return out;
 }

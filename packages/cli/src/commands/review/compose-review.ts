@@ -14,7 +14,8 @@
 // one downstream branch not updated when an upstream rule gained a new
 // state. This module is the single source of truth; the skill gathers the
 // state, calls it, and uses `{event, body}` verbatim. 422 recovery is the
-// same call with updated counts.
+// same call with the updated `--comments` file — the counts are counted
+// from it, never updated by hand.
 //
 // The model stays responsible for judgment (what is a Critical, is it
 // real); this owns only the bookkeeping that follows from the counts.
