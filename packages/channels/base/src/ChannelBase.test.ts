@@ -9069,7 +9069,10 @@ describe('ChannelBase', () => {
     it('logs a stable diagnostic when the recall revision stays unstable', async () => {
       const channelMemory = {
         ...createChannelMemory([
-          { id: 'm-a31f0d82c7e4', text: 'Use staging.' },
+          {
+            id: 'm-a31f0d82c7e4',
+            text: 'Deploy secret-project to staging.',
+          },
         ]),
         getChannelMemoryRevision: vi
           .fn()
@@ -9093,7 +9096,7 @@ describe('ChannelBase', () => {
       expect(log).not.toContain('revision-');
       expect(
         (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[0]![1],
-      ).toBe('deploy secret-project');
+      ).toContain('Deploy secret-project to staging.');
       stderrSpy.mockRestore();
     });
 

@@ -842,18 +842,19 @@ export abstract class ChannelBase {
       return selectRelevantChannelMemory(message, entries);
     }
 
+    let latestEntries: ChannelMemoryEntry[] = [];
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const cached = this.getCachedChannelMemoryRecallIndex(read.key, revision);
       if (cached) {
         return selectRelevantChannelMemoryFromIndex(message, cached);
       }
 
-      const entries = await channelMemory.listChannelMemoryEntries(target);
+      latestEntries = await channelMemory.listChannelMemoryEntries(target);
       let verifiedRevision: string;
       try {
         verifiedRevision = await channelMemory.getChannelMemoryRevision(target);
       } catch {
-        return selectRelevantChannelMemory(message, entries);
+        return selectRelevantChannelMemory(message, latestEntries);
       }
       if (revision !== verifiedRevision) {
         if (read.generation !== read.state.generation) return [];
@@ -861,7 +862,7 @@ export abstract class ChannelBase {
         continue;
       }
 
-      const index = createChannelMemoryRecallIndex(entries);
+      const index = createChannelMemoryRecallIndex(latestEntries);
       if (read.generation === read.state.generation) {
         this.setCachedChannelMemoryRecallIndex(read.key, revision, index);
       }
@@ -872,7 +873,7 @@ export abstract class ChannelBase {
       envelope,
       'recall revision unstable after retry',
     );
-    return [];
+    return selectRelevantChannelMemory(message, latestEntries);
   }
 
   private drainCollectBufferForCurrentPrompt(
