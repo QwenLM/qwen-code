@@ -118,10 +118,7 @@ import type {
 import { QWEN_SERVER_TOKEN_ENV } from './channel-worker-env.js';
 import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
 import { ChannelDeliveryError } from './channel-delivery-ipc.js';
-import {
-  createScheduledDeliveryDispatcher,
-  type ScheduledDeliveryDispatcher,
-} from './scheduled-delivery-dispatcher.js';
+import type { ScheduledDeliveryDispatcher } from './scheduled-delivery-dispatcher.js';
 import { channelSelectionNames } from './channel-selection.js';
 import {
   resolveChannelWorkspaceGroups,
@@ -5069,6 +5066,10 @@ async function runQwenServeImpl(
         const registry = candidateApp.locals?.['workspaceRegistry'] as
           | WorkspaceRegistry
           | undefined;
+        const { createScheduledDeliveryDispatcher } = await import(
+          './scheduled-delivery-dispatcher.js'
+        );
+        if (runtimeStartupSettled) return;
         scheduledDeliveryDispatcher ??= createScheduledDeliveryDispatcher({
           listWorkspaces: () =>
             registry?.list().map((runtime) => runtime.workspaceCwd) ?? [

@@ -10,7 +10,6 @@ import type {
   DaemonDirectoryListing,
   DaemonFileStat,
   DaemonGoal,
-  DaemonObservedChannelContacts,
   DaemonScheduledTask,
   DaemonWorkspaceActions,
   DaemonWorkspacePathSuggestions,
@@ -537,22 +536,6 @@ export function createDaemonWorkspaceActions({
     // web-shell's own origin), which is exactly where the page runs. A
     // `workspaceId` selects a non-primary workspace's own cron file via the
     // workspace-qualified route; omitting it hits the primary surface.
-    async listObservedChannelContacts(workspaceId) {
-      requireClient(getClient, 'List observed Channel contacts failed');
-      const path = observedChannelContactsPath(workspaceId);
-      const url = createDaemonRequestUrl(baseUrl, path);
-      const res = await withActionTimeout(
-        fetch(serializeDaemonRequestUrl(url, baseUrl), {
-          headers: createDaemonHeaders(token),
-        }),
-        'List observed Channel contacts timed out',
-      );
-      if (!res.ok) {
-        throw new Error(await readDaemonError(res, `GET ${path}`));
-      }
-      return (await res.json()) as DaemonObservedChannelContacts;
-    },
-
     async listScheduledTasks(workspaceId) {
       requireClient(getClient, 'List scheduled tasks failed');
       const path = scheduledTasksPath(workspaceId);
@@ -946,12 +929,6 @@ function scheduledTasksPath(workspaceId?: string, suffix = ''): string {
   return workspaceId
     ? `/workspaces/${encodeURIComponent(workspaceId)}/scheduled-tasks${suffix}`
     : `/scheduled-tasks${suffix}`;
-}
-
-function observedChannelContactsPath(workspaceId?: string): string {
-  return workspaceId
-    ? `/workspaces/${encodeURIComponent(workspaceId)}/channel/observed-contacts`
-    : '/workspace/channel/observed-contacts';
 }
 
 function createDaemonHeaders(token: string | undefined): HeadersInit {

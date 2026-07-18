@@ -63,44 +63,11 @@ describe('scheduled-tasks workspace actions', () => {
     expect(await makeActions().listScheduledTasks()).toEqual([]);
   });
 
-  it('lists primary observed Channel contacts', async () => {
-    const contacts = { users: [], groups: [] };
-    fetchMock.mockResolvedValue(ok(contacts));
-
-    await expect(
-      makeActions('tok').listObservedChannelContacts(),
-    ).resolves.toEqual(contacts);
-    expect(fetchMock.mock.calls[0][0]).toBe(
-      '/workspace/channel/observed-contacts',
-    );
-    expect(headersOf(initOf(fetchMock.mock.calls[0]))['Authorization']).toBe(
-      'Bearer tok',
-    );
-  });
-
-  it('lists observed contacts for only the selected workspace', async () => {
-    fetchMock.mockResolvedValue(ok({ users: [], groups: [] }));
-
-    await makeActions('tok').listObservedChannelContacts('ws/2');
-
-    expect(fetchMock.mock.calls[0][0]).toBe(
-      '/workspaces/ws%2F2/channel/observed-contacts',
-    );
-  });
-
   it('creates a task with a POST + JSON body', async () => {
     fetchMock.mockResolvedValue(ok({ id: 'x' }));
     const res = await makeActions().createScheduledTask({
       cron: '0 9 * * *',
       prompt: 'p',
-      delivery: {
-        kind: 'channel',
-        target: {
-          channelName: 'dingtalk',
-          chatId: 'group-42',
-          isGroup: true,
-        },
-      },
     });
     expect(res).toEqual({ id: 'x' });
     const init = initOf(fetchMock.mock.calls[0]);
@@ -110,30 +77,16 @@ describe('scheduled-tasks workspace actions', () => {
     expect(JSON.parse(init.body as string)).toMatchObject({
       cron: '0 9 * * *',
       prompt: 'p',
-      delivery: {
-        kind: 'channel',
-        target: {
-          channelName: 'dingtalk',
-          chatId: 'group-42',
-          isGroup: true,
-        },
-      },
     });
   });
 
   it('updates with a PATCH and URL-encodes the id', async () => {
     fetchMock.mockResolvedValue(ok({ id: 'a/b' }));
-    await makeActions().updateScheduledTask('a/b', {
-      enabled: false,
-      delivery: null,
-    });
+    await makeActions().updateScheduledTask('a/b', { enabled: false });
     const init = initOf(fetchMock.mock.calls[0]);
     expect(fetchMock.mock.calls[0][0]).toBe('/scheduled-tasks/a%2Fb');
     expect(init.method).toBe('PATCH');
-    expect(JSON.parse(init.body as string)).toEqual({
-      enabled: false,
-      delivery: null,
-    });
+    expect(JSON.parse(init.body as string)).toEqual({ enabled: false });
   });
 
   it('deletes with a DELETE', async () => {

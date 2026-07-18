@@ -33,7 +33,6 @@ describe('ObservedChannelContactStore', () => {
     const store = createStore();
     store.observe('dingtalk-main', {
       user: { id: 'direct-user', label: 'Direct User' },
-      chatId: 'direct-chat',
     });
     store.observe('dingtalk-main', {
       user: { id: 'user-1', label: 'User One' },
@@ -46,7 +45,6 @@ describe('ObservedChannelContactStore', () => {
         {
           channelName: 'dingtalk-main',
           id: 'direct-user',
-          chatId: 'direct-chat',
           label: 'Direct User',
           lastObservedAt: '2026-07-17T12:00:00.000Z',
         },

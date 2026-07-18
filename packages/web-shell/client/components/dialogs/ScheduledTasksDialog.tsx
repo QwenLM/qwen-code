@@ -15,9 +15,7 @@ import {
 import { createPortal } from 'react-dom';
 import {
   useWorkspaceActions,
-  type DaemonObservedChannelContacts,
   type DaemonScheduledTask,
-  type DaemonScheduledTaskChannelTarget,
   type DaemonScheduledTaskRun,
 } from '@qwen-code/webui/daemon-react-sdk';
 import type {
@@ -42,12 +40,6 @@ import {
   type Frequency,
   type TranslateFn,
 } from './scheduledTasksSchedule';
-import {
-  deliveryTargetsEqual,
-  flattenScheduledTaskDeliveryTargets,
-  resolveScheduledTaskDeliveryInput,
-  type ScheduledTaskDeliveryOption,
-} from './scheduledTaskDeliveryTargets';
 import styles from './ScheduledTasksDialog.module.css';
 
 /** Localized absolute timestamp, resilient to a bad epoch value. */
@@ -97,7 +89,6 @@ interface ScheduledTasksDialogProps {
   workspaces?: DaemonWorkspaceCapability[];
   /** Forces all task operations through this workspace's route. */
   lockedWorkspace?: DaemonWorkspaceCapability;
-  channelDeliveryEnabled?: boolean;
   onError: (error: unknown, fallback: string) => void;
 }
 
@@ -107,31 +98,6 @@ interface ScheduledTasksDialogProps {
  * in the busy/expanded per-card state. */
 function taskKey(task: DaemonScheduledTask): string {
   return `${task.workspaceId ?? ''}:${task.id}`;
-}
-
-function storedDeliveryInput(target: DaemonScheduledTaskChannelTarget): string {
-  return ['saved', target.channelName, target.chatId, target.threadId]
-    .filter((part): part is string => typeof part === 'string')
-    .join(' · ');
-}
-
-function storedDeliveryDescription(
-  target: DaemonScheduledTaskChannelTarget,
-  t: TranslateFn,
-): string {
-  const kind = target.threadId
-    ? 'topic'
-    : target.isGroup === true
-      ? 'group'
-      : 'direct';
-  return [
-    t(`scheduledTasks.delivery.kind.${kind}`),
-    target.channelName,
-    target.chatId,
-    target.threadId,
-  ]
-    .filter((part): part is string => typeof part === 'string')
-    .join(' · ');
 }
 
 const FREQUENCIES: Frequency[] = [
@@ -156,10 +122,6 @@ const MAX_SET_TIMEOUT_MS = 2_147_483_647;
 const PAST_DUE_FAST_RELOADS = 3;
 const OVERDUE_RELOAD_INTERVAL_MS = 30_000;
 const MAX_PROMPT_LENGTH = 100_000;
-const EMPTY_OBSERVED_CONTACTS: DaemonObservedChannelContacts = {
-  users: [],
-  groups: [],
-};
 const AT_REFERENCE_UNSAFE_CHARS = /[^\p{L}\p{N}_.-]/gu;
 const PROMPT_REFERENCE_TOKEN =
   /(^|[\s])(@(?:ext|mcp):(?:\\.[^\s\\]*|[^\s\\])+|\/(?:\\.[^\s\\/]*|[^\s\\/])+)(?=$|\s)/gu;
@@ -491,7 +453,6 @@ export function ScheduledTasksDialog({
   onOpenSession,
   workspaces,
   lockedWorkspace,
-  channelDeliveryEnabled = false,
   onError,
 }: ScheduledTasksDialogProps) {
   const { t } = useI18n();
@@ -550,14 +511,6 @@ export function ScheduledTasksDialog({
   const [builder, setBuilder] = useState<BuilderState>(DEFAULT_BUILDER);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
-  const [deliveryInput, setDeliveryInput] = useState('');
-  const [initialDeliveryTarget, setInitialDeliveryTarget] =
-    useState<DaemonScheduledTaskChannelTarget>();
-  const [deliveryOptions, setDeliveryOptions] = useState<
-    ScheduledTaskDeliveryOption[]
-  >([]);
-  const [deliveryLoading, setDeliveryLoading] = useState(false);
-  const [deliveryError, setDeliveryError] = useState<string | null>(null);
   const [referenceKind, setReferenceKind] = useState<PromptTagKind | null>(
     null,
   );
@@ -589,7 +542,6 @@ export function ScheduledTasksDialog({
   // stale data. Only the latest reload is allowed to apply its result.
   const reloadSeqRef = useRef(0);
   const referenceLoadSeqRef = useRef(0);
-  const deliveryLoadSeqRef = useRef(0);
   useEffect(() => {
     mountedRef.current = true;
     return () => {
@@ -856,50 +808,6 @@ export function ScheduledTasksDialog({
     };
   }, [referenceKind, resetReferenceState, updateReferencePickerPosition]);
 
-  useEffect(() => {
-    if (!channelDeliveryEnabled || !showForm) return;
-    const seq = ++deliveryLoadSeqRef.current;
-    setDeliveryLoading(true);
-    setDeliveryError(null);
-    void actions
-      .listObservedChannelContacts(formWorkspaceId)
-      .then((contacts) => {
-        if (!mountedRef.current || seq !== deliveryLoadSeqRef.current) return;
-        const options = flattenScheduledTaskDeliveryTargets(
-          contacts ?? EMPTY_OBSERVED_CONTACTS,
-        );
-        setDeliveryOptions(options);
-        if (initialDeliveryTarget) {
-          const current = options.find((item) =>
-            deliveryTargetsEqual(item.target, initialDeliveryTarget),
-          );
-          if (current) {
-            setDeliveryInput((value) =>
-              value === storedDeliveryInput(initialDeliveryTarget)
-                ? current.inputValue
-                : value,
-            );
-          }
-        }
-      })
-      .catch((err: unknown) => {
-        if (!mountedRef.current || seq !== deliveryLoadSeqRef.current) return;
-        setDeliveryOptions([]);
-        setDeliveryError(err instanceof Error ? err.message : String(err));
-      })
-      .finally(() => {
-        if (mountedRef.current && seq === deliveryLoadSeqRef.current) {
-          setDeliveryLoading(false);
-        }
-      });
-  }, [
-    actions,
-    channelDeliveryEnabled,
-    formWorkspaceId,
-    initialDeliveryTarget,
-    showForm,
-  ]);
-
   const resetForm = useCallback(() => {
     setName('');
     setPrompt('');
@@ -908,12 +816,6 @@ export function ScheduledTasksDialog({
     setShowForm(false);
     setEditingId(null);
     setFormWorkspaceId(lockedWorkspaceId);
-    setDeliveryInput('');
-    setInitialDeliveryTarget(undefined);
-    setDeliveryOptions([]);
-    setDeliveryLoading(false);
-    setDeliveryError(null);
-    deliveryLoadSeqRef.current++;
     resetReferenceState();
   }, [lockedWorkspaceId, resetReferenceState]);
 
@@ -926,10 +828,6 @@ export function ScheduledTasksDialog({
     setPrompt('');
     setBuilder(DEFAULT_BUILDER);
     setFormError(null);
-    setDeliveryInput('');
-    setInitialDeliveryTarget(undefined);
-    setDeliveryOptions([]);
-    setDeliveryError(null);
     resetReferenceState();
     setShowForm(true);
   }, [lockedWorkspaceId, resetReferenceState]);
@@ -946,11 +844,6 @@ export function ScheduledTasksDialog({
       // represent lands in the `custom` field, never silently rewritten.
       setBuilder(parseCronToBuilder(task.cron));
       setFormError(null);
-      const target = task.delivery?.target;
-      setInitialDeliveryTarget(target);
-      setDeliveryInput(target ? storedDeliveryInput(target) : '');
-      setDeliveryOptions([]);
-      setDeliveryError(null);
       resetReferenceState();
       setShowForm(true);
     },
@@ -975,24 +868,6 @@ export function ScheduledTasksDialog({
       );
       return;
     }
-    const trimmedDeliveryInput = deliveryInput.trim();
-    const selectedDelivery = resolveScheduledTaskDeliveryInput(
-      trimmedDeliveryInput,
-      deliveryOptions,
-    );
-    const unchangedStoredDelivery =
-      initialDeliveryTarget !== undefined &&
-      (trimmedDeliveryInput === storedDeliveryInput(initialDeliveryTarget) ||
-        deliveryTargetsEqual(selectedDelivery?.target, initialDeliveryTarget));
-    if (
-      channelDeliveryEnabled &&
-      trimmedDeliveryInput.length > 0 &&
-      !selectedDelivery &&
-      !unchangedStoredDelivery
-    ) {
-      setFormError(t('scheduledTasks.delivery.unobserved'));
-      return;
-    }
     setSubmitting(true);
     setFormError(null);
     try {
@@ -1000,26 +875,15 @@ export function ScheduledTasksDialog({
         // Update only the editable fields; `recurring`/`enabled` are omitted so
         // the PATCH leaves them unchanged (recurring isn't in this form, and
         // enabled is driven by the card toggle). Empty name clears it.
-        const patch = {
-          cron,
-          prompt: prompt.trim(),
-          name: name.trim() || null,
-          ...(channelDeliveryEnabled &&
-          initialDeliveryTarget !== undefined &&
-          trimmedDeliveryInput.length === 0
-            ? { delivery: null }
-            : channelDeliveryEnabled &&
-                selectedDelivery &&
-                !unchangedStoredDelivery
-              ? {
-                  delivery: {
-                    kind: 'channel' as const,
-                    target: selectedDelivery.target,
-                  },
-                }
-              : {}),
-        };
-        await actions.updateScheduledTask(editingId, patch, formWorkspaceId);
+        await actions.updateScheduledTask(
+          editingId,
+          {
+            cron,
+            prompt: prompt.trim(),
+            name: name.trim() || null,
+          },
+          formWorkspaceId,
+        );
       } else {
         await actions.createScheduledTask(
           {
@@ -1028,14 +892,6 @@ export function ScheduledTasksDialog({
             name: name.trim() || null,
             recurring: true,
             enabled: true,
-            ...(channelDeliveryEnabled && selectedDelivery
-              ? {
-                  delivery: {
-                    kind: 'channel' as const,
-                    target: selectedDelivery.target,
-                  },
-                }
-              : {}),
           },
           formWorkspaceId,
         );
@@ -1052,13 +908,9 @@ export function ScheduledTasksDialog({
   }, [
     actions,
     builder,
-    channelDeliveryEnabled,
-    deliveryInput,
-    deliveryOptions,
     editingId,
     formWorkspaceId,
     name,
-    initialDeliveryTarget,
     prompt,
     reload,
     resetForm,
@@ -1282,13 +1134,9 @@ export function ScheduledTasksDialog({
                   // so the picker is fixed while editing and when only one
                   // workspace is operable (nothing to choose).
                   disabled={!!editingId || operableWorkspaces.length <= 1}
-                  onChange={(e) => {
-                    setFormWorkspaceId(e.target.value || undefined);
-                    setDeliveryInput('');
-                    setInitialDeliveryTarget(undefined);
-                    setDeliveryOptions([]);
-                    setDeliveryError(null);
-                  }}
+                  onChange={(e) =>
+                    setFormWorkspaceId(e.target.value || undefined)
+                  }
                 >
                   {operableWorkspaces.map((ws) => (
                     <option key={ws.id} value={workspaceActionId(ws) ?? ''}>
@@ -1360,41 +1208,6 @@ export function ScheduledTasksDialog({
                 })}
               </div>
             </div>
-
-            {channelDeliveryEnabled && (
-              <label className={styles.field}>
-                <span className={styles.fieldLabel}>
-                  {t('scheduledTasks.delivery.destination')}
-                </span>
-                <input
-                  className={styles.input}
-                  type="text"
-                  list="scheduled-task-delivery-targets"
-                  value={deliveryInput}
-                  placeholder={t('scheduledTasks.delivery.placeholder')}
-                  onChange={(event) => setDeliveryInput(event.target.value)}
-                />
-                <datalist id="scheduled-task-delivery-targets">
-                  {deliveryOptions.map((option) => (
-                    <option
-                      key={`${option.kind}:${option.inputValue}`}
-                      value={option.inputValue}
-                    >
-                      {option.description}
-                    </option>
-                  ))}
-                </datalist>
-                <span className={styles.fieldHint}>
-                  {deliveryLoading
-                    ? t('scheduledTasks.delivery.loading')
-                    : deliveryError
-                      ? deliveryError
-                      : deliveryOptions.length === 0
-                        ? t('scheduledTasks.delivery.empty')
-                        : t('scheduledTasks.delivery.hint')}
-                </span>
-              </label>
-            )}
 
             <div className={styles.scheduleRow}>
               <label className={styles.field}>
@@ -1658,15 +1471,6 @@ export function ScheduledTasksDialog({
                       : 'scheduledTasks.runsOnce',
                   )}
                 </span>
-                {task.delivery && (
-                  <span
-                    className={styles.schedulePill}
-                    data-testid="scheduled-task-delivery"
-                    title={storedDeliveryDescription(task.delivery.target, t)}
-                  >
-                    {storedDeliveryDescription(task.delivery.target, t)}
-                  </span>
-                )}
                 {task.nextRunAt != null && (
                   <span
                     className={styles.countdown}

@@ -4179,9 +4179,6 @@ export abstract class ChannelBase {
         : sanitizedChatName || envelope.chatId;
     const observation: ObservedChannelContactObservation = {
       user: { id: envelope.senderId, label: userLabel },
-      ...(!envelope.isGroup
-        ? { chatId: envelope.deliveryChatId ?? envelope.chatId }
-        : {}),
       ...(envelope.isGroup
         ? {
             group: { id: envelope.chatId, label: groupLabel },

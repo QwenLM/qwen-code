@@ -62,7 +62,6 @@ describe('workspace observed channel contact routes', () => {
       daemonObservedContactsPath(primary.workspaceCwd),
     ).observe('dingtalk-main', {
       user: { id: 'direct-primary', label: 'Direct Primary' },
-      chatId: 'direct-primary-chat',
     });
     new ObservedChannelContactStore(
       daemonObservedContactsPath(primary.workspaceCwd),
@@ -93,7 +92,6 @@ describe('workspace observed channel contact routes', () => {
         {
           channelName: 'dingtalk-main',
           id: 'direct-primary',
-          chatId: 'direct-primary-chat',
           label: 'Direct Primary',
           lastObservedAt: expect.any(String),
         },

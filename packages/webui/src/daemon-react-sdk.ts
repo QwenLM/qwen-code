@@ -289,16 +289,8 @@ export type {
   DaemonGoal,
   /** The `GET /goals` payload: the goals plus a count of unreachable sessions. */
   DaemonGoalList,
-  /** Fresh workspace-scoped direct, group, and topic observations. */
-  DaemonObservedChannelContacts,
-  DaemonObservedChannelGroup,
-  DaemonObservedChannelRelatedUser,
-  DaemonObservedChannelTopic,
-  DaemonObservedChannelUser,
   /** A durable scheduled task (cron) as returned by the daemon. */
   DaemonScheduledTask,
-  /** A daemon-managed Channel destination for scheduled task results. */
-  DaemonScheduledTaskChannelTarget,
   /** One recorded fire in a scheduled task's run history. */
   DaemonScheduledTaskRun,
   /** Request body for creating a scheduled task. */

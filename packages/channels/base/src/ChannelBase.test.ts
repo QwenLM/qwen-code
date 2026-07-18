@@ -783,26 +783,7 @@ describe('ChannelBase', () => {
 
       expect(observe).toHaveBeenCalledWith('test-chan', {
         user: { id: 'user1', label: 'User 1' },
-        chatId: 'chat1',
       });
-      expect(bridge.prompt).toHaveBeenCalled();
-    });
-
-    it('observes an adapter-provided direct delivery id without changing the reply chat id', async () => {
-      const observe = vi.fn();
-      const ch = createChannel({}, { observedContacts: { observe } });
-      const message = {
-        ...envelope({ chatId: 'reply-conversation-id' }),
-        deliveryChatId: 'routable-staff-id',
-      } as Envelope & { deliveryChatId: string };
-
-      await ch.handleInbound(message);
-
-      expect(observe).toHaveBeenCalledWith('test-chan', {
-        user: { id: 'user1', label: 'User 1' },
-        chatId: 'routable-staff-id',
-      });
-      expect(message.chatId).toBe('reply-conversation-id');
       expect(bridge.prompt).toHaveBeenCalled();
     });
 
@@ -814,7 +795,6 @@ describe('ChannelBase', () => {
 
       expect(observe).toHaveBeenCalledWith('test-chan', {
         user: { id: 'user1', label: 'user1' },
-        chatId: 'chat1',
       });
     });
 
@@ -872,7 +852,6 @@ describe('ChannelBase', () => {
 
       expect(observe).toHaveBeenCalledWith('test-chan', {
         user: { id: 'user1', label: 'User 1' },
-        chatId: 'chat1',
       });
     });
 
