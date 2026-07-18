@@ -444,6 +444,22 @@ describe('qwen-autofix workflow', () => {
     expect(skill).toContain('drop one silently');
   });
 
+  it('requires bilingual bodies for files posted verbatim as PR comments', () => {
+    const skill = readAutofixSkill();
+    // Comment bodies mirror the repository's PR-body convention: English
+    // content ending with a complete collapsed Chinese translation.
+    expect(skill).toContain('<summary>中文说明</summary>');
+    expect(skill).toMatch(
+      /`address-summary\.md`, `no-action\.md`, and `e2e-report\.md`/,
+    );
+    // failure/handoff excerpts are byte-truncated into handoff comments; a
+    // severed <details> tag would swallow the rest of the comment, so those
+    // two files must stay English-only.
+    expect(skill).toContain(
+      'Keep `failure.md` and `handoff.md` English-only WITHOUT a details block',
+    );
+  });
+
   it('includes issue-level comments in review feedback scanning', () => {
     const reviewScanStep =
       workflow.match(
