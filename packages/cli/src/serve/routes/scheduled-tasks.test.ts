@@ -21,7 +21,6 @@ import {
   registerWorkspaceQualifiedScheduledTasksRoutes,
   scheduledTaskSessionName,
 } from './scheduled-tasks.js';
-import type { AdmitScheduledTaskChannelTarget } from './scheduled-tasks.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -189,96 +188,52 @@ describe('scheduled-tasks routes', () => {
     });
   });
 
-  it('persists an admitted channel delivery target', async () => {
-    const admitted: Array<Parameters<AdmitScheduledTaskChannelTarget>[0]> = [];
-    const app = express();
-    app.use(express.json());
-    registerScheduledTasksRoutes(app, {
-      boundWorkspace: h.workspace,
-      mutate: () => (_req, _res, next) => next(),
-      safeBody,
-      bridge: h.bridge,
-      admitChannelTarget: async (input) => {
-        admitted.push(input);
-        return {
-          ...input.target,
-          // Admission may canonicalize data from the observed-target registry.
-          isGroup: true,
-        };
-      },
-    });
-
+  it('persists an explicit channel delivery target without graph admission', async () => {
     const delivery = {
       kind: 'channel',
-      target: { channelName: 'dingtalk', chatId: 'group-42' },
+      channelName: 'dingtalk',
+      target: { type: 'chat', id: 'group-42' },
     };
-    const res = await request(app)
-      .post('/scheduled-tasks')
-      .send({ cron: '0 9 * * *', prompt: 'digest', delivery });
+    const res = await create({ cron: '0 9 * * *', prompt: 'digest', delivery });
 
     expect(res.status).toBe(201);
-    expect(admitted).toHaveLength(1);
-    expect(admitted[0]).toMatchObject({
-      workspaceCwd: h.workspace,
-      target: delivery.target,
-    });
-    expect(res.body.delivery).toEqual({
-      kind: 'channel',
-      target: { ...delivery.target, isGroup: true },
-    });
+    expect(res.body.delivery).toEqual(delivery);
     const stored = JSON.parse(
       await fsp.readFile(getCronFilePath(h.workspace), 'utf-8'),
     );
     expect(stored[0].delivery).toEqual(res.body.delivery);
   });
 
-  it('rejects channel delivery when no target-admission provider is installed', async () => {
+  it.each([
+    {
+      kind: 'channel',
+      channelName: '',
+      target: { type: 'chat', id: 'group-42' },
+    },
+    {
+      kind: 'channel',
+      channelName: 'dingtalk',
+      target: { type: 'chat', id: '' },
+    },
+    {
+      kind: 'channel',
+      channelName: 'dingtalk',
+      target: { type: 'topic', id: 'topic-1' },
+    },
+    {
+      kind: 'channel',
+      channelName: 'dingtalk',
+      target: { type: 'chat', id: 'group-42', threadId: 'thread-7' },
+    },
+    {
+      kind: 'channel',
+      target: { channelName: 'dingtalk', chatId: 'group-42', isGroup: true },
+    },
+  ])('rejects malformed channel delivery %#', async (delivery) => {
     const res = await create({
       cron: '0 9 * * *',
       prompt: 'digest',
-      delivery: {
-        kind: 'channel',
-        target: { channelName: 'dingtalk', chatId: 'untrusted-group' },
-      },
-    });
-    expect(res.status).toBe(501);
-    expect(res.body.code).toBe('channel_delivery_unavailable');
-    expect(h.bridge.spawned).toEqual([]);
-  });
-
-  it('rejects a channel target the admission provider has not observed', async () => {
-    const app = express();
-    app.use(express.json());
-    registerScheduledTasksRoutes(app, {
-      boundWorkspace: h.workspace,
-      mutate: () => (_req, _res, next) => next(),
-      safeBody,
-      bridge: h.bridge,
-      admitChannelTarget: async () => null,
-    });
-    const res = await request(app)
-      .post('/scheduled-tasks')
-      .send({
-        cron: '0 9 * * *',
-        prompt: 'digest',
-        delivery: {
-          kind: 'channel',
-          target: { channelName: 'dingtalk', chatId: 'unknown' },
-        },
-      });
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe('channel_target_not_admitted');
-    expect(h.bridge.spawned).toEqual([]);
-  });
-
-  it('rejects malformed channel delivery before admission', async () => {
-    const res = await create({
-      cron: '0 9 * * *',
-      prompt: 'digest',
-      delivery: {
-        kind: 'channel',
-        target: { channelName: '', chatId: 'group-42' },
-      },
+      delivery,
     });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('invalid_delivery');
@@ -413,42 +368,41 @@ describe('scheduled-tasks routes', () => {
     expect(list.body.tasks[0].enabled).toBe(false);
   });
 
-  it('adds and clears an admitted channel delivery via PATCH', async () => {
-    const app = express();
-    app.use(express.json());
-    registerScheduledTasksRoutes(app, {
-      boundWorkspace: h.workspace,
-      mutate: () => (_req, _res, next) => next(),
-      safeBody,
-      bridge: h.bridge,
-      admitChannelTarget: async ({ target }) => ({
-        ...target,
-        isGroup: true,
-      }),
-    });
-    const created = await request(app)
-      .post('/scheduled-tasks')
-      .send({ cron: '0 9 * * *', prompt: 'digest' });
+  it('adds, replaces, and clears explicit channel delivery via PATCH', async () => {
+    const created = await create({ cron: '0 9 * * *', prompt: 'digest' });
 
-    const added = await request(app)
+    const added = await request(h.app)
       .patch(`/scheduled-tasks/${created.body.id}`)
       .send({
         delivery: {
           kind: 'channel',
-          target: { channelName: 'dingtalk', chatId: 'group-42' },
+          channelName: 'dingtalk',
+          target: { type: 'chat', id: 'group-42' },
         },
       });
     expect(added.status).toBe(200);
     expect(added.body.delivery).toEqual({
       kind: 'channel',
-      target: {
-        channelName: 'dingtalk',
-        chatId: 'group-42',
-        isGroup: true,
-      },
+      channelName: 'dingtalk',
+      target: { type: 'chat', id: 'group-42' },
     });
 
-    const cleared = await request(app)
+    const replaced = await request(h.app)
+      .patch(`/scheduled-tasks/${created.body.id}`)
+      .send({
+        delivery: {
+          kind: 'channel',
+          channelName: 'dingtalk',
+          target: { type: 'user', id: 'staff-42' },
+        },
+      });
+    expect(replaced.status).toBe(200);
+    expect(replaced.body.delivery.target).toEqual({
+      type: 'user',
+      id: 'staff-42',
+    });
+
+    const cleared = await request(h.app)
       .patch(`/scheduled-tasks/${created.body.id}`)
       .send({ delivery: null });
     expect(cleared.status).toBe(200);
@@ -510,11 +464,8 @@ describe('scheduled-tasks routes', () => {
           sessionOwnership: 'shared',
           delivery: {
             kind: 'channel',
-            target: {
-              channelName: 'dingtalk',
-              chatId: 'group-42',
-              isGroup: true,
-            },
+            channelName: 'dingtalk',
+            target: { type: 'chat', id: 'group-42' },
           },
         },
       ]),
@@ -1453,6 +1404,24 @@ describe('workspace-qualified scheduled-tasks routes', () => {
     expect(secList.body.tasks[0].prompt).toBe('secondary work');
     const primaryList = await request(h.app).get('/scheduled-tasks');
     expect(primaryList.body.tasks).toHaveLength(0);
+  });
+
+  it('creates explicit delivery in the targeted workspace without graph admission', async () => {
+    const delivery = {
+      kind: 'channel',
+      channelName: 'dingtalk',
+      target: { type: 'chat', id: 'secondary-group' },
+    };
+    const res = await request(h.app)
+      .post(qualified(h.secondary.workspaceId))
+      .send({ cron: '0 9 * * *', prompt: 'secondary work', delivery });
+
+    expect(res.status).toBe(201);
+    expect(res.body.delivery).toEqual(delivery);
+    const onDisk = JSON.parse(
+      await fsp.readFile(getCronFilePath(h.secondary.workspaceCwd), 'utf-8'),
+    );
+    expect(onDisk[0].delivery).toEqual(delivery);
   });
 
   it('writes to the targeted workspace’s own cron file on disk', async () => {

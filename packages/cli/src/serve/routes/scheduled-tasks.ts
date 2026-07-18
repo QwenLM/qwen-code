@@ -45,7 +45,6 @@ import {
   MAX_JOBS,
   type DurableCronTask,
   type CronTaskRun,
-  type CronTaskChannelTarget,
   type CronTaskDelivery,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -130,18 +129,6 @@ interface ScheduledTaskTarget {
 }
 
 /**
- * Security boundary for external clients selecting an IM destination. The
- * implementation is expected to resolve the requested opaque ids against an
- * observed/authorized target registry and may return a canonicalized target.
- * `null` means the caller is not allowed to use that target.
- */
-export type AdmitScheduledTaskChannelTarget = (input: {
-  workspaceCwd: string;
-  target: CronTaskChannelTarget;
-  request: Request;
-}) => Promise<CronTaskChannelTarget | null>;
-
-/**
  * Resolves the target workspace for one request. Returns null when it can't be
  * resolved (unknown or untrusted `:workspace`), in which case the resolver has
  * ALREADY sent the error response and the handler must just return.
@@ -158,7 +145,6 @@ interface RegisterScheduledTaskCrudRoutesDeps {
   resolveTarget: ResolveScheduledTaskTarget;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
-  admitChannelTarget?: AdmitScheduledTaskChannelTarget;
 }
 
 interface RegisterScheduledTasksRoutesDeps {
@@ -171,7 +157,6 @@ interface RegisterScheduledTasksRoutesDeps {
    * fall back to the shared per-project durable-owner firing model.
    */
   bridge?: ScheduledTasksSessionBridge;
-  admitChannelTarget?: AdmitScheduledTaskChannelTarget;
 }
 
 interface RegisterWorkspaceQualifiedScheduledTasksRoutesDeps {
@@ -187,7 +172,6 @@ interface RegisterWorkspaceQualifiedScheduledTasksRoutesDeps {
    * revives. Off → tasks are created unbound (shared-owner firing).
    */
   manageScheduledTaskSessions: boolean;
-  admitChannelTarget?: AdmitScheduledTaskChannelTarget;
 }
 
 /** On-the-wire task shape — normalizes the optional on-disk fields so the
@@ -310,7 +294,7 @@ function registerScheduledTaskCrudRoutes(
   app: Application,
   deps: RegisterScheduledTaskCrudRoutesDeps,
 ): void {
-  const { prefix, resolveTarget, mutate, safeBody, admitChannelTarget } = deps;
+  const { prefix, resolveTarget, mutate, safeBody } = deps;
   const base = `${prefix}/scheduled-tasks`;
 
   // ── List ──────────────────────────────────────────────────────────
@@ -415,53 +399,7 @@ function registerScheduledTaskCrudRoutes(
       });
       return;
     }
-    let delivery: CronTaskDelivery | undefined;
-    if (parsedDelivery.value) {
-      if (!admitChannelTarget) {
-        res.status(501).json({
-          error:
-            'Channel delivery is unavailable because no target-admission provider is installed',
-          code: 'channel_delivery_unavailable',
-        });
-        return;
-      }
-      let admitted: CronTaskChannelTarget | null;
-      try {
-        admitted = await admitChannelTarget({
-          workspaceCwd,
-          target: parsedDelivery.value.target,
-          request: req,
-        });
-      } catch (err) {
-        writeStderrLine(
-          `qwen serve: POST ${base} target admission failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-        res.status(503).json({
-          error: 'Channel target admission is temporarily unavailable',
-          code: 'channel_target_admission_failed',
-        });
-        return;
-      }
-      if (admitted === null) {
-        res.status(403).json({
-          error: 'The requested Channel target is not observed or authorized',
-          code: 'channel_target_not_admitted',
-        });
-        return;
-      }
-      const canonical = parseDeliveryField({
-        kind: 'channel',
-        target: admitted,
-      });
-      if (!canonical.value) {
-        res.status(503).json({
-          error: 'Channel target admission returned an invalid target',
-          code: 'channel_target_admission_failed',
-        });
-        return;
-      }
-      delivery = canonical.value;
-    }
+    const delivery = parsedDelivery.value;
     const recurring = body['recurring'] !== false;
     const enabled = body['enabled'] !== false;
     const taskId = generateCronTaskId();
@@ -689,50 +627,7 @@ function registerScheduledTaskCrudRoutes(
           });
           return;
         }
-        if (!admitChannelTarget) {
-          res.status(501).json({
-            error:
-              'Channel delivery is unavailable because no target-admission provider is installed',
-            code: 'channel_delivery_unavailable',
-          });
-          return;
-        }
-        let admitted: CronTaskChannelTarget | null;
-        try {
-          admitted = await admitChannelTarget({
-            workspaceCwd,
-            target: parsedDelivery.value.target,
-            request: req,
-          });
-        } catch (err) {
-          writeStderrLine(
-            `qwen serve: PATCH ${base}/${id} target admission failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
-          res.status(503).json({
-            error: 'Channel target admission is temporarily unavailable',
-            code: 'channel_target_admission_failed',
-          });
-          return;
-        }
-        if (admitted === null) {
-          res.status(403).json({
-            error: 'The requested Channel target is not observed or authorized',
-            code: 'channel_target_not_admitted',
-          });
-          return;
-        }
-        const canonical = parseDeliveryField({
-          kind: 'channel',
-          target: admitted,
-        });
-        if (!canonical.value) {
-          res.status(503).json({
-            error: 'Channel target admission returned an invalid target',
-            code: 'channel_target_admission_failed',
-          });
-          return;
-        }
-        patch.delivery = canonical.value;
+        patch.delivery = parsedDelivery.value;
       }
     }
     if (Object.keys(patch).length === 0 && !clearName && !clearDelivery) {
@@ -1054,13 +949,12 @@ export function registerScheduledTasksRoutes(
   app: Application,
   deps: RegisterScheduledTasksRoutesDeps,
 ): void {
-  const { boundWorkspace, mutate, safeBody, bridge, admitChannelTarget } = deps;
+  const { boundWorkspace, mutate, safeBody, bridge } = deps;
   registerScheduledTaskCrudRoutes(app, {
     prefix: '',
     resolveTarget: () => ({ workspaceCwd: boundWorkspace, bridge }),
     mutate,
     safeBody,
-    admitChannelTarget,
   });
 }
 
@@ -1076,13 +970,8 @@ export function registerWorkspaceQualifiedScheduledTasksRoutes(
   app: Application,
   deps: RegisterWorkspaceQualifiedScheduledTasksRoutesDeps,
 ): void {
-  const {
-    workspaceRegistry,
-    mutate,
-    safeBody,
-    manageScheduledTaskSessions,
-    admitChannelTarget,
-  } = deps;
+  const { workspaceRegistry, mutate, safeBody, manageScheduledTaskSessions } =
+    deps;
   registerScheduledTaskCrudRoutes(app, {
     prefix: '/workspaces/:workspace',
     resolveTarget: (req, res) => {
@@ -1102,7 +991,6 @@ export function registerWorkspaceQualifiedScheduledTasksRoutes(
     },
     mutate,
     safeBody,
-    admitChannelTarget,
   });
 }
 
@@ -1118,37 +1006,42 @@ function parseDeliveryField(raw: unknown): {
   if (delivery['kind'] !== 'channel') {
     return { error: '`delivery.kind` must be `channel`' };
   }
+  if (
+    typeof delivery['channelName'] !== 'string' ||
+    delivery['channelName'].trim().length === 0
+  ) {
+    return { error: '`delivery.channelName` must be a non-empty string' };
+  }
+  if (
+    !Object.keys(delivery).every(
+      (key) => key === 'kind' || key === 'channelName' || key === 'target',
+    )
+  ) {
+    return { error: '`delivery` contains unsupported fields' };
+  }
   const rawTarget = delivery['target'];
   if (typeof rawTarget !== 'object' || rawTarget === null) {
     return { error: '`delivery.target` must be an object' };
   }
   const target = rawTarget as Record<string, unknown>;
   if (
-    typeof target['channelName'] !== 'string' ||
-    target['channelName'].trim().length === 0 ||
-    typeof target['chatId'] !== 'string' ||
-    target['chatId'].trim().length === 0 ||
-    (target['threadId'] !== undefined &&
-      typeof target['threadId'] !== 'string') ||
-    (target['isGroup'] !== undefined && typeof target['isGroup'] !== 'boolean')
+    (target['type'] !== 'user' && target['type'] !== 'chat') ||
+    typeof target['id'] !== 'string' ||
+    target['id'].trim().length === 0 ||
+    !Object.keys(target).every((key) => key === 'type' || key === 'id')
   ) {
     return {
       error:
-        '`delivery.target` requires non-empty string channelName/chatId and valid optional threadId/isGroup',
+        '`delivery.target` requires type `user` or `chat` and a non-empty string id',
     };
   }
   return {
     value: {
       kind: 'channel',
+      channelName: delivery['channelName'].trim(),
       target: {
-        channelName: target['channelName'].trim(),
-        chatId: target['chatId'].trim(),
-        ...(target['threadId'] !== undefined
-          ? { threadId: target['threadId'] }
-          : {}),
-        ...(target['isGroup'] !== undefined
-          ? { isGroup: target['isGroup'] }
-          : {}),
+        type: target['type'],
+        id: target['id'].trim(),
       },
     },
   };

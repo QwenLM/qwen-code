@@ -289,8 +289,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Read-only workspace graph of recently observed channel contacts.
   workspace_channel_observed_contacts: { since: 'v1' },
   // Durable scheduled tasks can deliver their completed result through a
-  // daemon-managed Channel worker. Conditional: the runtime must have both a
-  // target-admission provider and the post-run delivery pipeline wired.
+  // daemon-managed Channel worker. Conditional: the post-run delivery pipeline
+  // must be wired.
   scheduled_task_channel_delivery: { since: 'v1' },
   // Multi-workspace session routing. Advertised only when one daemon hosts
   // more than one registered workspace runtime.

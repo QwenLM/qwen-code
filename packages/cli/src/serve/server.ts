@@ -98,7 +98,6 @@ import { registerSessionRoutes } from './routes/session.js';
 import {
   registerScheduledTasksRoutes,
   registerWorkspaceQualifiedScheduledTasksRoutes,
-  type AdmitScheduledTaskChannelTarget,
 } from './routes/scheduled-tasks.js';
 import { registerGoalsRoutes } from './routes/goals.js';
 import { registerUsageStatsRoutes } from './routes/usage-stats.js';
@@ -343,15 +342,7 @@ export interface ServeAppDeps {
    */
   manageScheduledTaskSessions?: boolean;
   /**
-   * Resolves externally requested Channel targets against an observed and
-   * authorized mapping. The production daemon wires the workspace-scoped
-   * observed-contact registry; minimal embedders may omit it, in which case
-   * delivery-bearing schedule writes fail closed.
-   */
-  admitScheduledTaskChannelTarget?: AdmitScheduledTaskChannelTarget;
-  /**
-   * True only when post-run Channel delivery is fully wired. Capability
-   * advertisement also requires the admission provider above.
+   * True only when post-run Channel delivery is fully wired.
    */
   scheduledTaskChannelDeliveryAvailable?: boolean;
   /**
@@ -717,8 +708,7 @@ export function createServeApp(
         deps.setChannelWorkerSelection !== undefined &&
         deps.stopChannelWorker !== undefined,
       scheduledTaskChannelDeliveryAvailable:
-        deps.scheduledTaskChannelDeliveryAvailable === true &&
-        deps.admitScheduledTaskChannelTarget !== undefined,
+        deps.scheduledTaskChannelDeliveryAvailable === true,
       channelReloadAvailable: () => {
         if (deps.reloadChannelWorker === undefined) return false;
         const control = deps.getChannelWorkerControl?.();
@@ -1570,7 +1560,6 @@ export function createServeApp(
     mutate,
     safeBody,
     bridge: deps.manageScheduledTaskSessions ? bridge : undefined,
-    admitChannelTarget: deps.admitScheduledTaskChannelTarget,
   });
 
   // Workspace-wide active-goal listing (the Web Shell "Goals" page). Read-only
@@ -1590,7 +1579,6 @@ export function createServeApp(
     mutate,
     safeBody,
     manageScheduledTaskSessions: deps.manageScheduledTaskSessions === true,
-    admitChannelTarget: deps.admitScheduledTaskChannelTarget,
   });
 
   // Read-only token-usage dashboard (Daemon Status "统计" tab). Aggregate local
