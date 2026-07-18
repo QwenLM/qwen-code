@@ -747,6 +747,75 @@ describe('DaemonClient', () => {
       expect(transportFetch).not.toHaveBeenCalled();
     });
 
+    it('reads Git diff list and per-file hunks (incl. rename oldPath) over REST', async () => {
+      const diffList = {
+        v: 1 as const,
+        workspaceCwd: '/work/main',
+        available: true,
+        filesCount: 1,
+        linesAdded: 2,
+        linesRemoved: 1,
+        files: [
+          {
+            path: 'src/new.ts',
+            oldPath: 'src/old.ts',
+            added: 2,
+            removed: 1,
+            isBinary: false,
+            isUntracked: false,
+            isDeleted: false,
+            truncated: false,
+          },
+        ],
+        hiddenCount: 0,
+      };
+      const hunks = {
+        v: 1 as const,
+        workspaceCwd: '/work/main',
+        path: 'src/new.ts',
+        available: true,
+        hunks: [
+          {
+            oldStart: 1,
+            oldLines: 1,
+            newStart: 1,
+            newLines: 1,
+            lines: ['-a', '+b'],
+          },
+        ],
+      };
+      const { fetch, calls } = recordingFetch((req) =>
+        jsonResponse(200, req.url.includes('/diff/file') ? hunks : diffList),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.workspaceGitDiff()).resolves.toEqual(diffList);
+      // Without oldPath: no &oldPath= query segment.
+      await expect(client.workspaceGitDiffFile('src/new.ts')).resolves.toEqual(
+        hunks,
+      );
+      // With oldPath: urlEncoded into the query for rename detection.
+      await expect(
+        client.workspaceGitDiffFile('src/new.ts', 'src/old.ts'),
+      ).resolves.toEqual(hunks);
+      // Workspace-qualified variant routes through /workspaces/:cwd/git/diff/file.
+      await expect(
+        client.workspaceByCwd('/work/secondary').workspaceGitDiffFile('a.ts'),
+      ).resolves.toEqual(hunks);
+      expect(calls.map((call) => [call.method, call.url])).toEqual([
+        ['GET', 'http://daemon/workspace/git/diff'],
+        ['GET', 'http://daemon/workspace/git/diff/file?path=src%2Fnew.ts'],
+        [
+          'GET',
+          'http://daemon/workspace/git/diff/file?path=src%2Fnew.ts&oldPath=src%2Fold.ts',
+        ],
+        [
+          'GET',
+          'http://daemon/workspaces/%2Fwork%2Fsecondary/git/diff/file?path=a.ts',
+        ],
+      ]);
+    });
+
     it('lets ACP preheat wait longer than the client default timeout', async () => {
       let resolveResponse: ((value: Response) => void) | undefined;
       const slowFetch = vi.fn(

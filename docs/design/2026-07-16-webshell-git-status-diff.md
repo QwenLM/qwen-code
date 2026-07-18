@@ -264,9 +264,10 @@ interface DaemonWorkspaceGitStatus {
   conflicted?: number;
   /** 是否配置了 upstream。 */
   hasUpstream?: boolean;
-  /** 领先 upstream 的 commit 数。 */
+  /** 领先 upstream 的 commit 数；仅当 `hasUpstream` 为 true 时有意义，无
+   *  upstream 时为 0（此时 UI 不显示 ↑N）。 */
   ahead?: number;
-  /** 落后 upstream 的 commit 数。 */
+  /** 落后 upstream 的 commit 数；同 `ahead`，仅有 upstream 时有意义。 */
   behind?: number;
   /** stash 数量。 */
   stashCount?: number;
@@ -397,9 +398,10 @@ M]`）和 porcelain 行（统计 staged / unstaged / untracked）。解析逻辑
   `sdk-typescript/src/index.ts` 与 `src/daemon/index.ts` 导出。
 - `DaemonClient` 新增：
   - `workspaceGitDiff(): Promise<DaemonWorkspaceGitDiff>`
-  - `workspaceGitDiffFile(path: string): Promise<DaemonWorkspaceGitDiffHunks>`
+  - `workspaceGitDiffFile(path: string, oldPath?: string): Promise<DaemonWorkspaceGitDiffHunks>`
     （`path` 作为 query 参数需 `urlEncode`，对齐现有 `workspaceMcpTools` 等
-    方法的写法）。
+    方法的写法；`oldPath` 可选，传入时服务端按 rename 检测计算 old→new 的
+    diff，否则重命名文件会显示为整文件新增；`oldPath` 同样需 `urlEncode`）。
 - 事件：可选新增 `git_status_changed`（携带 enriched status）。本期更倾向于
   **不新增推送事件**，而是复用现有 `git_branch_changed` 作为“需要重新拉取
   status”的信号——见“刷新策略”。是否新增 `git_status_changed` 留作实施时权衡，
@@ -732,10 +734,12 @@ core fetchGitDiff(cwd) / fetchGitDiffHunksForFile(cwd, path)
 - [x] `DaemonClient`：`workspaceGitDiff()` / `workspaceGitDiffFile(path)`
       （path 作为 query，`urlEncode`，对齐 `workspaceMcpTools` 写法）；
       bound 与 workspace-qualified 两个 client 类各加一对方法。
-- [x] 浏览器 bundle 上限 160KB→165KB（`scripts/build.js`，含说明注释）。
-      未加 client 方法单测：SDK 现有 `workspaceGit()` 亦无对应单测，遵循既有
-      约定不补一次性测试；契约由 cli 路由单测 + typecheck + web-shell 消费侧
-      测试覆盖。
+- [x] 浏览器 bundle 上限 160KB→165KB（`packages/sdk-typescript/scripts/build.js`，
+      含说明注释）。
+      已补 client 方法单测：`DaemonClient.test.ts` 覆盖 `workspaceGitDiff()` /
+      `workspaceGitDiffFile(path, oldPath?)` 的 URL 构造（含 path/oldPath 的
+      `urlEncode`）与响应反序列化，与既有 `workspaceGit()` 单测同一模式；契约
+      另由 cli 路由单测 + typecheck + web-shell 消费侧测试覆盖。
 
 ### Task 4 · Web Shell ✅ 已完成
 
