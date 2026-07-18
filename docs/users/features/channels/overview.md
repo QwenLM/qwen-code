@@ -173,7 +173,7 @@ When `senderPolicy` is set to `"pairing"`, unknown senders go through an approva
 qwen channel pairing approve my-channel VEQDDWXJ
 ```
 
-Once approved, the user's ID is saved to `~/.qwen/channels/<name>-allowlist.json` and all future messages go through normally.
+Once approved, the user's ID is saved to the channel's workspace-scoped allowlist (`~/.qwen/channels/<workspace-scope>/<name>-allowlist.json`) and all future messages go through normally. Pairing state is scoped per workspace, so two workspaces using the same channel name keep separate approvals.
 
 ### Pairing CLI Commands
 
@@ -185,13 +185,15 @@ qwen channel pairing list my-channel
 qwen channel pairing approve my-channel <CODE>
 ```
 
+Run these from the channel's workspace directory (or pass `--cwd <dir>`) — pairing state is stored per workspace.
+
 ### Pairing Rules
 
 - Codes are 8 characters, uppercase, using an unambiguous alphabet (no `0`/`O`/`1`/`I`)
 - Codes expire after 1 hour
 - Maximum 3 pending requests per channel at a time — additional requests are ignored until one expires or is approved
 - Users listed in `allowedUsers` in `settings.json` always skip pairing
-- Approved users are stored in `~/.qwen/channels/<name>-allowlist.json` — treat this file as sensitive
+- Approved users are stored per workspace in `~/.qwen/channels/<workspace-scope>/<name>-allowlist.json` — treat this file as sensitive
 
 ## Group Chats
 
