@@ -1132,6 +1132,13 @@ jobs:
     needs: 'route'
     if: |-
       ${{ needs.route.outputs.takeover_cmd != '' }}
+    # Two quick commands are independent runs; without serialization an older
+    # /takeover could land its label write AFTER a newer /takeover stop read
+    # the unlabeled state, leaving the PR engaged against the latest intent.
+    # Queued (never cancelled) per-PR execution preserves command order.
+    concurrency:
+      group: 'qwen-autofix-takeover-cmd-${{ needs.route.outputs.cmd_pr }}'
+      cancel-in-progress: false
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:
@@ -1165,6 +1172,14 @@ jobs:
           if ! PR_INFO="$(gh pr view "${PR}" --repo "${REPO}" --json labels,isCrossRepository 2> /dev/null)"; then
             echo "::error::could not read PR #${PR}"
             exit 1
+          fi
+          # Skip wins over takeover EVERYWHERE — including here: engaging or
+          # re-arming a skip-labeled PR would post an 'engaged' window anchor
+          # for management that the scans deliberately refuse to perform.
+          if [[ "${CMD}" == 'add' && "$(jq -r --arg t "${SKIP_LABEL}" '[.labels[].name] | index($t) != null' <<< "${PR_INFO}")" == "true" ]]; then
+            gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🚫 Takeover not engaged: this PR carries `%s`, which wins over takeover. Remove `%s` first, then re-run `%s`.\n\n<details>\n<summary>中文说明</summary>\n\n🚫 未接管：本 PR 带有 `%s` 标签，其优先级高于接管。请先移除 `%s`，再执行 `%s`。\n\n</details>\n\n<!-- takeover-ack skip-blocked -->' "${SKIP_LABEL}" "${SKIP_LABEL}" "${TAKEOVER_COMMAND}" "${SKIP_LABEL}" "${SKIP_LABEL}" "${TAKEOVER_COMMAND}")"
+            echo "🧭 takeover command refused: ${SKIP_LABEL} present on #${PR}"
+            exit 0
           fi
           if [[ "$(jq -r 'if has("isCrossRepository") then .isCrossRepository else true end' <<< "${PR_INFO}")" != "false" ]]; then
             gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🚫 Takeover is not available for fork-based PRs. A maintainer can adopt this PR instead: snapshot the head into an in-repo branch, open a new PR (commit authorship is preserved), and take that over.\n\n<details>\n<summary>中文说明</summary>\n\n🚫 fork PR 暂不支持托管。维护者可改用领养方式：将 head 快照为本仓库分支并另开 PR（commit 署名保留），再对新 PR 执行接管。\n\n</details>\n\n<!-- takeover-ack fork-refused -->')"
@@ -1231,8 +1246,20 @@ jobs:
           # Bilingual with COLLAPSED Chinese (project convention), built via
           # printf so no workflow indentation leaks into the markdown (4+
           # leading spaces would render the marker line as a code block).
-          if [[ "${ACK}" == 'engaged' ]]; then
+          # Live label/author state decides WHAT to acknowledge: a skip label
+          # vetoes the engagement (skip wins — no engaged anchor for
+          # management the scans refuse), and a release on a BOT-authored PR
+          # must not claim disengagement — standard bot management continues,
+          # only takeover mode (raised cap) ends.
+          PR_STATE_INFO="$(gh pr view "${PR}" --repo "${REPO}" --json labels,author 2> /dev/null || echo '{}')"
+          HAS_SKIP="$(jq -r --arg t "${SKIP_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${PR_STATE_INFO}")"
+          PR_AUTHOR_LIVE="$(jq -r '.author.login // ""' <<< "${PR_STATE_INFO}")"
+          if [[ "${ACK}" == 'engaged' && "${HAS_SKIP}" == "true" ]]; then
+            BODY="$(printf '🚫 Takeover label applied but NOT engaged: this PR carries `%s`, which wins over takeover — the loop will not manage it. Remove `%s` to engage.\n\n<details>\n<summary>中文说明</summary>\n\n🚫 已打接管标签但未生效：本 PR 带有 `%s`，其优先级高于接管，循环不会介入。移除 `%s` 后才会接管。\n\n</details>\n\n<!-- takeover-ack skip-blocked -->' "${SKIP_LABEL}" "${SKIP_LABEL}" "${SKIP_LABEL}" "${SKIP_LABEL}")"
+          elif [[ "${ACK}" == 'engaged' ]]; then
             BODY="$(printf '🤝 Takeover engaged: the autofix loop now manages this PR — it will address new review feedback and resolve base conflicts until the label is removed or the round cap is reached. Remove the `%s` label (or comment `%s stop`) to release.\n\n<details>\n<summary>中文说明</summary>\n\n🤝 已接管：autofix 循环现在管理此 PR —— 将持续处理新的评审反馈与 base 冲突，直到移除标签或达到轮次上限。移除 `%s` 标签（或评论 `%s stop`）即可释放。\n\n</details>\n\n<!-- takeover-ack engaged -->' "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}")"
+          elif [[ "${PR_AUTHOR_LIVE}" == "${AUTOFIX_BOT}" ]]; then
+            BODY="$(printf '👋 Takeover mode ended: the raised round cap no longer applies. This is a bot-authored PR, so STANDARD bot management continues under the strict cap (apply `%s` to opt it out entirely). Re-apply `%s` (or comment `%s`) for the raised cap again.\n\n<details>\n<summary>中文说明</summary>\n\n👋 接管模式结束：提升的轮次上限不再适用。这是 bot 创建的 PR，常规 bot 管理仍将继续（严格上限；如需完全退出请打 `%s`）。重新打上 `%s` 标签（或评论 `%s`）可恢复提升上限。\n\n</details>\n\n<!-- takeover-ack released -->' "${SKIP_LABEL}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${SKIP_LABEL}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}")"
           else
             BODY="$(printf '👋 Takeover released: the autofix loop will no longer engage this PR (an in-flight round, if any, completes its bounded work). Re-apply `%s` (or comment `%s`) to re-engage.\n\n<details>\n<summary>中文说明</summary>\n\n👋 已释放：autofix 循环不再介入此 PR（在飞的一轮如有，将完成其有界工作）。重新打上 `%s` 标签（或评论 `%s`）即可再次接管。\n\n</details>\n\n<!-- takeover-ack released -->' "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}")"
           fi
@@ -1359,6 +1386,13 @@ jobs:
               --json headRefName,statusCheckRollup,createdAt,labels 2> /dev/null || echo '{}')"
             BRANCH="$(jq -r '.headRefName // ""' <<< "${PR_META}")"
             HAS_TAKEOVER="$(jq -r --arg t "${TAKEOVER_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${PR_META}")"
+            # The candidate snapshot filtered skip once, but this per-PR fetch
+            # is FRESHER — a skip label applied mid-scan must still win (the
+            # address job re-checks it live once more before any mutation).
+            if [[ "$(jq -r --arg t "${SKIP_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${PR_META}")" == "true" ]]; then
+              echo "⏭️ #${PR}: ${SKIP_LABEL} label present (applied mid-scan) — skipping"
+              continue
+            fi
             EFF_MAX_ROUNDS="${MAX_ROUNDS}"
             [[ "${HAS_TAKEOVER}" == "true" ]] && EFF_MAX_ROUNDS="${TAKEOVER_MAX_ROUNDS}"
             if [[ -z "${BRANCH}" ]]; then
@@ -1411,27 +1445,28 @@ jobs:
             # Inserting or reordering a field here or at any write site silently
             # corrupts round tracking; keep the `ts= acted= round=` order in lockstep.
             MARKERS="$(jq -c --arg ab "${AUTOFIX_BOT}" '
-              [ .[] | select((.user.login // "") == $ab)
-                | .created_at as $at | (.body // "")
-                | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+) -->") ] | .[]
-                | {ts: .[0], round: (.[2] | tonumber), at: $at} ]' "${WORKDIR}/ic.json")"
+              [ .[] | select((.user.login // "") == $ab) | (.body // "")
+                | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+)(?: win=([^ ]+))? -->") ] | .[]
+                | {ts: .[0], round: (.[2] | tonumber), win: (.[3] // "none")} ]' "${WORKDIR}/ic.json")"
             # The watermark is GLOBAL across all markers — feedback already
             # evaluated stays evaluated, no matter how counting windows move.
             EVAL_WM="$(jq -r 'map(.ts) | max // ""' <<< "${MARKERS}")"
-            # ROUND counting is windowed by the latest takeover engage ack:
-            # re-engaging (label off→on, or the command on an already-managed
-            # PR) posts a fresh '<!-- takeover-ack engaged -->' comment, and
-            # only eval markers NEWER than it count toward the cap — that ack
-            # IS the round-counter reset, human-visible and auditable. A PR
-            # never taken over has no ack, so every marker counts (strict
-            # lifetime cap, unchanged behavior). Within a window the highest
-            # round wins, not last-by-ts: a terminal handoff marker must make
-            # the scan skip regardless of its timestamp.
-            REARM_TS="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+            # ROUND counting is windowed by KEY EQUALITY, not timestamps: the
+            # current window key is the created_at of the latest
+            # '<!-- takeover-ack engaged -->' comment ('none' before any
+            # takeover), every marker records the key of the window it was
+            # produced in (win=…, legacy markers count as 'none'), and only
+            # markers of the CURRENT window count toward the cap. Timestamp
+            # windowing would race an in-flight address job selected before a
+            # re-arm: its marker lands AFTER the ack and would instantly
+            # re-cap the fresh window — key equality cannot. Within a window
+            # the highest round wins (a terminal handoff marker must make the
+            # scan skip regardless of order).
+            REARM_KEY="$(jq -r --arg ab "${AUTOFIX_BOT}" '
               [ .[] | select((.user.login // "") == $ab)
                 | select((.body // "") | contains("<!-- takeover-ack engaged -->"))
-                | .created_at ] | max // ""' "${WORKDIR}/ic.json")"
-            ROUND="$(jq -r --arg rt "${REARM_TS}" 'map(select((.at // "") > $rt)) | map(.round) | max // 0' <<< "${MARKERS}")"
+                | .created_at ] | max // "none"' "${WORKDIR}/ic.json")"
+            ROUND="$(jq -r --arg key "${REARM_KEY}" 'map(select(.win == $key)) | map(.round) | max // 0' <<< "${MARKERS}")"
 
             # Effective watermark = what the agent has actually evaluated (its last
             # eval marker's newest-feedback timestamp), NOT the last push. A bot
@@ -1538,7 +1573,8 @@ jobs:
             TARGETS="$(jq -c \
               --arg pr "${PR}" --arg branch "${BRANCH}" --arg issue "${ISSUE}" \
               --arg round "${ROUND}" --arg wm "${EFF_WM}" --arg mr "${EFF_MAX_ROUNDS}" \
-              '. + [{pr: $pr, branch: $branch, issue: $issue, round: $round, watermark: $wm, max_rounds: $mr}]' \
+              --arg win "${REARM_KEY}" \
+              '. + [{pr: $pr, branch: $branch, issue: $issue, round: $round, watermark: $wm, max_rounds: $mr, win: $win}]' \
               <<< "${TARGETS}")"
             # Fan out: emit EVERY eligible PR up to the per-scan budget. The
             # address matrix bounds simultaneity (max-parallel) and the per-PR
@@ -1595,6 +1631,10 @@ jobs:
       # shadowing the workflow-level MAX_ROUNDS
       # makes every round message, marker, and cap gate in this job use it.
       MAX_ROUNDS: '${{ matrix.target.max_rounds }}'
+      # The round-counting window key this target was selected under; every
+      # marker this job writes records it, and prepare discards the job if a
+      # re-arm superseded the key while it sat queued.
+      WINDOW: '${{ matrix.target.win }}'
     steps:
       # SECURITY: checkout trusted base code first. The PR branch is checked
       # out later in "Prepare branch and feedback" after the trusted CLI bundle
@@ -1766,20 +1806,27 @@ jobs:
           # is a stale duplicate and discards itself.
           STALE='false'
           LIVE_MARKS="$(jq -r --arg ab "${AUTOFIX_BOT}" '
-            [ .[] | select((.user.login // "") == $ab)
-              | .created_at as $at | (.body // "")
-              | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+) -->") ] | .[]
-              | {ts: .[0], round: (.[2] | tonumber), at: $at} ]' "${WORKDIR}/ic.json")"
+            [ .[] | select((.user.login // "") == $ab) | (.body // "")
+              | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+)(?: win=([^ ]+))? -->") ] | .[]
+              | {ts: .[0], round: (.[2] | tonumber), win: (.[3] // "none")} ]' "${WORKDIR}/ic.json")"
           LIVE_EVAL_WM="$(jq -r 'map(.ts) | max // ""' <<< "${LIVE_MARKS}")"
-          # Round counting mirrors the scan: windowed by the latest takeover
-          # engage ack (the round-counter reset), so a re-engaged PR's stale
-          # pre-reset markers can neither trip the cap nor inflate the live
+          # Round counting mirrors the scan: keyed to the CURRENT window (the
+          # latest engage ack's created_at, 'none' before any takeover), so
+          # pre-re-arm markers can neither trip the cap nor inflate the live
           # round here.
-          LIVE_REARM_TS="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+          LIVE_REARM_KEY="$(jq -r --arg ab "${AUTOFIX_BOT}" '
             [ .[] | select((.user.login // "") == $ab)
               | select((.body // "") | contains("<!-- takeover-ack engaged -->"))
-              | .created_at ] | max // ""' "${WORKDIR}/ic.json")"
-          LIVE_MAX_ROUND="$(jq -r --arg rt "${LIVE_REARM_TS}" 'map(select((.at // "") > $rt)) | map(.round) | max // 0' <<< "${LIVE_MARKS}")"
+              | .created_at ] | max // "none"' "${WORKDIR}/ic.json")"
+          LIVE_MAX_ROUND="$(jq -r --arg key "${LIVE_REARM_KEY}" 'map(select(.win == $key)) | map(.round) | max // 0' <<< "${LIVE_MARKS}")"
+          # A re-arm SUPERSEDES every job selected under the old window key:
+          # the maintainer asked for a fresh start, so a queued old-window job
+          # must discard instead of finishing and stamping an old-sequence
+          # marker into the new window. Conflicts stay actionable.
+          if [[ "${STALE}" != "true" && "${WINDOW:-none}" != "${LIVE_REARM_KEY}" && "${CONFLICT}" != "true" ]]; then
+            STALE='true'
+            echo "🫥 window superseded: selected under key '${WINDOW:-none}' but the live window is '${LIVE_REARM_KEY}' (re-armed while queued) — discarding without action or marker"
+          fi
           if [[ -n "${LIVE_EVAL_WM}" && "${CONFLICT}" != "true" ]] \
             && { [[ "${LIVE_EVAL_WM}" > "${WATERMARK}" ]] || [[ "${LIVE_MAX_ROUND}" -gt "${ROUND}" ]]; }; then
             LIVE_NEW="$(jq -rs \
@@ -2077,13 +2124,18 @@ jobs:
             {
               echo "🤖 Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS}). What changed, and what I pushed back on:"
               echo
-              cat "${WORKDIR}/address-summary.md"
+              # Strip HTML comments (the rule the handoff DETAIL already
+              # applies): model output posted verbatim under the bot identity
+              # could otherwise smuggle a forged control marker
+              # ('<!-- autofix-eval', '<!-- takeover-ack …') that the
+              # scanners would trust as real state.
+              sed 's/<!--[^>]*-->//g' "${WORKDIR}/address-summary.md"
               echo
               echo "Base-conflict check: $([[ "${CONFLICT}" == "true" ]] && echo 'conflicted with main — resolved in this push.' || echo 'no conflict with main.')"
               echo
               echo "Re-review when you have a moment. After round ${MAX_ROUNDS} this bot stops and leaves the PR for a human."
               echo
-              echo "<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} -->"
+              echo "<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} win=${WINDOW:-none} -->"
             } > "${WORKDIR}/report.md"
             STATUS="pushed (round ${NEXT_ROUND}/${MAX_ROUNDS})"
           else
@@ -2092,11 +2144,11 @@ jobs:
             {
               echo "🤖 Reviewed the latest feedback — no changes needed. Why, point by point:"
               echo
-              cat "${WORKDIR}/no-action.md"
+              sed 's/<!--[^>]*-->//g' "${WORKDIR}/no-action.md"
               echo
               echo "Base-conflict check: $([[ "${CONFLICT}" == "true" ]] && echo 'conflicts with main (no review fix needed, but a rebase/merge is required before merge).' || echo 'no conflict with main.')"
               echo
-              echo "<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} -->"
+              echo "<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} win=${WINDOW:-none} -->"
             } > "${WORKDIR}/report.md"
             STATUS="no action needed"
           fi
@@ -2236,7 +2288,7 @@ jobs:
               echo
               echo "Run log: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
               echo
-              echo "<!-- autofix-eval ts=${MARK_TS} acted=false round=${MARK_ROUND} -->"
+              echo "<!-- autofix-eval ts=${MARK_TS} acted=false round=${MARK_ROUND} win=${WINDOW:-none} -->"
             } > "${WORKDIR}/report.md"
             gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md" || echo "::warning::Failed to post handoff comment on PR #${PR}"
           fi

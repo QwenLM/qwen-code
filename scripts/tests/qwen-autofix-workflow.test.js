@@ -319,7 +319,12 @@ describe('qwen-autofix workflow', () => {
       round,
       reviews = [],
       acks = [],
+      // Default: the job was selected under the CURRENT window (the latest
+      // ack, or 'none' before any takeover) — the normal, non-raced case.
+      window = undefined,
     }) => {
+      const effWindow =
+        window ?? (acks.length ? acks[acks.length - 1] : 'none');
       const dir = mkdtempSync(join(tmpdir(), 'autofix-stale-'));
       try {
         writeFileSync(
@@ -328,7 +333,7 @@ describe('qwen-autofix workflow', () => {
             ...marks.map((m) => ({
               user: { login: 'qwen-code-dev-bot' },
               created_at: m.at ?? '2026-07-18T09:00:00Z',
-              body: `eval <!-- autofix-eval ts=${m.ts} acted=${m.acted ?? 'true'} round=${m.round} -->`,
+              body: `eval <!-- autofix-eval ts=${m.ts} acted=${m.acted ?? 'true'} round=${m.round}${m.win ? ` win=${m.win}` : ''} -->`,
             })),
             ...acks.map((at) => ({
               user: { login: 'qwen-code-dev-bot' },
@@ -350,6 +355,7 @@ describe('qwen-autofix workflow', () => {
             WATERMARK: W,
             ROUND: String(round),
             CONFLICT: conflict,
+            WINDOW: effWindow,
             AUTOFIX_BOT: 'qwen-code-dev-bot',
             REVIEW_BOT: 'qwen-code-ci-bot',
             TRUSTED_ASSOC: '["OWNER","MEMBER","COLLABORATOR"]',
@@ -421,16 +427,38 @@ describe('qwen-autofix workflow', () => {
         ],
       }),
     ).toBe(false);
-    // Re-armed window: a pre-reset capped marker sits at ts=W, but a later
-    // takeover engage ack opens a fresh counting window — the windowed live
-    // round is 0, so the re-engaged PR's first round (matrix round 0) must
-    // NOT be discarded as a same-ts round-advance duplicate.
+    // Re-armed window: a pre-reset capped marker (window 'none') plus a
+    // later engage ack — a job selected under the NEW key sees windowed live
+    // round 0 and proceeds; the old marker can neither cap it nor make it
+    // look like a same-ts round-advance duplicate.
     expect(
       runStaleGate({
-        marks: [{ ts: W, round: 50, at: '2026-07-18T09:00:00Z' }],
+        marks: [{ ts: W, round: 50 }],
         acks: ['2026-07-18T10:00:00Z'],
         conflict: 'false',
         round: 0,
+      }),
+    ).toBe(false);
+    // The other half of the race: a job still carrying the OLD window key
+    // after a re-arm superseded it must discard — finishing would stamp an
+    // old-sequence marker into the fresh window.
+    expect(
+      runStaleGate({
+        marks: [{ ts: W, round: 3 }],
+        acks: ['2026-07-18T10:00:00Z'],
+        conflict: 'false',
+        round: 3,
+        window: 'none',
+      }),
+    ).toBe(true);
+    // …unless it is resolving a live conflict, which stays actionable.
+    expect(
+      runStaleGate({
+        marks: [{ ts: W, round: 3 }],
+        acks: ['2026-07-18T10:00:00Z'],
+        conflict: 'true',
+        round: 3,
+        window: 'none',
       }),
     ).toBe(false);
   });
@@ -607,10 +635,32 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain("${{ needs.route.outputs.takeover_ack != '' }}");
     expect(workflow).toContain('<!-- takeover-ack engaged -->');
     expect(workflow).toContain('<!-- takeover-ack released -->');
-    // Every takeover-flow comment is bilingual with COLLAPSED Chinese
-    // (project convention): engage ack, release ack, re-arm ack, cap pause,
-    // and the fork-refusal explanation.
-    expect(workflow.split('<summary>中文说明</summary>').length - 1).toBe(5);
+    // Every takeover-flow comment is bilingual with COLLAPSED Chinese, and
+    // EVERY body proves it individually (a global count alone could balance
+    // one lost Chinese section against a duplicate elsewhere): engage,
+    // honest bot-PR release, human-PR release, re-arm, fork refusal, two
+    // skip-blocked refusals, and the cap pause.
+    const ackBodies = workflow.match(
+      /printf '[^']*takeover-(?:ack|cap)[^']*'/g,
+    );
+    expect(ackBodies).toHaveLength(8);
+    for (const body of ackBodies) {
+      expect(body).toContain('<summary>中文说明</summary>');
+    }
+    // Skip wins over takeover at ACK time too — engaging or re-arming a
+    // skip-labeled PR refuses instead of posting a bogus window anchor.
+    expect(
+      workflow.split('<!-- takeover-ack skip-blocked -->').length - 1,
+    ).toBe(2);
+    // Releasing a BOT-authored PR tells the truth: standard management
+    // continues; only takeover mode (the raised cap) ends.
+    expect(workflow).toContain('Takeover mode ended');
+    expect(workflow).toContain('STANDARD bot management continues');
+    // Commands are serialized per PR — an older /takeover can never land
+    // after a newer /takeover stop read the unlabeled state.
+    expect(workflow).toContain(
+      "group: 'qwen-autofix-takeover-cmd-${{ needs.route.outputs.cmd_pr }}'",
+    );
     // Fork PRs can never produce a red ack run or a stuck label: the
     // unlabeled branch log-and-drops forks (fork pull_request events carry
     // no secrets, so emitting the ack would fail the PAT identity check),
@@ -685,6 +735,17 @@ describe('qwen-autofix workflow', () => {
       ),
     ).toEqual(['1', '3']);
     expect(pick([], [])).toEqual([]);
+    // The producers must actually REQUEST labels — the jq consumers above
+    // stay green on handcrafted fixtures even if a future edit drops the
+    // field and skip/takeover filtering silently dies in production.
+    expect(
+      reviewScanJob.split(
+        '--limit 100 --json number,headRefName,isCrossRepository,labels',
+      ).length - 1,
+    ).toBe(2);
+    expect(reviewScanJob).toContain(
+      '--json headRefName,statusCheckRollup,createdAt,labels',
+    );
   });
 
   it('raises the round cap to TAKEOVER_MAX_ROUNDS while the label is present', () => {
@@ -740,15 +801,17 @@ describe('qwen-autofix workflow', () => {
   });
 
   it('behaviorally resets round counting at the latest takeover engage ack', () => {
-    // The round "counter" is not stored anywhere — it is DERIVED from the
-    // bot's eval-marker comments on the PR, and counting is windowed by the
-    // latest '<!-- takeover-ack engaged -->' comment: re-engaging starts a
-    // fresh window, so a PR that exhausted its rounds continues under
-    // management. The WATERMARK stays global across windows — feedback
-    // already addressed is never replayed. Extract the scan's
-    // MARKERS/REARM_TS/ROUND trio VERBATIM and replay it.
+    // The round "counter" is DERIVED from eval-marker comments, keyed by
+    // window: each marker records the window key it was produced under
+    // (win=…, legacy markers count as 'none'), the current key is the
+    // latest '<!-- takeover-ack engaged -->' comment's created_at, and only
+    // current-window markers count toward the cap. Key equality (not
+    // timestamps) is what makes a re-arm race-proof: an in-flight job's
+    // late marker carries the OLD key and can never re-cap the fresh
+    // window. The WATERMARK stays global. Extract the scan's
+    // MARKERS/REARM_KEY/ROUND trio VERBATIM and replay it.
     const trio = reviewScanJob.match(
-      /(MARKERS="\$\(jq -c[\s\S]*?ROUND="\$\(jq -r --arg rt "\$\{REARM_TS\}"[^\n]*)/,
+      /(MARKERS="\$\(jq -c[\s\S]*?ROUND="\$\(jq -r --arg key "\$\{REARM_KEY\}"[^\n]*)/,
     )?.[1];
     expect(trio).toBeTruthy();
     const roundOf = (comments) => {
@@ -772,10 +835,10 @@ describe('qwen-autofix workflow', () => {
         rmSync(dir, { recursive: true, force: true });
       }
     };
-    const marker = (round, ts, at) => ({
+    const marker = (round, ts, win) => ({
       user: { login: 'qwen-code-dev-bot' },
-      created_at: at,
-      body: `<!-- autofix-eval ts=${ts} acted=true round=${round} -->`,
+      created_at: '2026-07-18T09:00:00Z',
+      body: `<!-- autofix-eval ts=${ts} acted=true round=${round}${win ? ` win=${win}` : ''} -->`,
     });
     const engageAck = (at) => ({
       user: { login: 'qwen-code-dev-bot' },
@@ -783,40 +846,39 @@ describe('qwen-autofix workflow', () => {
       body: '🤝 … <!-- takeover-ack engaged -->',
     });
     const W = '2026-07-18T08:00:00Z';
-    // No ack → lifetime counting (unchanged strict behavior).
-    expect(roundOf([marker(5, W, '2026-07-18T09:00:00Z')]).round).toBe('5');
-    // Ack after the capped marker → fresh window, round 0 — but the
-    // watermark still carries the old evaluation.
-    const reset = roundOf([
-      marker(5, W, '2026-07-18T09:00:00Z'),
-      engageAck('2026-07-18T10:00:00Z'),
-    ]);
+    const K1 = '2026-07-18T10:00:00Z';
+    // No ack → the 'none' window: legacy markers count (strict lifetime).
+    expect(roundOf([marker(5, W)]).round).toBe('5');
+    // Ack after a capped legacy marker → fresh window, round 0 — but the
+    // watermark still carries the old evaluation (never replay feedback).
+    const reset = roundOf([marker(5, W), engageAck(K1)]);
     expect(reset.round).toBe('0');
     expect(reset.wm).toBe(W);
-    // New rounds inside the window count from 1 again.
+    // Rounds produced UNDER the new key count from 1 again.
     expect(
       roundOf([
-        marker(5, W, '2026-07-18T09:00:00Z'),
-        engageAck('2026-07-18T10:00:00Z'),
-        marker(1, '2026-07-18T11:00:00Z', '2026-07-18T11:30:00Z'),
+        marker(5, W),
+        engageAck(K1),
+        marker(1, '2026-07-18T11:00:00Z', K1),
       ]).round,
     ).toBe('1');
-    // The LATEST ack wins: a second re-arm re-opens the window again.
+    // The race the key model closes: an in-flight OLD-window job's marker
+    // lands AFTER the ack — timestamp windowing would instantly re-cap the
+    // fresh window; key equality keeps the count at 0.
+    expect(roundOf([engageAck(K1), marker(50, W)]).round).toBe('0');
+    // The LATEST ack wins: a second re-arm opens the window again.
     expect(
       roundOf([
-        marker(5, W, '2026-07-18T09:00:00Z'),
-        engageAck('2026-07-18T10:00:00Z'),
-        marker(50, '2026-07-18T11:00:00Z', '2026-07-18T11:30:00Z'),
+        marker(5, W),
+        engageAck(K1),
+        marker(50, '2026-07-18T11:00:00Z', K1),
         engageAck('2026-07-18T12:00:00Z'),
       ]).round,
     ).toBe('0');
     // The command job posts the re-arm ack when the label is already
-    // present, and the prepare-side live counting is windowed identically.
+    // present, and the prepare-side live counting is keyed identically.
     expect(workflow).toContain('re-armed ${TAKEOVER_LABEL} window');
-    // Marker sites: ack-job body, command re-arm body, scan REARM_TS jq,
-    // prepare LIVE_REARM_TS jq, and the scan's explanatory comment.
-    expect(workflow.split('<!-- takeover-ack engaged -->').length - 1).toBe(5);
-    expect(prepareBranchAndFeedbackStep).toContain('LIVE_REARM_TS');
+    expect(prepareBranchAndFeedbackStep).toContain('LIVE_REARM_KEY');
   });
 
   it('behaviorally validates forced targets against author, takeover, and skip', () => {
@@ -1852,7 +1914,7 @@ describe('qwen-autofix workflow', () => {
     // instead of re-handing-off every tick.
     expect(reviewAddressReportStep).toContain('MARK_ROUND="${MAX_ROUNDS}"');
     expect(reviewAddressReportStep).toContain(
-      '<!-- autofix-eval ts=${MARK_TS} acted=false round=${MARK_ROUND} -->',
+      '<!-- autofix-eval ts=${MARK_TS} acted=false round=${MARK_ROUND} win=${WINDOW:-none} -->',
     );
     // The ts fallback must be non-empty even under cascading API failure (empty
     // WATERMARK), or the scan's `ts=([^ ]+)` regex would not match the terminal

@@ -59,7 +59,12 @@ describe('fleet shepherd workflow', () => {
     expect(workflow).toContain(
       '--json number,headRefName,headRefOid,mergeable,isCrossRepository,statusCheckRollup',
     );
-    expect(workflow).not.toContain('gh pr view');
+    // Per-PR metadata still rides the ONE list call — the sole gh pr view
+    // is the labels-only live-skip recheck immediately before a mutation.
+    expect(workflow.split('gh pr view').length - 1).toBe(1);
+    expect(workflow).toContain(
+      'gh pr view "${pr}" --repo "${REPO}" --json labels',
+    );
     // autofix/skip is the maintainer opt-out honored at every engagement
     // path: a skip-labeled PR gets no shepherd levers and no dashboard row.
     // Replay the filter VERBATIM to prove the label actually excludes.
@@ -83,6 +88,23 @@ describe('fleet shepherd workflow', () => {
       }),
     ).map((r) => r.number);
     expect(kept).toEqual([1]);
+    // The PRODUCER must request labels too — the filter replay above stays
+    // green on fixtures even if a future edit drops the field and every PR
+    // silently bypasses the opt-out.
+    expect(workflow).toContain(
+      '--limit 50 --json number,headRefName,headRefOid,mergeable,isCrossRepository,statusCheckRollup,labels',
+    );
+    // The snapshot filter is only tick-start state: every MUTATING lever
+    // re-checks the live label first (fail closed — an unreadable label
+    // state counts as skipped), so consent withdrawn mid-tick still wins
+    // before a dispatch or branch sync.
+    expect(workflow).toContain('live_skip() {');
+    expect(workflow).toContain('return 0');
+    expect(
+      workflow.split('present (live) — consent withdrawn').length - 1,
+    ).toBe(2);
+    expect(workflow).toMatch(/elif live_skip "\$\{PR\}"; then/);
+    expect(workflow).toMatch(/if live_skip "\$\{PR\}"; then/);
     // PAT identity is verified before any write.
     expect(workflow).toContain(
       "::error::CI_DEV_BOT_PAT authenticates as '${bot_actor:-unknown}'",
