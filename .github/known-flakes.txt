@@ -1,0 +1,17 @@
+# Known-flaky test files: one extended regex per line, matched against the
+# failing test FILE paths parsed from a red Test job's logs. The Fleet
+# Shepherd only auto-reruns a failed run when EVERY failing test matches a
+# line here — one unknown failure means the run is left for the autofix loop
+# (or a human) instead of being retried blindly.
+#
+# Add a line only for failures repeatedly observed to pass on plain re-run
+# with no related diff. Remove lines when the underlying test is hardened.
+
+# web-tree-sitter WASM load exceeds the 5s vitest timeout on contended runners.
+shell-ast-parser-lazy\.test\.ts
+
+# Timer-precision flake: "appends a scheduled run record on each recurring fire".
+cronScheduler\.test\.ts
+
+# fs-heavy persistence test (~3s locally) that times out on loaded runners.
+workspace-registration-store\.test\.ts

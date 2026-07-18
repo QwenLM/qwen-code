@@ -1,0 +1,227 @@
+name: 'Fleet Shepherd'
+
+# Keeps the open bot-PR fleet moving without a human shepherd. Every tick it
+# walks the AUTOFIX_BOT's open PRs and applies the smallest lever that
+# unblocks each one — all levers were validated by hand before automation:
+#
+#   • conflict         → dispatch the autofix loop for that PR (its --conflict
+#                        path merges base and resolves), once per head SHA
+#   • stale base       → update-branch when far behind main (fresh CI signal +
+#                        propagates workflow/skill fixes; self-limiting since
+#                        behind_by resets to 0 after the sync)
+#   • known-flake red  → rerun failed jobs when EVERY failing test matches
+#                        .github/known-flakes.txt, capped per run, only after
+#                        the run fully concluded (rerunning a live run wedges)
+#   • scan liveness    → if no autofix full scan (schedule/dispatch) ran
+#                        recently, dispatch one (GitHub cron is unreliable)
+#
+# It also maintains a single "Fleet Shepherd Dashboard" issue (edited in
+# place, never comment spam) so fleet state is observable at a glance.
+#
+# Safety rails: bot-authored main-targeting in-repo PRs only; per-action
+# markers make every write idempotent; per-tick action caps bound blast
+# radius; DRY-RUN via dispatch input; global kill switch via the
+# FLEET_SHEPHERD_DISABLED repository variable. Dispatches and reruns use the
+# workflow's own token (actions: write); comments, update-branch, and the
+# dashboard use CI_DEV_BOT_PAT so synced branches still trigger CI and all
+# writes carry the bot identity.
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Log intended actions without performing any write'
+        required: false
+        default: false
+        type: 'boolean'
+
+permissions:
+  contents: 'read'
+  actions: 'write'
+
+concurrency:
+  group: 'fleet-shepherd'
+  cancel-in-progress: false
+
+env:
+  AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
+  BEHIND_SYNC_THRESHOLD: '25'
+  RERUN_MAX_ATTEMPTS: '2'
+  SCAN_LIVENESS_MINUTES: '60'
+  MAX_SYNCS_PER_TICK: '3'
+  MAX_DISPATCHES_PER_TICK: '2'
+  DASHBOARD_TITLE: 'Fleet Shepherd Dashboard'
+
+jobs:
+  shepherd:
+    if: |-
+      ${{ github.repository == 'QwenLM/qwen-code' && vars.FLEET_SHEPHERD_DISABLED != 'true' }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 15
+    steps:
+      - name: 'Checkout (flake registry)'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: 'Shepherd the fleet'
+        env:
+          REPO: '${{ github.repository }}'
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+          ACTIONS_TOKEN: '${{ github.token }}'
+          DRY_RUN: '${{ inputs.dry_run }}'
+        run: |-
+          FLAKE_FILE='.github/known-flakes.txt'
+          DASH_ROWS=''
+          SYNCS=0
+          DISPATCHES=0
+          NOW_EPOCH="$(date -u +%s)"
+
+          act() {
+            # act <description> <command...> — honors dry-run, never fails the tick.
+            local desc="$1"
+            shift
+            if [[ "${DRY_RUN}" == "true" ]]; then
+              echo "🧪 DRY-RUN: ${desc}"
+              return 0
+            fi
+            echo "▶ ${desc}"
+            "$@" || echo "::warning::action failed (${desc})"
+          }
+
+          # ---- identity: all PAT writes must be the bot -------------------
+          bot_actor="$(gh api user --jq '.login' 2> /dev/null || echo '')"
+          if [[ "${bot_actor}" != "${AUTOFIX_BOT}" ]]; then
+            echo "::error::CI_DEV_BOT_PAT authenticates as '${bot_actor:-unknown}'; expected ${AUTOFIX_BOT}."
+            exit 1
+          fi
+
+          # ---- scan liveness watchdog -------------------------------------
+          # GitHub cron is unreliable (observed 16h of silence on a */10
+          # schedule). If no full autofix scan ran recently and none is in
+          # flight, dispatch one unforced review scan.
+          LAST_SCAN="$(gh run list --repo "${REPO}" --workflow qwen-autofix.yml \
+            --limit 20 --json event,createdAt,status \
+            --jq '[.[] | select(.event == "schedule" or .event == "workflow_dispatch")] | first | .createdAt // ""' 2> /dev/null || echo '')"
+          SCAN_INFLIGHT="$(gh run list --repo "${REPO}" --workflow qwen-autofix.yml \
+            --limit 20 --json event,status \
+            --jq '[.[] | select((.event == "schedule" or .event == "workflow_dispatch") and .status != "completed")] | length' 2> /dev/null || echo 0)"
+          SCAN_AGE_MIN=99999
+          if [[ -n "${LAST_SCAN}" ]]; then
+            SCAN_AGE_MIN=$(( (NOW_EPOCH - $(date -u -d "${LAST_SCAN}" +%s)) / 60 ))
+          fi
+          echo "🫀 last full scan: ${LAST_SCAN:-never} (${SCAN_AGE_MIN}m ago), in-flight: ${SCAN_INFLIGHT}"
+          if [[ "${SCAN_AGE_MIN}" -ge "${SCAN_LIVENESS_MINUTES}" && "${SCAN_INFLIGHT}" == "0" ]]; then
+            act "scan liveness: dispatch unforced review scan" \
+              env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh workflow run qwen-autofix.yml --repo "${REPO}" -f phase=review
+          fi
+
+          # ---- walk the bot fleet -----------------------------------------
+          gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" --base main \
+            --limit 50 --json number,headRefName,isCrossRepository \
+            --jq '.[] | select(.isCrossRepository != true) | .number' > /tmp/fleet.txt || true
+
+          while IFS= read -r PR; do
+            [[ -z "${PR}" ]] && continue
+            META="$(gh pr view "${PR}" --repo "${REPO}" \
+              --json mergeable,headRefName,headRefOid,statusCheckRollup 2> /dev/null || echo '{}')"
+            BRANCH="$(jq -r '.headRefName // ""' <<< "${META}")"
+            HEAD="$(jq -r '.headRefOid // ""' <<< "${META}")"
+            MERGEABLE="$(jq -r '.mergeable // "UNKNOWN"' <<< "${META}")"
+            if [[ -z "${BRANCH}" || -z "${HEAD}" ]]; then
+              echo "⚠️ #${PR}: metadata fetch failed; skipping this tick"
+              DASH_ROWS="${DASH_ROWS}| #${PR} | ? | metadata fetch failed | — |\n"
+              continue
+            fi
+            PENDING="$(jq -r '[.statusCheckRollup[]? | select((.status // "") | IN("QUEUED", "IN_PROGRESS", "PENDING"))] | length' <<< "${META}")"
+            FAILED_TEST_URL="$(jq -r '[.statusCheckRollup[]? | select(.conclusion == "FAILURE") | select(.name | startswith("Test (ubuntu")) | .detailsUrl][0] // ""' <<< "${META}")"
+            BEHIND="$(gh api "repos/${REPO}/compare/main...${HEAD}" --jq '.behind_by // 0' 2> /dev/null || echo 0)"
+            gh api "repos/${REPO}/issues/${PR}/comments" --paginate 2> /dev/null > /tmp/ic.json || echo '[]' > /tmp/ic.json
+            MY_MARKS="$(jq -r --arg ab "${AUTOFIX_BOT}" '[.[] | select(.user.login == $ab) | .body] | join("\n")' /tmp/ic.json)"
+
+            STATUS_NOTE='idle'
+            ACTION_NOTE='—'
+
+            # 1) conflict → dispatch the loop for this PR, once per head SHA.
+            if [[ "${MERGEABLE}" == "CONFLICTING" ]]; then
+              STATUS_NOTE='conflicting'
+              if [[ "${MY_MARKS}" == *"<!-- fleet-shepherd conflict-dispatch sha=${HEAD} -->"* ]]; then
+                ACTION_NOTE='conflict dispatch already sent for this head'
+              elif [[ "${DISPATCHES}" -lt "${MAX_DISPATCHES_PER_TICK}" ]]; then
+                act "#${PR}: dispatch autofix for conflict resolution" \
+                  env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh workflow run qwen-autofix.yml --repo "${REPO}" -f pr_number="${PR}"
+                act "#${PR}: post conflict notice" \
+                  gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🐑 Merge conflict with main detected — dispatched the autofix loop to resolve it. / 检测到与 main 的合并冲突，已触发 autofix 处理。\n\n<!-- fleet-shepherd conflict-dispatch sha=%s -->' "${HEAD}")"
+                DISPATCHES=$(( DISPATCHES + 1 ))
+                ACTION_NOTE='dispatched conflict resolution'
+              else
+                ACTION_NOTE='dispatch cap reached this tick'
+              fi
+
+            # 2) stale base → sync. Self-limiting: behind_by resets on sync.
+            elif [[ "${MERGEABLE}" == "MERGEABLE" && "${BEHIND}" -ge "${BEHIND_SYNC_THRESHOLD}" && "${PENDING}" == "0" ]]; then
+              STATUS_NOTE="behind by ${BEHIND}"
+              if [[ "${SYNCS}" -lt "${MAX_SYNCS_PER_TICK}" ]]; then
+                act "#${PR}: update-branch (behind by ${BEHIND})" \
+                  gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" --silent
+                SYNCS=$(( SYNCS + 1 ))
+                ACTION_NOTE='synced with main'
+              else
+                ACTION_NOTE='sync cap reached this tick'
+              fi
+
+            # 3) red CI whose failures are ALL known flakes → safe rerun.
+            elif [[ -n "${FAILED_TEST_URL}" && "${PENDING}" == "0" ]]; then
+              STATUS_NOTE='ci red'
+              RUN_ID="$(grep -oE '/runs/[0-9]+' <<< "${FAILED_TEST_URL}" | grep -oE '[0-9]+' | head -1)"
+              JOB_ID="$(grep -oE '/job/[0-9]+' <<< "${FAILED_TEST_URL}" | grep -oE '[0-9]+' | head -1)"
+              RUN_STATE="$(gh run view "${RUN_ID}" --repo "${REPO}" --json status --jq '.status' 2> /dev/null || echo '')"
+              ATTEMPTS="$(grep -c "<!-- fleet-shepherd rerun run=${RUN_ID} " <<< "${MY_MARKS}" || true)"
+              if [[ "${RUN_STATE}" != "completed" ]]; then
+                ACTION_NOTE='run not concluded yet'
+              elif [[ "${ATTEMPTS}" -ge "${RERUN_MAX_ATTEMPTS}" ]]; then
+                ACTION_NOTE="rerun cap (${ATTEMPTS}/${RERUN_MAX_ATTEMPTS}) — needs a human"
+              else
+                gh api "repos/${REPO}/actions/jobs/${JOB_ID}/logs" 2> /dev/null \
+                  | grep -oE 'FAIL[[:space:]]+[^ ]+\.test\.[a-z]+' | awk '{print $NF}' | sort -u > /tmp/fails.txt || true
+                if [[ ! -s /tmp/fails.txt ]]; then
+                  ACTION_NOTE='no failing tests parsed from logs — leaving alone'
+                elif grep -vE -f <(grep -vE '^[[:space:]]*(#|$)' "${FLAKE_FILE}") /tmp/fails.txt > /dev/null; then
+                  ACTION_NOTE="non-flake failure ($(head -1 /tmp/fails.txt)) — leaving for the loop"
+                else
+                  act "#${PR}: rerun failed jobs of ${RUN_ID} (all failures known-flaky)" \
+                    env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run rerun "${RUN_ID}" --repo "${REPO}" --failed
+                  act "#${PR}: record rerun attempt" \
+                    gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🐑 Test failures all match the known-flake registry — re-ran failed jobs. / 失败均命中已知 flaky 清单，已重跑失败任务。\n\n<!-- fleet-shepherd rerun run=%s attempt=%s -->' "${RUN_ID}" "$(( ATTEMPTS + 1 ))")"
+                  ACTION_NOTE="reran flaky run (attempt $(( ATTEMPTS + 1 )))"
+                fi
+              fi
+            elif [[ "${PENDING}" != "0" ]]; then
+              STATUS_NOTE="checks in flight (${PENDING})"
+            fi
+
+            echo "🐑 #${PR} [${STATUS_NOTE}] → ${ACTION_NOTE}"
+            DASH_ROWS="${DASH_ROWS}| #${PR} | \`${HEAD:0:9}\` | ${STATUS_NOTE} | ${ACTION_NOTE} |\n"
+          done < /tmp/fleet.txt
+
+          # ---- dashboard: one issue, edited in place ----------------------
+          {
+            echo "Auto-maintained by the Fleet Shepherd workflow — do not edit by hand."
+            echo
+            echo "Last tick: $(date -u +%Y-%m-%dT%H:%M:%SZ) · full-scan age: ${SCAN_AGE_MIN}m · syncs: ${SYNCS} · dispatches: ${DISPATCHES}"
+            echo
+            echo '| PR | Head | State | Action this tick |'
+            echo '| --- | --- | --- | --- |'
+            printf '%b' "${DASH_ROWS}"
+          } > /tmp/dashboard.md
+          DASH_NUM="$(gh issue list --repo "${REPO}" --state open --search "in:title \"${DASHBOARD_TITLE}\"" \
+            --json number,title --jq --arg t "${DASHBOARD_TITLE}" '[.[] | select(.title == $t)] | first | .number // ""' 2> /dev/null || echo '')"
+          if [[ -z "${DASH_NUM}" ]]; then
+            act "create dashboard issue" \
+              gh issue create --repo "${REPO}" --title "${DASHBOARD_TITLE}" --body-file /tmp/dashboard.md
+          else
+            act "update dashboard issue #${DASH_NUM}" \
+              gh issue edit "${DASH_NUM}" --repo "${REPO}" --body-file /tmp/dashboard.md
+          fi
+          echo "✅ tick complete (syncs=${SYNCS} dispatches=${DISPATCHES})"
