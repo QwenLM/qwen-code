@@ -52,11 +52,25 @@ describe('qwen-triage tmux workflow', () => {
     expect(intakeStep).toContain("--add-label 'TBD'");
     expect(intakeStep).toContain('upsert_comment');
     expect(intakeStep).toContain('exit 1');
+    expect(intakeStep).toContain('intake failed closed');
+    expect(intakeStep).toContain('.user.login == \\"qwen-code-ci-bot\\"');
+    expect(intakeStep).not.toContain("--remove-label 'TBD'");
     expect(triageStep).toContain("steps.intake.outputs.decision == 'allow'");
     expect(triageStep).toContain(
       "steps.intake.outputs.decision == 'not_applicable'",
     );
+    expect(triageStep).toContain("github.event.action != 'synchronize'");
     expect(checkStep).toContain("steps.intake.outputs.decision == 'allow'");
+  });
+
+  it('runs PR update intake without cancelling or rerunning AI triage', () => {
+    const triageJob = job('triage');
+
+    expect(triageJob).toContain(
+      "format('{0}-intake-{1}', github.workflow, github.event.pull_request.number)",
+    );
+    expect(triageJob).toContain("github.event.action == 'edited'");
+    expect(triageJob).toContain("github.event.action == 'synchronize'");
   });
 
   it('does not require fork PR authors to have write permission for automatic triage', () => {

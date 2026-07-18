@@ -8,11 +8,16 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 
 const TRUSTED_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
-const ISSUE_LINK =
-  /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+(?:[\w.-]+\/[\w.-]+)?#\d+\b/i;
+const FEATURE_TITLE = /^\s*feat(?:\([^)]*\))?!?:/i;
 
-function isType(title, type) {
-  return new RegExp(`^\\s*${type}(?:\\([^)]*\\))?!?:`, 'i').test(title);
+function visibleMarkdown(value) {
+  return value
+    .replace(/<!--[\s\S]*?(?:-->|$)/g, '')
+    .replace(/```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)/g, '')
+    .replace(/<(?:pre|code)\b[^>]*>[\s\S]*?(?:<\/(?:pre|code)\s*>|$)/gi, '')
+    .replace(/^(?: {4}|\t).*(?:\r?\n|$)/gm, '')
+    .replace(/`[^`\r\n]*`/g, '')
+    .replace(/<\/?[A-Za-z][^>]*>/g, '');
 }
 
 function section(body, heading) {
@@ -36,13 +41,13 @@ function field(body, label) {
 }
 
 function meaningful(value) {
-  const normalized = value
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/[*_`]/g, '')
+  const normalized = visibleMarkdown(value)
+    .replace(/[*_]/g, '')
     .trim()
     .toLowerCase();
   return (
     normalized !== '' &&
+    /[\p{L}\p{N}]/u.test(normalized) &&
     !/^(?:n\/?a|none|not applicable|tbd|todo|placeholder)[.!]?$/.test(
       normalized,
     )
@@ -52,6 +57,7 @@ function meaningful(value) {
 export function assessPullRequestIntake(pr) {
   const title = typeof pr?.title === 'string' ? pr.title : '';
   const body = typeof pr?.body === 'string' ? pr.body : '';
+  const visibleBody = visibleMarkdown(body);
   const validCounts =
     Number.isInteger(pr?.additions) &&
     pr.additions >= 0 &&
@@ -60,18 +66,13 @@ export function assessPullRequestIntake(pr) {
   const additions = validCounts ? pr.additions : 0;
   const deletions = validCounts ? pr.deletions : 0;
   const changedLines = additions + deletions;
-  const feature = isType(title, 'feat');
-  const fix = isType(title, 'fix');
+  const feature = FEATURE_TITLE.test(title);
   const trusted = TRUSTED_ASSOCIATIONS.has(pr?.author_association);
   const reasons = [];
 
   if (!validCounts) {
     reasons.push('invalid_changed_line_count');
   }
-  if ((feature || fix) && !ISSUE_LINK.test(body)) {
-    reasons.push('missing_linked_issue');
-  }
-
   if (feature && trusted) {
     if (!meaningful(section(body, 'How to verify'))) {
       reasons.push('missing_dogfooding_plan');
@@ -84,10 +85,10 @@ export function assessPullRequestIntake(pr) {
   let oversizedComplete = false;
   if (changedLines > 2000) {
     const planningIssue = field(
-      body,
+      visibleBody,
       'Planning issue for changes over 2,000 lines',
     );
-    const cannotSplit = field(body, 'Why this change cannot be split');
+    const cannotSplit = field(visibleBody, 'Why this change cannot be split');
     if (!/(?:[\w.-]+\/[\w.-]+)?#\d+\b/.test(planningIssue)) {
       reasons.push('missing_planning_issue');
     }
@@ -114,8 +115,6 @@ export function assessPullRequestIntake(pr) {
 const MESSAGES = {
   invalid_changed_line_count:
     'Changed-line metadata is unavailable; retry the intake check.',
-  missing_linked_issue:
-    'Link a tracking issue with a closing keyword such as `Resolves #123`.',
   missing_dogfooding_plan:
     'Internal `feat:` PRs need a concrete user-perspective plan under `### How to verify`.',
   missing_dogfooding_evidence:

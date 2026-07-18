@@ -156,6 +156,10 @@ jobs:
       # group so they cannot cancel or replace an authorized run.
       group: >-
         ${{
+          (github.event_name == 'pull_request_target' &&
+           (github.event.action == 'edited' ||
+            github.event.action == 'synchronize')) &&
+          format('{0}-intake-{1}', github.workflow, github.event.pull_request.number) ||
           (
             (github.event_name == 'pull_request_target' &&
              (github.event.pull_request.draft == true ||
@@ -265,12 +269,19 @@ jobs:
         env:
           GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
           NUMBER: '${{ steps.resolve.outputs.number }}'
+          EVENT_NAME: '${{ github.event_name }}'
+          COMMENT_TARGET_IS_PR: '${{ github.event.issue.pull_request != null }}'
         run: |-
           set -euo pipefail
           pr_json="${RUNNER_TEMP:?}/pr-intake.json"
           comment="${RUNNER_TEMP:?}/pr-intake.md"
 
           if ! gh api "repos/${GITHUB_REPOSITORY}/pulls/${NUMBER}" > "$pr_json" 2>/dev/null; then
+            if [[ "$EVENT_NAME" == 'pull_request_target' ||
+                  ("$EVENT_NAME" == 'issue_comment' && "$COMMENT_TARGET_IS_PR" == 'true') ]]; then
+              echo "::error::Failed to fetch PR metadata for #${NUMBER}; intake failed closed."
+              exit 1
+            fi
             echo "decision=not_applicable" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -285,7 +296,7 @@ jobs:
             comment_id="$(
               gh api "repos/${GITHUB_REPOSITORY}/issues/${NUMBER}/comments" \
                 --paginate \
-                --jq ".[] | select((.body // \"\") | contains(\"${marker}\")) | .id" |
+                --jq ".[] | select((.user.login == \"qwen-code-ci-bot\" or .user.login == \"github-actions[bot]\") and ((.body // \"\") | contains(\"${marker}\"))) | .id" |
                 tail -n 1
             )"
             if [ -n "$comment_id" ]; then
@@ -297,27 +308,13 @@ jobs:
             fi
           }
 
-          prior_discussion="$(
-            gh api "repos/${GITHUB_REPOSITORY}/issues/${NUMBER}/comments" \
-              --paginate \
-              --jq '.[] | select((.body // "") | contains("<!-- qwen-pr-intake:needs-discussion -->")) | .id' |
-              tail -n 1
-          )"
-
           case "$decision" in
-            allow)
-              if [ -n "$prior_discussion" ]; then
-                gh pr edit "$NUMBER" --repo "$GITHUB_REPOSITORY" --remove-label 'TBD' >/dev/null 2>&1 || true
-              fi
-              ;;
+            allow) ;;
             needs_discussion)
               gh pr edit "$NUMBER" --repo "$GITHUB_REPOSITORY" --add-label 'TBD'
               upsert_comment '<!-- qwen-pr-intake:needs-discussion -->'
               ;;
             block)
-              if [ -n "$prior_discussion" ]; then
-                gh pr edit "$NUMBER" --repo "$GITHUB_REPOSITORY" --remove-label 'TBD' >/dev/null 2>&1 || true
-              fi
               upsert_comment '<!-- qwen-pr-intake:block -->'
               exit 1
               ;;
@@ -330,8 +327,11 @@ jobs:
       - name: 'Run Qwen Triage'
         id: 'triage'
         if: >-
-          steps.intake.outputs.decision == 'allow' ||
-          steps.intake.outputs.decision == 'not_applicable'
+          (github.event_name != 'pull_request_target' ||
+           (github.event.action != 'edited' &&
+            github.event.action != 'synchronize')) &&
+          (steps.intake.outputs.decision == 'allow' ||
+           steps.intake.outputs.decision == 'not_applicable')
         uses: 'QwenLM/qwen-code-action@6d08e91aa807257b9c8af60edb5bb6bb2d7d951f'
         env:
           GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
@@ -364,6 +364,9 @@ jobs:
       - name: 'Check triage response'
         if: >-
           (success() || failure()) &&
+          (github.event_name != 'pull_request_target' ||
+           (github.event.action != 'edited' &&
+            github.event.action != 'synchronize')) &&
           (steps.intake.outputs.decision == 'allow' ||
            steps.intake.outputs.decision == 'not_applicable')
         shell: 'bash'

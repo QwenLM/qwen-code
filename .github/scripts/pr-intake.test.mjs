@@ -20,10 +20,7 @@ function pr(overrides = {}) {
   };
 }
 
-const linkedBody = 'Resolves #3957';
-const dogfoodingBody = `${linkedBody}
-
-### How to verify
+const dogfoodingBody = `### How to verify
 
 Run the changed command in a real terminal and confirm the new flow.
 
@@ -35,42 +32,38 @@ test('allows small PR types that do not require an issue', () => {
   assert.equal(assessPullRequestIntake(pr()).decision, 'allow');
 });
 
-test('requires fix and feat PRs to link an issue', () => {
-  for (const title of ['fix: handle empty input', 'feat(cli)!: add mode']) {
-    const result = assessPullRequestIntake(pr({ title }));
-    assert.equal(result.decision, 'block');
-    assert.ok(result.reason_codes.includes('missing_linked_issue'));
-  }
-});
-
 test('does not require dogfooding evidence from external contributors', () => {
-  const result = assessPullRequestIntake(
-    pr({ title: 'feat: add mode', body: linkedBody }),
-  );
+  const result = assessPullRequestIntake(pr({ title: 'feat: add mode' }));
   assert.equal(result.decision, 'allow');
 });
 
 test('requires real dogfooding content for internal features', () => {
-  const result = assessPullRequestIntake(
-    pr({
-      title: 'feat: add mode',
-      body: `${linkedBody}
+  for (const content of [
+    'N/A',
+    '-',
+    '<!-- add evidence -->',
+    '```md\nrun the feature\n```',
+    '<br>',
+  ]) {
+    const result = assessPullRequestIntake(
+      pr({
+        title: 'feat: add mode',
+        body: `### How to verify
 
-### How to verify
-
-N/A
+${content}
 
 ### Evidence (Before & After)
 
-<!-- add evidence -->`,
-      author_association: 'MEMBER',
-    }),
-  );
-  assert.equal(result.decision, 'block');
-  assert.deepEqual(result.reason_codes, [
-    'missing_dogfooding_plan',
-    'missing_dogfooding_evidence',
-  ]);
+${content}`,
+        author_association: 'MEMBER',
+      }),
+    );
+    assert.equal(result.decision, 'block');
+    assert.deepEqual(result.reason_codes, [
+      'missing_dogfooding_plan',
+      'missing_dogfooding_evidence',
+    ]);
+  }
 });
 
 test('allows internal features with a real test plan and evidence', () => {
@@ -100,10 +93,20 @@ test('fails closed when changed-line metadata is unavailable', () => {
 });
 
 test('blocks oversized PRs without planning and split details', () => {
-  const result = assessPullRequestIntake(pr({ additions: 2001, deletions: 0 }));
-  assert.equal(result.decision, 'block');
-  assert.ok(result.reason_codes.includes('missing_planning_issue'));
-  assert.ok(result.reason_codes.includes('missing_cannot_split_reason'));
+  for (const body of [
+    '',
+    `<!--
+- Planning issue for changes over 2,000 lines: #3957
+- Why this change cannot be split: Hidden placeholder
+-->`,
+  ]) {
+    const result = assessPullRequestIntake(
+      pr({ additions: 2001, deletions: 0, body }),
+    );
+    assert.equal(result.decision, 'block');
+    assert.ok(result.reason_codes.includes('missing_planning_issue'));
+    assert.ok(result.reason_codes.includes('missing_cannot_split_reason'));
+  }
 });
 
 test('routes a documented oversized PR to maintainer discussion', () => {
