@@ -703,24 +703,150 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).not.toContain('(.isCrossRepository // true) | not');
   });
 
-  it('does not expose comment-triggered autofix commands', () => {
-    expect(workflow).not.toContain(
-      "issue_comment:\n    types:\n      - 'created'",
+  it('exposes exactly one comment command: label-toggle takeover sugar', () => {
+    // DESIGN REVERSAL, deliberate and maintainer-mandated: earlier versions
+    // pinned the comment surface fully closed. The reopened surface is the
+    // narrowest possible form — two exact-match constants whose ONLY side
+    // effect is toggling TAKEOVER_LABEL through a PAT-verified job. The
+    // label remains the single source of truth: engagement and release
+    // happen exclusively via the pull_request label events, so a manual
+    // label edit and the command are the same mechanism with two entry
+    // points. Allowed senders: the PR author (who may lack label access) or
+    // a write+ collaborator.
+    expect(workflow).toContain("issue_comment:\n    types:\n      - 'created'");
+    expect(workflow).toContain("TAKEOVER_COMMAND: '@qwen-code /takeover'");
+    // Cheap expression-level prefilter: comments that cannot be the command
+    // never even start the route job.
+    expect(workflow).toContain(
+      "startsWith(github.event.comment.body, '@qwen-code /takeover')",
     );
-    // pull_request_review_comment triggers are NOT used to avoid redundant
-    // runs on multi-comment reviews; only pull_request_review:submitted.
-    expect(workflow).not.toContain(
-      "pull_request_review_comment:\n    types:\n      - 'created'",
+    // Exact trimmed-body match only — no user-input parsing, no arguments.
+    expect(routeStep).toContain('== "${TAKEOVER_COMMAND}" ]]');
+    expect(routeStep).toContain('== "${TAKEOVER_COMMAND} stop" ]]');
+    // The command NEVER routes the engine directly (label events do), and
+    // the accepted path only records the toggle for the takeover-command
+    // job.
+    const cmdBranch = routeStep.match(
+      /if \[\[ "\$\{EVENT_NAME\}" == 'issue_comment' \]\]; then([\s\S]*?)\n              fi/,
+    )?.[1];
+    expect(cmdBranch).toBeTruthy();
+    expect(cmdBranch).not.toContain('DO_REVIEW=true');
+    expect(cmdBranch).toContain('TAKEOVER_CMD="${CMD}"');
+    // The toggle job is presence-aware and PAT-verified.
+    expect(workflow).toMatch(
+      /takeover-command:[\s\S]*?CI_DEV_BOT_PAT identity[\s\S]*?--add-label "\$\{TAKEOVER_LABEL\}"[\s\S]*?--remove-label "\$\{TAKEOVER_LABEL\}"/,
     );
-    expect(workflow).not.toContain(
-      "COMMENT_BODY: '${{ github.event.comment.body }}'",
-    );
+    // No other command surface exists.
+    expect(workflow).not.toContain('pull_request_review_comment');
     expect(workflow).not.toContain('@qwen-code /autofix');
     expect(workflow).not.toContain('/autofix run');
     expect(workflow).not.toContain('@qwen-code /address-review');
-    expect(routeStep).not.toContain('comment command accepted');
-    expect(routeStep).not.toContain('address-review command accepted');
     expect(routeStep).not.toContain('ROUTE_PR="${ISSUE_NUMBER}"');
+  });
+
+  it('behaviorally gates the takeover command on body, sender, and PR state', () => {
+    // Extract sanitize_number and the issue_comment branch VERBATIM (drift
+    // fails the test) and replay with a PATH-stubbed gh for the permission
+    // API: author and write+ pass, read-permission strangers do not, bodies
+    // with extra text do not, non-PR comments and closed PRs do not.
+    const sanitize = routeStep.match(
+      /(sanitize_number\(\) \{[\s\S]*?\n          \})/,
+    )?.[1];
+    const cmdBranch = routeStep.match(
+      /(if \[\[ "\$\{EVENT_NAME\}" == 'issue_comment' \]\]; then[\s\S]*?\n              fi)/,
+    )?.[1];
+    expect(sanitize).toBeTruthy();
+    expect(cmdBranch).toBeTruthy();
+    const runCmd = ({
+      body,
+      sender,
+      author = 'human-a',
+      ghPermission = 'read',
+      hasPr = 'url',
+      state = 'open',
+    }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-cmd-'));
+      try {
+        writeFileSync(
+          join(dir, 'gh'),
+          `#!/bin/bash\nprintf '%s' '${ghPermission}'\n`,
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `${sanitize.replace(/\n {10}/g, '\n')}\nEVENT_NAME=issue_comment\nTAKEOVER_CMD=''\nCMD_PR=''\n${cmdBranch.replace(/\n {14}/g, '\n')}\nprintf '%s|%s' "$TAKEOVER_CMD" "$CMD_PR"`,
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              COMMENT_BODY: body,
+              SENDER_LOGIN: sender,
+              COMMENT_PR_AUTHOR: author,
+              HAS_PR_URL: hasPr,
+              ISSUE_STATE: state,
+              ISSUE_NUMBER: '7165',
+              AUTOFIX_BOT: 'qwen-code-dev-bot',
+              TAKEOVER_COMMAND: '@qwen-code /takeover',
+              TAKEOVER_LABEL: 'autofix/takeover',
+              REPO: 'QwenLM/qwen-code',
+              GITHUB_TOKEN: 'x',
+            },
+            encoding: 'utf8',
+          },
+        );
+        return out.split('\n').at(-1);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    // PR author engages and releases without any label permission.
+    expect(runCmd({ body: '@qwen-code /takeover', sender: 'human-a' })).toBe(
+      'add|7165',
+    );
+    expect(
+      runCmd({ body: '  @qwen-code /takeover stop  ', sender: 'human-a' }),
+    ).toBe('remove|7165');
+    // A write+ collaborator may command someone else's PR.
+    expect(
+      runCmd({
+        body: '@qwen-code /takeover',
+        sender: 'maintainer-b',
+        ghPermission: 'write',
+      }),
+    ).toBe('add|7165');
+    // Read-permission strangers are ignored.
+    expect(
+      runCmd({
+        body: '@qwen-code /takeover',
+        sender: 'stranger-c',
+        ghPermission: 'read',
+      }),
+    ).toBe('|');
+    // Extra text is NOT a command (exact match only).
+    expect(
+      runCmd({ body: '@qwen-code /takeover please', sender: 'human-a' }),
+    ).toBe('|');
+    // Non-PR comments and closed PRs are ignored; so is the bot itself.
+    expect(
+      runCmd({ body: '@qwen-code /takeover', sender: 'human-a', hasPr: '' }),
+    ).toBe('|');
+    expect(
+      runCmd({
+        body: '@qwen-code /takeover',
+        sender: 'human-a',
+        state: 'closed',
+      }),
+    ).toBe('|');
+    expect(
+      runCmd({
+        body: '@qwen-code /takeover',
+        sender: 'qwen-code-dev-bot',
+        author: 'qwen-code-dev-bot',
+      }),
+    ).toBe('|');
   });
 
   it('gates real-time review triggers on bot author, trusted sender, and in-repo PR', () => {

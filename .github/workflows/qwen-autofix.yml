@@ -16,8 +16,15 @@ name: 'Qwen Autofix'
 #                             unlabeled releases it. autofix/skip opts any PR
 #                             out everywhere and wins over takeover. Labels
 #                             need GitHub triage+, so the permission gate is
-#                             GitHub's own — the comment-command surface
-#                             stays closed.
+#                             GitHub's own.
+#   • issue_comment         → '@qwen-code /takeover' (apply the label) and
+#                             '@qwen-code /takeover stop' (remove it) — sugar
+#                             for people without label access: the PR author,
+#                             or write+ collaborators. Exact-match constants,
+#                             and the ONLY side effect is the label toggle;
+#                             engagement/release still happen exclusively via
+#                             the label events, so manual labeling and the
+#                             commands are the same single mechanism.
 #   • workflow_dispatch     → force a phase, an issue, or a PR
 #
 # Every GitHub write (issue/PR comments, labels, branch push, PR create) goes
@@ -36,6 +43,9 @@ on:
     types:
       - 'labeled'
       - 'unlabeled'
+  issue_comment:
+    types:
+      - 'created'
   schedule:
     - cron: '*/10 * * * *' # Review first; issue fallback only when no PR needs work
   workflow_dispatch:
@@ -97,6 +107,9 @@ env:
   # everywhere, and wins when both are present.
   TAKEOVER_LABEL: 'autofix/takeover'
   SKIP_LABEL: 'autofix/skip'
+  # Comment-command sugar over TAKEOVER_LABEL ('<cmd>' applies it, '<cmd>
+  # stop' removes it). Matched EXACTLY against the trimmed comment body.
+  TAKEOVER_COMMAND: '@qwen-code /takeover'
   # Do not claim more issues when too many existing autofix PRs are still open.
   MAX_OPEN_AUTOFIX_PRS: '5'
 
@@ -105,8 +118,11 @@ jobs:
   # Router: fork the run into phases by schedule/dispatch input.
   # ---------------------------------------------------------------------------
   route:
+    # The issue_comment clause is a cheap expression-level prefilter: the
+    # overwhelming majority of comments never start a job at all. The real
+    # gates (exact body match, sender authorization) live in 'Decide phases'.
     if: |-
-      ${{ github.repository == 'QwenLM/qwen-code' }}
+      ${{ github.repository == 'QwenLM/qwen-code' && (github.event_name != 'issue_comment' || (github.event.issue.pull_request && startsWith(github.event.comment.body, '@qwen-code /takeover'))) }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     concurrency:
@@ -145,6 +161,8 @@ jobs:
       pr_number: '${{ steps.decide.outputs.pr_number }}'
       takeover_ack: '${{ steps.decide.outputs.takeover_ack }}'
       ack_pr: '${{ steps.decide.outputs.ack_pr }}'
+      takeover_cmd: '${{ steps.decide.outputs.takeover_cmd }}'
+      cmd_pr: '${{ steps.decide.outputs.cmd_pr }}'
     steps:
       - name: 'Decide phases'
         id: 'decide'
@@ -172,10 +190,15 @@ jobs:
           PR_BASE_REF: '${{ github.event.pull_request.base.ref }}'
           PR_STATE: '${{ github.event.pull_request.state }}'
           EVENT_ACTION: '${{ github.event.action }}'
+          COMMENT_BODY: '${{ github.event.comment.body }}'
+          COMMENT_PR_AUTHOR: '${{ github.event.issue.user.login }}'
+          HAS_PR_URL: '${{ github.event.issue.pull_request.url }}'
         run: |-
           DO_ISSUE=false
           DO_REVIEW=false
           TAKEOVER_ACK=''
+          TAKEOVER_CMD=''
+          CMD_PR=''
           DRY_RUN="${DRY_RUN_INPUT:-false}"
           sanitize_number() {
             local value="${1//$'\r'/}"
@@ -244,6 +267,59 @@ jobs:
                     echo "🧭 review event on bot PR #${PR_NUMBER_EVENT} by ${SENDER_LOGIN} (${sender_permission:-review-bot}) → review phase"
                   else
                     echo "🧭 review event ignored: sender '${SENDER_LOGIN}' permission='${sender_permission:-none}' is not trusted"
+                  fi
+                fi
+              fi
+              # Comment-command sugar over the labels: TAKEOVER_COMMAND
+              # applies TAKEOVER_LABEL, 'TAKEOVER_COMMAND stop' removes it —
+              # nothing else. The label stays the single source of truth:
+              # engagement and release happen ONLY via the label events
+              # below, so the command's whole blast radius is one label
+              # toggle. Exact match on the trimmed body (constants, never
+              # user-input parsing); allowed senders: the PR author (who may
+              # lack label access) or a write+ collaborator. This immediately
+              # narrows a previously fully-closed surface reopened under
+              # maintainer mandate.
+              if [[ "${EVENT_NAME}" == 'issue_comment' ]]; then
+                DO_ISSUE=false
+                DO_REVIEW=false
+                BODY_TRIMMED="$(printf '%s' "${COMMENT_BODY}" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+                CMD=''
+                [[ "${BODY_TRIMMED}" == "${TAKEOVER_COMMAND}" ]] && CMD='add'
+                [[ "${BODY_TRIMMED}" == "${TAKEOVER_COMMAND} stop" ]] && CMD='remove'
+                if [[ -z "${HAS_PR_URL}" ]]; then
+                  echo "🧭 takeover command ignored: not a PR comment"
+                elif [[ -z "${CMD}" ]]; then
+                  echo "🧭 takeover command ignored: body is not an exact command"
+                elif [[ "${ISSUE_STATE}" != 'open' ]]; then
+                  echo "🧭 takeover command ignored: PR is not open"
+                elif [[ -z "${SENDER_LOGIN}" || "${SENDER_LOGIN}" == "${AUTOFIX_BOT}" ]]; then
+                  echo "🧭 takeover command ignored: sender '${SENDER_LOGIN:-n/a}'"
+                else
+                  sender_is_authorized=false
+                  sender_permission=''
+                  if [[ "${SENDER_LOGIN}" == "${COMMENT_PR_AUTHOR}" ]]; then
+                    sender_is_authorized=true
+                    sender_permission='pr-author'
+                  else
+                    api_error_file="$(mktemp)"
+                    if sender_permission="$(gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission" --jq '.permission // ""' 2>"${api_error_file}")"; then
+                      case "${sender_permission}" in
+                        admin|maintain|write) sender_is_authorized=true ;;
+                      esac
+                    else
+                      api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
+                      echo "::warning::Permission API call failed for ${SENDER_LOGIN}: ${api_error:-unknown error}"
+                      sender_permission=''
+                    fi
+                    rm -f "${api_error_file}"
+                  fi
+                  if [[ "${sender_is_authorized}" == 'true' ]]; then
+                    TAKEOVER_CMD="${CMD}"
+                    CMD_PR="$(sanitize_number "${ISSUE_NUMBER}")"
+                    echo "🧭 takeover command accepted: ${CMD} ${TAKEOVER_LABEL} on PR #${ISSUE_NUMBER} by ${SENDER_LOGIN} (${sender_permission})"
+                  else
+                    echo "🧭 takeover command ignored: sender '${SENDER_LOGIN}' permission='${sender_permission:-none}' is not the PR author or write+"
                   fi
                 fi
               fi
@@ -330,6 +406,8 @@ jobs:
           echo "pr_number=${ROUTE_PR}" >> "${GITHUB_OUTPUT}"
           echo "takeover_ack=${TAKEOVER_ACK}" >> "${GITHUB_OUTPUT}"
           echo "ack_pr=$(sanitize_number "${PR_NUMBER_EVENT}")" >> "${GITHUB_OUTPUT}"
+          echo "takeover_cmd=${TAKEOVER_CMD}" >> "${GITHUB_OUTPUT}"
+          echo "cmd_pr=${CMD_PR}" >> "${GITHUB_OUTPUT}"
           echo "🧭 phase='${PHASE:-auto}' event='${EVENT_NAME}' issue='#${ISSUE_NUMBER:-n/a}' pr='#${PR_NUMBER_EVENT:-n/a}' schedule='${SCHEDULE:-n/a}' dry_run=${DRY_RUN} → issue=${DO_ISSUE} review=${DO_REVIEW}"
 
   # ===========================================================================
@@ -1025,6 +1103,63 @@ jobs:
           ${DETAIL}" || true
           if [[ -n "${COMMENT_ID}" ]]; then
             gh api -X DELETE "/repos/${REPO}/issues/comments/${COMMENT_ID}" || true
+          fi
+
+  # ===========================================================================
+  # TAKEOVER COMMAND — the accepted comment command's ONLY side effect: toggle
+  # TAKEOVER_LABEL. The resulting pull_request labeled/unlabeled event (fired
+  # by the PAT identity) then drives engagement/release exactly like a manual
+  # label edit — one mechanism, two entry points.
+  # ===========================================================================
+  takeover-command:
+    needs: 'route'
+    if: |-
+      ${{ needs.route.outputs.takeover_cmd != '' }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions:
+      contents: 'read'
+    env:
+      REPO: '${{ github.repository }}'
+      CMD: '${{ needs.route.outputs.takeover_cmd }}'
+      PR: '${{ needs.route.outputs.cmd_pr }}'
+      GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+    steps:
+      - name: 'Toggle takeover label'
+        run: |-
+          api_error_file="$(mktemp)"
+          if ! bot_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login' 2>"${api_error_file}")"; then
+            api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
+            rm -f "${api_error_file}"
+            echo "::error::Failed to verify CI_DEV_BOT_PAT identity with gh api user: ${api_error:-unknown error}."
+            exit 1
+          fi
+          rm -f "${api_error_file}"
+          if [[ "${bot_actor}" != "${AUTOFIX_BOT}" ]]; then
+            echo "::error::CI_DEV_BOT_PAT authenticates as '${bot_actor:-unknown}'; expected ${AUTOFIX_BOT}."
+            exit 1
+          fi
+          # Presence-aware toggle: adding a present label / removing an
+          # absent one fires no event, so make the no-op explicit instead.
+          if ! HAS="$(gh pr view "${PR}" --repo "${REPO}" --json labels 2> /dev/null \
+            | jq -r --arg t "${TAKEOVER_LABEL}" '[.labels[].name] | index($t) != null')"; then
+            echo "::error::could not read labels of PR #${PR}"
+            exit 1
+          fi
+          if [[ "${CMD}" == 'add' ]]; then
+            if [[ "${HAS}" == 'true' ]]; then
+              echo "ℹ️ #${PR} already carries ${TAKEOVER_LABEL} — nothing to do"
+            else
+              gh pr edit "${PR}" --repo "${REPO}" --add-label "${TAKEOVER_LABEL}"
+              echo "🏷️ applied ${TAKEOVER_LABEL} to #${PR}"
+            fi
+          else
+            if [[ "${HAS}" != 'true' ]]; then
+              echo "ℹ️ #${PR} does not carry ${TAKEOVER_LABEL} — nothing to do"
+            else
+              gh pr edit "${PR}" --repo "${REPO}" --remove-label "${TAKEOVER_LABEL}"
+              echo "🏷️ removed ${TAKEOVER_LABEL} from #${PR}"
+            fi
           fi
 
   # ===========================================================================
