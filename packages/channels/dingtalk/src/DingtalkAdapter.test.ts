@@ -2057,6 +2057,7 @@ describe('DingtalkChannel proactive send', () => {
   function proactive(channel: DingtalkChannelInstance) {
     return channel as unknown as {
       supportsProactiveTarget(target: SessionTarget): boolean;
+      supportsScheduledDeliveryTarget(target: SessionTarget): boolean;
       supportsProactiveWebhookTarget(target: SessionTarget): boolean;
       pushProactive(target: SessionTarget, text: string): Promise<void>;
     };
@@ -2106,10 +2107,12 @@ describe('DingtalkChannel proactive send', () => {
     expect(createChannel().supportsProactiveSend()).toBe(true);
   });
 
-  it('accepts stable direct-message targets for scheduled and webhook delivery', () => {
+  it('keeps standalone loops group-only while scheduled delivery accepts users', () => {
     const channel = proactive(createChannel());
     expect(channel.supportsProactiveTarget(groupTarget)).toBe(true);
-    expect(channel.supportsProactiveTarget(directTarget)).toBe(true);
+    expect(channel.supportsProactiveTarget(directTarget)).toBe(false);
+    expect(channel.supportsScheduledDeliveryTarget(groupTarget)).toBe(true);
+    expect(channel.supportsScheduledDeliveryTarget(directTarget)).toBe(true);
     expect(channel.supportsProactiveWebhookTarget(groupTarget)).toBe(true);
     expect(channel.supportsProactiveWebhookTarget(directTarget)).toBe(true);
     expect(

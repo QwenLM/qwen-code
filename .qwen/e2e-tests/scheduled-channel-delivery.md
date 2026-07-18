@@ -1,86 +1,74 @@
-# Scheduled Channel Delivery E2E Plan
+# Daemon Scheduled Channel Delivery E2E
 
 ## Scope
 
-Verify that a daemon-owned scheduled task can deliver an already-produced
-final response through the Channel worker without starting another Agent turn.
-The implementation includes task persistence, `/loop` integration, final-turn
-capture, durable outbox recovery, daemon-to-worker transport, and exact fresh
-target admission from the merged #7109 observed-contact registry. Web Shell
-loads those observations into one searchable input whose choices cover direct
-chats, groups, and group topics; an exact observed ID can also be pasted.
+This E2E covers the minimal daemon-owned contract:
 
-## 2026-07-18 local E2E result
+```json
+{
+  "kind": "channel",
+  "channelName": "e2e-dingtalk",
+  "target": { "type": "chat", "id": "<chat-id>" }
+}
+```
 
-- **IM `/loop`: passed.** Two group-created tasks and one direct-chat-created
-  task fired through the daemon scheduler, produced the exact marker, reached
-  the delivery outbox, and were acknowledged as delivered. The first direct
-  run exposed that DingTalk's reply conversation ID is not a stable proactive
-  recipient ID; after retaining the adapter-provided direct delivery ID, the
-  direct path passed as well.
-- **Hosted/headless client: passed.** A task created through the
-  workspace-qualified scheduled-tasks REST route fired and delivered to its
-  selected observed group. The client owned no timer or Channel credential.
-- **Web Shell: passed for observed direct and group targets.** The real daemon
-  exposed one direct chat and two groups. The browser picker rendered all
-  three, accepted an exact direct ID, accepted a selected group option, created
-  both tasks, and rendered the correct target kind and ID on each task card.
-  The two future-dated test tasks were deleted after verification.
-- **Group topic: component E2E only.** The current real observation registry
-  contained no topic, so the mapper/form/card path is covered by browser-level
-  component tests without fabricating a platform observation.
-- **Compatibility: passed.** Existing tasks without `delivery` remain valid;
-  IM, Web Shell, and headless clients all converge on the daemon-owned durable
-  task store and scheduler. CLI/headless integrations use the same qualified
-  REST contract rather than owning a second timer.
+`target.type` is either `chat` or `user`. The target is explicit and is not
+admitted through the observed-contact graph. Topic/thread targets, mentions,
+the Web Shell picker, and standalone `qwen channel start` behavior are outside
+this change.
 
-## Baseline
+## Real DingTalk result — 2026-07-19 (Asia/Shanghai)
 
-1. Build current `main` plus this branch and start `qwen serve` with one
-   configured Channel and an isolated `QWEN_RUNTIME_DIR`.
-2. Confirm the Channel worker and workspace runtime are healthy.
-3. From an accepted IM conversation, create `/loop add` with a near-future cron.
-4. Confirm the task appears in the workspace scheduled-task API with a shared
-   session binding and the exact current-chat delivery target.
+An isolated `QWEN_HOME` and runtime directory were used. `qwen serve` started
+one daemon-managed `e2e-dingtalk` worker for the repository workspace. The
+daemon advertised `scheduled_task_channel_delivery`, the worker connected over
+DingTalk Stream mode, and the temporary configuration was deleted after the
+run.
 
-## Local transport verification
+### Chat target
 
-1. Let the loop fire and record the Agent prompt count.
-2. Verify one outbox record is created only after a clean final answer.
-3. Verify exactly one message reaches the originating conversation using the
-   adapter's proactive formatting.
-4. Verify the worker acknowledgement occurs only after the adapter resolves.
-5. Verify delivery creates no new Agent session, prompt, webhook task, or model
-   call.
-6. Verify `/loop list`, `/loop show`, and `/loop cancel` operate on the durable
-   task while the shared conversation session remains available.
+- Task: `ngh4wqzr`
+- Delivery: `ngh4wqzr:1784391780000`
+- Marker: `QWEN-SCHED-E2E-20260719-0023-CHAT`
+- Target type: `chat`
+- Result: `delivered`, `attempts=1`
 
-## Negative cases
+The one-shot task fired at its scheduled minute, disappeared from the task
+list, produced only the requested final marker, persisted that marker in the
+workspace outbox, and received a successful DingTalk group-send acknowledgement.
 
-- Unknown or stopped worker retries as `channel_worker_unavailable`.
-- Mismatched Channel/target or unsupported target returns
-  `channel_delivery_invalid` before a platform call.
-- Adapter/platform send failure returns `channel_delivery_failed` with a
-  sanitized message.
-- Expired IPC returns `channel_delivery_timeout`.
-- A saturated worker returns `channel_delivery_queue_full`.
-- Worker shutdown waits for an in-flight delivery only for the bounded drain
-  window and never starts another Agent turn.
+### User target
 
-## Recovery and client compatibility
+- Task: `dz1vu8i2`
+- Delivery: `dz1vu8i2:1784391900000`
+- Marker: `QWEN-SCHED-E2E-20260719-0025-USER`
+- Target: `{ "type": "user", "id": "406850" }`
+- Result: `delivered`, `attempts=1`
 
-1. Force a transient platform error; verify only delivery retries and the Agent
-   prompt runs once.
-2. Restart the daemon after Agent completion but before delivery; verify outbox
-   recovery sends the stored final text.
-3. Verify Web Shell can read tasks containing additive `delivery` and
-   `sessionBinding` fields and still edits other fields without clearing them.
-4. Verify the merged #7109 provider exposes only fresh observed targets and
-   direct-message entries retain a routable chat ID distinct from user identity.
-5. Through the Web Shell picker, create direct and group tasks, verify their
-   stored targets and card presentation, then remove the future-dated fixtures.
-6. Verify a hosted client uses the workspace-qualified REST route and owns no
-   local timer, task store, daemon token, or Channel credential.
-7. Stop the daemon before a deadline; verify the documented deployment
-   boundary (no exact fire without an external wake-up) and catch-up behavior
-   after restart.
+The direct send used the stable DingTalk staff ID, not the inbound conversation
+ID. The adapter accepted the platform response only after checking that the
+recipient was absent from DingTalk's invalid and rate-limited user lists.
+
+## Verified boundaries
+
+- The daemon owns the timer, task store, final-answer capture, outbox, retries,
+  and Channel Worker dispatch.
+- The task's immutable workspace owns both its outbox and its Channel Worker;
+  a later session `/cd` cannot move delivery to another workspace.
+- Omitting `delivery` preserves the existing scheduled-task behavior.
+- Only a clean, non-empty terminal model answer is enqueued. Thoughts, tool
+  output, interrupted turns, errors, and Todo Stop Guard drafts are excluded.
+- Delivery retries reuse the persisted final answer and do not rerun the Agent.
+- Outbox directories/files use owner-only POSIX permissions.
+- Standalone loop target validation and Feishu direct proactive mapping remain
+  unchanged; daemon delivery uses dedicated validation/mapping hooks.
+
+## Automated regression evidence
+
+- Core scheduler/task/outbox: 194 tests passed.
+- ChannelBase: 495 tests passed.
+- DingTalk: 72 tests passed; Feishu: 76; WeCom: 135; Telegram: 15.
+- Session final-answer capture: 368 tests passed.
+- Focused CLI scheduled-delivery routes/IPC/worker/controller: 177 tests passed.
+- CLI daemon/worker/server regression group: 1,104 tests passed.
+- CLI typecheck and serve fast-path bundle closure check passed.

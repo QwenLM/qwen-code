@@ -43,6 +43,8 @@ import {
   SessionService,
   stripTerminalControlSequences,
   MAX_JOBS,
+  MAX_CHANNEL_DELIVERY_NAME_LENGTH,
+  MAX_CHANNEL_DELIVERY_TARGET_ID_LENGTH,
   type DurableCronTask,
   type CronTaskRun,
   type CronTaskDelivery,
@@ -1008,7 +1010,8 @@ function parseDeliveryField(raw: unknown): {
   }
   if (
     typeof delivery['channelName'] !== 'string' ||
-    delivery['channelName'].trim().length === 0
+    delivery['channelName'].trim().length === 0 ||
+    delivery['channelName'].length > MAX_CHANNEL_DELIVERY_NAME_LENGTH
   ) {
     return { error: '`delivery.channelName` must be a non-empty string' };
   }
@@ -1028,6 +1031,7 @@ function parseDeliveryField(raw: unknown): {
     (target['type'] !== 'user' && target['type'] !== 'chat') ||
     typeof target['id'] !== 'string' ||
     target['id'].trim().length === 0 ||
+    target['id'].length > MAX_CHANNEL_DELIVERY_TARGET_ID_LENGTH ||
     !Object.keys(target).every((key) => key === 'type' || key === 'id')
   ) {
     return {

@@ -1501,6 +1501,19 @@ describe('FeishuChannel', () => {
           body: expect.stringContaining('"receive_id":"ou_user"'),
         }),
       );
+
+      await channel.pushLoop(
+        {
+          channelName: 'test',
+          senderId: 'ou_user',
+          chatId: 'oc_direct_chat',
+          isGroup: false,
+        },
+        'standalone',
+      );
+      expect(fetchSpy.mock.calls.at(-1)?.[0]).toBe(
+        'https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id',
+      );
     });
   });
 

@@ -11564,6 +11564,7 @@ describe('Session', () => {
         cronExpr?: string;
         lastFiredAt?: number;
         delivery?: core.CronTaskDelivery;
+        workspaceCwd?: string;
       }) {
         return {
           size: 1,
@@ -11631,6 +11632,7 @@ describe('Session', () => {
 
       it('enqueues the final cron answer for admitted Channel delivery', async () => {
         const firedAt = 1_718_000_000_000;
+        const taskWorkspace = '/workspace/task-owner';
         const delivery: core.CronTaskDelivery = {
           kind: 'channel',
           channelName: 'dingtalk',
@@ -11641,8 +11643,12 @@ describe('Session', () => {
           prompt: 'nightly report',
           cronExpr: '0 9 * * *',
           lastFiredAt: firedAt,
+          workspaceCwd: taskWorkspace,
           delivery,
         });
+        mockConfig.getWorkingDir = vi
+          .fn()
+          .mockReturnValue('/workspace/after-cd');
         mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
         mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
         mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
@@ -11677,7 +11683,7 @@ describe('Session', () => {
 
         await vi.waitFor(() =>
           expect(enqueueScheduledDeliverySpy).toHaveBeenCalledWith(
-            process.cwd(),
+            taskWorkspace,
             {
               deliveryId: `task-1:${firedAt}`,
               taskId: 'task-1',
@@ -20015,6 +20021,7 @@ describe('Session', () => {
               cronExpr: string;
               lastFiredAt: number;
               delivery: core.CronTaskDelivery;
+              workspaceCwd: string;
             }) => void,
           ) =>
             callback({
@@ -20023,6 +20030,7 @@ describe('Session', () => {
               cronExpr: '* * * * *',
               lastFiredAt: firedAt,
               delivery,
+              workspaceCwd: process.cwd(),
             }),
         ),
         stop: vi.fn(),
@@ -20143,6 +20151,7 @@ describe('Session', () => {
               cronExpr: string;
               lastFiredAt: number;
               delivery: core.CronTaskDelivery;
+              workspaceCwd: string;
             }) => void,
           ) =>
             callback({
@@ -20151,6 +20160,7 @@ describe('Session', () => {
               cronExpr: '* * * * *',
               lastFiredAt: firedAt,
               delivery,
+              workspaceCwd: process.cwd(),
             }),
         ),
         stop: vi.fn(),

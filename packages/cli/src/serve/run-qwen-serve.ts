@@ -5203,6 +5203,7 @@ async function runQwenServeImpl(
             for (const runtimeBridge of getRuntimeBridgesForCleanup()) {
               runtimeBridge.killAllSync();
             }
+            removeCurrentServePidfile();
           } catch (err) {
             daemonLog.error(
               'force-kill error',

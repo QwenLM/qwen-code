@@ -229,6 +229,16 @@ describe('scheduled-tasks routes', () => {
       kind: 'channel',
       target: { channelName: 'dingtalk', chatId: 'group-42', isGroup: true },
     },
+    {
+      kind: 'channel',
+      channelName: 'x'.repeat(2049),
+      target: { type: 'chat', id: 'group-42' },
+    },
+    {
+      kind: 'channel',
+      channelName: 'dingtalk',
+      target: { type: 'chat', id: 'x'.repeat(2049) },
+    },
   ])('rejects malformed channel delivery %#', async (delivery) => {
     const res = await create({
       cron: '0 9 * * *',

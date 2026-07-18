@@ -6744,10 +6744,11 @@ describe('runQwenServe channel worker supervisor', () => {
       },
       {
         bridge,
-        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelWorkerSupervisorFactory: makeReadyWorkerFactory(worker),
         channelServicePidfile: pidfile,
       },
     );
+    await handle.runtimeReady;
 
     try {
       const signalListener = process
@@ -6769,10 +6770,12 @@ describe('runQwenServe channel worker supervisor', () => {
       expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
       expect(exitSpy).toHaveBeenCalledWith(1);
 
+      await vi.waitFor(() => expect(bridge.shutdown).toHaveBeenCalled());
       finishBridgeShutdown();
       await firstSignal;
     } finally {
       finishBridgeShutdown?.();
+      vi.mocked(bridge.shutdown).mockResolvedValue(undefined);
       await handle.close();
       exitSpy.mockRestore();
     }

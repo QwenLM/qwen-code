@@ -493,6 +493,16 @@ export class DingtalkChannel extends ChannelBase {
 
   protected override supportsProactiveTarget(target: SessionTarget): boolean {
     return (
+      target.isGroup === true &&
+      target.threadId === undefined &&
+      this.isStableTargetId(target.chatId)
+    );
+  }
+
+  protected override supportsScheduledDeliveryTarget(
+    target: SessionTarget,
+  ): boolean {
+    return (
       typeof target.isGroup === 'boolean' &&
       target.threadId === undefined &&
       this.isStableTargetId(target.chatId)

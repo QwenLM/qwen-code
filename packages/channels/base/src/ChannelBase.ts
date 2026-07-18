@@ -727,13 +727,24 @@ export abstract class ChannelBase {
       chatId: target.id,
       isGroup: target.type === 'chat',
     };
-    if (!this.supportsProactiveTarget(sessionTarget)) {
+    if (!this.supportsScheduledDeliveryTarget(sessionTarget)) {
       throw new ChannelProactiveDeliveryError(
         'permanent',
         `Channel "${this.name}" does not support this proactive target.`,
       );
     }
-    await this.pushProactive(sessionTarget, text);
+    await this.pushScheduledDelivery(sessionTarget, text);
+  }
+
+  protected supportsScheduledDeliveryTarget(target: SessionTarget): boolean {
+    return this.supportsProactiveTarget(target);
+  }
+
+  protected pushScheduledDelivery(
+    target: SessionTarget,
+    text: string,
+  ): Promise<void> {
+    return this.pushProactive(target, text);
   }
 
   protected supportsProactiveTarget(target: SessionTarget): boolean {
@@ -2578,8 +2589,8 @@ export abstract class ChannelBase {
       return true;
     }
 
-    const target = this.loopTargetFromEnvelope(envelope);
-    if (!this.supportsProactiveTarget(target)) {
+    const target = this.loopControllerTargetFromEnvelope(envelope);
+    if (!this.supportsLoopTarget(target)) {
       await this.sendMessage(
         envelope.chatId,
         'This channel does not support proactive loop messages for this chat target.',
@@ -2671,7 +2682,7 @@ export abstract class ChannelBase {
     }
     const target = this.loopToolTarget(sessionId);
     if (typeof target === 'string') return { text: target, isError: true };
-    if (!this.supportsProactiveTarget(target)) {
+    if (!this.supportsLoopTarget(target)) {
       return {
         text: 'This channel does not support proactive loop messages for this chat target.',
         isError: true,
@@ -2775,7 +2786,7 @@ export abstract class ChannelBase {
     if (!this.loopController) return true;
     const jobs = await this.loopController.listForTarget(
       this.name,
-      this.loopTargetFromEnvelope(envelope),
+      this.loopControllerTargetFromEnvelope(envelope),
     );
     if (jobs.length === 0) {
       await this.sendMessage(envelope.chatId, 'No loops.');
@@ -2799,7 +2810,7 @@ export abstract class ChannelBase {
     }
     const jobs = await this.loopController.listForTarget(
       this.name,
-      this.loopTargetFromEnvelope(envelope),
+      this.loopControllerTargetFromEnvelope(envelope),
     );
     const job = jobs.find((candidate) => candidate.id === id);
     if (!job) {
@@ -2867,7 +2878,7 @@ export abstract class ChannelBase {
     }
     const jobs = await this.loopController.listForTarget(
       this.name,
-      this.loopTargetFromEnvelope(envelope),
+      this.loopControllerTargetFromEnvelope(envelope),
     );
     const match = jobs.find((job) => job.id === id);
     if (!match) {
@@ -2886,13 +2897,28 @@ export abstract class ChannelBase {
     return this.normalizeLoopTarget({
       channelName: this.name,
       senderId: envelope.senderId,
-      chatId:
-        envelope.isGroup === true
-          ? envelope.chatId
-          : (envelope.deliveryChatId ?? envelope.chatId),
+      chatId: envelope.chatId,
       threadId: envelope.threadId,
       isGroup: envelope.isGroup === true,
     });
+  }
+
+  private loopControllerTargetFromEnvelope(envelope: Envelope): SessionTarget {
+    if (!this.loopController?.createForSession) {
+      return this.loopTargetFromEnvelope(envelope);
+    }
+    const target = this.loopTargetFromEnvelope(envelope);
+    if (target.isGroup === true) return target;
+    return {
+      ...target,
+      chatId: envelope.deliveryChatId ?? envelope.senderId,
+    };
+  }
+
+  private supportsLoopTarget(target: SessionTarget): boolean {
+    return this.loopController?.createForSession
+      ? this.supportsScheduledDeliveryTarget(target)
+      : this.supportsProactiveTarget(target);
   }
 
   private normalizeLoopTarget(
@@ -2911,7 +2937,16 @@ export abstract class ChannelBase {
       return 'Only authorized members can use loops in this shared session.';
     }
     const senderId = this.activePrompts.get(sessionId)?.senderId;
-    const normalizedTarget = this.normalizeLoopTarget(target);
+    let normalizedTarget = this.normalizeLoopTarget(target);
+    if (
+      this.loopController?.createForSession &&
+      normalizedTarget.isGroup !== true
+    ) {
+      normalizedTarget = {
+        ...normalizedTarget,
+        chatId: normalizedTarget.senderId,
+      };
+    }
     if (senderId && this.isSharedSessionTarget(normalizedTarget)) {
       return { ...normalizedTarget, senderId };
     }

@@ -66,6 +66,9 @@ export type CronTaskChannelTarget =
   | { type: 'user'; id: string }
   | { type: 'chat'; id: string };
 
+export const MAX_CHANNEL_DELIVERY_NAME_LENGTH = 2048;
+export const MAX_CHANNEL_DELIVERY_TARGET_ID_LENGTH = 2048;
+
 /**
  * Optional post-run delivery. Kept separate from the prompt/session binding:
  * the scheduler still executes the prompt in its normal session, then hands
@@ -459,6 +462,7 @@ function isValidDelivery(value: unknown): value is CronTaskDelivery {
     delivery['kind'] !== 'channel' ||
     typeof delivery['channelName'] !== 'string' ||
     delivery['channelName'].trim().length === 0 ||
+    delivery['channelName'].length > MAX_CHANNEL_DELIVERY_NAME_LENGTH ||
     !Object.keys(delivery).every(
       (key) => key === 'kind' || key === 'channelName' || key === 'target',
     )
@@ -472,6 +476,7 @@ function isValidDelivery(value: unknown): value is CronTaskDelivery {
     (target['type'] === 'user' || target['type'] === 'chat') &&
     typeof target['id'] === 'string' &&
     target['id'].trim().length > 0 &&
+    target['id'].length <= MAX_CHANNEL_DELIVERY_TARGET_ID_LENGTH &&
     Object.keys(target).every((key) => key === 'type' || key === 'id')
   );
 }

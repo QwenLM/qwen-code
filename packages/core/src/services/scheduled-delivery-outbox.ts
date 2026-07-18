@@ -11,7 +11,11 @@ import lockfile from 'proper-lockfile';
 import { Storage } from '../config/storage.js';
 import { getProjectHash } from '../utils/paths.js';
 import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
-import type { CronTaskChannelTarget } from './cronTasksFile.js';
+import {
+  MAX_CHANNEL_DELIVERY_NAME_LENGTH,
+  MAX_CHANNEL_DELIVERY_TARGET_ID_LENGTH,
+  type CronTaskChannelTarget,
+} from './cronTasksFile.js';
 
 export type ScheduledDeliveryStatus =
   | 'pending'
@@ -76,7 +80,6 @@ const OUTBOX_GUARD_FILENAME = 'scheduled_deliveries.guard';
 const MAX_RECORDS = 200;
 const MAX_TEXT_LENGTH = 100_000;
 const MAX_ID_LENGTH = 256;
-const MAX_TARGET_FIELD_LENGTH = 2048;
 const MAX_ERROR_CODE_LENGTH = 128;
 const MAX_ERROR_MESSAGE_LENGTH = 1000;
 
@@ -126,7 +129,7 @@ function isValidTarget(value: unknown): value is CronTaskChannelTarget {
   const target = value as Record<string, unknown>;
   return (
     (target['type'] === 'user' || target['type'] === 'chat') &&
-    isBoundedString(target['id'], MAX_TARGET_FIELD_LENGTH) &&
+    isBoundedString(target['id'], MAX_CHANNEL_DELIVERY_TARGET_ID_LENGTH) &&
     target['id'].trim().length > 0 &&
     Object.keys(target).every((key) => key === 'type' || key === 'id')
   );
@@ -148,7 +151,7 @@ function isValidRecord(value: unknown): value is ScheduledDeliveryRecord {
     isBoundedString(record['deliveryId'], MAX_ID_LENGTH) &&
     isBoundedString(record['taskId'], MAX_ID_LENGTH) &&
     isFiniteNumber(record['firedAt']) &&
-    isBoundedString(record['channelName'], MAX_TARGET_FIELD_LENGTH) &&
+    isBoundedString(record['channelName'], MAX_CHANNEL_DELIVERY_NAME_LENGTH) &&
     (record['channelName'] as string).trim().length > 0 &&
     isValidTarget(record['target']) &&
     isBoundedString(record['text'], MAX_TEXT_LENGTH) &&
@@ -215,14 +218,20 @@ async function mutateOutbox<T>(
   const file = getScheduledDeliveryOutboxPath(projectRoot);
   const guard = path.join(directory, OUTBOX_GUARD_FILENAME);
   return getOutboxMutex(file).runExclusive(async () => {
-    await fs.mkdir(directory, { recursive: true });
-    await fs.writeFile(guard, '', { flag: 'a' });
+    await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+    await fs.chmod(directory, 0o700);
+    await fs.writeFile(guard, '', { flag: 'a', mode: 0o600 });
+    await fs.chmod(guard, 0o600);
     const release = await lockfile.lock(guard, LOCK_OPTIONS);
     try {
       const current = await readOutboxFile(file);
       const next = mutate(current);
       if (next.records !== current) {
-        await atomicWriteJSON(file, next.records, { noFollow: true });
+        await atomicWriteJSON(file, next.records, {
+          noFollow: true,
+          mode: 0o600,
+          forceMode: true,
+        });
       }
       return next.result;
     } finally {

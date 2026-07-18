@@ -54,6 +54,20 @@ describe('scheduledDeliveryOutbox', () => {
     });
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'stores recipient data in owner-only files and directories',
+    async () => {
+      await enqueue();
+      const file = getScheduledDeliveryOutboxPath(workspace);
+      const directory = path.dirname(file);
+      const guard = path.join(directory, 'scheduled_deliveries.guard');
+
+      expect((await fs.stat(directory)).mode & 0o777).toBe(0o700);
+      expect((await fs.stat(guard)).mode & 0o777).toBe(0o600);
+      expect((await fs.stat(file)).mode & 0o777).toBe(0o600);
+    },
+  );
+
   it('rejects a conflicting reuse of a delivery id', async () => {
     await enqueue();
     await expect(enqueue({ text: 'different result' })).rejects.toThrow(

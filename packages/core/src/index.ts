@@ -259,6 +259,8 @@ export {
   appendCronRun,
   taskHasLegacyCondition,
   MAX_TASK_RUNS,
+  MAX_CHANNEL_DELIVERY_NAME_LENGTH,
+  MAX_CHANNEL_DELIVERY_TARGET_ID_LENGTH,
 } from './services/cronTasksFile.js';
 export * from './services/fileDiscoveryService.js';
 export * from './services/fileHistoryService.js';

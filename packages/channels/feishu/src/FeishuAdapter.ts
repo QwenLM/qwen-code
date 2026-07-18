@@ -683,6 +683,13 @@ export class FeishuChannel extends ChannelBase {
     target: SessionTarget,
     text: string,
   ): Promise<void> {
+    await this.sendMessageInternal(target.chatId, text, true);
+  }
+
+  protected override async pushScheduledDelivery(
+    target: SessionTarget,
+    text: string,
+  ): Promise<void> {
     await this.sendMessageInternal(
       target.chatId,
       text,

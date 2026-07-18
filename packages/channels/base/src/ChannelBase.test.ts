@@ -5887,7 +5887,7 @@ describe('ChannelBase', () => {
           target: {
             channelName: 'test-chan',
             senderId: 'user1',
-            chatId: 'chat1',
+            chatId: 'user1',
             threadId: undefined,
             isGroup: false,
           },
@@ -6042,7 +6042,7 @@ describe('ChannelBase', () => {
           target: {
             channelName: 'test-chan',
             senderId: 'user1',
-            chatId: 'chat1',
+            chatId: 'user1',
             threadId: undefined,
             isGroup: false,
           },

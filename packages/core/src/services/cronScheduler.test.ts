@@ -832,6 +832,20 @@ describe('CronScheduler', () => {
       expect(scheduler.durableActive).toBe(false);
     });
 
+    it('keeps the immutable owning workspace on durable jobs', async () => {
+      await scheduler.enableDurable('session-1');
+      const job = await scheduler.createDurable(
+        '0 9 * * *',
+        'workspace-owned task',
+        true,
+      );
+
+      expect(job.workspaceCwd).toBe(tmpDir);
+      expect(
+        scheduler.list().find((item) => item.id === job.id)?.workspaceCwd,
+      ).toBe(tmpDir);
+    });
+
     it('releases the lock on stop so another session can take over', async () => {
       await scheduler.enableDurable('session-1');
       const lockPath = getLockFilePath(tmpDir);

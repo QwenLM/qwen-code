@@ -91,6 +91,8 @@ export interface CronJob {
   boundSessionId?: string;
   /** Optional daemon Channel destination copied from the durable task. */
   delivery?: CronTaskDelivery;
+  /** Immutable workspace that owns this durable task and its delivery outbox. */
+  workspaceCwd?: string;
   /** One-shot that was due while no owning session ran — fired late. */
   missed?: boolean;
 }
@@ -501,6 +503,7 @@ export class CronScheduler {
     }
     const job = this.create(cronExpr, prompt, recurring);
     job.durable = true;
+    job.workspaceCwd = this.projectRoot;
     this.pendingAdd.add(job.id);
     try {
       await addCronTask(this.projectRoot, jobToDurableTask(job));
@@ -917,7 +920,12 @@ export class CronScheduler {
         );
         continue;
       }
-      const job = durableTaskToJob(task, this.recurringMaxAgeMs, existing);
+      const job = durableTaskToJob(
+        task,
+        this.recurringMaxAgeMs,
+        this.projectRoot,
+        existing,
+      );
       if (existing?.lastFiredAt !== undefined) {
         job.lastFiredAt = Math.max(existing.lastFiredAt, job.lastFiredAt ?? 0);
       }
@@ -956,6 +964,7 @@ export class CronScheduler {
           durableTaskToJob(
             { ...t, lastFiredAt: finalFireAt },
             this.recurringMaxAgeMs,
+            this.projectRoot,
           ),
         ),
       });
@@ -994,7 +1003,11 @@ export class CronScheduler {
         // surfaces and runs them instead of losing the task permanently.
         const skipped: string[] = [];
         const runnable = pending.tasks.filter((t) => {
-          const job = durableTaskToJob(t, this.recurringMaxAgeMs);
+          const job = durableTaskToJob(
+            t,
+            this.recurringMaxAgeMs,
+            this.projectRoot,
+          );
           // `job.durable &&` mirrors catch-up/final/tick — durableTaskToJob always
           // sets durable, so it's a no-op today, but keeps the four skip sites
           // identical so a future non-durable carrier can't be silently dropped.
@@ -1019,6 +1032,7 @@ export class CronScheduler {
           const carrier = durableTaskToJob(
             runnable[0]!,
             this.recurringMaxAgeMs,
+            this.projectRoot,
           );
           onFire({
             ...carrier,
@@ -1603,6 +1617,7 @@ function hasParseableCron(task: DurableCronTask): boolean {
 function durableTaskToJob(
   task: DurableCronTask,
   recurringMaxAgeMs: number,
+  projectRoot: string | null,
   existing?: CronJob,
 ): CronJob {
   // Jitter is deterministic per (id, cron, recurring) but costly to
@@ -1623,6 +1638,7 @@ function durableTaskToJob(
     lastFiredAt: task.lastFiredAt ?? undefined,
     jitterMs,
     durable: true,
+    ...(projectRoot ? { workspaceCwd: projectRoot } : {}),
     ...(task.sessionId ? { boundSessionId: task.sessionId } : {}),
     ...(task.delivery ? { delivery: task.delivery } : {}),
   };

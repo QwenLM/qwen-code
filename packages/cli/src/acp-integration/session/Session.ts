@@ -760,6 +760,7 @@ interface CronFire {
    * identifies this fire's entry in `runs[]`. */
   lastFiredAt?: number;
   delivery?: CronTaskDelivery;
+  workspaceCwd?: string;
 }
 
 interface CronQueueItem {
@@ -768,6 +769,7 @@ interface CronQueueItem {
   taskId?: string;
   firedAt?: number;
   delivery?: CronTaskDelivery;
+  workspaceCwd?: string;
 }
 
 const MAX_NOTIFICATION_QUEUE = 20;
@@ -4129,6 +4131,7 @@ export class Session implements SessionContext {
         ...(job.id ? { taskId: job.id } : {}),
         ...(job.lastFiredAt !== undefined ? { firedAt: job.lastFiredAt } : {}),
         ...(job.delivery ? { delivery: job.delivery } : {}),
+        ...(job.workspaceCwd ? { workspaceCwd: job.workspaceCwd } : {}),
       });
       void this.#drainCronQueue();
     });
@@ -4653,12 +4656,13 @@ export class Session implements SessionContext {
           cronCompleted &&
           !cronHadError &&
           item.delivery &&
+          item.workspaceCwd &&
           item.taskId &&
           item.firedAt !== undefined &&
           finalAnswer.trim().length > 0
         ) {
           try {
-            await enqueueScheduledDelivery(this.config.getWorkingDir(), {
+            await enqueueScheduledDelivery(item.workspaceCwd, {
               deliveryId: `${item.taskId}:${item.firedAt}`,
               taskId: item.taskId,
               firedAt: item.firedAt,
