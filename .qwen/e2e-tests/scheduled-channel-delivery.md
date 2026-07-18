@@ -6,9 +6,33 @@ Verify that a daemon-owned scheduled task can deliver an already-produced
 final response through the Channel worker without starting another Agent turn.
 The implementation includes task persistence, `/loop` integration, final-turn
 capture, durable outbox recovery, daemon-to-worker transport, and exact fresh
-target admission from the merged #7109 observed-contact registry. Web Shell can
-round-trip the additive task fields, but its destination-picker presentation
-and a real platform send remain manual E2E work outside this runtime PR.
+target admission from the merged #7109 observed-contact registry. Web Shell
+loads those observations into one searchable input whose choices cover direct
+chats, groups, and group topics; an exact observed ID can also be pasted.
+
+## 2026-07-18 local E2E result
+
+- **IM `/loop`: passed.** Two group-created tasks and one direct-chat-created
+  task fired through the daemon scheduler, produced the exact marker, reached
+  the delivery outbox, and were acknowledged as delivered. The first direct
+  run exposed that DingTalk's reply conversation ID is not a stable proactive
+  recipient ID; after retaining the adapter-provided direct delivery ID, the
+  direct path passed as well.
+- **Hosted/headless client: passed.** A task created through the
+  workspace-qualified scheduled-tasks REST route fired and delivered to its
+  selected observed group. The client owned no timer or Channel credential.
+- **Web Shell: passed for observed direct and group targets.** The real daemon
+  exposed one direct chat and two groups. The browser picker rendered all
+  three, accepted an exact direct ID, accepted a selected group option, created
+  both tasks, and rendered the correct target kind and ID on each task card.
+  The two future-dated test tasks were deleted after verification.
+- **Group topic: component E2E only.** The current real observation registry
+  contained no topic, so the mapper/form/card path is covered by browser-level
+  component tests without fabricating a platform observation.
+- **Compatibility: passed.** Existing tasks without `delivery` remain valid;
+  IM, Web Shell, and headless clients all converge on the daemon-owned durable
+  task store and scheduler. CLI/headless integrations use the same qualified
+  REST contract rather than owning a second timer.
 
 ## Baseline
 
@@ -53,8 +77,8 @@ and a real platform send remain manual E2E work outside this runtime PR.
    `sessionBinding` fields and still edits other fields without clearing them.
 4. Verify the merged #7109 provider exposes only fresh observed targets and
    direct-message entries retain a routable chat ID distinct from user identity.
-5. After the Web Shell/hosted BFF picker is implemented, create a task through
-   it and verify an owned task session delivers to the selected group.
+5. Through the Web Shell picker, create direct and group tasks, verify their
+   stored targets and card presentation, then remove the future-dated fixtures.
 6. Verify a hosted client uses the workspace-qualified REST route and owns no
    local timer, task store, daemon token, or Channel credential.
 7. Stop the daemon before a deadline; verify the documented deployment
