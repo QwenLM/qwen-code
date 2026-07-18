@@ -24,7 +24,10 @@ import { installGoalTerminalObserver } from '../utils/restoreGoal.js';
 import { formatDuration } from '../utils/formatters.js';
 import { t } from '../../i18n/index.js';
 
-// Keep in sync with GOAL_CLEAR_KEYWORDS in packages/web-shell/client/App.tsx
+// Mirrored by GOAL_CLEAR_KEYWORDS in
+// packages/web-shell/client/utils/goalCondition.ts, whose test reads this
+// literal and fails on drift. The Web Shell client bundles for the browser and
+// cannot import from core, so this is duplicated rather than shared.
 const CLEAR_KEYWORDS = new Set([
   'clear',
   'stop',

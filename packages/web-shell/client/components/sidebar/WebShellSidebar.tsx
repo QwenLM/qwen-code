@@ -52,6 +52,7 @@ import {
   SettingsIcon,
   SquarePenIcon,
   SunIcon,
+  TargetIcon,
 } from 'lucide-react';
 import { WebShellThemeId, type WebShellTheme } from '../../themeContext';
 import { useI18n } from '../../i18n';
@@ -123,6 +124,7 @@ export type WebShellSidebarFooterItem =
   | 'version'
   | 'theme'
   | 'scheduledTasks'
+  | 'goals'
   | 'sessionsOverview'
   | 'splitView'
   | 'daemonStatus'
@@ -153,6 +155,7 @@ const DEFAULT_FOOTER_ITEMS: readonly WebShellSidebarFooterItem[] = [
   'version',
   'theme',
   'scheduledTasks',
+  'goals',
   'sessionsOverview',
   'splitView',
   'daemonStatus',
@@ -208,6 +211,7 @@ interface WebShellSidebarProps {
   onOpenPlugins: () => void;
   onOpenDaemonStatus: () => void;
   onOpenScheduledTasks: () => void;
+  onOpenGoals: () => void;
   onOpenSessions: () => void;
   /**
    * Whether to offer the Session Overview entry point. Gated to large screens
@@ -408,6 +412,7 @@ export function WebShellSidebar({
   onOpenPlugins,
   onOpenDaemonStatus,
   onOpenScheduledTasks,
+  onOpenGoals,
   onOpenSessions,
   canOpenSessionsOverview,
   onOpenSplitView,
@@ -3379,6 +3384,20 @@ export function WebShellSidebar({
                 <CalendarClockIcon size={16} strokeWidth={1.2} />
               </span>
               {!collapsed && <span>{t('sidebar.scheduledTasks')}</span>}
+            </button>
+          )}
+          {footerItems.has('goals') && (
+            <button
+              className={styles.pluginButton}
+              type="button"
+              title={t('sidebar.goals')}
+              aria-label={t('sidebar.goals')}
+              onClick={onOpenGoals}
+            >
+              <span className={styles.navIcon}>
+                <TargetIcon size={16} strokeWidth={1.2} />
+              </span>
+              {!collapsed && <span>{t('sidebar.goals')}</span>}
             </button>
           )}
         </div>

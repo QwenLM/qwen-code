@@ -100,6 +100,7 @@ import type {
   BridgeRestoreSessionRequest,
   BridgeSessionState,
   BridgeRestoredSession,
+  BridgeSessionGoal,
   BridgeSessionSummary,
   BridgePendingInteraction,
   BridgeClientRequestContext,
@@ -6193,6 +6194,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return requestSessionStatus<{ cleared: boolean; condition?: string }>(
         sessionId,
         SERVE_CONTROL_EXT_METHODS.sessionGoalClear,
+      );
+    },
+
+    async getSessionGoal(sessionId) {
+      return requestSessionStatus<BridgeSessionGoal>(
+        sessionId,
+        SERVE_CONTROL_EXT_METHODS.sessionGoalGet,
       );
     },
 

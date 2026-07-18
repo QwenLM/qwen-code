@@ -9,6 +9,7 @@ import { withActionTimeout } from '../timing.js';
 import type {
   DaemonDirectoryListing,
   DaemonFileStat,
+  DaemonGoal,
   DaemonScheduledTask,
   DaemonWorkspaceActions,
   DaemonWorkspacePathSuggestions,
@@ -628,6 +629,57 @@ export function createDaemonWorkspaceActions({
       if (!res.ok) {
         throw new Error(await readDaemonError(res, `DELETE ${path}`));
       }
+    },
+
+    // Goals. `GET /goals` is REST-only (like /scheduled-tasks) and not on the
+    // DaemonClient transport; the clear path reuses the existing per-session
+    // route so a page-level clear and a `/goal clear` in chat take the same
+    // code path in the daemon.
+    async listGoals() {
+      requireClient(getClient, 'List goals failed');
+      const url = createDaemonRequestUrl(baseUrl, '/goals');
+      const res = await withActionTimeout(
+        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+          headers: createDaemonHeaders(token),
+        }),
+        'List goals timed out',
+      );
+      if (!res.ok) {
+        throw new Error(await readDaemonError(res, 'GET /goals'));
+      }
+      const data = (await res.json()) as {
+        goals?: DaemonGoal[];
+        droppedCount?: number;
+      };
+      return {
+        goals: Array.isArray(data.goals) ? data.goals : [],
+        droppedCount:
+          typeof data.droppedCount === 'number' && data.droppedCount > 0
+            ? data.droppedCount
+            : 0,
+      };
+    },
+
+    async clearGoal(sessionId) {
+      requireClient(getClient, 'Clear goal failed');
+      const url = createDaemonRequestUrl(
+        baseUrl,
+        `/session/${encodeURIComponent(sessionId)}/goal/clear`,
+      );
+      const res = await withActionTimeout(
+        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+          method: 'POST',
+          headers: createDaemonJsonHeaders(token),
+          body: '{}',
+        }),
+        'Clear goal timed out',
+      );
+      if (!res.ok) {
+        throw new Error(
+          await readDaemonError(res, `POST /session/${sessionId}/goal/clear`),
+        );
+      }
+      return (await res.json()) as { cleared: boolean };
     },
 
     async loadEnv() {

@@ -408,6 +408,24 @@ export interface BridgeSessionSummary {
   color?: SessionGroupPresetColor | null;
 }
 
+/**
+ * A session's live `/goal` state, as reported by the `qwen --acp` child.
+ *
+ * Only the active goal crosses the bridge. The child also caches the most
+ * recent goal that ended on its own, but nothing on this side reads it, so it
+ * is not part of the wire shape — add it back alongside the first consumer.
+ */
+export interface BridgeSessionGoal {
+  active: {
+    condition: string;
+    /** Judge turns completed so far; 0 before the first stop-hook evaluation. */
+    iterations: number;
+    setAt: number;
+    /** The judge's verdict on the most recent turn, when it has run. */
+    lastReason?: string;
+  } | null;
+}
+
 export interface SessionMetadataUpdate {
   displayName?: string;
 }
@@ -1016,6 +1034,13 @@ export interface AcpSessionBridge {
   clearSessionGoal(
     sessionId: string,
   ): Promise<{ cleared: boolean; condition?: string }>;
+
+  /**
+   * Read a live session's goal state. Throws `SessionNotFoundError` when the
+   * session is not resident — goals live in the child's memory, so a
+   * non-resident session has no goal to report.
+   */
+  getSessionGoal(sessionId: string): Promise<BridgeSessionGoal>;
 
   /**
    * Resume a live session's unfinished previous turn — an interrupted prompt

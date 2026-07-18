@@ -139,6 +139,7 @@ export async function collectHistoryReplayUpdates({
   gaps,
   cumulativeUsage,
   logger,
+  supersedeUnrestorableGoal,
 }: {
   sessionId: string;
   config?: Config;
@@ -146,11 +147,18 @@ export async function collectHistoryReplayUpdates({
   gaps?: HistoryGap[];
   cumulativeUsage: CumulativeUsage;
   logger?: ReplayLogger;
+  /**
+   * Forwarded to `HistoryReplayer`. Only the resume path, where
+   * `#restoreGoalOnResume` follows, sets this. Reading another session's
+   * history must render it as it was, not editorialize a goal it won't restore.
+   */
+  supersedeUnrestorableGoal?: boolean;
 }): Promise<{ updates: SessionUpdate[]; replayError?: string }> {
   const updates: SessionUpdate[] = [];
   try {
     await new HistoryReplayer(
       replayContext(sessionId, updates, cumulativeUsage, config),
+      { supersedeUnrestorableGoal },
     ).replay(records, gaps);
   } catch (error) {
     const replayError = error instanceof Error ? error.message : String(error);

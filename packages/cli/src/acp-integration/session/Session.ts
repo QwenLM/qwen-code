@@ -198,6 +198,10 @@ import {
 } from '../../ui/types.js';
 import { extractAtPathCommands } from '../../ui/hooks/atCommandProcessor.js';
 import {
+  goalTerminalEventToHistoryItem,
+  recordGoalStatusItem,
+} from '../../ui/utils/restoreGoal.js';
+import {
   ACP_ROUTE_ID_PREFIX,
   buildAcpModelOptions,
   getCurrentAcpModelId,
@@ -1180,10 +1184,14 @@ export class Session implements SessionContext {
     // Initialize modular components with this session as context
     this.toolCallEmitter = new ToolCallEmitter(this);
     this.planEmitter = new PlanEmitter(this);
-    this.historyReplayer = new HistoryReplayer(this);
+    // This replayer only ever runs on resume, so it may correct an active goal
+    // card that `#restoreGoalOnResume` is about to refuse.
+    this.historyReplayer = new HistoryReplayer(this, {
+      supersedeUnrestorableGoal: true,
+    });
     this.messageEmitter = new MessageEmitter(this);
 
-    this.#installGoalTerminalObserver();
+    this.installGoalTerminalObserver();
     this.#registerBackgroundNotificationCallbacks();
     this.#registerSubSessionSpawner();
   }
@@ -1557,21 +1565,45 @@ export class Session implements SessionContext {
     }
   }
 
-  #installGoalTerminalObserver(): void {
+  /**
+   * Installs (or replaces) this session's goal-terminal observer.
+   *
+   * Public because it does not stay installed: `registerGoalHook` and
+   * `unregisterGoalHook` both clear the observer table for the session, so any
+   * caller that (re-)registers a goal outside `#processSlashCommandResult` —
+   * notably goal restore on resume — has to put it back. Idempotent.
+   */
+  installGoalTerminalObserver(): void {
     setGoalTerminalObserver(this.sessionId, (event: GoalTerminalEvent) => {
       void this.messageEmitter.emitGoalTerminal(event).catch((error) => {
         debugLogger.warn(
           `Failed to emit goal terminal update: ${this.#formatError(error)}`,
         );
       });
+      // The wire update is live-only. Persist the terminal card too, so a
+      // resumed session sees the goal as finished instead of re-registering it
+      // from the still-present `set` card.
+      recordGoalStatusItem(this.config, goalTerminalEventToHistoryItem(event));
     });
   }
 
+  /**
+   * Emits a goal card and persists it to the transcript. Both `set` and
+   * `cleared` reach the client this way — from `#emitGoalStatusItems` for a
+   * `/goal` prompt, and from the `sessionGoalClear` ext method — so recording
+   * here (rather than at each call site) keeps the transcript in step with the
+   * hook. Replay goes through `messageEmitter.emitGoalStatus` directly and so
+   * does not re-record.
+   */
   emitGoalStatus(status: Omit<HistoryItemGoalStatus, 'id' | 'type'>): void {
     void this.messageEmitter.emitGoalStatus(status).catch((error) => {
       debugLogger.warn(
         `Failed to emit goal status update: ${this.#formatError(error)}`,
       );
+    });
+    recordGoalStatusItem(this.config, {
+      type: MessageType.GOAL_STATUS,
+      ...status,
     });
   }
 
@@ -6934,7 +6966,7 @@ export class Session implements SessionContext {
       }
     }
     if (hasActiveGoalStatus) {
-      this.#installGoalTerminalObserver();
+      this.installGoalTerminalObserver();
     }
   }
 
