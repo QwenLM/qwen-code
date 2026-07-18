@@ -343,7 +343,9 @@ jobs:
             # tested classifier, and a second scheduled rerun owner here raced
             # it. The shepherd only surfaces the state on the dashboard.
             elif [[ -n "${FAILED_TEST_URL}" && "${PENDING}" == "0" ]]; then
-              STATUS_NOTE='ci red'
+              # The URL is WHY the extraction exists: the dashboard links
+              # straight to the failing job so nobody walks PRs one by one.
+              STATUS_NOTE="[ci red](${FAILED_TEST_URL})"
               ACTION_NOTE='reruns owned by CI Failure Patrol'
             elif [[ "${PENDING}" != "0" ]]; then
               STATUS_NOTE="checks in flight (${PENDING})"

@@ -330,6 +330,9 @@ describe('fleet shepherd workflow', () => {
     // is just as red on the health view as an Ubuntu one.
     expect(workflow).toContain('startswith("Test (")');
     expect(workflow).not.toContain('Test (ubuntu');
+    // The extracted URL is surfaced as a dashboard link to the failing job —
+    // extracting it just to test non-emptiness would be dead weight.
+    expect(workflow).toContain('STATUS_NOTE="[ci red](${FAILED_TEST_URL})"');
     // act() propagates exit codes, so EVERY call site must be if-wrapped or a
     // failure aborts the tick under set -e — including the dashboard writes.
     expect(workflow).toMatch(/if ! act "create dashboard issue"/);
