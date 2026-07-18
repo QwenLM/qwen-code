@@ -35,6 +35,10 @@ describe('fleet shepherd workflow', () => {
     expect(workflow).toContain("group: 'fleet-shepherd'");
     expect(workflow).toContain('cancel-in-progress: false');
     expect(workflow).toContain('timeout-minutes: 15');
+    // The strict-mode contract the comments, if-wrappers, and the act()
+    // behavioral replay all assume is DECLARED, not left to Actions'
+    // default shell (which has -e but not pipefail).
+    expect(workflow).toContain('set -eo pipefail');
   });
 
   it('walks only in-repo main-targeting bot PRs', () => {

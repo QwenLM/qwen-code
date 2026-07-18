@@ -72,6 +72,11 @@ jobs:
           ACTIONS_TOKEN: '${{ github.token }}'
           DRY_RUN: '${{ inputs.dry_run }}'
         run: |-
+          # Explicit, not implied: the act() contract, every if-wrapper, and
+          # the behavioral test all assume these semantics (Actions' default
+          # bash gives -e but NOT pipefail).
+          set -eo pipefail
+
           DASH_ROWS=''
           SYNCS=0
           DISPATCHES=0
