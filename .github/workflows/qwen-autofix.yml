@@ -1420,19 +1420,26 @@ jobs:
           # QUEUES the duplicate rather than discarding it — but that queueing
           # is exactly what makes this check sound: address jobs for one PR run
           # strictly one at a time, so by the time the duplicate runs here, the
-          # first job's eval marker is posted and visible. Recompute the
-          # watermark from LIVE markers; if nothing is newer and there is no
-          # conflict, this run is a stale duplicate and discards itself.
+          # first job's eval marker is posted and visible. Two duplicate
+          # signatures: (a) a sibling evaluated through a NEWER live ts than
+          # our matrix watermark; (b) a conflict-only sibling resolved and
+          # marked at the SAME ts — with no newer feedback its marker keeps
+          # ts=watermark while its ROUND advances past ours (ours is the max
+          # round observed at scan time). Either way, if there is no live
+          # conflict left and nothing newer than the live watermark, this run
+          # is a stale duplicate and discards itself.
           STALE='false'
-          LIVE_EVAL_WM="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+          LIVE_MARKS="$(jq -r --arg ab "${AUTOFIX_BOT}" '
             [ .[] | select((.user.login // "") == $ab) | (.body // "")
-              | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+) -->") ] | .[]
-              | .[0] ] | max // ""' "${WORKDIR}/ic.json")"
-          if [[ -n "${LIVE_EVAL_WM}" && "${LIVE_EVAL_WM}" > "${WATERMARK}" && "${CONFLICT}" != "true" ]]; then
+              | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+) -->") ] | .[] ]' "${WORKDIR}/ic.json")"
+          LIVE_EVAL_WM="$(jq -r 'map(.[0]) | max // ""' <<< "${LIVE_MARKS}")"
+          LIVE_MAX_ROUND="$(jq -r 'map(.[2] | tonumber) | max // 0' <<< "${LIVE_MARKS}")"
+          if [[ -n "${LIVE_EVAL_WM}" && "${CONFLICT}" != "true" ]] \
+            && { [[ "${LIVE_EVAL_WM}" > "${WATERMARK}" ]] || [[ "${LIVE_MAX_ROUND}" -gt "${ROUND}" ]]; }; then
             LIVE_NEW="$(jq -rs \
               --arg wm "${LIVE_EVAL_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
               --argjson trust "${TRUSTED_ASSOC}" '
-              ((.[0] | map(select((.submitted_at // "") > $wm)
+              (.[0] | map(select((.submitted_at // "") > $wm)
                 | select((.user.login // "") != $ab)
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
                 | select((.state // "") | IN("CHANGES_REQUESTED", "COMMENTED"))) | length)
@@ -1449,7 +1456,7 @@ jobs:
               "${WORKDIR}/rv.json" "${WORKDIR}/rc.json" "${WORKDIR}/ic.json" "${WORKDIR}/checks.json")"
             if [[ "${LIVE_NEW}" == "0" ]]; then
               STALE='true'
-              echo "🫥 stale duplicate target: a sibling run already evaluated through ${LIVE_EVAL_WM} and nothing is newer — discarding without action or marker"
+              echo "🫥 stale duplicate target: a sibling run already evaluated through ${LIVE_EVAL_WM} (round ${LIVE_MAX_ROUND}) and nothing is newer — discarding without action or marker"
             fi
           fi
           echo "stale=${STALE}" >> "${GITHUB_OUTPUT}"
