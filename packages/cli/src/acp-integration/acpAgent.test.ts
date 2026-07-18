@@ -664,7 +664,6 @@ vi.mock('../utils/languageUtils.js', () => ({
   resolveOutputLanguageOrPreserveAuto: vi.fn(
     (v: string | null | undefined) => v ?? 'auto',
   ),
-  isAutoLanguage: vi.fn(() => false),
   OUTPUT_LANGUAGE_AUTO: 'auto',
 }));
 vi.mock('../i18n/index.js', async (importOriginal) => {
@@ -731,7 +730,6 @@ import {
 } from '@qwen-code/acp-bridge/status';
 import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
 import {
-  isAutoLanguage,
   resolveOutputLanguageOrPreserveAuto,
   updateOutputLanguageFile,
   writeOutputLanguageAndRegisterPath,
@@ -10624,7 +10622,6 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(isAutoLanguage).mockReturnValue(false);
     vi.mocked(resolveOutputLanguageOrPreserveAuto).mockImplementation(
       (v: string | null | undefined) => v ?? 'auto',
     );
@@ -11199,8 +11196,6 @@ describe('sessionLanguage multi-session propagation', () => {
   });
 
   it('preserves auto output language when syncing across sessions', async () => {
-    vi.mocked(isAutoLanguage).mockImplementation((value) => value === 'auto');
-
     const cfgA = makeConfig({
       getSessionId: vi.fn().mockReturnValue('s-a'),
       getOutputLanguageFilePath: vi
