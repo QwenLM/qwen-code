@@ -233,6 +233,20 @@ describe('ToolApproval accessibility', () => {
     expect(document.activeElement).toBe(opts[1]);
   });
 
+  it('focuses the safe default when a new request arrives while active', () => {
+    render(undefined); // keyboardActive=true (topmost)
+    const opts = optionButtons();
+    // User moves off the safe default (Reject) to Proceed.
+    pressKey(opts[0]!, 'ArrowDown');
+    expect(document.activeElement).toBe(opts[1]);
+
+    // A NEW request (different id) arrives while still active: focus must go to
+    // the new request's safe default, not the stale option index the user was on
+    // (which could map to a more permissive option in the new request).
+    rerender(true, { ...request, id: 'req-2' });
+    expect(document.activeElement).toBe(optionButtons()[0]);
+  });
+
   it('leaves Enter to native button activation (no double-press guard)', () => {
     render(undefined);
     const opts = optionButtons();
