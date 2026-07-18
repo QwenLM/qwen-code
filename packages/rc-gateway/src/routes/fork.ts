@@ -9,6 +9,7 @@ import type { RequestHandler } from 'express';
 import type { DaemonClient } from '@qwen-code/sdk';
 import type { AuditRecorder } from '../auditLog.js';
 import { resolveChatsDir, isValidSessionId } from '../sessions/chatsPath.js';
+import { resolveTurn } from '../sessions/turnResolver.js';
 import {
   forkRecords,
   serializeForked,
@@ -107,6 +108,7 @@ export function createForkRoute(
     const body = (req.body ?? {}) as {
       transcript?: unknown;
       fromEventId?: unknown;
+      fromTurn?: unknown;
       name?: unknown;
     };
 
@@ -136,12 +138,26 @@ export function createForkRoute(
     // fromEventId: optional non-negative integer. When provided, the transcript
     // slice is capped at this many records (0 = empty body; n = first n records).
     // Validated as a non-negative integer; anything else is ignored (full copy).
-    const fromEventId =
+    let fromEventId =
       typeof body.fromEventId === 'number' &&
       Number.isInteger(body.fromEventId) &&
       body.fromEventId >= 0
         ? body.fromEventId
         : undefined;
+
+    // fromTurn: an alternative, turn-numbered way to name the same slice
+    // boundary fromEventId already names (add-remote-rewind). Resolved via
+    // the shared resolveTurn once the parent records are read below;
+    // mutually exclusive with fromEventId (checked eagerly, before any
+    // filesystem read).
+    const hasFromTurn = body.fromTurn !== undefined;
+    if (hasFromTurn && fromEventId !== undefined) {
+      res.status(400).json({
+        error: 'fromTurn and fromEventId are mutually exclusive',
+        code: 'mutually_exclusive',
+      });
+      return;
+    }
 
     // 2. An invalid id can't name a file → treat as a missing parent.
     const parentId = req.params.id;
@@ -171,6 +187,18 @@ export function createForkRoute(
         code: 'parent_transcript_not_found',
       });
       return;
+    }
+
+    if (hasFromTurn) {
+      const resolved = resolveTurn(allRecords, body.fromTurn);
+      if (!resolved.ok) {
+        const status = resolved.error === 'invalid_turn' ? 400 : 409;
+        res
+          .status(status)
+          .json({ error: resolved.error, code: resolved.error });
+        return;
+      }
+      fromEventId = resolved.truncatedEventId;
     }
 
     // Apply fromEventId slicing: when present, take only the first fromEventId

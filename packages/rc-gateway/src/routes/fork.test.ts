@@ -509,3 +509,102 @@ describe('fork route', () => {
     });
   });
 });
+
+describe('fromTurn addressing', () => {
+  async function writeTwoTurnParent(): Promise<void> {
+    await mkdir(chatsDir, { recursive: true });
+    const records = [
+      {
+        uuid: 'u0',
+        parentUuid: null,
+        sessionId: PARENT_ID,
+        cwd: CWD,
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'first' }] },
+      },
+      {
+        uuid: 'a0',
+        parentUuid: 'u0',
+        sessionId: PARENT_ID,
+        cwd: CWD,
+        type: 'assistant',
+        message: { role: 'model', parts: [{ text: 'reply' }] },
+      },
+      {
+        uuid: 'u1',
+        parentUuid: 'a0',
+        sessionId: PARENT_ID,
+        cwd: CWD,
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'second' }] },
+      },
+    ];
+    await writeFile(
+      join(chatsDir, `${PARENT_ID}.jsonl`),
+      records.map((r) => JSON.stringify(r)).join('\n') + '\n',
+      'utf8',
+    );
+  }
+
+  it('fromTurn slices identically to the equivalent fromEventId', async () => {
+    await writeTwoTurnParent();
+    const { daemon: daemonA } = fakeDaemon(async () => ({}));
+    const fixedNow = () => new Date('2026-01-01T00:00:00.000Z');
+    const urlA = await mount({
+      daemon: daemonA,
+      audit: fakeAudit(),
+      randomId: () => NEW_ID,
+      now: fixedNow,
+    });
+    const resA = await postFork(urlA, { fromTurn: 1 });
+    expect(resA.status).toBe(200);
+    const bodyA = await readFile(join(chatsDir, `${NEW_ID}.jsonl`), 'utf8');
+
+    if (server) await new Promise<void>((r) => server!.close(() => r()));
+    server = undefined;
+    const { daemon: daemonB } = fakeDaemon(async () => ({}));
+    const urlB = await mount({
+      daemon: daemonB,
+      audit: fakeAudit(),
+      randomId: () => ROLLBACK_ID,
+      now: fixedNow,
+    });
+    const resB = await postFork(urlB, { fromEventId: 2 }); // turn 1's boundary = record index 2
+    expect(resB.status).toBe(200);
+    const bodyB = await readFile(
+      join(chatsDir, `${ROLLBACK_ID}.jsonl`),
+      'utf8',
+    );
+
+    // Both forks copy the same one record (the first user+assistant pair);
+    // strip the differing sessionId/uuid fields the fork writer stamps.
+    const stripIds = (text: string) =>
+      text
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => {
+          const obj = JSON.parse(line) as Record<string, unknown>;
+          delete obj['sessionId'];
+          return obj;
+        });
+    expect(stripIds(bodyA)).toEqual(stripIds(bodyB));
+  });
+
+  it('rejects both fromTurn and fromEventId with 400 mutually_exclusive', async () => {
+    await writeParent();
+    const { daemon } = fakeDaemon(async () => ({}));
+    const url = await mount({ daemon, audit: fakeAudit() });
+    const res = await postFork(url, { fromTurn: 0, fromEventId: 0 });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ code: 'mutually_exclusive' });
+  });
+
+  it('maps an invalid fromTurn to 400 invalid_turn', async () => {
+    await writeParent();
+    const { daemon } = fakeDaemon(async () => ({}));
+    const url = await mount({ daemon, audit: fakeAudit() });
+    const res = await postFork(url, { fromTurn: -1 });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ code: 'invalid_turn' });
+  });
+});
