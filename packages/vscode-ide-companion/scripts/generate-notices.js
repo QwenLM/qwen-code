@@ -55,6 +55,8 @@ async function getDependencyLicense(depName, depVersion, resolvedKey) {
       'LICENSE.md',
       'LICENSE.txt',
       'LICENSE-MIT.txt',
+      'LICENSE-MIT',
+      'LICENCE.md',
       'license.md',
       'license',
     ]
