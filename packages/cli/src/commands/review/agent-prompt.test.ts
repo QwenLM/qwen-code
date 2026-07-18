@@ -530,6 +530,36 @@ describe('--all-chunks — every auditor of a Step 5 round, in one call', () => 
     }
   });
 
+  it('refuses a plan with no chunks[] at all — an empty plan is not a clean round', () => {
+    // The first guard in runAllChunks; the id-validation tests below all pass
+    // a populated chunks[], so this guard inverted or deleted would let an
+    // empty plan through with no test going red.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-allchunks-none-'));
+    try {
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '- x');
+      const emptied = { ...PLAN, chunks: [] };
+      const missing = { ...PLAN } as Record<string, unknown>;
+      delete missing['chunks'];
+      for (const shape of [emptied, missing]) {
+        const plan = join(dir, 'plan.json');
+        writeFileSync(plan, JSON.stringify(shape));
+        expect(() =>
+          (agentPromptCommand.handler as (a: unknown) => void)({
+            plan,
+            role: 'reverse-audit',
+            'all-chunks': true,
+            findings,
+          }),
+        ).toThrow(/no `chunks\[\]`/);
+        expect(readRecordedPrompts(plan).size).toBe(0);
+      }
+      expect(writeStdoutLine as unknown as Mock).not.toHaveBeenCalled();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('refuses a plan whose every chunk id is unusable — zero auditors is not a clean round', () => {
     // The filter used to swallow this: all-non-integer ids passed the has-chunks
     // guard, the filter emptied the list, and the command printed "0 auditors
