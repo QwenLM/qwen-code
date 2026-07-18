@@ -757,6 +757,47 @@ describe('initDaemonLogger bounded storage', () => {
     await fallback.close();
   });
 
+  it('uses fallback when releasing failed stable ownership throws', async () => {
+    let appendCalls = 0;
+    const stderr: string[] = [];
+    const acquireLock = vi.fn(async (_target: string, options: unknown) => {
+      const lockPath = (options as { lockfilePath?: string }).lockfilePath;
+      return async () => {
+        if (lockPath?.endsWith('.stable-writer.lock')) {
+          throw new Error('stable release failed');
+        }
+      };
+    });
+    const fallback = await createLogger({
+      boundWorkspace: '/w',
+      baseDir: tmp,
+      runId: '11111111111111111111111111111111',
+      stderr: (line) => stderr.push(line),
+      acquireLock: acquireLock as never,
+      fs: {
+        ...fsPromises,
+        chmod: async () => {},
+        appendFile: async (...args) => {
+          appendCalls += 1;
+          if (appendCalls === 1) throw new Error('stable boot failed');
+          return fsPromises.appendFile(...args);
+        },
+      },
+      policy: { stableAcquireBudgetMs: 0 },
+    });
+
+    expect(fallback.getStatus()).toMatchObject({
+      mode: 'fallback',
+      health: 'degraded',
+      issues: ['init_failed', 'write_failed'],
+    });
+    expect(stderr).toContainEqual(
+      expect.stringContaining(
+        'stable log lease release failed; trying fallback',
+      ),
+    );
+  });
+
   it('releases stable ownership when the probe warning cannot reach stderr', async () => {
     let appendCalls = 0;
     const fallback = await createLogger({

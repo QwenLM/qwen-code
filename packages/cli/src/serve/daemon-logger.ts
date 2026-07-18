@@ -1668,17 +1668,10 @@ export async function initDaemonLogger(
     } catch (error) {
       warnOnce(
         'stable-release',
-        `qwen serve: daemon stable log lease release failed; file logging disabled: ${
+        `qwen serve: daemon stable log lease release failed; trying fallback: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
-      return createStderrOnlyLogger({
-        runId,
-        daemonId: computeDaemonId(pid),
-        now,
-        stderr,
-        issues,
-      });
     }
   } catch (error) {
     if (isErrno(error, 'ELOCKED')) {
