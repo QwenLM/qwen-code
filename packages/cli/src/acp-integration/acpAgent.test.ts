@@ -769,13 +769,21 @@ import {
   SERVE_STATUS_EXT_METHODS,
   SERVE_CONTROL_EXT_METHODS,
 } from '@qwen-code/acp-bridge/status';
-import { TODO_STOP_GUARD_QUEUE_RELEASE_METHOD } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
 import {
   updateOutputLanguageFile,
   writeOutputLanguageAndRegisterPath,
 } from '../utils/languageUtils.js';
 import { buildAuthMethods } from './authMethods.js';
+import {
+  CHANNEL_STARTUP_PROFILE_META_KEY,
+  CHANNEL_STARTUP_PROFILE_VERSION,
+  TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
+} from '@qwen-code/acp-bridge/bridgeTypes';
+import {
+  initializeAcpStartupProfiler,
+  resetAcpStartupProfilerForTesting,
+} from '../utils/acp-startup-profiler.js';
 
 describe('runAcpAgent shutdown cleanup', () => {
   let processExitSpy: MockInstance<typeof process.exit>;
@@ -791,6 +799,7 @@ describe('runAcpAgent shutdown cleanup', () => {
   const mockArgv = {} as CliArgs;
 
   beforeEach(() => {
+    resetAcpStartupProfilerForTesting();
     vi.clearAllMocks();
     mockMcpApprovals.getState.mockReturnValue('approved');
     mockMcpApprovals.setState.mockResolvedValue(undefined);
@@ -849,6 +858,7 @@ describe('runAcpAgent shutdown cleanup', () => {
   });
 
   afterEach(() => {
+    resetAcpStartupProfilerForTesting();
     processExitSpy.mockRestore();
     stdinDestroySpy.mockRestore();
     stdoutDestroySpy.mockRestore();
@@ -1457,6 +1467,44 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         },
       },
     });
+    expect(response).not.toHaveProperty('_meta');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('returns the startup profile only when initialize metadata requests v1', async () => {
+    initializeAcpStartupProfiler();
+    const mockSettings = {
+      merged: { mcpServers: {} },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const fakeConn = {
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    } as AgentSideConnectionLike;
+    const agent = capturedAgentFactory!(fakeConn) as AgentLike;
+
+    const response = (await agent.initialize({
+      clientCapabilities: {},
+      _meta: {
+        [CHANNEL_STARTUP_PROFILE_META_KEY]: {
+          v: CHANNEL_STARTUP_PROFILE_VERSION,
+        },
+      },
+    })) as Record<string, unknown>;
+
+    expect(response['_meta']).toMatchObject({
+      [CHANNEL_STARTUP_PROFILE_META_KEY]: {
+        v: CHANNEL_STARTUP_PROFILE_VERSION,
+        complete: false,
+        phases: expect.any(Object),
+        config: expect.any(Object),
+      },
+    });
+    expect(JSON.stringify(response['_meta']).length).toBeLessThan(2048);
 
     mockConnectionState.resolve();
     await agentPromise;
