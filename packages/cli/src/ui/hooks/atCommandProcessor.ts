@@ -152,6 +152,14 @@ function parseAllAtCommands(query: string): AtCommandPart[] {
   );
 }
 
+export function extractAtPathCommands(query: string): string[] {
+  return parseAllAtCommands(query).flatMap((part) =>
+    part.type === 'atPath' && part.content !== '@'
+      ? [part.content.substring(1)]
+      : [],
+  );
+}
+
 /**
  * Detect an `@server:uri` MCP resource reference. Returns the parsed
  * `{ serverName, uri }` ONLY when `pathName` is prefixed by a configured MCP

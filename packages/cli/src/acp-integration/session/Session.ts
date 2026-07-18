@@ -5,6 +5,7 @@
  */
 
 import { Buffer } from 'node:buffer';
+import { existsSync, statSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type {
@@ -63,6 +64,7 @@ import {
   getErrorStatus,
   UserPromptEvent,
   readManyFiles,
+  getSpecificMimeType,
   clampInlineMediaPart,
   Storage,
   Kind,
@@ -194,6 +196,7 @@ import {
   MessageType,
   type HistoryItemGoalStatus,
 } from '../../ui/types.js';
+import { extractAtPathCommands } from '../../ui/hooks/atCommandProcessor.js';
 import {
   ACP_ROUTE_ID_PREFIX,
   buildAcpModelOptions,
@@ -742,6 +745,18 @@ interface CronQueueItem {
 
 const MAX_NOTIFICATION_QUEUE = 20;
 const MAX_DEFERRED_UNRELATED_CRON_QUEUE = 20;
+
+export function isExistingFile(
+  resolved: string,
+  fileExists: (path: string) => boolean = existsSync,
+  statFile: (path: string) => { isFile(): boolean } = statSync,
+): boolean {
+  try {
+    return fileExists(resolved) && statFile(resolved).isFile();
+  } catch {
+    return false;
+  }
+}
 
 export function resolveHomeLoopResolverRoots({
   homeQwenDir = Storage.getGlobalQwenDir(),
@@ -7059,6 +7074,7 @@ export class Session implements SessionContext {
     const embeddedContext: EmbeddedResourceResource[] = [];
     const extensionMentions = new Map<string, string>();
     const mcpServerMentions = new Map<string, string>();
+    const textPathSpecsToRead = new Set<string>();
     const preserveUnsupportedImageForBridge = shouldRunVisionBridge(
       this.config,
     );
@@ -7068,6 +7084,26 @@ export class Session implements SessionContext {
         case 'text':
           collectExtensionMentionRefs(part.text, extensionMentions);
           collectMcpServerMentionRefs(part.text, mcpServerMentions);
+          for (const pathSpec of extractAtPathCommands(part.text)) {
+            const resolved = path.resolve(
+              this.config.getProjectRoot(),
+              pathSpec,
+            );
+            const filteringOptions = this.config.getFileFilteringOptions();
+            if (
+              path.isAbsolute(pathSpec) &&
+              getSpecificMimeType(resolved)?.startsWith('image/') &&
+              isExistingFile(resolved) &&
+              this.config
+                .getWorkspaceContext()
+                .isPathWithinWorkspace(pathSpec) &&
+              !this.config
+                .getFileService()
+                .shouldIgnoreFile(pathSpec, filteringOptions)
+            ) {
+              textPathSpecsToRead.add(pathSpec);
+            }
+          }
           return { text: part.text };
         case 'image':
           if (preserveUnsupportedImageForBridge) {
@@ -7116,6 +7152,12 @@ export class Session implements SessionContext {
     });
 
     const atPathCommandParts = parts.filter((part) => 'fileData' in part);
+    const pathSpecsToRead = [
+      ...new Set([
+        ...textPathSpecsToRead,
+        ...atPathCommandParts.map((part) => part.fileData!.fileUri!),
+      ]),
+    ];
     const extensionParts = await this.#resolveExtensionMentionParts(
       extensionMentions,
       abortSignal,
@@ -7124,7 +7166,7 @@ export class Session implements SessionContext {
       this.#resolveMcpServerMentionParts(mcpServerMentions);
 
     if (
-      atPathCommandParts.length === 0 &&
+      pathSpecsToRead.length === 0 &&
       embeddedContext.length === 0 &&
       extensionParts.length === 0 &&
       mcpServerParts.length === 0
@@ -7136,19 +7178,13 @@ export class Session implements SessionContext {
       );
     }
 
-    if (atPathCommandParts.length === 0 && embeddedContext.length === 0) {
+    if (pathSpecsToRead.length === 0 && embeddedContext.length === 0) {
       return this.#applyBridgeConversionsIfNeeded(
         [...parts, ...extensionParts, ...mcpServerParts],
         abortSignal,
         options.onFullTurnModel,
       );
     }
-
-    // Extract paths from @ commands - pass directly to readManyFiles without filtering
-    // since this is user-triggered behavior, not LLM-triggered
-    const pathSpecsToRead: string[] = atPathCommandParts.map(
-      (part) => part.fileData!.fileUri!,
-    );
 
     // Construct the initial part of the query for the LLM
     let initialQueryText = '';
