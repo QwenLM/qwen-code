@@ -58,6 +58,12 @@ export function getGlobalQwenDir(): string {
  * avoids cross-package imports, the same way this file mirrors core's
  * `Storage`. A path that does not exist keeps its resolved spelling, matching
  * the acp-bridge ENOENT fallback.
+ *
+ * Deliberately broader than acp-bridge on OTHER realpath errors
+ * (EACCES/EIO/ELOOP): acp-bridge propagates those because workspace
+ * registration must fail loudly, but pairing storage is a best-effort
+ * subsystem — a transient FS error must not prevent the channel from
+ * starting, so every failure falls back to the resolved spelling.
  */
 export function canonicalizeWorkspacePath(workspaceCwd: string): string {
   const resolved = resolvePath(workspaceCwd);

@@ -100,9 +100,10 @@ describe('canonicalizeWorkspacePath', () => {
   it('keeps the resolved spelling for a path that does not exist (ENOENT fallback)', () => {
     const missing = path.join(os.tmpdir(), 'qwen-scope-missing', 'nested');
     expect(canonicalizeWorkspacePath(missing)).toBe(resolvePath(missing));
-    // Still deterministic for scope naming.
+    // The scope name of a nonexistent path is exactly the one computed from
+    // its resolved spelling — the realpath step degrades to a no-op.
     expect(getWorkspaceScopeDirName(missing)).toBe(
-      getWorkspaceScopeDirName(missing),
+      getWorkspaceScopeDirName(resolvePath(missing)),
     );
   });
 });
