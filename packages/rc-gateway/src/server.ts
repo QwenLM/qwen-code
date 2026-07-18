@@ -79,6 +79,7 @@ import type { NativeShellsCapability } from './nativePush/nativeShells.js';
 import type { AggregateQuery } from './cost/usageStore.js';
 import type { UsageTickBroadcaster } from './cost/usageTickBroadcaster.js';
 import { createForkRoute } from './routes/fork.js';
+import { createRewindRoute } from './routes/rewind.js';
 import {
   createIdleToggleRoute,
   createIdleStatusRoute,
@@ -181,6 +182,14 @@ export interface GatewayDeps {
    * config + rate-limiter). Omitted → status reports `available:false`.
    */
   idleStatus?: IdleStatusResolver;
+  /**
+   * Root directory for per-session WAL files (add-session-forking,
+   * add-remote-rewind). When set, the fork and rewind routes seed durable
+   * WAL markers (`session_forked`/`child_forked`/`session_rewound`) that
+   * survive a reconnect. Omitted in production today — see the plan's
+   * Global Constraints note on this being a currently-dark wiring path.
+   */
+  walDir?: string;
   /**
    * Per-sub-actor write cap within the limiter's rolling window (bridge
    * fan-in protection). Defaults to {@link DEFAULT_SUB_ACTOR_CAP}. Falls back to
@@ -1005,6 +1014,38 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       createPushRouter(deps.vapid, deps.pushStore, notifier, audit),
     );
   }
+
+  // POST /session/:id/rewind (add-remote-rewind). OWNER-scoped — a strictly
+  // stronger gate than the WRITE-scoped fork route, because a rewind
+  // destructively truncates the daemon transcript. Mounted HERE (not beside the
+  // fork route) because it injects `notifier`, a `let` initialised in the push
+  // block just above; referencing it at the fork mount would hit its temporal
+  // dead zone. The shared `promptQueue` (the SAME instance passed to
+  // createPromptRoute) makes the route's `queue.acquire(id, 0)` guard reject a
+  // rewind while a prompt holds the session's FIFO slot (409 rewind_in_progress).
+  app.post(
+    '/session/:id/rewind',
+    requireScope(OWNER, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    createRewindRoute(
+      deps.daemon,
+      async () => {
+        try {
+          return (await deps.daemon.capabilities()).workspaceCwd;
+        } catch {
+          return undefined;
+        }
+      },
+      {
+        audit,
+        bus: ownerEvents,
+        notifier,
+        walDir: deps.walDir,
+        queue: promptQueue,
+      },
+    ),
+  );
 
   if (deps.snooze) {
     app.use(

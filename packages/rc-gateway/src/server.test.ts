@@ -823,6 +823,114 @@ describe('gateway app', () => {
     expect((await res.json()).code).toBe('parent_transcript_not_found');
   });
 
+  it('403s the rewind route for a write token (owner scope required)', async () => {
+    const { url, pairing } = await boot();
+    // owner ⊄ write: a write token is strictly weaker than owner, so the
+    // OWNER-gated rewind route must reject it BEFORE the handler runs.
+    const { code } = pairing.mint([SESSION_READ, WRITE]);
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'writer' }),
+    });
+    const writeToken = ((await redeem.json()) as { token: string }).token;
+
+    const res = await fetch(
+      `${url}/session/11111111111111111111111111111111/rewind`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${writeToken}`,
+        },
+        body: JSON.stringify({ toTurn: 0 }),
+      },
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it('mounts the rewind route: an owner token reaches the handler (not 403)', async () => {
+    const { url, pairing } = await boot();
+    const { code } = pairing.mint([OWNER]);
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'owner' }),
+    });
+    const ownerToken = ((await redeem.json()) as { token: string }).token;
+
+    // No on-disk transcript was written for this id, so the handler answers
+    // 404 (session/parent transcript not found). The assertion is that OWNER
+    // scope reaches the handler at all — i.e. NOT 403.
+    const res = await fetch(
+      `${url}/session/11111111111111111111111111111111/rewind`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${ownerToken}`,
+        },
+        body: JSON.stringify({ toTurn: 0 }),
+      },
+    );
+    expect(res.status).not.toBe(403);
+  });
+
+  it('rewind shares the prompt route PromptQueue: 409 rewind_in_progress while a prompt holds the slot', async () => {
+    // Behavioural proof that server.ts injects the SAME PromptQueue instance
+    // into both the prompt route and the rewind route. The prompt route
+    // acquires the per-session FIFO slot BEFORE calling the daemon and holds it
+    // until the daemon responds; a long promptDelayMs keeps it held. The rewind
+    // route's guard is a zero-wait acquire on that same session slot — if (and
+    // only if) it is the same queue object, a held slot makes rewind fail
+    // immediately with 409 rewind_in_progress (a separate queue would let the
+    // rewind proceed to a 404 transcript-not-found instead). The delay is long
+    // enough that the slot is provably held during the ~ms-scale rewind probe,
+    // yet short enough that awaiting the prompt at the end keeps teardown quick.
+    const sessionId = '33333333333333333333333333333333';
+    const { url, pairing } = await boot({ promptDelayMs: 500 });
+    const { code } = pairing.mint([OWNER]); // owner ⊃ write: prompts AND rewinds
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'owner' }),
+    });
+    const token = ((await redeem.json()) as { token: string }).token;
+
+    // Fire the prompt WITHOUT awaiting: it acquires and holds the session slot
+    // while the stub daemon sits on the 5s delay.
+    const promptPromise = fetch(`${url}/session/${sessionId}/prompt`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ prompt: 'hold the slot' }),
+    }).catch(() => undefined);
+
+    // The stub records the prompt body the instant the request arrives (before
+    // the delay), which is strictly after the gateway has acquired the queue
+    // slot — so this poll proves the slot is held before we probe the rewind.
+    const deadline = Date.now() + 2000;
+    while (stub!.lastPromptBody === undefined && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(stub!.lastPromptBody).toBeDefined();
+
+    const rewind = await fetch(`${url}/session/${sessionId}/rewind`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ toTurn: 0 }),
+    });
+    expect(rewind.status).toBe(409);
+    expect((await rewind.json()).code).toBe('rewind_in_progress');
+
+    await promptPromise; // let the in-flight prompt settle before teardown
+  });
+
   it('records activity on a prompt POST without breaking the route (working-device middleware wired)', async () => {
     const { url, pairing } = await boot();
     const { code } = pairing.mint([SESSION_READ, APPROVE, WRITE]);
