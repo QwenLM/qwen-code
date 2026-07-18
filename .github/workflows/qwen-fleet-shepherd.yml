@@ -57,6 +57,9 @@ env:
   MAX_SYNCS_PER_TICK: '3'
   MAX_CONFLICT_DISPATCHES_PER_TICK: '2'
   DASHBOARD_TITLE: 'Fleet Shepherd Dashboard'
+  # Maintainer opt-out label, honored at every engagement path (mirrors
+  # qwen-autofix.yml's SKIP_LABEL).
+  SKIP_LABEL: 'autofix/skip'
 
 jobs:
   shepherd:
@@ -249,15 +252,22 @@ jobs:
 
 
           # ---- walk the bot fleet (one list call carries all per-PR meta) --
+          # autofix/skip is the maintainer opt-out honored at every
+          # engagement path — a skip-labeled PR gets no shepherd levers and
+          # no dashboard row (gh's --jq takes no --arg, so filter with
+          # standalone jq).
           if ! gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" --base main \
-            --limit 50 --json number,headRefName,headRefOid,mergeable,isCrossRepository,statusCheckRollup \
-            --jq '[.[] | select(.isCrossRepository != true)]' > /tmp/fleet.json 2> /dev/null; then
+            --limit 50 --json number,headRefName,headRefOid,mergeable,isCrossRepository,statusCheckRollup,labels \
+            > /tmp/fleet-raw.json 2> /dev/null; then
             # A failed fleet fetch must not masquerade as an empty fleet: the
             # walk is skipped AND the dashboard keeps its previous body rather
             # than being overwritten with a misleading empty table.
             echo "::warning::fleet enumeration failed; skipping this tick's walk and dashboard update"
             exit 0
           fi
+          jq --arg skip "${SKIP_LABEL}" \
+            '[.[] | select(.isCrossRepository != true) | select([.labels[]?.name] | index($skip) | not)]' \
+            /tmp/fleet-raw.json > /tmp/fleet.json
 
           while IFS= read -r ROW; do
             [[ -z "${ROW}" ]] && continue

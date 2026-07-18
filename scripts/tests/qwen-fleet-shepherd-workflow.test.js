@@ -60,6 +60,29 @@ describe('fleet shepherd workflow', () => {
       '--json number,headRefName,headRefOid,mergeable,isCrossRepository,statusCheckRollup',
     );
     expect(workflow).not.toContain('gh pr view');
+    // autofix/skip is the maintainer opt-out honored at every engagement
+    // path: a skip-labeled PR gets no shepherd levers and no dashboard row.
+    // Replay the filter VERBATIM to prove the label actually excludes.
+    expect(workflow).toContain("SKIP_LABEL: 'autofix/skip'");
+    const fleetFilter = workflow.match(
+      /jq --arg skip "\$\{SKIP_LABEL\}" \\\n\s+'([\s\S]*?)' \\\n\s+\/tmp\/fleet-raw\.json/,
+    )?.[1];
+    expect(fleetFilter).toBeTruthy();
+    const kept = JSON.parse(
+      execFileSync('jq', ['--arg', 'skip', 'autofix/skip', fleetFilter], {
+        encoding: 'utf8',
+        input: JSON.stringify([
+          { number: 1, isCrossRepository: false, labels: [] },
+          {
+            number: 2,
+            isCrossRepository: false,
+            labels: [{ name: 'autofix/skip' }],
+          },
+          { number: 3, isCrossRepository: true, labels: [] },
+        ]),
+      }),
+    ).map((r) => r.number);
+    expect(kept).toEqual([1]);
     // PAT identity is verified before any write.
     expect(workflow).toContain(
       "::error::CI_DEV_BOT_PAT authenticates as '${bot_actor:-unknown}'",

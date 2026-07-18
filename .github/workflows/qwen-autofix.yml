@@ -11,6 +11,13 @@ name: 'Qwen Autofix'
 #   • every 10m            → review phase; issue phase only if no PR needs work
 #   • issues:labeled        → issue phase when ready label, state, and sender match
 #   • pull_request_review   → review phase for submitted feedback on bot PRs
+#   • pull_request:labeled  → maintainer applies autofix/takeover → the loop
+#                             manages that PR (human-authored included);
+#                             unlabeled releases it. autofix/skip opts any PR
+#                             out everywhere and wins over takeover. Labels
+#                             need GitHub triage+, so the permission gate is
+#                             GitHub's own — the comment-command surface
+#                             stays closed.
 #   • workflow_dispatch     → force a phase, an issue, or a PR
 #
 # Every GitHub write (issue/PR comments, labels, branch push, PR create) goes
@@ -25,6 +32,10 @@ on:
   pull_request_review:
     types:
       - 'submitted'
+  pull_request:
+    types:
+      - 'labeled'
+      - 'unlabeled'
   schedule:
     - cron: '*/10 * * * *' # Review first; issue fallback only when no PR needs work
   workflow_dispatch:
@@ -80,6 +91,12 @@ env:
   # Upper bound on review targets emitted per scan (fan-out defense-in-depth;
   # excess is logged and deferred to the next scan).
   MAX_TARGETS_PER_SCAN: '10'
+  # Maintainer-facing engagement labels (applying labels requires GitHub
+  # triage+, so the permission gate is GitHub's own): TAKEOVER opts a PR —
+  # including a human-authored one — into the loop; SKIP opts any PR out
+  # everywhere, and wins when both are present.
+  TAKEOVER_LABEL: 'autofix/takeover'
+  SKIP_LABEL: 'autofix/skip'
   # Do not claim more issues when too many existing autofix PRs are still open.
   MAX_OPEN_AUTOFIX_PRS: '5'
 
@@ -103,12 +120,19 @@ jobs:
       # The old single shared cancel-in-progress group let ANY newer event kill
       # pending full scans while route jobs sat queued behind runner backlog —
       # observed as hours of scan starvation during review-event storms.
-      # Four cases: schedule → one shared cron group (newer tick supersedes);
-      # pull_request_review → per-PR; issues → per-issue (same-target events
-      # coalesce, unrelated targets never collide); anything else (dispatch)
-      # → unique per run_id, and cancel-in-progress false below means manual
-      # dispatches are never cancelled at all.
-      group: "${{ github.event_name == 'schedule' && 'qwen-autofix-route-cron' || (github.event_name == 'pull_request_review' && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)) || (github.event_name == 'issues' && format('qwen-autofix-route-issue-{0}', github.event.issue.number)) || format('qwen-autofix-route-{0}', github.run_id) }}"
+      # Five cases: schedule → one shared cron group (newer tick supersedes);
+      # pull_request_review → per-PR, but ONLY when the review payload
+      # already looks trusted (the group is entered before any step runs, so
+      # an arbitrary commenter's review would otherwise cancel a queued
+      # legitimate route and then die in 'Decide phases' — untrusted payloads
+      # get a run-unique group and still face the real permission gate
+      # inside; the association literal mirrors TRUSTED_ASSOC and the login
+      # mirrors REVIEW_BOT); pull_request label events → per-PR (GitHub only
+      # lets triage+ apply labels, so the whole event class is trusted);
+      # issues → per-issue; anything else (dispatch) → unique per run_id,
+      # never cancelled.
+      group: >-
+        ${{ github.event_name == 'schedule' && 'qwen-autofix-route-cron' || (github.event_name == 'pull_request_review' && (contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association) || github.event.review.user.login == 'qwen-code-ci-bot') && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)) || (github.event_name == 'pull_request' && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)) || (github.event_name == 'issues' && format('qwen-autofix-route-issue-{0}', github.event.issue.number)) || format('qwen-autofix-route-{0}', github.run_id) }}
       cancel-in-progress: |-
         ${{ github.event_name != 'workflow_dispatch' }}
     permissions:
@@ -119,6 +143,8 @@ jobs:
       dry_run: '${{ steps.decide.outputs.dry_run }}'
       issue_number: '${{ steps.decide.outputs.issue_number }}'
       pr_number: '${{ steps.decide.outputs.pr_number }}'
+      takeover_ack: '${{ steps.decide.outputs.takeover_ack }}'
+      ack_pr: '${{ steps.decide.outputs.ack_pr }}'
     steps:
       - name: 'Decide phases'
         id: 'decide'
@@ -144,9 +170,12 @@ jobs:
           PR_NUMBER_EVENT: '${{ github.event.pull_request.number }}'
           PR_HEAD_REPO: '${{ github.event.pull_request.head.repo.full_name }}'
           PR_BASE_REF: '${{ github.event.pull_request.base.ref }}'
+          PR_STATE: '${{ github.event.pull_request.state }}'
+          EVENT_ACTION: '${{ github.event.action }}'
         run: |-
           DO_ISSUE=false
           DO_REVIEW=false
+          TAKEOVER_ACK=''
           DRY_RUN="${DRY_RUN_INPUT:-false}"
           sanitize_number() {
             local value="${1//$'\r'/}"
@@ -218,6 +247,37 @@ jobs:
                   fi
                 fi
               fi
+              # Label-driven takeover: TAKEOVER_LABEL applied to an eligible
+              # PR summons the loop onto it (human-authored included);
+              # removing it releases the PR — future engagement stops, and an
+              # in-flight round, if any, completes its bounded work (matrix
+              # runs are shared across PRs, so cancelling one is not possible
+              # without collateral damage). ISSUE_LABEL carries the label
+              # name for pull_request events too (same payload field).
+              if [[ "${EVENT_NAME}" == 'pull_request' ]]; then
+                DO_ISSUE=false
+                if [[ "${ISSUE_LABEL}" != "${TAKEOVER_LABEL}" ]]; then
+                  echo "🧭 pull_request ${EVENT_ACTION} ignored: label '${ISSUE_LABEL:-n/a}' is not ${TAKEOVER_LABEL}"
+                elif [[ "${EVENT_ACTION}" == 'labeled' ]]; then
+                  if [[ "${PR_HEAD_REPO}" != "${REPO}" ]]; then
+                    # Fork pull_request events carry no secrets — we cannot
+                    # even post a rejection comment. Log and stop.
+                    echo "🧭 takeover ignored: PR is a fork (${PR_HEAD_REPO} != ${REPO})"
+                  elif [[ "${PR_STATE}" != 'open' ]]; then
+                    echo "🧭 takeover ignored: PR state '${PR_STATE:-unknown}' is not open"
+                  elif [[ "${PR_BASE_REF}" != 'main' ]]; then
+                    echo "🧭 takeover ignored: PR targets '${PR_BASE_REF}' not 'main'"
+                  else
+                    DO_REVIEW=true
+                    ROUTE_PR="$(sanitize_number "${PR_NUMBER_EVENT}")"
+                    TAKEOVER_ACK='engaged'
+                    echo "🧭 ${TAKEOVER_LABEL} applied by ${SENDER_LOGIN} on PR #${PR_NUMBER_EVENT} → review phase (takeover)"
+                  fi
+                elif [[ "${EVENT_ACTION}" == 'unlabeled' ]]; then
+                  TAKEOVER_ACK='released'
+                  echo "🧭 ${TAKEOVER_LABEL} removed from PR #${PR_NUMBER_EVENT} by ${SENDER_LOGIN} → released"
+                fi
+              fi
               if [[ "${EVENT_NAME}" == 'issues' ]]; then
                 DO_REVIEW=false
                 label_is_trigger=false
@@ -268,6 +328,8 @@ jobs:
           echo "dry_run=${DRY_RUN}" >> "${GITHUB_OUTPUT}"
           echo "issue_number=${ROUTE_ISSUE}" >> "${GITHUB_OUTPUT}"
           echo "pr_number=${ROUTE_PR}" >> "${GITHUB_OUTPUT}"
+          echo "takeover_ack=${TAKEOVER_ACK}" >> "${GITHUB_OUTPUT}"
+          echo "ack_pr=$(sanitize_number "${PR_NUMBER_EVENT}")" >> "${GITHUB_OUTPUT}"
           echo "🧭 phase='${PHASE:-auto}' event='${EVENT_NAME}' issue='#${ISSUE_NUMBER:-n/a}' pr='#${PR_NUMBER_EVENT:-n/a}' schedule='${SCHEDULE:-n/a}' dry_run=${DRY_RUN} → issue=${DO_ISSUE} review=${DO_REVIEW}"
 
   # ===========================================================================
@@ -966,6 +1028,50 @@ jobs:
           fi
 
   # ===========================================================================
+  # TAKEOVER ACK — visible confirmation when a maintainer engages or releases
+  # a PR via the takeover label. Label events are explicit user actions, so
+  # every toggle acks (no dedup wanted). In-repo PRs only reach this job.
+  # ===========================================================================
+  takeover-ack:
+    needs: 'route'
+    if: |-
+      ${{ needs.route.outputs.takeover_ack != '' }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions:
+      contents: 'read'
+    env:
+      REPO: '${{ github.repository }}'
+      ACK: '${{ needs.route.outputs.takeover_ack }}'
+      PR: '${{ needs.route.outputs.ack_pr }}'
+      GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+    steps:
+      - name: 'Acknowledge takeover state change'
+        run: |-
+          api_error_file="$(mktemp)"
+          if ! bot_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login' 2>"${api_error_file}")"; then
+            api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
+            rm -f "${api_error_file}"
+            echo "::error::Failed to verify CI_DEV_BOT_PAT identity with gh api user: ${api_error:-unknown error}."
+            exit 1
+          fi
+          rm -f "${api_error_file}"
+          if [[ "${bot_actor}" != "${AUTOFIX_BOT}" ]]; then
+            echo "::error::CI_DEV_BOT_PAT authenticates as '${bot_actor:-unknown}'; expected ${AUTOFIX_BOT}."
+            exit 1
+          fi
+          if [[ "${ACK}" == 'engaged' ]]; then
+            BODY="🤝 Takeover engaged: the autofix loop now manages this PR — it will address new review feedback and resolve base conflicts until the label is removed or the round cap is reached. Remove the \\`${TAKEOVER_LABEL}\\` label to release. / 已接管：autofix 循环现在管理此 PR —— 将持续处理新的评审反馈与 base 冲突，直到移除标签或达到轮次上限。移除 \\`${TAKEOVER_LABEL}\\` 标签即可释放。
+
+          <!-- takeover-ack engaged -->"
+          else
+            BODY="👋 Takeover released: the autofix loop will no longer engage this PR (an in-flight round, if any, completes its bounded work). Re-apply \\`${TAKEOVER_LABEL}\\` to re-engage. / 已释放：autofix 循环不再介入此 PR（在飞的一轮如有，将完成其有界工作）。重新打上 \\`${TAKEOVER_LABEL}\\` 标签即可再次接管。
+
+          <!-- takeover-ack released -->"
+          fi
+          gh pr comment "${PR}" --repo "${REPO}" --body "${BODY}"
+
+  # ===========================================================================
   # REVIEW PHASE (scan) — find one autofix PR with new, unaddressed feedback
   # (or a base conflict) and emit it as a matrix. Cheap: GitHub API only.
   # ===========================================================================
@@ -989,18 +1095,25 @@ jobs:
         run: |-
           WORKDIR="$(mktemp -d)"
 
-          # Candidate PRs: open, same-repo, targeting main, authored by the
-          # dev-bot. A forced PR must still pass all these checks.
+          # Candidate PRs: open, same-repo, targeting main, and either
+          # authored by the dev-bot or opted in via TAKEOVER_LABEL. A PR
+          # carrying SKIP_LABEL is excluded everywhere — skip wins over
+          # takeover when both are present. A forced PR must still pass all
+          # these checks. NOTE `.isCrossRepository == false` (fail-closed on a
+          # missing field), never a `// true` default piped through `not`:
+          # jq's // treats false as empty, so that form is false for EVERY
+          # input and silently green-no-op'd all forced dispatches.
           if [[ -n "${FORCED_PR}" ]]; then
             META="$(gh pr view "${FORCED_PR}" --repo "${REPO}" \
-              --json number,state,author,headRefName,isCrossRepository,baseRefName 2> /dev/null || echo '{}')"
-            OK="$(jq -r --arg ab "${AUTOFIX_BOT}" \
+              --json number,state,author,headRefName,isCrossRepository,baseRefName,labels 2> /dev/null || echo '{}')"
+            OK="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg take "${TAKEOVER_LABEL}" --arg skip "${SKIP_LABEL}" \
               '(((.state // "") == "OPEN")
-                 and ((.author.login // "") == $ab)
-                 and ((.isCrossRepository // true) | not)
+                 and (((.author.login // "") == $ab) or ([.labels[]?.name] | index($take) != null))
+                 and ([.labels[]?.name] | index($skip) | not)
+                 and (.isCrossRepository == false)
                  and ((.baseRefName // "") == "main"))' <<< "${META}")"
             if [[ "${OK}" != "true" ]]; then
-              echo "❌ #${FORCED_PR} is not an open in-repo main-targeting PR owned by ${AUTOFIX_BOT}"
+              echo "❌ #${FORCED_PR} is not an open in-repo main-targeting PR owned by ${AUTOFIX_BOT} or labeled ${TAKEOVER_LABEL} (or it carries ${SKIP_LABEL})"
               echo "targets=[]" >> "${GITHUB_OUTPUT}"
               echo "has_targets=false" >> "${GITHUB_OUTPUT}"
               exit 0
@@ -1009,10 +1122,18 @@ jobs:
           else
             gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" \
               --base main \
-              --limit 100 --json number,headRefName,isCrossRepository > "${WORKDIR}/bot-prs.json"
-            CANDIDATES="$(jq -r \
-              '.[] | select(.isCrossRepository != true) | .number' \
-              "${WORKDIR}/bot-prs.json")"
+              --limit 100 --json number,headRefName,isCrossRepository,labels > "${WORKDIR}/bot-prs.json"
+            gh pr list --repo "${REPO}" --state open --label "${TAKEOVER_LABEL}" \
+              --base main \
+              --limit 100 --json number,headRefName,isCrossRepository,labels > "${WORKDIR}/takeover-prs.json"
+            CANDIDATES="$(jq -rs --arg skip "${SKIP_LABEL}" \
+              'add
+               | unique_by(.number)
+               | .[]
+               | select(.isCrossRepository != true)
+               | select([.labels[]?.name] | index($skip) | not)
+               | .number' \
+              "${WORKDIR}/bot-prs.json" "${WORKDIR}/takeover-prs.json")"
           fi
 
           # Pending-check staleness bound (invariant across candidate PRs, computed

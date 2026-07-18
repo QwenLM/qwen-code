@@ -551,6 +551,158 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).not.toContain('github.event.sender.author_association');
   });
 
+  it('engages and releases PRs through maintainer labels — comment surface stays closed', () => {
+    // Applying autofix/takeover (GitHub triage+ only — the permission gate
+    // is GitHub's own) summons the loop onto a PR, human-authored included;
+    // removing it releases the PR. autofix/skip opts any PR out everywhere
+    // and wins over takeover. No comment-triggered command is introduced.
+    expect(workflow).toContain(
+      "pull_request:\n    types:\n      - 'labeled'\n      - 'unlabeled'",
+    );
+    expect(workflow).toContain("TAKEOVER_LABEL: 'autofix/takeover'");
+    expect(workflow).toContain("SKIP_LABEL: 'autofix/skip'");
+    // Label events share the per-PR route group (the whole event class is
+    // triage-gated), while review events need a trusted-looking payload —
+    // the group is entered before any step runs.
+    expect(routeJob).toContain(
+      "github.event_name == 'pull_request' && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)",
+    );
+    expect(routeJob).toContain(
+      'contains(fromJSON(\'["OWNER", "MEMBER", "COLLABORATOR"]\'), github.event.review.author_association)',
+    );
+    // Decide gates: takeover only for open in-repo main-targeting PRs; fork
+    // label events carry no secrets, so they are logged and dropped.
+    expect(routeStep).toContain('→ review phase (takeover)');
+    expect(routeStep).toContain('takeover ignored: PR is a fork');
+    expect(routeStep).toContain('is not open');
+    expect(routeStep).toContain('→ released');
+    // Every toggle produces a visible bilingual ack via the PAT-verified bot
+    // identity.
+    expect(workflow).toContain(
+      "takeover_ack: '${{ steps.decide.outputs.takeover_ack }}'",
+    );
+    expect(workflow).toContain("${{ needs.route.outputs.takeover_ack != '' }}");
+    expect(workflow).toContain('<!-- takeover-ack engaged -->');
+    expect(workflow).toContain('<!-- takeover-ack released -->');
+    expect(workflow).toMatch(
+      /takeover-ack:[\s\S]*?CI_DEV_BOT_PAT identity[\s\S]*?gh pr comment "\$\{PR\}"/,
+    );
+  });
+
+  it('behaviorally selects candidates across bot and takeover PRs with skip winning', () => {
+    // Extract the candidate-selection jq VERBATIM (drift fails the test) and
+    // replay it: bot PRs and takeover-labeled PRs merge and dedupe; a
+    // skip-labeled PR disappears even when takeover is also present; fork
+    // heads never qualify.
+    const candProgram = reviewScanJob
+      .match(
+        /CANDIDATES="\$\(jq -rs --arg skip "\$\{SKIP_LABEL\}" \\\n\s+'([\s\S]*?)' \\\n/,
+      )?.[1]
+      ?.replace(/\n {15}/g, '\n');
+    expect(candProgram).toBeTruthy();
+    const pick = (bots, takeovers) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-cand-'));
+      try {
+        writeFileSync(join(dir, 'bots.json'), JSON.stringify(bots));
+        writeFileSync(join(dir, 'takeovers.json'), JSON.stringify(takeovers));
+        return execFileSync(
+          'jq',
+          [
+            '-rs',
+            '--arg',
+            'skip',
+            'autofix/skip',
+            candProgram,
+            join(dir, 'bots.json'),
+            join(dir, 'takeovers.json'),
+          ],
+          { encoding: 'utf8' },
+        )
+          .trim()
+          .split('\n')
+          .filter(Boolean);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const pr = (number, labels = [], fork = false) => ({
+      number,
+      headRefName: `b${number}`,
+      isCrossRepository: fork,
+      labels: labels.map((name) => ({ name })),
+    });
+    expect(
+      pick(
+        [pr(1), pr(2, ['autofix/skip'])],
+        [
+          pr(3, ['autofix/takeover']),
+          pr(1),
+          pr(4, ['autofix/takeover'], true),
+          pr(5, ['autofix/takeover', 'autofix/skip']),
+        ],
+      ),
+    ).toEqual(['1', '3']);
+    expect(pick([], [])).toEqual([]);
+  });
+
+  it('behaviorally validates forced targets against author, takeover, and skip', () => {
+    // Extract the forced-PR OK predicate VERBATIM and replay it: the bot's
+    // own PRs pass; a human PR passes only with the takeover label; skip
+    // vetoes even a takeover-labeled PR; closed and fork PRs never pass.
+    const okProgram = reviewScanJob.match(
+      /OK="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" --arg take "\$\{TAKEOVER_LABEL\}" --arg skip "\$\{SKIP_LABEL\}" \\\n\s+'([\s\S]*?)'/,
+    )?.[1];
+    expect(okProgram).toBeTruthy();
+    const ok = (meta) =>
+      execFileSync(
+        'jq',
+        [
+          '-r',
+          '--arg',
+          'ab',
+          'qwen-code-dev-bot',
+          '--arg',
+          'take',
+          'autofix/takeover',
+          '--arg',
+          'skip',
+          'autofix/skip',
+          okProgram,
+        ],
+        { encoding: 'utf8', input: JSON.stringify(meta) },
+      ).trim();
+    const meta = (author, labels = [], extra = {}) => ({
+      state: 'OPEN',
+      author: { login: author },
+      isCrossRepository: false,
+      baseRefName: 'main',
+      labels: labels.map((name) => ({ name })),
+      ...extra,
+    });
+    expect(ok(meta('qwen-code-dev-bot'))).toBe('true');
+    expect(ok(meta('human', ['autofix/takeover']))).toBe('true');
+    expect(ok(meta('human'))).toBe('false');
+    expect(ok(meta('human', ['autofix/takeover', 'autofix/skip']))).toBe(
+      'false',
+    );
+    expect(ok(meta('qwen-code-dev-bot', ['autofix/skip']))).toBe('false');
+    expect(ok(meta('human', ['autofix/takeover'], { state: 'CLOSED' }))).toBe(
+      'false',
+    );
+    expect(
+      ok(meta('human', ['autofix/takeover'], { isCrossRepository: true })),
+    ).toBe('false');
+    // A missing isCrossRepository fails CLOSED. This case is why the
+    // predicate reads `.isCrossRepository == false`: jq's // treats false as
+    // empty, so the previous `(.isCrossRepository // true) | not` was false
+    // for EVERY input and silently green-no-op'd all forced dispatches.
+    const missing = meta('qwen-code-dev-bot');
+    delete missing.isCrossRepository;
+    expect(ok(missing)).toBe('false');
+    expect(reviewScanJob).toContain('.isCrossRepository == false');
+    expect(reviewScanJob).not.toContain('(.isCrossRepository // true) | not');
+  });
+
   it('does not expose comment-triggered autofix commands', () => {
     expect(workflow).not.toContain(
       "issue_comment:\n    types:\n      - 'created'",
