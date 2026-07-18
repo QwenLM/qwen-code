@@ -437,6 +437,7 @@ export const ToolConfirmationMessage: React.FC<
       <AskUserQuestionDialog
         confirmationDetails={confirmationDetails}
         isFocused={isFocused}
+        availableWidth={contentWidth}
         onConfirm={onConfirm}
       />
     );
