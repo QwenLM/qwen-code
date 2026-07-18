@@ -36,6 +36,7 @@ import type {
   DaemonSessionTaskStatus,
   DaemonSessionArtifact,
   DaemonWorkspaceCapability,
+  DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList, type MessageListHandle } from './components/MessageList';
@@ -73,6 +74,7 @@ import {
 import { MemoryMessage } from './components/messages/MemoryMessage';
 import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
+import { GitDiffDialog } from './components/dialogs/GitDiffDialog';
 import { SkillsManagerPage } from './components/skills/SkillsManagerPage';
 import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
@@ -1251,44 +1253,70 @@ export function App({
   >(undefined);
   const selectedWorkspaceCwdRef = useRef(selectedWorkspaceCwd);
   selectedWorkspaceCwdRef.current = selectedWorkspaceCwd;
-  const [selectedWorkspaceGitBranch, setSelectedWorkspaceGitBranch] = useState<
-    string | undefined
+  const [selectedWorkspaceGitStatus, setSelectedWorkspaceGitStatus] = useState<
+    DaemonWorkspaceGitStatus | undefined
   >(undefined);
+  // The workspace the chip's status was last fetched for. On a workspace switch
+  // we clear the status immediately so the chip never shows the previous repo's
+  // branch/dirty counts while the new fetch is in flight; same-workspace
+  // re-runs (branch change, focus, poll) keep the live value to avoid flicker.
+  const gitStatusWorkspaceCwdRef = useRef<string | undefined>(undefined);
+  // Active workspace: the connected session's workspace, else the workspace
+  // picked for the next session (locked / selected / primary). Computed once
+  // and shared by the git-status effect and the Changes-dialog entry point so
+  // the chip and the dialog always target the same repo.
+  const activeWorkspaceCwd = useMemo(
+    () =>
+      connection.sessionId
+        ? connection.workspaceCwd
+        : (lockedWorkspaceCwd ??
+          selectedWorkspaceCwd ??
+          workspaces.find((entry) => entry.primary)?.cwd),
+    [
+      connection.sessionId,
+      connection.workspaceCwd,
+      lockedWorkspaceCwd,
+      selectedWorkspaceCwd,
+      workspaces,
+    ],
+  );
   useEffect(() => {
-    if (connection.sessionId) {
-      setSelectedWorkspaceGitBranch(undefined);
+    if (!activeWorkspaceCwd) {
+      gitStatusWorkspaceCwdRef.current = undefined;
+      setSelectedWorkspaceGitStatus(undefined);
       return;
     }
-    const primaryWorkspaceCwd = workspaces.find((entry) => entry.primary)?.cwd;
-    const workspaceCwd =
-      lockedWorkspaceCwd ?? selectedWorkspaceCwd ?? primaryWorkspaceCwd;
-    if (!workspaceCwd) {
-      setSelectedWorkspaceGitBranch(undefined);
-      return;
+    if (gitStatusWorkspaceCwdRef.current !== activeWorkspaceCwd) {
+      gitStatusWorkspaceCwdRef.current = activeWorkspaceCwd;
+      setSelectedWorkspaceGitStatus(undefined);
     }
     let cancelled = false;
-    setSelectedWorkspaceGitBranch(undefined);
-    void workspace.client
-      .workspaceByCwd(workspaceCwd)
-      .workspaceGit()
-      .then((git) => {
-        if (!cancelled) {
-          setSelectedWorkspaceGitBranch(git.branch ?? undefined);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) setSelectedWorkspaceGitBranch(undefined);
-      });
+    const fetchStatus = () => {
+      void workspace.client
+        .workspaceByCwd(activeWorkspaceCwd)
+        .workspaceGit()
+        .then((git) => {
+          if (!cancelled) setSelectedWorkspaceGitStatus(git);
+        })
+        .catch(() => {
+          if (!cancelled) setSelectedWorkspaceGitStatus(undefined);
+        });
+    };
+    fetchStatus();
+    // The enriched working-tree summary isn't pushed over SSE, so refresh it on
+    // focus and on a slow poll for the active workspace only. A live branch
+    // change re-runs this effect via the connection.gitBranch dependency.
+    const onFocus = () => fetchStatus();
+    window.addEventListener('focus', onFocus);
+    const poll = window.setInterval(() => {
+      if (document.visibilityState === 'visible') fetchStatus();
+    }, 30_000);
     return () => {
       cancelled = true;
+      window.removeEventListener('focus', onFocus);
+      window.clearInterval(poll);
     };
-  }, [
-    connection.sessionId,
-    lockedWorkspaceCwd,
-    selectedWorkspaceCwd,
-    workspaces,
-    workspace.client,
-  ]);
+  }, [activeWorkspaceCwd, connection.gitBranch, workspace.client]);
   const onToastRef = useRef(onToast);
   onToastRef.current = onToast;
   const toastIdRef = useRef(0);
@@ -2147,6 +2175,12 @@ export function App({
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [showThemeDialog, setShowThemeDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
+  // The workspace the Changes dialog reads. Set by whichever entry point opened
+  // it — the composer git chip / `/diff` (current workspace) or a sidebar
+  // folder's git chip (that workspace) — so each can target its own repo.
+  const [diffWorkspaceCwd, setDiffWorkspaceCwd] = useState<string | undefined>(
+    undefined,
+  );
   // Main content view. The scheduled-tasks page replaces the chat pane inline
   // (not a modal overlay), mirroring the reference design; creating or opening
   // a chat returns to 'chat'. (Daemon Status is no longer a boolean dialog — it
@@ -2870,6 +2904,10 @@ export function App({
       })),
     [connection.models],
   );
+  // The workspace the Changes dialog reads — the same active workspace the
+  // git-status effect targets (computed once above), so the chip and the
+  // dialog always target the same repo.
+  const gitDiffWorkspaceCwd = activeWorkspaceCwd;
   const dialogOpen =
     showResumeDialog ||
     showDeleteDialog ||
@@ -2878,6 +2916,7 @@ export function App({
     showHelpDialog ||
     showThemeDialog ||
     showToolsDialog ||
+    diffWorkspaceCwd !== undefined ||
     modelDialogMode !== null ||
     showApprovalModeDialog ||
     tasksDialogMessage !== null ||
@@ -4446,6 +4485,16 @@ export function App({
             setShowHelpDialog(true);
             return true;
           }
+          if (cmd === 'diff') {
+            // Local intercept: open the working-tree Changes dialog instead of
+            // forwarding `/diff` to the agent. Targets the current workspace.
+            if (!gitDiffWorkspaceCwd) {
+              pushToast('info', t('localCommand.diffNoWorkspace'));
+              return true;
+            }
+            setDiffWorkspaceCwd(gitDiffWorkspaceCwd);
+            return true;
+          }
           if (cmd === 'tasks') {
             openTasksPanel();
             return true;
@@ -5246,6 +5295,7 @@ export function App({
       openScheduledTasks,
       openGoals,
       createNewSession,
+      gitDiffWorkspaceCwd,
       handleBusyGoalClear,
       handleGoalSlashCommand,
       handleThemeChange,
@@ -6055,6 +6105,12 @@ export function App({
               <ToolsDialog />
             </DialogShell>
           )}
+          {diffWorkspaceCwd && (
+            <GitDiffDialog
+              workspaceCwd={diffWorkspaceCwd}
+              onClose={() => setDiffWorkspaceCwd(undefined)}
+            />
+          )}
           {tasksDialogMessage && (
             <DialogShell
               title={t('tasks.title')}
@@ -6318,6 +6374,7 @@ export function App({
                   sessionListReloadToken={sessionListReloadToken}
                   selectedWorkspaceCwd={selectedWorkspaceCwd}
                   onSelectWorkspace={setSelectedWorkspaceCwd}
+                  onOpenGitDiff={setDiffWorkspaceCwd}
                   workspaces={workspaces}
                   lockedWorkspaceCwd={lockedWorkspaceCwd}
                   lockedWorkspace={sidebarOptions.lockedWorkspace}
@@ -7118,7 +7175,13 @@ export function App({
                           gitBranch={
                             connection.sessionId
                               ? connection.gitBranch
-                              : selectedWorkspaceGitBranch
+                              : (selectedWorkspaceGitStatus?.branch ?? undefined)
+                          }
+                          gitStatus={selectedWorkspaceGitStatus}
+                          onOpenGitDiff={
+                            gitDiffWorkspaceCwd
+                              ? () => setDiffWorkspaceCwd(gitDiffWorkspaceCwd)
+                              : undefined
                           }
                           chatWidthMode={chatWidthMode}
                           showChatWidthToggle={!isChatEmptyState}

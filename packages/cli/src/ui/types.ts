@@ -227,6 +227,9 @@ export type HistoryItemStats = HistoryItemBase & {
  */
 export interface DiffRenderRow {
   filename: string;
+  /** Pre-rename path when this row is a rename; absent otherwise. `filename`
+   *  is the current (post-rename) path used to address the file. */
+  oldPath?: string;
   /** `undefined` for binary files; a line count (lower bound if `truncated`)
    *  otherwise. */
   added?: number;

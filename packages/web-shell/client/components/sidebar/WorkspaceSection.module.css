@@ -76,6 +76,25 @@
   border-radius: 4px;
 }
 
+/* Live git chip in the folder header — icon-only (the chip's `compact` form): a
+   status dot on the branch icon conveys dirty / conflict / in-progress at a
+   glance, while the branch name + ahead/behind live in the hover tooltip.
+   Rendered as a sibling of the header button (buttons can't nest), kept snug
+   after the folder name. The chip is a fixed 28px box, so the pill grows only to
+   carry the spare width to the hover actions on the right. */
+.gitPill {
+  display: inline-flex;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* With a chip present, let the pill — not the folder name — own the spare width,
+   so the icon sits right after the name and the hover actions stay pinned to the
+   right edge. Without a chip the header keeps growing as before. */
+.headerRow:has(.gitPill) .header {
+  flex-grow: 0;
+}
+
 /* Trusted sessions use the sidebar's shared row with its own left indent;
    read-only rows apply the same indent below. */
 .sessions {
