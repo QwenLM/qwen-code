@@ -144,14 +144,18 @@ jobs:
               echo "::warning::dashboard body read failed; dashboard write and liveness lever skipped this tick"
             fi
           fi
-          PREV_LIVENESS="$(grep -oE '<!-- fleet-shepherd liveness-dispatched: [^ ]+ -->' <<< "${PREV_DASH}" | grep -oE '[0-9T:Z-]{20}' | head -1 || true)"
+          PREV_LIVENESS_LINE="$(grep -oE '<!-- fleet-shepherd liveness-dispatched: [^>]* -->' <<< "${PREV_DASH}" | head -1 || true)"
+          PREV_LIVENESS="$(grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z' <<< "${PREV_LIVENESS_LINE}" | head -1 || true)"
+          PREV_LIVENESS_RUN="$(grep -oE 'run=[0-9]+' <<< "${PREV_LIVENESS_LINE}" | head -1 | cut -d= -f2 || true)"
 
           # ---- scan liveness watchdog -------------------------------------
           # GitHub cron is unreliable (observed 16h of silence on a */10
           # schedule). Liveness counts only SCHEDULE runs plus the shepherd's
-          # own liveness dispatches (recorded in the dashboard body) — a
-          # conflict dispatch is also a workflow_dispatch event but is NOT a
-          # full scan, so it must not satisfy the watchdog. Reads use the
+          # own liveness dispatches (watermark AND run id recorded in the
+          # dashboard body) — a conflict dispatch is also a workflow_dispatch
+          # event but is NOT a full scan, so it must neither satisfy nor
+          # starve the watchdog; run-id attribution is what keeps a same-tick
+          # conflict dispatch out of the count. Reads use the
           # workflow token: actions read/write is guaranteed there, while the
           # PAT's actions scope is not.
           # A FAILED snapshot read is UNKNOWN, not an empty repo: acting on
@@ -166,21 +170,21 @@ jobs:
             echo "::warning::autofix run-list read failed; liveness lever and conflict dispatches skipped this tick"
           fi
           LAST_SCHEDULE="$(jq -r '[.[] | select(.event == "schedule")] | first | .createdAt // ""' /tmp/scan-runs.json 2> /dev/null || echo '')"
-          # In-flight counts SCHEDULE runs plus dispatches that ARE ours (their
-          # createdAt is within a couple of minutes of our recorded liveness
-          # watermark). A forced conflict dispatch can hold a run in progress
-          # through a two-hour address job — counting those would starve the
-          # watchdog and stop full scans indefinitely. First-tick edge: with
-          # no watermark yet, a manual dispatch already in flight is not
-          # counted and one duplicate scan may be dispatched; the scan's own
-          # busy/nothing-new gates absorb it, and every later tick has the
-          # watermark.
-          SCAN_INFLIGHT="$(jq -r --arg lv "${PREV_LIVENESS}" '
+          # In-flight counts SCHEDULE runs plus OUR OWN liveness dispatch,
+          # attributed by recorded run id — never by timestamp proximity: a
+          # conflict dispatch fired later in the SAME tick is created seconds
+          # from the watermark, and a proximity window would count its
+          # two-hour address run as in-flight liveness, starving the
+          # watchdog. Unknown-id fallback (id capture failed, or a pre-id
+          # marker): the dispatch is simply not counted, so the failure mode
+          # is one absorbed duplicate scan — never starvation. Same for the
+          # first tick: no watermark, nothing attributed.
+          SCAN_INFLIGHT="$(jq -r --arg lvrun "${PREV_LIVENESS_RUN}" '
             [ .[] | select(.status != "completed")
               | select(
                   (.event == "schedule")
-                  or (.event == "workflow_dispatch" and $lv != ""
-                      and ((((.createdAt | fromdateiso8601) - ($lv | fromdateiso8601)) | fabs) < 180)) ) ]
+                  or (.event == "workflow_dispatch" and $lvrun != ""
+                      and ((.databaseId | tostring) == $lvrun)) ) ]
             | length' /tmp/scan-runs.json 2> /dev/null || echo 0)"
           LAST_SIGNAL="${LAST_SCHEDULE}"
           if [[ -n "${PREV_LIVENESS}" && "${PREV_LIVENESS}" > "${LAST_SIGNAL}" ]]; then
@@ -191,11 +195,29 @@ jobs:
             SCAN_AGE_MIN=$(( (NOW_EPOCH - $(date -u -d "${LAST_SIGNAL}" +%s)) / 60 ))
           fi
           LIVENESS_OUT="${PREV_LIVENESS}"
+          LIVENESS_RUN_OUT="${PREV_LIVENESS_RUN}"
           echo "🫀 last scan signal: ${LAST_SIGNAL:-never} (${SCAN_AGE_MIN}m ago), liveness-relevant in-flight: ${SCAN_INFLIGHT}, snapshot ok: ${SCAN_RUNS_OK}, watermark state known: ${DASH_LOOKUP_OK}"
           if [[ "${DASH_LOOKUP_OK}" == "true" && "${SCAN_RUNS_OK}" == "true" && "${SCAN_AGE_MIN}" -ge "${SCAN_LIVENESS_MINUTES}" && "${SCAN_INFLIGHT}" == "0" ]]; then
+            DISPATCH_T0="$(date -u -d '5 seconds ago' +%Y-%m-%dT%H:%M:%SZ)"
             if act "scan liveness: dispatch unforced review scan" \
               env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh workflow run qwen-autofix.yml --repo "${REPO}" -f phase=review; then
               LIVENESS_OUT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              LIVENESS_RUN_OUT=''
+              # Identify OUR run by id for next tick's in-flight attribution.
+              # Safe correlation window: nothing else in this tick has
+              # dispatched yet (conflict dispatches happen later in the
+              # walk), so the newest dispatch created since T0 is ours. If it
+              # never appears, run=none is recorded and the failure mode is a
+              # duplicate scan, not starvation.
+              if [[ "${DRY_RUN}" != "true" ]]; then
+                for _ in 1 2 3 4 5; do
+                  sleep 2
+                  LIVENESS_RUN_OUT="$(env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run list --repo "${REPO}" --workflow qwen-autofix.yml \
+                    --event workflow_dispatch --limit 5 --json databaseId,createdAt 2> /dev/null \
+                    | jq -r --arg t0 "${DISPATCH_T0}" '[ .[] | select(.createdAt >= $t0) ] | first | .databaseId // "" | tostring' 2> /dev/null || true)"
+                  if [[ -n "${LIVENESS_RUN_OUT}" && "${LIVENESS_RUN_OUT}" != "null" ]]; then break; fi
+                done
+              fi
             fi
           fi
 
@@ -366,7 +388,7 @@ jobs:
             printf '%b' "${DASH_ROWS}"
             if [[ -n "${LIVENESS_OUT}" ]]; then
               echo
-              echo "<!-- fleet-shepherd liveness-dispatched: ${LIVENESS_OUT} -->"
+              echo "<!-- fleet-shepherd liveness-dispatched: ${LIVENESS_OUT} run=${LIVENESS_RUN_OUT:-none} -->"
             fi
           } > /tmp/dashboard.md
           # Every act() call is if-wrapped: act propagates the real exit code

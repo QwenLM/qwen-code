@@ -172,22 +172,29 @@ describe('fleet shepherd workflow', () => {
     // Never stacks a liveness scan on top of an in-flight one.
     expect(workflow).toContain('"${SCAN_INFLIGHT}" == "0"');
     // The liveness signal counts SCHEDULE runs plus the shepherd's own
-    // liveness dispatches (dashboard watermark) — a conflict dispatch is a
-    // workflow_dispatch too and must NOT satisfy the watchdog.
+    // liveness dispatch, attributed by RECORDED RUN ID (a same-tick conflict
+    // dispatch sits seconds from the watermark, so timestamp proximity would
+    // count its two-hour run and starve the watchdog).
     expect(workflow).toContain('[.[] | select(.event == "schedule")] | first');
     expect(workflow).toContain(
-      '<!-- fleet-shepherd liveness-dispatched: ${LIVENESS_OUT} -->',
+      '<!-- fleet-shepherd liveness-dispatched: ${LIVENESS_OUT} run=${LIVENESS_RUN_OUT:-none} -->',
     );
+    expect(workflow).toContain("grep -oE 'run=[0-9]+'");
+    // The dispatched run's id is captured right after the dispatch, while no
+    // other dispatch can exist yet in the tick (conflict dispatches come
+    // later in the walk).
+    expect(workflow).toContain('--event workflow_dispatch --limit 5');
+    expect(workflow).toContain('DISPATCH_T0=');
     // A wide window so event storms can't push schedule runs out of view;
     // databaseId feeds the busy-set walk over the same snapshot.
     expect(workflow).toContain(
       '--limit 50 --json event,createdAt,status,databaseId',
     );
-    // One run-list call feeds the age, in-flight, and busy-set computations.
+    // ONE snapshot call feeds the age, in-flight, and busy-set computations
+    // (the only other run-list is the post-dispatch id capture).
     expect(
-      workflow.match(
-        /gh run list --repo "\$\{REPO\}" --workflow qwen-autofix\.yml/g,
-      ) ?? [],
+      workflow.match(/--limit 50 --json event,createdAt,status,databaseId/g) ??
+        [],
     ).toHaveLength(1);
     // A FAILED snapshot read is UNKNOWN, not an empty repo: no '[]' fallback
     // (which would zero in-flight AND blank the schedule signal, stacking a
@@ -268,48 +275,67 @@ describe('fleet shepherd workflow', () => {
 
   it('behaviorally proves in-flight counting ignores foreign dispatches', () => {
     // Extract the SCAN_INFLIGHT jq program VERBATIM from the workflow (drift
-    // fails the test) and replay it: an in-progress SCHEDULE run or a
-    // dispatch created within the window of OUR liveness watermark blocks
-    // the watchdog, while a forced conflict dispatch (createdAt far from the
-    // watermark — those runs can live for two hours) must NOT starve it.
+    // fails the test) and replay it. Attribution is by RECORDED RUN ID, not
+    // timestamp proximity: a conflict dispatch fired later in the same tick
+    // is created seconds from the liveness watermark, so any proximity
+    // window would count its two-hour address run as in-flight liveness and
+    // starve the watchdog.
     const jqProgram = workflow
       .match(
-        /SCAN_INFLIGHT="\$\(jq -r --arg lv "\$\{PREV_LIVENESS\}" '([\s\S]*?)' \/tmp\/scan-runs\.json/,
+        /SCAN_INFLIGHT="\$\(jq -r --arg lvrun "\$\{PREV_LIVENESS_RUN\}" '([\s\S]*?)' \/tmp\/scan-runs\.json/,
       )?.[1]
       ?.replace(/\n {12}/g, '\n');
     expect(jqProgram).toBeTruthy();
-    const count = (runs, lv) =>
-      execFileSync('jq', ['-r', '--arg', 'lv', lv, jqProgram], {
+    const count = (runs, lvrun) =>
+      execFileSync('jq', ['-r', '--arg', 'lvrun', lvrun, jqProgram], {
         encoding: 'utf8',
         input: JSON.stringify(runs),
       }).trim();
-    const LV = '2026-07-18T08:00:00Z';
-    const run = (event, createdAt, status = 'in_progress') => ({
+    const OURS = '900001';
+    const run = (event, databaseId, createdAt, status = 'in_progress') => ({
       event,
+      databaseId,
       createdAt,
       status,
     });
     // Live schedule run → counted (no stacking).
-    expect(count([run('schedule', '2026-07-18T07:59:00Z')], LV)).toBe('1');
-    // Completed schedule run → not counted.
-    expect(
-      count([run('schedule', '2026-07-18T07:59:00Z', 'completed')], LV),
-    ).toBe('0');
-    // Our own liveness dispatch (created just before the watermark was
-    // stamped) → counted.
-    expect(count([run('workflow_dispatch', '2026-07-18T07:59:30Z')], LV)).toBe(
+    expect(count([run('schedule', 900000, '2026-07-18T07:59:00Z')], OURS)).toBe(
       '1',
     );
-    // Foreign forced dispatch (conflict resolution, created 40m earlier,
-    // still running) → NOT counted: it must not satisfy or starve the
-    // watchdog.
-    expect(count([run('workflow_dispatch', '2026-07-18T07:20:00Z')], LV)).toBe(
-      '0',
-    );
-    // No watermark recorded yet → no dispatch is attributable to us.
-    expect(count([run('workflow_dispatch', '2026-07-18T07:59:30Z')], '')).toBe(
-      '0',
-    );
+    // Completed schedule run → not counted.
+    expect(
+      count(
+        [run('schedule', 900000, '2026-07-18T07:59:00Z', 'completed')],
+        OURS,
+      ),
+    ).toBe('0');
+    // Our own recorded liveness dispatch, still running → counted.
+    expect(
+      count([run('workflow_dispatch', 900001, '2026-07-18T07:59:58Z')], OURS),
+    ).toBe('1');
+    // The reviewer's reachable case: a conflict dispatch fired in the SAME
+    // tick, created 5 seconds after the watermark — inside any plausible
+    // proximity window — must NOT be counted (its id is not ours).
+    expect(
+      count([run('workflow_dispatch', 900002, '2026-07-18T08:00:05Z')], OURS),
+    ).toBe('0');
+    // Our run finished, only the same-tick conflict run lives on → the
+    // watchdog is free to dispatch once the age expires.
+    expect(
+      count(
+        [
+          run('workflow_dispatch', 900001, '2026-07-18T07:59:58Z', 'completed'),
+          run('workflow_dispatch', 900002, '2026-07-18T08:00:05Z'),
+        ],
+        OURS,
+      ),
+    ).toBe('0');
+    // No id recorded (pre-id marker or capture failure) → nothing
+    // attributed; the failure mode is one absorbed duplicate scan, never
+    // starvation.
+    expect(
+      count([run('workflow_dispatch', 900001, '2026-07-18T07:59:58Z')], ''),
+    ).toBe('0');
   });
 
   it('maintains one dashboard issue edited in place', () => {
