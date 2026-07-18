@@ -12,12 +12,12 @@ First and foremost, almost every Pull Request (PR) should be linked to a corresp
 
 Here is a breakdown of the specific automation workflows that run in our repository.
 
-### 1. When you open an Issue: `Automated Issue Triage`
+### 1. When you open an Issue: `Qwen Triage`
 
 This is the first bot you will interact with when you create an issue. Its job is to perform an initial analysis and apply the correct labels.
 
-- **Workflow File**: `.github/workflows/qwen-automated-issue-triage.yml`
-- **When it runs**: Immediately after an issue is created or reopened.
+- **Workflow File**: `.github/workflows/qwen-triage.yml`
+- **When it runs**: Immediately after an issue is created, or when a maintainer manually requests triage.
 - **What it does**:
   - It uses a Qwen model to analyze the issue's title and body against a detailed set of guidelines.
   - **Applies one `area/*` label**: Categorizes the issue into a functional area of the project (e.g., `area/ux`, `area/models`, `area/platform`).
@@ -28,6 +28,7 @@ This is the first bot you will interact with when you create an issue. Its job i
 - **What you should do**:
   - Fill out the issue template as completely as possible. The more detail you provide, the more accurate the triage will be.
   - If the `status/need-information` label is added, please provide the requested details in a comment.
+  - Maintainers can comment `@qwen-code /triage` to run triage again.
 
 ### 2. When you open a Pull Request: `Continuous Integration (CI)`
 
@@ -47,7 +48,7 @@ This workflow ensures that all changes meet our quality standards before they ca
 
 This workflow runs periodically to ensure all open PRs are correctly linked to issues and have consistent labels.
 
-- **Workflow File**: `.github/workflows/qwen-scheduled-pr-triage.yml`
+- **Workflow File**: `.github/workflows/gemini-scheduled-pr-triage.yml`
 - **When it runs**: Every 15 minutes on all open pull requests.
 - **What it does**:
   - **Checks for a linked issue**: The bot scans your PR description for a keyword that links it to an issue (e.g., `Fixes #123`, `Closes #456`).
@@ -57,19 +58,7 @@ This workflow runs periodically to ensure all open PRs are correctly linked to i
   - **Always link your PR to an issue.** This is the most important step. Add a line like `Resolves #<issue-number>` to your PR description.
   - This will ensure your PR is correctly categorized and moves through the review process smoothly.
 
-### 4. Ongoing Triage for Issues: `Scheduled Issue Triage`
-
-This is a fallback workflow to ensure that no issue gets missed by the triage process.
-
-- **Workflow File**: `.github/workflows/qwen-scheduled-issue-triage.yml`
-- **When it runs**: Every hour on all open issues.
-- **What it does**:
-  - It actively seeks out issues that either have no labels at all or still have the `status/need-triage` label.
-  - It then triggers the same powerful QwenCode-based analysis as the initial triage bot to apply the correct labels.
-- **What you should do**:
-  - You typically don't need to do anything. This workflow is a safety net to ensure every issue is eventually categorized, even if the initial triage fails.
-
-### 5. Release Automation
+### 4. Release Automation
 
 This workflow handles the process of packaging and publishing new versions of Qwen Code.
 
