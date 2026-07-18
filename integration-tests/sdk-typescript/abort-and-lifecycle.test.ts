@@ -349,13 +349,14 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         return { promise, resolve: () => resolveFn(), startTimer, clear };
       };
 
+      const PHASE_TIMEOUT = process.env['CI'] ? 60000 : 30000;
       const canUseToolCalled = boundedPromise(
         'canUseTool callback not called',
-        30000,
+        PHASE_TIMEOUT,
       );
-      const inputStreamDone = boundedPromise('inputStreamDone', 30000);
-      const firstResult = boundedPromise('firstResult', 30000);
-      const secondResult = boundedPromise('secondResult', 30000);
+      const inputStreamDone = boundedPromise('inputStreamDone', PHASE_TIMEOUT);
+      const firstResult = boundedPromise('firstResult', PHASE_TIMEOUT);
+      const secondResult = boundedPromise('secondResult', PHASE_TIMEOUT);
       const pendingTimers = [
         canUseToolCalled,
         inputStreamDone,

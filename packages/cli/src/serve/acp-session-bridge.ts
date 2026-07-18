@@ -74,6 +74,8 @@ export type {
   BridgeRestoredSession,
   BridgeSessionTranscriptPage,
   BridgeSessionTranscriptPageRequest,
+  BridgeGenerationModelSource,
+  BridgeGenerationStreamEvent,
   BridgeSessionSummary,
   SessionMetadataUpdate,
   BridgeClientRequestContext,

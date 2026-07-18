@@ -25,8 +25,10 @@ import { dirname } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   coverageFromTranscripts,
+  verificationGaps,
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
+import { shellQuotePath } from './lib/shell-quote.js';
 
 export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
 
@@ -105,6 +107,13 @@ export interface ComposeReviewResult {
    * read as "Comment, nothing blocking".
    */
   downgradedFrom: 'Approve' | 'Request changes' | null;
+  /**
+   * The orchestrator-facing fix for each coverage/verification gap the body
+   * discloses — printed to stderr by the command, never rendered into the body.
+   * The body tells the PR author what the review cannot certify; this tells the
+   * operator which command repairs it. Two registers, two channels.
+   */
+  remediation: string[];
 }
 
 const CRITICAL_MARKER = '**[Critical]**';
@@ -178,6 +187,19 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     input.unreviewedDimensions,
     'unreviewedDimensions',
   );
+  // The fixes for the gaps above, for stderr — never for the body. The gap says
+  // what the review cannot certify, to the PR author; the remediation names the
+  // command that repairs it, to the orchestrator. #7012's public body was fourteen
+  // lines of the second register posted to the first reader.
+  const remediation: string[] = [];
+  // FIX lines are commands. `<plan>` was a placeholder a reader had to notice
+  // and fill; pasted literally it parses as a shell redirection. The run KNOWS
+  // its plan path — substitute it, and leave only the selectors (`<id>`, `<r>`)
+  // that genuinely vary per agent, resolvable from the labels alongside.
+  // Shell-quoted: a workspace path containing a space would otherwise split
+  // the copy-pasted repair at the space, and a bare '…' wrap broke on embedded
+  // apostrophes instead. (`<plan>` stays bare — a placeholder, not a path.)
+  const planRef = input.planPath ? shellQuotePath(input.planPath) : '<plan>';
 
   // Coverage is shown, not asserted. Whatever the caller listed by hand, the
   // report's own gaps are added to it — a run cannot approve past a chunk nobody
@@ -226,15 +248,33 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
           `${label} — the agent made no tool call: it read nothing`,
         );
       }
+      if (cov.idleAgents.length > 0) {
+        remediation.push(
+          'idle agents: relaunch each with the same printed prompt — it already ' +
+            'names the brief and the diff reads; an agent that makes no tool ' +
+            'call has reviewed nothing, whatever its return says',
+        );
+      }
       // The defect that actually happened, named as itself. A blind agent was
       // launched with a prompt that never mentioned the diff, so it could not
       // have read it — and relaunching it would produce another agent that
       // cannot either. Do not call this a whiff; the prompt is the bug.
+      // The rebuild command goes to stderr with the other remediation, not into
+      // this line: the line lands in the posted body, and `qwen review
+      // agent-prompt` is not something a PR author can run.
       for (const label of cov.blindAgents) {
         unreviewed.push(
           `${label} — launched with a prompt that never named the diff file, ` +
-            'so it could not have read it (build the prompt with `qwen review ' +
-            'agent-prompt`)',
+            'so it could not have read it',
+        );
+      }
+      if (cov.blindAgents.length > 0) {
+        remediation.push(
+          'blind agents: rebuild each prompt with `"${QWEN_CODE_CLI:-qwen}" ' +
+            `review agent-prompt --plan ${planRef} --chunk <id>\` (or \`--role <r>\`) ` +
+            '`[--rules <rules file>]` and launch an agent with it verbatim — ' +
+            'do not relaunch the old prompt; a second blind agent reads no ' +
+            'more than the first',
         );
       }
       // Worked, but not on the diff. Not idle and not blind — it had the path and
@@ -244,6 +284,13 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
         unreviewed.push(
           `${label} — pointed at diff lines it never opened: it made tool calls, ` +
             'but none of them read the diff',
+        );
+      }
+      if (cov.unopenedAgents.length > 0) {
+        remediation.push(
+          'agents that never opened the diff: relaunch each with the same ' +
+            'printed prompt — the prompt already names the diff and its ranges; ' +
+            'the read is what proves the review happened',
         );
       }
       // The prompt was built in code and edited on the way to the agent. This caps
@@ -256,16 +303,42 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       for (const label of cov.rewrittenPrompts) {
         unreviewed.push(label);
       }
+      if (cov.rewrittenPrompts.length > 0) {
+        remediation.push(
+          'rewritten launches: re-run `"${QWEN_CODE_CLI:-qwen}" review ' +
+            `agent-prompt --plan ${planRef} --chunk <id>\` (or \`--role <r>\`, with ` +
+            '`--file <path>` for an invariant agent) `[--rules <rules file>]` ' +
+            'for each named agent and pass its output unedited — copy it, do ' +
+            'not retype it. Pass --rules whenever the review loaded any, or ' +
+            'the rebuilt brief silently drops the project rules',
+        );
+      }
       // A dimension nobody reviewed. This is exactly what `unreviewedDimensions`
       // has always meant, arrived at from the plan instead of from the orchestrator
       // noticing — which, on the run that never launched Agent 0, it did not.
       for (const label of cov.missingRoles) {
         unreviewed.push(label);
       }
+      if (cov.missingRoles.length > 0) {
+        remediation.push(
+          'missing briefs: build every required prompt in one call — ' +
+            `\`"\${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan ${planRef} ` +
+            '--roster [--rules <rules file>]` — and launch one agent per block ' +
+            'it prints, verbatim; `--role <n>` or `--chunk <id>` rebuilds a ' +
+            'single one. Pass --rules whenever the review loaded any',
+        );
+      }
       // Launched, but never read the brief it was pointed at: it reviewed with no
       // dimension, no severity definitions and no project rules.
       for (const label of cov.unreadBriefs) {
         unreviewed.push(label);
+      }
+      if (cov.unreadBriefs.length > 0) {
+        remediation.push(
+          'unread briefs: relaunch each agent with the same printed prompt — ' +
+            'the agent must OPEN the brief file the prompt names; that read ' +
+            'is the receipt',
+        );
       }
     } catch (err) {
       // Two different failures, and they must not wear each other's message. A
@@ -280,6 +353,36 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
           : `the plan could not be used (${(err as Error).message})`;
       unreviewed.push(
         `coverage — ${why}, so this run cannot show that any of the diff was read`,
+      );
+    }
+
+    // Step 4 (verify) and Step 5 (reverse audit) ran, and read their briefs?
+    // `check-coverage` proves Step 3, but it runs at Step 3D — before these exist —
+    // and their count is not in the plan, so its roster cannot reach them. This is
+    // the floor that does, and only `compose-review` asks it, which runs only at
+    // high effort — the only effort at which verify and reverse audit run at all.
+    // Reverse audit is required on every high-effort review; verify once the review
+    // has non-deterministic findings to verify. Deterministic `[build]`/`[test]`
+    // findings are pre-confirmed and skip verification by design, so they do not
+    // demand a verifier — including a body Critical that carries their source tag.
+    // Its own try, so a read failure here says so rather than wearing the coverage
+    // message, and does not undo a coverage pass a line above it.
+    try {
+      const findingsToVerify =
+        criticalsInline +
+        suggestionsInline +
+        bodyCriticals.filter((c) => !/\[(?:build|test)\]/i.test(c)).length;
+      const verification = verificationGaps(
+        input.planPath,
+        { postsFindings: findingsToVerify > 0 },
+        input.env,
+      );
+      for (const gap of verification.gaps) unreviewed.push(gap);
+      remediation.push(...verification.remediation);
+    } catch (err) {
+      unreviewed.push(
+        `verification — could not check that Step 4 and Step 5 ran ` +
+          `(${(err as Error).message})`,
       );
     }
   }
@@ -360,6 +463,15 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // disclosure of what was never read.
   const notReviewedParts: string[] = [];
   if (missingReceipts.length > 0) {
+    // One block for both channels, so an edit cannot touch the disclosure and
+    // miss its repair (or vice versa) — the drift the rest of this file exists
+    // to prevent.
+    remediation.push(
+      'chunks nobody read: build each with `"${QWEN_CODE_CLI:-qwen}" review ' +
+        `agent-prompt --plan ${planRef} --chunk <id> [--rules <rules file>]\` — or ` +
+        'the whole fan-out with `--roster` — and launch one agent per block, ' +
+        'verbatim',
+    );
     // Its own sentence, because its own cause. The clause below explains a gap
     // as a line too long to read, which is true of an *uncoverable* chunk and a
     // fabrication about one nobody receipted — the author would be told the diff
@@ -424,6 +536,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       cappedBy,
       downgraded,
       downgradedFrom,
+      remediation,
     };
   }
 
@@ -435,6 +548,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       cappedBy,
       downgraded,
       downgradedFrom,
+      remediation,
     };
   }
 
@@ -508,6 +622,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     cappedBy,
     downgraded,
     downgradedFrom,
+    remediation,
   };
 }
 
@@ -542,7 +657,15 @@ export const composeReviewCommand: CommandModule = {
     const parsed = JSON.parse(raw) as ComposeReviewInput;
     delete parsed.env;
     const result = composeReview(parsed);
-    const json = JSON.stringify(result, null, 2);
+    // The exact terminal verdict, persisted beside the fields it is computed
+    // from. `event` + `cappedBy` alone cannot reconstruct it — a presubmit
+    // downgrade also depends on `downgraded`/`downgradedFrom` — and Step 8's
+    // archived report copies this line rather than re-deriving a lossy one.
+    const json = JSON.stringify(
+      { ...result, verdictLine: verdictLine(result) },
+      null,
+      2,
+    );
     if (out) {
       mkdirSync(dirname(out), { recursive: true });
       writeFileSync(out, json, 'utf8');
@@ -555,6 +678,14 @@ export const composeReviewCommand: CommandModule = {
     // this command entirely and tell the user whatever it had concluded: dogfooded,
     // one did, and reported an Approve on a review whose coverage check had refused.
     // There is now nothing to compose. This is the sentence; print it.
+    //
+    // The fixes first, the verdict last. These lines are the orchestrator's copy
+    // of what the body's `Not reviewed:` disclosures only describe — the body
+    // names what cannot be certified for the PR author; this names the command
+    // that repairs it, on the channel the author never sees.
+    for (const fix of result.remediation) {
+      writeStderrLine(`FIX: ${fix}`);
+    }
     writeStderrLine(verdictLine(result));
   },
 };

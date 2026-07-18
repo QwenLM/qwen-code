@@ -987,6 +987,18 @@
   line-height: 1;
 }
 
+/* On a multi-workspace daemon the chip gets a stable per-workspace accent
+   (--ws-accent, set by a shared accent class): a faint tinted background plus a
+   colored folder, so panes stay distinguishable even when the chip collapses to
+   the icon-only compact state. */
+.workspaceChipAccented {
+  background: color-mix(in srgb, var(--ws-accent) 12%, transparent);
+}
+
+.workspaceChipAccented .workspaceChipIcon {
+  color: var(--ws-accent);
+}
+
 .workspaceChipIcon {
   display: inline-flex;
   width: 16px;

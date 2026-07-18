@@ -49,6 +49,7 @@ import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 // closure check doesn't trace create-sub-session's transitive deps through
 // the run-qwen-serve chunk. The launcher is only needed after listen().
 import { PathMutexRegistry } from './fs/path-mutex-registry.js';
+import { isDeepHealthQuery } from './health-query.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
@@ -140,6 +141,10 @@ import type {
 import { sanitizeLogText } from '@qwen-code/channel-base';
 import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
 import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.js';
+import {
+  setDeferredRuntimeRequestTiming,
+  type DeferredRuntimeRequestTiming,
+} from './server/request-helpers.js';
 
 // Reverse MCP channel; enabled only by explicit option or env opt-in.
 const QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV = 'QWEN_SERVE_CLIENT_MCP_OVER_WS';
@@ -960,6 +965,7 @@ function currentServeFeaturesForRunQwenServe(
     persistSettingAvailable: true,
     sessionShellCommandEnabled,
     sessionArtifactsPersistenceAvailable,
+    sessionGenerationAvailable: true,
     rateLimit: opts.rateLimit === true,
     reloadAvailable: true,
     channelReloadAvailable: opts.channelSelection !== undefined,
@@ -1206,7 +1212,7 @@ function createBootstrapServeApp(input: {
   }
   app.use(hostAllowlist(opts.hostname, getPort));
 
-  const healthHandler = (_req: Request, res: Response): void => {
+  const healthHandler = (req: Request, res: Response): void => {
     const runtimeError = getRuntimeError();
     if (runtimeError !== undefined) {
       res.status(503).json({
@@ -1218,6 +1224,11 @@ function createBootstrapServeApp(input: {
 
     if (onHealthServed) {
       res.once('finish', onHealthServed);
+    }
+    if (isDeepHealthQuery(req.query['deep'])) {
+      res.setHeader('Retry-After', '1');
+      res.status(503).json({ status: 'degraded', reason: 'bootstrap' });
+      return;
     }
     res.status(200).json({ status: 'ok' });
   };
@@ -1419,7 +1430,7 @@ function createDelegatingServeApp(
   getRuntimeApp: () => Application | undefined,
   options: {
     waitForDeferredRuntimeRoutes?: boolean;
-    startRuntime?: () => void;
+    startRuntime?: () => boolean;
     runtimeReady?: Promise<void>;
     authenticateDeferredRuntimeRequest?: RequestHandler;
     authenticateDeferredChannelWebhookRequest?: RequestHandler;
@@ -1437,6 +1448,11 @@ function createDelegatingServeApp(
         options.startRuntime &&
         options.runtimeReady
       ) {
+        const waitStartedAt = performance.now();
+        const timing: DeferredRuntimeRequestTiming = {
+          startedAt: new Date(),
+          path: 'joined',
+        };
         const webhookRequest = isChannelWebhookRequest(req);
         const authGate = webhookRequest
           ? (options.authenticateDeferredChannelWebhookRequest ??
@@ -1447,11 +1463,17 @@ function createDelegatingServeApp(
             return;
           }
         }
-        options.startRuntime();
+        setDeferredRuntimeRequestTiming(req, timing);
+        if (options.startRuntime()) {
+          timing.path = 'started_on_request';
+        }
         try {
           await options.runtimeReady;
         } catch {
           // Fall through to the bootstrap app so it can report the startup error.
+        } finally {
+          timing.waitMs =
+            Math.round((performance.now() - waitStartedAt) * 100) / 100;
         }
         target = getRuntimeApp();
       }
@@ -1982,7 +2004,7 @@ export async function runQwenServe(
   };
 
   // Resolve the bound workspace list. The first explicit workspace remains the
-  // primary workspace for legacy APIs; later workspaces are sessions-only
+  // primary workspace for legacy APIs; later workspaces are isolated secondary
   // runtimes.
   const workspaceInputs = rawWorkspaces.map((workspace) => ({
     raw: workspace,
@@ -2387,7 +2409,7 @@ export async function runQwenServe(
   let markRuntimeFailed!: (err: Error) => void;
   let runtimeStartupSettled = false;
   let startRuntimeAfterHealth: (() => void) | undefined;
-  let startRuntimeForRequest: (() => void) | undefined;
+  let startRuntimeForRequest: (() => boolean) | undefined;
   const deferRuntimeUntilFirstHealth =
     deps.resolveOnListen === true && deps.deferRuntimeUntilFirstHealth === true;
   const runtimeReady = new Promise<void>((resolve, reject) => {
@@ -3263,6 +3285,7 @@ export async function runQwenServe(
       statusProvider,
       workspaceProvidersStatusProvider,
       workspaceSkillsStatusProvider,
+      skillInstallEnv: runtimeEffectiveEnv,
       voiceEnv: runtimeEffectiveEnv,
       isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools: persistDisabledToolsFn,
@@ -3579,6 +3602,7 @@ export async function runQwenServe(
           }),
         workspaceSkillsStatusProvider:
           runtime.createWorkspaceSkillsStatusProvider(),
+        skillInstallEnv: secondaryEnv.effectiveEnv,
         voiceEnv: secondaryEnv.effectiveEnv,
         voiceSettingsScope: WORKSPACE_SETTING_SCOPE,
         isChannelLive: () => secondaryBridge.isChannelLive(),
@@ -3951,6 +3975,7 @@ export async function runQwenServe(
             }),
           workspaceSkillsStatusProvider:
             runtime.createWorkspaceSkillsStatusProvider(),
+          skillInstallEnv: wsEnv.effectiveEnv,
           voiceEnv: wsEnv.effectiveEnv,
           voiceSettingsScope: WORKSPACE_SETTING_SCOPE,
           isChannelLive: () => wsBridge.isChannelLive(),
@@ -4212,6 +4237,7 @@ export async function runQwenServe(
       fsFactory: routeFsFactory,
       primaryWorkspaceTrusted: trustedWorkspace,
       primaryRuntimeEnv,
+      daemonEnv: daemonRuntimeBaseEnv,
       daemonLog,
       getChannelWorkerSnapshot,
       getChannelWorkerSnapshots,
@@ -4373,7 +4399,7 @@ export async function runQwenServe(
     runtimeApp ??
     createDelegatingServeApp(bootstrapApp, () => runtimeApp, {
       waitForDeferredRuntimeRoutes: deferRuntimeUntilFirstHealth,
-      startRuntime: () => startRuntimeForRequest?.(),
+      startRuntime: () => startRuntimeForRequest?.() ?? false,
       runtimeReady,
       authenticateDeferredRuntimeRequest: bearerAuth(opts.token),
       authenticateDeferredChannelWebhookRequest: deferredChannelWebhookAuth,
@@ -4967,8 +4993,8 @@ export async function runQwenServe(
             );
           });
       };
-      const startRuntime = (): void => {
-        if (runtimeStarting) return;
+      const startRuntime = (): boolean => {
+        if (runtimeStarting) return false;
         armRuntimeStartupTimer();
         clearRuntimeStartAfterHealthTimer();
         clearRuntimeStartFallbackTimer();
@@ -4994,6 +5020,7 @@ export async function runQwenServe(
             await completeRuntimeStartup(runtime.app);
           })
           .catch((err) => failRuntimeStartup(err));
+        return true;
       };
       startRuntimeForRequest = startRuntime;
       const scheduleRuntimeStartFallback = (): void => {

@@ -28,6 +28,7 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
   writeStderrLine: vi.fn(),
 }));
+import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 
 const MODEL = 'test-model';
 
@@ -57,7 +58,7 @@ const DIFF = '/abs/diff.txt';
  * satisfies that one. A plan that requires nothing is not a plan any capture
  * command writes, and coverage now reads the roster out of it.
  */
-function plan(): string {
+function plan(opts: { step45?: boolean } = {}): string {
   const p = join(dir, 'plan.json');
   writeFileSync(
     p,
@@ -72,6 +73,11 @@ function plan(): string {
       ],
     }),
   );
+  // Every high-effort review runs Step 4 (verify) and Step 5 (reverse audit), and
+  // `composeReview` now proves they did — so a fixture meaning "a review that did
+  // everything right" includes them, exactly as it includes the roster. Pass
+  // `{ step45: false }` for a run that skipped one or both (the gap tests).
+  if (opts.step45 !== false) recordStep45(p);
   // Backdate it. The transcripts are written first and the stale-transcript
   // filter is `mtime < planMtime`; on a filesystem with millisecond granularity
   // both land in the same tick and the comparison flips at random. An explicit
@@ -79,6 +85,38 @@ function plan(): string {
   const old = new Date(2020, 0, 1);
   utimesSync(p, old, old);
   return p;
+}
+
+/**
+ * Lay down the Step 4 verifier and Step 5 reverse auditor a complete high-effort
+ * review runs: each one's recorded prompt, its brief, and the harness's transcript
+ * of an agent launched with it that opened the brief. Neither names a line range,
+ * so neither grants chunk coverage — they answer only "did the step run", which is
+ * what `verificationGaps` asks. Pass a subset of `keys` to model a skipped step.
+ */
+function recordStep45(
+  planPath: string,
+  keys: string[] = ['verify', 'reverse-audit'],
+): void {
+  const d = promptRecordDir(planPath);
+  mkdirSync(d, { recursive: true });
+  for (const key of keys) {
+    const brief = briefPath(planPath, key);
+    writeFileSync(brief, `The ${key} brief.`);
+    const launch =
+      `You are review agent \`${key}\`.\n` +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}")`;
+    // Match production (`prompt-record.ts`): the record filename is the
+    // percent-encoded key. A no-op for `verify`/`reverse-audit`, but a future role
+    // whose name `encodeURIComponent` transforms would otherwise be written to a
+    // name the reader never looks for.
+    writeFileSync(join(d, `${encodeURIComponent(key)}.txt`), launch);
+    transcript(`v-${key.replace(/[^a-z0-9]/gi, '_')}`, launch, {
+      toolCalls: 2,
+      opens: [brief],
+    });
+  }
 }
 
 /** Write one agent transcript, as the harness would. */
@@ -218,14 +256,22 @@ function blindPrompt(chunk: number): string {
   return `The changes are in chunk ${chunk} of 2, covering lines 1-100 of the diff.`;
 }
 
-/** Both chunks reviewed by agents that opened the diff. */
-function coveredPlan(): string {
+/**
+ * Both chunks reviewed by agents that opened the diff, and Step 4/5 ran — a
+ * complete high-effort review. Pass a subset of keys to model a run that skipped a
+ * step (what the (B) gap tests are about); `plan({ step45: false })` suppresses the
+ * default pair so this controls them exactly.
+ */
+function coveredPlan(
+  step45Keys: string[] = ['verify', 'reverse-audit'],
+): string {
   transcript('a1', goodPrompt(1), { toolCalls: 3 });
   transcript('a2', goodPrompt(2), { toolCalls: 2 });
-  const p = plan();
+  const p = plan({ step45: false });
   recordBuilt(p, 1);
   recordBuilt(p, 2);
   recordMatrix(p);
+  recordStep45(p, step45Keys);
   return p;
 }
 
@@ -510,6 +556,24 @@ describe('composeReview — stacked states compose, none erased', () => {
     expect(r.body).toContain('Unresolved, please confirm:');
     expect(r.body).toContain('Not reviewed: security');
     expect(r.body).not.toContain('no blockers');
+  });
+
+  it('reads as a sentence when no role was briefed at all', () => {
+    // The register this lands in matters as much as the fact. On #7012 the public
+    // CHANGES_REQUESTED body was twelve lines of the review's own plumbing, each
+    // naming an internal command (`agent-prompt --role 2`) the PR author has no way
+    // to run, while the two Criticals that needed acting on sat inline below. The
+    // author needs one thing from this: which of the review they should not trust.
+    const gap =
+      'every dimension — none of the 12 required agents was launched with a ' +
+      'prompt this skill built, so this diff was reviewed, if at all, from prompts ' +
+      'the run wrote for itself: the severity bar, the finding format and this ' +
+      "project's own rules never reached an agent";
+    const r = composeReview(base({ unreviewedDimensions: [gap] }));
+
+    expect(r.body).toContain(`Not reviewed: ${gap}.`);
+    expect(r.body).not.toMatch(/agent-prompt|--role|--chunk/);
+    expect(r.event).not.toBe('APPROVE'); // it still caps, as it always did
   });
 
   it('RC with body Criticals plus unread scope carries both disclosures', () => {
@@ -856,12 +920,20 @@ describe('coverage is recomputed, never accepted', () => {
     });
     expect(r.event).not.toBe('APPROVE');
     expect(r.body).toContain('read nothing');
+    // The repair rides the remediation channel — a body disclosure whose FIX
+    // silently vanished is the exact state that channel exists to prevent, and
+    // without this line, deleting the idle push would fail no test.
+    expect(r.remediation.join(' ')).toMatch(
+      /idle agents: relaunch each with the same printed prompt/,
+    );
   });
 
   it('names a blind launch as itself, not as a whiff', () => {
     // An agent whose prompt never named the diff could not have read it, and
     // relaunching it produces another agent that cannot either. The prompt is the
-    // defect, and the body has to say so or the reader will retry forever.
+    // defect. The body says what happened — to the PR author, who cannot run
+    // `agent-prompt` — and the rebuild command rides in `remediation`, which the
+    // command prints to stderr for the orchestrator.
     const r = composeReview({
       criticalsInline: 0,
       suggestionsInline: 0,
@@ -871,7 +943,157 @@ describe('coverage is recomputed, never accepted', () => {
     });
     expect(r.event).not.toBe('APPROVE');
     expect(r.body).toContain('never named the diff file');
-    expect(r.body).toContain('agent-prompt');
+    expect(r.body).not.toContain('agent-prompt');
+    expect(r.remediation.join(' ')).toContain(
+      '"${QWEN_CODE_CLI:-qwen}" review agent-prompt',
+    );
+    expect(r.remediation.join(' ')).toMatch(/do not relaunch the old prompt/);
+    // Blind agents read nothing, so the chunks they owned are also chunks
+    // nobody read — that disclosure's repair must ride along too. Deleting the
+    // missingReceipts push used to fail no test: no fixture reached it.
+    expect(r.body).toContain('no agent reported covering');
+    expect(r.remediation.join(' ')).toMatch(
+      /chunks nobody read: build each with/,
+    );
+  });
+
+  it('a missing-roles gap has a FIX on the remediation channel', () => {
+    // The blind agents got one; the sibling categories did not, and a body
+    // disclosure with no repair command is how #7012's orchestrator ended at
+    // "the agents clearly did their job". Here the test-matrix brief was never
+    // built: the body says what cannot be certified, in the author's register,
+    // and the remediation names the roster call, in the operator's.
+    // (Blind agents are pinned in the test above; the remaining three
+    // categories in the test below — between them, every category that
+    // discloses is asserted to repair.)
+    const p = plan({ step45: false });
+    transcript('a1', goodPrompt(1), { toolCalls: 3 });
+    transcript('a2', goodPrompt(2), { toolCalls: 2 });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    // recordMatrix(p) deliberately absent — the roster still requires it.
+    recordStep45(p);
+
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).not.toBe('APPROVE');
+    expect(r.body).toContain('no record shows its brief reaching an agent');
+    expect(r.body).not.toMatch(/agent-prompt|--roster|--role/);
+    // The FIX names the run's REAL plan path — a `<plan>` placeholder pasted
+    // literally parses as a shell redirection.
+    expect(r.remediation.join(' ')).toContain(
+      `"\${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan '${p}' --roster`,
+    );
+  });
+
+  it('rewritten, unread-brief and never-opened gaps each carry their FIX too', () => {
+    // The categories the missing-roles test above does not reach — without this,
+    // dropping any one of their `remediation.push` calls would fail no test, which
+    // is precisely the disclosure-without-repair state the channel exists to
+    // prevent. One plan, three defects: chunk 1's agent ran on a hand-written
+    // prompt (rewritten), chunk 2's got the built prompt and never opened its
+    // brief (unread), and a third agent got chunk 1's built prompt and never
+    // opened the diff (unopened).
+    const p = plan();
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p); // roster satisfied: these three categories, nothing else
+    transcript(
+      'a1',
+      `You are reviewing chunk 1 of 2.\n` +
+        `read_file(file_path="${DIFF}", offset=0, limit=100)`,
+      { toolCalls: 3 },
+    );
+    transcript('a2', goodPrompt(2), { toolCalls: 3, opens: [] });
+    transcript('a3', goodPrompt(1), {
+      toolCalls: 0,
+      opens: [briefPath(p, 'chunk-1')],
+    });
+
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).not.toBe('APPROVE');
+    const fixes = r.remediation.join(' ');
+    expect(fixes).toMatch(/rewritten launches: re-run/);
+    expect(fixes).toMatch(/unread briefs: relaunch/);
+    expect(fixes).toMatch(/agents that never opened the diff: relaunch/);
+    // And none of the three disclosures drags a command into the body.
+    expect(r.body).not.toMatch(/agent-prompt|--roster|--chunk/);
+  });
+
+  it('the handler prints every FIX to stderr, before the verdict, never to stdout', () => {
+    // The array on the result is data; the command boundary is the interface the
+    // orchestrator actually reads. Without this, rerouting FIX lines to stdout
+    // (corrupting the JSON callers parse) or printing them after `Verdict:` (so
+    // a reader that stops at the verdict never sees them) would stay green.
+    const p = plan({ step45: false });
+    transcript('a1', goodPrompt(1), { toolCalls: 3 });
+    transcript('a2', goodPrompt(2), { toolCalls: 2 });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordStep45(p); // roster misses the test matrix → one repairable gap
+    const input = join(dir, 'input.json');
+    writeFileSync(
+      input,
+      JSON.stringify({
+        criticalsInline: 0,
+        suggestionsInline: 0,
+        planPath: p,
+        modelId: MODEL,
+      }),
+    );
+
+    const prevDir = process.env['QWEN_CODE_PROJECT_DIR'];
+    const prevSession = process.env['QWEN_CODE_SESSION_ID'];
+    process.env['QWEN_CODE_PROJECT_DIR'] = ENV['QWEN_CODE_PROJECT_DIR'];
+    process.env['QWEN_CODE_SESSION_ID'] = ENV['QWEN_CODE_SESSION_ID'];
+    try {
+      vi.mocked(writeStderrLine).mockClear();
+      vi.mocked(writeStdoutLine).mockClear();
+      (composeReviewCommand.handler as (a: Record<string, unknown>) => void)({
+        input,
+      });
+
+      const stderr = vi
+        .mocked(writeStderrLine)
+        .mock.calls.map((c) => String(c[0]));
+      const fixIdx = stderr.findIndex((l) => l.startsWith('FIX: '));
+      const verdictIdx = stderr.findIndex((l) => l.startsWith('Verdict:'));
+      expect(fixIdx).toBeGreaterThanOrEqual(0);
+      expect(verdictIdx).toBeGreaterThan(fixIdx);
+      // And stdout stays parseable JSON — no FIX line in it.
+      const stdout = vi
+        .mocked(writeStdoutLine)
+        .mock.calls.map((c) => String(c[0]))
+        .join('\n');
+      expect(() => JSON.parse(stdout)).not.toThrow();
+      expect(stdout).not.toContain('FIX: ');
+      // The composed JSON persists the EXACT verdict line, so Step 8's archived
+      // report copies it instead of re-deriving a lossy one from event+cappedBy
+      // (a presubmit downgrade depends on fields that pair does not carry).
+      const parsedOut = JSON.parse(stdout) as { verdictLine?: string };
+      expect(parsedOut.verdictLine).toMatch(/^Verdict: /);
+      const printedVerdict = vi
+        .mocked(writeStderrLine)
+        .mock.calls.map((c) => String(c[0]))
+        .find((l) => l.startsWith('Verdict:'));
+      expect(parsedOut.verdictLine).toBe(printedVerdict);
+    } finally {
+      if (prevDir === undefined) delete process.env['QWEN_CODE_PROJECT_DIR'];
+      else process.env['QWEN_CODE_PROJECT_DIR'] = prevDir;
+      if (prevSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+      else process.env['QWEN_CODE_SESSION_ID'] = prevSession;
+    }
   });
 
   it('caps when the transcripts cannot be read at all — and says so', () => {
@@ -905,6 +1127,92 @@ describe('coverage is recomputed, never accepted', () => {
   });
 });
 
+describe('the Step 4/5 gate — verify and reverse audit must have run (high effort)', () => {
+  it('caps a clean APPROVE to COMMENT when the reverse audit never ran', () => {
+    // The high-value catch: a zero-finding high-effort review that skipped the pass
+    // meant to find what Step 3 missed cannot certify the diff clean. compose-review
+    // runs only at high effort, so reverse audit is always owed here.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['verify']), // reverse audit absent
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.body).toMatch(
+      /reverse audit — no auditor was launched with a prompt this skill builds/,
+    );
+  });
+
+  it('discloses that posted findings were not verified when Step 4 was skipped', () => {
+    // A confirmed Critical still blocks — a cap never softens a REQUEST_CHANGES —
+    // but the body says the posted findings were not verified.
+    const r = composeReview({
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['reverse-audit']), // verifier absent
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toMatch(/verification — the review posts findings/);
+  });
+
+  it('does not require a verifier on a review that confirmed nothing', () => {
+    // C=0, S=0: nothing to verify. The reverse audit ran, so this approves.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['reverse-audit']), // verifier absent, none needed
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('APPROVE');
+    expect(r.body).not.toMatch(/verification/);
+  });
+
+  it('approves a review that ran both verify and the reverse audit', () => {
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(), // both present
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('APPROVE');
+  });
+
+  it('requires a verifier for a body Critical that is not pre-confirmed', () => {
+    // A non-deterministic Critical that could not be anchored still posts (in the
+    // body) and still had to be verified — so a missing verifier is disclosed even
+    // with no inline findings.
+    const r = composeReview({
+      bodyCriticals: ['a real blocker that could not be anchored'],
+      planPath: coveredPlan(['reverse-audit']), // verifier absent
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toMatch(/verification — the review posts findings/);
+  });
+
+  it('does not require a verifier for a deterministic [build]/[test] body Critical', () => {
+    // A `[build]`/`[test]` finding is pre-confirmed and skips verification by design,
+    // so a review whose only finding is one must not be told its findings were
+    // unverified — that would post a false disclosure on a correct review.
+    const r = composeReview({
+      bodyCriticals: ['[build] `npm run build` failed: TS2345 in x.ts'],
+      planPath: coveredPlan(['reverse-audit']), // verifier absent, none needed
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).not.toMatch(/verification/);
+  });
+});
+
 // `verdictLine` is what Step 6 prints — the one place a verdict exists for the
 // user. It had no test, and a review of this change found the reason to want one.
 describe('verdictLine — the terminal verdict, and its dangling colon', () => {
@@ -916,6 +1224,7 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
       cappedBy: [],
       downgraded: false,
       downgradedFrom: null,
+      remediation: [],
       ...over,
     });
 

@@ -212,12 +212,13 @@ export class PromptQueueFullError extends Error {
 
 /**
  * Thrown by `spawnOrAttach` when the requested `workspaceCwd` doesn't
- * canonicalize to the daemon's bound workspace. Every
- * bridge instance is bound to exactly one workspace; cross-workspace
- * requests are rejected at the daemon boundary. The server route
- * translates this to a 400 response with `code: 'workspace_mismatch'`
- * and both paths in the body so clients can fall through to spawning
- * their own daemon / routing to a different one via an orchestrator.
+ * canonicalize to the bridge's bound workspace. Every bridge instance is bound
+ * to exactly one runtime; a multi-workspace daemon selects a bridge before
+ * dispatch. Cross-workspace requests that reach this boundary are rejected.
+ * The server route translates this to a 400 response with
+ * `code: 'workspace_mismatch'`
+ * and both paths in the body so clients can refresh the workspace catalog,
+ * register the requested workspace, or route to the correct runtime.
  */
 export class WorkspaceMismatchError extends Error {
   readonly bound: string;
@@ -230,11 +231,10 @@ export class WorkspaceMismatchError extends Error {
         ? `${requested.slice(0, MAX_WORKSPACE_PATH_LENGTH)}…[truncated]`
         : requested;
     super(
-      `Workspace mismatch: daemon is bound to "${bound}" but ` +
-        `request asked for "${safeRequested}". Each \`qwen serve\` ` +
-        `daemon binds to exactly one workspace; start a separate ` +
-        `daemon for "${safeRequested}" (or route the request to one ` +
-        `via an orchestrator).`,
+      `Workspace mismatch: runtime is bound to "${bound}" but ` +
+        `request asked for "${safeRequested}". Select a registered ` +
+        `runtime for "${safeRequested}" or register it before retrying; ` +
+        `this bridge will not fall back to the primary workspace.`,
     );
     this.name = 'WorkspaceMismatchError';
     this.bound = bound;

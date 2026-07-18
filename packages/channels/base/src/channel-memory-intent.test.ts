@@ -5,24 +5,24 @@ describe('parseChannelMemoryIntent', () => {
   it('parses Chinese remember prefixes', () => {
     expect(parseChannelMemoryIntent('记住：默认使用 staging 环境')).toEqual({
       kind: 'remember',
-      text: '默认使用 staging 环境',
+      texts: ['默认使用 staging 环境'],
     });
     expect(
       parseChannelMemoryIntent('帮我记一下，发布前跑 npm run build'),
     ).toEqual({
       kind: 'remember',
-      text: '发布前跑 npm run build',
+      texts: ['发布前跑 npm run build'],
     });
     expect(parseChannelMemoryIntent('以后记住要先看 CI')).toEqual({
       kind: 'remember',
-      text: '要先看 CI',
+      texts: ['要先看 CI'],
     });
   });
 
   it('parses English remember prefixes', () => {
     expect(parseChannelMemoryIntent('remember: use staging')).toEqual({
       kind: 'remember',
-      text: 'use staging',
+      texts: ['use staging'],
     });
   });
 
@@ -75,6 +75,17 @@ describe('parseChannelMemoryIntent', () => {
       kind: 'remove',
       id: 'm-a31f0d82c7e4',
     });
+    for (const text of [
+      '删除 m-a31f0d82c7e4',
+      '删掉 m-a31f0d82c7e4',
+      'delete m-a31f0d82c7e4',
+      'remove m-a31f0d82c7e4',
+    ]) {
+      expect(parseChannelMemoryIntent(text)).toEqual({
+        kind: 'remove',
+        id: 'm-a31f0d82c7e4',
+      });
+    }
     expect(
       parseChannelMemoryIntent('把 m-a31f0d82c7e4 改成默认使用 production'),
     ).toEqual({
@@ -84,6 +95,20 @@ describe('parseChannelMemoryIntent', () => {
     });
     expect(
       parseChannelMemoryIntent('update m-a31f0d82c7e4 to use production'),
+    ).toEqual({
+      kind: 'update',
+      id: 'm-a31f0d82c7e4',
+      text: 'use production',
+    });
+    expect(
+      parseChannelMemoryIntent('更新 m-a31f0d82c7e4 为默认使用 production'),
+    ).toEqual({
+      kind: 'update',
+      id: 'm-a31f0d82c7e4',
+      text: '默认使用 production',
+    });
+    expect(
+      parseChannelMemoryIntent('change m-a31f0d82c7e4 to use production'),
     ).toEqual({
       kind: 'update',
       id: 'm-a31f0d82c7e4',
@@ -123,6 +148,24 @@ describe('parseChannelMemoryIntent', () => {
     expect(parseChannelMemoryIntent('confirm clear memory')).toEqual({
       kind: 'clear_confirm',
     });
+  });
+
+  it('parses action-specific update and removal confirmations', () => {
+    expect(parseChannelMemoryIntent('确认更新记忆')).toEqual({
+      kind: 'update_confirm',
+    });
+    expect(parseChannelMemoryIntent('confirm memory update')).toEqual({
+      kind: 'update_confirm',
+    });
+    expect(parseChannelMemoryIntent('确认删除记忆')).toEqual({
+      kind: 'remove_confirm',
+    });
+    expect(parseChannelMemoryIntent('confirm memory removal')).toEqual({
+      kind: 'remove_confirm',
+    });
+    for (const text of ['确认', 'confirm', '可以', '好的']) {
+      expect(parseChannelMemoryIntent(text)).toBeNull();
+    }
   });
 
   it('leaves ambiguous prose alone', () => {

@@ -222,6 +222,22 @@ describe('SettingsMessage user-scope editing', () => {
     expect(onSubDialog).toHaveBeenCalledWith('fastModel', 'user');
   });
 
+  it('shows a fallback UI category with a readable label when no theme setting exists', () => {
+    const setValue = vi.fn(() =>
+      Promise.resolve({} as DaemonSettingUpdateResult),
+    );
+    // boolSetting has key 'general.testFlag' — no 'ui.theme', so the
+    // fallback UI category branch is exercised.
+    const container = renderPanel(makeState([boolSetting()], setValue));
+
+    const nav = container.querySelector('nav');
+    const labels = Array.from(nav?.querySelectorAll('span') ?? []).map(
+      (s) => s.textContent,
+    );
+    expect(labels).toContain('UI');
+    expect(labels).not.toContain('settings.category.UI');
+  });
+
   it('renders the model-management block inside the Model category', () => {
     const setValue = vi.fn(() =>
       Promise.resolve({} as DaemonSettingUpdateResult),

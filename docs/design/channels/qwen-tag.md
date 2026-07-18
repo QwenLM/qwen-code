@@ -1,6 +1,13 @@
 # RFC: "qwen tag" — a persistent, multiplayer, channel-resident agent for qwen-code (DingTalk-first)
 
-**Status:** Draft (v2)
+> **Historical decision record.** The one-process-per-workspace / one-daemon-per-
+> workspace premise in this draft is superseded. Named daemon-managed channels
+> are now grouped by owning workspace with one worker per owning runtime;
+> `--channel all` remains primary-only. The single global token and lack of
+> per-human identity remain current limitations. See
+> [`../daemon-multi-workspace-hardening.md`](../daemon-multi-workspace-hardening.md).
+
+**Status:** Historical draft (v2)
 **Date:** 2026-06-25
 **Author:** (qwen-code)
 
@@ -122,8 +129,8 @@ The four build areas, developed in detail in §6:
 
 ### Non-Goals
 
-- **NG1 — Not a hosted, multi-tenant SaaS.** A "qwen tag" is one agent process bound to **one** workspace (`serve.ts:165-171`; multi-workspace = one daemon per workspace on separate ports). No central control plane.
-- **NG2 — No per-human identity, billing, or cost budgets in this RFC.** The daemon's identity model is a **single global bearer token** (`auth.ts:259-266`) and `clientId`-level attribution throughout the event bus and permission audit. We add sender _markers in prompts_ (G2) but do **not** introduce authenticated per-user principals, per-user quotas, or cost tracking. Sender markers are advisory prompt text, not an auth boundary — every group member shares the daemon's single workspace credentials, and in a shared `'thread'` session is the _same_ daemon `clientId`.
+- **NG1 — Not a hosted, multi-tenant SaaS.** A daemon may host several isolated workspace runtimes, but it still has one process-global token, rate limiter, listener, and fault radius. There is no central control plane or per-human authorization boundary.
+- **NG2 — No per-human identity, billing, or cost budgets in this RFC.** The daemon's identity model is a **single global bearer token** (`auth.ts:259-266`) and `clientId`-level attribution throughout the event bus and permission audit. We add sender _markers in prompts_ (G2) but do **not** introduce authenticated per-user principals, per-user quotas, or cost tracking. Sender markers are advisory prompt text, not an auth boundary — every group member shares the owning workspace runtime's credentials, and in a shared `'thread'` session is the _same_ daemon `clientId`.
 - **NG3 — The Phase-3 multi-identity gateway is out of scope** here, mentioned only as a forward-pointer. This RFC covers Phase 0–2.
 - **NG4 — Feishu is secondary, not co-primary.** DingTalk is the reference implementation and the source of all worked examples.
 - **NG5 — Slack and other Western platforms are out of scope.** The registered channel types are `telegram`, `weixin`, `dingtalk`, `feishu`, and `qq` (`channel-registry.ts:10-14`); no Slack adapter exists.

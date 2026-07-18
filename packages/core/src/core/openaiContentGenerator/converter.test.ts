@@ -509,6 +509,146 @@ describe('OpenAIContentConverter', () => {
       ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
     });
 
+    it('rejects the recorded content-only nested thinking-tag leak', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const opening = converter.convertOpenAIChunkToGemini(
+        streamChunk('opening', { content: '<think>\n\n' }),
+        stream,
+      );
+      const repeatedOpening = converter.convertOpenAIChunkToGemini(
+        streamChunk('repeated-opening', { content: '</think><thi' }),
+        stream,
+      );
+
+      expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(repeatedOpening.candidates?.[0]?.content?.parts).toEqual([]);
+      const nestedOpening = converter.convertOpenAIChunkToGemini(
+        streamChunk('nested-opening', { content: 'nk>9<think>-3' }),
+        stream,
+      );
+
+      expect(nestedOpening.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(() => finishStream(stream)).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
+    });
+
+    it.each([
+      ['split literal block', ['<thi', 'nk>literal</think>']],
+      ['empty block with a separate finish chunk', ['<think>\n\n</think>', '']],
+      [
+        'two split valid blocks',
+        ['<think>\n\n', '</think><thi', 'nk>literal</think>'],
+      ],
+    ])('preserves content-only %s', (_name, chunks) => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const parts = chunks.flatMap((content, index) => {
+        const response = converter.convertOpenAIChunkToGemini(
+          streamChunk(
+            `literal-${index}`,
+            { content },
+            index === chunks.length - 1 ? 'stop' : null,
+          ),
+          stream,
+        );
+        return response.candidates?.[0]?.content?.parts ?? [];
+      });
+
+      expect(parts.map((part) => part.text).join('')).toBe(chunks.join(''));
+      expect(parts.every((part) => part.thought !== true)).toBe(true);
+    });
+
+    it('releases a long undecided prefix before the stream finishes', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const text = `<think>${' '.repeat(257)}`;
+
+      const response = converter.convertOpenAIChunkToGemini(
+        streamChunk('literal', { content: text }),
+        stream,
+      );
+      const continuation = converter.convertOpenAIChunkToGemini(
+        streamChunk('continuation', { content: 'literal' }, 'stop'),
+        stream,
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([{ text }]);
+      expect(continuation.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'literal' },
+      ]);
+    });
+
+    it('preserves a leak-shaped literal without provider provenance', () => {
+      const stream = withStreamParser();
+      const text = '<think>\n\n</think><think>9<think>-3';
+      const response = converter.convertOpenAIChunkToGemini(
+        streamChunk('literal', { content: text }, 'stop'),
+        stream,
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([{ text }]);
+    });
+
+    it.each([
+      [
+        'at the start of the stream',
+        ['<think></think><think>outer <think>literal', '</think></think>'],
+      ],
+      [
+        'after visible content',
+        [
+          'Explanation: ',
+          '<think></think><think>outer <think>literal</think></think>',
+        ],
+      ],
+    ])('preserves balanced nested literals %s', (_name, chunks) => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const parts = chunks.flatMap((content, index) => {
+        const response = converter.convertOpenAIChunkToGemini(
+          streamChunk(
+            `balanced-${index}`,
+            { content },
+            index === chunks.length - 1 ? 'stop' : null,
+          ),
+          stream,
+        );
+        return response.candidates?.[0]?.content?.parts ?? [];
+      });
+
+      expect(parts.map((part) => part.text).join('')).toBe(chunks.join(''));
+    });
+
+    it('fails closed when a suspicious prefix exceeds the buffer limit', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const content = '<think></think><think>9<think>' + 'x'.repeat(257);
+
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('long-leak', { content }),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it.each([
+      '<thinking></thinking><thinking>9<thinking>-3',
+      '<think ></think ><think >9<think >-3',
+    ])('rejects provider-tag grammar variant %s', (content) => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('variant', { content }, 'stop'),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
     it('rejects closing-tag recovery after a tag leaked in reasoning', () => {
       const stream = withStreamParser();
       converter.convertOpenAIChunkToGemini(

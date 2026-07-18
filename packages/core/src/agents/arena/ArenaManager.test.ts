@@ -403,6 +403,33 @@ describe('ArenaManager', () => {
         expect(spawnConfig.inProcess?.chatHistory).toBeUndefined();
       }
     });
+
+    it('builds the in-process worker system prompt in headless interaction mode', async () => {
+      // Arena workers run non-interactively, so ArenaManager passes 'headless'
+      // as the interaction mode (4th arg) to getCoreSystemPrompt. A regression
+      // that drops that argument would fall back to the interactive prompt,
+      // telling arena workers to ask the user questions no one can answer.
+      // Assert on the produced prompt: the headless variant carries a
+      // single-turn marker that is absent from every other interaction mode.
+      mockBackend.type = 'in-process';
+      const manager = new ArenaManager(mockConfig as never);
+
+      await manager.start(createValidStartOptions());
+
+      expect(mockBackend.spawnAgent).toHaveBeenCalledTimes(2);
+      for (const call of mockBackend.spawnAgent.mock.calls) {
+        const spawnConfig = call[0] as {
+          inProcess?: {
+            runtimeConfig?: { promptConfig?: { systemPrompt?: string } };
+          };
+        };
+        const systemPrompt =
+          spawnConfig.inProcess?.runtimeConfig?.promptConfig?.systemPrompt;
+        expect(systemPrompt).toContain(
+          'This is a non-interactive, single-turn run',
+        );
+      }
+    });
   });
 
   describe('active session lifecycle', () => {
