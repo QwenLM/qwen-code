@@ -376,7 +376,9 @@ export const ToolConfirmationMessage: React.FC<
           // See #6867.
           enforceHeightBudget
           truncateCueText={
-            compactMode ? `... more lines not shown ...` : undefined
+            compactMode
+              ? `... more lines not shown ...`
+              : `... more lines not shown (press 'e' to expand) ...`
           }
         />
         {isPlanExpanded && (

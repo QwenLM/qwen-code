@@ -221,9 +221,11 @@ describe('<MarkdownDisplay />', () => {
         />,
       );
       const output = lastFrame() ?? '';
-      // Cue names the count of dropped source lines and the expand key.
+      // Cue names the count of dropped source lines (context-agnostic default).
       expect(output).toMatch(/\d+ more lines? not shown/);
-      expect(output).toContain("press 'e' to expand");
+      // The 'e' hint is caller-specific (ToolConfirmationMessage passes it via
+      // truncateCueText), not baked into the default.
+      expect(output).not.toContain("press 'e' to expand");
     });
 
     it('does not show a truncation cue when streaming (isPending=true)', () => {

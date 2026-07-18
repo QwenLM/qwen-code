@@ -819,7 +819,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         wrap="truncate-end"
       >
         {truncateCueText ??
-          `... ${droppedSourceLines} more line${droppedSourceLines === 1 ? '' : 's'} not shown (press 'e' to expand) ...`}
+          `... ${droppedSourceLines} more line${droppedSourceLines === 1 ? '' : 's'} not shown ...`}
       </Text>,
     );
   }
