@@ -21,6 +21,7 @@ import {
   registerWorkspaceQualifiedScheduledTasksRoutes,
   scheduledTaskSessionName,
 } from './scheduled-tasks.js';
+import type { AdmitScheduledTaskChannelTarget } from './scheduled-tasks.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -179,6 +180,110 @@ describe('scheduled-tasks routes', () => {
     expect(h.bridge.closed).toEqual([]);
   });
 
+  it('returns an explicit owned session binding for route-created tasks', async () => {
+    const res = await create({ cron: '0 9 * * *', prompt: 'p' });
+    expect(res.status).toBe(201);
+    expect(res.body.sessionBinding).toEqual({
+      sessionId: res.body.sessionId,
+      ownership: 'owned',
+    });
+  });
+
+  it('persists an admitted channel delivery target', async () => {
+    const admitted: Array<Parameters<AdmitScheduledTaskChannelTarget>[0]> = [];
+    const app = express();
+    app.use(express.json());
+    registerScheduledTasksRoutes(app, {
+      boundWorkspace: h.workspace,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody,
+      bridge: h.bridge,
+      admitChannelTarget: async (input) => {
+        admitted.push(input);
+        return {
+          ...input.target,
+          // Admission may canonicalize data from the observed-target registry.
+          isGroup: true,
+        };
+      },
+    });
+
+    const delivery = {
+      kind: 'channel',
+      target: { channelName: 'dingtalk', chatId: 'group-42' },
+    };
+    const res = await request(app)
+      .post('/scheduled-tasks')
+      .send({ cron: '0 9 * * *', prompt: 'digest', delivery });
+
+    expect(res.status).toBe(201);
+    expect(admitted).toHaveLength(1);
+    expect(admitted[0]).toMatchObject({
+      workspaceCwd: h.workspace,
+      target: delivery.target,
+    });
+    expect(res.body.delivery).toEqual({
+      kind: 'channel',
+      target: { ...delivery.target, isGroup: true },
+    });
+    const stored = JSON.parse(
+      await fsp.readFile(getCronFilePath(h.workspace), 'utf-8'),
+    );
+    expect(stored[0].delivery).toEqual(res.body.delivery);
+  });
+
+  it('rejects channel delivery when no target-admission provider is installed', async () => {
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'digest',
+      delivery: {
+        kind: 'channel',
+        target: { channelName: 'dingtalk', chatId: 'untrusted-group' },
+      },
+    });
+    expect(res.status).toBe(501);
+    expect(res.body.code).toBe('channel_delivery_unavailable');
+    expect(h.bridge.spawned).toEqual([]);
+  });
+
+  it('rejects a channel target the admission provider has not observed', async () => {
+    const app = express();
+    app.use(express.json());
+    registerScheduledTasksRoutes(app, {
+      boundWorkspace: h.workspace,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody,
+      bridge: h.bridge,
+      admitChannelTarget: async () => null,
+    });
+    const res = await request(app)
+      .post('/scheduled-tasks')
+      .send({
+        cron: '0 9 * * *',
+        prompt: 'digest',
+        delivery: {
+          kind: 'channel',
+          target: { channelName: 'dingtalk', chatId: 'unknown' },
+        },
+      });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('channel_target_not_admitted');
+    expect(h.bridge.spawned).toEqual([]);
+  });
+
+  it('rejects malformed channel delivery before admission', async () => {
+    const res = await create({
+      cron: '0 9 * * *',
+      prompt: 'digest',
+      delivery: {
+        kind: 'channel',
+        target: { channelName: '', chatId: 'group-42' },
+      },
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_delivery');
+  });
+
   it('creates an UNBOUND task (no session) when no bridge is provided', async () => {
     // Mirrors createServeApp passing no bridge when resident task-session
     // management is off: binding a task to a session nothing keeps resident /
@@ -308,6 +413,48 @@ describe('scheduled-tasks routes', () => {
     expect(list.body.tasks[0].enabled).toBe(false);
   });
 
+  it('adds and clears an admitted channel delivery via PATCH', async () => {
+    const app = express();
+    app.use(express.json());
+    registerScheduledTasksRoutes(app, {
+      boundWorkspace: h.workspace,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody,
+      bridge: h.bridge,
+      admitChannelTarget: async ({ target }) => ({
+        ...target,
+        isGroup: true,
+      }),
+    });
+    const created = await request(app)
+      .post('/scheduled-tasks')
+      .send({ cron: '0 9 * * *', prompt: 'digest' });
+
+    const added = await request(app)
+      .patch(`/scheduled-tasks/${created.body.id}`)
+      .send({
+        delivery: {
+          kind: 'channel',
+          target: { channelName: 'dingtalk', chatId: 'group-42' },
+        },
+      });
+    expect(added.status).toBe(200);
+    expect(added.body.delivery).toEqual({
+      kind: 'channel',
+      target: {
+        channelName: 'dingtalk',
+        chatId: 'group-42',
+        isGroup: true,
+      },
+    });
+
+    const cleared = await request(app)
+      .patch(`/scheduled-tasks/${created.body.id}`)
+      .send({ delivery: null });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.delivery).toBeNull();
+  });
+
   it('clears the name when patched to an empty string', async () => {
     const created = await create({
       name: 'Named',
@@ -344,6 +491,44 @@ describe('scheduled-tasks routes', () => {
     expect(again.status).toBe(404);
     // A no-op delete (already gone) closes nothing further.
     expect(h.bridge.closed).toEqual([created.body.sessionId]);
+  });
+
+  it('does not close a shared IM session when its task is deleted', async () => {
+    const file = getCronFilePath(h.workspace);
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    await fsp.writeFile(
+      file,
+      JSON.stringify([
+        {
+          id: 'shared01',
+          cron: '0 9 * * *',
+          prompt: 'digest',
+          recurring: true,
+          createdAt: Date.now(),
+          lastFiredAt: null,
+          sessionId: 'im-conversation-1',
+          sessionOwnership: 'shared',
+          delivery: {
+            kind: 'channel',
+            target: {
+              channelName: 'dingtalk',
+              chatId: 'group-42',
+              isGroup: true,
+            },
+          },
+        },
+      ]),
+    );
+
+    const list = await request(h.app).get('/scheduled-tasks');
+    expect(list.body.tasks[0].sessionBinding).toEqual({
+      sessionId: 'im-conversation-1',
+      ownership: 'shared',
+    });
+
+    const del = await request(h.app).delete('/scheduled-tasks/shared01');
+    expect(del.status).toBe(200);
+    expect(h.bridge.closed).toEqual([]);
   });
 
   it('records a manual run: advances lastFiredAt and appends a manual run', async () => {

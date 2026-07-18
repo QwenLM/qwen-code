@@ -45,6 +45,8 @@ import {
   MAX_JOBS,
   type DurableCronTask,
   type CronTaskRun,
+  type CronTaskChannelTarget,
+  type CronTaskDelivery,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
@@ -128,6 +130,18 @@ interface ScheduledTaskTarget {
 }
 
 /**
+ * Security boundary for external clients selecting an IM destination. The
+ * implementation is expected to resolve the requested opaque ids against an
+ * observed/authorized target registry and may return a canonicalized target.
+ * `null` means the caller is not allowed to use that target.
+ */
+export type AdmitScheduledTaskChannelTarget = (input: {
+  workspaceCwd: string;
+  target: CronTaskChannelTarget;
+  request: Request;
+}) => Promise<CronTaskChannelTarget | null>;
+
+/**
  * Resolves the target workspace for one request. Returns null when it can't be
  * resolved (unknown or untrusted `:workspace`), in which case the resolver has
  * ALREADY sent the error response and the handler must just return.
@@ -144,6 +158,7 @@ interface RegisterScheduledTaskCrudRoutesDeps {
   resolveTarget: ResolveScheduledTaskTarget;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
+  admitChannelTarget?: AdmitScheduledTaskChannelTarget;
 }
 
 interface RegisterScheduledTasksRoutesDeps {
@@ -156,6 +171,7 @@ interface RegisterScheduledTasksRoutesDeps {
    * fall back to the shared per-project durable-owner firing model.
    */
   bridge?: ScheduledTasksSessionBridge;
+  admitChannelTarget?: AdmitScheduledTaskChannelTarget;
 }
 
 interface RegisterWorkspaceQualifiedScheduledTasksRoutesDeps {
@@ -171,6 +187,7 @@ interface RegisterWorkspaceQualifiedScheduledTasksRoutesDeps {
    * revives. Off → tasks are created unbound (shared-owner firing).
    */
   manageScheduledTaskSessions: boolean;
+  admitChannelTarget?: AdmitScheduledTaskChannelTarget;
 }
 
 /** On-the-wire task shape — normalizes the optional on-disk fields so the
@@ -186,6 +203,11 @@ interface ScheduledTaskView {
   lastFiredAt: number | null;
   nextRunAt: number | null;
   sessionId: string | null;
+  sessionBinding: {
+    sessionId: string;
+    ownership: 'owned' | 'shared';
+  } | null;
+  delivery: CronTaskDelivery | null;
   runs: CronTaskRun[];
 }
 
@@ -203,6 +225,10 @@ function computeNextRunAt(task: DurableCronTask): number | null {
 }
 
 function toView(task: DurableCronTask): ScheduledTaskView {
+  const sessionId =
+    typeof task.sessionId === 'string' && task.sessionId.length > 0
+      ? task.sessionId
+      : null;
   return {
     id: task.id,
     name:
@@ -222,10 +248,17 @@ function toView(task: DurableCronTask): ScheduledTaskView {
     nextRunAt: taskHasLegacyCondition(task) ? null : computeNextRunAt(task),
     // The task's bound session (its run-history transcript), or null for an
     // unbound tool-created/legacy task.
-    sessionId:
-      typeof task.sessionId === 'string' && task.sessionId.length > 0
-        ? task.sessionId
-        : null,
+    sessionId,
+    sessionBinding:
+      sessionId === null
+        ? null
+        : {
+            sessionId,
+            // Legacy route-created tasks predate this field and own their
+            // dedicated session. IM `/loop` tasks mark shared explicitly.
+            ownership: task.sessionOwnership ?? 'owned',
+          },
+    delivery: task.delivery ?? null,
     // Absent runs (tool-created / never-fired) normalizes to [] so the client
     // never special-cases undefined.
     runs: Array.isArray(task.runs) ? task.runs : [],
@@ -277,7 +310,7 @@ function registerScheduledTaskCrudRoutes(
   app: Application,
   deps: RegisterScheduledTaskCrudRoutesDeps,
 ): void {
-  const { prefix, resolveTarget, mutate, safeBody } = deps;
+  const { prefix, resolveTarget, mutate, safeBody, admitChannelTarget } = deps;
   const base = `${prefix}/scheduled-tasks`;
 
   // ── List ──────────────────────────────────────────────────────────
@@ -374,6 +407,61 @@ function registerScheduledTaskCrudRoutes(
       res.status(400).json(removedFieldError(removedField));
       return;
     }
+    const parsedDelivery = parseDeliveryField(body['delivery']);
+    if (parsedDelivery.error) {
+      res.status(400).json({
+        error: parsedDelivery.error,
+        code: 'invalid_delivery',
+      });
+      return;
+    }
+    let delivery: CronTaskDelivery | undefined;
+    if (parsedDelivery.value) {
+      if (!admitChannelTarget) {
+        res.status(501).json({
+          error:
+            'Channel delivery is unavailable because no target-admission provider is installed',
+          code: 'channel_delivery_unavailable',
+        });
+        return;
+      }
+      let admitted: CronTaskChannelTarget | null;
+      try {
+        admitted = await admitChannelTarget({
+          workspaceCwd,
+          target: parsedDelivery.value.target,
+          request: req,
+        });
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: POST ${base} target admission failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        res.status(503).json({
+          error: 'Channel target admission is temporarily unavailable',
+          code: 'channel_target_admission_failed',
+        });
+        return;
+      }
+      if (admitted === null) {
+        res.status(403).json({
+          error: 'The requested Channel target is not observed or authorized',
+          code: 'channel_target_not_admitted',
+        });
+        return;
+      }
+      const canonical = parseDeliveryField({
+        kind: 'channel',
+        target: admitted,
+      });
+      if (!canonical.value) {
+        res.status(503).json({
+          error: 'Channel target admission returned an invalid target',
+          code: 'channel_target_admission_failed',
+        });
+        return;
+      }
+      delivery = canonical.value;
+    }
     const recurring = body['recurring'] !== false;
     const enabled = body['enabled'] !== false;
     const taskId = generateCronTaskId();
@@ -448,6 +536,7 @@ function registerScheduledTaskCrudRoutes(
       // minute the task was created — same guard cronScheduler.create uses.
       lastFiredAt: now - (now % 60_000),
       enabled,
+      ...(delivery !== undefined ? { delivery } : {}),
       ...(boundSessionId !== undefined ? { sessionId: boundSessionId } : {}),
       ...(nameResult.value !== undefined ? { name: nameResult.value } : {}),
     };
@@ -520,6 +609,7 @@ function registerScheduledTaskCrudRoutes(
     // would mean holding the lock to reject a bad request.
     const patch: Partial<DurableCronTask> = {};
     let clearName = false;
+    let clearDelivery = false;
 
     const removedPatchField = findRemovedTaskField(body);
     if (removedPatchField) {
@@ -587,7 +677,65 @@ function registerScheduledTaskCrudRoutes(
       }
       patch.enabled = body['enabled'];
     }
-    if (Object.keys(patch).length === 0 && !clearName) {
+    if ('delivery' in body) {
+      if (body['delivery'] === null) {
+        clearDelivery = true;
+      } else {
+        const parsedDelivery = parseDeliveryField(body['delivery']);
+        if (!parsedDelivery.value) {
+          res.status(400).json({
+            error: parsedDelivery.error ?? '`delivery` is invalid',
+            code: 'invalid_delivery',
+          });
+          return;
+        }
+        if (!admitChannelTarget) {
+          res.status(501).json({
+            error:
+              'Channel delivery is unavailable because no target-admission provider is installed',
+            code: 'channel_delivery_unavailable',
+          });
+          return;
+        }
+        let admitted: CronTaskChannelTarget | null;
+        try {
+          admitted = await admitChannelTarget({
+            workspaceCwd,
+            target: parsedDelivery.value.target,
+            request: req,
+          });
+        } catch (err) {
+          writeStderrLine(
+            `qwen serve: PATCH ${base}/${id} target admission failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          res.status(503).json({
+            error: 'Channel target admission is temporarily unavailable',
+            code: 'channel_target_admission_failed',
+          });
+          return;
+        }
+        if (admitted === null) {
+          res.status(403).json({
+            error: 'The requested Channel target is not observed or authorized',
+            code: 'channel_target_not_admitted',
+          });
+          return;
+        }
+        const canonical = parseDeliveryField({
+          kind: 'channel',
+          target: admitted,
+        });
+        if (!canonical.value) {
+          res.status(503).json({
+            error: 'Channel target admission returned an invalid target',
+            code: 'channel_target_admission_failed',
+          });
+          return;
+        }
+        patch.delivery = canonical.value;
+      }
+    }
+    if (Object.keys(patch).length === 0 && !clearName && !clearDelivery) {
       res.status(400).json({
         error: 'No updatable fields provided',
         code: 'empty_patch',
@@ -630,6 +778,7 @@ function registerScheduledTaskCrudRoutes(
         // `name: null/""` clears the field rather than storing an empty name,
         // so toView reports it as unnamed and isValidTask never sees a "".
         if (clearName) delete next.name;
+        if (clearDelivery) delete next.delivery;
         // Re-seat the task's schedule anchor to "now" whenever an edit would
         // otherwise let the scheduler retroactively fire an already-past slot.
         const justReEnabled =
@@ -745,15 +894,21 @@ function registerScheduledTaskCrudRoutes(
     // Single atomic read-modify-write: capture the task's bound session AND
     // remove it in one cycle, closing the TOCTOU window a separate
     // read-then-remove would open (and cutting three file reads to one). The
-    // dedicated session exists only to run this task, so it's torn down after.
+    // An owned dedicated session exists only to run this task, so it's torn
+    // down after. A shared IM conversation session outlives the task.
     let boundSessionId: string | undefined;
     let removed = false;
     try {
       await updateCronTasks(workspaceCwd, (tasks) => {
         const idx = tasks.findIndex((t) => t.id === id);
         if (idx === -1) return tasks; // not found → no write
-        const match = tasks[idx]!.sessionId;
-        if (typeof match === 'string' && match.length > 0) {
+        const task = tasks[idx]!;
+        const match = task.sessionId;
+        if (
+          task.sessionOwnership !== 'shared' &&
+          typeof match === 'string' &&
+          match.length > 0
+        ) {
           boundSessionId = match;
         }
         removed = true;
@@ -899,12 +1054,13 @@ export function registerScheduledTasksRoutes(
   app: Application,
   deps: RegisterScheduledTasksRoutesDeps,
 ): void {
-  const { boundWorkspace, mutate, safeBody, bridge } = deps;
+  const { boundWorkspace, mutate, safeBody, bridge, admitChannelTarget } = deps;
   registerScheduledTaskCrudRoutes(app, {
     prefix: '',
     resolveTarget: () => ({ workspaceCwd: boundWorkspace, bridge }),
     mutate,
     safeBody,
+    admitChannelTarget,
   });
 }
 
@@ -920,8 +1076,13 @@ export function registerWorkspaceQualifiedScheduledTasksRoutes(
   app: Application,
   deps: RegisterWorkspaceQualifiedScheduledTasksRoutesDeps,
 ): void {
-  const { workspaceRegistry, mutate, safeBody, manageScheduledTaskSessions } =
-    deps;
+  const {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    manageScheduledTaskSessions,
+    admitChannelTarget,
+  } = deps;
   registerScheduledTaskCrudRoutes(app, {
     prefix: '/workspaces/:workspace',
     resolveTarget: (req, res) => {
@@ -941,7 +1102,56 @@ export function registerWorkspaceQualifiedScheduledTasksRoutes(
     },
     mutate,
     safeBody,
+    admitChannelTarget,
   });
+}
+
+function parseDeliveryField(raw: unknown): {
+  value?: CronTaskDelivery;
+  error?: string;
+} {
+  if (raw === undefined || raw === null) return {};
+  if (typeof raw !== 'object' || raw === null) {
+    return { error: '`delivery` must be an object or null' };
+  }
+  const delivery = raw as Record<string, unknown>;
+  if (delivery['kind'] !== 'channel') {
+    return { error: '`delivery.kind` must be `channel`' };
+  }
+  const rawTarget = delivery['target'];
+  if (typeof rawTarget !== 'object' || rawTarget === null) {
+    return { error: '`delivery.target` must be an object' };
+  }
+  const target = rawTarget as Record<string, unknown>;
+  if (
+    typeof target['channelName'] !== 'string' ||
+    target['channelName'].trim().length === 0 ||
+    typeof target['chatId'] !== 'string' ||
+    target['chatId'].trim().length === 0 ||
+    (target['threadId'] !== undefined &&
+      typeof target['threadId'] !== 'string') ||
+    (target['isGroup'] !== undefined && typeof target['isGroup'] !== 'boolean')
+  ) {
+    return {
+      error:
+        '`delivery.target` requires non-empty string channelName/chatId and valid optional threadId/isGroup',
+    };
+  }
+  return {
+    value: {
+      kind: 'channel',
+      target: {
+        channelName: target['channelName'].trim(),
+        chatId: target['chatId'].trim(),
+        ...(target['threadId'] !== undefined
+          ? { threadId: target['threadId'] }
+          : {}),
+        ...(target['isGroup'] !== undefined
+          ? { isGroup: target['isGroup'] }
+          : {}),
+      },
+    },
+  };
 }
 
 /**

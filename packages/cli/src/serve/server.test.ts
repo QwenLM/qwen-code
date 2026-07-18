@@ -453,6 +453,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'channel_reload',
   'channel_control',
   'workspace_channel_observed_contacts',
+  'scheduled_task_channel_delivery',
   'multi_workspace_sessions',
   'multi_workspace_session_rewind',
   'multi_workspace_session_shell',
@@ -2383,6 +2384,24 @@ describe('createServeApp', () => {
           expect(
             getAdvertisedServeFeatures(undefined, {
               channelControlAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'scheduled_task_channel_delivery') {
+          expect(
+            predicate({ scheduledTaskChannelDeliveryAvailable: true }),
+          ).toBe(true);
+          expect(
+            predicate({ scheduledTaskChannelDeliveryAvailable: false }),
+          ).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              scheduledTaskChannelDeliveryAvailable: true,
             }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(

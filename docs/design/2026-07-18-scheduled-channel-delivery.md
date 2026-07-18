@@ -134,24 +134,20 @@ has an authenticated internal boundary. This approach is rejected.
 The first version supports zero or one destination:
 
 ```ts
-interface ScheduledChannelDeliveryTarget {
+interface CronTaskChannelTarget {
   channelName: string;
-  kind: 'direct' | 'group';
   chatId: string;
   threadId?: string;
-  label?: string;
+  isGroup?: boolean;
 }
 
 interface DurableCronTask {
   // Existing fields omitted.
-  sessionBinding?: {
-    sessionId: string;
-    ownership: 'owned' | 'shared';
-  };
+  sessionId?: string;
+  sessionOwnership?: 'owned' | 'shared';
   delivery?: {
-    type: 'channel';
-    target: ScheduledChannelDeliveryTarget;
-    when: 'success';
+    kind: 'channel';
+    target: CronTaskChannelTarget;
   };
 }
 ```
@@ -163,10 +159,11 @@ task has an `owned` session that may be created and closed with the task; an IM
 the task must not close the conversation session. Old records with only
 `sessionId` are treated as `owned`.
 
-`channelName`, `kind`, `chatId`, and optional `threadId` are the routing
-snapshot. `label` is an optional sanitized display snapshot and never
-participates in routing or authorization. No adapter credential is copied into
-the task.
+`channelName`, `chatId`, optional `threadId`, and optional `isGroup` are the
+routing snapshot. No adapter credential or display label is copied into the
+task. The REST view additionally returns
+`sessionBinding: { sessionId, ownership } | null` while preserving the legacy
+top-level `sessionId` field for existing clients.
 
 The task stores a snapshot rather than an observed-contact reference. A
 selected observation can expire or be evicted, but that must not silently

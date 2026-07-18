@@ -288,6 +288,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   channel_control: { since: 'v1' },
   // Read-only workspace graph of recently observed channel contacts.
   workspace_channel_observed_contacts: { since: 'v1' },
+  // Durable scheduled tasks can deliver their completed result through a
+  // daemon-managed Channel worker. Conditional: the runtime must have both a
+  // target-admission provider and the post-run delivery pipeline wired.
+  scheduled_task_channel_delivery: { since: 'v1' },
   // Multi-workspace session routing. Advertised only when one daemon hosts
   // more than one registered workspace runtime.
   multi_workspace_sessions: { since: 'v1' },
@@ -393,6 +397,7 @@ export interface AdvertiseFeatureToggles {
    */
   channelReloadAvailable?: boolean;
   channelControlAvailable?: boolean;
+  scheduledTaskChannelDeliveryAvailable?: boolean;
   /**
    * Whether the daemon will accept client-hosted MCP servers over the WS
    * (`client_mcp_over_ws`, issue #5626).
@@ -493,6 +498,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ['workspace_reload', (toggles) => toggles.reloadAvailable === true],
   ['channel_reload', (toggles) => toggles.channelReloadAvailable === true],
   ['channel_control', (toggles) => toggles.channelControlAvailable === true],
+  [
+    'scheduled_task_channel_delivery',
+    (toggles) => toggles.scheduledTaskChannelDeliveryAvailable === true,
+  ],
   [
     'multi_workspace_sessions',
     (toggles) => toggles.multiWorkspaceSessionsEnabled === true,

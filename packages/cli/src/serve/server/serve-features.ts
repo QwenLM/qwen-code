@@ -47,6 +47,7 @@ interface CreateServeFeaturesDeps {
   reloadAvailable: boolean;
   channelReloadAvailable: () => boolean;
   channelControlAvailable: boolean;
+  scheduledTaskChannelDeliveryAvailable: boolean;
   sessionShellCommandEnabled: boolean;
   multiWorkspaceSessionsEnabled: () => boolean;
   persistentWorkspaceRegistrationAvailable: boolean;
@@ -72,6 +73,7 @@ export function createServeFeatures(
     reloadAvailable,
     channelReloadAvailable,
     channelControlAvailable,
+    scheduledTaskChannelDeliveryAvailable,
     sessionShellCommandEnabled,
     multiWorkspaceSessionsEnabled,
     persistentWorkspaceRegistrationAvailable,
@@ -115,6 +117,7 @@ export function createServeFeatures(
         reloadAvailable,
         channelReloadAvailable: channelReloadAvailable(),
         channelControlAvailable,
+        scheduledTaskChannelDeliveryAvailable,
         multiWorkspaceSessionsEnabled: multiWorkspaceSessionsEnabled(),
         persistentWorkspaceRegistrationAvailable,
         workspaceRuntimeRemovalAvailable,

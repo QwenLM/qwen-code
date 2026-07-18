@@ -145,6 +145,58 @@ describe('cronTasksFile', () => {
       expect(result).toEqual([task]);
     });
 
+    it('round-trips channel delivery and explicit shared session ownership', async () => {
+      const task = makeTask({
+        sessionId: 'im-session-1',
+        sessionOwnership: 'shared',
+        delivery: {
+          kind: 'channel',
+          target: {
+            channelName: 'dingtalk',
+            chatId: 'group-42',
+            threadId: 'thread-7',
+            isGroup: true,
+          },
+        },
+      });
+      await writeCronTasks(tmpDir, [task]);
+      expect(await readCronTasks(tmpDir)).toEqual([task]);
+    });
+
+    it.each([
+      { kind: 'webhook', target: { channelName: 'dingtalk', chatId: 'g1' } },
+      { kind: 'channel', target: { channelName: '', chatId: 'g1' } },
+      { kind: 'channel', target: { channelName: 'dingtalk', chatId: '' } },
+      {
+        kind: 'channel',
+        target: { channelName: 'dingtalk', chatId: 'g1', threadId: 7 },
+      },
+      {
+        kind: 'channel',
+        target: { channelName: 'dingtalk', chatId: 'g1', isGroup: 'yes' },
+      },
+    ])('rejects malformed channel delivery %#', async (delivery) => {
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([{ ...makeTask(), delivery }]),
+      );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+
+    it('rejects invalid or unbound session ownership', async () => {
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([{ ...makeTask(), sessionOwnership: 'borrowed' }]),
+      );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([{ ...makeTask(), sessionOwnership: 'shared' }]),
+      );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+
     it('accepts legacy tasks with no name/enabled fields', async () => {
       // A task written before the fields existed must still read back.
       const legacy = makeTask();

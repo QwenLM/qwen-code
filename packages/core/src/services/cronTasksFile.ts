@@ -61,6 +61,26 @@ export interface CronTaskRun {
  * `lastFiredAt`, so appending a capped run adds no extra write, only bytes). */
 export const MAX_TASK_RUNS = 20;
 
+/** A daemon-managed Channel destination for a scheduled task result. */
+export interface CronTaskChannelTarget {
+  channelName: string;
+  chatId: string;
+  threadId?: string;
+  isGroup?: boolean;
+}
+
+/**
+ * Optional post-run delivery. Kept separate from the prompt/session binding:
+ * the scheduler still executes the prompt in its normal session, then hands
+ * the final result to the daemon's Channel transport.
+ */
+export interface CronTaskDelivery {
+  kind: 'channel';
+  target: CronTaskChannelTarget;
+}
+
+export type CronTaskSessionOwnership = 'owned' | 'shared';
+
 export interface DurableCronTask {
   id: string;
   cron: string;
@@ -97,6 +117,15 @@ export interface DurableCronTask {
    * (`cron_create`) and legacy tasks, which keep the shared-owner firing model.
    */
   sessionId?: string;
+  /**
+   * Lifecycle of a bound session. Absent preserves the legacy meaning:
+   * route-created sessions are owned by the task. IM-created `/loop` tasks set
+   * `shared`, so deleting the task never closes the conversation session.
+   * Only valid when `sessionId` is present.
+   */
+  sessionOwnership?: CronTaskSessionOwnership;
+  /** Optional delivery of the completed run to a daemon-managed Channel. */
+  delivery?: CronTaskDelivery;
   /**
    * Bounded, newest-last history of recent fires (capped at MAX_TASK_RUNS).
    * Absent on tool-created tasks and on any task that has not fired yet.
@@ -417,6 +446,24 @@ function isValidRuns(value: unknown): value is CronTaskRun[] {
   });
 }
 
+function isValidDelivery(value: unknown): value is CronTaskDelivery {
+  if (typeof value !== 'object' || value === null) return false;
+  const delivery = value as Record<string, unknown>;
+  if (delivery['kind'] !== 'channel') return false;
+  const rawTarget = delivery['target'];
+  if (typeof rawTarget !== 'object' || rawTarget === null) return false;
+  const target = rawTarget as Record<string, unknown>;
+  return (
+    typeof target['channelName'] === 'string' &&
+    target['channelName'].length > 0 &&
+    typeof target['chatId'] === 'string' &&
+    target['chatId'].length > 0 &&
+    (target['threadId'] === undefined ||
+      typeof target['threadId'] === 'string') &&
+    (target['isGroup'] === undefined || typeof target['isGroup'] === 'boolean')
+  );
+}
+
 function isValidTask(value: unknown): value is DurableCronTask {
   if (typeof value !== 'object' || value === null) return false;
   const obj = value as Record<string, unknown>;
@@ -440,6 +487,12 @@ function isValidTask(value: unknown): value is DurableCronTask {
     // would treat it as unbound, so a "bound" task would silently run unbound.
     (obj['sessionId'] === undefined ||
       (typeof obj['sessionId'] === 'string' && obj['sessionId'].length > 0)) &&
+    (obj['sessionOwnership'] === undefined ||
+      ((obj['sessionOwnership'] === 'owned' ||
+        obj['sessionOwnership'] === 'shared') &&
+        typeof obj['sessionId'] === 'string' &&
+        obj['sessionId'].length > 0)) &&
+    (obj['delivery'] === undefined || isValidDelivery(obj['delivery'])) &&
     (obj['runs'] === undefined || isValidRuns(obj['runs']))
   );
 }
