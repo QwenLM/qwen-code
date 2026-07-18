@@ -68,6 +68,14 @@ describe('scheduled-tasks workspace actions', () => {
     const res = await makeActions().createScheduledTask({
       cron: '0 9 * * *',
       prompt: 'p',
+      delivery: {
+        kind: 'channel',
+        target: {
+          channelName: 'dingtalk',
+          chatId: 'group-42',
+          isGroup: true,
+        },
+      },
     });
     expect(res).toEqual({ id: 'x' });
     const init = initOf(fetchMock.mock.calls[0]);
@@ -77,16 +85,30 @@ describe('scheduled-tasks workspace actions', () => {
     expect(JSON.parse(init.body as string)).toMatchObject({
       cron: '0 9 * * *',
       prompt: 'p',
+      delivery: {
+        kind: 'channel',
+        target: {
+          channelName: 'dingtalk',
+          chatId: 'group-42',
+          isGroup: true,
+        },
+      },
     });
   });
 
   it('updates with a PATCH and URL-encodes the id', async () => {
     fetchMock.mockResolvedValue(ok({ id: 'a/b' }));
-    await makeActions().updateScheduledTask('a/b', { enabled: false });
+    await makeActions().updateScheduledTask('a/b', {
+      enabled: false,
+      delivery: null,
+    });
     const init = initOf(fetchMock.mock.calls[0]);
     expect(fetchMock.mock.calls[0][0]).toBe('/scheduled-tasks/a%2Fb');
     expect(init.method).toBe('PATCH');
-    expect(JSON.parse(init.body as string)).toEqual({ enabled: false });
+    expect(JSON.parse(init.body as string)).toEqual({
+      enabled: false,
+      delivery: null,
+    });
   });
 
   it('deletes with a DELETE', async () => {

@@ -202,6 +202,19 @@ export interface DaemonScheduledTaskRun {
   withheld?: boolean;
 }
 
+/** A daemon-managed Channel destination for a scheduled task result. */
+export interface DaemonScheduledTaskChannelTarget {
+  channelName: string;
+  chatId: string;
+  threadId?: string;
+  isGroup?: boolean;
+}
+
+export interface DaemonScheduledTaskDelivery {
+  kind: 'channel';
+  target: DaemonScheduledTaskChannelTarget;
+}
+
 export interface DaemonScheduledTask {
   id: string;
   name: string | null;
@@ -217,6 +230,14 @@ export interface DaemonScheduledTask {
   /** Id of the dedicated session this task is bound to — its transcript is the
    * task's run history. Null for unbound tool-created/legacy tasks. */
   sessionId: string | null;
+  /** Explicit lifecycle for the bound session. IM-created loops share their
+   * conversation session; UI-created tasks own their dedicated session. */
+  sessionBinding: {
+    sessionId: string;
+    ownership: 'owned' | 'shared';
+  } | null;
+  /** Optional final-result destination. Null preserves older tasks and daemons. */
+  delivery: DaemonScheduledTaskDelivery | null;
   /** Bounded, newest-last history of recent fires. Empty for tasks that have
    * not fired (and, by nature, for one-shots — they are deleted on fire). */
   runs: DaemonScheduledTaskRun[];
@@ -238,6 +259,9 @@ export interface DaemonCreateScheduledTaskRequest {
   recurring?: boolean;
   /** Defaults to true. */
   enabled?: boolean;
+  /** Requires the daemon's `scheduled_task_channel_delivery` capability and a
+   * target admitted from the workspace's observed Channel contacts. */
+  delivery?: DaemonScheduledTaskDelivery;
 }
 
 /** Partial update. `name: null` (or '') clears the name. Omitted fields are
@@ -248,6 +272,8 @@ export interface DaemonUpdateScheduledTaskRequest {
   name?: string | null;
   recurring?: boolean;
   enabled?: boolean;
+  /** Set a newly admitted target, or null to stop delivering future runs. */
+  delivery?: DaemonScheduledTaskDelivery | null;
 }
 
 export interface DaemonAddWorkspaceResult {

@@ -19,6 +19,8 @@ export type {
   DaemonGoal,
   DaemonGoalList,
   DaemonScheduledTask,
+  DaemonScheduledTaskChannelTarget,
+  DaemonScheduledTaskDelivery,
   DaemonScheduledTaskRun,
   DaemonCreateScheduledTaskRequest,
   DaemonUpdateScheduledTaskRequest,
