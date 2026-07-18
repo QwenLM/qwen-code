@@ -5,6 +5,15 @@ const mockLoadChannelsConfig = vi.hoisted(() => vi.fn());
 const mockLoadChannelsFromExtensions = vi.hoisted(() => vi.fn());
 const mockParseConfiguredChannels = vi.hoisted(() => vi.fn());
 const mockCreateChannel = vi.hoisted(() => vi.fn());
+const mockDurableLoopController = vi.hoisted(() => ({
+  create: vi.fn(),
+  listForTarget: vi.fn(),
+  disable: vi.fn(),
+  validateCron: vi.fn(),
+}));
+const mockCreateDurableChannelLoopController = vi.hoisted(() =>
+  vi.fn(() => mockDurableLoopController),
+);
 const mockReadChannelMemory = vi.hoisted(() => vi.fn());
 const mockGetChannelMemoryRevision = vi.hoisted(() => vi.fn());
 const mockListChannelMemoryEntries = vi.hoisted(() => vi.fn());
@@ -31,9 +40,19 @@ const mockObservedContactStore = vi.hoisted(() =>
   })),
 );
 const mockLoadSettings = vi.hoisted(() =>
-  vi.fn((_cwd?: string, _opts?: unknown) => ({
-    merged: { proxy: 'http://settings-proxy:8080' as string | undefined },
-  })),
+  vi.fn(
+    (
+      _cwd?: string,
+      _opts?: unknown,
+    ): {
+      merged: {
+        proxy?: string;
+        experimental?: { cron?: boolean };
+      };
+    } => ({
+      merged: { proxy: 'http://settings-proxy:8080' },
+    }),
+  ),
 );
 const mockResolveProxyUrl = vi.hoisted(() =>
   vi.fn((_cliProxy?: string, settingsProxy?: string) => settingsProxy),
@@ -183,6 +202,10 @@ vi.mock('./runtime.js', () => ({
 
 vi.mock('./observed-contact-store.js', () => ({
   ObservedChannelContactStore: mockObservedContactStore,
+}));
+
+vi.mock('./durable-loop-controller.js', () => ({
+  createDurableChannelLoopController: mockCreateDurableChannelLoopController,
 }));
 
 vi.mock('@qwen-code/channel-base', () => ({
@@ -635,6 +658,43 @@ describe('createDaemonChannelBridgeFacade', () => {
 });
 
 describe('runChannelDaemonWorker', () => {
+  it('injects a workspace durable loop controller when cron is enabled', async () => {
+    const sdk = createSdk();
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(mockCreateDurableChannelLoopController).toHaveBeenCalledWith({
+      workspaceCwd: '/workspace',
+    });
+    expect(mockCreateChannel.mock.calls[0]?.[3]).toEqual(
+      expect.objectContaining({ loopController: mockDurableLoopController }),
+    );
+    await handle.close();
+  });
+
+  it('omits the durable loop controller when cron is disabled', async () => {
+    const sdk = createSdk();
+    mockLoadSettings.mockReturnValueOnce({
+      merged: { experimental: { cron: false } },
+    });
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(mockCreateDurableChannelLoopController).not.toHaveBeenCalled();
+    expect(mockCreateChannel.mock.calls[0]?.[3]).not.toHaveProperty(
+      'loopController',
+    );
+    await handle.close();
+  });
+
   it('forwards router discard through the daemon bridge facade', async () => {
     const sdk = createSdk();
     const handle = await runChannelDaemonWorker({

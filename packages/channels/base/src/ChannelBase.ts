@@ -186,6 +186,16 @@ export interface ChannelBaseOptions {
 
 export interface ChannelLoopController {
   create(input: ChannelLoopInput): Promise<ChannelLoop>;
+  /**
+   * Create a loop bound to an already-resolved agent session. Daemon-backed
+   * controllers use this to persist a durable task without taking ownership of
+   * the conversation session that originated the loop.
+   */
+  createForSession?(
+    input: ChannelLoopInput,
+    maxEnabledLoops: number,
+    sessionId: string,
+  ): Promise<ChannelLoop | undefined>;
   createForTarget?(
     input: ChannelLoopInput,
     maxEnabledLoops: number,
@@ -2582,7 +2592,21 @@ export abstract class ChannelBase {
       ),
     };
     let job: ChannelLoop | undefined;
-    if (this.loopController.createForTarget) {
+    if (this.loopController.createForSession) {
+      const sessionId = await this.router.resolve(
+        this.name,
+        target.senderId,
+        target.chatId,
+        target.threadId,
+        input.cwd,
+        target.isGroup,
+      );
+      job = await this.loopController.createForSession(
+        input,
+        MAX_LOOP_JOBS_PER_TARGET,
+        sessionId,
+      );
+    } else if (this.loopController.createForTarget) {
       job = await this.loopController.createForTarget(
         input,
         MAX_LOOP_JOBS_PER_TARGET,
@@ -2668,7 +2692,13 @@ export abstract class ChannelBase {
       createdBy: sanitizeSenderName(this.toolCallerName(sessionId, target)),
     };
     let job: ChannelLoop | undefined;
-    if (this.loopController.createForTarget) {
+    if (this.loopController.createForSession) {
+      job = await this.loopController.createForSession(
+        loopInput,
+        MAX_LOOP_JOBS_PER_TARGET,
+        sessionId,
+      );
+    } else if (this.loopController.createForTarget) {
       job = await this.loopController.createForTarget(
         loopInput,
         MAX_LOOP_JOBS_PER_TARGET,

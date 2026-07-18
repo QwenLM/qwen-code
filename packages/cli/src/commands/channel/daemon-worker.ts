@@ -70,6 +70,7 @@ import {
 } from './runtime.js';
 import { BridgeChannelMemoryIntentClassifier } from './memory-intent-classifier.js';
 import { ObservedChannelContactStore } from './observed-contact-store.js';
+import { createDurableChannelLoopController } from './durable-loop-controller.js';
 
 const SESSION_SHELL_COMMAND_FEATURE = 'session_shell_command';
 const MAX_ACTIVE_WEBHOOK_TASKS = 16;
@@ -415,6 +416,12 @@ export async function runChannelDaemonWorker(
   const settings = loadSettings(daemonWorkspace, {
     skipLoadEnvironment: true,
   });
+  const cronEnabled =
+    process.env['QWEN_CODE_DISABLE_CRON'] !== '1' &&
+    settings.merged.experimental?.cron !== false;
+  const loopController = cronEnabled
+    ? createDurableChannelLoopController({ workspaceCwd: daemonWorkspace })
+    : undefined;
   throwIfStartupAborted(startupSignal);
   const proxy = resolveProxyUrl(
     undefined,
@@ -499,6 +506,7 @@ export async function runChannelDaemonWorker(
           createChannel(name, config, bridgeFacade, {
             ...(proxy ? { proxy } : {}),
             router: createdRouter,
+            ...(loopController ? { loopController } : {}),
             channelMemory: {
               readChannelMemory,
               getChannelMemoryRevision,

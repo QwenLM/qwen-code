@@ -5818,12 +5818,19 @@ describe('ChannelBase', () => {
         consecutiveFailures: 0,
         runCount: 0,
       };
-      const createLoop = vi.fn(async (_input: ChannelLoopInput) => created);
+      const createForSession = vi.fn(
+        async (
+          _input: ChannelLoopInput,
+          _maxEnabledLoops: number,
+          _sessionId: string,
+        ) => created,
+      );
       const ch = createChannel(
         {},
         {
           loopController: {
-            create: createLoop,
+            create: vi.fn(),
+            createForSession,
             listForTarget: vi.fn().mockResolvedValue([]),
             disable: vi.fn(),
             validateCron: vi.fn(),
@@ -5836,22 +5843,26 @@ describe('ChannelBase', () => {
         envelope({ text: '/loop add "0 9 * * *" post summary' }),
       );
 
-      expect(createLoop).toHaveBeenCalledWith({
-        channelName: 'test-chan',
-        target: {
+      expect(createForSession).toHaveBeenCalledWith(
+        {
           channelName: 'test-chan',
-          senderId: 'user1',
-          chatId: 'chat1',
-          threadId: undefined,
-          isGroup: false,
+          target: {
+            channelName: 'test-chan',
+            senderId: 'user1',
+            chatId: 'chat1',
+            threadId: undefined,
+            isGroup: false,
+          },
+          cwd: '/tmp',
+          cron: '0 9 * * *',
+          prompt: 'post summary',
+          label: 'post summary',
+          recurring: true,
+          createdBy: 'User 1',
         },
-        cwd: '/tmp',
-        cron: '0 9 * * *',
-        prompt: 'post summary',
-        label: 'post summary',
-        recurring: true,
-        createdBy: 'User 1',
-      });
+        10,
+        's-1',
+      );
       expect(ch.sent[0]!.text).toContain('Loop job-1');
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
@@ -5900,13 +5911,13 @@ describe('ChannelBase', () => {
         consecutiveFailures: 0,
         runCount: 0,
       };
-      const createForTarget = vi.fn().mockResolvedValue(created);
+      const createForSession = vi.fn().mockResolvedValue(created);
       const ch = createChannel(
         {},
         {
           loopController: {
             create: vi.fn(),
-            createForTarget,
+            createForSession,
             listForTarget: vi.fn().mockResolvedValue([]),
             disable: vi.fn(),
             validateCron: vi.fn(),
@@ -5927,7 +5938,7 @@ describe('ChannelBase', () => {
         recurring: false,
       });
 
-      expect(createForTarget).toHaveBeenCalledWith(
+      expect(createForSession).toHaveBeenCalledWith(
         {
           channelName: 'test-chan',
           target: {
@@ -5945,6 +5956,7 @@ describe('ChannelBase', () => {
           createdBy: 'user1',
         },
         10,
+        's-1',
       );
       expect(result).toBe('Loop job-1: */5 * * * *');
     });

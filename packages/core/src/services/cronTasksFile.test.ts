@@ -163,6 +163,33 @@ describe('cronTasksFile', () => {
       expect(await readCronTasks(tmpDir)).toEqual([task]);
     });
 
+    it('round-trips Channel /loop ownership metadata', async () => {
+      const task = makeTask({
+        sessionId: 'im-session-1',
+        sessionOwnership: 'shared',
+        channelLoop: {
+          senderId: 'user-1',
+          createdBy: 'Alice',
+          label: 'Daily digest',
+        },
+      });
+      await writeCronTasks(tmpDir, [task]);
+      expect(await readCronTasks(tmpDir)).toEqual([task]);
+    });
+
+    it('rejects malformed Channel /loop metadata', async () => {
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([
+          {
+            ...makeTask(),
+            channelLoop: { senderId: '', createdBy: 'Alice' },
+          },
+        ]),
+      );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+
     it.each([
       { kind: 'webhook', target: { channelName: 'dingtalk', chatId: 'g1' } },
       { kind: 'channel', target: { channelName: '', chatId: 'g1' } },

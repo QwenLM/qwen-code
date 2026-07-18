@@ -81,6 +81,13 @@ export interface CronTaskDelivery {
 
 export type CronTaskSessionOwnership = 'owned' | 'shared';
 
+/** Authorization/display snapshot for a Channel-originated `/loop` task. */
+export interface CronTaskChannelLoopMetadata {
+  senderId: string;
+  createdBy: string;
+  label?: string;
+}
+
 export interface DurableCronTask {
   id: string;
   cron: string;
@@ -126,6 +133,7 @@ export interface DurableCronTask {
   sessionOwnership?: CronTaskSessionOwnership;
   /** Optional delivery of the completed run to a daemon-managed Channel. */
   delivery?: CronTaskDelivery;
+  channelLoop?: CronTaskChannelLoopMetadata;
   /**
    * Bounded, newest-last history of recent fires (capped at MAX_TASK_RUNS).
    * Absent on tool-created tasks and on any task that has not fired yet.
@@ -464,6 +472,20 @@ function isValidDelivery(value: unknown): value is CronTaskDelivery {
   );
 }
 
+function isValidChannelLoopMetadata(
+  value: unknown,
+): value is CronTaskChannelLoopMetadata {
+  if (typeof value !== 'object' || value === null) return false;
+  const metadata = value as Record<string, unknown>;
+  return (
+    typeof metadata['senderId'] === 'string' &&
+    metadata['senderId'].length > 0 &&
+    typeof metadata['createdBy'] === 'string' &&
+    metadata['createdBy'].length > 0 &&
+    (metadata['label'] === undefined || typeof metadata['label'] === 'string')
+  );
+}
+
 function isValidTask(value: unknown): value is DurableCronTask {
   if (typeof value !== 'object' || value === null) return false;
   const obj = value as Record<string, unknown>;
@@ -493,6 +515,8 @@ function isValidTask(value: unknown): value is DurableCronTask {
         typeof obj['sessionId'] === 'string' &&
         obj['sessionId'].length > 0)) &&
     (obj['delivery'] === undefined || isValidDelivery(obj['delivery'])) &&
+    (obj['channelLoop'] === undefined ||
+      isValidChannelLoopMetadata(obj['channelLoop'])) &&
     (obj['runs'] === undefined || isValidRuns(obj['runs']))
   );
 }

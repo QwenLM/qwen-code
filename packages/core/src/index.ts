@@ -234,6 +234,7 @@ export type {
   CronTaskChannelTarget,
   CronTaskDelivery,
   CronTaskSessionOwnership,
+  CronTaskChannelLoopMetadata,
 } from './services/cronTasksFile.js';
 export type {
   ScheduledDeliveryStatus,
