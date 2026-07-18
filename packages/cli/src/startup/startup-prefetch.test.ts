@@ -631,6 +631,10 @@ describe('startupPrefetch', () => {
       'Startup update check failed:',
       error,
     );
+    expect(mockRecordStartupEvent).toHaveBeenCalledWith(
+      'startup_prefetch_failed',
+      { name: 'update_check' },
+    );
     expect(mockUpdateEventEmit).not.toHaveBeenCalledWith(
       'update-failed',
       expect.anything(),

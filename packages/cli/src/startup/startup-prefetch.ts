@@ -218,6 +218,7 @@ export function startPostRenderPrefetches(
         }
       } catch (error) {
         debugLogger.warn('Startup update check failed:', error);
+        throw error;
       }
     });
   }
