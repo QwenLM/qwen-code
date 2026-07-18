@@ -1,0 +1,50 @@
+name: 'Deploy GitHub Pages'
+
+on:
+  push:
+    tags: 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: 'read'
+  pages: 'write'
+  id-token: 'write'
+
+# Allow only one concurrent deployment, skipping runs queued between the run
+# in-progress and latest queued. However, do NOT cancel in-progress runs as we
+# want to allow these production deployments to complete.
+concurrency:
+  group: '${{ github.workflow }}'
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: |-
+      ${{ !contains(github.ref_name, 'nightly') }}
+    runs-on: 'ubuntu-latest'
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+
+      - name: 'Setup Pages'
+        uses: 'actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d' # ratchet:actions/configure-pages@v6
+
+      - name: 'Build with Jekyll'
+        uses: 'actions/jekyll-build-pages@44a6e6beabd48582f863aeeb6cb2151cc1716697' # ratchet:actions/jekyll-build-pages@v1
+        with:
+          source: './'
+          destination: './_site'
+
+      - name: 'Upload artifact'
+        uses: 'actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9' # ratchet:actions/upload-pages-artifact@v5
+
+  deploy:
+    environment:
+      name: 'github-pages'
+      url: '${{ steps.deployment.outputs.page_url }}'
+    runs-on: 'ubuntu-latest'
+    needs: 'build'
+    steps:
+      - name: 'Deploy to GitHub Pages'
+        id: 'deployment'
+        uses: 'actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128' # ratchet:actions/deploy-pages@v5

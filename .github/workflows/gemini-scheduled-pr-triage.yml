@@ -1,0 +1,30 @@
+name: 'Qwen Scheduled PR Triage 🚀'
+
+on:
+  schedule:
+    - cron: '*/15 * * * *' # Runs every 15 minutes
+  workflow_dispatch:
+
+jobs:
+  audit-prs:
+    timeout-minutes: 15
+    if: |-
+      ${{ github.repository == 'QwenLM/qwen-code' }}
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+      issues: 'write'
+      pull-requests: 'write'
+    runs-on: 'ubuntu-latest'
+    outputs:
+      prs_needing_comment: '${{ steps.run_triage.outputs.prs_needing_comment }}'
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+
+      - name: 'Run PR Triage Script'
+        id: 'run_triage'
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          GITHUB_REPOSITORY: '${{ github.repository }}'
+        run: './.github/scripts/pr-triage.sh'

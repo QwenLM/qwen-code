@@ -1,0 +1,635 @@
+name: 'Release'
+
+on:
+  schedule:
+    # Runs every day at midnight UTC for the nightly release.
+    - cron: '0 0 * * *'
+    # Runs every Tuesday at 23:59 UTC for the preview release.
+    - cron: '59 23 * * 2'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'The version to release (e.g., v0.1.11 or v0.1.11-preview.0). Required for manual patch releases.'
+        required: false
+        type: 'string'
+      ref:
+        description: 'The branch or ref (full git sha) to release from.'
+        required: true
+        type: 'string'
+        default: 'main'
+      dry_run:
+        description: 'Run a dry-run of the release process; no branches, npm packages or GitHub releases will be created.'
+        required: true
+        type: 'boolean'
+        default: true
+      create_nightly_release:
+        description: 'Auto apply the nightly release tag, input version is ignored.'
+        required: false
+        type: 'boolean'
+        default: false
+      create_preview_release:
+        description: 'Create a preview release. If version is X.Y.Z-preview.N, use it as-is. If version is X.Y.Z, derive X.Y.Z-preview.0.'
+        required: false
+        type: 'boolean'
+        default: false
+      force_skip_tests:
+        description: 'Skip the release validation jobs ("quality", "integration_none", and "integration_docker"), allowing publish to proceed without them. Prod releases should run validation.'
+        required: false
+        type: 'boolean'
+        default: false
+
+jobs:
+  prepare:
+    name: 'Prepare Release Metadata'
+    runs-on: 'ubuntu-latest'
+    if: |-
+      ${{ github.repository == 'QwenLM/qwen-code' }}
+    permissions:
+      contents: 'read'
+    outputs:
+      release_tag: '${{ steps.version.outputs.RELEASE_TAG }}'
+      release_version: '${{ steps.version.outputs.RELEASE_VERSION }}'
+      npm_tag: '${{ steps.version.outputs.NPM_TAG }}'
+      previous_release_tag: '${{ steps.version.outputs.PREVIOUS_RELEASE_TAG }}'
+      is_nightly: '${{ steps.vars.outputs.is_nightly }}'
+      is_preview: '${{ steps.vars.outputs.is_preview }}'
+      is_dry_run: '${{ steps.vars.outputs.is_dry_run }}'
+
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        with:
+          ref: '${{ github.event.inputs.ref || github.sha }}'
+          fetch-depth: 0
+
+      - name: 'Set booleans for simplified logic'
+        id: 'vars'
+        env:
+          CREATE_NIGHTLY_RELEASE: '${{ github.event.inputs.create_nightly_release }}'
+          CREATE_PREVIEW_RELEASE: '${{ github.event.inputs.create_preview_release }}'
+          CRON: '${{ github.event.schedule }}'
+          DRY_RUN_INPUT: '${{ github.event.inputs.dry_run }}'
+        run: |-
+          is_nightly="false"
+          if [[ "${CRON}" == "0 0 * * *" || "${CREATE_NIGHTLY_RELEASE}" == "true" ]]; then
+            is_nightly="true"
+          fi
+          echo "is_nightly=${is_nightly}" >> "${GITHUB_OUTPUT}"
+
+          is_preview="false"
+          if [[ "${CRON}" == "59 23 * * 2" || "${CREATE_PREVIEW_RELEASE}" == "true" ]]; then
+            is_preview="true"
+          fi
+          echo "is_preview=${is_preview}" >> "${GITHUB_OUTPUT}"
+
+          is_dry_run="false"
+          if [[ "${DRY_RUN_INPUT}" == "true" ]]; then
+            is_dry_run="true"
+          fi
+          echo "is_dry_run=${is_dry_run}" >> "${GITHUB_OUTPUT}"
+
+      - name: 'Setup Node.js'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+
+      - name: 'Install Dependencies'
+        env:
+          NPM_CONFIG_PREFER_OFFLINE: 'true'
+          QWEN_SKIP_PREPARE: '1'
+        run: |-
+          npm ci --no-audit --progress=false
+
+      - name: 'Get the version'
+        id: 'version'
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          IS_NIGHTLY: '${{ steps.vars.outputs.is_nightly }}'
+          IS_PREVIEW: '${{ steps.vars.outputs.is_preview }}'
+          MANUAL_VERSION: '${{ inputs.version }}'
+        run: |-
+          VERSION_ARGS=()
+          if [[ "${IS_NIGHTLY}" == "true" ]]; then
+            VERSION_ARGS+=(--type=nightly)
+          elif [[ "${IS_PREVIEW}" == "true" ]]; then
+            VERSION_ARGS+=(--type=preview)
+            if [[ -n "${MANUAL_VERSION}" ]]; then
+              MANUAL_CLEAN="${MANUAL_VERSION#v}"
+              if [[ "${MANUAL_CLEAN}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-preview\.[0-9]+$ ]]; then
+                VERSION_ARGS+=("--preview_version_override=${MANUAL_CLEAN}")
+              elif [[ "${MANUAL_CLEAN}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                VERSION_ARGS+=("--preview_version_override=${MANUAL_CLEAN}-preview.0")
+              else
+                echo "::error::For preview releases, version must be X.Y.Z or X.Y.Z-preview.N; got ${MANUAL_VERSION}"
+                exit 1
+              fi
+            fi
+          else
+            VERSION_ARGS+=(--type=stable)
+            if [[ -n "${MANUAL_VERSION}" ]]; then
+              VERSION_ARGS+=("--stable_version_override=${MANUAL_VERSION}")
+            fi
+          fi
+
+          VERSION_JSON=$(node scripts/get-release-version.js "${VERSION_ARGS[@]}")
+          echo "RELEASE_TAG=$(echo "$VERSION_JSON" | jq -r .releaseTag)" >> "$GITHUB_OUTPUT"
+          echo "RELEASE_VERSION=$(echo "$VERSION_JSON" | jq -r .releaseVersion)" >> "$GITHUB_OUTPUT"
+          echo "NPM_TAG=$(echo "$VERSION_JSON" | jq -r .npmTag)" >> "$GITHUB_OUTPUT"
+          echo "PREVIOUS_RELEASE_TAG=$(echo "$VERSION_JSON" | jq -r .previousReleaseTag)" >> "$GITHUB_OUTPUT"
+
+  quality:
+    name: 'Quality Checks'
+    runs-on: 'ubuntu-latest'
+    needs: 'prepare'
+    if: |-
+      ${{ github.event.inputs.force_skip_tests != 'true' }}
+    permissions:
+      contents: 'read'
+    env:
+      OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+      OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+      OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
+
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        with:
+          ref: '${{ github.event.inputs.ref || github.sha }}'
+          fetch-depth: 0
+
+      - name: 'Setup Node.js'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+
+      - name: 'Install Dependencies'
+        env:
+          NPM_CONFIG_PREFER_OFFLINE: 'true'
+          QWEN_SKIP_PREPARE: '1'
+        run: |-
+          npm ci --no-audit --progress=false
+
+      - name: 'Format Project'
+        run: |-
+          npm run format
+
+      - name: 'Run Lint'
+        run: |-
+          npm run lint:ci
+
+      - name: 'Check Serve Fast Path Bundle'
+        run: |-
+          npm run check:serve-fast-path-bundle
+
+      - name: 'Build Project'
+        run: |-
+          npm run build
+
+      - name: 'Typecheck Project'
+        run: |-
+          npm run typecheck
+
+      - name: 'Run Workspace Tests'
+        run: |-
+          npm run test:release
+
+  integration_none:
+    name: 'Integration Tests (No Sandbox)'
+    runs-on: 'ubuntu-latest'
+    needs: 'prepare'
+    if: |-
+      ${{ github.event.inputs.force_skip_tests != 'true' }}
+    permissions:
+      contents: 'read'
+    env:
+      OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+      OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+      OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
+
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        with:
+          ref: '${{ github.event.inputs.ref || github.sha }}'
+          fetch-depth: 0
+
+      - name: 'Setup Node.js'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+
+      - name: 'Install Dependencies'
+        env:
+          NPM_CONFIG_PREFER_OFFLINE: 'true'
+          QWEN_SKIP_PREPARE: '1'
+        run: |-
+          npm ci --no-audit --progress=false
+
+      - name: 'Build Bundle'
+        run: |-
+          npm run build
+          npm run bundle
+
+      - name: 'Run CLI Integration Tests'
+        run: |-
+          npm run test:integration:cli:sandbox:none
+
+      - name: 'Run Interactive Integration Tests'
+        run: |-
+          npm run test:integration:interactive:sandbox:none
+
+  integration_docker:
+    name: 'Integration Tests (Docker)'
+    runs-on: 'ubuntu-latest'
+    needs: 'prepare'
+    if: |-
+      ${{ github.event.inputs.force_skip_tests != 'true' }}
+    permissions:
+      contents: 'read'
+    env:
+      OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+      OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+      OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
+
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        with:
+          ref: '${{ github.event.inputs.ref || github.sha }}'
+          fetch-depth: 0
+
+      - name: 'Setup Node.js'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+
+      - name: 'Install Dependencies'
+        env:
+          NPM_CONFIG_PREFER_OFFLINE: 'true'
+          QWEN_SKIP_PREPARE: '1'
+        run: |-
+          npm ci --no-audit --progress=false
+
+      - name: 'Build Bundle'
+        run: |-
+          npm run build
+          npm run bundle
+
+      - name: 'Set up Docker'
+        uses: 'docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5' # ratchet:docker/setup-buildx-action@v4
+
+      - name: 'Build Sandbox'
+        env:
+          QWEN_SANDBOX: 'docker'
+        run: |-
+          npm run build:sandbox -- -s
+
+      - name: 'Run CLI Docker Integration Tests'
+        run: |-
+          # The package.json docker test scripts each rebuild the sandbox image.
+          # Run vitest directly here so this job reuses the image built above.
+          QWEN_SANDBOX=docker npx vitest run --root ./integration-tests cli
+
+      - name: 'Run Interactive Docker Integration Tests'
+        run: |-
+          QWEN_SANDBOX=docker npx vitest run --root ./integration-tests interactive
+
+  audio_capture_prebuilds:
+    name: 'Audio Capture Prebuilds'
+    needs: 'prepare'
+    if: |-
+      ${{ github.repository == 'QwenLM/qwen-code' }}
+    uses: './.github/workflows/audio-capture-prebuilds.yml'
+
+  publish:
+    name: 'Publish Release'
+    runs-on: 'ubuntu-latest'
+    needs:
+      - 'prepare'
+      - 'quality'
+      - 'integration_none'
+      - 'integration_docker'
+      - 'audio_capture_prebuilds'
+    if: |-
+      ${{
+        always() &&
+        needs.prepare.result == 'success' &&
+        (
+          github.repository != 'QwenLM/qwen-code' ||
+          needs.audio_capture_prebuilds.result == 'success'
+        ) &&
+        (
+          github.event.inputs.force_skip_tests == 'true' ||
+          (
+            needs.quality.result == 'success' &&
+            needs.integration_none.result == 'success' &&
+            needs.integration_docker.result == 'success'
+          )
+        )
+      }}
+    environment:
+      name: 'production-release'
+      url: '${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.prepare.outputs.release_tag }}'
+    permissions:
+      contents: 'write'
+      packages: 'write'
+      id-token: 'write'
+
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        with:
+          # Persist the bot PAT for release-branch pushes so downstream CI
+          # workflows are triggered.
+          token: '${{ secrets.CI_BOT_PAT }}'
+          ref: '${{ github.event.inputs.ref || github.sha }}'
+          fetch-depth: 0
+
+      - name: 'Setup Node.js'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+          registry-url: 'https://registry.npmjs.org'
+          scope: '@qwen-code'
+
+      - name: 'Install Dependencies'
+        env:
+          NPM_CONFIG_PREFER_OFFLINE: 'true'
+          QWEN_SKIP_PREPARE: '1'
+        run: |-
+          npm ci --no-audit --progress=false
+
+      - name: 'Configure Git User'
+        run: |-
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config core.hooksPath .husky
+
+      - name: 'Create and switch to a release branch'
+        id: 'release_branch'
+        env:
+          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
+        run: |-
+          BRANCH_NAME="release/${RELEASE_TAG}"
+          git switch -c "${BRANCH_NAME}"
+          echo "BRANCH_NAME=${BRANCH_NAME}" >> "${GITHUB_OUTPUT}"
+
+      - name: 'Update package versions'
+        env:
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+        run: |-
+          npm run release:version "${RELEASE_VERSION}"
+
+      - name: 'Commit and Conditionally Push package versions'
+        env:
+          BRANCH_NAME: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
+          IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
+          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
+        run: |-
+          git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json
+          if git diff --staged --quiet; then
+            echo "No version changes to commit"
+          else
+            git commit -m "chore(release): ${RELEASE_TAG}"
+          fi
+          if [[ "${IS_DRY_RUN}" == "false" ]]; then
+            echo "Pushing release branch to remote..."
+            git push --set-upstream origin "${BRANCH_NAME}" --follow-tags
+          else
+            echo "Dry run enabled. Skipping push."
+          fi
+
+      - name: 'Download audio capture prebuilds'
+        if: |-
+          ${{ github.repository == 'QwenLM/qwen-code' }}
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        with:
+          name: 'audio-capture-prebuilds'
+          path: 'packages/audio-capture/prebuilds'
+
+      - name: 'Build Bundle and Prepare Package'
+        env:
+          QWEN_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
+        run: |-
+          npm run build
+          npm run bundle
+          npm run prepare:package
+
+      - name: 'Build Standalone Archives'
+        env:
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
+        run: 'npm run package:standalone:release -- --version "${RELEASE_VERSION}" --out-dir dist/standalone'
+
+      - name: 'Publish @qwen-code/audio-capture'
+        if: |-
+          ${{ github.repository == 'QwenLM/qwen-code' }}
+        working-directory: 'packages/audio-capture'
+        run: |-
+          npm publish --access public --tag=${{ needs.prepare.outputs.npm_tag }} ${{ needs.prepare.outputs.is_dry_run == 'true' && '--dry-run' || '' }}
+        env:
+          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+
+      - name: 'Publish @qwen-code/qwen-code'
+        working-directory: 'dist'
+        run: |-
+          npm publish --access public --tag=${{ needs.prepare.outputs.npm_tag }} ${{ needs.prepare.outputs.is_dry_run == 'true' && '--dry-run' || '' }}
+        env:
+          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+
+      - name: 'Publish @qwen-code/channel-base'
+        working-directory: 'packages/channels/base'
+        run: |-
+          npm publish --access public --tag=${{ needs.prepare.outputs.npm_tag }} ${{ needs.prepare.outputs.is_dry_run == 'true' && '--dry-run' || '' }}
+        env:
+          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+
+      - name: 'Verify Standalone Archives'
+        run: |-
+          npm run verify:installation-release -- --dir dist/standalone
+
+      - name: 'Create GitHub Release and Tag'
+        if: |-
+          ${{ needs.prepare.outputs.is_dry_run == 'false' }}
+        env:
+          # CI_BOT_PAT required: GITHUB_TOKEN events cannot trigger downstream release-event workflows.
+          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          RELEASE_BRANCH: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
+          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
+          PREVIOUS_RELEASE_TAG: '${{ needs.prepare.outputs.previous_release_tag }}'
+          IS_NIGHTLY: '${{ needs.prepare.outputs.is_nightly }}'
+          IS_PREVIEW: '${{ needs.prepare.outputs.is_preview }}'
+        run: |-
+          PRERELEASE_FLAG=""
+          if [[ "${IS_NIGHTLY}" == "true" || "${IS_PREVIEW}" == "true" ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
+          gh release create "${RELEASE_TAG}" \
+            dist/cli.js \
+            dist/standalone/qwen-code-* \
+            dist/standalone/SHA256SUMS \
+            --target "${RELEASE_BRANCH}" \
+            --title "Release ${RELEASE_TAG}" \
+            --notes-start-tag "${PREVIOUS_RELEASE_TAG}" \
+            --generate-notes \
+            ${PRERELEASE_FLAG}
+
+  notify_failure:
+    name: 'Notify Release Failure'
+    runs-on: 'ubuntu-latest'
+    needs:
+      - 'prepare'
+      - 'quality'
+      - 'integration_none'
+      - 'integration_docker'
+      - 'publish'
+    if: |-
+      ${{
+        always() &&
+        (
+          github.event_name == 'schedule' ||
+          github.event.inputs.dry_run != 'true'
+        ) &&
+        (
+          needs.prepare.result == 'failure' ||
+          needs.quality.result == 'failure' ||
+          needs.integration_none.result == 'failure' ||
+          needs.integration_docker.result == 'failure' ||
+          needs.publish.result == 'failure'
+        )
+      }}
+    permissions:
+      actions: 'write'
+      issues: 'write'
+
+    steps:
+      - name: 'Create Issue on Failure'
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          GH_REPO: '${{ github.repository }}'
+          RELEASE_TAG: "${{ needs.prepare.outputs.release_tag || 'N/A' }}"
+          DETAILS_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          BUG_LABEL: 'type/bug'
+          READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
+          AUTOFIX_APPROVED_LABEL: 'autofix/approved'
+          PREPARE_RESULT: '${{ needs.prepare.result }}'
+          QUALITY_RESULT: '${{ needs.quality.result }}'
+          INTEGRATION_NONE_RESULT: '${{ needs.integration_none.result }}'
+          INTEGRATION_DOCKER_RESULT: '${{ needs.integration_docker.result }}'
+          PUBLISH_RESULT: '${{ needs.publish.result }}'
+        run: |-
+          failed_jobs="$(
+            for job in \
+              "prepare:${PREPARE_RESULT}" \
+              "quality:${QUALITY_RESULT}" \
+              "integration_none:${INTEGRATION_NONE_RESULT}" \
+              "integration_docker:${INTEGRATION_DOCKER_RESULT}" \
+              "publish:${PUBLISH_RESULT}"; do
+              name="${job%%:*}"
+              result="${job#*:}"
+              if [[ "${result}" == "failure" ]]; then
+                printf -- '- %s\n' "${name}"
+              fi
+            done
+          )"
+          if [[ -z "${failed_jobs}" ]]; then
+            failed_jobs='- unknown'
+          fi
+
+          body_file="$(mktemp)"
+          cat > "${body_file}" <<BODY
+          The release workflow failed.
+
+          Release tag: ${RELEASE_TAG}
+          Run: ${DETAILS_URL}
+
+          Failed job(s):
+          ${failed_jobs}
+          BODY
+
+          # `in:title` is a fuzzy full-text search, so anchor the reuse on an
+          # exact "Release Failed for <tag> on " title prefix — otherwise a tag
+          # that is a prefix of another (v0.18.1 vs v0.18.10) could reuse the
+          # wrong release's issue. Prefer a workflow-owned (github-actions[bot])
+          # match so a same-titled human/foreign issue sorting first can't make
+          # us skip an existing bot issue and open duplicates.
+          existing_issue="$(
+            gh issue list --repo "${GH_REPO}" \
+              --state open \
+              --search "\"Release Failed for ${RELEASE_TAG}\" in:title" \
+              --limit 30 \
+              --json number,url,labels,author,title \
+            | jq -c --arg tag "${RELEASE_TAG}" \
+              '[ .[] | select(.title | startswith("Release Failed for " + $tag + " on ")) ] | (map(select(.author.login == "github-actions[bot]"))[0] // .[0]) // empty'
+          )"
+          gh label create "${AUTOFIX_APPROVED_LABEL}" --repo "${GH_REPO}" \
+            --description 'Maintainer explicitly approved this issue for autonomous autofix' \
+            --color '0e8a16' 2> /dev/null || true
+          if [[ -n "${existing_issue}" ]]; then
+            issue_number="$(jq -r '.number' <<<"${existing_issue}")"
+            issue_url="$(jq -r '.url' <<<"${existing_issue}")"
+            issue_author="$(jq -r '.author.login // ""' <<<"${existing_issue}")"
+            if [[ "${issue_author}" != "github-actions[bot]" ]]; then
+              echo "::warning::Existing ${issue_url} was opened by ${issue_author:-unknown}; creating a workflow-owned issue instead."
+              existing_issue=''
+            elif jq -e \
+              '(.labels // []) | map(.name) | any(. == "autofix/skip" or . == "autofix/in-progress")' \
+              <<<"${existing_issue}" > /dev/null; then
+              echo "::warning::Release failed but existing ${issue_url} has an autofix exclusion label; no autofix dispatched."
+              exit 0
+            else
+              gh issue comment "${issue_number}" --repo "${GH_REPO}" --body-file "${body_file}" \
+                || echo "::warning::Failed to comment on existing issue #${issue_number}; proceeding with dispatch."
+              # Mirror the scheduled scan's exclusions for this release-forced
+              # dispatch: don't send the agent onto an issue a maintainer has
+              # taken over (assignee / linked PR / status/need-information /
+              # status/need-retesting). Fail closed — if the check can't run,
+              # skip the dispatch.
+              still_eligible="$(gh issue list --repo "${GH_REPO}" --state open \
+                --search "\"Release Failed for ${RELEASE_TAG}\" in:title no:assignee -linked:pr -label:status/need-information -label:status/need-retesting" \
+                --json number --jq "any(.[]; .number == ${issue_number})" || echo 'false')"
+              if [[ "${still_eligible}" != "true" ]]; then
+                echo "::warning::Reused ${issue_url} looks maintainer-owned (assignee / linked PR / need-information / need-retesting); skipping autofix dispatch."
+                exit 0
+              fi
+              # Ensure the fallback labels are present so that, if the dispatch
+              # below fails, the scheduled ready-for-agent scan can still find it.
+              # Safe to auto-apply approval: release-failure issue content is
+              # fully CI-generated, not user-controlled issue text.
+              gh issue edit "${issue_number}" --repo "${GH_REPO}" \
+                --add-label "${BUG_LABEL},${READY_FOR_AGENT_LABEL},${AUTOFIX_APPROVED_LABEL}" \
+                || echo "::warning::Failed to ensure ${BUG_LABEL}/${READY_FOR_AGENT_LABEL}/${AUTOFIX_APPROVED_LABEL} on issue #${issue_number}."
+            fi
+          fi
+
+          if [[ -z "${existing_issue}" ]]; then
+            # Safe to auto-apply approval: release-failure issue content is
+            # fully CI-generated, not user-controlled issue text.
+            issue_url="$(gh issue create --repo "${GH_REPO}" \
+              --title "Release Failed for ${RELEASE_TAG} on $(date -u +'%Y-%m-%d')" \
+              --body-file "${body_file}" \
+              --label "${BUG_LABEL}" \
+              --label "${READY_FOR_AGENT_LABEL}" \
+              --label "${AUTOFIX_APPROVED_LABEL}")"
+            issue_number="${issue_url##*/}"
+          fi
+
+          echo "Using ${issue_url}; dispatching autofix."
+          if ! gh workflow run qwen-autofix.yml --repo "${GH_REPO}" --ref main \
+            -f phase=issue \
+            -f issue_number="${issue_number}" \
+            -f dry_run=false; then
+            echo "::warning::Autofix dispatch failed; scheduled autofix can still pick up issue #${issue_number}."
+            exit 1
+          fi
