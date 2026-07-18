@@ -1106,6 +1106,36 @@ describe('coverage is recomputed, never accepted', () => {
     );
   });
 
+  it('says a shared cause once, with every subject on the one sentence', () => {
+    // #7166's posted body: ninety-nine disclosure paragraphs over FOUR causes
+    // — forty-three chunks all rewritten, fifty-five roles all unlaunched —
+    // with the six real findings buried beneath. Same cause, one sentence.
+    const p = plan();
+    // Both chunk launches rewritten: recorded prompts exist, the agents ran
+    // on hand-written prompts that DROP the brief line — an add-only wrap
+    // would rightly pass the delivery check.
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    transcript(
+      'a1',
+      `You are reviewing chunk 1 of 2.\nread_file(file_path="${DIFF}", offset=0, limit=100)`,
+      { toolCalls: 2 },
+    );
+    transcript(
+      'a2',
+      `You are reviewing chunk 2 of 2.\nread_file(file_path="${DIFF}", offset=100, limit=100)`,
+      { toolCalls: 2 },
+    );
+    const r = composeReview({ planPath: p, env: ENV, modelId: MODEL });
+    const reason = 'launched with a prompt that is not the one the CLI built';
+    // One clause for the shared cause — not one per chunk…
+    expect(r.body.split(reason)).toHaveLength(2);
+    // …and both subjects ride it.
+    expect(r.body).toMatch(
+      new RegExp(`Not reviewed: [^.]*chunk 1[^.]*chunk 2[^.]*— ${reason}\\.`),
+    );
+  });
+
   it('does not merge two invariant files under one label — the em-dash is part of the subject', () => {
     // An invariant agent's label legitimately carries an em-dash segment
     // (`Invariant agent A … — src/foo.ts`). A first-dash dedup key would

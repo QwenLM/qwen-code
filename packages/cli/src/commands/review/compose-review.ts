@@ -204,6 +204,11 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     input.unreviewedDimensions,
     'unreviewedDimensions',
   );
+  // Everything past this index is coverage-derived: the recomputation below
+  // only ever appends. The disclosure dedup prefers those entries — they are
+  // the evidence-bounded register — and the boundary is how it tells them
+  // from the caller's.
+  const callerUnreviewedCount = unreviewed.length;
   // The fixes for the gaps above, for stderr — never for the body. The gap says
   // what the review cannot certify, to the PR author; the remediation names the
   // command that repairs it, to the orchestrator. #7012's public body was fourteen
@@ -512,17 +517,33 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // before the entry's LAST em-dash segment, because an invariant agent's
   // label legitimately carries one (`Invariant agent A … — src/foo.ts`) and a
   // first-dash key would merge two files into one subject. This mirrors the
-  // chunk list above deduping by its `chunk <id>` prefix. When both sides
-  // name the same subject the LATER entry wins — coverage pushes after the
-  // input is read, and its texts are the evidence-bounded register this body
-  // is written in. First-appearance order is kept so deduping never reorders
-  // the disclosure list.
+  // chunk list above deduping by its `chunk <id>` prefix.
+  //
+  // Which text survives a collision: a coverage-derived entry beats the
+  // caller's — it is the evidence-bounded register this body is written in —
+  // and among coverage entries the EARLIEST wins, because the categories push
+  // in precision order: a chunk flagged `rewritten` is also, to the roster, a
+  // requirement with no verbatim launch, and keeping the later roster text
+  // would tell the author "no agent was launched" about an agent that
+  // demonstrably ran. First-appearance order is kept so deduping never
+  // reorders the disclosure list.
   const labelOf = (d: string): string => {
     const parts = d.split(' — ');
     return parts.length > 1 ? parts.slice(0, -1).join(' — ').trim() : d.trim();
   };
   const chosen = new Map<string, string>();
-  for (const d of unreviewed) chosen.set(labelOf(d), d);
+  const chosenFromCoverage = new Map<string, boolean>();
+  unreviewed.forEach((d, i) => {
+    const label = labelOf(d);
+    const fromCoverage = i >= callerUnreviewedCount;
+    if (!chosen.has(label)) {
+      chosen.set(label, d);
+      chosenFromCoverage.set(label, fromCoverage);
+    } else if (fromCoverage && !chosenFromCoverage.get(label)) {
+      chosen.set(label, d);
+      chosenFromCoverage.set(label, true);
+    }
+  });
   const seenLabels = new Set<string>();
   const dedupedUnreviewed: string[] = [];
   for (const d of unreviewed) {
@@ -543,8 +564,25 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       `Not reviewed: ${whiffedDimensions.join(', ')} — the agent returned no evidence of its walk twice.`,
     );
   }
+  // Same cause, one sentence. Forty-three chunks launched with rewritten
+  // prompts are one failure with forty-three subjects, not forty-three
+  // paragraphs: a posted body on #7166 was ninety-nine disclosure clauses
+  // over four causes, with the six real findings buried beneath the wall.
+  // Grouped by the reason text — the entry's last em-dash segment, the same
+  // split the dedup above keys on — exactly as the bare names group under
+  // the shared whiff sentence. A reason that embeds per-subject detail (an
+  // unread brief's own path) differs per entry and keeps its own line.
+  const byReason = new Map<string, string[]>();
   for (const d of explainedDimensions) {
-    notReviewedParts.push(`Not reviewed: ${d}.`);
+    const parts = d.split(' — ');
+    const reason = (parts.pop() as string).trim();
+    const subject = parts.join(' — ').trim();
+    const subjects = byReason.get(reason) ?? [];
+    subjects.push(subject);
+    byReason.set(reason, subjects);
+  }
+  for (const [reason, subjects] of byReason) {
+    notReviewedParts.push(`Not reviewed: ${subjects.join(', ')} — ${reason}.`);
   }
 
   // Clause 5 — blockers the review could neither confirm nor clear. They
