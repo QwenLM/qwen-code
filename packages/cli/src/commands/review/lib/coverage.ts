@@ -541,6 +541,25 @@ export function coverageFromTranscripts(
   const assignment = new Map<number, AgentRecord>();
   for (const [rec, i] of matchedRec) assignment.set(i, rec);
 
+  // The launched-side twin of `nobodyBuiltAnything`: every prompt was built and
+  // not one of them reached any agent on record. Said once per dimension it
+  // becomes N identical lines burying the single fact that explains all of
+  // them — the run stopped at the builder — and on #7188 a public review body
+  // was exactly that wall, eleven roles' worth. One line, same as the
+  // never-built collapse; the per-role selectors below survive for the repair.
+  const nobodyLaunchedAnything =
+    roster.length > 1 &&
+    buildable.length === roster.length &&
+    candidatesOf.every((c) => c.length === 0);
+  if (nobodyLaunchedAnything) {
+    missingRoles.push(
+      `every dimension — all ${roster.length} required prompts were built, ` +
+        `and no agent on record was launched with any of them: the run ` +
+        `stopped at the prompt builder, so this diff was reviewed, if at ` +
+        `all, from prompts the run wrote for itself`,
+    );
+  }
+
   let buildableIdx = -1;
   for (const req of roster) {
     const b = builtOf(req.key);
@@ -561,14 +580,16 @@ export function coverageFromTranscripts(
       // Not assignable even under a MAXIMUM matching — so this is provably a
       // shortage of transcripts, not an artifact of claim order.
       const anyMatch = candidatesOf[buildableIdx].length > 0;
-      missingRoles.push(
-        anyMatch
-          ? `${roleLabel(req)} — its prompt reached only an agent already ` +
-              `credited with another block; one agent was given several blocks, ` +
-              `and one transcript cannot certify two dimensions`
-          : `${roleLabel(req)} — its prompt was built, but no agent on record ` +
-              `was launched with it`,
-      );
+      if (!nobodyLaunchedAnything) {
+        missingRoles.push(
+          anyMatch
+            ? `${roleLabel(req)} — its prompt reached only an agent already ` +
+                `credited with another block; one agent was given several blocks, ` +
+                `and one transcript cannot certify two dimensions`
+            : `${roleLabel(req)} — its prompt was built, but no agent on record ` +
+                `was launched with it`,
+        );
+      }
       missingRoleSelectors.push(selectorOf(req));
       continue;
     }

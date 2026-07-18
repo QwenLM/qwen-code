@@ -504,11 +504,40 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       `Not reviewed: ${uncoverable.join(', ')} — a line there exceeds the read limit.`,
     );
   }
+  // One disclosure per subject. `unreviewed` fills from two sides — the
+  // caller's `unreviewedDimensions` and the coverage recomputation — and they
+  // describe the same failures: a run that pasted the gate's own gap lines
+  // into its input posted every one of them twice, 22 "Not reviewed" clauses
+  // for 11 roles on a public PR (#7188). Keyed by the label — everything
+  // before the entry's LAST em-dash segment, because an invariant agent's
+  // label legitimately carries one (`Invariant agent A … — src/foo.ts`) and a
+  // first-dash key would merge two files into one subject. This mirrors the
+  // chunk list above deduping by its `chunk <id>` prefix. When both sides
+  // name the same subject the LATER entry wins — coverage pushes after the
+  // input is read, and its texts are the evidence-bounded register this body
+  // is written in. First-appearance order is kept so deduping never reorders
+  // the disclosure list.
+  const labelOf = (d: string): string => {
+    const parts = d.split(' — ');
+    return parts.length > 1 ? parts.slice(0, -1).join(' — ').trim() : d.trim();
+  };
+  const chosen = new Map<string, string>();
+  for (const d of unreviewed) chosen.set(labelOf(d), d);
+  const seenLabels = new Set<string>();
+  const dedupedUnreviewed: string[] = [];
+  for (const d of unreviewed) {
+    const label = labelOf(d);
+    if (seenLabels.has(label)) continue;
+    seenLabels.add(label);
+    dedupedUnreviewed.push(chosen.get(label) as string);
+  }
   // Bare dimension names share the whiffed-agent explanation; an entry that
   // brought its own reason (after an em-dash) must not have the whiff
   // sentence appended to it — that would misstate why it went unreviewed.
-  const whiffedDimensions = unreviewed.filter((d) => !d.includes(' — '));
-  const explainedDimensions = unreviewed.filter((d) => d.includes(' — '));
+  const whiffedDimensions = dedupedUnreviewed.filter((d) => !d.includes(' — '));
+  const explainedDimensions = dedupedUnreviewed.filter((d) =>
+    d.includes(' — '),
+  );
   if (whiffedDimensions.length > 0) {
     notReviewedParts.push(
       `Not reviewed: ${whiffedDimensions.join(', ')} — the agent returned no evidence of its walk twice.`,

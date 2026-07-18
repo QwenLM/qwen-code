@@ -818,6 +818,59 @@ describe('the roster — who should have been here', () => {
     expect(r.missingRoles[0]).not.toMatch(/--role/);
   });
 
+  it('says one thing once when every prompt was built and none was launched', () => {
+    // The launched-side twin of the collapse above, and it shipped: on #7188
+    // the run built all eleven roster prompts, launched not one agent, and
+    // the posted body was eleven identical "its prompt was built, but no
+    // agent on record was launched with it" lines — burying the single fact
+    // that the run stopped at the builder.
+    const p = planPr();
+    // satisfyRoster wrote a matching transcript per role; remove every
+    // transcript — the records and briefs stay, so every requirement is
+    // BUILT, and nothing on record was launched.
+    for (const f of readdirSync(join(dir, 'subagents', 'S1'))) {
+      rmSync(join(dir, 'subagents', 'S1', f), { force: true });
+    }
+    // An agent DID run — on a prompt matching no record — so the transcript
+    // store is not empty and the chunks are covered; only the roles gap.
+    transcript('stray', wholeDiff(), { calls: 8 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.ok).toBe(false);
+    expect(r.missingRoles).toHaveLength(1);
+    expect(r.missingRoles[0]).toMatch(
+      /^every dimension — all \d+ required prompts were built/,
+    );
+    expect(r.missingRoles[0]).toContain(
+      'no agent on record was launched with any of them',
+    );
+    // The collapse is a body-side mercy, not a repair-side one: the operator
+    // still gets one selector per requirement.
+    const roster = requiredAgents(
+      JSON.parse(readFileSync(p, 'utf8')) as RosterPlan,
+    );
+    expect(roster.length).toBeGreaterThan(1);
+    expect(r.missingRoleSelectors).toHaveLength(roster.length);
+    // Author-facing register: no internal command in the posted line.
+    expect(r.missingRoles[0]).not.toContain('agent-prompt');
+  });
+
+  it('keeps the per-role not-launched text when only SOME launches are missing', () => {
+    // The collapse must not swallow the partial case: one unlaunched role
+    // beside launched siblings is that role's own line, naming it.
+    const p = planPr();
+    rmSync(join(dir, 'subagents', 'S1', 'agent-r-1c.jsonl'), { force: true });
+    transcript('sec', wholeDiff(), { calls: 8 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    const gap = r.missingRoles.join(' ');
+    expect(gap).toContain('Cross-file tracer');
+    expect(gap).toContain(
+      'its prompt was built, but no agent on record was launched with it',
+    );
+    expect(gap).not.toContain('every dimension');
+  });
+
   it('tells the operator where it looked, so a wrong --plan is not a missing file', () => {
     // "The builder never ran" and "the builder ran against a different --plan" reach
     // this check as the same thing: an absent record. They are fixed differently, so

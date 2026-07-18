@@ -1071,6 +1071,63 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
 });
 
 describe('coverage is recomputed, never accepted', () => {
+  it('does not repeat a disclosure the caller echoed back — one subject, one line', () => {
+    // #7188: the orchestrator pasted the gate's own gap sentences into
+    // `unreviewedDimensions`, coverage recomputed the same gaps, and the
+    // public body carried every disclosure twice — 22 "Not reviewed" clauses
+    // for 11 roles. The chunk list already dedupes by its `chunk <id>`
+    // prefix; the role list dedupes by label now, and when both sides name
+    // the same subject the coverage-derived text wins.
+    const p = plan();
+    transcript('a1', goodPrompt(1), { toolCalls: 3 });
+    transcript('a2', goodPrompt(2), { toolCalls: 2 });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    // test-matrix is required by this plan's roster and never built → exactly
+    // one coverage-derived role gap.
+    const label = 'Test coverage matrix (whole-diff)';
+    const r = composeReview({
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: [
+        `${label} — the run described this gap in its own words`,
+        'a subject only the caller noticed — the auditor returned nothing twice',
+      ],
+    });
+    // One clause for the shared subject — and it is the machine's sentence,
+    // not the caller's paraphrase.
+    expect(r.body.split(label)).toHaveLength(2);
+    expect(r.body).toContain('no record shows its brief reaching an agent');
+    expect(r.body).not.toContain('described this gap in its own words');
+    // A subject the coverage recomputation cannot see survives untouched.
+    expect(r.body).toContain(
+      'a subject only the caller noticed — the auditor returned nothing twice',
+    );
+  });
+
+  it('does not merge two invariant files under one label — the em-dash is part of the subject', () => {
+    // An invariant agent's label legitimately carries an em-dash segment
+    // (`Invariant agent A … — src/foo.ts`). A first-dash dedup key would
+    // merge two files into one subject and silently drop a disclosure.
+    const p = plan();
+    transcript('a1', goodPrompt(1), { toolCalls: 3 });
+    transcript('a2', goodPrompt(2), { toolCalls: 2 });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    const r = composeReview({
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: [
+        'Invariant agent A: state, timers — src/a.ts — the agent whiffed twice',
+        'Invariant agent A: state, timers — src/b.ts — the agent whiffed twice',
+      ],
+    });
+    expect(r.body).toContain('src/a.ts');
+    expect(r.body).toContain('src/b.ts');
+  });
+
   it('caps when no plan is given — nothing can show the diff was read', () => {
     const r = composeReview({
       criticalsInline: 0,
