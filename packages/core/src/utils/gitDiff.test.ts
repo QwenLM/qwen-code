@@ -234,6 +234,22 @@ index 0000000..3333333
     ]);
   });
 
+  it('skips a stray no-newline marker before any hunk header without throwing', () => {
+    // A malformed/truncated diff could carry a `\` line before any `@@`
+    // header; the pre-hunk guard skips it rather than throwing on a null
+    // currentHunk (which would lose every subsequent file's hunks).
+    const diff = `diff --git a/f.txt b/f.txt
+--- a/f.txt
++++ b/f.txt
+\\ No newline at end of file
+@@ -1 +1 @@
+-line
++line
+`;
+    const result = parseGitDiff(diff);
+    expect(result.get('f.txt')![0].lines).toEqual(['-line', '+line']);
+  });
+
   it('returns empty map on empty input', () => {
     expect(parseGitDiff('').size).toBe(0);
     expect(parseGitDiff('   \n').size).toBe(0);
