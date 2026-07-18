@@ -3815,11 +3815,18 @@ export abstract class ChannelBase {
       sanitizedSenderName === 'unknown'
         ? envelope.senderId
         : sanitizedSenderName || envelope.senderId;
+    const sanitizedChatName = envelope.chatName
+      ? sanitizeSenderName(envelope.chatName)
+      : '';
+    const groupLabel =
+      sanitizedChatName === 'unknown'
+        ? envelope.chatId
+        : sanitizedChatName || envelope.chatId;
     const observation: ObservedChannelContactObservation = {
       user: { id: envelope.senderId, label: userLabel },
       ...(envelope.isGroup
         ? {
-            group: { id: envelope.chatId, label: envelope.chatId },
+            group: { id: envelope.chatId, label: groupLabel },
             ...(envelope.threadId
               ? {
                   topic: {

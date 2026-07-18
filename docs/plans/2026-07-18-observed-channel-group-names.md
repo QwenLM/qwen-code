@@ -58,5 +58,5 @@
 2. Run the focused base, DingTalk, Telegram, and existing observed-contact store tests.
 3. Run `npm run lint && npm run typecheck && npm run build`.
 4. Inspect the complete diff in two clean self-audit passes; any fix resets the clean-pass count and relevant tests.
-5. Commit the implementation, push `feat/channel-observed-group-names`, and open a stacked draft PR that declares its dependency on #7109 and links #7154.
-6. Add the E2E plan/result as a separate PR comment. Verify DingTalk with a real group callback; record Feishu as a negative schema/fallback check rather than making an API request.
+5. Commit the implementation, push `feat/channel-observed-group-names`, and open a stacked ready-for-review PR that declares its dependency on #7109 and links #7154.
+6. Add the E2E plan/result as a separate PR comment. Exercise the complete DingTalk callback-to-read-API path with a `conversationTitle` payload, use #7109's live DingTalk transport result as the transport precondition, and record Feishu as a negative schema/fallback check rather than making an API request.

@@ -490,7 +490,7 @@ curl -H "Authorization: Bearer $QWEN_SERVER_TOKEN" \
 
 Use `GET /workspaces/:workspace/channel/observed-contacts` to select another registered, trusted workspace. Add `?freshWithinSeconds=N` to choose a window from one second through 365 days. The daemon advertises this API with the `workspace_channel_observed_contacts` capability.
 
-The response returns complete platform IDs and labels. Each `lastObservedAt` is a canonical ISO 8601 UTC timestamp with millisecond precision; clients can convert it to the user's local time zone for display. Top-level `users` contains users observed in direct messages. `groups` contains observed group conversations, `groups[].users` contains users observed in each group, and `groups[].topics[].users` contains users observed in Feishu or Telegram topics:
+The response returns complete platform IDs and labels. Group labels use names already present in accepted inbound messages when available: DingTalk supplies `conversationTitle`, and Telegram supplies `chat.title`. Feishu and WeCom group labels currently fall back to their complete IDs; no platform directory or group-detail API is queried. Topic labels also fall back to complete IDs. Each `lastObservedAt` is a canonical ISO 8601 UTC timestamp with millisecond precision; clients can convert it to the user's local time zone for display. Top-level `users` contains users observed in direct messages. `groups` contains observed group conversations, `groups[].users` contains users observed in each group, and `groups[].topics[].users` contains users observed in Feishu or Telegram topics:
 
 ```json
 {

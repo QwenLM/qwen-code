@@ -690,6 +690,7 @@ describe('ChannelBase', () => {
       await ch.processAfterAdapterPreflight(
         envelope({
           chatId: 'group-1',
+          chatName: 'Project Group',
           threadId: 'topic-1',
           isGroup: true,
           isMentioned: true,
@@ -698,8 +699,41 @@ describe('ChannelBase', () => {
 
       expect(observe).toHaveBeenCalledWith('test-chan', {
         user: { id: 'user1', label: 'User 1' },
-        group: { id: 'group-1', label: 'group-1' },
+        group: { id: 'group-1', label: 'Project Group' },
         topic: { id: 'topic-1', label: 'topic-1' },
+      });
+    });
+
+    it('falls back to the complete group ID for an unusable group name', async () => {
+      const observe = vi.fn();
+      const ch = createChannel(
+        { groupPolicy: 'open' },
+        { observedContacts: { observe } },
+      );
+
+      await ch.processAfterAdapterPreflight(
+        envelope({
+          chatId: 'group-1',
+          chatName: '\u0000\n',
+          isGroup: true,
+          isMentioned: true,
+        }),
+      );
+
+      expect(observe).toHaveBeenCalledWith('test-chan', {
+        user: { id: 'user1', label: 'User 1' },
+        group: { id: 'group-1', label: 'group-1' },
+      });
+    });
+
+    it('ignores a chat name on direct messages', async () => {
+      const observe = vi.fn();
+      const ch = createChannel({}, { observedContacts: { observe } });
+
+      await ch.handleInbound(envelope({ chatName: 'Not a group' }));
+
+      expect(observe).toHaveBeenCalledWith('test-chan', {
+        user: { id: 'user1', label: 'User 1' },
       });
     });
 

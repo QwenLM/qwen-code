@@ -100,6 +100,7 @@ export interface Envelope {
   senderId: string;
   senderName: string;
   chatId: string;
+  chatName?: string;
   text: string;
   threadId?: string;
   /** Platform-specific message ID for response correlation. */
