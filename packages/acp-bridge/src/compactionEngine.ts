@@ -242,6 +242,10 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
 
     switch (updateType) {
       case 'agent_message_chunk': {
+        if (hasTodoStopGuardDiscreteMeta(data?.update?._meta)) {
+          this.slots.push({ kind: 'misc', event });
+          break;
+        }
         this.mergeTextSlot('text', event, data);
         break;
       }
@@ -585,6 +589,15 @@ function stringArraysEqual(
   if (left === right) return true;
   if (!left || !right || left.length !== right.length) return false;
   return left.every((value, index) => value === right[index]);
+}
+
+function hasTodoStopGuardDiscreteMeta(meta: unknown): boolean {
+  return (
+    typeof meta === 'object' &&
+    meta !== null &&
+    (meta as Record<string, unknown>)['qwenDiscreteMessage'] === true &&
+    (meta as Record<string, unknown>)['source'] === 'todo_stop_guard'
+  );
 }
 
 function mergeToolCallEvent(

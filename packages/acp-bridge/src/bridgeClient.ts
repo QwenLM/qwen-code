@@ -29,6 +29,7 @@ import type {
   BridgeGenerationNotificationEvent,
   BridgePendingInteraction,
   MidTurnQueueEntry,
+  PendingPromptEntry,
 } from './bridgeTypes.js';
 import { SERVE_CONTROL_EXT_METHODS } from './status.js';
 import type {
@@ -464,6 +465,10 @@ export interface BridgeClientSessionEntry {
    * `extMethod` can splice it. See `SessionEntry.midTurnMessageQueue`.
    */
   midTurnMessageQueue: MidTurnQueueEntry[];
+  /** Complete prompts waiting behind the currently running prompt. */
+  pendingPromptList: PendingPromptEntry[];
+  /** The child reported that its Todo Stop Guard yielded to the FIFO. */
+  todoStopGuardAwaitingQueuedPrompt?: boolean;
   /** True while a prompt is executing for this session. */
   promptActive?: boolean;
   /** Admitted id for the prompt currently executing on this session. */
@@ -1021,11 +1026,18 @@ export class BridgeClient implements Client {
     // The drain always carries a sessionId; without one we can't route it on a
     // multi-session channel (and `resolveEntry(undefined)` would throw there),
     // so answer with an empty drain rather than poisoning the turn.
-    if (!sessionId) return { messages: [] };
+    if (!sessionId) return { messages: [], hasQueuedPrompt: false };
     const entry = this.resolveEntry(sessionId);
-    if (!entry) return { messages: [] };
+    if (!entry) return { messages: [], hasQueuedPrompt: false };
     const drained = entry.midTurnMessageQueue.splice(0);
     const messages = drained.map((item) => item.text);
+    const hasQueuedPrompt = entry.pendingPromptList.some(
+      (prompt) =>
+        prompt.state === 'queued' && !prompt.abortController.signal.aborted,
+    );
+    if (params['todoStopGuardWatchQueuedPrompt'] === true) {
+      entry.todoStopGuardAwaitingQueuedPrompt = hasQueuedPrompt;
+    }
     if (drained.length > 0) {
       // `publish()` never throws — it returns `undefined` on a closed bus (see
       // EventBus.publish's never-throws contract: "Don't add try/catch wrappers
@@ -1059,7 +1071,7 @@ export class BridgeClient implements Client {
         );
       }
     }
-    return { messages };
+    return { messages, hasQueuedPrompt };
   }
 
   /**

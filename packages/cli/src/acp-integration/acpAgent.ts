@@ -289,6 +289,7 @@ import {
   LOAD_REPLAY_MODE_META_KEY,
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
+  TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   type ClientMcpOverWsRuntimeConfig,
   type BridgeLoadReplayEnvelope,
 } from '@qwen-code/acp-bridge/bridgeTypes';
@@ -5986,6 +5987,25 @@ class QwenAgent implements Agent {
     const SESSION_ID_RE = /^[0-9a-fA-F-]{32,36}$/;
 
     switch (method) {
+      case TODO_STOP_GUARD_QUEUE_RELEASE_METHOD: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const session = this.sessions.get(sessionId);
+        if (!session) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Session not found for id: ${sessionId}`,
+          );
+        }
+        return {
+          released: session.releaseTodoStopGuardQueuedPromptWait(),
+        };
+      }
       case 'qwen/providers/list': {
         return {
           providers: ALL_PROVIDERS.map((provider) =>
@@ -7496,6 +7516,8 @@ class QwenAgent implements Agent {
           );
         }
 
+        session.clearTodoStopGuardTrust();
+
         return { previousCwd, newCwd: canonicalPath, warnings };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionApprovalMode: {
@@ -7536,6 +7558,9 @@ class QwenAgent implements Agent {
           throw err;
         }
         const current = config.getApprovalMode();
+        if (current === 'plan') {
+          session.clearTodoStopGuardTrust();
+        }
         return { previous, current };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionLanguage: {
@@ -9039,6 +9064,9 @@ class QwenAgent implements Agent {
               ) {
                 try {
                   config.setApprovalMode(newMode as ApprovalMode);
+                  if (newMode === 'plan') {
+                    session.clearTodoStopGuardTrust();
+                  }
                 } catch (err) {
                   debugLogger.warn(
                     `reload: setApprovalMode failed for session ${id}: ${err}`,
