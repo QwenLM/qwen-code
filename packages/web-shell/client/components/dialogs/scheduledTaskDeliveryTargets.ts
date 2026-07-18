@@ -10,7 +10,6 @@ export interface ScheduledTaskDeliveryOption {
   label: string;
   description: string;
   inputValue: string;
-  searchText: string;
   target: DaemonScheduledTaskChannelTarget;
 }
 
@@ -49,8 +48,6 @@ function option(
     label,
     description,
     inputValue,
-    searchText:
-      `${inputValue} ${target.chatId} ${target.threadId ?? ''}`.toLocaleLowerCase(),
     target,
   };
 }

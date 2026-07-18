@@ -117,7 +117,7 @@ git commit -m "feat(webui): read observed channel delivery targets"
 **Interfaces:**
 
 - Consumes: `DaemonObservedChannelContacts` and `DaemonScheduledTaskChannelTarget`.
-- Produces: `ScheduledTaskDeliveryOption` with `kind`, `label`, `inputValue`, `searchText`, and `target`.
+- Produces: `ScheduledTaskDeliveryOption` with `kind`, `label`, `description`, `inputValue`, and `target`.
 - Produces: `flattenScheduledTaskDeliveryTargets`, `deliveryTargetKey`, `deliveryTargetsEqual`, and `resolveScheduledTaskDeliveryInput`.
 
 - [ ] **Step 1: Write failing mapping tests**

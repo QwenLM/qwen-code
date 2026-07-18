@@ -6766,6 +6766,14 @@ export function App({
                           : workspaces
                       }
                       lockedWorkspace={lockedWorkspaceCapability}
+                      channelDeliveryEnabled={
+                        connection.capabilities?.features.includes(
+                          'scheduled_task_channel_delivery',
+                        ) === true &&
+                        connection.capabilities?.features.includes(
+                          'workspace_channel_observed_contacts',
+                        ) === true
+                      }
                       onCreateViaChat={() => {
                         // Start a FRESH session and jump to it so the task-
                         // creation chat doesn't pile onto the current

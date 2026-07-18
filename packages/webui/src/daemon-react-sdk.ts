@@ -297,6 +297,8 @@ export type {
   DaemonObservedChannelUser,
   /** A durable scheduled task (cron) as returned by the daemon. */
   DaemonScheduledTask,
+  /** A daemon-managed Channel destination for scheduled task results. */
+  DaemonScheduledTaskChannelTarget,
   /** One recorded fire in a scheduled task's run history. */
   DaemonScheduledTaskRun,
   /** Request body for creating a scheduled task. */

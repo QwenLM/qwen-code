@@ -30,6 +30,15 @@ interface MockTask {
   lastFiredAt: number | null;
   nextRunAt: number | null;
   sessionId: string | null;
+  delivery: {
+    kind: 'channel';
+    target: {
+      channelName: string;
+      chatId: string;
+      threadId?: string;
+      isGroup?: boolean;
+    };
+  } | null;
   runs: Array<{
     at: number;
     kind?: 'scheduled' | 'catch-up';
@@ -40,6 +49,7 @@ interface MockTask {
 const { actions } = vi.hoisted(() => ({
   actions: {
     listScheduledTasks: vi.fn(),
+    listObservedChannelContacts: vi.fn(),
     createScheduledTask: vi.fn(),
     updateScheduledTask: vi.fn(),
     runScheduledTask: vi.fn(),
@@ -69,6 +79,7 @@ async function mount(
       sessionId: string | null,
     ) => void | Promise<void>;
     onError?: (error: unknown, message: string) => void;
+    channelDeliveryEnabled?: boolean;
   } = {},
 ) {
   actions.listScheduledTasks.mockResolvedValue(tasks);
@@ -94,6 +105,7 @@ async function mount(
           onCreateViaChat={vi.fn()}
           onOpenSession={opts.onOpenSession}
           onError={opts.onError ?? vi.fn()}
+          channelDeliveryEnabled={opts.channelDeliveryEnabled}
         />
       </I18nProvider>,
     );
@@ -115,6 +127,18 @@ function click(el: Element | null | undefined) {
     el.dispatchEvent(
       new MouseEvent('click', { bubbles: true, cancelable: true }),
     );
+  });
+}
+
+function setInputValue(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype,
+    'value',
+  )?.set;
+  if (!setter) throw new Error('input value setter not found');
+  act(() => {
+    setter.call(input, value);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
   });
 }
 
@@ -176,6 +200,7 @@ const baseTask = (over: Partial<MockTask>): MockTask => ({
   lastFiredAt: null,
   nextRunAt: null,
   sessionId: null,
+  delivery: null,
   runs: [],
   ...over,
 });
@@ -595,6 +620,197 @@ describe('ScheduledTasksDialog editing', () => {
   });
 });
 
+describe('ScheduledTasksDialog Channel delivery', () => {
+  const contacts = {
+    users: [
+      {
+        channelName: 'dingtalk',
+        id: 'user-1',
+        label: 'Alice',
+        chatId: 'staff-1',
+        lastObservedAt: '2026-07-18T10:00:00.000Z',
+      },
+    ],
+    groups: [
+      {
+        channelName: 'dingtalk',
+        id: 'group-1',
+        label: 'Release group',
+        lastObservedAt: '2026-07-18T10:00:00.000Z',
+        users: [],
+        topics: [
+          {
+            id: 'topic-1',
+            label: 'Deployments',
+            lastObservedAt: '2026-07-18T10:00:00.000Z',
+            users: [],
+          },
+        ],
+      },
+    ],
+  };
+
+  function setPromptAndDelivery(promptText: string, deliveryText: string) {
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]')!;
+    const delivery = document.querySelector<HTMLInputElement>(
+      'input[list="scheduled-task-delivery-targets"]',
+    )!;
+    act(() => {
+      prompt.textContent = promptText;
+      prompt.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    });
+    setInputValue(delivery, deliveryText);
+  }
+
+  it('hides the destination picker when the daemon lacks capabilities', async () => {
+    await mount([]);
+    click(findButton('New scheduled task'));
+
+    expect(
+      document.querySelector('input[list="scheduled-task-delivery-targets"]'),
+    ).toBeNull();
+    expect(actions.listObservedChannelContacts).not.toHaveBeenCalled();
+  });
+
+  it('loads and renders direct, group, and topic destinations', async () => {
+    actions.listObservedChannelContacts.mockResolvedValue(contacts);
+    await mount([], { channelDeliveryEnabled: true });
+
+    click(findButton('New scheduled task'));
+    await flush();
+
+    expect(actions.listObservedChannelContacts).toHaveBeenCalledWith(undefined);
+    expect(
+      document.querySelectorAll('#scheduled-task-delivery-targets option'),
+    ).toHaveLength(3);
+  });
+
+  it('submits a selected observed group', async () => {
+    actions.listObservedChannelContacts.mockResolvedValue(contacts);
+    actions.createScheduledTask.mockResolvedValue(baseTask({}));
+    await mount([], { channelDeliveryEnabled: true });
+    click(findButton('New scheduled task'));
+    await flush();
+    setPromptAndDelivery('post status', 'group-1');
+
+    click(findButton('Create'));
+    await flush();
+
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        delivery: {
+          kind: 'channel',
+          target: {
+            channelName: 'dingtalk',
+            chatId: 'group-1',
+            isGroup: true,
+          },
+        },
+      }),
+      undefined,
+    );
+  });
+
+  it('accepts an exact observed direct chat id but rejects unknown text', async () => {
+    actions.listObservedChannelContacts.mockResolvedValue(contacts);
+    actions.createScheduledTask.mockResolvedValue(baseTask({}));
+    await mount([], { channelDeliveryEnabled: true });
+    click(findButton('New scheduled task'));
+    await flush();
+    setPromptAndDelivery('post status', 'staff-1');
+
+    click(findButton('Create'));
+    await flush();
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        delivery: {
+          kind: 'channel',
+          target: {
+            channelName: 'dingtalk',
+            chatId: 'staff-1',
+            isGroup: false,
+          },
+        },
+      }),
+      undefined,
+    );
+
+    actions.createScheduledTask.mockClear();
+    click(findButton('New scheduled task'));
+    await flush();
+    setPromptAndDelivery('post status', 'not-observed');
+    click(findButton('Create'));
+    await flush();
+    expect(actions.createScheduledTask).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain(
+      'Choose a recently observed destination.',
+    );
+  });
+
+  it('preserves an unchanged stale target and can explicitly clear it', async () => {
+    actions.listObservedChannelContacts.mockResolvedValue({
+      users: [],
+      groups: [],
+    });
+    const task = baseTask({
+      delivery: {
+        kind: 'channel',
+        target: {
+          channelName: 'dingtalk',
+          chatId: 'stale-group',
+          isGroup: true,
+        },
+      },
+    });
+    await mount([task], { channelDeliveryEnabled: true });
+    click(document.querySelector('[aria-label="Edit"]'));
+    await flush();
+
+    click(findButton('Save'));
+    await flush();
+    expect(actions.updateScheduledTask).toHaveBeenLastCalledWith(
+      't1',
+      expect.not.objectContaining({ delivery: expect.anything() }),
+      undefined,
+    );
+
+    click(document.querySelector('[aria-label="Edit"]'));
+    await flush();
+    const delivery = document.querySelector<HTMLInputElement>(
+      'input[list="scheduled-task-delivery-targets"]',
+    )!;
+    setInputValue(delivery, '');
+    click(findButton('Save'));
+    await flush();
+    expect(actions.updateScheduledTask).toHaveBeenLastCalledWith(
+      't1',
+      expect.objectContaining({ delivery: null }),
+      undefined,
+    );
+  });
+
+  it('shows the stored destination kind and ids on the task card', async () => {
+    await mount([
+      baseTask({
+        delivery: {
+          kind: 'channel',
+          target: {
+            channelName: 'dingtalk',
+            chatId: 'group-1',
+            threadId: 'topic-1',
+            isGroup: true,
+          },
+        },
+      }),
+    ]);
+
+    expect(
+      document.querySelector('[data-testid="scheduled-task-delivery"]')
+        ?.textContent,
+    ).toContain('Topic · dingtalk · group-1 · topic-1');
+  });
+});
+
 describe('ScheduledTasksDialog run history', () => {
   it('toggles the run list open, newest-first, tagging late fires', async () => {
     await mount([
@@ -893,6 +1109,7 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     byWorkspace: Record<string, MockTask[]>,
     ws: typeof WORKSPACES = WORKSPACES,
     lockedWorkspace?: (typeof WORKSPACES)[number],
+    channelDeliveryEnabled = false,
   ) {
     actions.listScheduledTasks.mockImplementation(async (wsId?: string) =>
       wsId === undefined
@@ -902,6 +1119,10 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     actions.createScheduledTask.mockResolvedValue(baseTask({}));
     actions.updateScheduledTask.mockResolvedValue(baseTask({}));
     actions.deleteScheduledTask.mockResolvedValue(undefined);
+    actions.listObservedChannelContacts.mockResolvedValue({
+      users: [],
+      groups: [],
+    });
     actions.loadExtensionsStatus.mockResolvedValue({ extensions: [] });
     actions.loadSkillsStatus.mockResolvedValue({ skills: [] });
     actions.loadMcpStatus.mockResolvedValue({ servers: [] });
@@ -916,6 +1137,7 @@ describe('ScheduledTasksDialog multi-workspace', () => {
             onCreateViaChat={vi.fn()}
             workspaces={ws}
             lockedWorkspace={lockedWorkspace}
+            channelDeliveryEnabled={channelDeliveryEnabled}
             onError={vi.fn()}
           />
         </I18nProvider>,
@@ -990,6 +1212,29 @@ describe('ScheduledTasksDialog multi-workspace', () => {
 
     expect(actions.createScheduledTask).toHaveBeenCalledWith(
       expect.objectContaining({ prompt: 'do secondary work' }),
+      'id-other',
+    );
+  });
+
+  it('reloads delivery destinations for only the selected workspace', async () => {
+    await mountMulti(
+      { primary: [], 'id-other': [] },
+      WORKSPACES,
+      undefined,
+      true,
+    );
+    click(findButton('New scheduled task'));
+    await flush();
+    expect(actions.listObservedChannelContacts).toHaveBeenCalledWith(undefined);
+
+    const wsSelect = findWorkspaceSelect()!;
+    act(() => {
+      wsSelect.value = 'id-other';
+      wsSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await flush();
+
+    expect(actions.listObservedChannelContacts).toHaveBeenLastCalledWith(
       'id-other',
     );
   });
