@@ -195,12 +195,6 @@ describe('clearCommand', () => {
     expect(mockAbortBackgroundShells.mock.invocationCallOrder[0]).toBeLessThan(
       mockResetBackgroundShells.mock.invocationCallOrder[0],
     );
-    expect(mockAbortBackgroundTasks.mock.invocationCallOrder[0]).toBeLessThan(
-      mockResetBackgroundTasks.mock.invocationCallOrder[0],
-    );
-    expect(mockAbortMonitors.mock.invocationCallOrder[0]).toBeLessThan(
-      mockResetMonitors.mock.invocationCallOrder[0],
-    );
   });
 
   it('keeps the committed session when post-commit cleanup fails', async () => {

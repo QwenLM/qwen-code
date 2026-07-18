@@ -2825,7 +2825,7 @@ export class Config {
       recorder.activate(lease, authoritative);
       this.unboundSessionWriterLeases.delete(lease);
     } catch (error) {
-      let failure = normalizeSessionWriterStorageError(error);
+      const failure = normalizeSessionWriterStorageError(error);
       if (failure instanceof SessionWriterError) {
         this.debugLogger.warn(
           `Session writer failure sessionId=${this.sessionId} operation=activate errorKind=${failure.errorKind}`,
@@ -2835,7 +2835,10 @@ export class Config {
         await lease?.release();
         if (lease) this.unboundSessionWriterLeases.delete(lease);
       } catch (releaseError) {
-        failure = releaseError;
+        this.debugLogger.error(
+          `Failed to release session writer lease for sessionId=${this.sessionId}:`,
+          releaseError,
+        );
       }
       throw failure;
     }

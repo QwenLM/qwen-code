@@ -3576,9 +3576,10 @@ describe('Server Config (config.ts)', () => {
       loadSpy.mockRestore();
     });
 
-    it('retains and retries a lease that fails to release before recorder activation', async () => {
+    it('preserves the activation failure while retrying a failed lease release', async () => {
       const sessionId = '24232323-2323-2323-2323-232323232324';
       const writer = testWriterLease(sessionId);
+      const loadFailure = new Error('load failed');
       writer.release
         .mockRejectedValueOnce(new Error('temporary release failure'))
         .mockResolvedValueOnce(undefined);
@@ -3587,7 +3588,7 @@ describe('Server Config (config.ts)', () => {
         .mockResolvedValue(writer.lease);
       const loadSpy = vi
         .spyOn(SessionService.prototype, 'loadSession')
-        .mockRejectedValue(new Error('load failed'));
+        .mockRejectedValue(loadFailure);
       const config = new Config({
         ...baseParams,
         sessionId,
@@ -3602,7 +3603,7 @@ describe('Server Config (config.ts)', () => {
           skipSkillManager: true,
           skipFileCheckpointing: true,
         }),
-      ).rejects.toThrow('temporary release failure');
+      ).rejects.toBe(loadFailure);
 
       expect(writer.release).toHaveBeenCalledTimes(2);
       expect(config.hasSessionWriterOwnership()).toBe(false);

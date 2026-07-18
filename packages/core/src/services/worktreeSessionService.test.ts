@@ -172,6 +172,24 @@ describe('isSessionRuntimeActive', () => {
       isSessionRuntimeActive('owner-session', repoRoot),
     ).resolves.toBe(true);
   });
+
+  it('treats an explicitly deactivated runtime as inactive for a live pid', async () => {
+    const repoRoot = path.join(tmpDir, 'repo');
+    Storage.setRuntimeBaseDir(path.join(tmpDir, 'runtime'));
+    await writeRuntimeStatus(
+      new Storage(repoRoot).getRuntimeStatusPath('owner-session'),
+      {
+        sessionId: 'owner-session',
+        workDir: repoRoot,
+        pid: process.pid,
+        active: false,
+      },
+    );
+
+    await expect(
+      isSessionRuntimeActive('owner-session', repoRoot),
+    ).resolves.toBe(false);
+  });
 });
 
 describe('restoreWorktreeContext', () => {
