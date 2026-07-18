@@ -11,6 +11,7 @@ import {
 import type { ClientMcpSenderRegistry } from './acp-http/client-mcp-sender-registry.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import type { DaemonWorkspaceService } from './workspace-service/types.js';
+import type { WorkspaceRuntimeCoordinator } from './workspace-runtime-coordinator.js';
 
 export interface WorkspaceRuntimeEnvMetadata {
   readonly mode: 'parent-process' | 'runtime-overlay';
@@ -39,6 +40,7 @@ export interface WorkspaceRuntime {
   readonly workspaceService: DaemonWorkspaceService;
   readonly routeFileSystemFactory: WorkspaceFileSystemFactory;
   readonly clientMcpSenderRegistry: ClientMcpSenderRegistry;
+  runtimeCoordinator?: WorkspaceRuntimeCoordinator;
 }
 
 export type WorkspaceSessionOwnerResolution =

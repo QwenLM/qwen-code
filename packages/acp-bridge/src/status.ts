@@ -10,6 +10,45 @@ import { SkillError } from '@qwen-code/qwen-code-core';
 
 export const STATUS_SCHEMA_VERSION = 1 as const;
 
+export type ServeWorkspaceRuntimeCapability =
+  | 'extensions'
+  | 'mcp'
+  | 'skills'
+  | 'tools';
+
+export type ServeWorkspaceRuntimeCapabilityState =
+  | 'not_started'
+  | 'starting'
+  | 'ready'
+  | 'stale'
+  | 'error';
+
+export interface ServeWorkspaceRuntimeCapabilityStatus {
+  state: ServeWorkspaceRuntimeCapabilityState;
+  runtimeEpoch?: number;
+  desiredGeneration?: number;
+  appliedGeneration?: number;
+  appliedEpoch?: number;
+  error?: {
+    code: string;
+    message: string;
+  };
+}
+
+export interface ServeWorkspaceRuntimeStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  workspaceCwd: string;
+  state: 'cold' | 'starting' | 'active' | 'idle' | 'stopping' | 'error';
+  runtimeLive: boolean;
+  runtimeEpoch: number;
+  capabilities: Partial<
+    Record<
+      ServeWorkspaceRuntimeCapability,
+      ServeWorkspaceRuntimeCapabilityStatus
+    >
+  >;
+}
+
 /**
  * Closed enumeration of structured error categories surfaced on diagnostic
  * status cells. Cells produced by `/workspace/preflight`, `/workspace/env`,
@@ -169,6 +208,8 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceReload: 'qwen/control/workspace/reload',
   workspaceSkillsRefresh: 'qwen/control/workspace/skills/refresh',
   workspaceExtensionsRefresh: 'qwen/control/workspace/extensions/refresh',
+  workspaceRuntimeExtensionsRefresh:
+    'qwen/control/workspace/runtime/extensions/refresh',
   /**
    * Reverse tool channel (issue #5626, Phase 2). Unlike every other entry
    * here — which the PARENT serve process calls DOWN into the `qwen --acp`
@@ -190,6 +231,12 @@ export const SERVE_CONTROL_EXT_METHODS = {
    * `first-turn` mode, which waits for the sub-session's first turn to finish).
    */
   createSubSession: 'qwen/control/create-sub-session',
+} as const;
+
+/** Child-to-daemon notifications for workspace-runtime control leases. */
+export const SERVE_WORKSPACE_NOTIFICATION_EXT_METHODS = {
+  mcpAuthenticationCompleted:
+    'qwen/notify/workspace/mcp/authentication-completed',
 } as const;
 
 export type ServeStatus =
@@ -355,6 +402,9 @@ export interface ServeWorkspaceMcpStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   workspaceCwd: string;
   initialized: boolean;
+  /** Epoch of the ACP runtime that produced this live or cached Catalog. */
+  runtimeEpoch?: number;
+  source?: 'live' | 'cache' | 'config';
   discoveryState?: ServeMcpDiscoveryState;
   servers: ServeWorkspaceMcpServerStatus[];
   errors?: ServeStatusCell[];
@@ -387,6 +437,8 @@ export interface ServeWorkspaceMcpToolsStatus {
   workspaceCwd: string;
   serverName: string;
   initialized: boolean;
+  /** Epoch of the ACP runtime that produced this live or cached Catalog. */
+  runtimeEpoch?: number;
   acpChannelLive: boolean;
   tools: ServeWorkspaceMcpToolStatus[];
   errors?: ServeStatusCell[];
@@ -419,6 +471,8 @@ export interface ServeWorkspaceMcpResourcesStatus {
   workspaceCwd: string;
   serverName: string;
   initialized: boolean;
+  /** Epoch of the ACP runtime that produced this live or cached Catalog. */
+  runtimeEpoch?: number;
   acpChannelLive: boolean;
   resources: ServeWorkspaceMcpResourceStatus[];
   errors?: ServeStatusCell[];
@@ -448,6 +502,9 @@ export interface ServeWorkspaceSkillsStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   workspaceCwd: string;
   initialized: boolean;
+  /** Epoch of the ACP runtime that produced this live or cached Catalog. */
+  runtimeEpoch?: number;
+  source?: 'live' | 'cache' | 'config';
   skills: ServeWorkspaceSkillStatus[];
   errors?: ServeStatusCell[];
 }
@@ -1069,6 +1126,8 @@ export interface ServeExtensionEntry {
   description?: string;
   version: string;
   isActive: boolean;
+  defaultActivation?: 'enabled' | 'disabled';
+  workspaceActivation?: 'inherit' | 'enabled' | 'disabled';
   path: string;
   source?: string;
   installType?: ServeExtensionInstallType;
@@ -1084,6 +1143,8 @@ export interface ServeWorkspaceExtensionsStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   workspaceCwd: string;
   initialized: boolean;
+  /** Epoch of the ACP runtime that produced this live or cached Catalog. */
+  runtimeEpoch?: number;
   extensions: ServeExtensionEntry[];
   errors?: ServeStatusCell[];
 }
@@ -1252,6 +1313,8 @@ export interface ServeWorkspaceToolsStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   workspaceCwd: string;
   initialized: true;
+  /** Epoch of the ACP runtime that produced this live or cached Catalog. */
+  runtimeEpoch?: number;
   acpChannelLive: boolean;
   tools: ServeWorkspaceToolStatus[];
   errors?: ServeStatusCell[];

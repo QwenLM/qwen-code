@@ -125,6 +125,11 @@ export interface DaemonWorkspaceService {
     ctx: WorkspaceRequestContext,
   ): Promise<ServeWorkspaceSkillsStatus>;
 
+  /** Daemon-local configured Skill inventory for the bound workspace. */
+  getWorkspaceSkillsConfigStatus(
+    ctx: WorkspaceRequestContext,
+  ): Promise<ServeWorkspaceSkillsStatus>;
+
   /** Model-provider status for the bound workspace. */
   getWorkspaceProvidersStatus(
     ctx: WorkspaceRequestContext,
@@ -239,7 +244,7 @@ export interface DaemonWorkspaceService {
   /** Reload all settings (env + model + permissions + tools + memory). */
   reload(ctx: WorkspaceRequestContext): Promise<ReloadResponse>;
 
-  /** Drop cached skill status so extension skill changes are re-enumerated. */
+  /** Drop both runtime Skill snapshots and daemon-local config inventory. */
   invalidateWorkspaceSkillsStatus(): void;
 
   /** Broadcast extension refresh to all active sessions (fire-and-forget). */
@@ -268,6 +273,7 @@ export interface WorkspaceAcpPreheatResult {
   durationMs: number;
   reason?: 'timeout' | 'error';
   error?: string;
+  backgroundInProgress?: boolean;
 }
 
 export interface WorkspaceAcpStatusResult {
@@ -331,7 +337,11 @@ export interface WorkspaceVoiceSettingsUpdate {
   voiceModel?: string;
 }
 
-export type WorkspaceSkillToggleActivation = 'applied' | 'deferred' | 'partial';
+export type WorkspaceSkillToggleActivation =
+  | 'applied'
+  | 'deferred'
+  | 'reconciling'
+  | 'partial';
 
 export interface WorkspaceSkillToggleResult {
   skillName: string;

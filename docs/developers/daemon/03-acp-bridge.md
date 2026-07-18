@@ -4,7 +4,7 @@
 
 `packages/acp-bridge/` owns the boundary between the daemon's HTTP layer and the ACP child process. It is consumed by `packages/cli/src/serve/` (the `qwen serve` daemon) and was extracted in #4175 F1 step 3 so future consumers (`channels/base/AcpBridge.ts`, the VS Code IDE companion) can use the same bridge core without reaching into the CLI package.
 
-Each active `WorkspaceRuntime` owns one `HttpAcpBridge` instance. Production attempts to preheat the primary bridge and retries on first use after failure. A trusted secondary opens its `AcpChannel` and starts its child on demand; an untrusted secondary cannot start ACP. Within the runtime, the bridge provides multiplexed sessions over the channel, per-session `EventBus`es, a `MultiClientPermissionMediator`, a `BridgeFileSystem` adapter, and ACP-oriented helpers (`spawnOrAttach`, `loadSession`, `resumeSession`, `sendPrompt`, `cancelSession`, `respondToPermission`, plus extMethod RPCs for workspace status and MCP restart). Bridges and children are never shared across workspace runtimes.
+Each active `WorkspaceRuntime` owns one `HttpAcpBridge` instance. Every trusted workspace opens its `AcpChannel` and starts its child on the first runtime command or Session; an untrusted workspace cannot start ACP. Within the runtime, the bridge provides multiplexed sessions over the channel, per-session `EventBus`es, a `MultiClientPermissionMediator`, a `BridgeFileSystem` adapter, and ACP-oriented helpers (`spawnOrAttach`, `loadSession`, `resumeSession`, `sendPrompt`, `cancelSession`, `respondToPermission`, plus extMethod RPCs for workspace status and MCP restart). Bridges and children are never shared across workspace runtimes.
 
 ## Responsibilities
 
@@ -47,7 +47,7 @@ Each active `WorkspaceRuntime` owns one `HttpAcpBridge` instance. Production att
 | `mediator`      | `MultiClientPermissionMediator` | One per bridge instance.                                                                                                                                                                                                                                                                                                                                                                                 |
 | Constants       | —                               | `DEFAULT_INIT_TIMEOUT_MS = 10_000`, `MCP_RESTART_TIMEOUT_MS = 300_000`, `DEFAULT_MAX_SESSIONS = 20`, `MAX_EVENT_RING_SIZE = 1_000_000`, `DEFAULT_PERMISSION_TIMEOUT_MS = 5min`, `DEFAULT_MAX_PENDING_PER_SESSION = 64`.                                                                                                                                                                                  |
 
-**`isDying` invariant**: any teardown path must set `ChannelInfo.isDying = true` synchronously **before** awaiting `channel.kill()`. `ensureChannel` treats a dying channel as absent and spawns a fresh one. Without this flag a concurrent `spawnOrAttach` arriving during the SIGTERM grace window (up to 10s) would attach to a transport about to close and the caller's sessionId would 404 on every follow-up. **Set sites** (must keep in sync): `ensureChannel` (initialize failure + late-shutdown re-check), `doSpawn` (newSession failure on empty channel), `killSession` (last session leaving), `shutdown` (bulk).
+**`isDying` invariant**: any teardown path must set `ChannelInfo.isDying = true` synchronously **before** awaiting `channel.kill()`. `ensureChannel` treats a dying channel as absent and spawns a fresh one. Without this flag a concurrent `spawnOrAttach` arriving during the SIGTERM grace window (up to 10s) would attach to a transport about to close and the caller's sessionId would 404 on every follow-up. Teardown includes initialization failures, failed empty-channel spawns, workspace idle expiry, and shutdown; closing the last Session only releases its lease and schedules the workspace idle policy.
 
 **`channelInfo` retention invariant**: do **not** clear `channelInfo` when setting `isDying = true`. `killAllSync` must still find the channel during the SIGTERM grace window to fire SIGKILL on `process.exit(1)`. `aliveChannels` holds the dying entry until `channel.exited` fires.
 
@@ -177,7 +177,7 @@ sequenceDiagram
 ## State & Lifecycle
 
 - Bridge construction is synchronous. A caller may preheat the channel before the first session; otherwise the first `spawnOrAttach` cold-starts the ACP child. A failed preheat leaves first use free to retry.
-- `defaultEntry` lives for the lifetime of the bridge under `sessionScope: 'single'`; the channel reaps when `sessionIds.size === 0` (after `killSession`) AND `isDying` flips true.
+- `defaultEntry` is the reusable logical Session under `sessionScope: 'single'`. Session close removes only its Session lease; the workspace channel remains live by default after all Session, restore, workspace-control, discovery, and authentication work drains. A positive `channelIdleTimeoutMs` enables delayed compatibility auto-reap; `0` is rejected.
 - `MAX_EVENT_RING_SIZE = 1_000_000` is a soft upper bound on `BridgeOptions.eventRingSize` to catch operator typos before ~500 MB per-session OOMs.
 - `DEFAULT_PERMISSION_TIMEOUT_MS = 5 * 60 * 1000` keeps a wedged permission request from blocking the per-session `promptQueue` forever.
 - `DEFAULT_MAX_PENDING_PER_SESSION = 64` mirrors `DEFAULT_MAX_SUBSCRIBERS`; excess `requestPermission` calls resolve as cancelled with a stderr warning.
@@ -212,7 +212,7 @@ sequenceDiagram
 | `permissionPolicy`                            | from `settings.json`'s `policy.permissionStrategy` | One of `first-responder` / `designated` / `consensus` / `local-only`.                                                 |
 | `permissionConsensusQuorum`                   | from `settings.json`                               | N for consensus policy.                                                                                               |
 | `permissionAudit`                             | `createNoOpPermissionAuditPublisher()`             | Wire to `PermissionAuditRing` for the audit trail.                                                                    |
-| `channelIdleTimeoutMs`                        | `0`                                                | Keep the ACP child alive for this many milliseconds after the last session closes.                                    |
+| `channelIdleTimeoutMs`                        | unset                                              | Positive compatibility auto-reap delay after all workspace runtime work drains; unset keeps the runtime live.         |
 
 ## Additional bridge methods
 

@@ -22,6 +22,7 @@ import {
   type WorkspaceRuntime,
 } from './workspace-registry.js';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
+import { getWorkspaceRuntimeCoordinator } from './workspace-runtime-coordinator.js';
 import {
   WorkspaceSkillNotFoundError,
   type DaemonWorkspaceService,
@@ -64,13 +65,14 @@ function makeBridge(): AcpSessionBridge {
       v: 1,
       resources: [],
     })),
+    isChannelLive: vi.fn(() => false),
     getDaemonStatusSnapshot: vi.fn(() => ({
       limits: {
         maxSessions: 20,
         maxPendingPromptsPerSession: 5,
         eventRingSize: 8000,
         compactedReplayMaxBytes: 4 * 1024 * 1024,
-        channelIdleTimeoutMs: 0,
+        channelIdleTimeoutMs: null,
         sessionIdleTimeoutMs: 1_800_000,
       },
       sessionCount: 0,
@@ -154,6 +156,13 @@ function makeWorkspaceService(label: string): DaemonWorkspaceService {
       v: 1,
       workspaceCwd: ctx.workspaceCwd,
       skills: [],
+    })),
+    getWorkspaceSkillsConfigStatus: vi.fn(async (ctx) => ({
+      v: 1,
+      workspaceCwd: ctx.workspaceCwd,
+      initialized: true,
+      source: 'config' as const,
+      skills: [{ name: label }],
     })),
     getWorkspaceProvidersStatus: vi.fn(async (ctx) => ({
       v: 1,
@@ -256,6 +265,9 @@ async function makeHarness(opts?: {
     primaryCwd,
     secondaryCwd,
     secondaryId: secondary.workspaceId,
+    secondaryBridge: secondary.bridge,
+    primaryRuntime: primary,
+    secondaryRuntime: secondary,
     secondaryWorkspaceService,
     persistSetting,
   };
@@ -619,6 +631,172 @@ describe('workspace-qualified core REST', () => {
     }
   });
 
+  it('routes workspace-qualified MCP configuration without a session client', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const base = `/workspaces/${encodeURIComponent(h.secondaryId)}/config/mcp/servers`;
+      const get = await request(h.app)
+        .get(base)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host());
+      expect(get.status).toBe(200);
+      expect(get.body).toMatchObject({
+        v: 1,
+        effective: {},
+        user: {},
+        workspace: {},
+        disabledServers: expect.any(Array),
+      });
+
+      const put = await request(h.app)
+        .put(`${base}/docs`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({
+          scope: 'workspace',
+          config: { command: 'node', args: ['server.js'] },
+        });
+      expect(put.status).toBe(200);
+      expect(put.body).toMatchObject({
+        name: 'docs',
+        scope: 'workspace',
+        activation: 'deferred',
+      });
+      expect(h.persistSetting).toHaveBeenCalledWith(
+        h.secondaryCwd,
+        expect.any(String),
+        'mcpServers',
+        expect.objectContaining({ docs: expect.any(Object) }),
+      );
+
+      vi.mocked(h.secondaryBridge.publishWorkspaceEvent).mockClear();
+      const disable = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/config/mcp/docs/disable`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host());
+      expect(disable.status).toBe(200);
+      expect(disable.body.activation).toBe('deferred');
+      expect(h.secondaryBridge.publishWorkspaceEvent).toHaveBeenCalledWith({
+        type: 'settings_changed',
+        data: {
+          key: 'mcp.excluded',
+          value: ['docs'],
+          scope: 'workspace',
+        },
+      });
+
+      const badScope = await request(h.app)
+        .put(`${base}/docs`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ scope: 'user', config: { command: 'node' } });
+      expect(badScope.status).toBe(400);
+      expect(badScope.body.code).toBe('invalid_scope');
+
+      const primaryReconcile = vi
+        .spyOn(
+          getWorkspaceRuntimeCoordinator(h.primaryRuntime),
+          'reconcileMcpConfiguration',
+        )
+        .mockReturnValue('deferred');
+      const secondaryReconcile = vi
+        .spyOn(
+          getWorkspaceRuntimeCoordinator(h.secondaryRuntime),
+          'reconcileMcpConfiguration',
+        )
+        .mockReturnValue('deferred');
+      const genericMutation = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/settings`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({
+          scope: 'workspace',
+          key: 'mcpServers',
+          value: { command: 'node' },
+          mcpServerMutation: { operation: 'set', name: 'generic' },
+        });
+      expect(genericMutation.status).toBe(200);
+      expect(genericMutation.body.activation).toBe('deferred');
+      expect(secondaryReconcile).toHaveBeenCalledOnce();
+      expect(primaryReconcile).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('allows untrusted config reads while trust-gating MCP and Skill writes', async () => {
+    const h = await makeHarness({
+      secondaryTrusted: false,
+      token: 'secret',
+    });
+    const headers = { Authorization: 'Bearer secret', Host: host() };
+    const mcpBase = `/workspaces/${encodeURIComponent(h.secondaryId)}/config/mcp`;
+    const skillsBase = `/workspaces/${encodeURIComponent(h.secondaryId)}/config/skills`;
+    try {
+      const mcpInventory = await request(h.app)
+        .get(`${mcpBase}/servers`)
+        .set(headers);
+      expect(mcpInventory.status).toBe(200);
+
+      const mcpWrite = await request(h.app)
+        .put(`${mcpBase}/servers/docs`)
+        .set(headers)
+        .send({
+          scope: 'workspace',
+          config: { command: 'node', args: ['server.js'] },
+        });
+      const mcpDelete = await request(h.app)
+        .delete(`${mcpBase}/servers/docs?scope=workspace`)
+        .set(headers);
+      const mcpDisable = await request(h.app)
+        .post(`${mcpBase}/docs/disable`)
+        .set(headers);
+
+      const skillsInventory = await request(h.app).get(skillsBase).set(headers);
+      expect(skillsInventory.status).toBe(200);
+      expect(skillsInventory.body).toMatchObject({
+        workspaceCwd: h.secondaryCwd,
+        source: 'config',
+      });
+
+      const skillInstall = await request(h.app)
+        .post(`${skillsBase}/install`)
+        .set(headers)
+        .send({
+          name: 'review',
+          scope: 'workspace',
+          source: { type: 'folder', path: '/tmp/review' },
+        });
+      const skillDelete = await request(h.app)
+        .delete(`${skillsBase}/review?scope=workspace`)
+        .set(headers);
+      const skillEnable = await request(h.app)
+        .post(`${skillsBase}/review/enable`)
+        .set(headers)
+        .send({ enabled: true });
+
+      for (const response of [
+        mcpWrite,
+        mcpDelete,
+        mcpDisable,
+        skillInstall,
+        skillDelete,
+        skillEnable,
+      ]) {
+        expect(response.status).toBe(403);
+        expect(response.body).toMatchObject({ code: 'untrusted_workspace' });
+      }
+      expect(h.persistSetting).not.toHaveBeenCalled();
+      expect(
+        h.secondaryWorkspaceService.setWorkspaceSkillEnabled,
+      ).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('routes workspace-qualified permissions and rejects non-workspace scope', async () => {
     const h = await makeHarness({ token: 'secret' });
     try {
@@ -774,6 +952,18 @@ describe('workspace-qualified core REST', () => {
 
   it('routes workspace-qualified MCP control through the selected runtime', async () => {
     const h = await makeHarness({ token: 'secret' });
+    vi.mocked(h.secondaryBridge.isChannelLive).mockReturnValue(true);
+    vi.mocked(
+      h.secondaryWorkspaceService.getWorkspaceMcpStatus,
+    ).mockResolvedValue({
+      v: 1,
+      workspaceCwd: h.secondaryCwd,
+      initialized: true,
+      source: 'live',
+      runtimeEpoch: 1,
+      discoveryState: 'completed',
+      servers: [],
+    });
     try {
       const restart = await request(h.app)
         .post(
@@ -802,6 +992,28 @@ describe('workspace-qualified core REST', () => {
         action: 'enable',
         clientId: 'client-1',
       });
+      expect(h.secondaryBridge.manageMcpServer).toHaveBeenCalledWith(
+        'docs',
+        'enable',
+        'client-1',
+      );
+
+      const approve = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/mcp/docs/approve`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .set('Host', host())
+        .send({});
+      expect(approve.status).toBe(200);
+      expect(approve.body.operationId).toEqual(expect.any(String));
+      expect(h.secondaryBridge.manageMcpServer).toHaveBeenCalledWith(
+        'docs',
+        'approve',
+        'client-1',
+        expect.any(String),
+      );
 
       const add = await request(h.app)
         .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/mcp/servers`)
@@ -910,6 +1122,19 @@ describe('workspace-qualified core REST', () => {
         sessionsFailed: 0,
       });
 
+      const configToggle = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/config/skills/review/enable`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ enabled: true });
+      expect(configToggle.status).toBe(200);
+      expect(configToggle.body).toMatchObject({
+        skillName: 'review',
+        enabled: true,
+      });
+
       vi.mocked(
         h.secondaryWorkspaceService.setWorkspaceSkillEnabled,
       ).mockRejectedValueOnce(new WorkspaceSkillNotFoundError('missing'));
@@ -953,6 +1178,30 @@ describe('workspace-qualified core REST', () => {
       expect(res.body.code).toBe('untrusted_workspace');
     } finally {
       await fsp.rm(untrusted.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('reads Skills config inventory from the selected workspace', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const response = await request(h.app)
+        .get(`/workspaces/${encodeURIComponent(h.secondaryId)}/config/skills`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host());
+
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        workspaceCwd: h.secondaryCwd,
+        source: 'config',
+        skills: [{ name: 'secondary' }],
+      });
+      expect(
+        h.secondaryWorkspaceService.getWorkspaceSkillsConfigStatus,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({ workspaceCwd: h.secondaryCwd }),
+      );
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
     }
   });
 

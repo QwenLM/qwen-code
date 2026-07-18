@@ -294,18 +294,20 @@ normally; it must not trigger a resync loop.
 
 ### ACP Child Preheat
 
-`bridge.preheat()` warms the ACP child process before the first session so that
-the first real session avoids cold-start latency. It pairs with
-`channelIdleTimeoutMs`, which keeps the ACP child alive after the last session
-closes, and skip-relaunch behavior, which reuses an already idle child when a
-new session arrives.
+`bridge.preheat()` remains available to explicit embedders, but `qwen serve`
+starts every workspace child lazily on the first runtime command or Session.
+The Workspace Runtime remains
+live after all Session and management leases drain, and skip-relaunch behavior
+reuses that idle child when a new Session or management operation arrives.
+Omitting `channelIdleTimeoutMs` keeps this default. A positive value enables
+delayed compatibility auto-reap; `0` is rejected.
 
 ## Configuration
 
 - `BridgeOptions.maxSessions` (default 20) — cap.
 - `BridgeOptions.sessionScope` (default `'single'`; optional `'thread'`).
 - `BridgeOptions.initializeTimeoutMs` (default 10s) — ACP `initialize` handshake.
-- `BridgeOptions.channelIdleTimeoutMs` (default 0; reap the ACP child immediately).
+- `BridgeOptions.channelIdleTimeoutMs` (unset by default, disabling automatic channel reaping; a configured value must be positive).
 - Capability tags: `session_create`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume` (deprecated alias), `session_list`, `session_info`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`, `session_recap`, `session_generation`, `session_btw`, `session_context_usage`, `session_tasks`, `session_stats`, `session_lsp`, `session_status`, `non_blocking_prompt`.
 
 ### Stateless generation (`session_generation` capability tag)

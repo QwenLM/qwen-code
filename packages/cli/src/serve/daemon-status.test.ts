@@ -34,7 +34,7 @@ const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
     maxPendingPromptsPerSession: 5,
     eventRingSize: 8000,
     compactedReplayMaxBytes: 4 * 1024 * 1024,
-    channelIdleTimeoutMs: 0,
+    channelIdleTimeoutMs: null,
     sessionIdleTimeoutMs: 1_800_000,
   },
   sessionCount: 0,

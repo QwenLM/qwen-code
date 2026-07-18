@@ -748,9 +748,8 @@ export interface RunQwenServeDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
   /**
-   * Whether to start the real ACP child eagerly after listen. Production
-   * keeps this on; tests can disable it so boot-path assertions do not wait
-   * on a real child bridge.
+   * Whether to start the real ACP child eagerly after listen. Disabled by
+   * default; tests and embedded callers can opt in when exercising preheat.
    */
   preheatBridge?: boolean;
   /**
@@ -815,8 +814,7 @@ export interface RunQwenServeDeps {
 }
 
 function shouldPreheatBridge(deps: RunQwenServeDeps): boolean {
-  if (deps.preheatBridge !== undefined) return deps.preheatBridge;
-  return process.env['VITEST_WORKER_ID'] === undefined;
+  return deps.preheatBridge === true;
 }
 
 let coreRuntimePromise: Promise<CoreRuntime> | undefined;
@@ -964,16 +962,19 @@ function advertisedMaxPendingPromptsPerSession(
   return value;
 }
 
-function channelIdleTimeoutMs(value: number | undefined): number {
-  return value !== undefined && Number.isFinite(value) && value > 0
-    ? Math.min(value, MAX_TIMEOUT_MS)
-    : 0;
+function clampTimeoutMs(value: number): number {
+  return Math.min(value, MAX_TIMEOUT_MS);
+}
+
+function advertisedChannelIdleTimeoutMs(
+  value: number | undefined,
+): number | null {
+  return value === undefined ? null : clampTimeoutMs(value);
 }
 
 function sessionIdleTimeoutMs(value: number | undefined): number {
-  return value !== undefined
-    ? channelIdleTimeoutMs(value)
-    : DEFAULT_SESSION_IDLE_TIMEOUT_MS;
+  if (value === undefined) return DEFAULT_SESSION_IDLE_TIMEOUT_MS;
+  return value > 0 ? clampTimeoutMs(value) : 0;
 }
 
 function currentServeFeaturesForRunQwenServe(
@@ -1392,7 +1393,9 @@ function createBootstrapServeApp(input: {
           opts.compactedReplayMaxBytes ?? DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
         promptDeadlineMs: positiveFiniteOrNull(opts.promptDeadlineMs),
         writerIdleTimeoutMs: positiveFiniteOrNull(opts.writerIdleTimeoutMs),
-        channelIdleTimeoutMs: channelIdleTimeoutMs(opts.channelIdleTimeoutMs),
+        channelIdleTimeoutMs: advertisedChannelIdleTimeoutMs(
+          opts.channelIdleTimeoutMs,
+        ),
         sessionIdleTimeoutMs: sessionIdleTimeoutMs(opts.sessionIdleTimeoutMs),
         acpConnectionCap: null,
       },
@@ -2372,10 +2375,10 @@ async function runQwenServeImpl(
     if (
       !Number.isFinite(opts.channelIdleTimeoutMs) ||
       !Number.isInteger(opts.channelIdleTimeoutMs) ||
-      opts.channelIdleTimeoutMs < 0
+      opts.channelIdleTimeoutMs <= 0
     ) {
       throw new TypeError(
-        `Invalid channelIdleTimeoutMs: ${opts.channelIdleTimeoutMs}. Must be a non-negative integer (milliseconds, 0 = immediate kill).`,
+        `Invalid channelIdleTimeoutMs: ${opts.channelIdleTimeoutMs}. Must be a positive integer (milliseconds); omit it to disable automatic reaping.`,
       );
     }
   }
@@ -2396,8 +2399,8 @@ async function runQwenServeImpl(
   // Validate here (not just in the yargs handler) so embedded callers of
   // `runQwenServe({ permissionResponseTimeoutMs })` also fail loud: the
   // bridge treats a non-finite / negative value as the "disabled"
-  // sentinel, which would silently drop the permission deadline. Mirrors
-  // `channelIdleTimeoutMs`; out-of-range values are clamped by the bridge.
+  // sentinel, which would silently drop the permission deadline. Large
+  // positive values are clamped by the bridge.
   if (opts.permissionResponseTimeoutMs !== undefined) {
     if (
       !Number.isFinite(opts.permissionResponseTimeoutMs) ||
@@ -3337,7 +3340,9 @@ async function runQwenServeImpl(
           ? { compactedReplayMaxBytes: opts.compactedReplayMaxBytes }
           : {}),
         ...(opts.channelIdleTimeoutMs !== undefined
-          ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
+          ? {
+              channelIdleTimeoutMs: clampTimeoutMs(opts.channelIdleTimeoutMs),
+            }
           : {}),
         ...(opts.sessionReapIntervalMs !== undefined
           ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
@@ -3646,7 +3651,9 @@ async function runQwenServeImpl(
           ? { compactedReplayMaxBytes: opts.compactedReplayMaxBytes }
           : {}),
         ...(opts.channelIdleTimeoutMs !== undefined
-          ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
+          ? {
+              channelIdleTimeoutMs: clampTimeoutMs(opts.channelIdleTimeoutMs),
+            }
           : {}),
         ...(opts.sessionReapIntervalMs !== undefined
           ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
@@ -4014,7 +4021,9 @@ async function runQwenServeImpl(
             ? { compactedReplayMaxBytes: opts.compactedReplayMaxBytes }
             : {}),
           ...(opts.channelIdleTimeoutMs !== undefined
-            ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
+            ? {
+                channelIdleTimeoutMs: clampTimeoutMs(opts.channelIdleTimeoutMs),
+              }
             : {}),
           ...(opts.sessionReapIntervalMs !== undefined
             ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
@@ -4230,6 +4239,7 @@ async function runQwenServeImpl(
         const existing = runtimeCleanupPromises.get(runtimeToDrain);
         if (existing) return existing;
         const cleanup = (async () => {
+          runtimeToDrain.runtimeCoordinator?.dispose();
           await workspaceVoiceCoordinator.disposeRuntime(
             runtimeToDrain,
             reason,

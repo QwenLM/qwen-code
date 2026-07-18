@@ -40,6 +40,7 @@ import type {
   ServeWorkspaceHooksStatus,
   ServeWorkspaceMcpToolsStatus,
   ServeWorkspaceMcpResourcesStatus,
+  ServeWorkspaceRuntimeCapability,
   ServeWorkspaceToolsStatus,
   ServeSessionContextUsageStatus,
   ServeSessionStatsStatus,
@@ -593,7 +594,7 @@ export interface BridgeDaemonStatusLimits {
   maxPendingPromptsPerSession: number | null;
   eventRingSize: number;
   compactedReplayMaxBytes: number;
-  channelIdleTimeoutMs: number;
+  channelIdleTimeoutMs: number | null;
   sessionIdleTimeoutMs: number;
 }
 
@@ -917,6 +918,8 @@ export interface AcpSessionBridge {
    * Generic workspace-status query delegated through the live ACP channel.
    * Returns `idle()` when no child is running. Used by DaemonWorkspaceService
    * to forward status methods without coupling to their concrete shapes.
+   * Workspace runtime Catalog responses are stamped with the producing channel's
+   * `runtimeEpoch`; idle/config responses do not invent one.
    */
   queryWorkspaceStatus<T>(method: string, idle: () => T): Promise<T>;
 
@@ -1084,6 +1087,16 @@ export interface AcpSessionBridge {
 
   /** Read workspace-level installed extension status. */
   getWorkspaceExtensionsStatus(): Promise<ServeWorkspaceExtensionsStatus>;
+
+  /** Refresh workspace extension runtime state, even with no live session. */
+  refreshWorkspaceExtensions?(
+    data?: Omit<BridgeExtensionsChangedData, 'refreshed' | 'failed'>,
+  ): Promise<{
+    refreshed: number;
+    failed: number;
+    generation?: number;
+    runtimeEpoch?: number;
+  }>;
 
   /**
    * Broadcast extension refresh to all active sessions and emit an
@@ -1303,6 +1316,8 @@ export interface AcpSessionBridge {
     serverName: string,
     action: 'approve' | 'enable' | 'disable' | 'authenticate' | 'clear-auth',
     originatorClientId: string | undefined,
+    operationId?: string,
+    deadlineAt?: number,
   ): Promise<{
     serverName: string;
     action: 'approve' | 'enable' | 'disable' | 'authenticate' | 'clear-auth';
@@ -1311,6 +1326,7 @@ export interface AcpSessionBridge {
     messages?: string[];
     authUrl?: string;
     pending?: boolean;
+    runtimeEpoch: number;
   }>;
 
   generateWorkspaceAgent(
@@ -1356,6 +1372,33 @@ export interface AcpSessionBridge {
    * session count.
    */
   isChannelLive(): boolean;
+
+  /** Whether the current runtime has any physical Session/control/auth lease. */
+  hasActiveWorkspaceWork?(): boolean;
+
+  /** Wait for a timed-out physical request in this capability to settle. */
+  waitForWorkspacePhysicalRequests?(
+    capability: ServeWorkspaceRuntimeCapability,
+  ): Promise<void>;
+
+  /** Whether the old channel is being reaped and no replacement is live yet. */
+  isChannelStopping?(): boolean;
+
+  /** Monotonically increasing identity of the latest initialized ACP runtime. */
+  getRuntimeEpoch?(): number;
+
+  /**
+   * Keep the workspace runtime alive while a sessionless management workflow
+   * performs multiple ACP calls. The callback receives the acquired runtime
+   * epoch so callers can fence every result to the same physical child.
+   */
+  withWorkspaceRuntimeControl?<T>(
+    run: (runtimeEpoch: number) => Promise<T>,
+    timeoutMs?: number,
+  ): Promise<T>;
+
+  /** Whether a detached MCP authentication callback still owns this runtime. */
+  isWorkspaceMcpAuthenticationPending?(operationId: string): boolean;
 
   /** Number of sessions with an active prompt. */
   readonly activePromptCount: number;

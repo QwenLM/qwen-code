@@ -112,6 +112,10 @@ import {
   registerWorkspaceStatusRoutes,
 } from './routes/workspace-status.js';
 import {
+  registerWorkspaceQualifiedRuntimeRoutes,
+  registerWorkspaceRuntimeRoutes,
+} from './routes/workspace-runtime.js';
+import {
   createDaemonWorkspaceService,
   type DaemonWorkspaceService,
   type DaemonWorkspaceServiceDeps,
@@ -1152,6 +1156,18 @@ export function createServeApp(
     workspaceRegistry,
     sendBridgeError,
   });
+  registerWorkspaceRuntimeRoutes(app, {
+    workspaceRuntime: primaryRuntime,
+    mutate,
+    safeBody,
+    sendBridgeError,
+  });
+  registerWorkspaceQualifiedRuntimeRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    sendBridgeError,
+  });
   registerWorkspaceGitRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
@@ -1301,17 +1317,23 @@ export function createServeApp(
     clientId: string | undefined,
   ) => {
     invalidateServeFeaturesCache();
-    primaryBridge.publishWorkspaceEvent({
-      type: 'settings_changed',
-      data: { key, value, scope },
-      ...(clientId ? { originatorClientId: clientId } : {}),
-    });
+    const affectedRuntimes =
+      scope === 'user' ? workspaceRegistry.list() : [primaryRuntime];
+    for (const runtime of affectedRuntimes) {
+      runtime.bridge.publishWorkspaceEvent({
+        type: 'settings_changed',
+        data: { key, value, scope },
+        ...(clientId ? { originatorClientId: clientId } : {}),
+      });
+    }
   };
 
   if (deps.persistSetting) {
     const persistSetting = deps.persistSetting;
     registerWorkspaceSettingsRoutes(app, {
       boundWorkspace: primaryBoundWorkspace,
+      workspaceRuntime: primaryRuntime,
+      workspaceRegistry,
       mutate,
       safeBody,
       persistSetting: async (...args) => {
@@ -1320,6 +1342,7 @@ export function createServeApp(
       broadcastSettingsChanged,
       parseAndValidateClientId: (req, res) =>
         parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+      sendBridgeError,
     });
     registerWorkspaceQualifiedSettingsRoutes(app, {
       workspaceRegistry,
@@ -1329,6 +1352,7 @@ export function createServeApp(
         await persistSetting(...args);
       },
       invalidateServeFeaturesCache,
+      sendBridgeError,
     });
   }
   registerWorkspacePermissionsRoutes(app, {
@@ -1427,6 +1451,7 @@ export function createServeApp(
 
   registerWorkspaceMcpControlRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
+    workspaceRuntime: workspaceRegistry.primary,
     bridge: primaryBridge,
     workspace: primaryWorkspace,
     mutate,
@@ -1525,6 +1550,7 @@ export function createServeApp(
   });
   registerWorkspaceSkillsRoutes(app, {
     workspaceRuntime: primaryRuntime,
+    workspaceRegistry,
     mutate,
     safeBody,
     sendBridgeError,
