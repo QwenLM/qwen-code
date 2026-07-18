@@ -1025,8 +1025,12 @@ jobs:
           # statusCheckRollup — and a fanned-out matrix holds queued jobs well
           # past a 10-minute tick, so without this the next scan re-emits the
           # same PRs and the per-PR address groups accumulate duplicates that
-          # later replay stale watermarks. One runs-list plus one jobs-view per
-          # live run is cheap (there are at most a few).
+          # later replay stale watermarks. The status filter is SERVER-side: a
+          # client-side filter over the N newest runs loses a long-lived
+          # fanned-out run once cron traffic pushes it past the window, and
+          # its queued PRs silently stop looking busy. Filtered this way the
+          # limit applies to LIVE runs only (at most a handful), and one
+          # jobs-view per live run stays cheap.
           BUSY_PRS=' '
           while IFS= read -r LIVE_RUN; do
             [[ -z "${LIVE_RUN}" ]] && continue
@@ -1034,9 +1038,14 @@ jobs:
               [[ -n "${BUSY}" ]] && BUSY_PRS="${BUSY_PRS}${BUSY} "
             done < <(gh run view "${LIVE_RUN}" --repo "${REPO}" --json jobs \
               --jq '.jobs[] | select(.status != "completed") | .name | capture("^review-address \\((?<pr>[0-9]+),") | .pr' 2> /dev/null)
-          done < <(gh run list --repo "${REPO}" --workflow qwen-autofix.yml \
-            --limit 15 --json databaseId,status \
-            --jq '.[] | select(.status != "completed") | .databaseId' 2> /dev/null)
+          done < <(
+            for LIVE_STATUS in in_progress queued; do
+              # || true: one status query failing must not hide the other.
+              gh run list --repo "${REPO}" --workflow qwen-autofix.yml \
+                --status "${LIVE_STATUS}" --limit 50 --json databaseId \
+                --jq '.[].databaseId' 2> /dev/null || true
+            done | sort -u
+          )
           [[ "${BUSY_PRS}" != ' ' ]] && echo "🚧 address in flight/queued for PR(s):${BUSY_PRS}"
 
           TARGETS='[]'

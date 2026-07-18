@@ -221,7 +221,7 @@ describe('qwen-autofix workflow', () => {
     // older PRs for hours whenever cron ticks were sparse.
     expect(reviewScanJob).not.toContain('break # one PR per scheduled scan');
     expect(reviewScanJob).toContain('Fan out: emit EVERY eligible PR');
-    expect(workflow).toContain("max-parallel: 3");
+    expect(workflow).toContain('max-parallel: 3');
     // Pathological-backlog bound: the budget BREAKS the candidate loop (so it
     // bounds runtime and API usage, not just matrix size), the deferral is
     // LOGGED, and the next scan picks up the remainder.
@@ -229,22 +229,29 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain(
       'deferring the remaining candidates to the next scan',
     );
-    expect(reviewScanJob).toMatch(/target budget \(\$\{MAX_TARGETS_PER_SCAN\}\) reached[\s\S]{0,120}break/);
+    expect(reviewScanJob).toMatch(
+      /target budget \(\$\{MAX_TARGETS_PER_SCAN\}\) reached[\s\S]{0,120}break/,
+    );
     // Fanned-out matrices hold QUEUED jobs past a tick and schedule/dispatch
     // runs never appear in the PR's checks — the scan must skip PRs whose
     // review-address is already running or queued in any live autofix run.
     expect(reviewScanJob).toContain(
       'review-address already in flight or queued — skipping',
     );
+    // The live-run listing filters status SERVER-side (in_progress + queued
+    // union): a client-side filter over the N newest runs loses a long-lived
+    // fanned-out run once cron traffic pushes it past the window, and its
+    // queued PRs silently stop looking busy.
+    expect(reviewScanJob).toContain('for LIVE_STATUS in in_progress queued');
+    expect(reviewScanJob).toContain('--status "${LIVE_STATUS}" --limit 50');
+    expect(reviewScanJob).not.toContain('--limit 15');
     // The busy-set cannot see a sibling scan that has not yet emitted its
     // matrix, so review-address REVALIDATES the watermark against LIVE
     // markers before doing work: the per-PR address group serializes
     // duplicates, so the later one reliably sees the first one's marker and
     // discards itself — no agent run, no marker, no comment.
     expect(prepareBranchAndFeedbackStep).toContain('LIVE_EVAL_WM');
-    expect(prepareBranchAndFeedbackStep).toContain(
-      'stale duplicate target',
-    );
+    expect(prepareBranchAndFeedbackStep).toContain('stale duplicate target');
     expect(
       workflow.split("steps.prepare.outputs.stale != 'true'").length - 1,
     ).toBe(2);
@@ -1040,7 +1047,9 @@ describe('qwen-autofix workflow', () => {
       // outcome), while an in-branch copy would let branch code define its own
       // gate.
       expect(step).toContain('bash "${RUNNER_TEMP}/check-settings-schema.sh"');
-      expect(step).not.toContain('bash .github/scripts/check-settings-schema.sh');
+      expect(step).not.toContain(
+        'bash .github/scripts/check-settings-schema.sh',
+      );
       expect(step).toContain(
         'No package changes detected; skipping package tests.',
       );
@@ -1098,10 +1107,14 @@ describe('qwen-autofix workflow', () => {
     );
     expect(reviewVerifyGate).toBeTruthy();
     expect(
-      reviewVerifyGate.indexOf('bash "${RUNNER_TEMP}/check-settings-schema.sh"'),
+      reviewVerifyGate.indexOf(
+        'bash "${RUNNER_TEMP}/check-settings-schema.sh"',
+      ),
     ).toBeGreaterThanOrEqual(0);
     expect(
-      reviewVerifyGate.indexOf('bash "${RUNNER_TEMP}/check-settings-schema.sh"'),
+      reviewVerifyGate.indexOf(
+        'bash "${RUNNER_TEMP}/check-settings-schema.sh"',
+      ),
     ).toBeLessThan(reviewVerifyGate.indexOf('outcome=noop'));
   });
 
@@ -1244,11 +1257,17 @@ describe('qwen-autofix workflow', () => {
     expect(reviewAddressReportStep).toContain('"${JOB_STATUS:-}" != "success"');
     // The env declaration must exist, else JOB_STATUS is always empty at runtime,
     // the :- default fires, and "!= success" is always true → over-eager handoffs.
-    expect(reviewAddressReportStep).toContain("JOB_STATUS: '${{ job.status }}'");
+    expect(reviewAddressReportStep).toContain(
+      "JOB_STATUS: '${{ job.status }}'",
+    );
     // ...but a published run (OUTCOME fixed/noop) must NOT post a handoff, even if
     // a later always() step fails the job — otherwise it contradicts the success.
-    expect(reviewAddressReportStep).toContain('"${OUTCOME:-unknown}" != "fixed"');
-    expect(reviewAddressReportStep).toContain('"${OUTCOME:-unknown}" != "noop"');
+    expect(reviewAddressReportStep).toContain(
+      '"${OUTCOME:-unknown}" != "fixed"',
+    );
+    expect(reviewAddressReportStep).toContain(
+      '"${OUTCOME:-unknown}" != "noop"',
+    );
     // Terminal round when feedback was never read (empty NEWEST) so the scan skips
     // instead of re-handing-off every tick.
     expect(reviewAddressReportStep).toContain('MARK_ROUND="${MAX_ROUNDS}"');
@@ -1265,9 +1284,7 @@ describe('qwen-autofix workflow', () => {
     // the terminal marker makes the scan skip forever, the headline must state the
     // real recovery (delete the marker), not promise a re-trigger the guard ignores.
     expect(reviewAddressReportStep).toContain('could not start evaluation');
-    expect(reviewAddressReportStep).toContain(
-      'delete this bot\'s terminal',
-    );
+    expect(reviewAddressReportStep).toContain("delete this bot's terminal");
     // Truncate UTF-8 safely so a split multi-byte sequence can't corrupt the body,
     // and keep the `|| true` — iconv -c exits 1 when it discards a byte, which under
     // set -eo pipefail would abort the step and skip the marker (a silent stall).
@@ -1316,27 +1333,47 @@ describe('qwen-autofix workflow', () => {
     )?.[1];
     expect(decision).toBeTruthy();
     const runPostHandoff = (env) =>
-      execFileSync(
-        'bash',
-        ['-c', `${decision}\nprintf '%s' "$POST_HANDOFF"`],
-        { env: { ...process.env, ...env }, encoding: 'utf8' },
-      );
+      execFileSync('bash', ['-c', `${decision}\nprintf '%s' "$POST_HANDOFF"`], {
+        env: { ...process.env, ...env },
+        encoding: 'utf8',
+      });
     const base = { DRY_RUN: 'false', GITHUB_TOKEN: 'x' };
     // A published run (fixed/noop) must NOT hand off even if a later always() step
     // failed the job — otherwise it contradicts the already-reported success.
-    expect(runPostHandoff({ ...base, OUTCOME: 'fixed', JOB_STATUS: 'failure' })).toBe('false');
-    expect(runPostHandoff({ ...base, OUTCOME: 'noop', JOB_STATUS: 'failure' })).toBe('false');
-    expect(runPostHandoff({ ...base, OUTCOME: 'fixed', JOB_STATUS: 'success' })).toBe('false');
+    expect(
+      runPostHandoff({ ...base, OUTCOME: 'fixed', JOB_STATUS: 'failure' }),
+    ).toBe('false');
+    expect(
+      runPostHandoff({ ...base, OUTCOME: 'noop', JOB_STATUS: 'failure' }),
+    ).toBe('false');
+    expect(
+      runPostHandoff({ ...base, OUTCOME: 'fixed', JOB_STATUS: 'success' }),
+    ).toBe('false');
     // Dry-run never hands off.
-    expect(runPostHandoff({ ...base, DRY_RUN: 'true', OUTCOME: 'failed', JOB_STATUS: 'failure' })).toBe('false');
+    expect(
+      runPostHandoff({
+        ...base,
+        DRY_RUN: 'true',
+        OUTCOME: 'failed',
+        JOB_STATUS: 'failure',
+      }),
+    ).toBe('false');
     // Real non-success ends DO hand off: verify failure, pre-verify crash (empty
     // OUTCOME), and cancellation / job timeout.
-    expect(runPostHandoff({ ...base, OUTCOME: 'failed', JOB_STATUS: 'failure' })).toBe('true');
-    expect(runPostHandoff({ ...base, OUTCOME: '', JOB_STATUS: 'failure' })).toBe('true');
-    expect(runPostHandoff({ ...base, OUTCOME: '', JOB_STATUS: 'cancelled' })).toBe('true');
+    expect(
+      runPostHandoff({ ...base, OUTCOME: 'failed', JOB_STATUS: 'failure' }),
+    ).toBe('true');
+    expect(
+      runPostHandoff({ ...base, OUTCOME: '', JOB_STATUS: 'failure' }),
+    ).toBe('true');
+    expect(
+      runPostHandoff({ ...base, OUTCOME: '', JOB_STATUS: 'cancelled' }),
+    ).toBe('true');
     // Empty OUTCOME with a *successful* job — documents that no handoff is posted
     // (verify runs always(), so in practice OUTCOME is set on a successful job).
-    expect(runPostHandoff({ ...base, OUTCOME: '', JOB_STATUS: 'success' })).toBe('false');
+    expect(
+      runPostHandoff({ ...base, OUTCOME: '', JOB_STATUS: 'success' }),
+    ).toBe('false');
 
     // Terminal-round transition: feedback read (NEWEST set) → normal increment;
     // feedback never read (empty) → MAX_ROUNDS so the scan skips instead of
@@ -1368,16 +1405,28 @@ describe('qwen-autofix workflow', () => {
       ).trim();
     // Started AFTER the cutoff (recent) → active → blocks.
     expect(
-      runStaleness([{ status: 'IN_PROGRESS', startedAt: '2026-07-16T01:00:00Z', workflowName: 'CI' }]),
+      runStaleness([
+        {
+          status: 'IN_PROGRESS',
+          startedAt: '2026-07-16T01:00:00Z',
+          workflowName: 'CI',
+        },
+      ]),
     ).toBe('true');
     // Started BEFORE the cutoff (stuck past the bound) → dead → does not block.
     expect(
-      runStaleness([{ status: 'IN_PROGRESS', startedAt: '2026-07-15T00:00:00Z', workflowName: 'CI' }]),
+      runStaleness([
+        {
+          status: 'IN_PROGRESS',
+          startedAt: '2026-07-15T00:00:00Z',
+          workflowName: 'CI',
+        },
+      ]),
     ).toBe('false');
     // Queued, never started (no startedAt) → does not block.
-    expect(
-      runStaleness([{ status: 'QUEUED', workflowName: 'CI' }]),
-    ).toBe('false');
+    expect(runStaleness([{ status: 'QUEUED', workflowName: 'CI' }])).toBe(
+      'false',
+    );
   });
 
   it('writes agent output to a log and marks loop guard failures for handoff', () => {
