@@ -7,6 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthType } from '../../core/contentGenerator.js';
 import type { ModelProvidersConfig } from '../../models/types.js';
+import { createCredentialStore } from '../../models/credential-provider.js';
 import {
   applyProviderInstallPlan,
   buildInstallPlan,
@@ -47,6 +48,30 @@ describe('applyProviderInstallPlan', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('stores custom provider keys outside process.env and restores them on rollback', async () => {
+    const adapter = createAdapter();
+    const store = createCredentialStore({
+      QWEN_CUSTOM_API_KEY_TEST: 'previous-key',
+    });
+    const refreshAuth = vi.fn().mockRejectedValue(new Error('refresh failed'));
+    const plan: ProviderInstallPlan = {
+      providerId: 'test',
+      authType: AuthType.USE_OPENAI,
+      env: { QWEN_CUSTOM_API_KEY_TEST: 'new-key' },
+    };
+
+    await expect(
+      applyProviderInstallPlan(plan, {
+        settings: adapter,
+        credentialStore: store,
+        refreshAuth,
+      }),
+    ).rejects.toThrow('refresh failed');
+
+    expect(process.env['QWEN_CUSTOM_API_KEY_TEST']).toBeUndefined();
+    expect(store.get('QWEN_CUSTOM_API_KEY_TEST')).toBe('previous-key');
   });
 
   it('refuses an install plan that sets a reserved env var (NODE_OPTIONS)', async () => {

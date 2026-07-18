@@ -182,12 +182,19 @@ describe('workspace skill settings persistence', () => {
     await handle.runtimeReady;
     expect(persistDisabledSkills).toBeDefined();
 
+    fs.writeFileSync(
+      path.join(workspace, '.env'),
+      'QWEN_CUSTOM_API_KEY_SKILL_TEST=workspace-key\n',
+    );
+    delete process.env['QWEN_CUSTOM_API_KEY_SKILL_TEST'];
+
     await expect(
       persistDisabledSkills!(workspace, 'review', false),
     ).resolves.toEqual({
       changed: true,
       disabled: ['orphan', 'review'],
     });
+    expect(process.env['QWEN_CUSTOM_API_KEY_SKILL_TEST']).toBeUndefined();
     await expect(
       persistDisabledSkills!(workspace, 'review', false),
     ).resolves.toEqual({

@@ -3217,7 +3217,9 @@ export async function runQwenServe(
       enabled: boolean,
     ) =>
       withSettingsLock(workspace, async () => {
-        const fresh = settingsRuntime.settings.loadSettings(workspace);
+        const fresh = settingsRuntime.settings.loadSettings(workspace, {
+          credentialStore,
+        });
         const normalizedName = skillName.trim().toLowerCase();
         const disabledNames = (value: unknown): string[] =>
           Array.isArray(value)

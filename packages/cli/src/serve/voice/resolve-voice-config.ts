@@ -4,11 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  ModelsConfig,
-  type CredentialProvider,
-  type CredentialStore,
-} from '@qwen-code/qwen-code-core';
+import { ModelsConfig, type CredentialStore } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import {
@@ -53,7 +49,6 @@ function readVoiceModel(settings: LoadedSettings): string | undefined {
 function buildModelsConfig(
   settings: LoadedSettings,
   env: Readonly<Record<string, string | undefined>>,
-  credentialProvider?: CredentialProvider,
 ): ModelsConfig {
   const merged = settings.merged;
   const selectedAuthType =
@@ -67,7 +62,6 @@ function buildModelsConfig(
   return new ModelsConfig({
     initialAuthType: selectedAuthType,
     modelProvidersConfig: merged.modelProviders,
-    credentialProvider,
     generationConfig: resolvedCliConfig.generationConfig,
     generationConfigSources: resolvedCliConfig.sources,
   });

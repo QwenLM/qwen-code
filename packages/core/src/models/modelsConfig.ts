@@ -869,8 +869,8 @@ export class ModelsConfig {
       } else {
         debugLogger.debug(
           `No API key found for model "${model.id}": ` +
-            `process.env["${model.envKey}"] is ${apiKey === '' ? 'empty string' : 'not set'}. ` +
-            `Run /auth or set ${model.envKey} in your environment.`,
+            `credential provider returned ${apiKey === '' ? 'an empty string' : 'no value'} for ${model.envKey}. ` +
+            `Run /auth or configure ${model.envKey}.`,
         );
       }
       this._generationConfig.apiKeyEnvKey = model.envKey;

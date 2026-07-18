@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import * as realChildProcess from 'child_process';
 
 type SpawnOptions = {
   env?: Record<string, string | undefined>;
@@ -51,6 +52,7 @@ class MockStdioClientTransport {
 }
 
 mock.module('child_process', () => ({
+  ...realChildProcess,
   spawn: spawnMock,
 }));
 

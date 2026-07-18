@@ -8,13 +8,13 @@ import type { ModelDefinition } from '../../config/models.ts';
 import type { BackendConfig } from '../backend/types.ts';
 import {
   QwenAgent,
+  buildQwenAcpEnv,
   extractQwenParentToolUseId,
   formatQwenAcpErrorMessage,
   resolveQwenParentToolUseId,
 } from '../qwen-agent.ts';
 
 type QwenModelInternals = {
-  buildEnv: () => NodeJS.ProcessEnv;
   recordSessionModels: (result: Record<string, unknown>) => void;
   applySessionSettings: (sessionId: string) => Promise<void>;
   callAcp: <T>(
@@ -132,8 +132,7 @@ describe('QwenAgent model metadata', () => {
       SAFE_VAR: 'ok',
     };
     try {
-      const agent = createAgent(cwd, () => {});
-      const env = (agent as unknown as QwenModelInternals).buildEnv();
+      const env = buildQwenAcpEnv('qwen', [], {});
 
       expect(env.QWEN_SERVER_TOKEN).toBeUndefined();
       expect(env.QWEN_DAEMON_TOKEN).toBeUndefined();
