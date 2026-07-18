@@ -23,6 +23,8 @@ export interface StubDaemon {
   lastCreateSessionBody: unknown;
   /** Body of the most recent POST /session/:id/prompt request. */
   lastPromptBody: unknown;
+  /** Body of the most recent POST /session/:id/rewind request. */
+  lastRewindBody: unknown;
   /**
    * Start/end wall-clock timestamps (ms, `Date.now()`) for every
    * POST /session/:id/prompt call the stub has served, in completion order.
@@ -73,6 +75,15 @@ export interface StubDaemonOptions {
   capabilitiesStatus?: number;
   /** Status for POST /session/:id/end (default 200). Non-200 → { error }. */
   endSessionStatus?: number;
+  /** Status for POST /session/:id/rewind (default 200). */
+  rewindStatus?: number;
+  /**
+   * Response body for POST /session/:id/rewind on success. Defaults to
+   * `{ targetTurnIndex: <the request's toTurn>, apiTruncateIndex: 0 }` so a
+   * test that doesn't care about the exact value still gets one that's
+   * consistent with what it sent.
+   */
+  rewindResult?: { targetTurnIndex: number; apiTruncateIndex: number };
   /** Status for POST /session (default 200). Non-200 → { error }. */
   createSessionStatus?: number;
 }
@@ -92,6 +103,7 @@ export async function startStubDaemon(
     createdSessionCount: 0,
     lastCreateSessionBody: undefined as unknown,
     lastPromptBody: undefined as unknown,
+    lastRewindBody: undefined as unknown,
     promptCallLog: [] as Array<{
       sessionId: string;
       startedAt: number;
@@ -178,6 +190,22 @@ export async function startStubDaemon(
     }
   });
 
+  app.post('/session/:id/rewind', (req, res) => {
+    state.lastRewindBody = req.body;
+    const status = opts.rewindStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json({ error: 'stub error' });
+      return;
+    }
+    const toTurn = (req.body as { toTurn?: unknown })?.toTurn;
+    res.status(200).json(
+      opts.rewindResult ?? {
+        targetTurnIndex: typeof toTurn === 'number' ? toTurn : 0,
+        apiTruncateIndex: 0,
+      },
+    );
+  });
+
   app.post('/session/:id/prompt', (req, res) => {
     const status = opts.promptStatus ?? 200;
     state.lastPromptBody = req.body;
@@ -261,6 +289,9 @@ export async function startStubDaemon(
     },
     get lastPromptBody() {
       return state.lastPromptBody;
+    },
+    get lastRewindBody() {
+      return state.lastRewindBody;
     },
     get promptCallLog() {
       return state.promptCallLog;
