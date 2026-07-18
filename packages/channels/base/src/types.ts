@@ -101,6 +101,11 @@ export interface Envelope {
   senderName: string;
   chatId: string;
   chatName?: string;
+  /**
+   * Stable platform id for a later direct proactive send when it differs from
+   * the conversation id used for replying to this inbound turn.
+   */
+  deliveryChatId?: string;
   text: string;
   threadId?: string;
   /** Platform-specific message ID for response correlation. */

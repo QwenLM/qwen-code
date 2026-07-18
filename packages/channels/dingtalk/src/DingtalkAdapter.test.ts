@@ -1502,6 +1502,7 @@ describe('DingtalkChannel sender attribution', () => {
     expect(handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
         messageId: 'header-m1',
+        deliveryChatId: 'staff-1',
       }),
     );
   });
@@ -2105,10 +2106,10 @@ describe('DingtalkChannel proactive send', () => {
     expect(createChannel().supportsProactiveSend()).toBe(true);
   });
 
-  it('accepts direct-message targets only for webhooks', () => {
+  it('accepts stable direct-message targets for scheduled and webhook delivery', () => {
     const channel = proactive(createChannel());
     expect(channel.supportsProactiveTarget(groupTarget)).toBe(true);
-    expect(channel.supportsProactiveTarget(directTarget)).toBe(false);
+    expect(channel.supportsProactiveTarget(directTarget)).toBe(true);
     expect(channel.supportsProactiveWebhookTarget(groupTarget)).toBe(true);
     expect(channel.supportsProactiveWebhookTarget(directTarget)).toBe(true);
     expect(

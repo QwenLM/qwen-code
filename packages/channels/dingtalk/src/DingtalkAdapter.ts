@@ -491,11 +491,9 @@ export class DingtalkChannel extends ChannelBase {
     return true;
   }
 
-  // Regular proactive paths accept only group targets; webhook tasks may use
-  // DMs through the one-to-one API.
   protected override supportsProactiveTarget(target: SessionTarget): boolean {
     return (
-      target.isGroup === true &&
+      typeof target.isGroup === 'boolean' &&
       target.threadId === undefined &&
       this.isStableTargetId(target.chatId)
     );
@@ -1325,6 +1323,7 @@ export class DingtalkChannel extends ChannelBase {
         ...(isGroup && conversationTitle
           ? { chatName: conversationTitle }
           : {}),
+        ...(!isGroup && senderStaffId ? { deliveryChatId: senderStaffId } : {}),
         text: envelopeText,
         isGroup,
         isMentioned,

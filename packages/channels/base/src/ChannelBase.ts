@@ -2601,11 +2601,11 @@ export abstract class ChannelBase {
     if (this.loopController.createForSession) {
       const sessionId = await this.router.resolve(
         this.name,
-        target.senderId,
-        target.chatId,
-        target.threadId,
+        envelope.senderId,
+        envelope.chatId,
+        envelope.threadId,
         input.cwd,
-        target.isGroup,
+        envelope.isGroup === true,
       );
       job = await this.loopController.createForSession(
         input,
@@ -2877,7 +2877,10 @@ export abstract class ChannelBase {
     return this.normalizeLoopTarget({
       channelName: this.name,
       senderId: envelope.senderId,
-      chatId: envelope.chatId,
+      chatId:
+        envelope.isGroup === true
+          ? envelope.chatId
+          : (envelope.deliveryChatId ?? envelope.chatId),
       threadId: envelope.threadId,
       isGroup: envelope.isGroup === true,
     });
@@ -4167,7 +4170,9 @@ export abstract class ChannelBase {
         : sanitizedChatName || envelope.chatId;
     const observation: ObservedChannelContactObservation = {
       user: { id: envelope.senderId, label: userLabel },
-      ...(!envelope.isGroup ? { chatId: envelope.chatId } : {}),
+      ...(!envelope.isGroup
+        ? { chatId: envelope.deliveryChatId ?? envelope.chatId }
+        : {}),
       ...(envelope.isGroup
         ? {
             group: { id: envelope.chatId, label: groupLabel },

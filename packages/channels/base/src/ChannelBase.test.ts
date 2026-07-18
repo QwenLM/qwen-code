@@ -768,6 +768,24 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).toHaveBeenCalled();
     });
 
+    it('observes an adapter-provided direct delivery id without changing the reply chat id', async () => {
+      const observe = vi.fn();
+      const ch = createChannel({}, { observedContacts: { observe } });
+      const message = {
+        ...envelope({ chatId: 'reply-conversation-id' }),
+        deliveryChatId: 'routable-staff-id',
+      } as Envelope & { deliveryChatId: string };
+
+      await ch.handleInbound(message);
+
+      expect(observe).toHaveBeenCalledWith('test-chan', {
+        user: { id: 'user1', label: 'User 1' },
+        chatId: 'routable-staff-id',
+      });
+      expect(message.chatId).toBe('reply-conversation-id');
+      expect(bridge.prompt).toHaveBeenCalled();
+    });
+
     it('falls back to the complete sender ID for an unusable label', async () => {
       const observe = vi.fn();
       const ch = createChannel({}, { observedContacts: { observe } });
@@ -5885,6 +5903,66 @@ describe('ChannelBase', () => {
       );
       expect(ch.sent[0]!.text).toContain('Loop job-1');
       expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('/loop add uses the direct delivery id without changing session routing', async () => {
+      const createForSession = vi.fn().mockResolvedValue({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'routable-user-id',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'User 1',
+        createdAt: '2026-06-30T01:02:03.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      } satisfies ChannelLoop);
+      const ch = createChannel(
+        {},
+        {
+          loopController: {
+            create: vi.fn(),
+            createForSession,
+            listForTarget: vi.fn().mockResolvedValue([]),
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'reply-conversation-id',
+          deliveryChatId: 'routable-user-id',
+          text: '/loop add "0 9 * * *" post summary',
+        }),
+      );
+
+      expect(createForSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          target: expect.objectContaining({ chatId: 'routable-user-id' }),
+        }),
+        10,
+        's-1',
+      );
+      const sessionCreateCount = vi.mocked(bridge.newSession).mock.calls.length;
+      await ch.handleInbound(
+        envelope({
+          chatId: 'reply-conversation-id',
+          deliveryChatId: 'routable-user-id',
+          text: 'hello',
+        }),
+      );
+      expect(bridge.newSession).toHaveBeenCalledTimes(sessionCreateCount);
     });
 
     it('/loop add rejects single-scope sessions', async () => {
