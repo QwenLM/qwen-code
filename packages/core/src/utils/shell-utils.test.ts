@@ -441,6 +441,25 @@ describe('getCommandRoot — parameter expansion in command position', () => {
     expect(getCommandRoot(`"$${NAME}" review foo`)).toBeUndefined();
   });
 
+  it('field-splits an UNQUOTED expansion the way the shell does', () => {
+    // Both cases verified against real bash. Unset: `$VAR printf OK` removes
+    // the empty expansion and runs `printf` — returning no root here would
+    // hard-refuse a command the shell executes fine. Multi-word: with
+    // VAR='/usr/bin/env printf', the shell's command is `env` after splitting;
+    // reporting 'env printf' would show the wrong permission root.
+    expect(getCommandRoot(`$${NAME} printf OK`)).toBe('printf');
+    expect(getCommandRoot(`\${${NAME}} printf OK`)).toBe('printf');
+    process.env[NAME] = '/usr/bin/env printf';
+    expect(getCommandRoot(`$${NAME} OK`)).toBe('env');
+    // Quoting suppresses splitting: the whole value is one (unrunnable) word,
+    // and the root is its basename — faithful to what the shell would exec.
+    expect(getCommandRoot(`"$${NAME}" OK`)).toBe('env printf');
+  });
+
+  it('an empty unquoted expansion with nothing after it still has no root', () => {
+    expect(getCommandRoot(`$${NAME}`)).toBeUndefined();
+  });
+
   it('skips leading env assignments before the expansion, like the plain path', () => {
     process.env[NAME] = '/repo/scripts/dev.js';
     expect(getCommandRoot(`FOO=1 "\${${NAME}:-qwen}" review foo`)).toBe(

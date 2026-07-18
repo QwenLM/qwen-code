@@ -338,13 +338,17 @@ export function splitCommands(command: string): string[] {
  * user" until the model hand-resolved the variable itself.
  *
  * Resolution mirrors POSIX: `:-` substitutes the default when the variable is
- * unset OR empty; `-` only when unset; a bare `$VAR` that resolves to nothing
- * yields no root, and the command stays refusable — there is nothing to name.
- * The environment consulted is this process's own, which is what the spawned
- * shell inherits.
+ * unset OR empty; `-` only when unset. Quoting then decides what happens,
+ * exactly as it does in the shell. A QUOTED expansion is one word: empty means
+ * an empty command name, which has nothing to name and stays refusable. An
+ * UNQUOTED expansion field-splits: an empty result is REMOVED and the next
+ * token is the command (`$VAR printf OK` with VAR unset runs `printf`), and a
+ * multi-word value's FIRST field is the command (`$VAR OK` with
+ * VAR='/usr/bin/env printf' runs `env`). The environment consulted is this
+ * process's own, which is what the spawned shell inherits.
  */
 const PARAMETER_EXPANSION_COMMAND =
-  /^"?\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?-)([^}]*))?\}|([A-Za-z_][A-Za-z0-9_]*))"?$/;
+  /^("?)\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?-)([^}]*))?\}|([A-Za-z_][A-Za-z0-9_]*))\1$/;
 
 function resolveLeadingParameterExpansion(command: string): string | undefined {
   let rest = command;
@@ -359,15 +363,27 @@ function resolveLeadingParameterExpansion(command: string): string | undefined {
   if (!head) return undefined;
   const m = PARAMETER_EXPANSION_COMMAND.exec(head.token);
   if (!m) return undefined;
-  const name = (m[1] ?? m[4]) as string;
-  const op = m[2];
+  const quoted = m[1] === '"';
+  const name = (m[2] ?? m[5]) as string;
+  const op = m[3];
   const value = process.env[name];
   const useDefault =
     op === undefined ? false : op === ':-' ? !value : value === undefined;
   const resolved = useDefault
-    ? stripSymmetricQuotes(m[3] ?? '').value
+    ? stripSymmetricQuotes(m[4] ?? '').value
     : (value ?? '');
-  return resolved || undefined;
+  if (quoted) {
+    // One word, splitting suppressed — empty is an empty command name.
+    return resolved || undefined;
+  }
+  // Unquoted: the shell field-splits the expansion before command lookup.
+  const fields = resolved.split(/[ \t\n]+/).filter(Boolean);
+  if (fields.length === 0) {
+    // The empty expansion is removed; the command is whatever follows it.
+    const next = head.rest.trim();
+    return next ? getCommandRoot(next) : undefined;
+  }
+  return fields[0];
 }
 
 /**
