@@ -1276,7 +1276,15 @@ jobs:
           # management the scans refuse), and a release on a BOT-authored PR
           # must not claim disengagement — standard bot management continues,
           # only takeover mode (raised cap) ends.
-          PR_STATE_INFO="$(gh pr view "${PR}" --repo "${REPO}" --json labels,author 2> /dev/null || echo '{}')"
+          # Fail CLOSED like the sibling takeover-command job: empty metadata
+          # here would default HAS_SKIP to false and post a wrong "engaged"
+          # ack on a skip-labeled PR during a transient API failure. A red
+          # ack job posts nothing — engagement itself is scan-driven and
+          # unaffected.
+          if ! PR_STATE_INFO="$(gh pr view "${PR}" --repo "${REPO}" --json labels,author 2> /dev/null)"; then
+            echo "::error::could not read PR #${PR} state for takeover ack"
+            exit 1
+          fi
           HAS_SKIP="$(jq -r --arg t "${SKIP_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${PR_STATE_INFO}")"
           PR_AUTHOR_LIVE="$(jq -r '.author.login // ""' <<< "${PR_STATE_INFO}")"
           if [[ "${ACK}" == 'engaged' && "${HAS_SKIP}" == "true" ]]; then

@@ -684,6 +684,15 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toMatch(
       /takeover-ack:[\s\S]*?CI_DEV_BOT_PAT identity[\s\S]*?gh pr comment "\$\{PR\}"/,
     );
+    // The ack's state read fails CLOSED like the command job: empty
+    // metadata would default HAS_SKIP false and post a wrong "engaged" ack
+    // on a skip-labeled PR during a transient API failure.
+    expect(workflow).toContain(
+      'could not read PR #${PR} state for takeover ack',
+    );
+    expect(workflow).not.toContain(
+      `--json labels,author 2> /dev/null || echo '{}'`,
+    );
   });
 
   it('behaviorally selects candidates across bot and takeover PRs with skip winning', () => {
