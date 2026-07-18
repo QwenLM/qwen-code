@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { logger } from '../utils/logger.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
@@ -71,7 +72,7 @@ export class QwenSessionReader {
         // All projects
         const tmpDir = path.join(this.runtimeDir, 'tmp');
         if (!fs.existsSync(tmpDir)) {
-          console.log('[QwenSessionReader] Tmp directory not found:', tmpDir);
+          logger.log('[QwenSessionReader] Tmp directory not found:', tmpDir);
           return [];
         }
 
@@ -91,7 +92,7 @@ export class QwenSessionReader {
 
       return sessions;
     } catch (error) {
-      console.error('[QwenSessionReader] Failed to get sessions:', error);
+      logger.error('[QwenSessionReader] Failed to get sessions:', error);
       return [];
     }
   }
@@ -124,7 +125,7 @@ export class QwenSessionReader {
         session.filePath = filePath;
         sessions.push(session);
       } catch (error) {
-        console.error(
+        logger.error(
           '[QwenSessionReader] Failed to read session file:',
           filePath,
           error,
@@ -141,7 +142,7 @@ export class QwenSessionReader {
           sessions.push(session);
         }
       } catch (error) {
-        console.error(
+        logger.error(
           '[QwenSessionReader] Failed to read JSONL session file:',
           filePath,
           error,
@@ -313,10 +314,7 @@ export class QwenSessionReader {
         cwd,
       };
     } catch (error) {
-      console.error(
-        '[QwenSessionReader] Failed to parse JSONL session:',
-        error,
-      );
+      logger.error('[QwenSessionReader] Failed to parse JSONL session:', error);
       return null;
     }
   }
@@ -405,7 +403,7 @@ export class QwenSessionReader {
       fs.unlinkSync(session.filePath);
       return true;
     } catch (error) {
-      console.error('[QwenSessionReader] Failed to delete session:', error);
+      logger.error('[QwenSessionReader] Failed to delete session:', error);
       return false;
     }
   }
@@ -450,7 +448,7 @@ export class QwenSessionReader {
       fs.appendFileSync(session.filePath, record + '\n');
       return true;
     } catch (error) {
-      console.error('[QwenSessionReader] Failed to rename session:', error);
+      logger.error('[QwenSessionReader] Failed to rename session:', error);
       return false;
     }
   }

@@ -106,6 +106,10 @@ export interface FakeAgentOpts {
   initializeDelayMs?: number;
   /** Force `initialize` to throw. */
   initializeThrows?: Error;
+  initializeImpl?: (
+    p: InitializeRequest,
+    self: FakeAgent,
+  ) => Promise<InitializeResponse> | InitializeResponse;
   /**
    * Custom prompt handler. Default returns `end_turn` synchronously. Useful
    * for test cases that want to observe prompt ordering.
@@ -141,6 +145,7 @@ export interface FakeAgentOpts {
 }
 
 export class FakeAgent implements Agent {
+  initializeCalls: InitializeRequest[] = [];
   newSessionCalls: NewSessionRequest[] = [];
   loadSessionCalls: LoadSessionRequest[] = [];
   resumeSessionCalls: ResumeSessionRequest[] = [];
@@ -150,10 +155,14 @@ export class FakeAgent implements Agent {
     [];
   constructor(private readonly opts: FakeAgentOpts = {}) {}
 
-  async initialize(_p: InitializeRequest): Promise<InitializeResponse> {
+  async initialize(p: InitializeRequest): Promise<InitializeResponse> {
+    this.initializeCalls.push(p);
     if (this.opts.initializeThrows) throw this.opts.initializeThrows;
     if (this.opts.initializeDelayMs) {
       await new Promise((r) => setTimeout(r, this.opts.initializeDelayMs));
+    }
+    if (this.opts.initializeImpl) {
+      return await this.opts.initializeImpl(p, this);
     }
     return {
       protocolVersion: PROTOCOL_VERSION,

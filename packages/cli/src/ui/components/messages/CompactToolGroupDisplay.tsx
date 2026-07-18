@@ -276,10 +276,46 @@ function safeDescription(raw: string | undefined): string | undefined {
   const cleaned = stripped.replace(/[\x00-\x1f\x7f]/g, ' ').trim();
   /* eslint-enable no-control-regex */
 
-  // Reject JSON-looking blobs (error fallback from args)
-  if (cleaned.startsWith('{') || cleaned.startsWith('[')) return undefined;
+  // Reject JSON blobs (error fallback from args) without rejecting legitimate
+  // paths such as "[id].tsx" or "{draft}.md".
+  if (cleaned.startsWith('{') || cleaned.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(cleaned) as unknown;
+      if (typeof parsed === 'object' && parsed !== null) return undefined;
+    } catch {
+      // The description only resembles JSON, so keep it.
+    }
+  }
 
   return cleaned || undefined;
+}
+
+function getActiveToolHint(
+  toolCalls: IndividualToolCallDisplay[],
+): string | undefined {
+  if (toolCalls.length < 2) return undefined;
+
+  const statuses = [
+    ToolCallStatus.Confirming,
+    ToolCallStatus.Executing,
+    ToolCallStatus.Pending,
+  ];
+  for (const status of statuses) {
+    for (let index = toolCalls.length - 1; index >= 0; index--) {
+      const tool = toolCalls[index];
+      if (tool.status === status) {
+        const category = getToolCategory(tool.name);
+        const usesCountSummary = toolCalls.some(
+          (candidate, candidateIndex) =>
+            candidateIndex !== index &&
+            getToolCategory(candidate.name) === category,
+        );
+        return usesCountSummary ? safeDescription(tool.description) : undefined;
+      }
+    }
+  }
+
+  return undefined;
 }
 
 /**
@@ -288,11 +324,11 @@ function safeDescription(raw: string | undefined): string | undefined {
  * Single tool (with description) → "Read a.ts" / "Ran ls -la"
  * Single tool (no description)   → "Read 1 file" / "Ran 1 command"
  * Multi  same                    → "Read 3 files"
- * Multi mixed                    → "Read a.ts, ran npm test, edited b.ts"
+ * Multi mixed                    → "Read 2 files, ran npm test"
  *
  * Uses past tense when all tools are done, present progressive when active.
- * Falls back to count format when description is empty, contains control
- * characters, or looks like a JSON blob (e.g. error fallback from args).
+ * Falls back to count format when description is missing, cleans to empty,
+ * or parses as a JSON object or array (e.g. error args).
  */
 export function buildToolSummary(
   toolCalls: IndividualToolCallDisplay[],
@@ -358,6 +394,7 @@ export function estimateCompactToolGroupHeight(
   const activeTool = getActiveTool(toolCalls);
   const isActive = isToolGroupActive(overallStatus);
   const summary = `${buildToolSummary(toolCalls, isActive)}${isActive ? '…' : ''}`;
+  const hint = getActiveToolHint(toolCalls);
   const summaryWidth = Math.max(
     1,
     contentWidth -
@@ -370,7 +407,7 @@ export function estimateCompactToolGroupHeight(
     trim: false,
   });
 
-  return Math.max(1, wrappedSummary.split('\n').length);
+  return Math.max(1, wrappedSummary.split('\n').length) + (hint ? 1 : 0);
 }
 
 export const CompactToolGroupDisplay: React.FC<
@@ -381,6 +418,7 @@ export const CompactToolGroupDisplay: React.FC<
   const overallStatus = getOverallStatus(toolCalls);
   const activeTool = getActiveTool(toolCalls);
   const isActive = isToolGroupActive(overallStatus);
+  const hint = getActiveToolHint(toolCalls);
 
   return (
     <Box flexDirection="column" width={contentWidth} paddingX={1} gap={0}>
@@ -398,6 +436,13 @@ export const CompactToolGroupDisplay: React.FC<
           timeoutMs={getShellTimeoutMs(activeTool)}
         />
       </Box>
+      {hint && (
+        <Box paddingLeft={STATUS_INDICATOR_WIDTH}>
+          <Text dimColor wrap="truncate-end">
+            ⎿ {hint}
+          </Text>
+        </Box>
+      )}
     </Box>
   );
 };

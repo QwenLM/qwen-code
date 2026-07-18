@@ -85,6 +85,8 @@ import {
 import { canonicalizeWorkspace } from './workspacePaths.js';
 import { parseSessionSource } from './session-source.js';
 import {
+  CHANNEL_STARTUP_PROFILE_META_KEY,
+  CHANNEL_STARTUP_PROFILE_VERSION,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_META_KEY,
   LOAD_REPLAY_MODE_META_KEY,
@@ -92,6 +94,7 @@ import {
   LOAD_REPLAY_VERSION,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
 } from './bridgeTypes.js';
+import { getChannelStartupProfileAttributes } from './channel-startup-profile.js';
 import type {
   BridgeSession,
   BridgeRestoreSessionRequest,
@@ -2132,10 +2135,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             'qwen-code.daemon.bridge.operation': 'channel.initialize',
             'qwen-code.daemon.acp_channel.id': acpChannelId,
           },
-          async () =>
-            await withTimeout(
+          async () => {
+            const response = await withTimeout(
               connection.initialize({
                 protocolVersion: PROTOCOL_VERSION,
+                _meta: {
+                  [CHANNEL_STARTUP_PROFILE_META_KEY]: {
+                    v: CHANNEL_STARTUP_PROFILE_VERSION,
+                  },
+                },
                 clientCapabilities: {
                   fs: { readTextFile: true, writeTextFile: true },
                 },
@@ -2143,7 +2151,21 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               }),
               initTimeoutMs,
               'initialize',
-            ),
+            );
+            try {
+              const attributes = getChannelStartupProfileAttributes(
+                response,
+                Date.now(),
+                initTimeoutMs,
+              );
+              if (attributes && telemetry.setActiveSpanAttributes) {
+                telemetry.setActiveSpanAttributes(attributes);
+              }
+            } catch {
+              // Startup profiling must not affect bridge behavior.
+            }
+            return response;
+          },
         );
       } catch (err) {
         // Mark the half-initialized channel as dying/unavailable, then

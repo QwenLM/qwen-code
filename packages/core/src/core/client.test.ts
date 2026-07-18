@@ -154,7 +154,24 @@ vi.mock('./turn', async (importOriginal) => {
 });
 
 vi.mock('../config/config.js');
-vi.mock('./prompts');
+// Mock the prompt builders (spied on below) but keep the pure
+// resolveInteractionMode helper real so client.ts resolves the actual
+// interaction mode from the config instead of receiving an automocked
+// undefined.
+vi.mock('./prompts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./prompts.js')>();
+  return {
+    ...actual,
+    getCustomSystemPrompt: vi.fn(),
+    getCoreSystemPrompt: vi.fn(),
+    getCompressionPrompt: vi.fn(),
+    getProjectSummaryPrompt: vi.fn(),
+    getPlanModeSystemReminder: vi.fn(),
+    getArenaSystemReminder: vi.fn(),
+    getInsightPrompt: vi.fn(),
+    resolvePathFromEnv: vi.fn(),
+  };
+});
 vi.mock('../models/content-generator-config.js', async (importOriginal) => {
   const actual =
     await importOriginal<
@@ -546,6 +563,8 @@ describe('Gemini Client (client.ts)', () => {
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(true),
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getSdkMode: vi.fn().mockReturnValue(false),
+      getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
+      isInteractive: vi.fn().mockReturnValue(false),
       getIdeModeFeature: vi.fn().mockReturnValue(false),
       getIdeMode: vi.fn().mockReturnValue(true),
       getDebugMode: vi.fn().mockReturnValue(false),
@@ -8943,8 +8962,41 @@ Other open files:
         '',
         'test-model',
         'Be extra concise.',
+        'headless',
       );
     });
+
+    it.each([
+      ['interactive', true, false],
+      ['acp', false, true],
+      ['headless', false, false],
+    ] as const)(
+      'should pass %s mode to the core system prompt',
+      async (mode, interactive, acp) => {
+        const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+        const abortSignal = new AbortController().signal;
+
+        vi.mocked(getCoreSystemPrompt).mockClear();
+        vi.mocked(client['config'].isInteractive).mockReturnValue(interactive);
+        vi.mocked(
+          client['config'].getExperimentalZedIntegration,
+        ).mockReturnValue(acp);
+
+        await client.generateContent(
+          contents,
+          {},
+          abortSignal,
+          DEFAULT_QWEN_FLASH_MODEL,
+        );
+
+        expect(getCoreSystemPrompt).toHaveBeenCalledWith(
+          '',
+          'test-model',
+          undefined,
+          mode,
+        );
+      },
+    );
 
     it('should append config appendSystemPrompt after a config system prompt override', async () => {
       const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];

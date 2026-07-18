@@ -146,6 +146,38 @@ export const getCachedStringWidth = (str: string): number => {
   return width;
 };
 
+const graphemeSegmenter = new Intl.Segmenter(undefined, {
+  granularity: 'grapheme',
+});
+
+/**
+ * Truncate text to a display width (terminal cells), appending an ellipsis
+ * when clipped. Grapheme- and width-aware (via `getCachedStringWidth`) so CJK
+ * text — two cells per character — is bounded correctly. Returns an empty
+ * string when even the ellipsis would overflow the budget.
+ */
+export function truncateToWidth(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) {
+    return '';
+  }
+  if (getCachedStringWidth(text) <= maxWidth) {
+    return text;
+  }
+  const ellipsis = '…';
+  const budget = Math.max(0, maxWidth - getCachedStringWidth(ellipsis));
+  let width = 0;
+  let result = '';
+  for (const { segment } of graphemeSegmenter.segment(text)) {
+    const segmentWidth = getCachedStringWidth(segment);
+    if (width + segmentWidth > budget) {
+      break;
+    }
+    result += segment;
+    width += segmentWidth;
+  }
+  return `${result}${ellipsis}`;
+}
+
 export interface VisualHeightSlice {
   text: string;
   hiddenLinesCount: number;

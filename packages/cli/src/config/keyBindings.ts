@@ -172,7 +172,10 @@ export const defaultKeyBindings: KeyBindingConfig = {
   ],
 
   // Auto-completion
-  [Command.ACCEPT_SUGGESTION]: [{ key: 'tab' }, { key: 'return', ctrl: false }],
+  [Command.ACCEPT_SUGGESTION]: [
+    { key: 'tab' },
+    { key: 'return', ctrl: false, shift: false },
+  ],
   // Completion navigation: arrows + readline/Vim-style Ctrl+P/Ctrl+N
   [Command.COMPLETION_UP]: [
     { key: 'up', shift: false },

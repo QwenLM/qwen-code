@@ -12,6 +12,7 @@ import * as path from 'node:path';
 import {
   computeInitialTurnFromHistory,
   fireSessionPermissionDeniedForAutoMode,
+  isExistingFile,
   resolveHomeLoopResolverRoots,
   Session,
 } from './Session.js';
@@ -192,6 +193,34 @@ describe('computeInitialTurnFromHistory', () => {
         'test-session-id',
       ),
     ).toBe(2);
+  });
+});
+
+describe('isExistingFile', () => {
+  it('returns false when the path does not exist', () => {
+    expect(isExistingFile('/tmp/missing.png', () => false)).toBe(false);
+  });
+
+  it('returns false when the path is not a file', () => {
+    expect(
+      isExistingFile(
+        '/tmp/dir',
+        () => true,
+        () => ({ isFile: () => false }),
+      ),
+    ).toBe(false);
+  });
+
+  it('returns false when stat fails after exists succeeds', () => {
+    expect(
+      isExistingFile(
+        '/tmp/image.png',
+        () => true,
+        () => {
+          throw new Error('EACCES');
+        },
+      ),
+    ).toBe(false);
   });
 });
 
@@ -481,7 +510,10 @@ describe('Session', () => {
       getTool: vi.fn(),
       ensureTool: vi.fn().mockResolvedValue(true),
     };
-    const fileService = { shouldGitIgnoreFile: vi.fn().mockReturnValue(false) };
+    const fileService = {
+      shouldGitIgnoreFile: vi.fn().mockReturnValue(false),
+      shouldIgnoreFile: vi.fn().mockReturnValue(false),
+    };
 
     mockConfig = {
       setApprovalMode: vi.fn(),
@@ -506,6 +538,13 @@ describe('Session', () => {
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
       getFileService: vi.fn().mockReturnValue(fileService),
       getFileFilteringRespectGitIgnore: vi.fn().mockReturnValue(true),
+      getFileFilteringOptions: vi.fn().mockReturnValue({
+        respectGitIgnore: true,
+        respectQwenIgnore: true,
+      }),
+      getWorkspaceContext: vi.fn().mockReturnValue({
+        isPathWithinWorkspace: vi.fn().mockReturnValue(true),
+      }),
       getEnableRecursiveFileSearch: vi.fn().mockReturnValue(false),
       getTargetDir: vi.fn().mockReturnValue(process.cwd()),
       getDebugMode: vi.fn().mockReturnValue(false),
@@ -3804,6 +3843,125 @@ describe('Session', () => {
         expect(textParts(firstSentMessage())).toContain('[file image]');
       } finally {
         readManyFilesSpy.mockRestore();
+      }
+    });
+
+    it('resolves image @ paths from ACP text through the vision bridge', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-acp-image-'),
+      );
+      const imagePath = path.join(tempDir, 'image.png');
+      await fs.writeFile(imagePath, 'image');
+      mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
+      mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+        isPathWithinWorkspace: (pathSpec: string) =>
+          path.resolve(tempDir, pathSpec).startsWith(`${tempDir}${path.sep}`),
+      });
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'qwen3.7-plus',
+      });
+      const readManyFilesSpy = vi
+        .spyOn(core, 'readManyFiles')
+        .mockResolvedValue({
+          contentParts: {
+            inlineData: { mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+          },
+        } as Awaited<ReturnType<typeof core.readManyFiles>>);
+      runVisionBridgeSpy.mockResolvedValue({
+        applied: true,
+        status: 'ok',
+        parts: [{ text: 'look at this' }, { text: '[text @ file image]' }],
+        transcript: '[text @ file image]',
+        convertedCount: 1,
+        omittedCount: 0,
+        modelId: 'qwen3.7-plus',
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            {
+              type: 'text',
+              text: `look at @scope/pkg and @${imagePath}`,
+            },
+          ],
+        });
+
+        expect(readManyFilesSpy).toHaveBeenCalledWith(mockConfig, {
+          paths: [imagePath],
+          signal: expect.any(AbortSignal),
+          preserveUnsupportedImageForBridge: true,
+        });
+        const bridgeParts = runVisionBridgeSpy.mock.calls[0]?.[0]
+          ?.parts as Part[];
+        expect(bridgeParts.some((part) => 'inlineData' in part)).toBe(true);
+        expect(textParts(firstSentMessage())).toContain('[text @ file image]');
+      } finally {
+        readManyFilesSpy.mockRestore();
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('ignores non-image and relative ACP text @ paths', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-acp-paths-'),
+      );
+      const outsideDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-acp-outside-'),
+      );
+      const textPath = path.join(tempDir, 'notes.txt');
+      const relativeImagePath = 'relative.png';
+      const outsidePath = path.join(outsideDir, 'outside.png');
+      const ignoredPath = path.join(tempDir, 'ignored.png');
+      await fs.writeFile(textPath, 'notes');
+      await fs.writeFile(path.join(tempDir, relativeImagePath), 'image');
+      await fs.mkdir(path.join(tempDir, 'dir'));
+      await fs.writeFile(ignoredPath, 'ignored');
+      await fs.writeFile(outsidePath, 'outside');
+      mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
+      mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+        isPathWithinWorkspace: (pathSpec: string) =>
+          path.resolve(tempDir, pathSpec).startsWith(`${tempDir}${path.sep}`),
+      });
+      const fileService = {
+        shouldIgnoreFile: vi.fn((pathSpec: string) => pathSpec === ignoredPath),
+      };
+      mockConfig.getFileService = vi.fn().mockReturnValue(fileService);
+      mockConfig.getFileFilteringOptions = vi.fn().mockReturnValue({
+        respectGitIgnore: true,
+        respectQwenIgnore: true,
+      });
+      const readManyFilesSpy = vi
+        .spyOn(core, 'readManyFiles')
+        .mockResolvedValue({
+          contentParts: 'allowed file',
+          files: [],
+        } as Awaited<ReturnType<typeof core.readManyFiles>>);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            {
+              type: 'text',
+              text: `read @${textPath} @${relativeImagePath} @${path.join(tempDir, 'dir')} @${outsidePath} @${ignoredPath}`,
+            },
+          ],
+        });
+
+        expect(readManyFilesSpy).not.toHaveBeenCalled();
+      } finally {
+        readManyFilesSpy.mockRestore();
+        await fs.rm(tempDir, { recursive: true, force: true });
+        await fs.rm(outsideDir, { recursive: true, force: true });
       }
     });
 
