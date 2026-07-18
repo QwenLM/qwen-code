@@ -171,54 +171,49 @@ export function startPostRenderPrefetches(
         import('../utils/updateEventEmitter.js'),
         import('../i18n/index.js'),
       ]);
-      try {
-        const result = await checkForUpdatesDetailed();
-        if (result.status === 'update') {
-          const projectRoot = config.getProjectRoot();
-          const hostUpdateRelaunch = process.env[HOST_UPDATE_RELAUNCH_ENV_VAR];
-          if (hostUpdateRelaunch === 'true') {
-            updateEventEmitter.emit('update-info', {
-              message: `${result.info.message}\n${t(
-                'Run /update to install the update on the host.',
-              )}`,
-            });
-            return;
-          }
-          if (hostUpdateRelaunch === 'false') {
-            updateEventEmitter.emit('update-info', {
-              message: `${result.info.message}\n${t(
-                'Update Qwen Code on the host, then restart the sandbox.',
-              )}`,
-            });
-            return;
-          }
-          const installationInfo = getInstallationInfo(projectRoot, true);
-          if (
-            installationInfo.updateCommand ||
-            (installationInfo.isStandalone && installationInfo.standaloneDir)
-          ) {
-            if (requestUpdateOnExit()) {
-              updateEventEmitter.emit('update-info', {
-                message: `${result.info.message}\n${t(
-                  'The update will be installed after you exit this session.',
-                )}`,
-              });
-            } else {
-              updateEventEmitter.emit('update-info', {
-                message: `${result.info.message}\n${t(
-                  'Run /update to install the update.',
-                )}`,
-              });
-            }
-          } else {
-            void handleAutoUpdate(result.info, settings, projectRoot);
-          }
-        } else if (result.status === 'error') {
-          debugLogger.warn('Startup update check failed:', result.error);
+      const result = await checkForUpdatesDetailed();
+      if (result.status === 'update') {
+        const projectRoot = config.getProjectRoot();
+        const hostUpdateRelaunch = process.env[HOST_UPDATE_RELAUNCH_ENV_VAR];
+        if (hostUpdateRelaunch === 'true') {
+          updateEventEmitter.emit('update-info', {
+            message: `${result.info.message}\n${t(
+              'Run /update to install the update on the host.',
+            )}`,
+          });
+          return;
         }
-      } catch (error) {
-        debugLogger.warn('Startup update check failed:', error);
-        throw error;
+        if (hostUpdateRelaunch === 'false') {
+          updateEventEmitter.emit('update-info', {
+            message: `${result.info.message}\n${t(
+              'Update Qwen Code on the host, then restart the sandbox.',
+            )}`,
+          });
+          return;
+        }
+        const installationInfo = getInstallationInfo(projectRoot, true);
+        if (
+          installationInfo.updateCommand ||
+          (installationInfo.isStandalone && installationInfo.standaloneDir)
+        ) {
+          if (requestUpdateOnExit()) {
+            updateEventEmitter.emit('update-info', {
+              message: `${result.info.message}\n${t(
+                'The update will be installed after you exit this session.',
+              )}`,
+            });
+          } else {
+            updateEventEmitter.emit('update-info', {
+              message: `${result.info.message}\n${t(
+                'Run /update to install the update.',
+              )}`,
+            });
+          }
+        } else {
+          void handleAutoUpdate(result.info, settings, projectRoot);
+        }
+      } else if (result.status === 'error') {
+        debugLogger.warn('Startup update check failed:', result.error);
       }
     });
   }

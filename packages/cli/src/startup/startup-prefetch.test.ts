@@ -627,10 +627,7 @@ describe('startupPrefetch', () => {
 
     await vi.dynamicImportSettled();
 
-    expect(mockWarn).toHaveBeenCalledWith(
-      'Startup update check failed:',
-      error,
-    );
+    expect(mockWarn).toHaveBeenCalledWith('update_check failed:', error);
     expect(mockRecordStartupEvent).toHaveBeenCalledWith(
       'startup_prefetch_failed',
       { name: 'update_check' },
