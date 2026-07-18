@@ -103,8 +103,10 @@ env:
   MAX_TARGETS_PER_SCAN: '10'
   # Upper bound on candidates INSPECTED per scan: idle candidates consume
   # serial API calls even when they emit nothing, and takeover widens the
-  # candidate pool. Excess candidates defer to the next scan (newest-first
-  # ordering means they rotate, not starve).
+  # candidate pool. Candidates are inspected NEWEST-first; past the budget
+  # the oldest tail defers — old quiet PRs are the least likely to hold new
+  # feedback, and a deferred PR with a live conflict is still picked up by
+  # the shepherd's conflict lever.
   MAX_CANDIDATE_INSPECTIONS: '60'
   # Maintainer-facing engagement labels (applying labels requires GitHub
   # triage+, so the permission gate is GitHub's own): TAKEOVER opts a PR —
@@ -120,7 +122,7 @@ env:
   # unattended cap (MAX_ROUNDS) would strangle it. The circuit breaker stays
   # (a bot↔review-bot ping-pong is still bounded), it is just sized for
   # explicitly delegated work; removing the label restores the strict cap,
-  # and re-engaging opens a fresh counting window (see REARM_TS below).
+  # and re-engaging opens a fresh counting window (see REARM_KEY below).
   TAKEOVER_MAX_ROUNDS: '100'
   # Do not claim more issues when too many existing autofix PRs are still open.
   MAX_OPEN_AUTOFIX_PRS: '5'
@@ -1347,6 +1349,7 @@ jobs:
             CANDIDATES="$(jq -rs --arg skip "${SKIP_LABEL}" \
               'add
                | unique_by(.number)
+               | sort_by(-.number)
                | .[]
                | select(.isCrossRepository == false)
                | select([.labels[]?.name] | index($skip) | not)
@@ -1399,14 +1402,16 @@ jobs:
           TARGETS='[]'
           INSPECTED=0
           for PR in ${CANDIDATES}; do
+            # The busy skip is free (in-memory set) — it must not consume
+            # inspection budget.
+            if [[ "${BUSY_PRS}" == *" ${PR} "* ]]; then
+              echo "⏳ #${PR}: review-address already in flight or queued — skipping"
+              continue
+            fi
             INSPECTED=$(( INSPECTED + 1 ))
             if [[ "${INSPECTED}" -gt "${MAX_CANDIDATE_INSPECTIONS}" ]]; then
               echo "🧮 candidate-inspection budget (${MAX_CANDIDATE_INSPECTIONS}) reached — deferring the rest to the next scan"
               break
-            fi
-            if [[ "${BUSY_PRS}" == *" ${PR} "* ]]; then
-              echo "⏳ #${PR}: review-address already in flight or queued — skipping"
-              continue
             fi
             # One PR fetch for the branch name, check rollup, creation time
             # (the watermark floor below), and labels (the effective round
@@ -1518,7 +1523,13 @@ jobs:
               # if the cap is hit again, a fresh reminder. A failed post
               # retries naturally on the next scan (marker still absent).
               if [[ "${HAS_TAKEOVER}" == "true" ]]; then
-                CAP_NOTICED="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg rt "${REARM_TS}" '
+                # Dedup boundary = the current window key; with no engage ack
+                # yet (key 'none') fall back to LIFETIME dedup — created_at is
+                # never > 'none' lexically, which would flip this into posting
+                # every scan.
+                NOTICE_RT="${REARM_KEY}"
+                [[ "${NOTICE_RT}" == "none" ]] && NOTICE_RT=''
+                CAP_NOTICED="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg rt "${NOTICE_RT}" '
                   [ .[] | select((.user.login // "") == $ab)
                     | select((.body // "") | contains("<!-- takeover-cap-reached -->"))
                     | select((.created_at // "") > $rt) ] | length' "${WORKDIR}/ic.json")"
@@ -1771,6 +1782,11 @@ jobs:
           echo 'Restoring tracked build output before switching to the PR branch.'
           git status --short
           git restore --source=HEAD --staged --worktree .
+          # This step's env carries the PAT, and checkout fires post-checkout
+          # hooks — sever hooks here exactly like the push steps do; the
+          # agent step (no PAT, sandboxed tools) re-points hooksPath at
+          # .husky itself so ITS commits still get checked.
+          git config core.hooksPath /dev/null
           git checkout -B "${BRANCH}" "origin/${BRANCH}"
 
           # Does the branch conflict with base? merge-tree computes the merge
@@ -2001,6 +2017,10 @@ jobs:
           fi
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
           rm -f "${WORKDIR}/failure.md"
+          # Prepare severed hooks for its PAT-bearing git ops; THIS step holds
+          # no PAT and runs agent tools in the sandbox, so the branch's own
+          # hooks may check the agent's commits again.
+          git config core.hooksPath .husky
           node .qwen/skills/autofix/scripts/run-agent.mjs \
             --mode address-review \
             --pr "${PR}" \
@@ -2158,12 +2178,14 @@ jobs:
             {
               echo "🤖 Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS}). What changed, and what I pushed back on:"
               echo
-              # Strip HTML comments (the rule the handoff DETAIL already
-              # applies): model output posted verbatim under the bot identity
-              # could otherwise smuggle a forged control marker
-              # ('<!-- autofix-eval', '<!-- takeover-ack …') that the
-              # scanners would trust as real state.
-              sed 's/<!--[^>]*-->//g' "${WORKDIR}/address-summary.md"
+              # Neutralize the comment-opening token itself: model output
+              # posted verbatim under the bot identity could smuggle a forged
+              # control marker ('<!-- autofix-eval …') the scanners would
+              # trust. Token-breaking is LINE-INDEPENDENT — a strip like
+              # 's/<!--[^>]*-->//' misses a marker whose --> sits on another
+              # line, and jq scan() matches across newlines. The backslashes
+              # render away in markdown, so the visible text is unchanged.
+              sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/address-summary.md"
               echo
               echo "Base-conflict check: $([[ "${CONFLICT}" == "true" ]] && echo 'conflicted with main — resolved in this push.' || echo 'no conflict with main.')"
               echo
@@ -2178,7 +2200,7 @@ jobs:
             {
               echo "🤖 Reviewed the latest feedback — no changes needed. Why, point by point:"
               echo
-              sed 's/<!--[^>]*-->//g' "${WORKDIR}/no-action.md"
+              sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/no-action.md"
               echo
               echo "Base-conflict check: $([[ "${CONFLICT}" == "true" ]] && echo 'conflicts with main (no review fix needed, but a rebase/merge is required before merge).' || echo 'no conflict with main.')"
               echo
@@ -2314,7 +2336,7 @@ jobs:
                 # `set -eo pipefail` would abort the step and skip the marker + gh
                 # pr comment below — the exact silent stall this block prevents — so
                 # `|| true` keeps the (already-emitted) cleaned text and continues.
-                head -c 1500 "${DETAIL_FILE}" | iconv -f utf-8 -t utf-8 -c | sed 's/<!--[^>]*-->//g' || true
+                head -c 1500 "${DETAIL_FILE}" | iconv -f utf-8 -t utf-8 -c | sed 's/<!--/<!\\-\\-/g' || true
               else
                 echo "AutoFix failed before producing a verified commit (the run crashed or timed out before it could explain why)."
               fi
