@@ -7,6 +7,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { EOL } from 'node:os';
 import { promises as fsp } from 'node:fs';
+import { Box } from 'ink';
 
 // Capture launches of the external editor so the full-plan viewer (#7001)
 // can be asserted without spawning a real editor process.
@@ -22,6 +23,7 @@ import type {
   ToolCallConfirmationDetails,
   Config,
 } from '@qwen-code/qwen-code-core';
+import { IdeClient, ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
 import { renderWithProviders } from '../../../test-utils/render.js';
 import type { LoadedSettings } from '../../../config/settings.js';
 
@@ -476,6 +478,252 @@ describe('ToolConfirmationMessage', () => {
       );
 
       expect(lastFrame()).not.toContain('Modify with external editor');
+    });
+
+    it('renders edit warnings and honors hideAlwaysAllow on small terminals', () => {
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getIdeMode: () => false,
+      } as unknown as Config;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            ...editConfirmationDetails,
+            hideAlwaysAllow: true,
+            warnings: [
+              'Unknown shell safety',
+              'Exact shell command: sed -i s/a/b/ test.txt',
+            ],
+          }}
+          config={mockConfig}
+          availableTerminalHeight={10}
+          contentWidth={50}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('Unknown shell safety');
+      expect(frame).toContain('Exact shell command');
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).not.toContain('Yes, allow always');
+    });
+
+    it('budgets edit warnings using their rendered inner width', () => {
+      const availableTerminalHeight = 11;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            ...editConfirmationDetails,
+            fileDiff: '@@ -1 +1 @@\n-a\n+b',
+            hideAlwaysAllow: true,
+            hideModify: true,
+            warnings: ['x'.repeat(44)],
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={50}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      expect(frame).toContain('x'.repeat(44));
+      expect(frame).toContain('Apply this change?');
+      expect(frame).toContain('Yes, allow once');
+    });
+
+    it('keeps a multiline exact command visible within the body budget', () => {
+      const availableTerminalHeight = 11;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            ...editConfirmationDetails,
+            fileDiff: '@@ -1 +1 @@\n-a\n+b',
+            hideAlwaysAllow: true,
+            hideModify: true,
+            warnings: [
+              'Plan mode could not determine whether this command is read-only.',
+              'Exact shell command: `printf a\nprintf b`',
+            ],
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={50}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      expect(frame).toContain('Plan mode could not determine');
+      expect(frame).toContain('Exact shell command');
+      expect(frame).toContain('printf a ↵');
+      expect(frame).toContain('Apply this change?');
+      expect(frame).toContain('Yes, allow once');
+    });
+
+    it('budgets compact edit warnings at the wrapping boundary', () => {
+      const availableTerminalHeight = 9;
+      const { lastFrame } = renderWithProviders(
+        <Box width={50}>
+          <ToolConfirmationMessage
+            confirmationDetails={{
+              ...editConfirmationDetails,
+              fileDiff: '@@ -1 +1 @@\n-a\n+b',
+              hideAlwaysAllow: true,
+              hideModify: true,
+              warnings: ['x'.repeat(46), 'y'.repeat(46)],
+            }}
+            config={mockConfig}
+            availableTerminalHeight={availableTerminalHeight}
+            contentWidth={50}
+            compactMode={true}
+          />
+        </Box>,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      expect(frame).toContain('x'.repeat(46));
+      expect(frame).toContain('y'.repeat(46));
+      expect(frame).toContain('Apply this change?');
+      expect(frame).toContain('Yes, allow once');
+    });
+
+    it('keeps one-line compact bodies within the terminal height', () => {
+      const availableTerminalHeight = 5;
+      const { lastFrame } = renderWithProviders(
+        <Box width={50}>
+          <ToolConfirmationMessage
+            confirmationDetails={{
+              ...editConfirmationDetails,
+              fileDiff: '@@ -1 +1 @@\n-a\n+b',
+              hideAlwaysAllow: true,
+              hideModify: true,
+              warnings: [
+                'Plan mode could not determine whether this command is read-only.',
+                'Exact shell command: `printf a\nprintf b`',
+              ],
+            }}
+            config={mockConfig}
+            availableTerminalHeight={availableTerminalHeight}
+            contentWidth={50}
+            compactMode={true}
+          />
+        </Box>,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      expect(frame).toContain('Exact shell command');
+      expect(frame).toContain('Apply this change?');
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('No');
+    });
+
+    it('keeps compact edit warnings and diff within the available height', () => {
+      const availableTerminalHeight = 9;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            ...editConfirmationDetails,
+            fileDiff:
+              '@@ -1,3 +1,3 @@\n-old one\n-old two\n+new one\n+new two\n context',
+            hideAlwaysAllow: true,
+            hideModify: true,
+            warnings: [
+              'Plan mode could not determine whether this shell command is read-only. Approval applies only to this exact invocation once.',
+              `Exact shell command: \`python -c "${"open('result.txt', 'a').write('changed');".repeat(12)}"\``,
+            ],
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={50}
+          compactMode={true}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      expect(frame).toContain('Plan mode could not determine');
+      expect(frame).toContain('Exact shell command');
+      expect(frame).toContain('lines hidden');
+      expect(frame).toContain('Apply this change?');
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('No');
+    });
+
+    it('resolves ordinary IDE edits but skips confirmations that have no IDE diff', async () => {
+      const resolveDiffFromCli = vi.fn().mockResolvedValue(undefined);
+      const isDiffingEnabled = vi.fn().mockReturnValue(true);
+      const getInstanceSpy = vi
+        .spyOn(IdeClient, 'getInstance')
+        .mockResolvedValue({
+          isDiffingEnabled,
+          resolveDiffFromCli,
+        } as unknown as IdeClient);
+      const ideConfig = {
+        isTrustedFolder: () => true,
+        getIdeMode: () => true,
+      } as unknown as Config;
+
+      const ordinaryOnConfirm = vi.fn().mockResolvedValue(undefined);
+      const ordinary = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            ...editConfirmationDetails,
+            onConfirm: ordinaryOnConfirm,
+          }}
+          config={ideConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+      );
+      await vi.waitFor(() => expect(isDiffingEnabled).toHaveBeenCalled());
+      ordinary.stdin.write('\r');
+      await vi.waitFor(() =>
+        expect(resolveDiffFromCli).toHaveBeenCalledWith(
+          '/test.txt',
+          'accepted',
+        ),
+      );
+      ordinary.unmount();
+
+      resolveDiffFromCli.mockClear();
+      isDiffingEnabled.mockClear();
+      const skippedOnConfirm = vi.fn().mockResolvedValue(undefined);
+      const skipped = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            ...editConfirmationDetails,
+            onConfirm: skippedOnConfirm,
+            skipIdeDiff: true,
+          }}
+          config={ideConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+      );
+      await vi.waitFor(() => expect(isDiffingEnabled).toHaveBeenCalled());
+      skipped.stdin.write('\r');
+      await vi.waitFor(() =>
+        expect(skippedOnConfirm).toHaveBeenCalledWith(
+          ToolConfirmationOutcome.ProceedOnce,
+        ),
+      );
+      expect(resolveDiffFromCli).not.toHaveBeenCalled();
+
+      skipped.unmount();
+      getInstanceSpy.mockRestore();
     });
   });
 

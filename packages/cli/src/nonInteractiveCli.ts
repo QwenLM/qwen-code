@@ -561,7 +561,13 @@ export async function runNonInteractive(
           // hangs until its 600s stall timeout fires.
           approvalListener = (event) => {
             const mode = config.getApprovalMode();
-            if (mode === ApprovalMode.YOLO) {
+            const confirmationDetails = event.confirmationDetails;
+            const requiresExplicitHostApproval =
+              confirmationDetails?.type !== 'plan' &&
+              confirmationDetails !== undefined &&
+              'hideAlwaysAllow' in confirmationDetails &&
+              confirmationDetails.hideAlwaysAllow === true;
+            if (mode === ApprovalMode.YOLO && !requiresExplicitHostApproval) {
               // `respond` may reject if the teammate terminates between the
               // approval request and our response — catch it so it doesn't
               // become an unhandledRejection that can crash the process.
@@ -577,11 +583,9 @@ export async function runNonInteractive(
             }
             // Surface a clear reason on stderr — otherwise the
             // failure looks like the teammate gave up for no reason.
-            const reason =
-              `Auto-cancelling tool ${event.toolName} requested by ` +
-              `teammate "${event.teammateName}": current approval mode ` +
-              `(${mode}) cannot prompt in non-stream-json mode. ` +
-              `Use --yolo or stream-json to allow teammate tool calls.`;
+            const reason = requiresExplicitHostApproval
+              ? `Auto-cancelling tool ${event.toolName} requested by teammate "${event.teammateName}": this request requires an explicit interactive approval surface and cannot be bypassed by YOLO mode.`
+              : `Auto-cancelling tool ${event.toolName} requested by teammate "${event.teammateName}": current approval mode (${mode}) cannot prompt in non-stream-json mode. Use --yolo or stream-json to allow teammate tool calls.`;
             process.stderr.write(`[team] ${reason}\n`);
             // Also surface to the leader's LLM, otherwise it just
             // sees the teammate fail without any signal that an

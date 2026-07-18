@@ -38,6 +38,7 @@ import * as core from '@qwen-code/qwen-code-core';
 import { SettingScope } from '../../config/settings.js';
 import type {
   AgentSideConnection,
+  PermissionOption,
   PromptRequest,
   SessionNotification,
 } from '@agentclientprotocol/sdk';
@@ -521,6 +522,7 @@ describe('Session', () => {
       // session.prompt(), so the default must be defined. Individual tests
       // that care override via `mockConfig.getApprovalMode = vi.fn()...`.
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getApprovalModeRevision: vi.fn().mockReturnValue(0),
       switchModel: switchModelSpy,
       getModel: vi.fn().mockImplementation(() => currentModel),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
@@ -10194,6 +10196,473 @@ describe('Session', () => {
         { answers: undefined },
       );
       expect(executeSpy).toHaveBeenCalled();
+    });
+
+    it('blocks known Plan shell writes before requesting ACP permission', async () => {
+      const executeSpy = vi.fn();
+      const getConfirmationDetails = vi.fn();
+      const invocation = {
+        params: { command: 'touch changed.txt' },
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getConfirmationDetails,
+        getDescription: vi.fn().mockReturnValue('touch changed.txt'),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: executeSpy,
+      };
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.SHELL,
+        kind: core.Kind.Execute,
+        build: vi.fn().mockReturnValue(invocation),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockConfig.getApprovalModeRevision = vi.fn().mockReturnValue(1);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-plan-write',
+                  name: core.ToolNames.SHELL,
+                  args: { command: 'touch changed.txt' },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'run write' }],
+      });
+
+      expect(getConfirmationDetails).not.toHaveBeenCalled();
+      expect(mockClient.requestPermission).not.toHaveBeenCalled();
+      expect(executeSpy).not.toHaveBeenCalled();
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          error: expect.objectContaining({
+            message: expect.stringContaining('classified as state-modifying'),
+          }),
+        }),
+      );
+    });
+
+    it('routes unknown resolved shell aliases to exact one-off ACP approval', async () => {
+      const rawCommand = "python -c 'print(1)'";
+      const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+      const executeSpy = vi.fn().mockResolvedValue({
+        llmContent: 'ok',
+        returnDisplay: 'ok',
+      });
+      const invocation = {
+        params: { command: rawCommand },
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'exec',
+          title: 'Confirm shell',
+          command: rawCommand,
+          rootCommand: 'python',
+          onConfirm: onConfirmSpy,
+        }),
+        getDescription: vi.fn().mockReturnValue(rawCommand),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: executeSpy,
+      };
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.SHELL,
+        kind: core.Kind.Execute,
+        build: vi.fn().mockReturnValue(invocation),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockConfig.getApprovalModeRevision = vi.fn().mockReturnValue(2);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-plan-unknown',
+                  name: 'Shell',
+                  args: { command: rawCommand },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'inspect through wrapper' }],
+      });
+
+      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+      const permissionRequest = vi.mocked(mockClient.requestPermission).mock
+        .calls[0][0];
+      expect(
+        (permissionRequest.options as PermissionOption[]).map(
+          (option) => option.optionId,
+        ),
+      ).toEqual([
+        core.ToolConfirmationOutcome.ProceedOnce,
+        core.ToolConfirmationOutcome.Cancel,
+      ]);
+      expect(permissionRequest.toolCall.content[0]).toMatchObject({
+        content: {
+          text: expect.stringContaining('exact invocation once'),
+        },
+      });
+      expect(onConfirmSpy).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.ProceedOnce,
+        undefined,
+      );
+      expect(executeSpy).toHaveBeenCalledOnce();
+    });
+
+    it('rejects ACP shell args mutated while building the invocation', async () => {
+      const rawCommand = "python -c 'print(1)'";
+      const executeSpy = vi.fn();
+      const getConfirmationDetails = vi.fn();
+      const build = vi.fn((input: Record<string, unknown>) => {
+        input['command'] = 'touch changed.txt';
+        return {
+          params: input,
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getConfirmationDetails,
+          getDescription: vi.fn().mockReturnValue('touch changed.txt'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: executeSpy,
+        };
+      });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.SHELL,
+        kind: core.Kind.Execute,
+        build,
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockConfig.getApprovalModeRevision = vi.fn().mockReturnValue(2);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-plan-build-mutation',
+                  name: core.ToolNames.SHELL,
+                  args: { command: rawCommand },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'run wrapper' }],
+      });
+
+      expect(build).toHaveBeenCalledOnce();
+      expect(getConfirmationDetails).not.toHaveBeenCalled();
+      expect(mockClient.requestPermission).not.toHaveBeenCalled();
+      expect(executeSpy).not.toHaveBeenCalled();
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          error: expect.objectContaining({
+            message: expect.stringContaining('exact invocation changed'),
+          }),
+        }),
+      );
+    });
+
+    it('cancels forged ACP outcomes that were not offered', async () => {
+      const rawCommand = "python -c 'print(1)'";
+      const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+      const executeSpy = vi.fn();
+      const invocation = {
+        params: { command: rawCommand },
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'exec',
+          title: 'Confirm shell',
+          command: rawCommand,
+          rootCommand: 'python',
+          onConfirm: onConfirmSpy,
+        }),
+        getDescription: vi.fn().mockReturnValue(rawCommand),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: executeSpy,
+      };
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.SHELL,
+        kind: core.Kind.Execute,
+        build: vi.fn().mockReturnValue(invocation),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockConfig.getApprovalModeRevision = vi.fn().mockReturnValue(3);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      vi.mocked(mockClient.requestPermission).mockImplementation(
+        async (params) => {
+          params.options.push({
+            optionId: core.ToolConfirmationOutcome.ProceedAlwaysProject,
+            name: 'Injected persistent approval',
+            kind: 'allow_always',
+          });
+          return {
+            outcome: {
+              outcome: 'selected',
+              optionId: core.ToolConfirmationOutcome.ProceedAlwaysProject,
+            },
+          };
+        },
+      );
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-plan-forged',
+                  name: core.ToolNames.SHELL,
+                  args: { command: rawCommand },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'run wrapper' }],
+      });
+
+      expect(onConfirmSpy).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.Cancel,
+      );
+      expect(executeSpy).not.toHaveBeenCalled();
+    });
+
+    it('keeps ambient Shell cwd fixed after ACP approval is consumed', async () => {
+      const rawCommand = "python -c 'print(1)'";
+      const modelArgs = { command: rawCommand };
+      let targetDir = '/workspace/one';
+      const onConfirmSpy = vi.fn().mockImplementation(async () => {
+        targetDir = '/workspace/two';
+        modelArgs.command = 'touch changed.txt';
+      });
+      const executeSpy = vi.fn();
+      const invocation = {
+        params: modelArgs,
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'exec',
+          title: 'Confirm shell',
+          command: rawCommand,
+          rootCommand: 'python',
+          onConfirm: onConfirmSpy,
+        }),
+        getDescription: vi.fn().mockReturnValue(rawCommand),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: executeSpy,
+      };
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.SHELL,
+        kind: core.Kind.Execute,
+        build: vi.fn().mockReturnValue(invocation),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockConfig.getApprovalModeRevision = vi.fn().mockReturnValue(4);
+      mockConfig.getTargetDir = vi.fn(() => targetDir);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-plan-cwd-consumed',
+                  name: core.ToolNames.SHELL,
+                  args: modelArgs,
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'inspect through wrapper' }],
+      });
+
+      expect(invocation.params).toEqual({
+        command: rawCommand,
+        directory: '/workspace/one',
+      });
+      expect(targetDir).toBe('/workspace/two');
+      expect(modelArgs.command).toBe('touch changed.txt');
+      expect(onConfirmSpy).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.ProceedOnce,
+        undefined,
+      );
+      expect(executeSpy).toHaveBeenCalledOnce();
+    });
+
+    it('invalidates ACP approval when ambient Shell cwd moves while pending', async () => {
+      const rawCommand = "python -c 'print(1)'";
+      let targetDir = '/workspace/one';
+      const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+      const executeSpy = vi.fn();
+      const invocation = {
+        params: { command: rawCommand },
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'exec',
+          title: 'Confirm shell',
+          command: rawCommand,
+          rootCommand: 'python',
+          onConfirm: onConfirmSpy,
+        }),
+        getDescription: vi.fn().mockReturnValue(rawCommand),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: executeSpy,
+      };
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.SHELL,
+        kind: core.Kind.Execute,
+        build: vi.fn().mockReturnValue(invocation),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockConfig.getApprovalModeRevision = vi.fn().mockReturnValue(4);
+      mockConfig.getTargetDir = vi.fn(() => targetDir);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      vi.mocked(mockClient.requestPermission).mockImplementation(async () => {
+        targetDir = '/workspace/two';
+        return {
+          outcome: {
+            outcome: 'selected',
+            optionId: core.ToolConfirmationOutcome.ProceedOnce,
+          },
+        };
+      });
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-plan-cwd-stale',
+                  name: core.ToolNames.SHELL,
+                  args: { command: rawCommand },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'inspect through wrapper' }],
+      });
+
+      expect(invocation.params).toEqual({
+        command: rawCommand,
+        directory: '/workspace/one',
+      });
+      expect(onConfirmSpy).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.Cancel,
+        expect.objectContaining({
+          cancelMessage: expect.stringContaining('no longer valid'),
+        }),
+      );
+      expect(executeSpy).not.toHaveBeenCalled();
+    });
+
+    it('revalidates Plan shell context after a pending permission hook', async () => {
+      const rawCommand = "python -c 'print(1)'";
+      let revision = 4;
+      const hookSpy = vi
+        .spyOn(core, 'firePermissionRequestHook')
+        .mockImplementation(async () => {
+          revision++;
+          return { hasDecision: false };
+        });
+      const executeSpy = vi.fn();
+      const invocation = {
+        params: { command: rawCommand },
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'exec',
+          title: 'Confirm shell',
+          command: rawCommand,
+          rootCommand: 'python',
+          onConfirm: vi.fn().mockResolvedValue(undefined),
+        }),
+        getDescription: vi.fn().mockReturnValue(rawCommand),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: executeSpy,
+      };
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.SHELL,
+        kind: core.Kind.Execute,
+        build: vi.fn().mockReturnValue(invocation),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockConfig.getApprovalModeRevision = vi.fn(() => revision);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-plan-hook-stale',
+                  name: core.ToolNames.SHELL,
+                  args: { command: rawCommand },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'inspect through wrapper' }],
+        });
+      } finally {
+        hookSpy.mockRestore();
+      }
+
+      expect(mockClient.requestPermission).not.toHaveBeenCalled();
+      expect(executeSpy).not.toHaveBeenCalled();
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          error: expect.objectContaining({
+            message: expect.stringContaining('no longer valid'),
+          }),
+        }),
+      );
     });
 
     it('returns permission error for disabled tools (L1 isToolEnabled check)', async () => {
