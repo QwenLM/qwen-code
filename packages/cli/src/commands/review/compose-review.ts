@@ -29,13 +29,31 @@ import {
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
 import { shellQuotePath } from './lib/shell-quote.js';
+import {
+  CRITICAL_PREFIX,
+  SUGGESTION_PREFIX,
+  countInlineFindings,
+  unmarkedComments,
+  type DraftedComment,
+} from './lib/inline-counts.js';
 
 export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
 
 export interface ComposeReviewInput {
-  /** Critical findings anchored as inline `comments` entries. Omitted = 0. */
+  /**
+   * Critical findings anchored as inline `comments` entries.
+   *
+   * A seam for the two CLI boundaries and the tests — NEVER a field of the
+   * model-written state JSON. Both boundaries derive it from the drafted
+   * comments (`compose-review --comments`, `submit`'s payload) and refuse it
+   * when the JSON carries it: a count handed over beside the thing it counts
+   * is a count that can disagree with it, and a dogfooded report-only run —
+   * where nothing downstream recounts — moved its one Critical from
+   * `bodyCriticals` to an inline comment, lost the count on the way, and this
+   * function printed `Verdict: Approve` over a Critical the report listed.
+   */
   criticalsInline?: number;
-  /** Suggestion findings anchored as inline `comments` entries. Omitted = 0. */
+  /** Suggestion findings anchored inline. Same seam, same refusal. */
   suggestionsInline?: number;
   /**
    * Critical descriptions whose only copy lives in the review body — the
@@ -116,10 +134,8 @@ export interface ComposeReviewResult {
   remediation: string[];
 }
 
-const CRITICAL_MARKER = '**[Critical]**';
-
 function withMarker(line: string): string {
-  return line.startsWith(CRITICAL_MARKER) ? line : `${CRITICAL_MARKER} ${line}`;
+  return line.startsWith(CRITICAL_PREFIX) ? line : `${CRITICAL_PREFIX} ${line}`;
 }
 
 // The input arrives as JSON a model wrote, and the skill tells it to omit
@@ -628,25 +644,96 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
 
 interface ComposeReviewCliArgs {
   input: string | undefined;
+  comments: string;
   out: string | undefined;
+}
+
+/**
+ * The drafted inline comments, read from the file Step 6 is told to pass.
+ *
+ * Accepts the bare array or the full review-payload shape (`{comments: […]}`),
+ * so the same file Step 7 submits can be handed over unchanged. Every entry
+ * must open with a severity marker: `countInlineFindings` weighs an unmarked
+ * body as nothing, and for a verdict computation "nothing" means a blocker
+ * written without its marker approves the review it should have blocked.
+ * Step 6 is where the draft is still cheap to fix, so it refuses here.
+ */
+function readDraftedComments(path: string): DraftedComment[] {
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch (err) {
+    throw new Error(
+      `compose-review: cannot read the comments file ${path}: ` +
+        `${(err as Error).message}. Pass the drafted inline comments — the ` +
+        `same array the review payload will carry — or a file containing [] ` +
+        `when nothing anchors inline.`,
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `compose-review: the comments file ${path} is not JSON: ${(err as Error).message}`,
+    );
+  }
+  const comments = Array.isArray(parsed)
+    ? parsed
+    : (parsed as { comments?: unknown })?.comments;
+  if (!Array.isArray(comments)) {
+    throw new Error(
+      `compose-review: the comments file ${path} must be a JSON array of ` +
+        `comment objects, or a review payload with a \`comments\` array.`,
+    );
+  }
+  const unmarked = unmarkedComments(comments as DraftedComment[]);
+  if (unmarked.length > 0) {
+    throw new Error(
+      `compose-review: comments[${unmarked.join(', ')}] in ${path} open with ` +
+        `neither ${CRITICAL_PREFIX} nor ${SUGGESTION_PREFIX}. Every inline ` +
+        `comment is a finding and carries its severity first — an unmarked ` +
+        `body would be counted as neither, and a blocker that weighs nothing ` +
+        `approves the review it should block. Fix the draft, not the counts.`,
+    );
+  }
+  return comments as DraftedComment[];
 }
 
 export const composeReviewCommand: CommandModule = {
   command: 'compose-review',
   describe:
-    'Compute the review event and body from the finding counts and run states (the Step 7 invariant, as code); reads the state JSON from --input or stdin',
+    'Compute the review event and body from the drafted comments and run states (the Step 7 invariant, as code); reads the state JSON from --input or stdin',
   builder: (yargs) =>
     yargs
       .option('input', {
         type: 'string',
         describe: 'Path to the state JSON (omit to read stdin)',
       })
+      .option('comments', {
+        type: 'string',
+        demandOption: true,
+        describe:
+          'Path to the drafted inline comments JSON (the review payload, or ' +
+          'its bare comments array). The inline counts are counted from it, ' +
+          'never typed — pass a file containing [] when nothing anchors inline.',
+      })
       .option('out', {
         type: 'string',
         describe: 'Also write the {event, body} JSON to this path',
       }),
   handler: (argv) => {
-    const { input, out } = argv as unknown as ComposeReviewCliArgs;
+    const { input, comments, out } = argv as unknown as ComposeReviewCliArgs;
+    // yargs enforces --comments on the real command line; this covers every
+    // other way in (tests, programmatic calls) with the same sentence instead
+    // of an ENOENT on `undefined`.
+    if (!comments) {
+      throw new Error(
+        'compose-review: --comments is required — the inline counts are ' +
+          'counted from the drafted comments file, never typed. Pass a file ' +
+          'containing [] when nothing anchors inline.',
+      );
+    }
     const raw = readFileSync(input ?? 0, 'utf8');
     // The input is a JSON the model wrote. `env` decides where the harness
     // transcripts are read from, and it must NOT come from that JSON: a model
@@ -656,7 +743,28 @@ export const composeReviewCommand: CommandModule = {
     // always resolves the transcripts from the environment the CLI exported.
     const parsed = JSON.parse(raw) as ComposeReviewInput;
     delete parsed.env;
-    const result = composeReview(parsed);
+    // The inline counts are counted, not accepted — `submit` has refused them
+    // since the count-beside-the-comments bug, and this boundary refusing them
+    // too is what makes the Step 6 line and the posted verdict the same
+    // computation on the same source. Silently overwriting instead would let a
+    // run keep believing the number it typed.
+    if (
+      parsed.criticalsInline !== undefined ||
+      parsed.suggestionsInline !== undefined
+    ) {
+      throw new Error(
+        'compose-review: `criticalsInline` / `suggestionsInline` are counted ' +
+          'from the --comments file, not taken from the state JSON. Remove ' +
+          'them. (A dogfooded run moved its one Critical from `bodyCriticals` ' +
+          'to an inline comment, dropped the count on the way, and the ' +
+          'verdict line read Approve over a blocker.)',
+      );
+    }
+    const drafted = readDraftedComments(comments);
+    const result = composeReview({
+      ...parsed,
+      ...countInlineFindings(drafted),
+    });
     // The exact terminal verdict, persisted beside the fields it is computed
     // from. `event` + `cappedBy` alone cannot reconstruct it — a presubmit
     // downgrade also depends on `downgraded`/`downgradedFrom` — and Step 8's

@@ -53,6 +53,7 @@ import {
   skillArgsPath,
   currentSessionId,
 } from '../../services/skill-args-file.js';
+import { countInlineFindings } from './lib/inline-counts.js';
 
 /**
  * Where the CLI records a skill's invocation arguments, verbatim, before the
@@ -118,19 +119,10 @@ interface ReviewPayload {
   body?: unknown;
 }
 
-/**
- * The prefixes the skill mandates on every posted comment, and the autofix
- * workflow keys off.
- *
- * They are what makes the inline counts *derivable*. A caller used to hand
- * `criticalsInline` over as a number beside the comments — and a number beside a
- * thing is a number that can disagree with it. The breaching dogfood run posted a
- * body reading "Suggestions are inline" next to an empty `comments` array and a
- * summary claiming `0 Suggestion inline`; every count in it disagreed with every
- * other. Count the comments.
- */
-const CRITICAL_PREFIX = '**[Critical]**';
-const SUGGESTION_PREFIX = '**[Suggestion]**';
+// The severity prefixes and the counting live in `lib/inline-counts.ts`,
+// shared with `compose-review`: the Step 6 verdict line and the Step 7 posted
+// verdict must be the same computation on the same source, and two counting
+// functions is how they were once allowed to disagree.
 
 /**
  * Was this run authorised to write to the pull request?
@@ -269,12 +261,7 @@ function compose(payload: ReviewPayload): {
 } {
   const comments = payload.comments ?? [];
   const state = payload.state ?? ({} as ComposeReviewInput);
-  const criticalsInline = comments.filter((c) =>
-    (c.body ?? '').trimStart().startsWith(CRITICAL_PREFIX),
-  ).length;
-  const suggestionsInline = comments.filter((c) =>
-    (c.body ?? '').trimStart().startsWith(SUGGESTION_PREFIX),
-  ).length;
+  const { criticalsInline, suggestionsInline } = countInlineFindings(comments);
 
   // `env` decides where the harness transcripts are read from, and it must not
   // come from a JSON the caller wrote: a run that wanted an approval could point
