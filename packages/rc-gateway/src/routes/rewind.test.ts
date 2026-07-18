@@ -366,6 +366,63 @@ describe('POST /session/:id/rewind', () => {
     wal.close();
   });
 
+  it('close() failure after a durable append still records audit + publishes + 202, marker persists', async () => {
+    await writeTranscript(2);
+    const { daemon } = fakeDaemon(async (_id, req) => ({
+      targetTurnIndex: req.toTurn,
+      apiTruncateIndex: 0,
+    }));
+    const audit = fakeAudit();
+    const bus = new OwnerEventBus();
+    const seen: OwnerEvent[] = [];
+    bus.subscribe((e) => seen.push(e));
+    const walDir = join(runtimeBase, 'wal');
+    const url = await mount({ daemon, audit, bus, walDir });
+
+    // The marker append succeeds (real impl → bytes durable via writeSync), but
+    // close() throws — a realistic deferred-writeback EIO on NFS. This must NOT
+    // abort the post-commit steps: the marker is already committed on disk.
+    const closeSpy = vi
+      .spyOn(SessionWal.prototype, 'close')
+      .mockImplementation(() => {
+        throw new Error('EIO on close (deferred writeback)');
+      });
+    // The swallowed-close log must not spam test output; assert it fired.
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await postRewind(url, { toTurn: 1 });
+    // Success, not 500 rewind_failed: append succeeded ⇒ committed.
+    expect(res.status).toBe(202);
+    expect(await res.json()).toMatchObject({ toTurn: 1, truncatedEventId: 2 });
+
+    // The invariant: marker durable ⇒ audit written AND frame published.
+    expect(audit.calls).toHaveLength(1);
+    expect(audit.calls[0]).toMatchObject({
+      action: 'session_rewound',
+      actorTokenId: 'tok1',
+      target: SESSION_ID,
+      detail: { toTurn: 1, truncatedEventId: 2 },
+    });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({
+      type: 'session_event',
+      sessionId: SESSION_ID,
+      event: { type: 'session_rewound', data: { toTurn: 1 } },
+    });
+    // close() failure was swallowed + logged, not thrown.
+    expect(errorSpy).toHaveBeenCalled();
+
+    // The marker really is on disk (append happened before close threw).
+    closeSpy.mockRestore();
+    const wal = new SessionWal({ dir: walDir, sessionId: SESSION_ID });
+    expect(wal.count()).toBe(1);
+    const [frame] = [
+      ...decodeSegment(join(walDir, 'wal', `${SESSION_ID}.log`)),
+    ];
+    expect(frame).toMatchObject({ id: 1, type: 'session_rewound' });
+    wal.close();
+  });
+
   it('multi-client fan-out: two subscribers both observe the marker', async () => {
     await writeTranscript(2);
     const { daemon } = fakeDaemon(async (_id, req) => ({

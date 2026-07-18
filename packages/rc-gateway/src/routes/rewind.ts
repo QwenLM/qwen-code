@@ -194,7 +194,7 @@ export function createRewindRoute(
         try {
           appendMarkerWithRetry(wal, markerId, markerData);
         } catch (err) {
-          wal.close();
+          safeCloseWal(wal, sessionId, markerId);
           // The daemon has ALREADY rewound — the gateway WAL now diverges from
           // the daemon's view. Log loudly so an operator can reconcile.
           // eslint-disable-next-line no-console
@@ -210,7 +210,13 @@ export function createRewindRoute(
           });
           return;
         }
-        wal.close();
+        // The marker bytes are now DURABLE (writeSync succeeded). From here the
+        // rewind is COMMITTED: a subsequent close() failure (e.g. a deferred
+        // writeback EIO on NFS) must NOT abort the post-commit steps. Swallow
+        // and log it — never let it skip audit / bus.publish / the 202. A
+        // marker on disk without an audit row is the exact inconsistency the
+        // saga must never produce.
+        safeCloseWal(wal, sessionId, markerId);
       }
 
       // 5. Publish the marker on the owner bus, reusing the existing
@@ -247,6 +253,30 @@ export function createRewindRoute(
     } finally {
       release();
     }
+  }
+}
+
+/**
+ * Close the WAL fd, swallowing any error. `close()` runs only AFTER the marker
+ * bytes are already durable (append used `writeSync`), so a `closeSync` failure
+ * cannot un-persist the marker; it must never propagate out of the success path
+ * and skip the post-commit audit / publish / 202. At most it is logged.
+ */
+function safeCloseWal(
+  wal: SessionWal,
+  sessionId: string,
+  markerId: number,
+): void {
+  try {
+    wal.close();
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[rewind] WAL close failed after durable marker append ` +
+        `(session=${sessionId}, markerId=${markerId}); ` +
+        `marker is persisted, continuing with audit/publish`,
+      err,
+    );
   }
 }
 
