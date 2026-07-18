@@ -594,10 +594,7 @@ describe('OpenAIContentConverter', () => {
     it.each([
       [
         'at the start of the stream',
-        [
-          '<think></think><think>outer <think>literal',
-          '</think></think>',
-        ],
+        ['<think></think><think>outer <think>literal', '</think></think>'],
       ],
       [
         'after visible content',
@@ -627,8 +624,7 @@ describe('OpenAIContentConverter', () => {
     it('fails closed when a suspicious prefix exceeds the buffer limit', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
-      const content =
-        '<think></think><think>9<think>' + 'x'.repeat(257);
+      const content = '<think></think><think>9<think>' + 'x'.repeat(257);
 
       expect(() =>
         converter.convertOpenAIChunkToGemini(

@@ -219,6 +219,49 @@ describe('BackgroundAgentResumeService', () => {
     expect(subagentManager.loadSubagent).toHaveBeenCalledWith('researcher');
   });
 
+  it('preserves model on recovered paused agents for per-model caps', async () => {
+    const sessionId = 'session-model';
+    const agentId = 'agent-model';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Model-aware recovery test',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      model: 'qwen3-max',
+    });
+    fs.writeFileSync(
+      getAgentJsonlPath(tempDir, sessionId, agentId),
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: {
+          role: 'user',
+          parts: [{ text: 'Model-aware recovery test' }],
+        },
+      }) + '\n',
+      'utf8',
+    );
+
+    const { service } = createService();
+    const recovered = await service.loadPausedBackgroundAgents(sessionId);
+
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]).toMatchObject({
+      agentId,
+      status: 'paused',
+      model: 'qwen3-max',
+    });
+  });
+
   it('keeps interrupted fork tasks visible as paused entries', async () => {
     const sessionId = 'session-fork';
     const agentId = 'agent-fork';
