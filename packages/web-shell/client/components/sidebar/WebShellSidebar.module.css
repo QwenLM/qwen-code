@@ -6,7 +6,6 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
   padding: 12px;
   overflow: hidden;
   background: var(--sidebar-background);
@@ -29,14 +28,18 @@
 }
 
 .newChatButton,
+.pluginButton,
 .footerButton,
 .collapseButton,
 .projectRow,
 .sessionRow,
+.sessionGroupHeader,
+.sessionGroupActionButton,
 .retry,
 .iconButton,
 .projectIconButton,
 .sessionActionButton,
+.groupMenuItem,
 .secondaryButton,
 .dangerButton {
   appearance: none;
@@ -47,30 +50,57 @@
 }
 
 .newChatButton,
+.pluginButton,
 .footerButton,
 .projectRow {
   width: 100%;
-  height: 40px;
   display: flex;
   align-items: center;
   gap: 5px;
-  padding: 0 8px;
+  padding: 0 4px;
   border-radius: 8px;
   color: var(--sidebar-foreground);
   cursor: pointer;
 }
 
+.newChatButton,
+.pluginButton {
+  height: 32px;
+}
+
 .newChatButton {
-  background: var(--sidebar-accent);
+  background: transparent;
   color: var(--sidebar-accent-foreground);
-  padding: 8px 4px;
+}
+
+.pluginButton {
+  flex: 0 0 auto;
+}
+
+.primaryNav {
+  display: flex;
+  width: 100%;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 0;
+}
+
+.newChatButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
 }
 
 .newChatButton:hover,
+.pluginButton:hover,
 .footerButton:hover,
 .projectRow:hover,
 .sessionRow:hover,
 .sessionRow:focus-visible,
+.sessionGroupHeader:hover,
+.sessionGroupHeader:focus-visible,
+.sessionGroupActionButton:hover,
+.sessionGroupActionButton:focus-visible,
 .collapseButton:hover,
 .collapseButton:focus-visible,
 .iconButton:hover,
@@ -82,9 +112,12 @@
 }
 
 .newChatButton:focus-visible,
+.pluginButton:focus-visible,
 .footerButton:focus-visible,
 .projectRow:focus-visible,
 .sessionRow:focus-visible,
+.sessionGroupHeader:focus-visible,
+.sessionGroupActionButton:focus-visible,
 .collapseButton:focus-visible,
 .iconButton:focus-visible,
 .projectIconButton:focus-visible,
@@ -106,9 +139,175 @@
 .navIcon svg,
 .iconButton svg,
 .collapseButton svg {
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.iconButton svg {
   width: 18px;
   height: 18px;
+  stroke-width: 1.8;
+}
+
+.topRow {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px 12px;
+  border-bottom: 1px solid var(--sidebar-border);
+}
+
+.topRow .newChatButton {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+}
+
+.brandLogo {
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+}
+
+.brandLogo svg {
+  width: 26px;
+  height: 26px;
   display: block;
+}
+
+.brandName {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--sidebar-foreground);
+  font-size: 18px;
+  font-weight: 500;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.collapsed .topRow {
+  width: 100%;
+  justify-content: center;
+}
+
+.collapsed .topRow .newChatButton {
+  flex: 0 0 auto;
+}
+
+.workspacePicker {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.workspacePickerLabel {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 16px;
+}
+
+.workspacePickerHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.workspaceAddIconButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.workspaceAddIconButton:hover {
+  background: var(--sidebar-accent);
+  color: var(--sidebar-foreground);
+}
+
+.workspaceList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.workspaceSessionBody {
+  margin-bottom: 12px;
+}
+
+.projectsHeader {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  height: 32px;
+  gap: 4px;
+  padding-left: 8px;
+  color: var(--muted-foreground);
+}
+
+.pinnedSessionList {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: 12px;
+}
+
+.projectsHeaderToggle,
+.projectsHeaderAction {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.projectsHeaderActions {
+  display: flex;
+  margin-left: auto;
+  align-items: center;
+  gap: 2px;
+}
+
+.projectsHeaderActions .projectsHeaderAction {
+  margin-left: 0;
+}
+
+.projectsHeaderToggle {
+  display: inline-flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.projectsHeaderToggle svg,
+.projectsHeaderAction svg {
+  width: 15px;
+  height: 15px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.8;
@@ -116,14 +315,63 @@
   stroke-linejoin: round;
 }
 
-.settingsIcon svg {
-  width: 16px;
-  height: 16px;
-  stroke-width: 1.6;
+.projectsHeaderAction {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  margin-left: auto;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  cursor: pointer;
 }
 
-.projectFolderIcon svg {
-  stroke-width: 1.5;
+.projectsHeaderAction:hover,
+.projectsHeaderAction:focus-visible {
+  background: var(--sidebar-accent);
+  color: var(--sidebar-accent-foreground);
+}
+
+.projectSearch {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.projectSearch > svg {
+  position: absolute;
+  z-index: 1;
+  top: 50%;
+  left: 10px;
+  width: 15px;
+  height: 15px;
+  color: var(--muted-foreground);
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.projectSearch input {
+  width: 100%;
+  padding-left: 32px;
+}
+
+.addWorkspaceButton {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.addWorkspaceButton:hover {
+  background: var(--sidebar-accent);
+  color: var(--sidebar-foreground);
 }
 
 .body {
@@ -132,6 +380,7 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+  margin-right: -12px;
   overflow: hidden;
 }
 
@@ -150,10 +399,13 @@
   line-height: 22px;
 }
 
+.projectRowExpanded {
+}
+
 .projectIconButton {
-  width: 24px;
-  height: 24px;
-  flex: 0 0 24px;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -163,12 +415,55 @@
 }
 
 .projectIconButton svg {
-  width: 15px;
-  height: 15px;
+  width: 14px;
+  height: 14px;
   display: block;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.workspaceHeaderActions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  margin-right: 8px;
+}
+
+.workspaceHeaderAction {
+  appearance: none;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.workspaceHeaderAction:hover,
+.workspaceHeaderAction:focus-visible {
+  background: var(--sidebar-accent);
+  color: var(--sidebar-accent-foreground);
+}
+
+.workspaceHeaderAction:focus-visible {
+  outline: 2px solid var(--sidebar-ring);
+  outline-offset: 2px;
+}
+
+.workspaceHeaderAction svg {
+  display: block;
+  fill: none;
+  stroke: currentColor;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
@@ -189,14 +484,150 @@
   margin-left: auto;
 }
 
+.projectHoverAction {
+  opacity: 0;
+}
+
+.projectRow:hover .projectHoverAction,
+.projectRow:focus-within .projectHoverAction {
+  opacity: 1;
+}
+
 .sessionList {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
+  gap: 4px;
+  padding-right: 12px;
+  padding-bottom: 44px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  touch-action: pan-y;
+}
+
+.sessionGroupSection {
+  display: flex;
+  flex-direction: column;
   gap: 2px;
-  overflow: auto;
-  padding-bottom: 48px;
+}
+
+.sessionGroupHeaderRow {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 8px;
+}
+
+.sessionGroupHeaderRow:hover,
+.sessionGroupHeaderRow:focus-within {
+  background: var(--sidebar-accent);
+  color: var(--sidebar-accent-foreground);
+}
+
+.sessionGroupHeaderRow .sessionGroupHeader:hover,
+.sessionGroupHeaderRow .sessionGroupHeader:focus-visible {
+  background: transparent;
+}
+
+.sessionGroupHeader {
+  min-width: 0;
+  height: 32px;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 0 20px;
+  border-radius: 8px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 20px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sessionGroupDot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 999px;
+}
+
+.sessionGroupDotMuted {
+  background: var(--muted-foreground);
+}
+
+.sessionGroupTitle {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessionGroupCount {
+  flex: 0 0 auto;
+  color: color-mix(in srgb, var(--muted-foreground) 86%, transparent);
+}
+
+.sessionGroupChevron {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sessionGroupChevron svg,
+.sessionGroupActionButton svg {
+  width: 13px;
+  height: 13px;
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.sessionGroupHeaderActions {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.sessionGroupHeaderRow:hover .sessionGroupHeaderActions,
+.sessionGroupHeaderRow:focus-within .sessionGroupHeaderActions {
+  opacity: 1;
+}
+
+.sessionGroupActionButton {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.sessionGroupActionButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+}
+
+.sessionGroupList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .sessionRow {
@@ -205,9 +636,9 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 8px;
-  margin-left: 26px;
+  padding: 2px 0 2px 26px;
   border-radius: 8px;
+  color: color-mix(in srgb, var(--sidebar-foreground) 68%, transparent);
   cursor: pointer;
 }
 
@@ -311,12 +742,14 @@
 
 .sessionStatusSlot {
   position: absolute;
-  left: -15px;
-  width: 8px;
-  height: 8px;
+  top: 50%;
+  left: 7px;
+  width: 18px;
+  height: 18px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  transform: translateY(-50%);
 }
 
 .sessionStatusDot {
@@ -329,15 +762,75 @@
   animation: sidebarPulse 1.6s ease-in-out infinite;
 }
 
+.sessionTitlePin {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.sessionTitlePin:hover {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+.sessionTitlePin:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.sessionTitlePin svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .sessionMetaSlot {
   position: relative;
-  width: 34px;
-  height: 30px;
   flex: 0 0 auto;
+  height: 30px;
   margin-left: auto;
   display: flex;
   align-items: center;
   justify-content: flex-end;
+}
+
+.sessionAttention {
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--success-color) 10%, transparent);
+  color: color-mix(in srgb, var(--success-color) 95%, var(--foreground));
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.sessionAttentionUserInput {
+  background: color-mix(in srgb, var(--agent-blue-500) 10%, transparent);
+  color: color-mix(in srgb, var(--agent-blue-500) 95%, var(--foreground));
+}
+
+.sessionAttention + .sessionLoading {
+  margin-left: 10px;
+}
+
+.sessionRow:hover .sessionMetaSlot,
+.sessionMetaSlot:has(.sessionActionButton:focus-visible),
+.sessionMetaSlot:has([data-state='open']) {
+  min-width: 86px;
 }
 
 .sessionTime {
@@ -345,9 +838,11 @@
   font-size: 12px;
   line-height: 18px;
   white-space: nowrap;
+  padding-right: 10px;
 }
 
 .sessionLoading {
+  margin-right: 10px;
   width: 14px;
   height: 14px;
   display: inline-flex;
@@ -359,40 +854,36 @@
 
 .sessionRow:hover:not(.runningSession) .sessionTime,
 .sessionRow:focus-within:not(.runningSession) .sessionTime,
+.sessionRow:hover:not(.runningSession) .sessionAttention,
+.sessionRow:focus-within:not(.runningSession) .sessionAttention,
 .sessionMetaSlot:hover .sessionTime,
-.sessionMetaSlot:focus-within .sessionTime,
 .sessionMetaSlot:hover .sessionLoading,
-.sessionMetaSlot:focus-within .sessionLoading {
+.sessionMetaSlot:hover .sessionAttention,
+.sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionTime,
+.sessionMetaSlot:has([data-state='open']) .sessionTime,
+.sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionLoading,
+.sessionMetaSlot:has([data-state='open']) .sessionLoading,
+.sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionAttention,
+.sessionMetaSlot:has([data-state='open']) .sessionAttention {
   opacity: 0;
 }
 
 .sessionActions {
   position: absolute;
-  top: 0;
-  right: 0;
+  inset: 0;
   display: inline-flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 2px;
-  padding-left: 6px;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    var(--sidebar-background) 8px
-  );
   opacity: 0;
 }
 
 .sessionRow:hover:not(.runningSession) .sessionActions,
 .sessionRow:focus-within:not(.runningSession) .sessionActions,
 .sessionMetaSlot:hover .sessionActions,
-.sessionMetaSlot:focus-within .sessionActions {
+.sessionActions:has(.sessionActionButton:focus-visible),
+.sessionActions:has([data-state='open']) {
   opacity: 1;
-}
-
-.currentSession .sessionActions,
-.sessionRow:hover .sessionActions,
-.sessionRow:focus-within .sessionActions {
-  background: linear-gradient(90deg, transparent, var(--sidebar-accent) 8px);
 }
 
 @keyframes sidebarSpin {
@@ -443,6 +934,10 @@
   color: var(--accent-foreground);
 }
 
+.activeSessionActionButton {
+  color: var(--agent-blue-500);
+}
+
 .sessionActionButton:disabled {
   cursor: not-allowed;
   opacity: 0.42;
@@ -476,6 +971,144 @@
   border-color: var(--sidebar-ring);
   outline: 0;
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--sidebar-ring) 18%, transparent);
+}
+
+.dialogSelect {
+  border: 1px solid var(--sidebar-border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.dialogInput:focus-visible,
+.dialogSelect:focus-visible {
+  border-color: var(--sidebar-ring);
+  outline: 0;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--sidebar-ring) 18%, transparent);
+}
+
+.groupMenu {
+  position: fixed;
+  z-index: 1100;
+  width: 240px;
+  max-height: min(320px, calc(100vh - 16px));
+  padding: 6px;
+  border: 1px solid var(--sidebar-border);
+  border-radius: 8px;
+  background: var(--background);
+  color: var(--foreground);
+  overflow-y: auto;
+  box-shadow:
+    0 10px 24px rgb(0 0 0 / 22%),
+    0 2px 6px rgb(0 0 0 / 16%);
+}
+
+.groupMenuItem {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px;
+  border-radius: 6px;
+  color: var(--foreground);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 13px;
+  line-height: 20px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.groupMenuItem:hover,
+.groupMenuItem:focus-visible,
+.groupMenuItemActive {
+  background: var(--sidebar-accent);
+  color: var(--sidebar-accent-foreground);
+  outline: 0;
+}
+
+.groupMenuName {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.groupMenuDot,
+.groupMenuEmptyDot,
+.groupMenuIcon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.groupMenuDot {
+  border-radius: 999px;
+}
+
+.groupMenuEmptyDot {
+  border: 1px solid var(--muted-foreground);
+  border-radius: 999px;
+}
+
+.groupMenuIcon svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.groupMenuCheck {
+  flex: 0 0 auto;
+  color: var(--agent-blue-500);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.groupMenuSeparator {
+  height: 1px;
+  margin: 6px 4px;
+  background: var(--sidebar-border);
+}
+
+.groupColorRed {
+  background: var(--accent-red);
+}
+
+.groupColorOrange {
+  background: var(--accent-orange);
+}
+
+.groupColorYellow {
+  background: var(--accent-yellow);
+}
+
+.groupColorGreen {
+  background: var(--accent-green);
+}
+
+.groupColorBlue {
+  background: var(--agent-blue-500);
+}
+
+.groupColorPurple {
+  background: var(--agent-purple-600);
+}
+
+.groupColorCustom {
+  box-shadow: inset 0 0 0 1px
+    color-mix(in srgb, var(--foreground) 28%, transparent);
 }
 
 .iconButton:disabled {
@@ -527,10 +1160,87 @@
   line-height: 22px;
 }
 
+.workspaceRemovalActivityList {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted-foreground);
+  font-size: 14px;
+  line-height: 22px;
+}
+
 .confirmActions {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.groupForm {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  font-family: var(--font-sans, system-ui, sans-serif);
+}
+
+.fieldStack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.dialogSelect {
+  width: 100%;
+  height: 32px;
+  padding: 0 8px;
+}
+
+.dialogInput {
+  width: 100%;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--sidebar-border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.groupCustomColorRow {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 8px 10px;
+  align-items: end;
+}
+
+.groupColorPicker {
+  width: 44px;
+  height: 44px;
+  padding: 3px;
+  border: 1px solid var(--sidebar-border);
+  border-radius: 8px;
+  background: var(--background);
+  cursor: pointer;
+}
+
+.groupHexField {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.groupColorError {
+  grid-column: 2;
+  color: var(--destructive, #dc2626);
+  font-size: 11px;
+  line-height: 16px;
 }
 
 .secondaryButton,
@@ -562,23 +1272,97 @@
 }
 
 .footer {
+  position: absolute;
+  z-index: 5;
+  right: 12px;
+  bottom: 4px;
+  left: 12px;
   flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding-top: 12px;
+  padding-top: 4px;
   border-top: 1px solid var(--sidebar-border);
+  background: var(--sidebar-background);
 }
 
 .footerButton {
-  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.footerPrimary,
+.footerActions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.footerPrimary {
+  flex: 0 1 auto;
+}
+
+.footerActions {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.footerButtonLabel {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.footerCompact,
+.footerTight {
+  gap: 4px;
+}
+
+.footerCompact .footerPrimary,
+.footerCompact .footerActions,
+.footerTight .footerPrimary,
+.footerTight .footerActions {
+  gap: 4px;
+}
+
+.footerCompact .footerButton,
+.footerTight .footerButton {
+  width: 26px;
+  height: 28px;
+  flex: 0 0 26px;
+  justify-content: center;
+  padding: 0;
+}
+
+.footerCompact .footerButtonLabel,
+.footerTight .footerButtonLabel {
+  display: none;
+}
+
+.footerCompact .collapseButton,
+.footerTight .collapseButton {
+  width: 26px;
+  height: 28px;
 }
 
 .collapseButton {
   flex: 0 0 auto;
 }
 
+.version {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  user-select: text;
+}
+
 .collapsed .newChatButton,
+.collapsed .pluginButton,
 .collapsed .footerButton,
 .collapsed .projectRow {
   width: 32px;
@@ -589,15 +1373,25 @@
 .collapsed .body {
   align-items: center;
   width: 100%;
+  margin-right: 0;
 }
 
 .collapsed .sessionList {
   align-items: center;
   width: 100%;
+  margin-right: 0;
+  padding-right: 0;
+  padding-bottom: 220px;
 }
 
 .collapsed .footer {
   flex-direction: column;
+}
+
+.collapsed .footerPrimary,
+.collapsed .footerActions {
+  flex-direction: column;
+  margin-left: 0;
 }
 
 .resizeHandle {
@@ -628,8 +1422,202 @@
   display: none;
 }
 
+.sessionActionButtonActive,
+.sessionActionButtonActive:hover {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+
+.menuActive .sessionActions {
+  opacity: 1;
+}
+
+.actionMenu {
+  position: fixed;
+  z-index: 1100;
+  min-width: 168px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow:
+    0 2px 4px -2px rgb(0 0 0 / 10%),
+    0 8px 16px -4px rgb(0 0 0 / 18%);
+}
+
+.actionMenuItem {
+  appearance: none;
+  width: 100%;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--popover-foreground);
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.actionMenuItem:hover:not(:disabled),
+.actionMenuItem:focus-visible:not(:disabled) {
+  background: var(--accent);
+  color: var(--accent-foreground);
+  outline: none;
+}
+
+.actionMenuItem:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.actionMenuItemDanger:not(:disabled) {
+  color: var(--error-color);
+}
+
+.actionMenuItemDanger:hover:not(:disabled),
+.actionMenuItemDanger:focus-visible:not(:disabled) {
+  background: var(--error-bg);
+  color: var(--error-color);
+}
+
+.actionMenuIcon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.actionMenuIcon svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.actionMenuLabel {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.archivedSection {
+  display: flex;
+  flex-direction: column;
+  padding-top: 4px;
+  border-top: 1px solid var(--sidebar-border);
+}
+
+.archivedHeader {
+  appearance: none;
+  width: 100%;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
+  cursor: pointer;
+}
+
+.archivedHeader:hover,
+.archivedHeader:focus-visible {
+  background: var(--sidebar-accent);
+  color: var(--sidebar-accent-foreground);
+  outline: none;
+}
+
+.archivedChevron {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.archivedChevron svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.archivedTitle {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.archivedCount {
+  flex: 0 0 auto;
+  min-width: 20px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.archivedList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 0;
+}
+
+.archivedRow {
+  cursor: default;
+}
+
 @media (max-width: 760px) {
   .sidebar {
+    display: none;
+  }
+
+  .sidebar.mobileOpen {
+    display: flex;
+    z-index: 50;
+    /* The width var is shared with the desktop resize handle and can be wider
+       than a phone viewport; cap it so the drawer never overflows the screen. */
+    max-width: 100vw;
+  }
+
+  .resizeHandle {
     display: none;
   }
 }

@@ -44,6 +44,9 @@ import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
 import { WorkspaceContext } from '../../utils/workspaceContext.js';
 import { SyntheticOutputTool } from '../../tools/syntheticOutput.js';
 import { rebuildToolRegistryOnOverride } from '../../tools/agent/agent.js';
+import { toModelVisibleSubagentResult } from '../subagent-result.js';
+import { SUBAGENT_PLAN_LIFECYCLE_TOOLS } from './subagent-plan-tool-policy.js';
+import { runWithAgentContext } from './agent-context.js';
 
 /**
  * Default ceiling on total `agent()` calls per workflow run (matches upstream
@@ -150,16 +153,25 @@ const WORKFLOW_SUBAGENT_MAX_TURNS = 50;
 const WORKFLOW_SUBAGENT_MAX_TIME_MINUTES = 10;
 
 /**
- * disallowedTools mirror the upstream `Tg8` workflow-subagent config — both
+ * disallowedTools mirror the upstream `Tg8` workflow-subagent config. These
  * tools would let a subagent break the "final text IS the return value"
- * contract. SendMessage would deliver the answer to the user instead of
- * the calling script; ExitPlanMode would interrupt the workflow's plan-mode
- * intent. Defense-in-depth alongside the §XmO system prompt that already
- * documents both restrictions.
+ * contract: SendMessage would deliver the answer to the user instead of
+ * the calling script, plan lifecycle tools would interrupt the workflow's
+ * plan-mode intent, and MonitorTool depends on AgentTool-owned notification
+ * callbacks that workflow subagents do not register. Defense-in-depth alongside
+ * the workflow system prompt's return-value contract.
  */
 const WORKFLOW_SUBAGENT_DISALLOWED_TOOLS: string[] = [
   ToolNames.SEND_MESSAGE,
-  ToolNames.EXIT_PLAN_MODE,
+  ToolNames.MONITOR,
+  ...SUBAGENT_PLAN_LIFECYCLE_TOOLS,
+  // AgentTool: workflow subagents must not spawn sub-agents even where
+  // maxSubagentDepth would permit nesting — a leaf-spawned agent would run
+  // outside the orchestrator's concurrency cap, agent counter, and token
+  // budget, and its result would bypass the script's return-value contract.
+  // The WorkflowTool itself is already excluded from every subagent; this
+  // closes the same loop for plain `agent` calls (review #6189).
+  ToolNames.AGENT,
 ];
 
 /**
@@ -410,6 +422,8 @@ async function runSingleDispatch(
   const { AgentHeadless, ContextState } = await import('./agent-headless.js');
   const ctx = new ContextState();
   ctx.set('task_prompt', prompt);
+  const workflowAgentId = `workflow-agent-${randomBytes(8).toString('hex')}`;
+  debugLogger.debug(`[workflow] Dispatch ${workflowAgentId}`);
 
   if (
     opts.agentType === undefined &&
@@ -422,7 +436,6 @@ async function runSingleDispatch(
       config,
       {
         systemPrompt: WORKFLOW_SUBAGENT_SYSTEM_PROMPT,
-        initialMessages: [],
       },
       {},
       // T11 (PR #4732 R1): bound resource ceiling so a single agent() call
@@ -451,7 +464,12 @@ async function runSingleDispatch(
     // is valid inside the throw path because AgentHeadless's own
     // outer `finally` finalizes stats before propagating the error.
     try {
-      await subagent.execute(ctx, attemptSignal);
+      // runWithAgentContext is load-bearing for workflow subagents: it
+      // establishes the ALS frame that isSubagentLikeExecutionContext() reads,
+      // so plan lifecycle tools remain blocked if tool filtering changes.
+      await runWithAgentContext(workflowAgentId, () =>
+        subagent.execute(ctx, attemptSignal),
+      );
     } finally {
       reportTokens(subagent, opts, onTokens);
     }
@@ -463,13 +481,21 @@ async function runSingleDispatch(
     const mode = subagent.getTerminateMode();
     if (mode !== AgentTerminateMode.GOAL) {
       throw new Error(
-        `Workflow subagent did not complete (terminate mode: ${mode}).`,
+        `Workflow subagent ${workflowAgentId} did not complete (terminate mode: ${mode}).`,
       );
     }
-    return subagent.getFinalText();
+    return toModelVisibleSubagentResult(subagent.getFinalText(), mode);
   }
 
-  return runOverridePath(config, ctx, opts, attemptSignal, onTokens, emitter);
+  return runOverridePath(
+    config,
+    ctx,
+    opts,
+    attemptSignal,
+    workflowAgentId,
+    onTokens,
+    emitter,
+  );
 }
 
 /**
@@ -539,6 +565,7 @@ async function runOverridePath(
   ctx: ContextState,
   opts: WorkflowAgentOpts,
   signal: AbortSignal | undefined,
+  workflowAgentId: string,
   /**
    * P5: forwarded from createProductionDispatch. The override path
    * builds its own AgentHeadless and runs subagent.execute(); the
@@ -756,7 +783,12 @@ async function runOverridePath(
       // AgentHeadless's own outer `finally` finalizes stats before
       // propagating.
       try {
-        await subagent.execute(ctx, dispatchSignal);
+        // runWithAgentContext is load-bearing for workflow subagents: it
+        // establishes the ALS frame that isSubagentLikeExecutionContext() reads,
+        // so plan lifecycle tools remain blocked if tool filtering changes.
+        await runWithAgentContext(workflowAgentId, () =>
+          subagent.execute(ctx, dispatchSignal),
+        );
       } finally {
         reportTokens(subagent, opts, onTokens);
       }
@@ -803,7 +835,7 @@ async function runOverridePath(
           mode !== AgentTerminateMode.CANCELLED
         ) {
           throw new Error(
-            `Workflow subagent did not complete (terminate mode: ${mode}).`,
+            `Workflow subagent ${workflowAgentId} did not complete (terminate mode: ${mode}).`,
           );
         }
         // The dispatch aborts via schemaState.abortController on the
@@ -830,10 +862,13 @@ async function runOverridePath(
       const mode = subagent.getTerminateMode();
       if (mode !== AgentTerminateMode.GOAL) {
         throw new Error(
-          `Workflow subagent did not complete (terminate mode: ${mode}).`,
+          `Workflow subagent ${workflowAgentId} did not complete (terminate mode: ${mode}).`,
         );
       }
-      let finalText: WorkflowAgentResult = subagent.getFinalText();
+      let finalText: WorkflowAgentResult = toModelVisibleSubagentResult(
+        subagent.getFinalText(),
+        mode,
+      );
       // P5 R1: token reporting moved up to the single site after
       // `subagent.execute()` returns — see the `reportTokens(...)` call
       // above the schema/non-schema branching.

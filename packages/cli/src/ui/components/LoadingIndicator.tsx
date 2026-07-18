@@ -90,8 +90,12 @@ export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
   const showTokens = !isNarrow && outputTokens > 0;
   const tokenArrow = isReceivingContent ? '↓' : '↑';
 
+  // Keep the timer's sub-second precision for rate calculations, but display
+  // only completed whole seconds in the status line.
   const timeStr =
-    elapsedTime < 60 ? `${elapsedTime}s` : formatDuration(elapsedTime * 1000);
+    elapsedTime < 60
+      ? `${Math.floor(Math.max(0, elapsedTime))}s`
+      : formatDuration(elapsedTime * 1000);
 
   const tokenStr = showTokens
     ? ` · ${tokenArrow} ${formatTokenCount(outputTokens)} tokens`

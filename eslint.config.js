@@ -34,6 +34,7 @@ export default tseslint.config(
       '.qwen/**',
       'packages/desktop/**',
       'packages/cua-driver/**', // vendored trycua/cua driver (Rust + scripts); not qwen-code TS
+      'packages/mobile-mcp/**', // vendored mobile-next/mobile-mcp; has own eslint config
     ],
   },
   eslint.configs.recommended,
@@ -170,6 +171,82 @@ export default tseslint.config(
     },
   },
   {
+    files: [
+      'packages/web-shell/client/**/*.{ts,tsx}',
+      'packages/web-shell/*.config.ts',
+    ],
+    plugins: {
+      import: importPlugin,
+    },
+    settings: {
+      'import/resolver': {
+        node: true,
+      },
+    },
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+        ...globals.es2021,
+        ...globals.node,
+      },
+    },
+    rules: {
+      'react/prop-types': 'off',
+      '@typescript-eslint/consistent-type-imports': [
+        'error',
+        { disallowTypeAnnotations: false },
+      ],
+      '@typescript-eslint/no-explicit-any': 'error',
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        {
+          argsIgnorePattern: '^_',
+          varsIgnorePattern: '^_',
+          caughtErrorsIgnorePattern: '^_',
+        },
+      ],
+      'no-console': ['error', { allow: ['warn', 'error'] }],
+      'no-debugger': 'error',
+      'object-shorthand': 'error',
+      'prefer-const': ['error', { destructuring: 'all' }],
+    },
+  },
+  {
+    files: [
+      'packages/web-shell/client/**/*.test.{ts,tsx}',
+      'packages/web-shell/client/test/**/*.{ts,tsx}',
+    ],
+    plugins: {
+      vitest,
+    },
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+        ...globals.es2021,
+        ...globals.vitest,
+      },
+    },
+    rules: {
+      ...vitest.configs.recommended.rules,
+      'vitest/expect-expect': 'off',
+      'vitest/no-commented-out-tests': 'off',
+      'no-console': 'off',
+    },
+  },
+  {
+    files: ['packages/web-shell/client/e2e/**/*.{ts,tsx}'],
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+        ...globals.es2021,
+        ...globals.node,
+      },
+    },
+    rules: {
+      'no-console': 'off',
+    },
+  },
+  {
     // Enforce kebab-case filenames
     files: ['packages/core/src/**/*.ts', 'packages/cli/src/**/*.ts'],
     ignores: legacyFilenames.flatMap((name) => [
@@ -221,6 +298,8 @@ export default tseslint.config(
       'packages/*/scripts/**/*.js',
       // Verification reproducer scripts under docs/ also run with `node`.
       'docs/**/*.mjs',
+      // Plan C CDP-tunnel acceptance harness (issue #5626) runs with `node`.
+      'packages/cli/src/serve/cdp-tunnel/acceptance/**/*.mjs',
     ],
     languageOptions: {
       globals: {
@@ -256,6 +335,14 @@ export default tseslint.config(
       'no-undef': 'off',
     },
   },
+  {
+    files: ['.github/scripts/**/*.{js,mjs,cjs}'],
+    languageOptions: {
+      globals: {
+        ...globals.node,
+      },
+    },
+  },
   // ==================== no-console allowlist ====================
   // The following files/packages are allowed to use console.*
 
@@ -267,6 +354,13 @@ export default tseslint.config(
   // WebUI package - UI component library with Storybook
   {
     files: ['packages/webui/**/*.ts', 'packages/webui/**/*.tsx', 'packages/webui/**/*.js'],
+    rules: { 'no-console': 'off' },
+  },
+  // Chrome extension (chrome-extension) - the MV3 background service
+  // worker and content scripts run in the browser with no stdio; console is
+  // the only logging / debugging channel available there.
+  {
+    files: ['packages/chrome-extension/**/*.ts', 'packages/chrome-extension/**/*.tsx'],
     rules: { 'no-console': 'off' },
   },
   // Specific CLI files that intentionally wrap console usage

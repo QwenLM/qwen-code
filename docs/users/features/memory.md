@@ -91,7 +91,7 @@ Qwen doesn't save everything — only things that would actually be useful next 
 
 ### Where it's stored
 
-Auto-memory files live at `~/.qwen/projects/<project>/memory/`. All branches and worktrees of the same repository share the same memory folder, so what Qwen learns in one branch is available in others.
+Auto-memory files live at `~/.qwen/projects/<project>/memory/`. All branches of the same checkout share the same memory folder, so what Qwen learns in one branch is available in others. Each linked git worktree gets its own memory folder, matching the per-worktree isolation of chats and other session state — repository-wide conventions you want in every worktree belong in [team memory](#team-memory-shared-with-collaborators).
 
 Everything saved is plain markdown — you can open, edit, or delete any file at any time.
 
@@ -99,7 +99,7 @@ Everything saved is plain markdown — you can open, edit, or delete any file at
 
 Qwen periodically goes through its saved memories to remove duplicates and clean up outdated entries. This runs automatically in the background once a day after enough sessions have accumulated. You can trigger it manually with `/dream` if you want it to run now.
 
-While cleanup is running, **✦ dreaming** appears in the corner of the screen. Your session continues normally.
+Your session continues normally while cleanup runs in the background.
 
 ### Turning it on or off
 

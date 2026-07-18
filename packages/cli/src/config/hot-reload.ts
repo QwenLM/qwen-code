@@ -7,6 +7,7 @@
 import equal from 'fast-deep-equal';
 import {
   createDebugLogger,
+  ApprovalMode,
   type Config,
   getMCPServerStatus,
   type MCPServerConfig,
@@ -86,11 +87,12 @@ export function mcpGatingEqual(a: McpGating, b: McpGating): boolean {
  * The pending list is always recomputed per #4615 so a hot-reload never
  * connects an unapproved gated server.
  */
-function recomputeMcpGating(
+export function recomputeMcpGating(
   settings: LoadedSettings,
   assembled: Record<string, MCPServerConfig>,
   cwd: string,
   bootAllowed: readonly string[] | undefined,
+  isYolo: boolean,
 ): McpGating {
   // Preserve `[]` (deny-all); only an absent key yields `undefined` (allow-all).
   const settingsAllowed = settings.merged.mcp?.allowed?.filter(Boolean);
@@ -104,7 +106,7 @@ function recomputeMcpGating(
   return {
     allowed,
     excluded: excluded && excluded.length > 0 ? excluded : undefined,
-    pending: getPendingGatedMcpServers(assembled, cwd),
+    pending: isYolo ? undefined : getPendingGatedMcpServers(assembled, cwd),
   };
 }
 
@@ -143,11 +145,13 @@ export function registerMcpHotReload(
       cwd,
       topTierMcpServers,
     );
+    const isYolo = config.getApprovalMode() === ApprovalMode.YOLO;
     const nextGating = recomputeMcpGating(
       settings,
       next,
       cwd,
       config.getCliAllowedMcpServerNames(),
+      isYolo,
     );
 
     const prevServers = config.getSettingsMcpServers();
@@ -229,7 +233,7 @@ export function registerMcpHotReload(
     // Prompt for approval AFTER reconcile, so `config.getMcpServers()` (which
     // the dialog reads) already reflects the new map. Emit regardless of
     // reconcile success — a server left pending still needs the user's decision.
-    if (promptable.length > 0) {
+    if (!isYolo && promptable.length > 0) {
       debugLogger.debug(
         `gated servers awaiting approval → emitting ${AppEvent.McpPendingApprovalChanged}: [${promptable.join(
           ', ',

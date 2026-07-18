@@ -1,0 +1,392 @@
+// @vitest-environment jsdom
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { AtMentionPanel } from './AtMentionPanel';
+import type { AtMentionMenuState } from '../hooks/useAtMentionMenu';
+import type { WebShellAtProvider } from '../customization';
+import { I18nProvider } from '../i18n';
+
+Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+
+class ResizeObserverMock {
+  observe = vi.fn();
+  disconnect = vi.fn();
+}
+
+globalThis.ResizeObserver =
+  ResizeObserverMock as unknown as typeof ResizeObserver;
+
+let container: HTMLDivElement | null = null;
+let anchor: HTMLDivElement | null = null;
+let root: Root | null = null;
+
+function providerView(provider: WebShellAtProvider) {
+  return {
+    id: provider.id,
+    provider,
+    label: provider.label,
+    textValue:
+      provider.textValue ??
+      (typeof provider.label === 'string' ? provider.label : provider.id),
+    description: provider.description,
+    tabs: provider.tabs,
+    renderItem: provider.renderItem,
+  };
+}
+
+function categoriesMenu(): AtMentionMenuState {
+  const provider: WebShellAtProvider = {
+    id: 'files',
+    label: 'Files',
+    description: 'Reference workspace files',
+    search: async () => [],
+  };
+  return {
+    from: 0,
+    to: 1,
+    query: '',
+    level: 'categories',
+    selectedIndex: 0,
+    providers: [providerView(provider)],
+    items: [],
+    loading: false,
+  };
+}
+
+function itemsMenu(): AtMentionMenuState {
+  return {
+    ...categoriesMenu(),
+    level: 'items',
+    selectedProviderId: 'files',
+    items: [
+      {
+        id: 'readme',
+        label: 'README.md',
+        insertText: '@README.md ',
+      },
+    ],
+  };
+}
+
+function tabbedItemsMenu(): AtMentionMenuState {
+  const provider: WebShellAtProvider = {
+    id: 'tables',
+    label: 'Tables',
+    tabs: [
+      { id: 'mc', label: 'MaxCompute' },
+      { id: 'hg', label: 'Hologres' },
+    ],
+    search: async () => [],
+  };
+  return {
+    ...categoriesMenu(),
+    level: 'items',
+    selectedProviderId: 'tables',
+    providers: [providerView(provider)],
+    tabs: provider.tabs,
+    selectedTabId: 'mc',
+    items: [
+      {
+        id: 'orders',
+        label: 'orders',
+        subtitle: 'project_a',
+        description: 'daily order table',
+        insertText: '@orders ',
+      },
+    ],
+  };
+}
+
+function mount(menu: AtMentionMenuState, handlers = {}) {
+  container = document.createElement('div');
+  anchor = document.createElement('div');
+  document.body.append(container, anchor);
+  anchor.getBoundingClientRect = vi.fn(() => ({
+    x: 20,
+    y: 100,
+    top: 100,
+    right: 420,
+    bottom: 140,
+    left: 20,
+    width: 400,
+    height: 40,
+    toJSON: () => ({}),
+  }));
+  root = createRoot(container);
+  act(() => {
+    root!.render(
+      <I18nProvider language="en">
+        <AtMentionPanel
+          menu={menu}
+          anchorRef={{ current: anchor }}
+          panelRef={{ current: null }}
+          onSelect={vi.fn()}
+          onAccept={vi.fn()}
+          onBack={vi.fn()}
+          onSearch={vi.fn()}
+          onSelectTab={vi.fn()}
+          {...handlers}
+        />
+      </I18nProvider>,
+    );
+  });
+}
+
+afterEach(() => {
+  act(() => root?.unmount());
+  container?.remove();
+  anchor?.remove();
+  document.body
+    .querySelectorAll('[role="listbox"], [role="region"]')
+    .forEach((node) => node.remove());
+  container = null;
+  anchor = null;
+  root = null;
+});
+
+describe('AtMentionPanel', () => {
+  it('renders provider categories in a listbox', () => {
+    mount(categoriesMenu());
+
+    expect(
+      document.body
+        .querySelector('[role="region"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Reference menu');
+    expect(
+      document.body
+        .querySelector('[role="listbox"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Reference menu');
+    expect(document.body.textContent).toContain('Files');
+    expect(document.body.textContent).toContain('Reference workspace files');
+  });
+
+  it('dispatches item-search keyboard actions', () => {
+    const onBack = vi.fn();
+    const onAccept = vi.fn();
+    const onSelect = vi.fn();
+    mount(itemsMenu(), { onBack, onAccept, onSelect });
+
+    const input = document.body.querySelector('input')!;
+    expect(input.getAttribute('aria-label')).toBe('Search');
+    expect(input.getAttribute('aria-controls')).toBe('at-mention-listbox');
+    act(() => {
+      input.focus();
+    });
+    expect(input.getAttribute('aria-activedescendant')).toBe(
+      'at-mention-option-0',
+    );
+    act(() => {
+      input.blur();
+    });
+    expect(input.getAttribute('aria-activedescendant')).toBe(
+      'at-mention-option-0',
+    );
+    expect(document.getElementById('at-mention-option-0')).not.toBeNull();
+    act(() => {
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }),
+      );
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }),
+      );
+    });
+
+    expect(onAccept).toHaveBeenCalledTimes(2);
+    expect(onBack).toHaveBeenCalledOnce();
+    expect(onSelect).toHaveBeenCalledWith(0);
+  });
+
+  it('dispatches search input changes', () => {
+    const onSearch = vi.fn();
+    mount(itemsMenu(), { onSearch });
+
+    const input = document.body.querySelector('input')!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set?.call(input, 'read');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    expect(onSearch).toHaveBeenCalledWith('read');
+  });
+
+  it('renders provider tabs and item subtitle fields', () => {
+    const onSelectTab = vi.fn();
+    mount(tabbedItemsMenu(), { onSelectTab });
+
+    expect(document.body.textContent).toContain('MaxCompute');
+    expect(document.body.textContent).toContain('Hologres');
+    expect(document.body.textContent).toContain('orders');
+    expect(document.body.textContent).toContain('project_a');
+    expect(document.body.textContent).toContain('daily order table');
+
+    const tabs = [...document.body.querySelectorAll('[role="tab"]')];
+    act(() => {
+      tabs[1]?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(onSelectTab).toHaveBeenCalledWith('hg');
+  });
+
+  it('guards image icon sources', () => {
+    const menu = itemsMenu();
+    menu.items = [
+      {
+        id: 'safe',
+        label: 'Safe image',
+        icon: 'data:image/png;base64,iVBOR',
+        iconMode: 'image',
+      },
+      {
+        id: 'unsafe',
+        label: 'Unsafe image',
+        icon: 'javascript:alert(1)',
+        iconMode: 'image',
+      },
+    ];
+    mount(menu);
+
+    const images = [...document.body.querySelectorAll('img')];
+    expect(images).toHaveLength(1);
+    expect(images[0]?.getAttribute('src')).toBe('data:image/png;base64,iVBOR');
+  });
+
+  it('guards mask icon sources', () => {
+    const menu = itemsMenu();
+    menu.items = [
+      {
+        id: 'safe',
+        label: 'Safe mask',
+        icon: 'data:image/png;base64,iVBOR',
+      },
+      {
+        id: 'unsafe',
+        label: 'Unsafe mask',
+        icon: 'javascript:alert(1)',
+      },
+    ];
+    mount(menu);
+
+    const icons = [
+      ...document.body.querySelectorAll('[style*="--at-item-icon-url"]'),
+    ];
+    expect(icons).toHaveLength(1);
+    expect(icons[0]?.getAttribute('style')).toContain(
+      'data:image/png;base64,iVBOR',
+    );
+    expect(document.body.innerHTML).not.toContain('javascript:alert');
+  });
+
+  it('falls back when a custom item renderer throws', () => {
+    const error = new Error('bad item');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const menu = itemsMenu();
+    const provider: WebShellAtProvider = {
+      id: 'files',
+      label: 'Files',
+      renderItem: () => {
+        throw error;
+      },
+      search: async () => [],
+    };
+    menu.providers = [providerView(provider)];
+
+    mount(menu);
+
+    expect(document.body.textContent).toContain('README.md');
+    expect(warn).toHaveBeenCalledWith(
+      '[WebShell] at mention item render failed',
+      error,
+    );
+    warn.mockRestore();
+  });
+
+  it('focuses search when explicitly requested', () => {
+    vi.useFakeTimers();
+    mount({ ...itemsMenu(), inputMode: 'search' });
+
+    const input = document.body.querySelector('input')!;
+    act(() => {
+      vi.runOnlyPendingTimers();
+    });
+
+    expect(document.activeElement).toBe(input);
+    vi.useRealTimers();
+  });
+
+  it('does not focus search when reopened from an inserted reference', () => {
+    vi.useFakeTimers();
+    mount({ ...itemsMenu(), inputMode: 'context' });
+
+    const input = document.body.querySelector('input')!;
+    act(() => {
+      vi.runOnlyPendingTimers();
+    });
+
+    expect(document.activeElement).not.toBe(input);
+    vi.useRealTimers();
+  });
+
+  it('lets IME composition keys pass through the item search input', () => {
+    const onBack = vi.fn();
+    const onAccept = vi.fn();
+    const onSelect = vi.fn();
+    mount(itemsMenu(), { onBack, onAccept, onSelect });
+
+    const input = document.body.querySelector('input')!;
+    const enterEvent = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+    });
+    Object.defineProperty(enterEvent, 'isComposing', { value: true });
+    const arrowEvent = new KeyboardEvent('keydown', {
+      key: 'ArrowDown',
+      bubbles: true,
+    });
+    Object.defineProperty(arrowEvent, 'keyCode', { value: 229 });
+    act(() => {
+      input.dispatchEvent(enterEvent);
+      input.dispatchEvent(arrowEvent);
+    });
+
+    expect(onAccept).not.toHaveBeenCalled();
+    expect(onBack).not.toHaveBeenCalled();
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('activates panel buttons from click events', () => {
+    const onBack = vi.fn();
+    const onAccept = vi.fn();
+    mount(itemsMenu(), { onBack, onAccept });
+
+    const buttons = document.body.querySelectorAll('button');
+    act(() => {
+      buttons[0]?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      buttons[1]?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(onBack).toHaveBeenCalledOnce();
+    expect(onAccept).toHaveBeenCalledWith(0);
+  });
+
+  it('shows loading state', () => {
+    mount({ ...itemsMenu(), items: [], loading: true });
+    expect(document.body.textContent).toContain('Loading...');
+  });
+
+  it('shows empty state', () => {
+    mount({ ...itemsMenu(), items: [], loading: false });
+    expect(document.body.textContent).toContain('No results');
+  });
+});

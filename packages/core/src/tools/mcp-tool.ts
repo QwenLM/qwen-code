@@ -136,6 +136,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     private readonly cliConfig?: Config,
     private readonly mcpClient?: McpDirectClient,
     private readonly mcpTimeout?: number,
+    private readonly mcpToolIdleTimeoutMs?: number,
     private readonly annotations?: McpToolAnnotations,
     private readonly retryCount: number = 0,
   ) {
@@ -143,19 +144,14 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * MCP tool default permission based on trust and annotations:
+   * MCP tool default permission based on trust:
    * - trust: true in a trusted folder → 'allow' (server explicitly trusted by user config)
-   * - readOnlyHint → 'allow'
    * - All other MCP tools → 'ask'
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
     // MCP servers explicitly marked as trusted bypass confirmation,
     // but only when the workspace folder is also trusted (security gate).
     if (this.trust === true && this.cliConfig?.isTrustedFolder()) {
-      return 'allow';
-    }
-    // MCP tools annotated with readOnlyHint: true are safe
-    if (this.annotations?.readOnlyHint === true) {
       return 'allow';
     }
     return 'ask';
@@ -264,6 +260,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           this.cliConfig,
           newTool['mcpClient'],
           this.mcpTimeout,
+          this.mcpToolIdleTimeoutMs,
           this.annotations,
           this.retryCount + 1,
         );
@@ -317,7 +314,38 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     signal: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
+    // Create an AbortController for idle timeout
+    const idleTimeoutController = new AbortController();
+    let idleTimeoutId: ReturnType<typeof setTimeout> | undefined;
+
+    // Combine the external signal with our idle timeout controller
+    const combinedSignal = AbortSignal.any([
+      signal,
+      idleTimeoutController.signal,
+    ]);
+
+    const resetIdleTimeout = () => {
+      if (idleTimeoutId) {
+        clearTimeout(idleTimeoutId);
+      }
+      if (this.mcpToolIdleTimeoutMs && this.mcpToolIdleTimeoutMs > 0) {
+        const timer = setTimeout(() => {
+          const error = new Error(
+            `MCP tool '${this.serverToolName}' on server '${this.serverName}' ` +
+              `did not respond within ${this.mcpToolIdleTimeoutMs}ms idle timeout`,
+          );
+          error.name = 'AbortError';
+          idleTimeoutController.abort(error);
+        }, this.mcpToolIdleTimeoutMs);
+        timer.unref();
+        idleTimeoutId = timer;
+      }
+    };
+
     try {
+      // Start the idle timeout
+      resetIdleTimeout();
+
       const callToolResult = await this.mcpClient!.callTool(
         {
           name: this.serverToolName,
@@ -326,6 +354,9 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         undefined,
         {
           onprogress: (progress) => {
+            // Reset idle timeout on progress
+            resetIdleTimeout();
+
             if (updateOutput) {
               const progressData: McpToolProgressData = {
                 type: 'mcp_tool_progress',
@@ -337,7 +368,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
             }
           },
           timeout: this.mcpTimeout,
-          signal,
+          signal: combinedSignal,
         },
       );
 
@@ -374,6 +405,11 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       };
     } catch (error) {
       return this.handleReconnectOnError(error, signal, updateOutput);
+    } finally {
+      // Clear the idle timeout in all cases
+      if (idleTimeoutId) {
+        clearTimeout(idleTimeoutId);
+      }
     }
   }
 
@@ -510,7 +546,9 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
     private readonly cliConfig?: Config,
     private readonly mcpClient?: McpDirectClient,
     private readonly mcpTimeout?: number,
+    private readonly mcpToolIdleTimeoutMs?: number,
     readonly annotations?: McpToolAnnotations,
+    alwaysLoad = false,
   ) {
     super(
       nameOverride ??
@@ -523,7 +561,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       true, // canUpdateOutput — enables streaming progress for MCP tools
       true, // shouldDefer — MCP tools are discovered via ToolSearch to keep the
       //   initial tool-declaration list small when many MCP servers are attached.
-      false, // alwaysLoad
+      alwaysLoad,
       // searchHint: server name boosts fuzzy matching when the user references
       // the server in their query ("send a slack message").
       `mcp ${serverName}`,
@@ -542,7 +580,9 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.cliConfig,
       this.mcpClient,
       this.mcpTimeout,
+      this.mcpToolIdleTimeoutMs,
       this.annotations,
+      this.alwaysLoad,
     );
   }
 
@@ -577,7 +617,9 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.cliConfig,
       this.mcpClient,
       this.mcpTimeout,
+      this.mcpToolIdleTimeoutMs,
       this.annotations,
+      this.alwaysLoad,
     );
   }
 
@@ -594,6 +636,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.cliConfig,
       this.mcpClient,
       this.mcpTimeout,
+      this.mcpToolIdleTimeoutMs,
       this.annotations,
     );
   }

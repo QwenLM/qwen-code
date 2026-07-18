@@ -8,14 +8,33 @@
   --font-sans:
     -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   --radius: 6px;
+  /* Theme-independent session/workspace accent palette — single source of truth
+     for the sidebar group dots, overview badges, and split-pane workspace
+     accents. Kept here (not per-theme) since the values don't vary by theme. */
+  --accent-red: #ff5a5f;
+  --accent-orange: #ff8a2a;
+  --accent-yellow: #f6c431;
+  --accent-green: #69c987;
   position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  /*
+   * Safe-area padding for mobile devices with notch / home indicator.
+   * With `viewport-fit=cover` in index.html the page extends behind the
+   * status-bar, home-indicator, and landscape notch regions; these env()
+   * insets push the content back into the visible safe area. On desktop
+   * or phones without notches every inset evaluates to 0 so nothing
+   * changes.
+   */
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
   background: var(--background);
   color: var(--foreground);
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 14px;
   line-height: 1.5;
   overflow: hidden;
@@ -49,6 +68,233 @@
   overflow: hidden;
 }
 
+.artifactResizeHandle {
+  flex: 0 0 8px;
+  width: 8px;
+  margin-left: -4px;
+  cursor: col-resize;
+  position: relative;
+  z-index: 2;
+  touch-action: none;
+}
+
+.artifactResizeHandle::after {
+  content: '';
+  position: absolute;
+  inset: 0 3px;
+  background: transparent;
+}
+
+/* Positioning context so the scheduled-tasks page (position:absolute) covers
+   exactly the chat pane. Only applied while the page is shown, so normal chat
+   layout is untouched. */
+.chatPaneShowingPage {
+  position: relative;
+}
+
+/* Full-pane view that replaces the chat (messages + composer stay mounted
+   underneath, so returning to chat preserves their state). */
+.fullPage {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  background: var(--background);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.fullPageHeader {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+}
+/* Non-blocking banner shown at the top of the split when the outer (main)
+   session is waiting on an approval that's hidden behind the split view. */
+.splitApprovalNotice {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  background: var(--warning-bg);
+  border-bottom: 1px solid var(--warning-border);
+  color: var(--warning-color);
+  font-size: 13px;
+}
+.splitApprovalNotice button {
+  appearance: none;
+  margin-left: auto;
+  border: 1px solid var(--warning-border);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 3px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.splitApprovalNotice button:hover {
+  background: var(--warning-border);
+}
+.fullPageBack {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.fullPageBack:hover {
+  background: var(--muted);
+  color: var(--foreground);
+}
+.fullPageTitle {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--foreground);
+}
+.fullPageBody {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 20px 24px;
+}
+
+.mobileDrawer {
+  display: contents;
+}
+
+.mobileBackdrop {
+  display: none;
+}
+
+/* Hosts can embed WebShell in a narrow side pane while the browser viewport
+ * remains wide. The public drawer API must still show a usable overlay inside
+ * that container instead of relying exclusively on the viewport media query. */
+.mobileDrawerForced {
+  display: block;
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  pointer-events: auto;
+  visibility: visible;
+  padding-top: env(safe-area-inset-top);
+  padding-right: env(safe-area-inset-right);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+}
+
+.mobileDrawerForced .mobileBackdrop {
+  display: block;
+  position: absolute;
+  inset: 0;
+  z-index: 49;
+  background: rgba(0, 0, 0, 0.5);
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.mobileDrawerForced > aside {
+  position: relative;
+  z-index: 50;
+}
+
+.hamburgerButton {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--foreground);
+  cursor: pointer;
+  flex-shrink: 0;
+  border-radius: var(--radius);
+}
+
+.hamburgerButton:hover {
+  background: var(--accent);
+}
+
+.hamburgerButton svg {
+  width: 20px;
+  height: 20px;
+}
+
+@media (max-width: 900px) {
+  .artifactResizeHandle {
+    display: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .mobileDrawer {
+    display: block;
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 50;
+    pointer-events: none;
+    visibility: hidden;
+    /* Keep the panel visible until the backdrop finishes fading out so they
+       disappear together instead of the panel vanishing a frame early. */
+    transition: visibility 0s linear 200ms;
+  }
+
+  .mobileDrawerOpen {
+    visibility: visible;
+    pointer-events: auto;
+    /* Show immediately on open; only the close path needs the delay above. */
+    transition-delay: 0s;
+    /* With `viewport-fit=cover`, the fixed drawer extends behind the status
+       bar, home indicator, and landscape notch. Push the sidebar content
+       into the safe area while keeping the backdrop full-screen (it is a
+       sibling, not a child). */
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+
+  .mobileBackdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 49;
+    background: rgba(0, 0, 0, 0.5);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 200ms ease;
+  }
+
+  .mobileDrawerOpen .mobileBackdrop {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .hamburgerButton {
+    display: flex;
+  }
+
+  .hamburgerButtonFloating {
+    position: fixed;
+    top: calc(env(safe-area-inset-top) + 12px);
+    left: calc(env(safe-area-inset-left) + 12px);
+    z-index: 10;
+  }
+}
+
 .appChatEmpty.appWithSidebar {
   justify-content: flex-start;
   overflow: hidden;
@@ -62,6 +308,27 @@
 .app,
 .app * {
   box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+.app *::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.app *::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+
+.app *::-webkit-scrollbar-thumb {
+  border: 2px solid var(--scrollbar-track);
+  border-radius: 999px;
+  background: var(--scrollbar-thumb);
+}
+
+.app *::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
 }
 
 .themeDark {
@@ -127,6 +394,9 @@
   --chat-editor-accent-color: #4a9eff;
   --chat-editor-selection-bg: #3d5a7a;
   --chat-editor-selection-color: #ffffff;
+  --scrollbar-track: transparent;
+  --scrollbar-thumb: #3a3a3a;
+  --scrollbar-thumb-hover: #525252;
 }
 
 .themeLight {
@@ -192,6 +462,9 @@
   --chat-editor-accent-color: #0b66c3;
   --chat-editor-selection-bg: rgba(11, 102, 195, 0.18);
   --chat-editor-selection-color: var(--chat-editor-text-primary);
+  --scrollbar-track: transparent;
+  --scrollbar-thumb: #c7c9cc;
+  --scrollbar-thumb-hover: #aeb1b5;
 }
 
 .content {
@@ -211,6 +484,155 @@
   overflow: visible;
 }
 
+.missingSessionState {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 24px;
+  color: var(--foreground);
+  font-family: var(--font-sans);
+}
+
+.missingSessionMessage {
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: 1.4;
+  text-align: center;
+}
+
+.missingSessionButton {
+  min-width: 120px;
+  min-height: 38px;
+  padding: 0 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    opacity 120ms ease;
+}
+
+.missingSessionButton:hover,
+.missingSessionButton:focus-visible {
+  border-color: color-mix(in srgb, var(--foreground) 24%, var(--border));
+  opacity: 0.9;
+}
+
+.missingSessionButton:focus-visible {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--foreground) 12%, transparent);
+  outline: none;
+}
+
+.missingSessionButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* In-place panel that replaces the chat view (message list + composer) when
+   Settings or Daemon Status is opened. Fills the chat pane and owns its own
+   scroll container, mirroring what the DialogShell body used to provide. */
+.panelHost {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.panelHeader {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 46px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.panelBack {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.panelBack:hover,
+.panelBack:focus-visible {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+.panelBack svg {
+  width: 18px;
+  height: 18px;
+}
+
+.panelTitle {
+  min-width: 0;
+  flex: 1 1 auto;
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.panelBody {
+  container-name: panel-body;
+  container-type: inline-size;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 20px;
+}
+
+/* The chat view (message list + composer) stays mounted while a panel is shown,
+   just hidden — so the composer keeps its unsent draft and attachments instead
+   of losing them on unmount. */
+.chatViewWrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.chatViewHidden {
+  display: none;
+}
+
+.chatSubtree {
+  display: contents;
+}
+
+.chatSubtreeHidden {
+  display: none;
+}
+
+/* Empty (new-chat) state centers the welcome header + composer vertically via
+   `.appChatEmpty .chatPane { justify-content: center }`. For that to take effect
+   the wrapper must shrink to its content instead of filling the pane — the same
+   thing `.content` already does in this state. */
+.appChatEmpty .chatViewWrap {
+  flex: 0 0 auto;
+  overflow: visible;
+}
+
 .footer {
   position: relative;
   width: min(100%, var(--chat-shell-width));
@@ -223,7 +645,7 @@
 
 .bottomPanels {
   position: absolute;
-  top: -50px;
+  bottom: calc(100% + var(--web-shell-bottom-panel-gap, 6px));
   right: 0;
   left: 0;
   z-index: 3;
@@ -245,9 +667,14 @@
   pointer-events: auto;
 }
 
+.approvalOverlay:focus,
+.approvalOverlay:focus-visible {
+  outline: none;
+}
+
 .scrollToBottomLayer {
   position: absolute;
-  top: -44px;
+  bottom: calc(100% + 10px);
   right: 0;
   left: 0;
   z-index: 3;
@@ -257,7 +684,10 @@
 }
 
 .scrollToBottomLayerWithTodos {
-  top: -94px;
+  bottom: calc(
+    100% + var(--web-shell-bottom-panel-height, 0px) +
+      var(--web-shell-bottom-panel-gap, 6px) + 8px
+  );
 }
 
 .scrollToBottomButton {
@@ -307,8 +737,161 @@
   padding: 0;
 }
 
+.composerHeader {
+  margin-bottom: 8px;
+}
+
+.customFooter {
+  flex-shrink: 0;
+}
+
+/* Esc-clear hint, shown in the composer's top status slot (where the streaming
+   loader sits) — the two never coexist, so it stays clear of the queue. */
+.escClearStatus {
+  flex-shrink: 0;
+  padding: 4px 0;
+  font-size: 13px;
+  color: var(--muted-foreground);
+}
+
+.composerActionTip {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 13px;
+  color: var(--muted-foreground);
+}
+
+.composerActionTipIcon {
+  color: color-mix(in srgb, var(--streaming-label-color) 78%, transparent);
+  font-size: 11px;
+  line-height: 1;
+  transform: translateY(-0.5px);
+}
+
+.composerActionTipText {
+  min-width: 0;
+  color: var(--streaming-label-color);
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+.composerActionTipActions {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 4px;
+}
+
+.composerActionTipButton {
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.15;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 3px 8px;
+  white-space: nowrap;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease,
+    color 120ms ease,
+    transform 120ms ease;
+}
+
+.composerActionTipButtonPrimary {
+  border-color: color-mix(in srgb, var(--primary) 14%, var(--border));
+  background: color-mix(in srgb, var(--primary) 5%, transparent);
+  color: color-mix(in srgb, var(--foreground) 94%, var(--primary));
+}
+
+.composerActionTipButton:hover,
+.composerActionTipButton:focus-visible {
+  outline: none;
+  transform: translateY(-0.5px);
+}
+
+.composerActionTipButtonPrimary:hover,
+.composerActionTipButtonPrimary:focus-visible {
+  border-color: color-mix(in srgb, var(--primary) 28%, var(--border));
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  color: var(--foreground);
+}
+
 .emptyWelcomeFooter {
   padding: 12px 0 0;
+}
+
+.mobileWelcomeFooterMiddle {
+  display: none;
+}
+
+.mobileWelcomeGroup {
+  display: contents;
+}
+
+@media (max-width: 760px) {
+  .appChatEmpty .chatPaneWithMobileComposerBottom {
+    position: relative;
+    overflow: hidden;
+  }
+
+  .appChatEmpty .chatViewWithMobileComposerBottom .footer {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    margin-top: 0;
+  }
+
+  .appChatEmpty .mobileWelcomeGroup {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .appChatEmpty .chatViewWithWelcomeMiddle .footerWithCustomFooter {
+    display: contents;
+  }
+
+  .appChatEmpty .chatViewWithWelcomeMiddle .footerWithCustomFooter .composer {
+    order: 2;
+    width: min(100%, var(--chat-shell-width));
+    margin: 0 auto;
+    padding-right: 20px;
+    padding-left: 20px;
+  }
+
+  .appChatEmpty .chatViewWithWelcomeMiddle .mobileWelcomeFooterMiddle {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: flex-start;
+    justify-content: center;
+    width: min(100%, var(--chat-shell-width));
+    margin: 0 auto;
+    padding-right: 20px;
+    padding-left: 20px;
+  }
+
+  .appChatEmpty .chatViewWithWelcomeMiddle .customFooter {
+    order: 1;
+    display: flex;
+    flex: 0 0 auto;
+    align-items: flex-start;
+    justify-content: center;
+    width: min(100%, var(--chat-shell-width));
+    margin: 0 auto;
+    padding-right: 20px;
+    padding-left: 20px;
+  }
+  .desktopWelcomeFooter {
+    display: none;
+  }
+
+  .emptyWelcomeFooter {
+    text-align: center;
+  }
 }
 
 .queuedPrompts {
@@ -371,6 +954,29 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.queuedPromptState {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  color: var(--secondary-foreground);
+}
+
+.queuedPromptSpinner {
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 999px;
+  animation: queuedPromptSpin 0.8s linear infinite;
+}
+
+@keyframes queuedPromptSpin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .queuedPromptActions {

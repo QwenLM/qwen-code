@@ -1,0 +1,140 @@
+.pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  /* On a multi-workspace pane, `--ws-accent` is set by a shared accent class
+     (workspaceAccent.module.css) and colorizes this divider into a per-workspace
+     strip; it falls back to the neutral border everywhere else, so single-
+     workspace panes are unchanged. */
+  border-bottom: 1px solid var(--ws-accent, var(--border));
+  background: color-mix(in srgb, var(--foreground) 3%, transparent);
+  flex: 0 0 auto;
+}
+
+/* The `--ws-accent` variable that colorizes the divider above and the tag below
+   is set by a shared accent class from workspaceAccent.module.css (also used by
+   the composer chip), applied to `.header` when the pane has a workspace. */
+
+/* Which workspace this pane's session lives in — a compact colored chip at the
+   start of the header, shown only on a multi-workspace daemon. The dot never
+   shrinks, so panes stay distinguishable by color even when the name and the
+   session title both ellipsize on a narrow split; the full cwd is in the
+   native title tooltip. */
+.workspaceTag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 50%;
+  padding: 2px 8px 2px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ws-accent) 14%, transparent);
+  color: color-mix(in srgb, var(--ws-accent) 70%, var(--foreground));
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.workspaceTagDot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 999px;
+  background: var(--ws-accent);
+}
+
+.workspaceTagText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Per-pane connection-loss indicator: each pane has its own daemon connection,
+   so a drop on one shouldn't silently leave stale messages with no signal. */
+.connectionError {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  background: var(--warning-bg);
+  border-bottom: 1px solid var(--warning-border);
+  color: var(--warning-color);
+  font-size: 12px;
+}
+.connectionErrorText {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--foreground);
+}
+
+.closeButton,
+.maximizeButton {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.closeButton:hover,
+.maximizeButton:hover {
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--foreground) 8%, transparent);
+}
+
+/* The maximized pane keeps its toggle visually "active" so it's clear which
+   control returns to the tiled layout. */
+.maximizeButton[aria-pressed='true'] {
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--foreground) 10%, transparent);
+}
+
+/* The transcript takes the remaining height and scrolls independently per pane. */
+.body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.footer {
+  flex: 0 0 auto;
+  padding: 8px;
+  position: relative;
+}
+
+.approval {
+  margin-bottom: 8px;
+}

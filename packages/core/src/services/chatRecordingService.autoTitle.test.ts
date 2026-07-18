@@ -178,8 +178,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
   });
 
   it('does not overwrite a manual title', async () => {
-    chatRecordingService.recordCustomTitle('chose-this-myself', 'manual');
-    await chatRecordingService.flush();
+    await chatRecordingService.recordCustomTitle('chose-this-myself', 'manual');
     vi.mocked(jsonl.writeLine).mockClear();
 
     chatRecordingService.recordAssistantTurn({
@@ -364,16 +363,14 @@ describe('ChatRecordingService - auto-title trigger', () => {
     expect(svc.getCurrentCustomTitle()).toBe('Auto-generated title');
     expect(svc.getCurrentTitleSource()).toBe('auto');
 
-    // finalize() was called by the constructor — drain the queued async
-    // write before inspecting the mock.
+    await svc.flush();
+    expect(findCustomTitleRecord()).toBeUndefined();
+
+    svc.recordUserMessage([{ text: 'resume work' }]);
     await svc.flush();
 
-    // The re-appended record must carry titleSource: 'auto', not 'manual'.
-    const finalizeRecord = vi
-      .mocked(jsonl.writeLine)
-      .mock.calls.map((c) => c[1] as ChatRecord)
-      .find((r) => r.type === 'system' && r.subtype === 'custom_title');
-    expect(finalizeRecord?.systemPayload).toEqual({
+    const reanchoredRecord = findCustomTitleRecord();
+    expect(reanchoredRecord?.systemPayload).toEqual({
       customTitle: 'Auto-generated title',
       titleSource: 'auto',
     });
@@ -404,12 +401,13 @@ describe('ChatRecordingService - auto-title trigger', () => {
     expect(svc.getCurrentCustomTitle()).toBe('User chose this');
     expect(svc.getCurrentTitleSource()).toBe('manual');
     await svc.flush();
+    expect(findCustomTitleRecord()).toBeUndefined();
 
-    const finalizeRecord = vi
-      .mocked(jsonl.writeLine)
-      .mock.calls.map((c) => c[1] as ChatRecord)
-      .find((r) => r.type === 'system' && r.subtype === 'custom_title');
-    expect(finalizeRecord?.systemPayload).toEqual({
+    svc.recordUserMessage([{ text: 'resume work' }]);
+    await svc.flush();
+
+    const reanchoredRecord = findCustomTitleRecord();
+    expect(reanchoredRecord?.systemPayload).toEqual({
       customTitle: 'User chose this',
       titleSource: 'manual',
     });
@@ -438,13 +436,14 @@ describe('ChatRecordingService - auto-title trigger', () => {
     // `titleSource: 'manual'` we can't actually verify.
     expect(svc.getCurrentTitleSource()).toBeUndefined();
     await svc.flush();
+    expect(findCustomTitleRecord()).toBeUndefined();
 
-    const finalizeRecord = vi
-      .mocked(jsonl.writeLine)
-      .mock.calls.map((c) => c[1] as ChatRecord)
-      .find((r) => r.type === 'system' && r.subtype === 'custom_title');
+    svc.recordUserMessage([{ text: 'resume work' }]);
+    await svc.flush();
+
+    const reanchoredRecord = findCustomTitleRecord();
     // Payload must NOT contain a titleSource field when source is unknown.
-    expect(finalizeRecord?.systemPayload).toEqual({
+    expect(reanchoredRecord?.systemPayload).toEqual({
       customTitle: 'Legacy title',
     });
   });
@@ -536,8 +535,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
     await flushMicrotasks();
 
     // User renames while the title LLM call is still pending.
-    chatRecordingService.recordCustomTitle('user-chosen', 'manual');
-    await chatRecordingService.flush();
+    await chatRecordingService.recordCustomTitle('user-chosen', 'manual');
     vi.mocked(jsonl.writeLine).mockClear();
 
     // Now the LLM call returns a title.
@@ -548,5 +546,92 @@ describe('ChatRecordingService - auto-title trigger', () => {
     expect(findCustomTitleRecord()).toBeUndefined();
     expect(chatRecordingService.getCurrentCustomTitle()).toBe('user-chosen');
     expect(chatRecordingService.getCurrentTitleSource()).toBe('manual');
+  });
+
+  it('lets an explicit auto rename cancel and outrank background auto-title', async () => {
+    let resolveLlm: (value: unknown) => void = () => {};
+    tryGenerateSessionTitleMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveLlm = resolve;
+        }),
+    );
+
+    chatRecordingService.recordAssistantTurn({
+      model: 'qwen-plus',
+      message: [{ text: 'turn' }],
+    });
+    await flushMicrotasks();
+
+    await expect(
+      chatRecordingService.recordCustomTitle('User Auto Title', 'auto'),
+    ).resolves.toBe(true);
+    resolveLlm({ ok: true, title: 'Background Title', modelUsed: 'fast' });
+    await flushMicrotasks();
+
+    const titleRecords = vi
+      .mocked(jsonl.writeLine)
+      .mock.calls.map((call) => call[1] as ChatRecord)
+      .filter(
+        (record) =>
+          record.type === 'system' && record.subtype === 'custom_title',
+      );
+    expect(titleRecords).toHaveLength(1);
+    expect(titleRecords[0]?.systemPayload).toMatchObject({
+      customTitle: 'User Auto Title',
+      titleSource: 'auto',
+    });
+    expect(chatRecordingService.getCurrentCustomTitle()).toBe(
+      'User Auto Title',
+    );
+  });
+
+  it('does not start background auto-title while an explicit title is pending', async () => {
+    let resolveTitleWrite!: () => void;
+    vi.mocked(jsonl.writeLine).mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        resolveTitleWrite = resolve;
+      }),
+    );
+    const explicit = chatRecordingService.recordCustomTitle(
+      'Pending Explicit',
+      'auto',
+    );
+    await vi.waitFor(() => expect(jsonl.writeLine).toHaveBeenCalledOnce());
+
+    chatRecordingService.recordAssistantTurn({
+      model: 'qwen-plus',
+      message: [{ text: 'turn while rename is pending' }],
+    });
+    expect(tryGenerateSessionTitleMock).not.toHaveBeenCalled();
+
+    resolveTitleWrite();
+    await expect(explicit).resolves.toBe(true);
+    await chatRecordingService.flush();
+  });
+
+  it('does not retry background auto-title after its write degrades the recorder', async () => {
+    mockOk('Failed Durable Title');
+    vi.mocked(jsonl.writeLine)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('disk full'));
+
+    chatRecordingService.recordAssistantTurn({
+      model: 'qwen-plus',
+      message: [{ text: 'first turn' }],
+    });
+    await flushMicrotasks();
+    await expect(chatRecordingService.flush()).rejects.toThrow('disk full');
+    expect(tryGenerateSessionTitleMock).toHaveBeenCalledOnce();
+    expect(chatRecordingService.getCurrentCustomTitle()).toBeUndefined();
+
+    chatRecordingService.recordAssistantTurn({
+      model: 'qwen-plus',
+      message: [{ text: 'second turn' }],
+    });
+    await flushMicrotasks();
+
+    expect(tryGenerateSessionTitleMock).toHaveBeenCalledOnce();
+    expect(jsonl.writeLine).toHaveBeenCalledTimes(2);
   });
 });

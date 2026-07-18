@@ -39,6 +39,7 @@ import {
   type AnyDeclarativeTool,
   type DiscoveredMCPPrompt,
   createDebugLogger,
+  matchesAnyServerPattern,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings, SettingScope } from '../../../config/settings.js';
 import { loadMcpApprovals } from '../../../config/mcpApprovals.js';
@@ -429,6 +430,35 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     }
   }, [config, selectedServer, reloadServers]);
 
+  const handleApprove = useCallback(async () => {
+    if (!config || !selectedServer) return;
+
+    try {
+      setIsLoading(true);
+      const approvals = loadMcpApprovals();
+      const root = config.getWorkingDir();
+      await approvals.setState(
+        root,
+        selectedServer.name,
+        selectedServer.config,
+        'approved',
+      );
+      config.approveMcpServerForSession(selectedServer.name);
+      const toolRegistry = config.getToolRegistry();
+      if (toolRegistry) {
+        await toolRegistry.discoverToolsForServer(selectedServer.name);
+      }
+      await reloadServers();
+    } catch (error) {
+      debugLogger.error(
+        `Error approving server '${selectedServer.name}':`,
+        error,
+      );
+    } finally {
+      setIsLoading(false);
+    }
+  }, [config, selectedServer, reloadServers]);
+
   // Enable server
   const handleEnableServer = useCallback(async () => {
     if (!config || !selectedServer) return;
@@ -534,8 +564,8 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
         ).settings;
         const currentExcluded = scopeSettings.mcp?.excluded || [];
 
-        // If server is not in exclusion list, add it
-        if (!currentExcluded.includes(server.name)) {
+        // If server is not already covered by an exclusion pattern, add it
+        if (!matchesAnyServerPattern(server.name, currentExcluded)) {
           const newExcluded = [...currentExcluded, server.name];
           settings.setValue(
             targetScope === 'user' ? SettingScope.User : SettingScope.Workspace,
@@ -580,8 +610,8 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
         ).settings;
         const currentExcluded = scopeSettings.mcp?.excluded || [];
 
-        // If server is not in exclusion list, add it
-        if (!currentExcluded.includes(server.name)) {
+        // If server is not already covered by an exclusion pattern, add it
+        if (!matchesAnyServerPattern(server.name, currentExcluded)) {
           const newExcluded = [...currentExcluded, server.name];
           settings.setValue(
             scope === 'user' ? SettingScope.User : SettingScope.Workspace,
@@ -753,6 +783,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
             server={selectedServer}
             onViewTools={handleViewTools}
             onViewResources={handleViewResources}
+            onApprove={handleApprove}
             onReconnect={handleReconnect}
             onDisable={handleDisable}
             onAuthenticate={handleAuthenticate}
@@ -833,6 +864,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     handleViewResources,
     handleReconnect,
     handleDisable,
+    handleApprove,
     handleAuthenticate,
     handleClearAuth,
     handleNavigateBack,

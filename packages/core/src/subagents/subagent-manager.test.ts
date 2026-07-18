@@ -1182,6 +1182,86 @@ You are weird.
   });
 
   describe('loadSubagent', () => {
+    it('applies the configured model only to the built-in Explore agent', async () => {
+      vi.mocked(fs.readdir).mockRejectedValue(new Error('Directory not found'));
+      const configuredManager = new SubagentManager(
+        makeFakeConfig({
+          agents: { builtin: { exploreModel: 'fast' } },
+        }),
+      );
+
+      expect((await configuredManager.loadSubagent('Explore'))?.model).toBe(
+        'fast',
+      );
+      expect(
+        (await configuredManager.loadSubagent('Explore', 'builtin'))?.model,
+      ).toBe('fast');
+
+      const builtins = await configuredManager.listSubagents({
+        level: 'builtin',
+        force: true,
+      });
+      expect(builtins.find((agent) => agent.name === 'Explore')?.model).toBe(
+        'fast',
+      );
+    });
+
+    it('does not apply the built-in Explore model to a same-name session agent', async () => {
+      const configuredManager = new SubagentManager(
+        makeFakeConfig({
+          agents: { builtin: { exploreModel: 'fast' } },
+        }),
+      );
+      configuredManager.loadSessionSubagents([
+        {
+          name: 'Explore',
+          description: 'Session Explore',
+          systemPrompt: 'Use the session agent.',
+          level: 'session',
+        },
+      ]);
+
+      const config = await configuredManager.loadSubagent('Explore');
+
+      expect(config?.level).toBe('session');
+      expect(config?.model).toBeUndefined();
+    });
+
+    it('ignores a non-string built-in Explore model setting', async () => {
+      const configuredManager = new SubagentManager(
+        makeFakeConfig({
+          agents: {
+            builtin: { exploreModel: 1 as unknown as string },
+          },
+        }),
+      );
+
+      const config = await configuredManager.loadSubagent('Explore', 'builtin');
+
+      expect(config?.model).toBeUndefined();
+    });
+
+    it.each([
+      { exploreModel: '   ', expectedModel: undefined },
+      { exploreModel: 'inherit', expectedModel: 'inherit' },
+    ])(
+      'resolves the built-in Explore model setting "$exploreModel"',
+      async ({ exploreModel, expectedModel }) => {
+        const configuredManager = new SubagentManager(
+          makeFakeConfig({
+            agents: { builtin: { exploreModel } },
+          }),
+        );
+
+        const config = await configuredManager.loadSubagent(
+          'Explore',
+          'builtin',
+        );
+
+        expect(config?.model).toBe(expectedModel);
+      },
+    );
+
     it('should load subagent from project level first', async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       vi.mocked(fs.readdir).mockResolvedValue(['test-agent.md'] as any);
@@ -1655,6 +1735,61 @@ System prompt 3`);
         'Explore',
         'statusline-setup',
       ]);
+      expect(subagents.every((s) => s.level === 'builtin')).toBe(true);
+    });
+  });
+
+  describe('safe mode', () => {
+    let safeManager: SubagentManager;
+
+    beforeEach(() => {
+      const safeConfig = makeFakeConfig({ safeMode: true });
+      vi.spyOn(safeConfig, 'getToolRegistry').mockReturnValue(mockToolRegistry);
+      vi.spyOn(safeConfig, 'getProjectRoot').mockReturnValue('/test/project');
+      safeManager = new SubagentManager(safeConfig);
+    });
+
+    it('listSubagents returns only builtin subagents', async () => {
+      // Even if project/user dirs have agents, safe mode must ignore them
+      vi.mocked(fs.readdir)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .mockResolvedValue(['evil-agent.md'] as any);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: evil-agent
+description: Injected via project
+---
+malicious prompt`);
+
+      const subagents = await safeManager.listSubagents();
+
+      expect(subagents.every((s) => s.level === 'builtin')).toBe(true);
+      expect(subagents.find((s) => s.name === 'evil-agent')).toBeUndefined();
+    });
+
+    it('listSubagents overrides explicit non-builtin level to builtin', async () => {
+      vi.mocked(fs.readdir)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .mockResolvedValue([] as any);
+
+      const subagents = await safeManager.listSubagents({ level: 'project' });
+
+      expect(subagents.every((s) => s.level === 'builtin')).toBe(true);
+    });
+
+    it('refreshCache only populates builtin level', async () => {
+      vi.mocked(fs.readdir)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .mockResolvedValue(['evil.md'] as any);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: evil
+description: bad
+---
+bad`);
+
+      await safeManager.refreshCache();
+
+      // After refresh, listing should only show builtin
+      const subagents = await safeManager.listSubagents();
       expect(subagents.every((s) => s.level === 'builtin')).toBe(true);
     });
   });

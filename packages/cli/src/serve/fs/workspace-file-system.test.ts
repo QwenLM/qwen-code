@@ -18,7 +18,7 @@ import {
   type WorkspaceFileSystem,
   type WorkspaceFileSystemFactory,
 } from './index.js';
-import type { BridgeEvent } from '../event-bus.js';
+import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import { canonicalizeWorkspace } from './paths.js';
 import { isFsError } from './errors.js';
 
@@ -43,7 +43,7 @@ async function makeHarness(opts?: {
   const workspace = canonicalizeWorkspace(wsDir);
   const events: BridgeEvent[] = [];
   const factory = createWorkspaceFileSystemFactory({
-    boundWorkspace: workspace,
+    boundWorkspaces: [workspace],
     trusted: opts?.trusted ?? true,
     emit: (e) => events.push(e),
     ignore: opts?.ignore,
@@ -55,6 +55,37 @@ async function makeHarness(opts?: {
     route: 'TEST /op',
   });
   return { factory, fs, events, workspace, scratch };
+}
+
+async function makeMultiRootHarness(
+  setup?: (primaryDir: string, secondDir: string) => Promise<void>,
+): Promise<
+  Harness & {
+    secondWorkspace: string;
+  }
+> {
+  const scratch = await fsp.mkdtemp(
+    path.join(os.tmpdir(), `qwen-wfs-${randomBytes(4).toString('hex')}-`),
+  );
+  const primaryDir = path.join(scratch, 'primary');
+  const secondDir = path.join(scratch, 'second');
+  await fsp.mkdir(primaryDir);
+  await fsp.mkdir(secondDir);
+  await setup?.(primaryDir, secondDir);
+  const workspace = canonicalizeWorkspace(primaryDir);
+  const secondWorkspace = canonicalizeWorkspace(secondDir);
+  const events: BridgeEvent[] = [];
+  const factory = createWorkspaceFileSystemFactory({
+    boundWorkspaces: [workspace, secondWorkspace],
+    trusted: true,
+    emit: (e) => events.push(e),
+  });
+  const fs = factory.forRequest({
+    originatorClientId: 'client-x',
+    sessionId: 'sess-1',
+    route: 'TEST /op',
+  });
+  return { factory, fs, events, workspace, secondWorkspace, scratch };
 }
 
 async function teardown(h: Harness): Promise<void> {
@@ -268,7 +299,7 @@ describe('WorkspaceFileSystem - list', () => {
 
       const workspace = canonicalizeWorkspace(wsDir);
       const factory = createWorkspaceFileSystemFactory({
-        boundWorkspace: workspace,
+        boundWorkspaces: [workspace],
         trusted: true,
         emit: () => undefined,
         customIgnoreFiles: ['.cursorignore'],
@@ -702,6 +733,20 @@ describe('WorkspaceFileSystem - write/edit', () => {
     expect(out.writtenBytes).toBeGreaterThan(0);
     const after = await fsp.readFile(target, 'utf-8');
     expect(after).toBe('foo=42\nbar=2\n');
+  });
+
+  it('edit() preserves the tail of files larger than the default range cap', async () => {
+    const target = path.join(h.workspace, 'large-edit.txt');
+    const tail = 'tail-marker\n';
+    const content = `foo=1\n${'body\n'.repeat(6_000)}${tail}`;
+    await fsp.writeFile(target, content);
+    const r = await h.fs.resolve('large-edit.txt', 'edit');
+
+    const out = await h.fs.edit(r, 'foo=1', 'foo=42');
+
+    expect(out.writtenBytes).toBeGreaterThan(25_000);
+    const after = await fsp.readFile(target, 'utf-8');
+    expect(after).toBe(`foo=42\n${'body\n'.repeat(6_000)}${tail}`);
   });
 
   it('throws parse_error when oldText is not present', async () => {
@@ -1149,7 +1194,7 @@ describe('WorkspaceFileSystem - audit always emits on body errors', () => {
     // the audit message round-trip works in raw-path mode.
     const events: BridgeEvent[] = [];
     const factory = createWorkspaceFileSystemFactory({
-      boundWorkspace: h.workspace,
+      boundWorkspaces: [h.workspace],
       trusted: true,
       emit: (e) => events.push(e),
       includeRawPaths: true,
@@ -1198,6 +1243,43 @@ describe('WorkspaceFileSystem - glob escape audit', () => {
       /\d+ hit\(s\) that resolved outside workspace/,
     );
     expect((denied!.data as { pattern?: string }).pattern).toBe('*.ts');
+  });
+
+  it('classifies glob realpath permission failures separately', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'inside.ts'), 'x');
+    await fsp.writeFile(path.join(h.workspace, 'blocked.ts'), 'y');
+
+    const originalRealpath = fsp.realpath.bind(fsp);
+    const realpathSpy = vi.spyOn(fsp, 'realpath').mockImplementation((async (
+      ...args: Parameters<typeof fsp.realpath>
+    ) => {
+      if (String(args[0]).endsWith(`${path.sep}blocked.ts`)) {
+        const err = new Error('blocked') as NodeJS.ErrnoException;
+        err.code = 'EACCES';
+        throw err;
+      }
+      return originalRealpath(...args);
+    }) as typeof fsp.realpath);
+
+    try {
+      const hits = await h.fs.glob('*.ts');
+      expect(hits.map((p) => path.basename(p))).toEqual(['inside.ts']);
+    } finally {
+      realpathSpy.mockRestore();
+    }
+
+    const permissionDenied = h.events.find(
+      (e) =>
+        e.type === FS_DENIED_EVENT_TYPE &&
+        (e.data as { errorKind: string }).errorKind === 'permission_denied',
+    );
+    const symlinkEscape = h.events.find(
+      (e) =>
+        e.type === FS_DENIED_EVENT_TYPE &&
+        (e.data as { errorKind: string }).errorKind === 'symlink_escape',
+    );
+    expect(permissionDenied).toBeDefined();
+    expect(symlinkEscape).toBeUndefined();
   });
 
   it('records fs.access with workspace-hashed pathHash and pattern field on glob success (raw-paths mode)', async () => {
@@ -1271,6 +1353,165 @@ describe('WorkspaceFileSystem - glob audit privacy default', () => {
   });
 });
 
+describe('WorkspaceFileSystem - multi-root workspaces', () => {
+  let h: Harness & { secondWorkspace: string };
+  beforeEach(async () => {
+    h = await makeMultiRootHarness();
+  });
+  afterEach(async () => teardown(h));
+
+  it('resolves and reads absolute paths from a secondary root', async () => {
+    const target = path.join(h.secondWorkspace, 'pkg', 'index.ts');
+    await fsp.mkdir(path.dirname(target));
+    await fsp.writeFile(target, 'export const value = 1;\n');
+
+    const resolved = await h.fs.resolve(target, 'read');
+    const out = await h.fs.readText(resolved);
+
+    expect(resolved).toBe(target);
+    expect(out.content).toBe('export const value = 1;\n');
+  });
+
+  it('resolves relative write targets against the primary root', async () => {
+    await fsp.mkdir(path.join(h.secondWorkspace, 'src'));
+
+    const resolved = await h.fs.resolve('src/new.ts', 'write');
+
+    expect(resolved).toBe(path.join(h.workspace, 'src', 'new.ts'));
+  });
+
+  it('writes absolute paths inside a secondary root', async () => {
+    const target = path.join(h.secondWorkspace, 'src', 'created.ts');
+    await fsp.mkdir(path.dirname(target));
+
+    const resolved = await h.fs.resolve(target, 'write');
+    await h.fs.writeText(resolved, 'export const created = true;\n');
+
+    await expect(fsp.readFile(target, 'utf8')).resolves.toBe(
+      'export const created = true;\n',
+    );
+    expect(
+      h.events.find(
+        (e) =>
+          e.type === FS_ACCESS_EVENT_TYPE &&
+          (e.data as { intent?: string }).intent === 'write',
+      ),
+    ).toBeDefined();
+  });
+
+  it('glob searches every root and returns absolute paths without relative dedup', async () => {
+    const primaryPackage = path.join(h.workspace, 'package.json');
+    const secondPackage = path.join(h.secondWorkspace, 'package.json');
+    await fsp.writeFile(primaryPackage, '{}\n');
+    await fsp.writeFile(secondPackage, '{}\n');
+
+    const hits = await h.fs.glob('package.json');
+
+    expect(hits.sort()).toEqual([primaryPackage, secondPackage].sort());
+  });
+
+  it('glob enforces maxResults across all roots', async () => {
+    for (const workspace of [h.workspace, h.secondWorkspace]) {
+      await fsp.writeFile(path.join(workspace, 'a.ts'), '');
+      await fsp.writeFile(path.join(workspace, 'b.ts'), '');
+      await fsp.writeFile(path.join(workspace, 'c.ts'), '');
+    }
+
+    const hits = await h.fs.glob('*.ts', { maxResults: 3 });
+
+    expect(hits).toHaveLength(3);
+  });
+
+  it('returns healthy root glob results when one workspace root fails', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'primary.ts'), '');
+    await fsp.chmod(h.secondWorkspace, 0o000);
+    try {
+      await expect(h.fs.glob('*.ts')).resolves.toEqual([
+        path.join(h.workspace, 'primary.ts'),
+      ]);
+    } finally {
+      await fsp.chmod(h.secondWorkspace, 0o700);
+    }
+  });
+
+  it('throws AggregateError when every workspace root glob fails', async () => {
+    await fsp.chmod(h.workspace, 0o000);
+    await fsp.chmod(h.secondWorkspace, 0o000);
+    try {
+      const err = await h.fs.glob('*.ts').catch((e: unknown) => e);
+      const cause = (err as Error & { cause?: unknown }).cause;
+
+      expect(isFsError(err)).toBe(true);
+      expect(cause).toBeInstanceOf(AggregateError);
+      expect((cause as AggregateError).errors).toHaveLength(2);
+    } finally {
+      await fsp.chmod(h.workspace, 0o700);
+      await fsp.chmod(h.secondWorkspace, 0o700);
+    }
+  });
+
+  it('glob with cwd searches only that resolved root', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'primary.ts'), '');
+    await fsp.writeFile(path.join(h.secondWorkspace, 'secondary.ts'), '');
+    const cwd = await h.fs.resolve(h.secondWorkspace, 'glob');
+
+    const hits = await h.fs.glob('*.ts', { cwd });
+
+    expect(hits).toEqual([path.join(h.secondWorkspace, 'secondary.ts')]);
+  });
+
+  it('deduplicates glob hits that resolve to the same workspace file', async () => {
+    const target = path.join(h.secondWorkspace, 'shared.ts');
+    await fsp.writeFile(target, '');
+    await fsp.symlink(target, path.join(h.workspace, 'linked.ts'), 'file');
+
+    const hits = await h.fs.glob('*.ts');
+
+    expect(hits).toEqual([target]);
+  });
+
+  it('glob applies ignore rules from the canonical target workspace', async () => {
+    await teardown(h);
+    h = await makeMultiRootHarness((_primaryDir, secondDir) =>
+      fsp.writeFile(path.join(secondDir, '.gitignore'), '*.log\n'),
+    );
+    const target = path.join(h.secondWorkspace, 'secret.log');
+    await fsp.writeFile(target, '');
+    await fsp.symlink(target, path.join(h.workspace, 'linked.log'), 'file');
+
+    const hits = await h.fs.glob('linked.log');
+
+    expect(hits).toEqual([]);
+  });
+
+  it('rejects nested workspace roots at factory construction', async () => {
+    const scratch = await fsp.mkdtemp(
+      path.join(
+        os.tmpdir(),
+        `qwen-wfs-nested-${randomBytes(4).toString('hex')}-`,
+      ),
+    );
+    try {
+      const parent = path.join(scratch, 'parent');
+      const child = path.join(parent, 'child');
+      await fsp.mkdir(child, { recursive: true });
+
+      expect(() =>
+        createWorkspaceFileSystemFactory({
+          boundWorkspaces: [
+            canonicalizeWorkspace(parent),
+            canonicalizeWorkspace(child),
+          ],
+          trusted: true,
+          emit: () => undefined,
+        }),
+      ).toThrow(/nested/i);
+    } finally {
+      await fsp.rm(scratch, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('WorkspaceFileSystem - factory', () => {
   it('canonicalizes the workspace once at factory build', async () => {
     const scratch = await fsp.mkdtemp(
@@ -1286,7 +1527,7 @@ describe('WorkspaceFileSystem - factory', () => {
       await fsp.symlink(real, aliased, 'dir');
       const events: BridgeEvent[] = [];
       const factory = createWorkspaceFileSystemFactory({
-        boundWorkspace: aliased,
+        boundWorkspaces: [aliased],
         trusted: true,
         emit: (e) => events.push(e),
       });

@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ToolPlanConfirmationDetails, ToolResult } from './tools.js';
+import type {
+  ToolCallConfirmationDetails,
+  ToolPlanConfirmationDetails,
+  ToolResult,
+} from './tools.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import {
   BaseDeclarativeTool,
@@ -16,16 +20,14 @@ import type { FunctionDeclaration } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
-import { isAutonomousPrePlanMode } from '../plan-gate/state.js';
-import {
-  runPlanApprovalGate,
-  formatBlockedResponse,
-  formatNeedsUserResponse,
-  formatCapEscalationResponse,
-  formatApprovedNotes,
-} from '../plan-gate/planApprovalGate.js';
-import type { EvidenceBundle } from '../plan-gate/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  buildSubagentPlanToolBlockedResult,
+  isPlanRequiredTeammateContext,
+  isPlanLifecycleToolUnavailableInSubagent,
+} from '../agents/runtime/subagent-plan-tool-policy.js';
+import { getTeammateContext } from '../agents/team/identity.js';
+import type { TeamPlanApprovalDecision } from '../agents/team/TeamManager.js';
 
 const debugLogger = createDebugLogger('EXIT_PLAN_MODE');
 
@@ -33,6 +35,7 @@ export interface ExitPlanModeParams {
   plan: string;
   originalRequest?: string;
   researchSummary?: string;
+  /** @deprecated Plan approval no longer uses an LLM review gate. */
   resolutionSummary?: string;
 }
 
@@ -69,17 +72,12 @@ const exitPlanModeToolSchemaData: FunctionDeclaration = {
       originalRequest: {
         type: 'string',
         description:
-          'The original user request that prompted this plan. Restate it faithfully — it is the primary input for the plan approval gate.',
+          'The original user request that prompted this plan. Restate it faithfully for a plan-required teammate leader.',
       },
       researchSummary: {
         type: 'string',
         description:
-          'A brief summary of the investigation and key findings gathered during plan mode, including important file paths, symbols, and constraints discovered.',
-      },
-      resolutionSummary: {
-        type: 'string',
-        description:
-          'When re-submitting after a gate review blocked the plan, include a summary referencing each finding id (e.g. GF-1) and how you addressed it.',
+          'A brief summary of the investigation and key findings gathered during plan mode for a plan-required teammate leader.',
       },
     },
     required: ['plan'],
@@ -88,11 +86,22 @@ const exitPlanModeToolSchemaData: FunctionDeclaration = {
   },
 };
 
+interface ExitApprovalSnapshot {
+  plan: string;
+  approvalModeRevision: number;
+  prePlanMode: ApprovalMode;
+}
+
+interface ExitApproval {
+  snapshot: ExitApprovalSnapshot;
+  targetMode: ApprovalMode;
+}
+
 class ExitPlanModeToolInvocation extends BaseToolInvocation<
   ExitPlanModeParams,
   ToolResult
 > {
-  private wasApproved = false;
+  private approval?: ExitApproval;
 
   constructor(
     private readonly config: Config,
@@ -105,63 +114,77 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
     return 'Plan:';
   }
 
-  /**
-   * The Plan Approval Gate auto-approves (runs inside execute(), no user prompt)
-   * only when the model entered plan mode itself via enter_plan_mode while the
-   * session was AUTO/YOLO — an autonomous flow that should not be interrupted.
-   *
-   * When the user entered plan mode explicitly (Shift+Tab, /plan, the dialog),
-   * the confirmation UI always handles approval, even if prePlanMode happens to
-   * be AUTO/YOLO. Note the Shift+Tab cycle order (…→auto→yolo→plan) means a
-   * manual entry ALWAYS lands with prePlanMode === 'yolo', so prePlanMode alone
-   * cannot distinguish the two cases — `enteredByModel` is the discriminator
-   * (issue #5574).
-   */
+  override requiresUserInteraction(): boolean {
+    return (
+      !isPlanRequiredTeammateContext() &&
+      !isPlanLifecycleToolUnavailableInSubagent(ToolNames.EXIT_PLAN_MODE)
+    );
+  }
+
   override async getDefaultPermission(): Promise<PermissionDecision> {
-    const prePlanMode = this.config.getPrePlanMode();
-    const gateState = this.config.getPlanGateState();
     if (
-      isAutonomousPrePlanMode(prePlanMode) &&
-      gateState &&
-      gateState.enteredByModel &&
-      gateState.gateMode !== 'user_takeover'
+      isPlanRequiredTeammateContext() ||
+      isPlanLifecycleToolUnavailableInSubagent(ToolNames.EXIT_PLAN_MODE)
     ) {
       return 'allow';
     }
-    return 'ask';
+    return this.config.getApprovalMode() === ApprovalMode.PLAN ? 'ask' : 'deny';
   }
 
   override async getConfirmationDetails(
-    _abortSignal: AbortSignal,
-  ): Promise<ToolPlanConfirmationDetails> {
-    const prePlanMode = this.config.getPrePlanMode();
+    abortSignal: AbortSignal,
+  ): Promise<ToolCallConfirmationDetails> {
+    if (isPlanRequiredTeammateContext()) {
+      return super.getConfirmationDetails(abortSignal);
+    }
+    if (isPlanLifecycleToolUnavailableInSubagent(ToolNames.EXIT_PLAN_MODE)) {
+      return super.getConfirmationDetails(abortSignal);
+    }
+    if (this.config.getApprovalMode() !== ApprovalMode.PLAN) {
+      throw new Error('Cannot request plan approval outside plan mode.');
+    }
+
+    const snapshot: ExitApprovalSnapshot = {
+      plan: this.params.plan,
+      approvalModeRevision: this.config.getApprovalModeRevision(),
+      prePlanMode: this.config.getPrePlanMode(),
+    };
+    this.approval = undefined;
+
     const details: ToolPlanConfirmationDetails = {
       type: 'plan',
       title: 'Would you like to proceed?',
-      plan: this.params.plan,
-      prePlanMode,
+      hideAlwaysAllow: true,
+      plan: snapshot.plan,
+      prePlanMode: snapshot.prePlanMode,
       onConfirm: async (outcome: ToolConfirmationOutcome) => {
         switch (outcome) {
           case ToolConfirmationOutcome.RestorePrevious:
-            this.wasApproved = true;
-            this.setApprovalModeSafely(prePlanMode);
+            this.approval = {
+              snapshot,
+              targetMode: snapshot.prePlanMode,
+            };
             break;
           case ToolConfirmationOutcome.ProceedAlways:
-            this.wasApproved = true;
-            this.setApprovalModeSafely(ApprovalMode.AUTO_EDIT);
+            this.approval = {
+              snapshot,
+              targetMode: ApprovalMode.AUTO_EDIT,
+            };
             break;
           case ToolConfirmationOutcome.ProceedOnce:
-            this.wasApproved = true;
-            this.setApprovalModeSafely(ApprovalMode.DEFAULT);
+            this.approval = {
+              snapshot,
+              targetMode: ApprovalMode.DEFAULT,
+            };
             break;
           case ToolConfirmationOutcome.Cancel:
-            this.wasApproved = false;
-            this.setApprovalModeSafely(ApprovalMode.PLAN);
+            this.approval = undefined;
             break;
           default:
-            this.wasApproved = true;
-            this.setApprovalModeSafely(ApprovalMode.DEFAULT);
-            break;
+            this.approval = undefined;
+            throw new Error(
+              `Invalid plan approval outcome: ${String(outcome)}`,
+            );
         }
       },
     };
@@ -169,274 +192,188 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
     return details;
   }
 
-  private setApprovalModeSafely(mode: ApprovalMode): void {
-    try {
-      this.config.setApprovalMode(mode);
-    } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : String(error);
-      debugLogger.error(
-        `[ExitPlanModeTool] Failed to set approval mode to "${mode}": ${errorMessage}`,
-      );
-    }
-  }
-
-  private buildRejectedGateDisplay(
-    message: string,
-    plan: string,
-    details: string,
-  ): ToolResult['returnDisplay'] {
-    return {
-      type: 'plan_summary',
-      message,
-      plan: `${plan.trimEnd()}\n\n---\n\n${details}`,
-      rejected: true,
-    };
-  }
-
   async execute(signal: AbortSignal): Promise<ToolResult> {
-    const { plan, originalRequest, researchSummary, resolutionSummary } =
-      this.params;
-    const prePlanMode = this.config.getPrePlanMode();
-    const gateState = this.config.getPlanGateState();
-
-    try {
-      // ── Path A: user_override from cap escalation ──────────────
-      if (gateState?.gateMode === 'user_override') {
-        return this.approveAndRestore(plan, prePlanMode, 'Gate user override');
-      }
-
-      // ── Path B: AUTO/YOLO gate path (model-initiated, no takeover) ──
-      if (
-        isAutonomousPrePlanMode(prePlanMode) &&
-        gateState &&
-        gateState.enteredByModel &&
-        gateState.gateMode !== 'user_takeover'
-      ) {
-        // Update the gate state with the latest resolution summary
-        if (resolutionSummary) {
-          gateState.lastResolutionSummary = resolutionSummary;
-        }
-
-        const bundle: EvidenceBundle = {
-          originalRequest:
-            originalRequest ||
-            '(original request not provided by model — review the plan on its own merits)',
-          plan,
-          researchSummary,
-          resolutionSummary: gateState.lastResolutionSummary,
-          lastFindings:
-            gateState.lastFindings.length > 0
-              ? gateState.lastFindings
-              : undefined,
-        };
-
-        const decision = await runPlanApprovalGate(this.config, bundle, signal);
-
-        // After the async gate call, verify the user hasn't toggled out
-        // of plan mode mid-gate (e.g. via Shift+Tab).
-        const currentGateState = this.config.getPlanGateState();
-        if (
-          this.config.getApprovalMode() !== ApprovalMode.PLAN ||
-          !currentGateState ||
-          currentGateState.entryId !== gateState.entryId
-        ) {
-          return {
-            llmContent:
-              'Plan mode was exited while the gate was running. No action taken.',
-            returnDisplay: 'Plan mode exited during gate review.',
-          };
-        }
-
-        // Re-read prePlanMode after the async gate in case it was updated
-        // (e.g. config reload) while the gate was running.
-        const currentPrePlanMode = this.config.getPrePlanMode();
-
-        switch (decision.kind) {
-          case 'approved': {
-            const notes = decision.nonBlockingFindings
-              ? formatApprovedNotes(decision.nonBlockingFindings)
-              : '';
-            return this.approveAndRestore(
-              plan,
-              currentPrePlanMode,
-              'Gate approved' + (notes ? `\n\n${notes}` : ''),
-            );
-          }
-          case 'blocked': {
-            const llmContent = formatBlockedResponse(decision);
-            const message = `Plan gate: blocked (${decision.findings.length} finding(s))`;
-            return {
-              llmContent,
-              returnDisplay: this.buildRejectedGateDisplay(
-                message,
-                plan,
-                llmContent,
-              ),
-            };
-          }
-          case 'needs_user': {
-            gateState.needsUserPending = true;
-            const llmContent = formatNeedsUserResponse(decision);
-            const message = `Plan gate: needs user input (${decision.questions.length} question(s))`;
-            return {
-              llmContent,
-              returnDisplay: this.buildRejectedGateDisplay(
-                message,
-                plan,
-                llmContent,
-              ),
-            };
-          }
-          case 'cap_escalation': {
-            gateState.capEscalationPending = true;
-            const llmContent = formatCapEscalationResponse(decision);
-            const message = `Plan gate: cap reached with ${decision.blockingFindings.length} blocking finding(s)`;
-            return {
-              llmContent,
-              returnDisplay: this.buildRejectedGateDisplay(
-                message,
-                plan,
-                llmContent,
-              ),
-            };
-          }
-          case 'unavailable': {
-            // Gate is broken — fall back to DEFAULT mode so the user
-            // gets a real confirmation dialog on the next action,
-            // instead of trapping in plan mode with no escape hatch.
-            debugLogger.warn(
-              `Gate unavailable, falling back to DEFAULT mode: ${decision.reason}`,
-            );
-            return this.fallbackToUserDecision(plan);
-          }
-          default: {
-            const _exhaustive: never = decision;
-            return {
-              llmContent: `Unexpected gate decision: ${JSON.stringify(_exhaustive)}`,
-              returnDisplay: 'Unexpected gate decision',
-            };
-          }
-        }
-      }
-
-      // ── Path C: normal user confirmation path ──────────────────
-      // Guard: if we somehow reached here without being in plan mode
-      // (e.g. user toggled mode externally), report it accurately.
-      if (
-        this.config.getApprovalMode() !== ApprovalMode.PLAN &&
-        !this.wasApproved
-      ) {
-        return {
-          llmContent: 'Not in plan mode — no action taken.',
-          returnDisplay: 'Not in plan mode.',
-        };
-      }
-
-      // onConfirm already set the approval mode (PLAN -> target), so we
-      // must NOT touch it here — only save the plan and return the result.
-      if (!this.wasApproved) {
-        const rejectionMessage =
-          'Plan execution was not approved. Remaining in plan mode.';
-        return {
-          llmContent: rejectionMessage,
-          returnDisplay: rejectionMessage,
-        };
-      }
-
-      // Save plan to disk (mode was already set by onConfirm)
-      try {
-        this.config.savePlan(plan);
-      } catch (error) {
-        debugLogger.warn(
-          `[ExitPlanModeTool] Failed to save plan to disk: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-
-      const llmMessage =
-        'User approved. You can now start coding. Start with updating your todo list if applicable.';
-      return {
-        llmContent: llmMessage,
-        returnDisplay: {
-          type: 'plan_summary',
-          message: 'User approved.',
-          plan,
-        },
-      };
-    } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : String(error);
-      debugLogger.error(
-        `[ExitPlanModeTool] Error executing exit_plan_mode: ${errorMessage}`,
-      );
-
-      const errorLlmContent = `Failed to present plan: ${errorMessage}`;
-
-      return {
-        llmContent: errorLlmContent,
-        returnDisplay: `Error presenting plan: ${errorMessage}`,
-      };
-    }
-  }
-
-  private approveAndRestore(
-    plan: string,
-    targetMode: ApprovalMode,
-    context: string,
-  ): ToolResult {
-    // Persist the approved plan to disk
-    try {
-      this.config.savePlan(plan);
-    } catch (error) {
-      debugLogger.warn(
-        `[ExitPlanModeTool] Failed to save plan to disk: ${error instanceof Error ? error.message : String(error)}`,
+    if (isPlanLifecycleToolUnavailableInSubagent(ToolNames.EXIT_PLAN_MODE)) {
+      return buildSubagentPlanToolBlockedResult(
+        ToolNames.EXIT_PLAN_MODE,
+        'ExitPlanModeTool',
+        debugLogger,
       );
     }
 
-    // Restore the pre-plan approval mode (this also clears gate state
-    // via setApprovalMode's PLAN→non-PLAN transition).
-    this.setApprovalModeSafely(targetMode);
-
-    const llmMessage = `${context}. You can now start coding. Start with updating your todo list if applicable.`;
-    const displayMessage = `${context}.`;
-
-    return {
-      llmContent: llmMessage,
-      returnDisplay: {
-        type: 'plan_summary',
-        message: displayMessage,
+    const { plan, originalRequest, researchSummary } = this.params;
+    if (isPlanRequiredTeammateContext()) {
+      return this.executePlanRequiredTeammate(
         plan,
-      },
-    };
-  }
+        originalRequest,
+        researchSummary,
+        signal,
+      );
+    }
 
-  /**
-   * Gate unavailable fallback — switch to DEFAULT mode so the next
-   * action triggers a real user confirmation dialog. This breaks the
-   * gate trap while forcing the model to present the plan for approval
-   * rather than auto-executing in AUTO/YOLO.
-   */
-  private fallbackToUserDecision(plan: string): ToolResult {
-    this.setApprovalModeSafely(ApprovalMode.DEFAULT);
+    const approval = this.approval;
+    if (!approval) {
+      return this.noActionResult(
+        'Plan execution was not approved. Remaining in plan mode.',
+      );
+    }
+    const { snapshot, targetMode } = approval;
+    if (signal.aborted) {
+      return this.noActionResult(
+        'Plan exit was cancelled. Remaining in plan mode.',
+      );
+    }
+    if (
+      this.config.getApprovalMode() !== ApprovalMode.PLAN ||
+      this.config.getApprovalModeRevision() !== snapshot.approvalModeRevision
+    ) {
+      return this.noActionResult(
+        'Plan approval is stale because the approval mode changed. No action was taken.',
+      );
+    }
 
-    // Save plan so it's on disk even if the model proceeds.
+    this.savePlanBestEffort(snapshot.plan);
     try {
-      this.config.savePlan(plan);
+      this.config.setApprovalMode(targetMode);
     } catch (error) {
-      debugLogger.warn(
-        `[ExitPlanModeTool] Failed to save plan to disk: ${error instanceof Error ? error.message : String(error)}`,
+      const message = error instanceof Error ? error.message : String(error);
+      debugLogger.error(
+        `[ExitPlanModeTool] Failed to set approval mode to "${targetMode}": ${message}`,
+      );
+      return this.errorResult(
+        `Failed to exit plan mode: ${message}. Remaining in plan mode.`,
       );
     }
 
     return {
       llmContent:
-        'Gate is unavailable and cannot review the plan. Ask the user whether to execute this plan or stay in plan mode to revise it.',
+        'User approved. You can now start coding. Start with updating your todo list if applicable.',
       returnDisplay: {
         type: 'plan_summary',
-        message:
-          'Plan gate is unavailable. The plan has been saved — please confirm whether to execute it.',
+        message: 'User approved.',
+        plan: snapshot.plan,
+      },
+    };
+  }
+
+  private async executePlanRequiredTeammate(
+    plan: string,
+    originalRequest: string | undefined,
+    researchSummary: string | undefined,
+    signal: AbortSignal,
+  ): Promise<ToolResult> {
+    if (this.config.getApprovalMode() !== ApprovalMode.PLAN) {
+      return this.errorResult('Not in plan mode — no action taken.');
+    }
+
+    const approvalModeRevision = this.config.getApprovalModeRevision();
+    const teammate = getTeammateContext();
+    const manager = this.config.getTeamManager();
+    if (!teammate || !manager) {
+      return this.errorResult(
+        'Plan-required teammate approval is unavailable in this context.',
+      );
+    }
+
+    let decision: TeamPlanApprovalDecision;
+    try {
+      decision = await manager.requestPlanApproval({
+        teammateName: teammate.agentName,
+        plan,
+        originalRequest,
+        researchSummary,
+        signal,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return this.errorResult(
+        `Failed to request leader plan approval: ${message}`,
+      );
+    }
+
+    if (signal.aborted) {
+      return this.noActionResult(
+        'Leader plan approval was cancelled. Remaining in plan mode.',
+      );
+    }
+    if (
+      this.config.getApprovalMode() !== ApprovalMode.PLAN ||
+      this.config.getApprovalModeRevision() !== approvalModeRevision
+    ) {
+      return this.noActionResult(
+        'Leader plan approval is stale because the approval mode changed. No action was taken.',
+      );
+    }
+
+    if (decision.action === 'reject') {
+      const feedback = decision.message
+        ? `\n\nLeader feedback:\n${decision.message}`
+        : '';
+      const llmContent =
+        'Leader rejected the plan. Revise the plan based on the feedback and call exit_plan_mode again.' +
+        feedback;
+      return {
+        llmContent,
+        returnDisplay: {
+          type: 'plan_summary',
+          message: 'Leader rejected the plan.',
+          plan: `${plan.trimEnd()}\n\n---\n\n${llmContent}`,
+          rejected: true,
+        },
+      };
+    }
+
+    if (decision.targetMode === ApprovalMode.PLAN) {
+      return this.errorResult(
+        'Leader approval did not select an execution mode. Remaining in plan mode.',
+      );
+    }
+
+    this.savePlanBestEffort(plan);
+    try {
+      this.config.setApprovalMode(decision.targetMode);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return this.errorResult(
+        `Leader approved the plan, but failed to exit plan mode: ${message}.`,
+      );
+    }
+
+    const feedback = decision.message
+      ? ` Leader note: ${decision.message}`
+      : '';
+    return {
+      llmContent: `Leader approved.${feedback} You can now start coding. Start with updating your todo list if applicable.`,
+      returnDisplay: {
+        type: 'plan_summary',
+        message: 'Leader approved.',
         plan,
       },
+    };
+  }
+
+  private savePlanBestEffort(plan: string): void {
+    try {
+      this.config.savePlan(plan);
+    } catch (error) {
+      debugLogger.warn(
+        `[ExitPlanModeTool] Failed to save plan to disk: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  private errorResult(message: string): ToolResult {
+    return {
+      llmContent: message,
+      returnDisplay: message,
+      error: { message },
+    };
+  }
+
+  private noActionResult(message: string): ToolResult {
+    return {
+      llmContent: message,
+      returnDisplay: message,
     };
   }
 }
@@ -457,12 +394,12 @@ export class ExitPlanModeTool extends BaseDeclarativeTool<
         string,
         unknown
       >,
-      true, // isOutputMarkdown
-      false, // canUpdateOutput
-      true, // shouldDefer
-      // alwaysLoad: plan mode tells the model to call exit_plan_mode directly,
-      // so its schema must always be declared, not deferred (issue #5210).
-      true, // alwaysLoad
+      true,
+      false,
+      true,
+      // Plan mode tells the model to call exit_plan_mode directly, so its schema
+      // must always be declared instead of deferred (issue #5210).
+      true,
     );
   }
 
@@ -474,7 +411,6 @@ export class ExitPlanModeTool extends BaseDeclarativeTool<
     ) {
       return 'Parameter "plan" must be a non-empty string.';
     }
-
     return null;
   }
 

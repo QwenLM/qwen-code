@@ -25,6 +25,15 @@ import {
   getResumeTokenCounts,
   type ConversationRecord,
 } from './sessionService.js';
+import {
+  SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+  SessionTranscriptTooLargeError,
+} from './session-transcript-reader.js';
+import {
+  SESSION_ARTIFACT_PERSISTENCE_VERSION,
+  stableSessionArtifactId,
+} from './session-artifact-persistence.js';
+import { SessionOrganizationService } from './session-organization-service.js';
 import { CompressionStatus } from '../core/turn.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
@@ -40,6 +49,10 @@ describe('SessionService', () => {
   let readdirSyncSpy: MockInstance<typeof fs.readdirSync>;
   let statSyncSpy: MockInstance<typeof fs.statSync>;
   let unlinkSyncSpy: MockInstance<typeof fs.unlinkSync>;
+  let existsSyncSpy: MockInstance<typeof fs.existsSync>;
+  let mkdirSyncSpy: MockInstance<typeof fs.mkdirSync>;
+  let renameSyncSpy: MockInstance<typeof fs.renameSync>;
+  let rmSyncSpy: MockInstance<typeof fs.rmSync>;
 
   beforeEach(() => {
     vi.mocked(getProjectHash).mockReturnValue('test-project-hash');
@@ -63,6 +76,12 @@ describe('SessionService', () => {
     unlinkSyncSpy = vi
       .spyOn(fs, 'unlinkSync')
       .mockImplementation(() => undefined);
+    existsSyncSpy = vi.spyOn(fs, 'existsSync');
+    mkdirSyncSpy = vi.spyOn(fs, 'mkdirSync');
+    renameSyncSpy = vi
+      .spyOn(fs, 'renameSync')
+      .mockImplementation(() => undefined);
+    rmSyncSpy = vi.spyOn(fs, 'rmSync').mockImplementation(() => undefined);
 
     // Mock jsonl-utils. `parseLineTolerant` defaults to a no-op so any code
     // path that streams lines through it (e.g. countSessionMessages,
@@ -174,6 +193,145 @@ describe('SessionService', () => {
       // sessionIdB should be first (more recent mtime)
       expect(result.items[0].sessionId).toBe(sessionIdB);
       expect(result.items[1].sessionId).toBe(sessionIdA);
+    });
+
+    it('should ignore archive directory when listing active sessions', async () => {
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+        'archive',
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items.map((item) => item.sessionId)).toEqual([sessionIdA]);
+      expect(result.items[0].isArchived).toBe(false);
+      expect(jsonl.readLines).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(jsonl.readLines).mock.calls[0][0]).not.toContain(
+        '/archive/',
+      );
+    });
+
+    it('should list archived sessions from archive directory only', async () => {
+      readdirSyncSpy.mockImplementation((dir: fs.PathLike) => {
+        if (dir.toString().endsWith('/chats/archive')) {
+          return [`${sessionIdB}.jsonl`] as unknown as Array<fs.Dirent<Buffer>>;
+        }
+        return [`${sessionIdA}.jsonl`] as unknown as Array<fs.Dirent<Buffer>>;
+      });
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordB1]);
+
+      const result = await sessionService.listSessions({
+        archiveState: 'archived',
+      });
+
+      expect(result.items.map((item) => item.sessionId)).toEqual([sessionIdB]);
+      expect(result.items[0].isArchived).toBe(true);
+      expect(vi.mocked(jsonl.readLines).mock.calls[0][0]).toContain(
+        '/chats/archive/',
+      );
+    });
+
+    it('getSessionInfoCounts aggregates active and archived membership', async () => {
+      readdirSyncSpy.mockImplementation((dir: fs.PathLike) => {
+        if (dir.toString().endsWith(`${path.sep}archive`)) {
+          return [`${sessionIdB}.jsonl`] as unknown as Array<fs.Dirent<Buffer>>;
+        }
+        return [
+          `${sessionIdA}.jsonl`,
+          'archive',
+          'not-a-session.txt',
+        ] as unknown as Array<fs.Dirent<Buffer>>;
+      });
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes(sessionIdA)) return [recordA1];
+          if (filePath.includes(sessionIdB)) return [recordB1];
+          return [];
+        },
+      );
+
+      const result = await sessionService.getSessionInfoCounts();
+
+      expect(result).toEqual({
+        active: 1,
+        archived: 1,
+        total: 2,
+        truncated: false,
+      });
+      // Membership scan only needs the first record — never a deep read.
+      for (const [, lineLimit] of vi.mocked(jsonl.readLines).mock.calls) {
+        expect(lineLimit).toBe(1);
+      }
+    });
+
+    it('getSessionInfoCounts excludes sessions from other projects', async () => {
+      readdirSyncSpy.mockImplementation((dir: fs.PathLike) =>
+        dir.toString().endsWith(`${path.sep}archive`)
+          ? ([] as unknown as Array<fs.Dirent<Buffer>>)
+          : ([`${sessionIdA}.jsonl`] as unknown as Array<fs.Dirent<Buffer>>),
+      );
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        { ...recordA1, cwd: '/different/project' },
+      ]);
+      vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
+        cwd === '/test/project/root'
+          ? 'test-project-hash'
+          : 'other-project-hash',
+      );
+
+      await expect(sessionService.getSessionInfoCounts()).resolves.toEqual({
+        active: 0,
+        archived: 0,
+        total: 0,
+        truncated: false,
+      });
+    });
+
+    it('getSessionInfoCounts returns zeros when chats dirs are missing', async () => {
+      const error = new Error('ENOENT') as NodeJS.ErrnoException;
+      error.code = 'ENOENT';
+      readdirSyncSpy.mockImplementation(() => {
+        throw error;
+      });
+
+      await expect(sessionService.getSessionInfoCounts()).resolves.toEqual({
+        active: 0,
+        archived: 0,
+        total: 0,
+        truncated: false,
+      });
+    });
+
+    it('marks counts truncated when a candidate session cannot be read', async () => {
+      readdirSyncSpy.mockImplementation((dir: fs.PathLike) =>
+        dir.toString().endsWith(`${path.sep}archive`)
+          ? ([] as unknown as Array<fs.Dirent<Buffer>>)
+          : ([`${sessionIdA}.jsonl`, `${sessionIdB}.jsonl`] as unknown as Array<
+              fs.Dirent<Buffer>
+            >),
+      );
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes(sessionIdA)) return [recordA1];
+          throw new Error('unreadable');
+        },
+      );
+
+      await expect(sessionService.getSessionInfoCounts()).resolves.toEqual({
+        active: 1,
+        archived: 0,
+        total: 1,
+        truncated: true,
+      });
     });
 
     it('should extract prompt text from first record', async () => {
@@ -412,6 +570,433 @@ describe('SessionService', () => {
       expect(loaded?.conversation.messages[0].uuid).toBe('b1');
       expect(loaded?.conversation.messages[1].uuid).toBe('b2');
       expect(loaded?.lastCompletedUuid).toBe('b2');
+    });
+
+    it('reads archived sessions only through the explicit read-only method', async () => {
+      const now = Date.now();
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.read).mockResolvedValue([recordB1, recordB2]);
+
+      const loaded = await sessionService.loadArchivedSession(sessionIdB, {
+        maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+      });
+
+      expect(loaded?.conversation.messages).toHaveLength(2);
+      expect(vi.mocked(jsonl.read)).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdB}.jsonl`),
+      );
+      expect(statSyncSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('accepts an archived session exactly at the requested size limit', async () => {
+      statSyncSpy.mockReturnValue({
+        size: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.read).mockResolvedValue([recordB1, recordB2]);
+
+      await expect(
+        sessionService.loadArchivedSession(sessionIdB, {
+          maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+        }),
+      ).resolves.toBeDefined();
+    });
+
+    it('rejects an archived session above the requested size limit', async () => {
+      const snapshotSize = SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1;
+      statSyncSpy.mockReturnValue({
+        size: snapshotSize,
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+
+      const load = sessionService.loadArchivedSession(sessionIdB, {
+        maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+      });
+
+      await expect(load).rejects.toEqual(
+        new SessionTranscriptTooLargeError(
+          sessionIdB,
+          snapshotSize,
+          SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+        ),
+      );
+      expect(vi.mocked(jsonl.read)).not.toHaveBeenCalled();
+    });
+
+    it('rejects invalid archived session ids before accessing storage', async () => {
+      await expect(
+        sessionService.loadArchivedSession('../outside', {
+          maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+        }),
+      ).resolves.toBeUndefined();
+      expect(statSyncSpy).not.toHaveBeenCalled();
+      expect(vi.mocked(jsonl.read)).not.toHaveBeenCalled();
+    });
+
+    it('returns undefined when the archived file is missing at the size check', async () => {
+      statSyncSpy.mockImplementationOnce(() => {
+        throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+      });
+
+      await expect(
+        sessionService.loadArchivedSession(sessionIdB, {
+          maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+        }),
+      ).resolves.toBeUndefined();
+      expect(vi.mocked(jsonl.read)).not.toHaveBeenCalled();
+    });
+
+    it('loads artifact side records attached to the active branch', async () => {
+      const now = Date.now();
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        isFile: () => true,
+      } as fs.Stats);
+      const artifactId = stableSessionArtifactId(
+        sessionIdB,
+        'url:https://example.com/report',
+      );
+      const artifactRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 'artifact-1',
+        parentUuid: 'b1',
+        type: 'system',
+        subtype: 'session_artifact_event',
+        message: undefined,
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: sessionIdB,
+          sequence: 1,
+          recordedAt: '2026-07-06T00:00:00.000Z',
+          changes: [
+            {
+              action: 'created',
+              artifactId,
+              artifact: {
+                id: artifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Report',
+                url: 'https://example.com/report',
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-07-06T00:00:00.000Z',
+                updatedAt: '2026-07-06T00:00:00.000Z',
+                persistedAt: '2026-07-06T00:00:00.000Z',
+              },
+            },
+          ],
+        },
+      };
+      vi.mocked(jsonl.read).mockResolvedValue([
+        recordB1,
+        artifactRecord,
+        recordB2,
+      ]);
+
+      const loaded = await sessionService.loadSession(sessionIdB);
+
+      expect(
+        loaded?.conversation.messages.map((record) => record.uuid),
+      ).toEqual(['b1', 'b2']);
+      expect(loaded?.artifactSnapshot?.artifacts).toEqual([
+        expect.objectContaining({
+          id: artifactId,
+          title: 'Report',
+        }),
+      ]);
+    });
+
+    it('loads artifact side records after a tail-neutral title reanchor', async () => {
+      const now = Date.now();
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        isFile: () => true,
+      } as fs.Stats);
+      const artifactId = stableSessionArtifactId(
+        sessionIdB,
+        'url:https://example.com/reanchored-report',
+      );
+      const titleRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 'title-reanchor',
+        parentUuid: 'b1',
+        type: 'system',
+        subtype: 'custom_title',
+        message: undefined,
+        systemPayload: {
+          customTitle: 'Reanchored title',
+          titleSource: 'auto',
+        },
+      };
+      const artifactRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 'artifact-after-title',
+        parentUuid: 'b1',
+        type: 'system',
+        subtype: 'session_artifact_event',
+        message: undefined,
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: sessionIdB,
+          sequence: 1,
+          recordedAt: '2026-07-06T00:00:00.000Z',
+          changes: [
+            {
+              action: 'created',
+              artifactId,
+              artifact: {
+                id: artifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Reanchored report',
+                url: 'https://example.com/reanchored-report',
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-07-06T00:00:00.000Z',
+                updatedAt: '2026-07-06T00:00:00.000Z',
+                persistedAt: '2026-07-06T00:00:00.000Z',
+              },
+            },
+          ],
+        },
+      };
+      vi.mocked(jsonl.read).mockResolvedValue([
+        recordB1,
+        titleRecord,
+        artifactRecord,
+        recordB2,
+      ]);
+
+      const loaded = await sessionService.loadSession(sessionIdB);
+
+      expect(
+        loaded?.conversation.messages.map((record) => record.uuid),
+      ).toEqual(['b1', 'b2']);
+      expect(loaded?.artifactSnapshot?.artifacts).toEqual([
+        expect.objectContaining({
+          id: artifactId,
+          title: 'Reanchored report',
+        }),
+      ]);
+    });
+
+    it('loads chained artifact side records attached to the active branch', async () => {
+      const now = Date.now();
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        isFile: () => true,
+      } as fs.Stats);
+      const artifactId = stableSessionArtifactId(
+        sessionIdB,
+        'url:https://example.com/chained-report',
+      );
+      const createRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 'artifact-create',
+        parentUuid: 'b1',
+        type: 'system',
+        subtype: 'session_artifact_event',
+        message: undefined,
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: sessionIdB,
+          sequence: 1,
+          recordedAt: '2026-07-06T00:00:00.000Z',
+          changes: [
+            {
+              action: 'created',
+              artifactId,
+              artifact: {
+                id: artifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Chained report',
+                url: 'https://example.com/chained-report',
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-07-06T00:00:00.000Z',
+                updatedAt: '2026-07-06T00:00:00.000Z',
+                persistedAt: '2026-07-06T00:00:00.000Z',
+              },
+            },
+          ],
+        },
+      };
+      const removeRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 'artifact-remove',
+        parentUuid: 'artifact-create',
+        type: 'system',
+        subtype: 'session_artifact_event',
+        message: undefined,
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: sessionIdB,
+          sequence: 2,
+          recordedAt: '2026-07-06T00:00:01.000Z',
+          changes: [
+            {
+              action: 'removed',
+              artifactId,
+              reason: 'explicit',
+            },
+          ],
+        },
+      };
+      vi.mocked(jsonl.read).mockResolvedValue([
+        recordB1,
+        createRecord,
+        removeRecord,
+        recordB2,
+      ]);
+
+      const loaded = await sessionService.loadSession(sessionIdB);
+
+      expect(
+        loaded?.conversation.messages.map((record) => record.uuid),
+      ).toEqual(['b1', 'b2']);
+      expect(loaded?.artifactSnapshot?.artifacts).toEqual([]);
+      expect(loaded?.artifactSnapshot?.tombstonedIds).toContain(artifactId);
+    });
+
+    it('does not load artifact side records from abandoned branches', async () => {
+      const now = Date.now();
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        isFile: () => true,
+      } as fs.Stats);
+      const artifactId = stableSessionArtifactId(
+        sessionIdB,
+        'url:https://example.com/abandoned-report',
+      );
+      const artifactRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 'artifact-abandoned',
+        parentUuid: 'b1',
+        type: 'system',
+        subtype: 'session_artifact_event',
+        message: undefined,
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: sessionIdB,
+          sequence: 1,
+          recordedAt: '2026-07-06T00:00:00.000Z',
+          changes: [
+            {
+              action: 'created',
+              artifactId,
+              artifact: {
+                id: artifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Abandoned report',
+                url: 'https://example.com/abandoned-report',
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-07-06T00:00:00.000Z',
+                updatedAt: '2026-07-06T00:00:00.000Z',
+                persistedAt: '2026-07-06T00:00:00.000Z',
+              },
+            },
+          ],
+        },
+      };
+      const abandonedChild: ChatRecord = {
+        ...recordB2,
+        uuid: 'abandoned-child',
+        parentUuid: 'b1',
+      };
+      vi.mocked(jsonl.read).mockResolvedValue([
+        recordB1,
+        artifactRecord,
+        abandonedChild,
+        recordB2,
+      ]);
+
+      const loaded = await sessionService.loadSession(sessionIdB);
+
+      expect(
+        loaded?.conversation.messages.map((record) => record.uuid),
+      ).toEqual(['b1', 'b2']);
+      expect(loaded?.artifactSnapshot).toBeUndefined();
+    });
+
+    it('does not treat trailing artifact side records as the conversation leaf', async () => {
+      const now = Date.now();
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        isFile: () => true,
+      } as fs.Stats);
+      const artifactId = stableSessionArtifactId(
+        sessionIdB,
+        'url:https://example.com/trailing-report',
+      );
+      const artifactRecord: ChatRecord = {
+        ...recordB2,
+        uuid: 'artifact-tail',
+        parentUuid: 'b2',
+        type: 'system',
+        subtype: 'session_artifact_event',
+        message: undefined,
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: sessionIdB,
+          sequence: 1,
+          recordedAt: '2026-07-06T00:00:00.000Z',
+          changes: [
+            {
+              action: 'created',
+              artifactId,
+              artifact: {
+                id: artifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Trailing report',
+                url: 'https://example.com/trailing-report',
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-07-06T00:00:00.000Z',
+                updatedAt: '2026-07-06T00:00:00.000Z',
+                persistedAt: '2026-07-06T00:00:00.000Z',
+              },
+            },
+          ],
+        },
+      };
+      vi.mocked(jsonl.read).mockResolvedValue([
+        recordB1,
+        recordB2,
+        artifactRecord,
+      ]);
+
+      const loaded = await sessionService.loadSession(sessionIdB);
+
+      expect(
+        loaded?.conversation.messages.map((record) => record.uuid),
+      ).toEqual(['b1', 'b2']);
+      expect(loaded?.lastCompletedUuid).toBe('b2');
+      expect(loaded?.artifactSnapshot?.artifacts).toEqual([
+        expect.objectContaining({
+          id: artifactId,
+          title: 'Trailing report',
+        }),
+      ]);
     });
 
     it('keeps the latest file history snapshot for a prompt id', async () => {
@@ -854,6 +1439,32 @@ describe('SessionService', () => {
 
       expect(result).toBe(true);
       expect(unlinkSyncSpy).toHaveBeenCalled();
+      expect(rmSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`file-history/${sessionIdA}`),
+        { recursive: true, force: true },
+      );
+    });
+
+    it('should clear session organization when removing a session', async () => {
+      const warnings: string[] = [];
+      sessionService = new SessionService('/test/project/root', {
+        onWarning: (message) => warnings.push(message),
+      });
+      const removeOrganizationSpy = vi
+        .spyOn(SessionOrganizationService.prototype, 'removeSession')
+        .mockImplementation(function (this: {
+          onWarning?: (message: string) => void;
+        }) {
+          this.onWarning?.('sidecar warning');
+          return Promise.resolve();
+        });
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      const result = await sessionService.removeSession(sessionIdA);
+
+      expect(result).toBe(true);
+      expect(removeOrganizationSpy).toHaveBeenCalledWith(sessionIdA);
+      expect(warnings).toEqual(['sidecar warning']);
     });
 
     it('should return false when session does not exist', async () => {
@@ -923,14 +1534,425 @@ describe('SessionService', () => {
 
       expect(result).toBe(false);
     });
+
+    it('should remove archived session files and both worktree sidecars', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) return [recordA1];
+          const error = new Error('ENOENT') as NodeJS.ErrnoException;
+          error.code = 'ENOENT';
+          throw error;
+        },
+      );
+      existsSyncSpy.mockImplementation((filePath: fs.PathLike) =>
+        filePath.toString().endsWith(`${sessionIdA}.worktree.json`),
+      );
+
+      const result = await sessionService.removeSession(sessionIdA);
+
+      expect(result).toBe(true);
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+      );
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.worktree.json`),
+      );
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.worktree.json`),
+      );
+    });
+
+    it('should remove both JSONL files when active and archived copies conflict', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      existsSyncSpy.mockImplementation((filePath: fs.PathLike) =>
+        filePath.toString().endsWith(`/chats/archive/${sessionIdA}.jsonl`),
+      );
+
+      const result = await sessionService.removeSession(sessionIdA);
+
+      expect(result).toBe(true);
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+      );
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+      );
+    });
+  });
+
+  describe('archiveSessions', () => {
+    beforeEach(() => {
+      mkdirSyncSpy.mockImplementation(() => undefined);
+    });
+
+    const mockActiveSessionOnly = () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) {
+            const error = new Error('ENOENT') as NodeJS.ErrnoException;
+            error.code = 'ENOENT';
+            throw error;
+          }
+          return [recordA1];
+        },
+      );
+    };
+
+    const mockActiveWorktreeSidecarOnly = () => {
+      existsSyncSpy.mockImplementation((filePath) => {
+        const value = filePath.toString();
+        if (value.endsWith(`/chats/archive/${sessionIdA}.jsonl`)) {
+          return false;
+        }
+        if (value.endsWith(`/chats/${sessionIdA}.worktree.json`)) {
+          return true;
+        }
+        if (value.endsWith(`/chats/archive/${sessionIdA}.worktree.json`)) {
+          return false;
+        }
+        return false;
+      });
+    };
+
+    it('should move active sessions into the archive directory', async () => {
+      mockActiveSessionOnly();
+      const result = await sessionService.archiveSessions([sessionIdA]);
+
+      expect(result.archived).toEqual([sessionIdA]);
+      expect(result.alreadyArchived).toEqual([]);
+      expect(result.notFound).toEqual([]);
+      expect(result.errors).toEqual([]);
+      expect(mkdirSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining('/chats/archive'),
+        { recursive: true },
+      );
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+      );
+    });
+
+    it('should archive JSONL and warn when archiving worktree sidecar fails', async () => {
+      mockActiveSessionOnly();
+      mockActiveWorktreeSidecarOnly();
+      const warnings: string[] = [];
+      const service = new SessionService('/test/project/root', {
+        onWarning: (message) => warnings.push(message),
+      });
+      const sidecarError = new Error('sidecar move failed');
+      renameSyncSpy.mockImplementation((sourcePath) => {
+        if (sourcePath.toString().endsWith('.worktree.json')) {
+          throw sidecarError;
+        }
+        return undefined;
+      });
+
+      const result = await service.archiveSessions([sessionIdA]);
+
+      expect(result.archived).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain(
+        `archiveSessions: failed to move worktree sidecar for ${sessionIdA}`,
+      );
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+      );
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.worktree.json`),
+        expect.stringContaining(`/chats/archive/${sessionIdA}.worktree.json`),
+      );
+    });
+
+    it('should not move worktree sidecar when archiving JSONL fails', async () => {
+      mockActiveSessionOnly();
+      mockActiveWorktreeSidecarOnly();
+      const jsonlError = new Error(
+        `EACCES: permission denied, rename '/tmp/runtime/chats/${sessionIdA}.jsonl' -> '/tmp/runtime/chats/archive/${sessionIdA}.jsonl'`,
+      ) as NodeJS.ErrnoException;
+      jsonlError.code = 'EACCES';
+      renameSyncSpy.mockImplementation((sourcePath) => {
+        if (sourcePath.toString().endsWith('.jsonl')) {
+          throw jsonlError;
+        }
+        return undefined;
+      });
+
+      const result = await sessionService.archiveSessions([sessionIdA]);
+
+      expect(result.archived).toEqual([]);
+      expect(result.errors[0]?.sessionId).toBe(sessionIdA);
+      expect(result.errors[0]?.error.message).toBe(
+        'Failed to archive session file: EACCES',
+      );
+      expect(result.errors[0]?.error.message).not.toContain('/tmp/runtime');
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+      );
+      expect(renameSyncSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.worktree.json`),
+        expect.stringContaining(`/chats/archive/${sessionIdA}.worktree.json`),
+      );
+    });
+
+    it('should skip location reads when archiving known active sessions', async () => {
+      const getLocationSpy = vi.spyOn(sessionService, 'getSessionLocation');
+
+      const result = await sessionService.archiveSessions([sessionIdA], {
+        knownLocation: 'active',
+      });
+
+      expect(result.archived).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(getLocationSpy).not.toHaveBeenCalled();
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+      );
+    });
+
+    it('should report already archived sessions without moving them', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) return [recordA1];
+          const error = new Error('ENOENT') as NodeJS.ErrnoException;
+          error.code = 'ENOENT';
+          throw error;
+        },
+      );
+
+      const result = await sessionService.archiveSessions([sessionIdA]);
+
+      expect(result.archived).toEqual([]);
+      expect(result.alreadyArchived).toEqual([sessionIdA]);
+      expect(renameSyncSpy).not.toHaveBeenCalled();
+    });
+
+    it('should report active and archived duplicate ids as errors', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      const result = await sessionService.archiveSessions([sessionIdA]);
+
+      expect(result.archived).toEqual([]);
+      expect(result.errors[0]?.sessionId).toBe(sessionIdA);
+      expect(result.errors[0]?.error.message).toMatch(/conflict/i);
+      expect(renameSyncSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('unarchiveSessions', () => {
+    beforeEach(() => {
+      mkdirSyncSpy.mockImplementation(() => undefined);
+    });
+
+    const mockArchivedSessionOnly = () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) return [recordA1];
+          const error = new Error('ENOENT') as NodeJS.ErrnoException;
+          error.code = 'ENOENT';
+          throw error;
+        },
+      );
+    };
+
+    const mockArchivedWorktreeSidecarOnly = () => {
+      existsSyncSpy.mockImplementation((filePath) => {
+        const value = filePath.toString();
+        if (value.endsWith(`/chats/${sessionIdA}.jsonl`)) {
+          return false;
+        }
+        if (value.endsWith(`/chats/archive/${sessionIdA}.worktree.json`)) {
+          return true;
+        }
+        if (value.endsWith(`/chats/${sessionIdA}.worktree.json`)) {
+          return false;
+        }
+        return false;
+      });
+    };
+
+    it('should move archived sessions back to the active directory', async () => {
+      mockArchivedSessionOnly();
+
+      const result = await sessionService.unarchiveSessions([sessionIdA]);
+
+      expect(result.unarchived).toEqual([sessionIdA]);
+      expect(result.alreadyActive).toEqual([]);
+      expect(result.notFound).toEqual([]);
+      expect(result.errors).toEqual([]);
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+      );
+    });
+
+    it('should skip location reads when unarchiving known archived sessions', async () => {
+      mockArchivedSessionOnly();
+      const getLocationSpy = vi.spyOn(sessionService, 'getSessionLocation');
+
+      const result = await sessionService.unarchiveSessions([sessionIdA], {
+        knownLocation: 'archived',
+      });
+
+      expect(result.unarchived).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(getLocationSpy).not.toHaveBeenCalled();
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+      );
+    });
+
+    it('should recreate active chats directory before moving archived sessions', async () => {
+      mockArchivedSessionOnly();
+
+      const result = await sessionService.unarchiveSessions([sessionIdA]);
+
+      expect(result.unarchived).toEqual([sessionIdA]);
+      expect(mkdirSyncSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/\/chats$/),
+        { recursive: true },
+      );
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+      );
+    });
+
+    it('should report not found when neither active nor archived file exists', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(async () => {
+        const error = new Error('ENOENT') as NodeJS.ErrnoException;
+        error.code = 'ENOENT';
+        throw error;
+      });
+
+      const result = await sessionService.unarchiveSessions([sessionIdA]);
+
+      expect(result.unarchived).toEqual([]);
+      expect(result.alreadyActive).toEqual([]);
+      expect(result.notFound).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(renameSyncSpy).not.toHaveBeenCalled();
+    });
+
+    it('should report already active sessions without moving them', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) {
+            const error = new Error('ENOENT') as NodeJS.ErrnoException;
+            error.code = 'ENOENT';
+            throw error;
+          }
+          return [recordA1];
+        },
+      );
+
+      const result = await sessionService.unarchiveSessions([sessionIdA]);
+
+      expect(result.unarchived).toEqual([]);
+      expect(result.alreadyActive).toEqual([sessionIdA]);
+      expect(result.notFound).toEqual([]);
+      expect(result.errors).toEqual([]);
+      expect(renameSyncSpy).not.toHaveBeenCalled();
+    });
+
+    it('should unarchive JSONL and warn when worktree sidecar move fails', async () => {
+      mockArchivedSessionOnly();
+      mockArchivedWorktreeSidecarOnly();
+      const warnings: string[] = [];
+      const service = new SessionService('/test/project/root', {
+        onWarning: (message) => warnings.push(message),
+      });
+      const sidecarError = new Error('sidecar move failed');
+      renameSyncSpy.mockImplementation((sourcePath) => {
+        if (sourcePath.toString().endsWith('.worktree.json')) {
+          throw sidecarError;
+        }
+        return undefined;
+      });
+
+      const result = await service.unarchiveSessions([sessionIdA]);
+
+      expect(result.unarchived).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain(
+        `unarchiveSessions: failed to move worktree sidecar for ${sessionIdA}`,
+      );
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+      );
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.worktree.json`),
+        expect.stringContaining(`/chats/${sessionIdA}.worktree.json`),
+      );
+    });
+
+    it('should not move worktree sidecar when unarchiving JSONL fails', async () => {
+      mockArchivedSessionOnly();
+      mockArchivedWorktreeSidecarOnly();
+      const jsonlError = new Error(
+        `ENOSPC: no space left on device, rename '/tmp/runtime/chats/archive/${sessionIdA}.jsonl' -> '/tmp/runtime/chats/${sessionIdA}.jsonl'`,
+      ) as NodeJS.ErrnoException;
+      jsonlError.code = 'ENOSPC';
+      renameSyncSpy.mockImplementation((sourcePath) => {
+        if (
+          sourcePath.toString().endsWith('.jsonl') &&
+          sourcePath.toString().includes('/chats/archive/')
+        ) {
+          throw jsonlError;
+        }
+        return undefined;
+      });
+
+      const result = await sessionService.unarchiveSessions([sessionIdA]);
+
+      expect(result.unarchived).toEqual([]);
+      expect(result.errors[0]?.sessionId).toBe(sessionIdA);
+      expect(result.errors[0]?.error.message).toBe(
+        'Failed to unarchive session file: ENOSPC',
+      );
+      expect(result.errors[0]?.error.message).not.toContain('/tmp/runtime');
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+      );
+      expect(renameSyncSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.worktree.json`),
+        expect.stringContaining(`/chats/${sessionIdA}.worktree.json`),
+      );
+    });
+
+    it('should reject unarchive when active and archived files both exist', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      const result = await sessionService.unarchiveSessions([sessionIdA]);
+
+      expect(result.unarchived).toEqual([]);
+      expect(result.errors[0]?.sessionId).toBe(sessionIdA);
+      expect(result.errors[0]?.error.message).toMatch(/conflict/i);
+      expect(renameSyncSpy).not.toHaveBeenCalled();
+    });
   });
 
   describe('removeSessions', () => {
     it('should remove multiple sessions and report each outcome', async () => {
+      const removeOrganizationsSpy = vi
+        .spyOn(SessionOrganizationService.prototype, 'removeSessions')
+        .mockResolvedValue();
       // recordA1 belongs to current project; recordB1 also; the third id
       // never has a backing record (notFound).
       vi.mocked(jsonl.readLines).mockImplementation(
         async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) {
+            const error = new Error('ENOENT') as NodeJS.ErrnoException;
+            error.code = 'ENOENT';
+            throw error;
+          }
           if (filePath.includes(sessionIdA)) return [recordA1];
           if (filePath.includes(sessionIdB)) return [recordB1];
           return [];
@@ -947,10 +1969,24 @@ describe('SessionService', () => {
       expect(result.notFound).toEqual([sessionIdC]);
       expect(result.errors).toEqual([]);
       expect(unlinkSyncSpy).toHaveBeenCalledTimes(2);
+      expect(removeOrganizationsSpy).toHaveBeenCalledTimes(1);
+      expect(removeOrganizationsSpy).toHaveBeenCalledWith([
+        sessionIdA,
+        sessionIdB,
+      ]);
     });
 
     it('should de-duplicate input ids', async () => {
-      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) {
+            const error = new Error('ENOENT') as NodeJS.ErrnoException;
+            error.code = 'ENOENT';
+            throw error;
+          }
+          return [recordA1];
+        },
+      );
 
       const result = await sessionService.removeSessions([
         sessionIdA,
@@ -966,6 +2002,11 @@ describe('SessionService', () => {
     it('should keep going when one removal fails', async () => {
       vi.mocked(jsonl.readLines).mockImplementation(
         async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) {
+            const error = new Error('ENOENT') as NodeJS.ErrnoException;
+            error.code = 'ENOENT';
+            throw error;
+          }
           if (filePath.includes(sessionIdA)) return [recordA1];
           if (filePath.includes(sessionIdB)) return [recordB1];
           return [];
@@ -1144,6 +2185,35 @@ describe('SessionService', () => {
     });
   });
 
+  describe('getSessionLocation', () => {
+    it('should report conflict when active and archived files both exist', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      await expect(sessionService.getSessionLocation(sessionIdA)).resolves.toBe(
+        'conflict',
+      );
+    });
+
+    it('should warn when reading a session head fails', async () => {
+      const warnings: string[] = [];
+      const service = new SessionService('/test/project/root', {
+        onWarning: (message) => warnings.push(message),
+      });
+      const error = new Error('malformed JSON');
+      vi.mocked(jsonl.readLines).mockRejectedValue(error);
+
+      await expect(service.getSessionLocation(sessionIdA)).rejects.toThrow(
+        error,
+      );
+      expect(warnings).toHaveLength(2);
+      for (const warning of warnings) {
+        expect(warning).toContain('readProjectSessionHead: failed to read');
+        expect(warning).toContain(`${sessionIdA}.jsonl`);
+        expect(warning).toContain('malformed JSON');
+      }
+    });
+  });
+
   describe('loadLastSession', () => {
     it('should return the most recent session (same as getLatestSession)', async () => {
       const now = Date.now();
@@ -1246,6 +2316,41 @@ describe('SessionService', () => {
       const exists = await sessionService.sessionExists(sessionIdA);
 
       expect(exists).toBe(true);
+    });
+
+    it('should keep default existence checks active-only', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) return [recordA1];
+          const error = new Error('ENOENT') as NodeJS.ErrnoException;
+          error.code = 'ENOENT';
+          throw error;
+        },
+      );
+
+      await expect(sessionService.sessionExists(sessionIdA)).resolves.toBe(
+        false,
+      );
+      await expect(
+        sessionService.sessionExistsInAnyState(sessionIdA),
+      ).resolves.toBe(true);
+    });
+
+    it('should treat unreadable active or archived files as existing for any-state checks', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) {
+            throw new Error('malformed jsonl');
+          }
+          const error = new Error('ENOENT') as NodeJS.ErrnoException;
+          error.code = 'ENOENT';
+          throw error;
+        },
+      );
+
+      await expect(
+        sessionService.sessionExistsInAnyState(sessionIdA),
+      ).resolves.toBe(true);
     });
   });
 
@@ -1807,6 +2912,7 @@ describe('SessionService', () => {
     let realPath: typeof import('node:path');
     let service: SessionService;
     let cwd: string;
+    let originalQwenHome: string | undefined;
 
     beforeEach(async () => {
       realOs = await import('node:os');
@@ -1848,10 +2954,13 @@ describe('SessionService', () => {
       vi.mocked(readdirSyncSpy).mockRestore?.();
       vi.mocked(statSyncSpy).mockRestore?.();
       vi.mocked(unlinkSyncSpy).mockRestore?.();
+      vi.mocked(rmSyncSpy).mockRestore?.();
 
       realTmpDir = fs.mkdtempSync(
         realPath.join(realOs.tmpdir(), 'fork-session-'),
       );
+      originalQwenHome = process.env['QWEN_HOME'];
+      process.env['QWEN_HOME'] = realTmpDir;
       process.env['QWEN_RUNTIME_DIR'] = realTmpDir;
       cwd = process.cwd();
       service = new SessionService(cwd);
@@ -1859,6 +2968,11 @@ describe('SessionService', () => {
 
     afterEach(() => {
       delete process.env['QWEN_RUNTIME_DIR'];
+      if (originalQwenHome === undefined) {
+        delete process.env['QWEN_HOME'];
+      } else {
+        process.env['QWEN_HOME'] = originalQwenHome;
+      }
       try {
         fs.rmSync(realTmpDir, { recursive: true, force: true });
       } catch {
@@ -1873,7 +2987,7 @@ describe('SessionService', () => {
       );
       fs.mkdirSync(chatsDir, { recursive: true });
       const file = realPath.join(chatsDir, `${sessionId}.jsonl`);
-      const lines = [
+      const lines: Array<Record<string, unknown>> = [
         {
           uuid: 'u1',
           parentUuid: null,
@@ -1941,6 +3055,324 @@ describe('SessionService', () => {
       expect(srcLines.every((r) => !r.forkedFrom)).toBe(true);
     });
 
+    it('copies artifact side records from the active branch', async () => {
+      const oldId = '71717171-7171-7171-7171-717171717171';
+      const newId = '81818181-8181-8181-8181-818181818181';
+      const { file, lines } = seedSession(oldId);
+      const oldArtifactId = stableSessionArtifactId(
+        oldId,
+        'url:https://example.com/forked',
+      );
+      const artifactRecord = {
+        uuid: 'artifact-1',
+        parentUuid: 'u1',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'session_artifact_event',
+        timestamp: '2026-04-22T00:00:00.500Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: oldId,
+          sequence: 1,
+          recordedAt: '2026-04-22T00:00:00.500Z',
+          changes: [
+            {
+              action: 'created',
+              artifactId: oldArtifactId,
+              artifact: {
+                id: oldArtifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Forked artifact',
+                url: 'https://example.com/forked',
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-04-22T00:00:00.500Z',
+                updatedAt: '2026-04-22T00:00:00.500Z',
+                persistedAt: '2026-04-22T00:00:00.500Z',
+              },
+            },
+          ],
+        },
+      };
+      fs.writeFileSync(
+        file,
+        [lines[0], artifactRecord, lines[1]]
+          .map((line) => JSON.stringify(line))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId);
+      const loaded = await service.loadSession(newId);
+      const forkedLines = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+
+      expect(result.copiedCount).toBe(3);
+      expect(
+        loaded?.conversation.messages.map((record) => record.uuid),
+      ).toEqual(['u1', 'u2']);
+      expect(
+        forkedLines.find((record) => record.uuid === 'artifact-1'),
+      ).toMatchObject({
+        parentUuid: 'u1',
+      });
+      expect(forkedLines.find((record) => record.uuid === 'u2')).toMatchObject({
+        parentUuid: 'u1',
+      });
+      expect(loaded?.artifactSnapshot?.artifacts).toEqual([
+        expect.objectContaining({
+          id: stableSessionArtifactId(newId, 'url:https://example.com/forked'),
+          title: 'Forked artifact',
+        }),
+      ]);
+    });
+
+    it('does not copy artifact side records from abandoned branches', async () => {
+      const oldId = '74747474-7474-7474-7474-747474747474';
+      const newId = '84848484-8484-8484-8484-848484848484';
+      const { file, lines } = seedSession(oldId);
+      const oldArtifactId = stableSessionArtifactId(
+        oldId,
+        'url:https://example.com/abandoned-forked',
+      );
+      const artifactRecord = {
+        uuid: 'artifact-abandoned',
+        parentUuid: 'u1',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'session_artifact_event',
+        timestamp: '2026-04-22T00:00:00.500Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: oldId,
+          sequence: 1,
+          recordedAt: '2026-04-22T00:00:00.500Z',
+          changes: [
+            {
+              action: 'created',
+              artifactId: oldArtifactId,
+              artifact: {
+                id: oldArtifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Abandoned forked artifact',
+                url: 'https://example.com/abandoned-forked',
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-04-22T00:00:00.500Z',
+                updatedAt: '2026-04-22T00:00:00.500Z',
+                persistedAt: '2026-04-22T00:00:00.500Z',
+              },
+            },
+          ],
+        },
+      };
+      const abandonedChild = {
+        ...lines[1],
+        uuid: 'abandoned-child',
+        parentUuid: 'u1',
+      };
+      fs.writeFileSync(
+        file,
+        [lines[0], artifactRecord, abandonedChild, lines[1]]
+          .map((line) => JSON.stringify(line))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId);
+      const loaded = await service.loadSession(newId);
+      const forkedLines = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+
+      expect(result.copiedCount).toBe(2);
+      expect(
+        forkedLines.some((record) => record.uuid === 'artifact-abandoned'),
+      ).toBe(false);
+      expect(
+        loaded?.conversation.messages.map((record) => record.uuid),
+      ).toEqual(['u1', 'u2']);
+      expect(loaded?.artifactSnapshot).toBeUndefined();
+    });
+
+    it('does not treat trailing artifact side records as the fork leaf', async () => {
+      const oldId = '73737373-7373-7373-7373-737373737373';
+      const newId = '83838383-8383-8383-8383-838383838383';
+      const { file, lines } = seedSession(oldId);
+      const url = 'https://example.com/trailing-forked';
+      const oldArtifactId = stableSessionArtifactId(oldId, `url:${url}`);
+      const artifactRecord = {
+        uuid: 'artifact-tail',
+        parentUuid: 'u2',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'session_artifact_event',
+        timestamp: '2026-04-22T00:00:01.500Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: oldId,
+          sequence: 1,
+          recordedAt: '2026-04-22T00:00:01.500Z',
+          changes: [
+            {
+              action: 'created',
+              artifactId: oldArtifactId,
+              artifact: {
+                id: oldArtifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Trailing forked artifact',
+                url,
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-04-22T00:00:01.500Z',
+                updatedAt: '2026-04-22T00:00:01.500Z',
+                persistedAt: '2026-04-22T00:00:01.500Z',
+              },
+            },
+          ],
+        },
+      };
+      fs.writeFileSync(
+        file,
+        [...lines, artifactRecord]
+          .map((line) => JSON.stringify(line))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId);
+      const loaded = await service.loadSession(newId);
+
+      expect(result.copiedCount).toBe(3);
+      expect(
+        loaded?.conversation.messages.map((record) => record.uuid),
+      ).toEqual(['u1', 'u2']);
+      expect(loaded?.lastCompletedUuid).toBe('u2');
+      expect(loaded?.artifactSnapshot?.artifacts).toEqual([
+        expect.objectContaining({
+          id: stableSessionArtifactId(newId, `url:${url}`),
+          title: 'Trailing forked artifact',
+        }),
+      ]);
+    });
+
+    it('does not resurrect artifacts removed by later side records when forking', async () => {
+      const oldId = '72727272-7272-7272-7272-727272727272';
+      const newId = '82828282-8282-8282-8282-828282828282';
+      const { file, lines } = seedSession(oldId);
+      const url = 'https://example.com/forked-then-removed';
+      const oldArtifactId = stableSessionArtifactId(oldId, `url:${url}`);
+      const forkedArtifactId = stableSessionArtifactId(newId, `url:${url}`);
+      const createRecord = {
+        uuid: 'artifact-create',
+        parentUuid: 'u1',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'session_artifact_event',
+        timestamp: '2026-04-22T00:00:00.500Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: oldId,
+          sequence: 1,
+          recordedAt: '2026-04-22T00:00:00.500Z',
+          changes: [
+            {
+              action: 'created',
+              artifactId: oldArtifactId,
+              artifact: {
+                id: oldArtifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Forked artifact',
+                url,
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-04-22T00:00:00.500Z',
+                updatedAt: '2026-04-22T00:00:00.500Z',
+                persistedAt: '2026-04-22T00:00:00.500Z',
+              },
+            },
+          ],
+        },
+      };
+      const removeRecord = {
+        uuid: 'artifact-remove',
+        parentUuid: 'u1',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'session_artifact_event',
+        timestamp: '2026-04-22T00:00:00.750Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: oldId,
+          sequence: 2,
+          recordedAt: '2026-04-22T00:00:00.750Z',
+          changes: [
+            {
+              action: 'removed',
+              artifactId: oldArtifactId,
+              reason: 'explicit',
+            },
+          ],
+        },
+      };
+      fs.writeFileSync(
+        file,
+        [lines[0], createRecord, removeRecord, lines[1]]
+          .map((line) => JSON.stringify(line))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId);
+      const loaded = await service.loadSession(newId);
+      const forkedLines = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      const forkedRemovePayload = forkedLines.find(
+        (record) => record.uuid === 'artifact-remove',
+      )?.systemPayload;
+
+      expect(result.copiedCount).toBe(4);
+      expect(loaded?.artifactSnapshot?.artifacts).toEqual([]);
+      expect(loaded?.artifactSnapshot?.tombstonedIds).toContain(
+        forkedArtifactId,
+      );
+      expect(forkedRemovePayload).toMatchObject({
+        changes: [
+          {
+            action: 'removed',
+            artifactId: forkedArtifactId,
+            reason: 'explicit',
+          },
+        ],
+      });
+    });
+
     it('preserves file history snapshots on the forked session', async () => {
       const oldId = '31313131-3131-3131-3131-313131313131';
       const newId = '41414141-4141-4141-4141-414141414141';
@@ -1983,6 +3415,25 @@ describe('SessionService', () => {
       expect(loaded?.fileHistorySnapshots?.[0]?.promptId).toBe(
         `${newId}########0`,
       );
+    });
+
+    it('removes copied file-history backups when deleting a fork', async () => {
+      const oldId = '31313131-3131-3131-3131-313131313132';
+      const newId = '41414141-4141-4141-4141-414141414142';
+      seedSession(oldId);
+      const sourceBackupDir = realPath.join(realTmpDir, 'file-history', oldId);
+      const targetBackupDir = realPath.join(realTmpDir, 'file-history', newId);
+      fs.mkdirSync(sourceBackupDir, { recursive: true });
+      fs.writeFileSync(realPath.join(sourceBackupDir, 'backup-a'), 'content');
+
+      await service.forkSession(oldId, newId);
+      expect(fs.existsSync(realPath.join(targetBackupDir, 'backup-a'))).toBe(
+        true,
+      );
+
+      await expect(service.removeSession(newId)).resolves.toBe(true);
+      expect(fs.existsSync(targetBackupDir)).toBe(false);
+      expect(fs.existsSync(sourceBackupDir)).toBe(true);
     });
 
     it('forks only the active branch after rewind', async () => {
@@ -2084,6 +3535,30 @@ describe('SessionService', () => {
       );
     });
 
+    it('removes a partially written target when fork creation fails', async () => {
+      const oldId = '55555555-5555-5555-5555-555555555556';
+      const newId = '66666666-6666-6666-6666-666666666667';
+      seedSession(oldId);
+      const targetPath = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+        `${newId}.jsonl`,
+      );
+      vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(((
+        file: fs.PathOrFileDescriptor,
+      ) => {
+        if (typeof file === 'number') {
+          fs.writeSync(file, 'partial');
+        }
+        throw new Error('disk full');
+      }) as typeof fs.writeFileSync);
+
+      await expect(service.forkSession(oldId, newId)).rejects.toThrow(
+        'disk full',
+      );
+      expect(fs.existsSync(targetPath)).toBe(false);
+    });
+
     it('throws when the source session belongs to a different project', async () => {
       // Defensive guard: a file can physically sit in this project's chats
       // dir but carry a record whose cwd hashes to a different project
@@ -2150,6 +3625,99 @@ describe('SessionService', () => {
       await expect(service.forkSession(valid, 'bogus')).rejects.toThrow(
         /Invalid new sessionId/,
       );
+    });
+
+    it('drops creation metadata so the fork inherits no lineage or source', async () => {
+      // A fork is a fresh top-level session, not a sub-session. Copying the
+      // source's parent_session record would make the fork report the original's
+      // parent as its own. Seed the parent_session record on the active branch
+      // (u1 -> parent_session -> u2) so it would otherwise be copied.
+      const oldId = 'aaaaaaaa-1111-1111-1111-111111111111';
+      const newId = 'bbbbbbbb-2222-2222-2222-222222222222';
+      const chatsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+      );
+      fs.mkdirSync(chatsDir, { recursive: true });
+      const srcFile = realPath.join(chatsDir, `${oldId}.jsonl`);
+      const lines: Array<Record<string, unknown>> = [
+        {
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId: oldId,
+          type: 'user',
+          timestamp: '2026-04-22T00:00:00.000Z',
+          cwd,
+          version: 'test',
+          message: { role: 'user', parts: [{ text: 'hello' }] },
+        },
+        {
+          uuid: 'up',
+          parentUuid: 'u1',
+          sessionId: oldId,
+          type: 'system',
+          subtype: 'parent_session',
+          timestamp: '2026-04-22T00:00:00.500Z',
+          cwd,
+          version: 'test',
+          systemPayload: { parentSessionId: 'P' },
+        },
+        {
+          uuid: 'u2',
+          parentUuid: 'us',
+          sessionId: oldId,
+          type: 'assistant',
+          timestamp: '2026-04-22T00:00:01.000Z',
+          cwd,
+          version: 'test',
+          message: { role: 'model', parts: [{ text: 'hi' }] },
+        },
+      ];
+      lines.splice(2, 0, {
+        uuid: 'us',
+        parentUuid: 'up',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'session_source',
+        timestamp: '2026-04-22T00:00:00.750Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          sourceType: 'scheduled_task',
+          sourceId: 'task-123',
+        },
+      });
+      fs.writeFileSync(
+        srcFile,
+        lines.map((l) => JSON.stringify(l)).join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId);
+
+      const written = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+      expect(
+        written.some(
+          (r) => r.type === 'system' && r.subtype === 'parent_session',
+        ),
+      ).toBe(false);
+      expect(
+        written.some(
+          (r) => r.type === 'system' && r.subtype === 'session_source',
+        ),
+      ).toBe(false);
+
+      // The source keeps its lineage; the fork carries none of it.
+      expect(await service.readParentSessionId(oldId)).toBe('P');
+      expect(await service.readParentSessionId(newId)).toBeUndefined();
+      expect(await service.readCreationMetadata(oldId)).toMatchObject({
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+      });
+      expect(await service.readCreationMetadata(newId)).toEqual({});
     });
   });
 
@@ -2325,6 +3893,258 @@ describe('SessionService', () => {
 
       const titles = await service.findSessionTitlesByPrefix('anything');
       expect(titles).toEqual([]);
+    });
+  });
+
+  describe('listSessions parentSessionId round-trip', () => {
+    // Uses real disk like findSessionTitlesByPrefix — readParentSessionIdFromFile
+    // does a synchronous tail/head scan of the file, so the mocked
+    // jsonl.readLines path can't stand in for it. Seed a real transcript with a
+    // parent_session record and assert listSessions rehydrates parentSessionId.
+    let realTmpDir: string;
+    let realPath: typeof import('node:path');
+    let service: SessionService;
+    let cwd: string;
+
+    beforeEach(async () => {
+      const realOs = await import('node:os');
+      realPath = await vi.importActual<typeof import('node:path')>('node:path');
+      const actualPaths =
+        await vi.importActual<typeof import('../utils/paths.js')>(
+          '../utils/paths.js',
+        );
+      const actualJsonl = await vi.importActual<
+        typeof import('../utils/jsonl-utils.js')
+      >('../utils/jsonl-utils.js');
+
+      vi.mocked(path.join).mockImplementation(
+        realPath.join as unknown as typeof path.join,
+      );
+      vi.mocked(path.dirname).mockImplementation(
+        realPath.dirname as unknown as typeof path.dirname,
+      );
+      vi.mocked(path.isAbsolute).mockImplementation(
+        realPath.isAbsolute as unknown as typeof path.isAbsolute,
+      );
+      vi.mocked(path.resolve).mockImplementation(
+        realPath.resolve as unknown as typeof path.resolve,
+      );
+      vi.mocked(getProjectHash).mockImplementation(actualPaths.getProjectHash);
+      const mockedPaths = (await import('../utils/paths.js')) as unknown as {
+        sanitizeCwd: (cwd: string) => string;
+      };
+      mockedPaths.sanitizeCwd = actualPaths.sanitizeCwd;
+      vi.mocked(jsonl.read).mockImplementation(actualJsonl.read);
+      vi.mocked(jsonl.readLines).mockImplementation(actualJsonl.readLines);
+
+      vi.mocked(readdirSyncSpy).mockRestore?.();
+      vi.mocked(statSyncSpy).mockRestore?.();
+      vi.mocked(unlinkSyncSpy).mockRestore?.();
+
+      realTmpDir = fs.mkdtempSync(
+        realPath.join(realOs.tmpdir(), 'parent-session-id-'),
+      );
+      process.env['QWEN_RUNTIME_DIR'] = realTmpDir;
+      cwd = process.cwd();
+      service = new SessionService(cwd);
+    });
+
+    afterEach(() => {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      try {
+        fs.rmSync(realTmpDir, { recursive: true, force: true });
+      } catch {
+        // best-effort
+      }
+    });
+
+    const getChatsDir = () => {
+      const chatsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+      );
+      fs.mkdirSync(chatsDir, { recursive: true });
+      return chatsDir;
+    };
+
+    const userLine = (sessionId: string, text: string) => ({
+      uuid: 'u1',
+      parentUuid: null,
+      sessionId,
+      type: 'user',
+      timestamp: '2026-04-22T00:00:00.000Z',
+      cwd,
+      version: 'test',
+      message: { role: 'user', parts: [{ text }] },
+    });
+
+    const parentSessionLine = (sessionId: string, parentSessionId: string) => ({
+      uuid: 'u2',
+      parentUuid: 'u1',
+      sessionId,
+      type: 'system',
+      subtype: 'parent_session',
+      timestamp: '2026-04-22T00:00:01.000Z',
+      cwd,
+      version: 'test',
+      systemPayload: { parentSessionId },
+    });
+
+    const sessionSourceLine = (sessionId: string) => ({
+      uuid: 'u3',
+      parentUuid: 'u2',
+      sessionId,
+      type: 'system',
+      subtype: 'session_source',
+      timestamp: '2026-04-22T00:00:02.000Z',
+      cwd,
+      version: 'test',
+      systemPayload: {
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+      },
+    });
+
+    const writeSession = (
+      sessionId: string,
+      lines: Array<Record<string, unknown>>,
+    ) => {
+      const file = realPath.join(getChatsDir(), `${sessionId}.jsonl`);
+      fs.writeFileSync(
+        file,
+        lines.map((l) => JSON.stringify(l)).join('\n') + '\n',
+      );
+      return file;
+    };
+
+    const findItem = (
+      items: Array<{
+        sessionId: string;
+        parentSessionId?: string;
+        sourceType?: string;
+        sourceId?: string;
+      }>,
+      sessionId: string,
+    ) => items.find((item) => item.sessionId === sessionId);
+
+    it('rehydrates parentSessionId from a parent_session record', async () => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      writeSession(sessionId, [
+        userLine(sessionId, 'hello'),
+        parentSessionLine(sessionId, 'parent-abc'),
+      ]);
+
+      const result = await service.listSessions();
+
+      const item = findItem(result.items, sessionId);
+      expect(item).toBeDefined();
+      expect(item?.parentSessionId).toBe('parent-abc');
+    });
+
+    it('rehydrates source metadata for lists and direct restore lookup', async () => {
+      const sessionId = '77777777-7777-7777-7777-777777777777';
+      writeSession(sessionId, [
+        userLine(sessionId, 'hello'),
+        parentSessionLine(sessionId, 'parent-abc'),
+        sessionSourceLine(sessionId),
+      ]);
+
+      const result = await service.listSessions();
+
+      expect(findItem(result.items, sessionId)).toMatchObject({
+        parentSessionId: 'parent-abc',
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+      });
+      expect(await service.readCreationMetadata(sessionId)).toEqual({
+        parentSessionId: 'parent-abc',
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+      });
+    });
+
+    it('keeps the first immutable source record', async () => {
+      const sessionId = '88888888-8888-8888-8888-888888888888';
+      writeSession(sessionId, [
+        userLine(sessionId, 'hello'),
+        sessionSourceLine(sessionId),
+        {
+          ...sessionSourceLine(sessionId),
+          uuid: 'u4',
+          systemPayload: { sourceType: 'api', sourceId: 'request-456' },
+        },
+      ]);
+
+      expect(await service.readCreationMetadata(sessionId)).toMatchObject({
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+      });
+    });
+
+    it('leaves parentSessionId undefined when no parent_session record exists', async () => {
+      const sessionId = '22222222-2222-2222-2222-222222222222';
+      writeSession(sessionId, [userLine(sessionId, 'hello')]);
+
+      const result = await service.listSessions();
+
+      const item = findItem(result.items, sessionId);
+      expect(item).toBeDefined();
+      expect(item?.parentSessionId).toBeUndefined();
+    });
+
+    it('reads a parent_session record near the head past the tail window', async () => {
+      // The parent_session record is written once near the start of the file.
+      // Push it out of the trailing 64KB scan window with bulk user records so
+      // the read must fall back to the head window to recover it.
+      const sessionId = '33333333-3333-3333-3333-333333333333';
+      const bulk = 'x'.repeat(4000);
+      const lines: Array<Record<string, unknown>> = [
+        userLine(sessionId, 'hello'),
+        parentSessionLine(sessionId, 'parent-head'),
+      ];
+      // 30 * ~4KB comfortably exceeds the 64KB tail window.
+      for (let i = 0; i < 30; i++) {
+        lines.push({
+          uuid: `bulk-${i}`,
+          parentUuid: i === 0 ? 'u2' : `bulk-${i - 1}`,
+          sessionId,
+          type: 'user',
+          timestamp: '2026-04-22T00:01:00.000Z',
+          cwd,
+          version: 'test',
+          message: { role: 'user', parts: [{ text: bulk }] },
+        });
+      }
+      writeSession(sessionId, lines);
+
+      const result = await service.listSessions();
+
+      const item = findItem(result.items, sessionId);
+      expect(item).toBeDefined();
+      expect(item?.parentSessionId).toBe('parent-head');
+    });
+
+    it('readParentSessionId returns the parentSessionId for a session with a parent_session record', async () => {
+      const sessionId = '44444444-4444-4444-4444-444444444444';
+      writeSession(sessionId, [
+        userLine(sessionId, 'hello'),
+        parentSessionLine(sessionId, 'parent-xyz'),
+      ]);
+
+      expect(await service.readParentSessionId(sessionId)).toBe('parent-xyz');
+    });
+
+    it('readParentSessionId returns undefined for a session without a parent_session record', async () => {
+      const sessionId = '55555555-5555-5555-5555-555555555555';
+      writeSession(sessionId, [userLine(sessionId, 'hello')]);
+
+      expect(await service.readParentSessionId(sessionId)).toBeUndefined();
+    });
+
+    it('readParentSessionId returns undefined for a nonexistent session', async () => {
+      const sessionId = '66666666-6666-6666-6666-666666666666';
+
+      expect(await service.readParentSessionId(sessionId)).toBeUndefined();
     });
   });
 });

@@ -12,26 +12,32 @@
  * progress information into a count.
  *
  * Each row shows: status glyph · agent name · elapsed · tokens.
- * Rendered in the committed phase only; during the live phase
- * `LiveAgentPanel` below the composer owns the per-agent roster.
- * Elapsed and token data fall back to
- * `AgentResultDisplay.executionSummary` when the registry entry has
- * been unregistered.
+ * Rendered in BOTH phases via `ToolGroupMessage`'s `inlineToolCalls`
+ * hand-off. During the live phase only terminal (completed / failed /
+ * cancelled) agents render here — running / background ones are owned by
+ * `LiveAgentPanel` below the composer — and an `availableTerminalHeight`
+ * windowing backstop caps the panel height so the non-`<Static>` live
+ * frame can't overflow and trigger ink's scroll snap-back. In the
+ * committed phase the full roster renders with no cap, as the persistent
+ * scrollback record. `totalAgentCount` keeps the header tally honest when
+ * the rendered rows are a live-phase subset. Elapsed and token data fall
+ * back to `AgentResultDisplay.executionSummary` when the registry entry
+ * has been unregistered.
  */
 
 import type React from 'react';
 import { useContext, useEffect, useMemo, useState } from 'react';
 import { Box, Text } from 'ink';
-import {
-  type AgentResultDisplay,
-  ToolDisplayNames,
-  ToolNames,
-} from '@qwen-code/qwen-code-core';
+import { type AgentResultDisplay } from '@qwen-code/qwen-code-core';
 import type { IndividualToolCallDisplay } from '../../types.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
 import { theme } from '../../semantic-colors.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
-import { escapeAnsiCtrlCodes } from '../../utils/textUtils.js';
+import {
+  escapeAnsiCtrlCodes,
+  sanitizeMultilineForDisplay,
+} from '../../utils/textUtils.js';
+import { TOOL_DISPLAY_BY_NAME } from '../../utils/tool-display-map.js';
 import { localizeToolDisplayName } from '../../../i18n/index.js';
 
 interface InlineParallelAgentsDisplayProps {
@@ -43,6 +49,16 @@ interface InlineParallelAgentsDisplayProps {
    * defaults to the number of agent entries in `toolCalls`.
    */
   totalAgentCount?: number;
+  /**
+   * Hard cap on the panel's rendered height (rows). The panel renders
+   * inside the non-`<Static>` live frame; if that frame exceeds the
+   * terminal height, ink clears the whole screen on every repaint
+   * (scroll snap-back / flicker — see ink `shouldClearTerminalForFrame`).
+   * When set, the agent list windows to the most recent rows that fit,
+   * leaving a "+N more" indicator. Omitted → no cap (committed phase,
+   * where the row already lives in `<Static>`).
+   */
+  availableTerminalHeight?: number;
 }
 
 /**
@@ -89,15 +105,6 @@ interface RowData {
   recentActivity?: { name: string; description?: string };
   tokenCount?: number;
 }
-
-// Internal tool name → display name lookup (mirrors LiveAgentPanel so
-// rows surface `Shell` instead of raw `run_shell_command`).
-const TOOL_DISPLAY_BY_NAME: Record<string, string> = Object.fromEntries(
-  (Object.keys(ToolNames) as Array<keyof typeof ToolNames>).map((key) => [
-    ToolNames[key],
-    ToolDisplayNames[key],
-  ]),
-);
 
 function activityLabel(row: RowData): string {
   // `row.recentActivity` was snapshotted in the rows useMemo by reading
@@ -173,7 +180,7 @@ function truncateMiddle(input: string, max: number): string {
 
 export const InlineParallelAgentsDisplay: React.FC<
   InlineParallelAgentsDisplayProps
-> = ({ toolCalls, contentWidth, totalAgentCount }) => {
+> = ({ toolCalls, contentWidth, totalAgentCount, availableTerminalHeight }) => {
   const config = useContext(ConfigContext);
 
   // Static slice of agent calls for this group. The caller already
@@ -246,8 +253,8 @@ export const InlineParallelAgentsDisplay: React.FC<
           : undefined,
         tokenCount:
           result.tokenCount ??
-          live?.stats?.totalTokens ??
-          result.executionSummary?.totalTokens,
+          live?.stats?.outputTokens ??
+          result.executionSummary?.outputTokens,
       };
     });
   }, [agentEntries, config, now]);
@@ -263,25 +270,77 @@ export const InlineParallelAgentsDisplay: React.FC<
   const total = totalAgentCount ?? rows.length;
   const headerLabel = `Parallel agents · ${total} · ${doneCount}/${total} done`;
 
+  // Height backstop: the panel lives in the non-`<Static>` live frame, so its
+  // total height must stay within budget or ink clears the whole terminal on
+  // every repaint (scroll snap-back). The header always costs 1 row; when rows
+  // overflow, the "+N more" indicator costs another. Window to the most recent
+  // rows that still fit AFTER reserving those lines, so the rendered height
+  // (header + optional indicator + visibleRows) never exceeds the budget — even
+  // at degenerate budgets ≤ 2, where we drop all rows (and at a budget of 1 the
+  // indicator too, leaving just the header whose label still states the total).
+  // A budget ≤ 0 / undefined means "no cap" (committed phase — already in
+  // `<Static>`).
+  const hasBudget =
+    availableTerminalHeight != null && availableTerminalHeight > 0;
+  let overflowCount = 0;
+  let visibleRows = rows;
+  if (hasBudget && rows.length + 1 > availableTerminalHeight) {
+    // header (1) + all rows would exceed the budget → window.
+    if (availableTerminalHeight >= 2) {
+      // Reserve 1 row for the header and 1 for the "+N more" indicator; the
+      // remainder is for rows.
+      const rowsFit = availableTerminalHeight - 2;
+      overflowCount = rows.length - rowsFit;
+      visibleRows = rowsFit > 0 ? rows.slice(rows.length - rowsFit) : [];
+    } else {
+      // Budget of 1: only the header fits — drop every row and the indicator
+      // too. The header label still states the total agent count.
+      visibleRows = [];
+    }
+  }
+
   return (
     <Box flexDirection="column" width={contentWidth} paddingX={1}>
       <Box>
-        <Text bold color={theme.text.accent}>
+        {/* truncate-end keeps the header to 1 line — the backstop budgets it as
+            one row; without it a narrow terminal would wrap it and overflow. */}
+        <Text bold color={theme.text.accent} wrap="truncate-end">
           {headerLabel}
         </Text>
       </Box>
-      {rows.map((row) => (
+      {overflowCount > 0 && (
+        <Box>
+          {/* Likewise 1 line: the backstop reserves a single row for this. */}
+          <Text color={theme.text.secondary} wrap="truncate-end">
+            … +{overflowCount} more {overflowCount === 1 ? 'agent' : 'agents'}
+          </Text>
+        </Box>
+      )}
+      {/* INVARIANT: header (1) + optional overflow indicator (1) + each AgentRow
+          (1) must each render exactly 1 terminal line. The height backstop above
+          (rowsFit = budget - 2) counts one line apiece; if any grows to multiple
+          lines the frame would exceed the budget and re-trigger the
+          shouldClearTerminalForFrame snap-back this guards against. Enforced by
+          wrap="truncate-end" on every Text here and in AgentRow. */}
+      {visibleRows.map((row) => (
         <AgentRow key={row.agentId} row={row} now={now} />
       ))}
     </Box>
   );
 };
 
+// INVARIANT: must render exactly ONE terminal line. The parent's height
+// backstop (rowsFit = availableTerminalHeight - 2) assumes one line per row;
+// all Text elements below use wrap="truncate-end" to hold that. Do not add
+// wrapping/multi-line content here without revisiting that windowing math.
 const AgentRow: React.FC<{ row: RowData; now: number }> = ({ row, now }) => {
   const { glyph, color } = statusGlyph(row.status);
   const safeName = escapeAnsiCtrlCodes(row.name);
   const displayName = truncateMiddle(safeName, NAME_COL_WIDTH);
-  const activity = escapeAnsiCtrlCodes(activityLabel(row));
+  // sanitizeMultilineForDisplay: LLM-generated descriptions can carry bare
+  // C0 controls that escapeAnsiCtrlCodes passes through — matches the
+  // hardened dialog Progress rows and ToolMessage approval context.
+  const activity = sanitizeMultilineForDisplay(activityLabel(row));
   const elapsed = elapsedLabel(row, now);
   const tokens =
     row.tokenCount && row.tokenCount > 0
@@ -301,7 +360,9 @@ const AgentRow: React.FC<{ row: RowData; now: number }> = ({ row, now }) => {
   return (
     <Box flexDirection="row">
       <Box flexShrink={0} marginRight={1}>
-        <Text color={color}>{glyph}</Text>
+        <Text color={color} wrap="truncate-end">
+          {glyph}
+        </Text>
       </Box>
       <Box flexShrink={0} marginRight={1} width={NAME_COL_WIDTH}>
         <Text wrap="truncate-end">{displayName}</Text>
@@ -312,7 +373,9 @@ const AgentRow: React.FC<{ row: RowData; now: number }> = ({ row, now }) => {
         </Text>
       </Box>
       <Box flexShrink={0}>
-        <Text color={theme.text.secondary}>{trailing}</Text>
+        <Text color={theme.text.secondary} wrap="truncate-end">
+          {trailing}
+        </Text>
       </Box>
     </Box>
   );

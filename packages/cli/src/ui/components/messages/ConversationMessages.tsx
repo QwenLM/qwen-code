@@ -17,10 +17,11 @@ import {
   SCREEN_READER_USER_PREFIX,
 } from '../../textConstants.js';
 import { t } from '../../../i18n/index.js';
-import { getCachedStringWidth } from '../../utils/textUtils.js';
+import { wrapToVisualLines } from '../../utils/textUtils.js';
 import { formatDuration } from '../../utils/displayUtils.js';
 
 export const THINKING_ICON = '∴ ';
+export const THINKING_ICON_PENDING = '∵ ';
 
 export const toggleKeyHint =
   process.platform === 'darwin' ? 'option+t' : 'alt+t';
@@ -57,6 +58,11 @@ interface ThinkMessageProps {
   availableTerminalHeight?: number;
   contentWidth: number;
   durationMs?: number;
+  /**
+   * VP mode only: the collapsed line is mouse-clickable, so the hint advertises
+   * "click" in addition to the keyboard toggle. Non-VP has no click handler.
+   */
+  clickable?: boolean;
 }
 
 interface ThinkMessageContentProps {
@@ -233,7 +239,7 @@ export const AssistantMessage: React.FC<AssistantMessageProps> = ({
 }) => (
   <PrefixedMarkdownMessage
     text={text}
-    prefix="✦"
+    prefix="◆"
     prefixColor={theme.text.accent}
     ariaLabel={SCREEN_READER_MODEL_PREFIX}
     isPending={isPending}
@@ -257,44 +263,13 @@ export const AssistantMessageContent: React.FC<
     isPending={isPending}
     availableTerminalHeight={availableTerminalHeight}
     contentWidth={contentWidth}
-    basePrefix="✦"
+    basePrefix="◆"
     sourceCopyIndexOffsets={sourceCopyIndexOffsets}
   />
 );
 
 const MAX_STREAMING_THINKING_VISUAL_LINES = 4;
-
-function wrapToVisualLines(text: string, width: number): string[] {
-  if (width <= 0) {
-    return [''];
-  }
-  const visualLines: string[] = [];
-  for (const logicalLine of text.split('\n')) {
-    if (logicalLine === '') {
-      visualLines.push('');
-      continue;
-    }
-    let currentLine = '';
-    let currentWidth = 0;
-    for (const char of logicalLine) {
-      const charWidth = getCachedStringWidth(char);
-      if (currentWidth + charWidth > width && currentWidth > 0) {
-        visualLines.push(currentLine);
-        currentLine = '';
-        currentWidth = 0;
-      }
-      currentLine += char;
-      currentWidth += charWidth;
-    }
-    if (currentLine) {
-      visualLines.push(currentLine);
-    }
-  }
-  if (visualLines.length === 0) {
-    visualLines.push('');
-  }
-  return visualLines;
-}
+const BRIEF_THOUGHT_THRESHOLD_MS = 1_000;
 
 function tailVisualLines(
   text: string,
@@ -313,94 +288,16 @@ function tailVisualLines(
   return lines.slice(-maxLines).join('\n');
 }
 
-export const ThinkMessage: React.FC<ThinkMessageProps> = ({
-  text,
-  isPending,
-  expanded = false,
-  availableTerminalHeight,
-  contentWidth,
-  durationMs,
-}) => {
-  const durationSuffix =
-    durationMs != null ? ` ${formatDuration(durationMs)}` : '';
+const ThinkBody: React.FC<{
+  text: string;
+  isPending: boolean;
+  expanded: boolean;
+  availableTerminalHeight?: number;
+  contentWidth: number;
+}> = ({ text, isPending, expanded, availableTerminalHeight, contentWidth }) => {
+  if (!isPending && !expanded) return null;
 
-  if (!isPending && !expanded) {
-    const label =
-      durationMs != null
-        ? `${t('Thought for')} ${formatDuration(durationMs)}`
-        : t('Thinking');
-    return (
-      <Text dimColor italic>
-        {THINKING_ICON}
-        {label} {t('({{keyHint}} to expand)', { keyHint: toggleKeyHint })}
-      </Text>
-    );
-  }
-
-  if (isPending) {
-    const innerWidth = Math.max(contentWidth - 2, 20);
-    const maxLines =
-      availableTerminalHeight != null
-        ? Math.max(
-            1,
-            Math.min(
-              MAX_STREAMING_THINKING_VISUAL_LINES,
-              Math.floor(availableTerminalHeight / 3),
-            ),
-          )
-        : MAX_STREAMING_THINKING_VISUAL_LINES;
-    const display = tailVisualLines(text, innerWidth, maxLines);
-    return (
-      <Box flexDirection="column">
-        <Text dimColor italic>
-          {THINKING_ICON}
-          {t('Thinking')}…{durationSuffix}
-        </Text>
-        <Box paddingLeft={2}>
-          <Text dimColor wrap="truncate">
-            {display}
-          </Text>
-        </Box>
-      </Box>
-    );
-  }
-
-  const expandedLabel =
-    durationMs != null
-      ? `${t('Thought for')} ${formatDuration(durationMs)}`
-      : `${t('Thinking')}…`;
-  return (
-    <Box flexDirection="column">
-      <Text dimColor italic>
-        {THINKING_ICON}
-        {expandedLabel}{' '}
-        {t('({{keyHint}} to collapse)', { keyHint: toggleKeyHint })}
-      </Text>
-      <Box paddingLeft={2} flexDirection="column">
-        <MarkdownDisplay
-          text={text}
-          isPending={false}
-          availableTerminalHeight={availableTerminalHeight}
-          contentWidth={contentWidth - 2}
-          textColor={theme.text.secondary}
-        />
-      </Box>
-    </Box>
-  );
-};
-
-export const ThinkMessageContent: React.FC<ThinkMessageContentProps> = ({
-  text,
-  isPending,
-  expanded = false,
-  availableTerminalHeight,
-  contentWidth,
-}) => {
-  if (!isPending && !expanded) {
-    return null;
-  }
-
-  if (isPending) {
+  if (isPending && !expanded) {
     const innerWidth = Math.max(contentWidth - 2, 20);
     const maxLines =
       availableTerminalHeight != null
@@ -426,7 +323,7 @@ export const ThinkMessageContent: React.FC<ThinkMessageContentProps> = ({
     <Box paddingLeft={2} flexDirection="column">
       <MarkdownDisplay
         text={text}
-        isPending={false}
+        isPending={isPending}
         availableTerminalHeight={availableTerminalHeight}
         contentWidth={contentWidth - 2}
         textColor={theme.text.secondary}
@@ -434,3 +331,76 @@ export const ThinkMessageContent: React.FC<ThinkMessageContentProps> = ({
     </Box>
   );
 };
+
+export const ThinkMessage: React.FC<ThinkMessageProps> = ({
+  text,
+  isPending,
+  expanded = false,
+  availableTerminalHeight,
+  contentWidth,
+  durationMs,
+  clickable = false,
+}) => {
+  const durationSuffix =
+    durationMs != null ? ` ${formatDuration(durationMs)}` : '';
+  const completedLabel =
+    durationMs == null
+      ? null
+      : durationMs < BRIEF_THOUGHT_THRESHOLD_MS
+        ? t('Thought briefly')
+        : `${t('Thought for')} ${formatDuration(durationMs)}`;
+
+  if (!isPending && !expanded) {
+    const label = completedLabel ?? t('Thinking');
+    const hint = clickable
+      ? t('(click or {{keyHint}} to expand)', { keyHint: toggleKeyHint })
+      : t('({{keyHint}} to expand)', { keyHint: toggleKeyHint });
+    return (
+      <Text dimColor italic>
+        {THINKING_ICON}
+        {label} {hint}
+      </Text>
+    );
+  }
+
+  const label = isPending
+    ? `${t('Thinking')}…${durationSuffix}`
+    : (completedLabel ?? `${t('Thinking')}…`);
+  const collapseHint =
+    !isPending && expanded
+      ? ` ${t('({{keyHint}} to collapse)', { keyHint: toggleKeyHint })}`
+      : '';
+
+  return (
+    <Box flexDirection="column">
+      <Text dimColor italic>
+        {isPending ? THINKING_ICON_PENDING : THINKING_ICON}
+        {label}
+        {collapseHint}
+      </Text>
+      <ThinkBody
+        text={text}
+        isPending={isPending}
+        expanded={expanded}
+        availableTerminalHeight={availableTerminalHeight}
+        contentWidth={contentWidth}
+      />
+    </Box>
+  );
+};
+
+export const ThinkMessageContent: React.FC<ThinkMessageContentProps> = ({
+  text,
+  isPending,
+  expanded = false,
+  availableTerminalHeight,
+  contentWidth,
+}) => (
+  <ThinkBody
+    text={text}
+    isPending={isPending}
+    expanded={expanded}
+    availableTerminalHeight={availableTerminalHeight}
+    contentWidth={contentWidth}
+  />
+);

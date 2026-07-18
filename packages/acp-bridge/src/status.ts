@@ -110,10 +110,14 @@ export const SERVE_STATUS_EXT_METHODS = {
   sessionTasks: 'qwen/status/session/tasks',
   sessionStats: 'qwen/status/session/stats',
   sessionLspStatus: 'qwen/status/session/lsp',
+  sessionTranscript: 'qwen/status/session/transcript',
   sessionRewindSnapshots: 'qwen/status/session/rewind_snapshots',
   workspaceHooks: 'qwen/status/workspace/hooks',
   sessionHooks: 'qwen/status/session/hooks',
   workspaceExtensions: 'qwen/status/workspace/extensions',
+  // Process-wide rss/cpu of this ACP child, self-reported to the daemon for
+  // the Daemon Status resource charts (workspace-scoped; no sessionId).
+  workspaceResource: 'qwen/status/workspace/resource',
 } as const;
 
 /**
@@ -129,22 +133,56 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionBranch: 'qwen/control/session/branch',
   sessionForkAgent: 'qwen/control/session/fork_agent',
   sessionRecap: 'qwen/control/session/recap',
+  sessionGenerationStart: 'qwen/control/session/generation/start',
+  sessionGenerationCancel: 'qwen/control/session/generation/cancel',
   sessionBtw: 'qwen/control/session/btw',
   sessionShellHistory: 'qwen/control/session/shell_history',
   sessionLanguage: 'qwen/control/session/language',
   sessionRewind: 'qwen/control/session/rewind',
+  sessionContinue: 'qwen/control/session/continue',
   sessionTitle: 'qwen/control/session/title',
+  sessionParent: 'qwen/control/session/parent',
+  sessionSource: 'qwen/control/session/source',
+  sessionArtifactsPersist: 'qwen/control/session/artifacts/persist',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
   workspaceMcpManage: 'qwen/control/workspace/mcp/manage',
+  workspaceMcpInitialize: 'qwen/control/workspace/mcp/initialize',
+  workspaceMcpReload: 'qwen/control/workspace/mcp/reload',
   workspaceAgentGenerate: 'qwen/control/workspace/agents/generate',
+  workspaceMemoryRememberAvailability:
+    'qwen/control/workspace/memory/remember/availability',
+  workspaceMemoryRemember: 'qwen/control/workspace/memory/remember',
+  workspaceMemoryForget: 'qwen/control/workspace/memory/forget',
+  workspaceMemoryDream: 'qwen/control/workspace/memory/dream',
   // Runtime MCP server mutation ext-methods
   sessionTaskCancel: 'qwen/control/session/task/cancel',
   sessionGoalClear: 'qwen/control/session/goal/clear',
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',
   workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
   workspaceReload: 'qwen/control/workspace/reload',
+  workspaceSkillsRefresh: 'qwen/control/workspace/skills/refresh',
   workspaceExtensionsRefresh: 'qwen/control/workspace/extensions/refresh',
+  /**
+   * Reverse tool channel (issue #5626, Phase 2). Unlike every other entry
+   * here — which the PARENT serve process calls DOWN into the `qwen --acp`
+   * child — this one is called by the CHILD UP into the parent: a
+   * client-hosted (extension) MCP server's `sendSdkMcpMessage` round-trips a
+   * JSON-RPC `mcp_message` from the child's `McpClientManager` back to the
+   * parent's `ClientMcpRegistrar`, which pushes it down the daemon WS to the
+   * client and returns the correlated response. Params: `{ server, payload }`;
+   * result: `{ payload }`.
+   */
+  clientMcpMessage: 'qwen/control/client_mcp/message',
   sessionCd: 'qwen/control/session/cd',
+  /**
+   * Also called by the CHILD UP into the parent (like `clientMcpMessage`): the
+   * `create_sub_session` tool, running inside a child's agent turn, asks the
+   * daemon to spawn a fresh top-level sub-session and run a prompt in it. Params:
+   * `{ prompt, completion:'sent'|'first-turn', model?, name?, callerSessionId? }`;
+   * result: `{ sessionId, result?, stopReason? }` (result present only for the
+   * `first-turn` mode, which waits for the sub-session's first turn to finish).
+   */
+  createSubSession: 'qwen/control/create-sub-session',
 } as const;
 
 export type ServeStatus =
@@ -188,7 +226,19 @@ export interface ServeWorkspaceMcpServerStatus extends ServeStatusCell {
   transport: ServeMcpTransport;
   disabled: boolean;
   hasOAuthTokens?: boolean;
+  requiresAuth?: boolean;
+  approvalState?: 'pending' | 'rejected';
+  authenticationState?: 'pending' | 'succeeded' | 'failed';
+  authenticationError?: string;
   source?: 'user' | 'project' | 'extension';
+  configOrigin?:
+    | 'user_settings'
+    | 'workspace_settings'
+    | 'project_mcp_json'
+    | 'system_settings'
+    | 'extension'
+    | 'runtime';
+  removable?: boolean;
   config?: {
     command?: string;
     args?: string[];
@@ -262,10 +312,10 @@ export interface ServeWorkspaceMcpServerStatus extends ServeStatusCell {
 export type ServeMcpBudgetMode = 'enforce' | 'warn' | 'off';
 
 /**
- * Workspace-level budget status cell. Surfaced as one entry in
- * `ServeWorkspaceMcpStatus.budgets[]`. The list shape (vs a single
- * `budget?` field) is forward-compat for a future change that may
- * add a `scope: 'pool'` cell alongside without a schema bump.
+ * MCP budget status cell. Surfaced as one entry in
+ * `ServeWorkspaceMcpStatus.budgets[]`. Daemons advertising
+ * `mcp_workspace_pool` emit workspace-scoped accounting; the legacy no-pool
+ * fallback emits session-scoped accounting.
  *
  * Consumers MUST tolerate additional entries with unrecognized
  * `scope` values — drop them rather than failing.
@@ -275,22 +325,13 @@ export interface ServeMcpBudgetStatusCell extends ServeStatusCell {
   /**
    * Identifies which accounting scope this cell describes.
    *
-   * **The budget feature v1 emits `'session'`** because each ACP session creates
-   * its own `Config`/`McpClientManager` via `acpAgent.newSessionConfig()`
-   * — so the budget caps live MCP clients **per session**, not
-   * per-workspace. The snapshot reflects the bootstrap session's
-   * view; concurrent sessions each enforce their own copy of the
-   * cap independently. See `qwen-serve-protocol.md` "The budget feature v1
-   * scope: per-session" for the operator-facing rationale.
+   * `'workspace'` means sessions inside the selected runtime share an MCP pool
+   * and budget. `'session'` is the legacy per-session manager used when
+   * `mcp_workspace_pool` is absent.
    *
-   * Future PRs:
-   *   - A future shared MCP pool may introduce a workspace-scoped
-   *     manager and will emit `'workspace'` (or `'pool'`) cells.
-   *   - The `string & {}` widening keeps IDE autocomplete + literal
-   *     narrowing for known scopes while allowing unknown scopes
-   *     through without a compile-time break — the protocol contract
-   *     is "consumers MUST tolerate additional scope values, drop
-   *     don't fail."
+   * The `string & {}` widening keeps IDE autocomplete + literal narrowing for
+   * known scopes while allowing unknown scopes through without a compile-time
+   * break. Consumers drop unrecognized scopes rather than failing.
    */
   scope: 'session' | 'workspace' | (string & {});
   /** Live (CONNECTED) MCP client count at snapshot time. */
@@ -384,9 +425,16 @@ export interface ServeWorkspaceSkillStatus extends ServeStatusCell {
   description: string;
   level: ServeSkillLevel;
   modelInvocable: boolean;
+  userInvocable?: false;
+  installedPath?: string;
   argumentHint?: string;
   model?: string;
   extensionName?: string;
+}
+
+export interface ServeWorkspaceSkillsRefreshResult {
+  sessionsRefreshed: number;
+  sessionsFailed: number;
 }
 
 export interface ServeWorkspaceSkillsStatus {
@@ -402,6 +450,7 @@ export interface ServeWorkspaceProviderCurrent {
   modelId?: string;
   baseUrl?: string;
   fastModelId?: string;
+  visionModelId?: string;
 }
 
 export interface ServeWorkspaceProviderModel {
@@ -435,6 +484,7 @@ export interface ServeWorkspaceProvidersStatus {
   initialized: boolean;
   acpChannelLive?: boolean;
   current?: ServeWorkspaceProviderCurrent;
+  approvalMode?: string;
   providers: ServeWorkspaceProviderStatus[];
   errors?: ServeStatusCell[];
 }
@@ -561,6 +611,20 @@ export interface ServeSessionAgentTaskStatus {
   stats?: { totalTokens: number; toolUses: number; durationMs: number };
   recentActivities?: Array<{ name: string; description: string; at: number }>;
   prompt?: string;
+  /**
+   * `id` of the agent task that spawned this one; absent for agents
+   * launched by the top-level session. Mirrors `AgentTask.parentAgentId`
+   * (a `null` there serializes as absent here). Lets clients render the
+   * roster as a tree.
+   */
+  parentAgentId?: string;
+  /**
+   * Display name (`subagentType`) of the spawning agent, captured at
+   * registration time so it survives the parent's eviction. Display-only.
+   */
+  parentName?: string;
+  /** Launch depth (0-based; 0 = spawned by the top-level session). */
+  depth?: number;
 }
 
 export interface ServeSessionShellTaskStatus {
@@ -900,6 +964,9 @@ export const IDLE_HOOK_EVENTS: Record<HookEventName, ServeHookEventMeta> = {
     description: 'When a new session is started',
     matcherKind: 'sessionTrigger',
   },
+  MessageDisplay: {
+    description: 'Repeatedly, as the assistant reply streams',
+  },
   Stop: { description: 'Right before Qwen Code concludes its response' },
   SubagentStart: {
     description: 'When a subagent is started',
@@ -969,6 +1036,7 @@ export interface ServeExtensionCapabilities {
 export type ServeExtensionUpdateState =
   | 'checking for updates'
   | 'updated, needs restart'
+  | 'updated with warnings'
   | 'updating'
   | 'updated'
   | 'update available'
@@ -991,6 +1059,7 @@ export interface ServeExtensionEntry {
   id: string;
   name: string;
   displayName?: string;
+  description?: string;
   version: string;
   isActive: boolean;
   path: string;

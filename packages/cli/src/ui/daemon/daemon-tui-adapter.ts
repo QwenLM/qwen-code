@@ -9,7 +9,10 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  isVisionBridgeNoticeDisplay,
+} from '@qwen-code/qwen-code-core';
 import {
   ToolCallStatus,
   type HistoryItemToolGroup,
@@ -267,6 +270,11 @@ function formatToolResultDisplay(
   }
   if (typeof value === 'string') {
     return sanitizeDisplayText(value);
+  }
+  if (isVisionBridgeNoticeDisplay(value)) {
+    return sanitizeDaemonValue(
+      value,
+    ) as IndividualToolCallDisplay['resultDisplay'];
   }
   if (
     isRecord(value) &&
@@ -566,6 +574,28 @@ export function reduceDaemonEventToTuiUpdates(
           item: {
             type: 'info',
             text: `Model switched to ${modelId}`,
+          },
+          daemonEventId: event.id,
+        },
+      ];
+    }
+
+    case 'model_fallback': {
+      if (
+        !isRecord(event.data) ||
+        typeof event.data['fromModel'] !== 'string' ||
+        typeof event.data['toModel'] !== 'string'
+      ) {
+        return [];
+      }
+      const fromModel = sanitizeDisplayText(event.data['fromModel']);
+      const toModel = sanitizeDisplayText(event.data['toModel']);
+      return [
+        {
+          type: 'history',
+          item: {
+            type: 'notification',
+            text: `Model ${fromModel} unavailable, falling back to ${toModel}`,
           },
           daemonEventId: event.id,
         },

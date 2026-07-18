@@ -12,6 +12,10 @@ import { randomUUID } from 'node:crypto';
 import readline from 'node:readline';
 import type { Content, Part } from '@google/genai';
 import * as jsonl from '../utils/jsonl-utils.js';
+import {
+  buildOrderedUuidChain,
+  type HistoryGap,
+} from '../utils/conversation-chain.js';
 import type {
   ChatCompressionRecordPayload,
   ChatRecord,
@@ -35,6 +39,14 @@ import {
   readLastJsonStringFieldsSync,
 } from '../utils/sessionStorageUtils.js';
 import { getUsageOutputTokenCountForPromptEstimate } from './tokenEstimation.js';
+import {
+  isSessionArtifactRecord,
+  rebuildSessionArtifactSnapshot,
+  remapSessionArtifactPayloadForFork,
+  type RebuiltSessionArtifactSnapshot,
+} from './session-artifact-persistence.js';
+import { SessionOrganizationService } from './session-organization-service.js';
+import { SessionTranscriptTooLargeError } from './session-transcript-reader.js';
 
 const debugLogger = createDebugLogger('SESSION');
 
@@ -75,7 +87,21 @@ export interface SessionListItem {
    * chose.
    */
   titleSource?: TitleSource;
+  /** Id of the session that spawned this one (via `create_sub_session`), if
+   * any. Read from the transcript's `parent_session` record. Absent for a
+   * top-level session. */
+  parentSessionId?: string;
+  /** Immutable creator attribution read from `session_source`. */
+  sourceType?: string;
+  /** Optional source-specific identifier paired with `sourceType`. */
+  sourceId?: string;
+  /** True when the item was read from the archive directory. */
+  isArchived?: boolean;
 }
+
+export type SessionArchiveState = 'active' | 'archived';
+
+export type SessionLocation = SessionArchiveState | 'conflict' | undefined;
 
 /**
  * Pagination options for listing sessions.
@@ -92,6 +118,11 @@ export interface ListSessionsOptions {
    * @default 20
    */
   size?: number;
+  /**
+   * Which session directory to list.
+   * @default 'active'
+   */
+  archiveState?: SessionArchiveState;
 }
 
 /**
@@ -110,12 +141,59 @@ export interface ListSessionsResult {
 }
 
 /**
+ * Aggregate persisted-session counts for a workspace.
+ *
+ * Built by scanning local JSONL files. This is intentionally separate from
+ * {@link listSessions} so paginated list callers are not forced into a full
+ * disk walk.
+ */
+export interface SessionInfoCounts {
+  /** Persisted active (non-archived) sessions belonging to this project. */
+  active: number;
+  /** Persisted archived sessions belonging to this project. */
+  archived: number;
+  /** `active + archived`. */
+  total: number;
+  /**
+   * True when the scan could not classify every candidate session file, so
+   * counts may be lower than the true population.
+   */
+  truncated: boolean;
+}
+
+/**
  * Result of removing multiple sessions.
  */
 export interface RemoveSessionsResult {
   removed: string[];
   notFound: string[];
   errors: Array<{ sessionId: string; error: Error }>;
+}
+
+export interface ArchiveSessionsResult {
+  archived: string[];
+  alreadyArchived: string[];
+  notFound: string[];
+  errors: Array<{ sessionId: string; error: Error }>;
+}
+
+export interface ArchiveSessionsOptions {
+  knownLocation?: 'active';
+}
+
+export interface UnarchiveSessionsResult {
+  unarchived: string[];
+  alreadyActive: string[];
+  notFound: string[];
+  errors: Array<{ sessionId: string; error: Error }>;
+}
+
+export interface UnarchiveSessionsOptions {
+  knownLocation?: 'archived';
+}
+
+export interface SessionServiceOptions {
+  onWarning?: (message: string) => void;
 }
 
 /**
@@ -141,6 +219,15 @@ export interface ResumedSessionData {
   lastCompletedUuid: string | null;
   /** Deserialized file history snapshots for resume (enables /rewind across sessions) */
   fileHistorySnapshots?: FileHistorySnapshot[];
+  /** Persisted session artifact metadata reconstructed from JSONL records. */
+  artifactSnapshot?: RebuiltSessionArtifactSnapshot;
+  /**
+   * Breaks in the persisted parentUuid chain that were detected during
+   * reconstruction (an earlier segment of history was physically lost and could
+   * not be recovered). Lets the surface render a visible gap divider. Undefined
+   * when the chain was intact.
+   */
+  historyGaps?: HistoryGap[];
 }
 
 /**
@@ -235,15 +322,57 @@ export class SessionService {
   private readonly storage: Storage;
   private readonly projectHash: string;
   private readonly projectRoot: string;
+  private readonly onWarning: ((message: string) => void) | undefined;
 
-  constructor(cwd: string) {
+  constructor(cwd: string, options: SessionServiceOptions = {}) {
     this.storage = new Storage(cwd);
     this.projectRoot = cwd;
     this.projectHash = getProjectHash(cwd);
+    this.onWarning = options.onWarning;
+  }
+
+  /** The workspace root this service is bound to (the cwd it was constructed
+   * with). Lets callers that already hold a service — e.g. the session
+   * archive/delete choke points — reach per-project state such as the durable
+   * scheduled-tasks file without re-plumbing the workspace path. */
+  getProjectRoot(): string {
+    return this.projectRoot;
+  }
+
+  private warn(message: string): void {
+    debugLogger.warn(message);
+    this.onWarning?.(message);
   }
 
   private getChatsDir(): string {
     return path.join(this.storage.getProjectDir(), 'chats');
+  }
+
+  private getArchiveChatsDir(): string {
+    return path.join(this.getChatsDir(), 'archive');
+  }
+
+  private getChatsDirForState(state: SessionArchiveState): string {
+    return state === 'archived'
+      ? this.getArchiveChatsDir()
+      : this.getChatsDir();
+  }
+
+  private getSessionFilePath(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return path.join(this.getChatsDirForState(state), `${sessionId}.jsonl`);
+  }
+
+  private getWorktreeSessionPathForState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return path.join(
+      this.getChatsDirForState(state),
+      `${sessionId}.worktree.json`,
+    );
   }
 
   private async sessionBelongsToCurrentProject(
@@ -269,7 +398,173 @@ export class SessionService {
    * exist yet — consumers must handle ENOENT as "no active worktree".
    */
   getWorktreeSessionPath(sessionId: string): string {
-    return path.join(this.getChatsDir(), `${sessionId}.worktree.json`);
+    return this.getWorktreeSessionPathForState(sessionId, 'active');
+  }
+
+  private async readProjectSessionHead(
+    sessionId: string,
+    filePath: string,
+  ): Promise<ChatRecord | undefined> {
+    try {
+      const records = await jsonl.readLines<ChatRecord>(filePath, 1);
+      if (records.length === 0) {
+        return undefined;
+      }
+      const firstRecord = records[0];
+      if (
+        !(await this.sessionBelongsToCurrentProject(sessionId, firstRecord.cwd))
+      ) {
+        return undefined;
+      }
+      return firstRecord;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return undefined;
+      }
+      this.warn(`readProjectSessionHead: failed to read ${filePath}: ${error}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Reads the persisted `parentSessionId` for a single session (active or
+   * archived), or undefined when it has no parent. Used to re-seed a live entry
+   * on restore/resume so a restored sub-session's status still reports its
+   * lineage after a daemon restart. Best-effort: a read failure returns
+   * undefined rather than throwing — a missing link must never fail a restore.
+   */
+  async readParentSessionId(sessionId: string): Promise<string | undefined> {
+    return (await this.readCreationMetadata(sessionId)).parentSessionId;
+  }
+
+  /** Reads immutable creation metadata for an active or archived session. */
+  async readCreationMetadata(sessionId: string): Promise<{
+    parentSessionId?: string;
+    sourceType?: string;
+    sourceId?: string;
+  }> {
+    for (const state of ['active', 'archived'] as const) {
+      const filePath = this.getSessionFilePath(sessionId, state);
+      try {
+        const records = await jsonl.readLines<ChatRecord>(
+          filePath,
+          MAX_PROMPT_SCAN_LINES,
+        );
+        if (records.length === 0) continue;
+        if (
+          !(await this.sessionBelongsToCurrentProject(
+            records[0].sessionId,
+            records[0].cwd,
+          ))
+        ) {
+          continue;
+        }
+        return this.extractCreationMetadataFromRecords(records);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        this.warn(
+          `readCreationMetadata: failed to read ${sessionId}: ${error}`,
+        );
+      }
+    }
+    return {};
+  }
+
+  async getSessionLocation(sessionId: string): Promise<SessionLocation> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
+      return undefined;
+    }
+
+    const [active, archived] = await Promise.all([
+      this.readProjectSessionHead(
+        sessionId,
+        this.getSessionFilePath(sessionId, 'active'),
+      ),
+      this.readProjectSessionHead(
+        sessionId,
+        this.getSessionFilePath(sessionId, 'archived'),
+      ),
+    ]);
+
+    if (active && archived) return 'conflict';
+    if (active) return 'active';
+    if (archived) return 'archived';
+    return undefined;
+  }
+
+  private removeFileIfExists(filePath: string): void {
+    try {
+      fs.unlinkSync(filePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw error;
+      }
+    }
+  }
+
+  private removeWorktreeSidecars(sessionId: string): void {
+    for (const state of ['active', 'archived'] as const) {
+      const sidecar = this.getWorktreeSessionPathForState(sessionId, state);
+      if (fs.existsSync(sidecar)) {
+        this.removeFileIfExists(sidecar);
+      }
+    }
+  }
+
+  private removeFileHistoryBackups(sessionId: string): void {
+    fs.rmSync(
+      path.join(Storage.getGlobalQwenDir(), FILE_HISTORY_DIR, sessionId),
+      { recursive: true, force: true },
+    );
+  }
+
+  private async removeSessionOrganization(sessionId: string): Promise<void> {
+    try {
+      await new SessionOrganizationService(this.projectRoot, (message) => {
+        this.warn(message);
+      }).removeSession(sessionId);
+    } catch (error) {
+      this.warn(
+        `removeSession: failed to clear session organization for ${sessionId}: ${error}`,
+      );
+    }
+  }
+
+  private async removeSessionOrganizations(
+    sessionIds: string[],
+  ): Promise<void> {
+    if (sessionIds.length === 0) return;
+    try {
+      await new SessionOrganizationService(this.projectRoot, (message) => {
+        this.warn(message);
+      }).removeSessions(sessionIds);
+    } catch (error) {
+      this.warn(
+        `removeSessions: failed to clear session organization for ${sessionIds.join(
+          ', ',
+        )}: ${error}`,
+      );
+    }
+  }
+
+  private moveOptionalFile(sourcePath: string, targetPath: string): boolean {
+    if (!fs.existsSync(sourcePath)) {
+      return false;
+    }
+    if (fs.existsSync(targetPath)) {
+      throw new Error('Archive sidecar conflict: destination already exists');
+    }
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.renameSync(sourcePath, targetPath);
+    return true;
+  }
+
+  private sessionFileMoveError(
+    action: 'archive' | 'unarchive',
+    error: unknown,
+  ): Error {
+    const code = (error as NodeJS.ErrnoException).code ?? 'unknown error';
+    return new Error(`Failed to ${action} session file: ${code}`);
   }
 
   /**
@@ -333,9 +628,61 @@ export class SessionService {
   }
 
   /**
+   * Extracts the `parent_session` record's `parentSessionId` from records
+   * ALREADY read for the listing (the first {@link MAX_PROMPT_SCAN_LINES}), or
+   * undefined when the session has no parent. The record is written once right
+   * after the sub-session is created — before any prompt — so it is reliably
+   * within that window. No extra file open, unlike the title (which re-anchors
+   * at EOF and needs its own tail-then-head scan).
+   */
+  private extractCreationMetadataFromRecords(records: ChatRecord[]): {
+    parentSessionId?: string;
+    sourceType?: string;
+    sourceId?: string;
+  } {
+    let parentSessionId: string | undefined;
+    let sourceType: string | undefined;
+    let sourceId: string | undefined;
+    for (const record of records) {
+      if (record.type === 'system' && record.subtype === 'parent_session') {
+        const payload = record.systemPayload as
+          | { parentSessionId?: unknown }
+          | undefined;
+        if (
+          parentSessionId === undefined &&
+          typeof payload?.parentSessionId === 'string'
+        ) {
+          parentSessionId = payload.parentSessionId;
+        }
+      }
+      if (record.type === 'system' && record.subtype === 'session_source') {
+        const payload = record.systemPayload as
+          | { sourceType?: unknown; sourceId?: unknown }
+          | undefined;
+        if (
+          sourceType === undefined &&
+          typeof payload?.sourceType === 'string'
+        ) {
+          sourceType = payload.sourceType;
+          sourceId =
+            typeof payload.sourceId === 'string' ? payload.sourceId : undefined;
+        }
+      }
+    }
+    return {
+      ...(parentSessionId ? { parentSessionId } : {}),
+      ...(sourceType ? { sourceType } : {}),
+      ...(sourceId !== undefined ? { sourceId } : {}),
+    };
+  }
+
+  /**
    * Public accessor: returns both the current custom title and its source
    * for a given session. Used by `ChatRecordingService` on resume to
    * preserve the persisted `titleSource` rather than defaulting to manual.
+   *
+   * @remarks Only checks active sessions. Use `getSessionLocation()` or
+   * `sessionExistsInAnyState()` for archive-aware lookups.
    */
   getSessionTitleInfo(sessionId: string): {
     title?: string;
@@ -473,6 +820,9 @@ export class SessionService {
    * of multi-MB sessions. Call this lazily, only when a specific
    * session's message count is about to be displayed (e.g., from a
    * preview panel) or computed from a resumed conversation.
+   *
+   * @remarks Only checks active sessions. Use `getSessionLocation()` or
+   * `sessionExistsInAnyState()` for archive-aware lookups.
    */
   async countSessionMessages(sessionId: string): Promise<number> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
@@ -544,8 +894,9 @@ export class SessionService {
   async listSessions(
     options: ListSessionsOptions = {},
   ): Promise<ListSessionsResult> {
-    const { cursor, size = 20 } = options;
-    const chatsDir = this.getChatsDir();
+    const { cursor, size = 20, archiveState = 'active' } = options;
+    const chatsDir = this.getChatsDirForState(archiveState);
+    const isArchived = archiveState === 'archived';
 
     // Get all valid session files (matching UUID pattern) with their stats
     let files: Array<{ name: string; mtime: number }> = [];
@@ -630,6 +981,7 @@ export class SessionService {
       const prompt = this.extractFirstPromptFromRecords(records);
 
       const titleInfo = this.readSessionTitleInfoFromFile(filePath, tailBuffer);
+      const source = this.extractCreationMetadataFromRecords(records);
       items.push({
         sessionId: firstRecord.sessionId,
         cwd: firstRecord.cwd,
@@ -642,6 +994,12 @@ export class SessionService {
         // and `countSessionMessages` for the rationale.
         customTitle: titleInfo.title,
         titleSource: titleInfo.source,
+        ...(source.parentSessionId
+          ? { parentSessionId: source.parentSessionId }
+          : {}),
+        ...(source.sourceType ? { sourceType: source.sourceType } : {}),
+        ...(source.sourceId !== undefined ? { sourceId: source.sourceId } : {}),
+        isArchived,
       });
     }
 
@@ -657,6 +1015,86 @@ export class SessionService {
       nextCursor,
       hasMore: hasMoreFiles,
     };
+  }
+
+  /**
+   * Counts persisted sessions for this project by scanning the active and
+   * archived chats directories.
+   *
+   * Same disk-walk shape as {@link findSessionTitlesByPrefix} /
+   * {@link findSessionsByTitle}: `readdir` the chats dir, cap at the
+   * file-processing safety limit, then read only the first JSONL record for
+   * project membership. Title/prompt/message hydration is skipped entirely.
+   *
+   * Still an O(n) disk walk — callers (and HTTP clients of
+   * `GET .../session-info`) must not poll this in a tight loop.
+   */
+  async getSessionInfoCounts(): Promise<SessionInfoCounts> {
+    const [active, archived] = await Promise.all([
+      this.countSessionsInState('active'),
+      this.countSessionsInState('archived'),
+    ]);
+    return {
+      active: active.count,
+      archived: archived.count,
+      total: active.count + archived.count,
+      truncated: active.truncated || archived.truncated,
+    };
+  }
+
+  private async countSessionsInState(
+    archiveState: SessionArchiveState,
+  ): Promise<{ count: number; truncated: boolean }> {
+    const chatsDir = this.getChatsDirForState(archiveState);
+    let fileNames: string[];
+    try {
+      fileNames = fs.readdirSync(chatsDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { count: 0, truncated: false };
+      }
+      throw error;
+    }
+
+    let count = 0;
+    let filesProcessed = 0;
+    let truncated = false;
+
+    for (const name of fileNames) {
+      if (!SESSION_FILE_PATTERN.test(name)) continue;
+      if (filesProcessed >= MAX_FILES_TO_PROCESS) {
+        truncated = true;
+        break;
+      }
+      filesProcessed++;
+
+      const filePath = path.join(chatsDir, name);
+      // Project filter only — same first-record membership check as
+      // findSessionTitlesByPrefix, without the title tail-read (every file
+      // is a candidate when counting).
+      try {
+        const records = await jsonl.readLines<ChatRecord>(filePath, 1);
+        if (records.length === 0) {
+          truncated = true;
+          continue;
+        }
+        const firstRecord = records[0]!;
+        if (
+          !(await this.sessionBelongsToCurrentProject(
+            firstRecord.sessionId,
+            firstRecord.cwd,
+          ))
+        ) {
+          continue;
+        }
+        count++;
+      } catch {
+        truncated = true;
+        continue;
+      }
+    }
+
+    return { count, truncated };
   }
 
   /**
@@ -728,12 +1166,19 @@ export class SessionService {
 
   /**
    * Reconstructs a linear conversation from tree-structured records.
+   *
+   * Delegates the parentUuid walk to {@link buildOrderedUuidChain}. With
+   * `detectGaps`, a walk that stops on a physically-missing parent records the
+   * break in the returned `gaps` (see {@link HistoryGap}) so the surface can
+   * mark it — the earlier records are NOT reconstructed (reconnecting them
+   * could resurrect turns the user rewound away). Without `detectGaps` the
+   * result is identical to the historical walk.
    */
   private reconstructHistory(
     records: ChatRecord[],
-    leafUuid?: string,
-  ): ChatRecord[] {
-    if (records.length === 0) return [];
+    opts?: { leafUuid?: string; detectGaps?: boolean },
+  ): { messages: ChatRecord[]; gaps: HistoryGap[] } {
+    if (records.length === 0) return { messages: [], gaps: [] };
 
     const recordsByUuid = new Map<string, ChatRecord[]>();
     for (const record of records) {
@@ -742,29 +1187,27 @@ export class SessionService {
       recordsByUuid.set(record.uuid, existing);
     }
 
-    let currentUuid: string | null =
-      leafUuid ?? records[records.length - 1].uuid;
-    const uuidChain: string[] = [];
-    const visited = new Set<string>();
+    const { uuids, gaps } = buildOrderedUuidChain(records, opts);
 
-    while (currentUuid && !visited.has(currentUuid)) {
-      visited.add(currentUuid);
-      uuidChain.push(currentUuid);
-      const recordsForUuid = recordsByUuid.get(currentUuid);
-      if (!recordsForUuid || recordsForUuid.length === 0) break;
-      currentUuid = recordsForUuid[0].parentUuid;
-    }
-
-    uuidChain.reverse();
     const messages: ChatRecord[] = [];
-    for (const uuid of uuidChain) {
+    for (const uuid of uuids) {
       const recordsForUuid = recordsByUuid.get(uuid);
       if (recordsForUuid && recordsForUuid.length > 0) {
         messages.push(this.aggregateRecords(recordsForUuid));
       }
     }
 
-    return messages;
+    return { messages, gaps };
+  }
+
+  private lastConversationRecordUuid(records: ChatRecord[]): string | null {
+    for (let index = records.length - 1; index >= 0; index--) {
+      const record = records[index];
+      if (record && !isSessionArtifactRecord(record)) {
+        return record.uuid;
+      }
+    }
+    return null;
   }
 
   /**
@@ -772,13 +1215,56 @@ export class SessionService {
    * Reconstructs the full conversation from tree-structured records.
    *
    * @param sessionId The session ID to load
-   * @returns Session data for resumption, or null if not found
+   * @returns Session data for resumption, or undefined if not found
+   * @remarks Only checks active sessions. Use `getSessionLocation()` or
+   * `sessionExistsInAnyState()` for archive-aware lookups.
    */
   async loadSession(
     sessionId: string,
   ): Promise<ResumedSessionData | undefined> {
-    const chatsDir = this.getChatsDir();
-    const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+    return this.loadSessionFromState(sessionId, 'active');
+  }
+
+  /**
+   * Reads an archived session without changing its archive state.
+   * Daemon load/resume paths must continue to use {@link loadSession}.
+   */
+  async loadArchivedSession(
+    sessionId: string,
+    options: { maxBytes: number },
+  ): Promise<ResumedSessionData | undefined> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
+      return undefined;
+    }
+    const filePath = this.getSessionFilePath(sessionId, 'archived');
+    let stats: fs.Stats;
+    try {
+      stats = fs.statSync(filePath);
+      if (stats.size > options.maxBytes) {
+        throw new SessionTranscriptTooLargeError(
+          sessionId,
+          stats.size,
+          options.maxBytes,
+        );
+      }
+    } catch (error) {
+      if (error instanceof SessionTranscriptTooLargeError) {
+        throw error;
+      }
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw error;
+      }
+      return undefined;
+    }
+    return this.loadSessionFromState(sessionId, 'archived', stats);
+  }
+
+  private async loadSessionFromState(
+    sessionId: string,
+    state: SessionArchiveState,
+    stats?: fs.Stats,
+  ): Promise<ResumedSessionData | undefined> {
+    const filePath = this.getSessionFilePath(sessionId, state);
 
     const records = await this.readAllRecords(filePath);
     if (records.length === 0) {
@@ -796,13 +1282,34 @@ export class SessionService {
     }
 
     // Reconstruct linear history
-    const messages = this.reconstructHistory(records);
+    const leafUuid = this.lastConversationRecordUuid(records);
+    if (!leafUuid) {
+      return;
+    }
+
+    const { messages, gaps } = this.reconstructHistory(records, {
+      leafUuid,
+      detectGaps: true,
+    });
     if (messages.length === 0) {
       return;
     }
 
+    if (gaps.length > 0) {
+      debugLogger.warn(
+        `loadSession: detected ${gaps.length} unrecoverable history gap(s) ` +
+          `for session ${sessionId}: ` +
+          gaps
+            .map(
+              (g) =>
+                `child=${g.childUuid} missingParent=${g.missingParentUuid}`,
+            )
+            .join('; '),
+      );
+    }
+
     const lastMessage = messages[messages.length - 1];
-    const stats = fs.statSync(filePath);
+    stats ??= fs.statSync(filePath);
 
     const conversation: ConversationRecord = {
       sessionId: firstRecord.sessionId,
@@ -847,6 +1354,14 @@ export class SessionService {
       fileHistorySnapshots.length > MAX_SNAPSHOTS
         ? fileHistorySnapshots.slice(-MAX_SNAPSHOTS)
         : fileHistorySnapshots;
+    const activeBranchRecords = includeActiveSideArtifactRecords(
+      records,
+      messages,
+    );
+    const artifactSnapshot = rebuildSessionArtifactSnapshot(
+      activeBranchRecords,
+      firstRecord.sessionId,
+    );
 
     return {
       conversation,
@@ -854,6 +1369,8 @@ export class SessionService {
       lastCompletedUuid: lastMessage.uuid,
       fileHistorySnapshots:
         cappedSnapshots.length > 0 ? cappedSnapshots : undefined,
+      ...(artifactSnapshot ? { artifactSnapshot } : {}),
+      historyGaps: gaps.length > 0 ? gaps : undefined,
     };
   }
 
@@ -864,26 +1381,42 @@ export class SessionService {
    * @returns true if removed, false if not found
    */
   async removeSession(sessionId: string): Promise<boolean> {
+    const removed = await this.removeSessionFiles(sessionId);
+    if (removed) {
+      await this.removeSessionOrganization(sessionId);
+    }
+    return removed;
+  }
+
+  private async removeSessionFiles(sessionId: string): Promise<boolean> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
       return false;
     }
-    const chatsDir = this.getChatsDir();
-    const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
 
     try {
-      // Verify the file exists and belongs to this project
-      const records = await jsonl.readLines<ChatRecord>(filePath, 1);
-      if (records.length === 0) {
+      const activePath = this.getSessionFilePath(sessionId, 'active');
+      const active = await this.readProjectSessionHead(sessionId, activePath);
+      if (active) {
+        this.removeFileIfExists(activePath);
+        const archivedPath = this.getSessionFilePath(sessionId, 'archived');
+        if (fs.existsSync(archivedPath)) {
+          this.removeFileIfExists(archivedPath);
+        }
+        this.removeWorktreeSidecars(sessionId);
+        this.removeFileHistoryBackups(sessionId);
+        return true;
+      }
+      const archivedPath = this.getSessionFilePath(sessionId, 'archived');
+      const archived = await this.readProjectSessionHead(
+        sessionId,
+        archivedPath,
+      );
+      if (!archived) {
         return false;
       }
-
-      if (
-        !(await this.sessionBelongsToCurrentProject(sessionId, records[0].cwd))
-      ) {
-        return false;
-      }
-
-      fs.unlinkSync(filePath);
+      this.removeFileIfExists(archivedPath);
+      this.removeWorktreeSidecars(sessionId);
+      this.removeFileHistoryBackups(sessionId);
       return true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -891,6 +1424,140 @@ export class SessionService {
       }
       throw error;
     }
+  }
+
+  async archiveSessions(
+    sessionIds: string[],
+    options: ArchiveSessionsOptions = {},
+  ): Promise<ArchiveSessionsResult> {
+    const archived: string[] = [];
+    const alreadyArchived: string[] = [];
+    const notFound: string[] = [];
+    const errors: Array<{ sessionId: string; error: Error }> = [];
+
+    for (const sessionId of [...new Set(sessionIds)]) {
+      try {
+        if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
+          notFound.push(sessionId);
+          continue;
+        }
+        if (options.knownLocation !== 'active') {
+          const location = await this.getSessionLocation(sessionId);
+          if (location === undefined) {
+            notFound.push(sessionId);
+            continue;
+          }
+          if (location === 'archived') {
+            alreadyArchived.push(sessionId);
+            continue;
+          }
+          if (location === 'conflict') {
+            throw new Error(`Session archive conflict: ${sessionId}`);
+          }
+        }
+
+        const sourcePath = this.getSessionFilePath(sessionId, 'active');
+        const targetPath = this.getSessionFilePath(sessionId, 'archived');
+        if (fs.existsSync(targetPath)) {
+          throw new Error(`Session archive conflict: ${sessionId}`);
+        }
+
+        fs.mkdirSync(this.getArchiveChatsDir(), { recursive: true });
+        const activeSidecar = this.getWorktreeSessionPathForState(
+          sessionId,
+          'active',
+        );
+        const archivedSidecar = this.getWorktreeSessionPathForState(
+          sessionId,
+          'archived',
+        );
+        try {
+          fs.renameSync(sourcePath, targetPath);
+        } catch (error) {
+          throw this.sessionFileMoveError('archive', error);
+        }
+        try {
+          this.moveOptionalFile(activeSidecar, archivedSidecar);
+        } catch (sidecarError) {
+          this.warn(
+            `archiveSessions: failed to move worktree sidecar for ${sessionId} from ${activeSidecar} to ${archivedSidecar}: ${sidecarError}`,
+          );
+        }
+        archived.push(sessionId);
+      } catch (error) {
+        errors.push({
+          sessionId,
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+      }
+    }
+
+    return { archived, alreadyArchived, notFound, errors };
+  }
+
+  async unarchiveSessions(
+    sessionIds: string[],
+    options: UnarchiveSessionsOptions = {},
+  ): Promise<UnarchiveSessionsResult> {
+    const unarchived: string[] = [];
+    const alreadyActive: string[] = [];
+    const notFound: string[] = [];
+    const errors: Array<{ sessionId: string; error: Error }> = [];
+
+    for (const sessionId of [...new Set(sessionIds)]) {
+      try {
+        if (options.knownLocation !== 'archived') {
+          const location = await this.getSessionLocation(sessionId);
+          if (location === undefined) {
+            notFound.push(sessionId);
+            continue;
+          }
+          if (location === 'active') {
+            alreadyActive.push(sessionId);
+            continue;
+          }
+          if (location === 'conflict') {
+            throw new Error(`Session archive conflict: ${sessionId}`);
+          }
+        }
+
+        const sourcePath = this.getSessionFilePath(sessionId, 'archived');
+        const targetPath = this.getSessionFilePath(sessionId, 'active');
+        if (fs.existsSync(targetPath)) {
+          throw new Error(`Session archive conflict: ${sessionId}`);
+        }
+
+        const archivedSidecar = this.getWorktreeSessionPathForState(
+          sessionId,
+          'archived',
+        );
+        const activeSidecar = this.getWorktreeSessionPathForState(
+          sessionId,
+          'active',
+        );
+        fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+        try {
+          fs.renameSync(sourcePath, targetPath);
+        } catch (error) {
+          throw this.sessionFileMoveError('unarchive', error);
+        }
+        try {
+          this.moveOptionalFile(archivedSidecar, activeSidecar);
+        } catch (sidecarError) {
+          this.warn(
+            `unarchiveSessions: failed to move worktree sidecar for ${sessionId} from ${archivedSidecar} to ${activeSidecar}: ${sidecarError}`,
+          );
+        }
+        unarchived.push(sessionId);
+      } catch (error) {
+        errors.push({
+          sessionId,
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+      }
+    }
+
+    return { unarchived, alreadyActive, notFound, errors };
   }
 
   /**
@@ -913,7 +1580,7 @@ export class SessionService {
 
     const uniqueSessionIds = [...new Set(sessionIds)];
     const results = await Promise.allSettled(
-      uniqueSessionIds.map((sessionId) => this.removeSession(sessionId)),
+      uniqueSessionIds.map((sessionId) => this.removeSessionFiles(sessionId)),
     );
 
     for (let i = 0; i < results.length; i++) {
@@ -932,6 +1599,8 @@ export class SessionService {
       }
     }
 
+    await this.removeSessionOrganizations(removed);
+
     return { removed, notFound, errors };
   }
 
@@ -944,6 +1613,8 @@ export class SessionService {
    *   existing callers are unchanged — pass `'auto'` only for titles produced
    *   by the auto-title generator.
    * @returns true if renamed successfully, false if session not found
+   * @remarks Only checks active sessions. Use `getSessionLocation()` or
+   * `sessionExistsInAnyState()` for archive-aware lookups.
    */
   async renameSession(
     sessionId: string,
@@ -1017,6 +1688,8 @@ export class SessionService {
    *
    * @throws If source does not exist, source is empty, source belongs to a
    *   different project, or the target file already exists.
+   * @remarks Only checks active source sessions. Use `getSessionLocation()` or
+   * `sessionExistsInAnyState()` for archive-aware lookups.
    */
   async forkSession(
     sourceSessionId: string,
@@ -1052,7 +1725,27 @@ export class SessionService {
 
     // Copy only the active branch. Rewind leaves old records in the JSONL as
     // abandoned parentUuid branches; copying raw records would resurrect them.
-    const sourceRecords = this.reconstructHistory(records);
+    const leafUuid = this.lastConversationRecordUuid(records);
+    if (!leafUuid) {
+      throw new Error(`Source session not found or empty: ${sourceSessionId}`);
+    }
+    const { messages: activeMessages } = this.reconstructHistory(records, {
+      leafUuid,
+    });
+    const sourceRecords = includeActiveSideArtifactRecords(
+      records,
+      activeMessages,
+    ).filter(
+      // A fork is a fresh top-level session with its own creation metadata.
+      // Inheriting either record would falsely attribute the fork to the
+      // source session's parent or creator.
+      (record) =>
+        !(
+          record.type === 'system' &&
+          (record.subtype === 'parent_session' ||
+            record.subtype === 'session_source')
+        ),
+    );
     if (sourceRecords.length === 0) {
       throw new Error(`Source session not found or empty: ${sourceSessionId}`);
     }
@@ -1061,27 +1754,29 @@ export class SessionService {
     // clean linear descendant. `forkedFrom` captures the origin of each
     // message.
     let prevUuid: string | null = null;
+    const remappedArtifactIds = new Map<string, string>();
     const forked: ChatRecord[] = sourceRecords.map((record) => {
-      const systemPayload =
-        record.type === 'system' && record.subtype === 'file_history_snapshot'
-          ? remapFileHistorySnapshotPayload(
-              record.systemPayload,
-              sourceSessionId,
-              newSessionId,
-            )
-          : record.systemPayload;
+      const isArtifactRecord = isSessionArtifactRecord(record);
+      const systemPayload = remapSystemPayloadForFork(
+        record,
+        sourceSessionId,
+        newSessionId,
+        remappedArtifactIds,
+      );
       const next: ChatRecord = {
         ...record,
         sessionId: newSessionId,
         cwd: this.projectRoot,
         systemPayload,
-        parentUuid: prevUuid,
+        parentUuid: isArtifactRecord ? record.parentUuid : prevUuid,
         forkedFrom: {
           sessionId: sourceSessionId,
           messageUuid: record.uuid,
         },
       };
-      prevUuid = record.uuid;
+      if (!isArtifactRecord) {
+        prevUuid = record.uuid;
+      }
       return next;
     });
 
@@ -1131,13 +1826,34 @@ export class SessionService {
       }
       throw err;
     }
+    let targetComplete = false;
     try {
-      fs.writeFileSync(fd, body, { encoding: 'utf8' });
-    } finally {
-      fs.closeSync(fd);
-    }
+      try {
+        fs.writeFileSync(fd, body, { encoding: 'utf8' });
+      } finally {
+        fs.closeSync(fd);
+      }
 
-    await copyFileHistoryBackups(sourceSessionId, newSessionId);
+      await copyFileHistoryBackups(sourceSessionId, newSessionId);
+      targetComplete = true;
+    } finally {
+      if (!targetComplete) {
+        try {
+          this.removeFileIfExists(targetPath);
+        } catch (cleanupError) {
+          this.warn(
+            `forkSession: failed to clean up incomplete target ${newSessionId}: ${cleanupError}`,
+          );
+        }
+        try {
+          this.removeFileHistoryBackups(newSessionId);
+        } catch (cleanupError) {
+          this.warn(
+            `forkSession: failed to clean up file history for incomplete target ${newSessionId}: ${cleanupError}`,
+          );
+        }
+      }
+    }
 
     return { filePath: targetPath, copiedCount: forked.length };
   }
@@ -1147,6 +1863,8 @@ export class SessionService {
    *
    * @param sessionId The session ID to look up
    * @returns The custom title, or undefined if none set
+   * @remarks Only checks active sessions. Use `getSessionLocation()` or
+   * `sessionExistsInAnyState()` for archive-aware lookups.
    */
   getSessionTitle(sessionId: string): string | undefined {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
@@ -1163,6 +1881,8 @@ export class SessionService {
    *
    * @param title The custom title to search for (case-insensitive exact match)
    * @returns Array of matching session list items
+   * @remarks Only searches active sessions. Archived title search is not
+   * supported.
    */
   async findSessionsByTitle(title: string): Promise<SessionListItem[]> {
     const normalizedTitle = title.toLowerCase().trim();
@@ -1339,6 +2059,8 @@ export class SessionService {
    *
    * @param sessionId The session ID to check
    * @returns true if session exists and belongs to current project
+   * @remarks Only checks active sessions. Use `getSessionLocation()` or
+   * `sessionExistsInAnyState()` for archive-aware lookups.
    */
   async sessionExists(sessionId: string): Promise<boolean> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
@@ -1355,6 +2077,15 @@ export class SessionService {
       return this.sessionBelongsToCurrentProject(sessionId, records[0].cwd);
     } catch {
       return false;
+    }
+  }
+
+  async sessionExistsInAnyState(sessionId: string): Promise<boolean> {
+    try {
+      const location = await this.getSessionLocation(sessionId);
+      return location !== undefined;
+    } catch {
+      return true;
     }
   }
 }
@@ -1538,6 +2269,118 @@ function remapFileHistorySnapshotPayload(
   } catch {
     return payload;
   }
+}
+
+function remapSystemPayloadForFork(
+  record: ChatRecord,
+  sourceSessionId: string,
+  newSessionId: string,
+  remappedArtifactIds: Map<string, string>,
+): ChatRecord['systemPayload'] {
+  if (record.type !== 'system') return record.systemPayload;
+  if (record.subtype === 'file_history_snapshot') {
+    return remapFileHistorySnapshotPayload(
+      record.systemPayload,
+      sourceSessionId,
+      newSessionId,
+    );
+  }
+  if (
+    record.subtype === 'session_artifact_event' ||
+    record.subtype === 'session_artifact_snapshot'
+  ) {
+    return remapSessionArtifactPayloadForFork(
+      record.systemPayload,
+      sourceSessionId,
+      newSessionId,
+      remappedArtifactIds,
+    ) as ChatRecord['systemPayload'];
+  }
+  return record.systemPayload;
+}
+
+function includeActiveSideArtifactRecords(
+  records: ChatRecord[],
+  activeRecords: ChatRecord[],
+): ChatRecord[] {
+  const activeByUuid = new Map(
+    activeRecords.map((record) => [record.uuid, record]),
+  );
+  const activeUuids = new Set(activeByUuid.keys());
+  const firstActiveUuid = activeRecords[0]?.uuid;
+  const firstActiveIndex =
+    firstActiveUuid === undefined
+      ? -1
+      : records.findIndex((record) => record.uuid === firstActiveUuid);
+  const nextActiveUuidByIndex = new Map<number, string>();
+  const nextBlockingUuidByIndex = new Map<number, string>();
+  let nextActiveUuid: string | undefined;
+  let nextBlockingUuid: string | undefined;
+  for (let index = records.length - 1; index >= 0; index--) {
+    if (nextActiveUuid !== undefined) {
+      nextActiveUuidByIndex.set(index, nextActiveUuid);
+    }
+    if (nextBlockingUuid !== undefined) {
+      nextBlockingUuidByIndex.set(index, nextBlockingUuid);
+    }
+    if (activeUuids.has(records[index]!.uuid)) {
+      nextActiveUuid = records[index]!.uuid;
+      nextBlockingUuid = undefined;
+    } else if (
+      !isSessionArtifactRecord(records[index]!) &&
+      !isTailNeutralSideRecord(records[index]!)
+    ) {
+      nextBlockingUuid = records[index]!.uuid;
+    }
+  }
+  const selected: ChatRecord[] = [];
+  const includedSideArtifactUuids = new Set<string>();
+  let previousActiveUuid: string | undefined;
+  for (let index = 0; index < records.length; index++) {
+    const record = records[index]!;
+    const activeRecord = activeByUuid.get(record.uuid);
+    if (activeRecord) {
+      selected.push(activeRecord);
+      activeByUuid.delete(record.uuid);
+      previousActiveUuid = record.uuid;
+      continue;
+    }
+    if (!isSessionArtifactRecord(record)) {
+      continue;
+    }
+    const nextUuid = nextActiveUuidByIndex.get(index);
+    const hasBlockingRecordBeforeNextActive =
+      nextBlockingUuidByIndex.has(index);
+    const isInActiveSegment =
+      !hasBlockingRecordBeforeNextActive &&
+      (nextUuid !== undefined
+        ? activeUuids.has(nextUuid)
+        : previousActiveUuid !== undefined &&
+          activeUuids.has(previousActiveUuid));
+    if (
+      record.parentUuid !== null &&
+      (activeUuids.has(record.parentUuid) ||
+        includedSideArtifactUuids.has(record.parentUuid)) &&
+      isInActiveSegment &&
+      (record.parentUuid === previousActiveUuid ||
+        includedSideArtifactUuids.has(record.parentUuid))
+    ) {
+      selected.push(record);
+      includedSideArtifactUuids.add(record.uuid);
+    } else if (
+      record.parentUuid === null &&
+      index < firstActiveIndex &&
+      isInActiveSegment
+    ) {
+      selected.push(record);
+      includedSideArtifactUuids.add(record.uuid);
+    }
+  }
+  return selected;
+}
+
+function isTailNeutralSideRecord(record: ChatRecord): boolean {
+  return record.type === 'system' && record.subtype === 'custom_title';
 }
 
 function collectFileHistorySnapshotPromptIds(

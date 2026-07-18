@@ -21,8 +21,10 @@ pub type AXUIElementRef = *mut __AXUIElement;
 // ── AXError ──────────────────────────────────────────────────────────────────
 
 pub type AXError = c_int;
+pub const AX_MESSAGING_TIMEOUT_SECS: u64 = 5;
 pub const kAXErrorSuccess: AXError = 0;
 pub const kAXErrorFailure: AXError = -25200;
+pub const kAXErrorIllegalArgument: AXError = -25201;
 pub const kAXErrorInvalidUIElement: AXError = -25202;
 pub const kAXErrorAttributeUnsupported: AXError = -25205;
 pub const kAXErrorNoValue: AXError = -25212;
@@ -44,6 +46,7 @@ pub const kAXValueIllegalType: AXValueType = 1_000;
 // ── Link to AXUIElement functions ────────────────────────────────────────────
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
+    pub fn AXUIElementCreateSystemWide() -> AXUIElementRef;
     pub fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
     pub fn AXUIElementCopyAttributeValue(
         element: AXUIElementRef,
@@ -66,6 +69,10 @@ extern "C" {
         element: AXUIElementRef,
         attribute: CFStringRef,
         value: CFTypeRef,
+    ) -> AXError;
+    pub fn AXUIElementSetMessagingTimeout(
+        element: AXUIElementRef,
+        timeout_in_seconds: f32,
     ) -> AXError;
     pub fn AXUIElementGetTypeID() -> CFTypeID;
     pub fn AXIsProcessTrusted() -> bool;
@@ -110,6 +117,27 @@ pub unsafe fn copy_string_attr(element: AXUIElementRef, attr_name: &str) -> Opti
     }
     let s = CFStr::wrap_under_create_rule(value as _);
     Some(s.to_string())
+}
+
+/// Copy a numeric attribute from an AX element as an `f64`. Returns `None` on
+/// any error or if the attribute is not a `CFNumber`. SwiftUI sliders expose a
+/// readable numeric `AXValue` even when that value is not settable — this lets
+/// the stepping fallback read the control's current position for feedback.
+pub unsafe fn copy_number_attr(element: AXUIElementRef, attr_name: &str) -> Option<f64> {
+    use core_foundation::number::CFNumber;
+    let attr = CFStr::new(attr_name);
+    let mut value: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);
+    if err != kAXErrorSuccess || value.is_null() {
+        return None;
+    }
+    let cf_number_type_id = CFNumber::type_id();
+    if core_foundation::base::CFGetTypeID(value) != cf_number_type_id {
+        CFRelease(value);
+        return None;
+    }
+    let n = CFNumber::wrap_under_create_rule(value as _);
+    n.to_f64()
 }
 
 /// Get the action names for an AX element.
@@ -272,10 +300,44 @@ pub unsafe fn perform_action(element: AXUIElementRef, action_name: &str) -> AXEr
     AXUIElementPerformAction(element, action.as_concrete_TypeRef())
 }
 
+pub unsafe fn set_messaging_timeout(element: AXUIElementRef, timeout_in_seconds: f32) -> AXError {
+    AXUIElementSetMessagingTimeout(element, timeout_in_seconds)
+}
+
+/// Apply the native AX messaging timeout to every accessibility object used by
+/// this process. Apple documents object-level timeouts as non-inheriting, so
+/// setting only an application element does not protect its descendants.
+pub fn set_global_messaging_timeout(timeout_in_seconds: f32) -> Result<(), AXError> {
+    if !timeout_in_seconds.is_finite() || timeout_in_seconds <= 0.0 {
+        return Err(kAXErrorIllegalArgument);
+    }
+    unsafe {
+        let system_wide = AXUIElementCreateSystemWide();
+        if system_wide.is_null() {
+            return Err(kAXErrorFailure);
+        }
+        let status = AXUIElementSetMessagingTimeout(system_wide, timeout_in_seconds);
+        CFRelease(system_wide as CFTypeRef);
+        if status == kAXErrorSuccess { Ok(()) } else { Err(status) }
+    }
+}
+
 /// Set an AX attribute to a CFString value.
 pub unsafe fn set_string_attr(element: AXUIElementRef, attr_name: &str, value: &str) -> AXError {
     let attr = CFStr::new(attr_name);
     let cf_value = CFStr::new(value);
+    AXUIElementSetAttributeValue(element, attr.as_concrete_TypeRef(), cf_value.as_CFTypeRef())
+}
+
+/// Set an AX attribute to a CFNumber (double) value. Numeric controls — most
+/// notably `AXSlider` (NSSlider) and `AXStepper` — expose a numeric `AXValue`
+/// reject a `CFString` write — `-25200` (kAXErrorFailure, observed live on a
+/// SwiftUI `AXSlider`) or `-25201` (kAXErrorIllegalArgument); only a `CFNumber`
+/// is accepted. Text fields, by contrast, take a `CFString`.
+pub unsafe fn set_number_attr(element: AXUIElementRef, attr_name: &str, value: f64) -> AXError {
+    use core_foundation::number::CFNumber;
+    let attr = CFStr::new(attr_name);
+    let cf_value = CFNumber::from(value);
     AXUIElementSetAttributeValue(element, attr.as_concrete_TypeRef(), cf_value.as_CFTypeRef())
 }
 
@@ -350,4 +412,23 @@ pub unsafe fn copy_ax_windows(element: AXUIElementRef) -> Vec<AXUIElementRef> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn global_messaging_timeout_accepts_production_value() {
+        assert_eq!(
+            set_global_messaging_timeout(AX_MESSAGING_TIMEOUT_SECS as f32),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn global_messaging_timeout_rejects_invalid_values() {
+        assert_eq!(set_global_messaging_timeout(0.0), Err(kAXErrorIllegalArgument));
+        assert_eq!(set_global_messaging_timeout(f32::NAN), Err(kAXErrorIllegalArgument));
+    }
 }

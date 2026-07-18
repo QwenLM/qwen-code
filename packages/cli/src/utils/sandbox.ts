@@ -8,7 +8,6 @@ import { exec, execSync, spawn, type ChildProcess } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { quote, parse } from 'shell-quote';
 import {
   getUserSettingsDir,
@@ -20,12 +19,18 @@ import {
   FatalSandboxError,
   Storage,
   isSubpath,
+  resolveBundleDir,
 } from '@qwen-code/qwen-code-core';
 import { randomBytes } from 'node:crypto';
 import { writeStderrLine } from './stdioHelpers.js';
 import { parseSandboxImageName } from './sandboxImageName.js';
 import { isContainerPathWithinWorkdir } from './sandbox-path.js';
 import { parseSandboxMountSpec } from './sandboxMounts.js';
+import {
+  CUSTOM_SANDBOX_IMAGE_ENV_VAR,
+  HOST_UPDATE_RELAUNCH_ENV_VAR,
+  SKIP_UPDATE_CHECK_ENV_VAR,
+} from './processUtils.js';
 
 const execAsync = promisify(exec);
 
@@ -60,6 +65,34 @@ const BUILTIN_SEATBELT_PROFILES = [
   'restrictive-closed',
   'restrictive-proxied',
 ];
+
+export function getSandboxPassthroughEnvArgs(
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  return [
+    'QWEN_DEBUG_LOG_FILE',
+    'QWEN_CODE_LEGACY_MCP_BLOCKING',
+    SKIP_UPDATE_CHECK_ENV_VAR,
+    CUSTOM_SANDBOX_IMAGE_ENV_VAR,
+    HOST_UPDATE_RELAUNCH_ENV_VAR,
+  ].flatMap((envVar) =>
+    env[envVar] === undefined ? [] : ['--env', `${envVar}=${env[envVar]}`],
+  );
+}
+
+export function resolveSeatbeltProfileFile(
+  profile: string,
+  importMetaUrl = import.meta.url,
+): string {
+  if (!BUILTIN_SEATBELT_PROFILES.includes(profile)) {
+    return path.join(SETTINGS_DIRECTORY_NAME, `sandbox-macos-${profile}.sb`);
+  }
+
+  return path.join(
+    resolveBundleDir(importMetaUrl),
+    `sandbox-macos-${profile}.sb`,
+  );
+}
 
 /**
  * Determines whether the sandbox container should be run with the current user's UID and GID.
@@ -189,16 +222,7 @@ export async function start_sandbox(
     }
 
     const profile = (process.env['SEATBELT_PROFILE'] ??= 'permissive-open');
-    let profileFile = fileURLToPath(
-      new URL(`sandbox-macos-${profile}.sb`, import.meta.url),
-    );
-    // if profile name is not recognized, then look for file under project settings directory
-    if (!BUILTIN_SEATBELT_PROFILES.includes(profile)) {
-      profileFile = path.join(
-        SETTINGS_DIRECTORY_NAME,
-        `sandbox-macos-${profile}.sb`,
-      );
-    }
+    const profileFile = resolveSeatbeltProfileFile(profile);
     if (!fs.existsSync(profileFile)) {
       throw new FatalSandboxError(
         `Missing macos seatbelt profile file '${profileFile}'`,
@@ -273,6 +297,9 @@ export async function start_sandbox(
       'sh',
       '-c',
       [
+        ...(process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'] === '1'
+          ? ['ELECTRON_RUN_AS_NODE=1']
+          : []),
         `SANDBOX=sandbox-exec`,
         `NODE_OPTIONS="${nodeOptions}"`,
         ...finalArgv.map((arg) => quote([arg])),
@@ -623,14 +650,7 @@ export async function start_sandbox(
       `QWEN_CODE_TEST_VAR=${process.env['QWEN_CODE_TEST_VAR']}`,
     );
   }
-  for (const envVar of [
-    'QWEN_DEBUG_LOG_FILE',
-    'QWEN_CODE_LEGACY_MCP_BLOCKING',
-  ] as const) {
-    if (process.env[envVar]) {
-      args.push('--env', `${envVar}=${process.env[envVar]}`);
-    }
-  }
+  args.push(...getSandboxPassthroughEnvArgs());
   if (process.env['QWEN_CODE_MCP_APPROVALS_PATH']) {
     args.push(
       '--env',

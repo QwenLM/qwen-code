@@ -9,6 +9,7 @@ import type {
   DaemonAuthProviderId,
   DaemonEvent,
   DaemonErrorKind,
+  DaemonSessionArtifactChange,
   PermissionResponse,
 } from '../types.js';
 
@@ -34,6 +35,7 @@ export type DaemonUiEventType =
   | 'debug'
   // Session-meta events
   | 'session.metadata.changed'
+  | 'session.artifact.changed'
   | 'session.approval_mode.changed'
   | 'session.available_commands'
   | 'session.state_resync_required'
@@ -56,6 +58,7 @@ export type DaemonUiEventType =
   | 'workspace.mcp.child_refused'
   | 'workspace.mcp.server_restarted'
   | 'workspace.mcp.server_restart_refused'
+  | 'workspace.mcp.server_changed'
   | 'workspace.extensions.changed'
   // Auth flow events (Wave 4 OAuth)
   | 'auth.device_flow.started'
@@ -94,8 +97,28 @@ export interface DaemonUiTextEvent extends DaemonUiEventBase {
   meta?: DaemonTextDeltaMeta;
 }
 
+export interface DaemonInputReference {
+  id: string;
+  kind?: string;
+  label?: string;
+  value?: string;
+  serialized?: string;
+  removable?: boolean;
+}
+
+export interface DaemonInputReferenceAnnotation {
+  type: 'reference';
+  start: number;
+  end: number;
+  text: string;
+  reference: DaemonInputReference;
+}
+
+export type DaemonInputAnnotation = DaemonInputReferenceAnnotation;
+
 export interface DaemonTextDeltaMeta extends Record<string, unknown> {
   qwenDiscreteMessage?: boolean;
+  inputAnnotations?: DaemonInputAnnotation[];
 }
 
 export interface DaemonUiUserImageEvent extends DaemonUiEventBase {
@@ -281,6 +304,12 @@ export interface DaemonUiSessionMetadataChangedEvent extends DaemonUiEventBase {
   displayName?: string;
 }
 
+export interface DaemonUiSessionArtifactChangedEvent extends DaemonUiEventBase {
+  type: 'session.artifact.changed';
+  sessionId: string;
+  change: DaemonSessionArtifactChange;
+}
+
 export interface DaemonUiSessionApprovalModeChangedEvent
   extends DaemonUiEventBase {
   type: 'session.approval_mode.changed';
@@ -388,10 +417,13 @@ export interface DaemonUiSessionBranchedEvent extends DaemonUiEventBase {
 
 export interface DaemonUiWorkspaceMemoryChangedEvent extends DaemonUiEventBase {
   type: 'workspace.memory.changed';
-  scope: 'workspace' | 'global';
-  filePath: string;
-  mode: 'append' | 'replace';
-  bytesWritten: number;
+  scope: 'workspace' | 'global' | 'managed';
+  filePath?: string;
+  mode?: 'append' | 'replace';
+  bytesWritten?: number;
+  source?: string;
+  taskId?: string;
+  touchedScopes?: Array<'user' | 'project'>;
 }
 
 export interface DaemonUiWorkspaceAgentChangedEvent extends DaemonUiEventBase {
@@ -469,7 +501,24 @@ export interface DaemonUiMcpServerRestartRefusedEvent
   extends DaemonUiEventBase {
   type: 'workspace.mcp.server_restart_refused';
   serverName: string;
-  reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+  reason:
+    | 'in_flight'
+    | 'disabled'
+    | 'budget_would_exceed'
+    | 'authentication_required';
+}
+
+export interface DaemonUiMcpServerChangedEvent extends DaemonUiEventBase {
+  type: 'workspace.mcp.server_changed';
+  serverName: string;
+  action:
+    | 'added'
+    | 'removed'
+    | 'approve'
+    | 'enable'
+    | 'disable'
+    | 'authenticate'
+    | 'clear-auth';
 }
 
 export interface DaemonUiExtensionsChangedEvent extends DaemonUiEventBase {
@@ -553,6 +602,7 @@ export type DaemonUiEvent =
   | DaemonUiErrorEvent
   // Session-meta events
   | DaemonUiSessionMetadataChangedEvent
+  | DaemonUiSessionArtifactChangedEvent
   | DaemonUiSessionApprovalModeChangedEvent
   | DaemonUiSessionAvailableCommandsEvent
   | DaemonUiStateResyncRequiredEvent
@@ -575,6 +625,7 @@ export type DaemonUiEvent =
   | DaemonUiMcpChildRefusedEvent
   | DaemonUiMcpServerRestartedEvent
   | DaemonUiMcpServerRestartRefusedEvent
+  | DaemonUiMcpServerChangedEvent
   | DaemonUiExtensionsChangedEvent
   // Auth device-flow events
   | DaemonUiAuthDeviceFlowEvent;
@@ -849,6 +900,7 @@ export interface DaemonStatusTranscriptBlock extends DaemonTranscriptBlockBase {
   text: string;
   code?: string;
   promptId?: string;
+  errorKind?: DaemonErrorKind;
   source?: string;
   data?: unknown;
 }
@@ -959,6 +1011,7 @@ export interface DaemonTranscriptStore {
   appendLocalUserMessage(
     text: string,
     images?: Array<{ data: string; mimeType: string }>,
+    meta?: DaemonTextDeltaMeta,
   ): void;
   reset(seed?: Partial<DaemonTranscriptState>): void;
   /**

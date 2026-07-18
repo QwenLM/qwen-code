@@ -76,7 +76,7 @@ jobs:
 
     steps:
       - name: 'Check out source'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
         with:
           fetch-depth: 0
 
@@ -234,7 +234,7 @@ jobs:
 
     steps:
       - name: 'Check out source'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
         with:
           ref: '${{ needs.release_metadata.outputs.release_ref }}'
 
@@ -578,16 +578,15 @@ jobs:
             create_args=(
               "$RELEASE_TAG"
               "${assets[@]}"
-              --generate-notes
               --target "$RELEASE_TARGET"
               --title "$title"
             )
             if [ -n "$previous_tag" ]; then
-              echo "Using $previous_tag as the release notes start tag."
-              create_args+=(--notes-start-tag "$previous_tag")
+              release_notes="[Full changelog](https://github.com/${GH_REPO}/compare/${previous_tag}...${RELEASE_TAG})"
             else
-              echo "No previous published stable release found for release notes."
+              release_notes="Desktop release ${RELEASE_TAG}."
             fi
+            create_args+=(--notes "$release_notes")
             if [ "$RELEASE_DRAFT" = "true" ]; then
               create_args+=(--draft)
             fi

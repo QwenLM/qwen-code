@@ -14,6 +14,7 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
   SessionNotification,
+  SessionUpdate,
   WriteTextFileRequest,
   WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
@@ -24,7 +25,21 @@ import type { BridgeEvent, EventBus } from './eventBus.js';
 // so a rename can't silently break the protocol.
 import { MID_TURN_MESSAGE_INJECTED_EVENT } from './daemonEventTypes.js';
 import { MID_TURN_QUEUE_DRAIN_METHOD } from './bridgeTypes.js';
-import type { MidTurnQueueEntry } from './bridgeTypes.js';
+import type {
+  BridgeGenerationNotificationEvent,
+  BridgePendingInteraction,
+  MidTurnQueueEntry,
+  PendingPromptEntry,
+} from './bridgeTypes.js';
+import { SERVE_CONTROL_EXT_METHODS } from './status.js';
+import type {
+  ClientMcpMessageSender,
+  CreateSubSessionHandler,
+} from './bridgeOptions.js';
+import {
+  MAX_SUB_SESSION_NAME_CHARS,
+  MAX_SUB_SESSION_PROMPT_CHARS,
+} from './bridgeOptions.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
 // Narrowed from the concrete `MultiClientPermissionMediator` to the
@@ -38,6 +53,15 @@ import type {
 } from './permission.js';
 import { CancelSentinelCollisionError } from './bridgeErrors.js';
 import { writeStderrLine } from './internal/stderrLine.js';
+import type {
+  SessionArtifactChange,
+  SessionArtifactInput,
+  SessionArtifactStore,
+} from './sessionArtifacts.js';
+
+// Keep in sync with core `ToolNames.ARTIFACT`; acp-bridge avoids a runtime
+// import from core for this hot demux path.
+const PUBLISH_ARTIFACT_TOOL_NAME = 'artifact';
 
 /**
  * Duck-type check for `FsError` from `cli/src/serve/fs/errors.ts`.
@@ -68,6 +92,227 @@ function isFsErrorShape(err: unknown): err is FsErrorShape {
   );
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function pendingInteractionOptions(
+  options: RequestPermissionRequest['options'],
+): BridgePendingInteraction['options'] {
+  return options.map((option) => ({
+    optionId: String((option as { optionId?: unknown }).optionId ?? ''),
+    ...(typeof (option as { name?: unknown }).name === 'string'
+      ? { label: (option as { name: string }).name }
+      : {}),
+    ...(typeof (option as { kind?: unknown }).kind === 'string'
+      ? { kind: (option as { kind: string }).kind }
+      : {}),
+  }));
+}
+
+function pendingInteractionFromRequest(
+  requestId: string,
+  params: RequestPermissionRequest,
+): BridgePendingInteraction {
+  const toolCall = params.toolCall as unknown as Record<string, unknown>;
+  const meta = isRecord(toolCall['_meta']) ? toolCall['_meta'] : undefined;
+  const rawInput = toolCall['rawInput'];
+  const options = pendingInteractionOptions(
+    Array.isArray(params.options) ? params.options : [],
+  );
+  const isUserQuestion = meta?.['qwenInteractionKind'] === 'user_question';
+
+  if (isUserQuestion) {
+    const rawQuestions = Array.isArray(meta?.['qwenQuestions'])
+      ? meta['qwenQuestions']
+      : isRecord(rawInput) && Array.isArray(rawInput['questions'])
+        ? rawInput['questions']
+        : [];
+    return {
+      requestId,
+      kind: 'user_question',
+      createdAt: new Date().toISOString(),
+      ...(typeof toolCall['title'] === 'string'
+        ? { title: toolCall['title'] }
+        : {}),
+      questions: rawQuestions.flatMap((question, index) =>
+        isRecord(question) ? [{ ...question, answerKey: String(index) }] : [],
+      ),
+      options,
+    };
+  }
+
+  return {
+    requestId,
+    kind: 'permission',
+    createdAt: new Date().toISOString(),
+    action: {
+      ...(typeof toolCall['kind'] === 'string'
+        ? { type: toolCall['kind'] }
+        : {}),
+      ...(typeof toolCall['title'] === 'string'
+        ? { title: toolCall['title'] }
+        : {}),
+      ...(toolCall['content'] !== undefined
+        ? { content: toolCall['content'] }
+        : {}),
+      ...(toolCall['locations'] !== undefined
+        ? { locations: toolCall['locations'] }
+        : {}),
+      ...(rawInput !== undefined ? { input: rawInput } : {}),
+    },
+    options,
+  };
+}
+
+function fallbackPendingPermissionInteraction(
+  requestId: string,
+  options: RequestPermissionRequest['options'],
+): BridgePendingInteraction {
+  return {
+    requestId,
+    kind: 'permission',
+    createdAt: new Date().toISOString(),
+    action: {},
+    options: pendingInteractionOptions(options),
+  };
+}
+
+function artifactPayloadFields(
+  artifact: Record<string, unknown>,
+): SessionArtifactInput {
+  return {
+    title: artifact['title'] as string,
+    kind: artifact['kind'] as SessionArtifactInput['kind'],
+    storage: artifact['storage'] as SessionArtifactInput['storage'],
+    description: artifact['description'] as string | undefined,
+    workspacePath: artifact['workspacePath'] as string | undefined,
+    managedId: artifact['managedId'] as string | undefined,
+    url: artifact['url'] as string | undefined,
+    mimeType: artifact['mimeType'] as string | undefined,
+    sizeBytes: artifact['sizeBytes'] as number | undefined,
+    metadata: artifact['metadata'] as SessionArtifactInput['metadata'],
+    retention: artifact['retention'] as SessionArtifactInput['retention'],
+  };
+}
+
+function extractCappedArtifactInputs(
+  rawArtifacts: unknown[],
+  limit: number,
+  sessionId: string,
+  source: 'tool' | 'hook',
+  toInput: (artifact: Record<string, unknown>) => SessionArtifactInput,
+): SessionArtifactInput[] {
+  const artifacts: SessionArtifactInput[] = [];
+  for (let index = 0; index < rawArtifacts.length; index++) {
+    const artifact = rawArtifacts[index];
+    if (!isRecord(artifact)) {
+      writeStderrLine(
+        `[artifacts] session=${sessionId} action=dropped reason=malformed source=${source} index=${index}`,
+      );
+      continue;
+    }
+    if (artifacts.length >= limit) {
+      writeStderrLine(
+        `[artifacts] session=${sessionId} action=dropped reason="artifact batch limit exceeded" source=${source} dropped=${rawArtifacts.length - index}`,
+      );
+      break;
+    }
+    artifacts.push(toInput(artifact));
+  }
+  return artifacts;
+}
+
+function artifactIngestionErrorReason(error: unknown): unknown {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+  return {
+    name: error.name,
+    message: error.message,
+    stack: error.stack?.split('\n').slice(0, 4).join('\n'),
+  };
+}
+
+function extractSessionUpdateArtifacts(
+  params: SessionNotification,
+  updateMeta: Record<string, unknown> | undefined,
+  limit: number,
+  sessionId: string,
+): SessionArtifactInput[] {
+  const rawArtifacts = updateMeta?.['artifacts'];
+  if (!Array.isArray(rawArtifacts)) {
+    return [];
+  }
+  const update = params.update as {
+    sessionUpdate?: unknown;
+    status?: unknown;
+    toolCallId?: unknown;
+  };
+  if (
+    update.sessionUpdate !== 'tool_call_update' ||
+    (update.status !== 'completed' &&
+      update.status !== 'failed' &&
+      update.status !== 'cancelled')
+  ) {
+    return [];
+  }
+  const toolCallId =
+    typeof update.toolCallId === 'string' ? update.toolCallId : undefined;
+  const toolName =
+    typeof updateMeta?.['toolName'] === 'string'
+      ? updateMeta['toolName']
+      : undefined;
+  return extractCappedArtifactInputs(
+    rawArtifacts,
+    limit,
+    sessionId,
+    'tool',
+    (artifact) => ({
+      ...artifactPayloadFields(artifact),
+      source: 'tool' as const,
+      toolCallId,
+      toolName,
+    }),
+  );
+}
+
+function sanitizeSessionUpdateArtifacts(
+  params: SessionNotification,
+  updateMeta: Record<string, unknown> | undefined,
+): SessionNotification {
+  if (!Array.isArray(updateMeta?.['artifacts'])) {
+    return params;
+  }
+  const sanitizedMeta = { ...updateMeta };
+  delete sanitizedMeta['artifacts'];
+  const update = {
+    ...(params.update as Record<string, unknown>),
+    _meta: sanitizedMeta,
+  } as SessionNotification['update'];
+  return {
+    ...params,
+    update,
+  };
+}
+
+function isTrustedArtifactToolUpdate(
+  params: SessionNotification,
+  updateMeta: Record<string, unknown> | undefined,
+): boolean {
+  const update = params.update as {
+    sessionUpdate?: unknown;
+    status?: unknown;
+  };
+  // ToolCallEmitter stamps _meta.toolName from the actual tool invocation. The
+  // artifact payload itself is never allowed to self-declare publisher trust.
+  return (
+    update.sessionUpdate === 'tool_call_update' &&
+    update.status === 'completed' &&
+    updateMeta?.['toolName'] === PUBLISH_ARTIFACT_TOOL_NAME
+  );
+}
+
 /**
  * Rethrow an FsError as a structured ACP `RequestError` so the
  * agent's RPC client sees `data.errorKind` / `data.hint` /
@@ -77,7 +322,8 @@ function isFsErrorShape(err: unknown): err is FsErrorShape {
  */
 function preserveFsErrorOverAcp(err: unknown): never {
   if (isFsErrorShape(err)) {
-    throw new RequestError(-32603, err.message, {
+    const code = err.kind === 'parse_error' ? -32602 : -32603;
+    throw new RequestError(code, err.message, {
       errorKind: err.kind,
       ...(err.hint !== undefined ? { hint: err.hint } : {}),
       ...(err.status !== undefined ? { status: err.status } : {}),
@@ -110,9 +356,9 @@ function resolutionToAcpResponse(
  * Bounded buffering for ACP `extNotification` frames that arrive on
  * `BridgeClient` before the matching session has been registered in
  * `byId`. The bridge populates `byId` only AFTER `connection.newSession`
- * returns, but the child's MCP discovery runs INSIDE `newSession` and
- * may fire budget events synchronously before the response makes it
- * back. Without buffering, those frames are silently dropped.
+ * returns, but child initialization may fire notifications synchronously
+ * before the response makes it back. Without buffering, those frames are
+ * silently dropped.
  *
  * The triple bound (max sessions x max events per session x TTL)
  * caps worst-case heap retention even if a malicious / buggy child
@@ -196,8 +442,10 @@ function sliceLineRange(
  * structurally satisfies this interface, so no explicit conversion
  * is required.
  *
- * Only four fields cross the boundary: `sessionId`, `events`,
- * `pendingPermissionIds`, `activePromptOriginatorClientId`. New fields
+ * Only the fields declared on this narrowed interface cross the boundary:
+ * `sessionId`, `events`,
+ * `pendingPermissionIds`, `pendingInteractions`, `activePromptId`,
+ * `activePromptOriginatorClientId`. New fields
  * BridgeClient grows must be added here too (and the factory's
  * `SessionEntry` is required to provide them — TS enforces the
  * structural match at the callback signature).
@@ -205,7 +453,11 @@ function sliceLineRange(
 export interface BridgeClientSessionEntry {
   sessionId: string;
   events: EventBus;
+  artifacts: SessionArtifactStore;
+  recordingDegraded: boolean;
   pendingPermissionIds: Set<string>;
+  /** Pollable pending human interactions, keyed by permission request id. */
+  pendingInteractions: Map<string, BridgePendingInteraction>;
   /**
    * Mid-turn user messages queued by the browser, drained here when the ACP
    * child calls the `craft/drainMidTurnQueue` ext-method. Owned by the full
@@ -213,6 +465,14 @@ export interface BridgeClientSessionEntry {
    * `extMethod` can splice it. See `SessionEntry.midTurnMessageQueue`.
    */
   midTurnMessageQueue: MidTurnQueueEntry[];
+  /** Complete prompts waiting behind the currently running prompt. */
+  pendingPromptList: PendingPromptEntry[];
+  /** The child reported that its Todo Stop Guard yielded to the FIFO. */
+  todoStopGuardAwaitingQueuedPrompt?: boolean;
+  /** True while a prompt is executing for this session. */
+  promptActive?: boolean;
+  /** Admitted id for the prompt currently executing on this session. */
+  activePromptId?: string;
   activePromptOriginatorClientId?: string;
   /**
    * True while the bridge drives a model roundtrip; the
@@ -223,6 +483,13 @@ export interface BridgeClientSessionEntry {
   modelRoundtripInFlight?: boolean;
   /** A2: mirrors `modelRoundtripInFlight` for approval-mode roundtrips. */
   approvalModeRoundtripInFlight?: boolean;
+}
+
+interface PreparedSessionUpdateFrames {
+  frames: Array<Omit<BridgeEvent, 'id' | 'v'>>;
+  artifacts: SessionArtifactInput[];
+  trustedPublisher: boolean;
+  turn: Pick<BridgeEvent, 'promptId' | 'originatorClientId'>;
 }
 
 /**
@@ -321,6 +588,48 @@ export class BridgeClient implements Client {
       modeId: string,
       originatorClientId: string | undefined,
     ) => void,
+    /**
+     * Reverse tool channel (issue #5626, Phase 2). Resolves the
+     * `sendSdkMcpMessage`-shaped sender for a client-hosted MCP server name so
+     * the `qwen/control/client_mcp/message` ext-method (child → parent) can
+     * deliver a JSON-RPC frame to the extension and return the response.
+     * Omitted by tests / Mode A consumers — the method then rejects with
+     * `methodNotFound` (no client-hosted server can exist without it).
+     */
+    private readonly clientMcpSender?: ClientMcpMessageSender,
+    private readonly ownsSession: (sessionId: string) => boolean = () => true,
+    /**
+     * Optional daemon token-usage hook. Called once per model round with the
+     * per-round input/output token increments read from
+     * `agent_message_chunk._meta.usage` at {@link sessionUpdate} (the single
+     * session/update fan-in). Wired only by the daemon host for the Daemon
+     * Status token-burn chart; omitted by tests / Mode A in-process consumers.
+     * `apiErrors` / `apiRetries` are the per-round model-API-error and
+     * automatic-retry increments riding the same `_meta` frame (0 when the
+     * round had none), for the daemon's model-API-health charts.
+     */
+    private readonly onTokenUsage?: (
+      inputTokens: number,
+      outputTokens: number,
+      durationMs?: number,
+      apiErrors?: number,
+      apiRetries?: number,
+    ) => void,
+    /**
+     * Daemon-host seam for the `create_sub_session` tool. Invoked from the
+     * `extMethod` dispatch (a child→daemon REQUEST, so it returns a Promise the
+     * child awaits) with the prompt, completion mode, and optional model/name;
+     * the host spawns a sub-session and, for `'first-turn'`, returns its result.
+     * Omitted by tests / Mode A / non-daemon — the method then reports
+     * `methodNotFound` and the tool surfaces itself as daemon-only.
+     */
+    private readonly onCreateSubSession?: CreateSubSessionHandler,
+    /** Request-scoped generation events are routed to a private bridge queue,
+     * never to the session EventBus. */
+    private readonly onGenerationEvent?: (
+      sessionId: string,
+      event: BridgeGenerationNotificationEvent,
+    ) => void,
   ) {}
 
   async requestPermission(
@@ -344,10 +653,9 @@ export class BridgeClient implements Client {
     // this prompt. The mediator validates the voter's `optionId`
     // against this set so a malicious client can't forge an option
     // (e.g. `ProceedAlways*`) the agent intentionally hid.
+    const options = Array.isArray(params.options) ? params.options : [];
     const allowedOptionIds = new Set(
-      params.options.map((o: { optionId?: unknown }) =>
-        String(o.optionId ?? ''),
-      ),
+      options.map((o: { optionId?: unknown }) => String(o.optionId ?? '')),
     );
     allowedOptionIds.delete('');
 
@@ -371,11 +679,12 @@ export class BridgeClient implements Client {
     // symmetric defense for the publish-failure case.
     const published = entry.events.publish({
       type: 'permission_request',
+      ...(entry.activePromptId ? { promptId: entry.activePromptId } : {}),
       data: {
         requestId,
         sessionId: entry.sessionId,
         toolCall: params.toolCall,
-        options: params.options,
+        options,
       },
       ...(entry.activePromptOriginatorClientId
         ? { originatorClientId: entry.activePromptOriginatorClientId }
@@ -387,11 +696,27 @@ export class BridgeClient implements Client {
     // path doesn't need to roll back. The mediator's
     // `forgetSession` is the only thing that drains this index (via
     // the bridge's `cancelPendingForSession`).
+    let interaction: BridgePendingInteraction | undefined;
+    try {
+      interaction = pendingInteractionFromRequest(requestId, {
+        ...params,
+        options,
+      });
+    } catch (error) {
+      writeStderrLine(
+        `qwen serve: failed to snapshot pending interaction ${requestId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      interaction = fallbackPendingPermissionInteraction(requestId, options);
+    }
     entry.pendingPermissionIds.add(requestId);
+    if (interaction) entry.pendingInteractions.set(requestId, interaction);
     try {
       const record: PermissionRequestRecord = {
         requestId,
         sessionId: entry.sessionId,
+        promptId: entry.activePromptId,
         originatorClientId: entry.activePromptOriginatorClientId,
         allowedOptionIds,
         issuedAtMs: Date.now(),
@@ -403,17 +728,61 @@ export class BridgeClient implements Client {
       return resolutionToAcpResponse(resolution);
     } finally {
       entry.pendingPermissionIds.delete(requestId);
+      entry.pendingInteractions.delete(requestId);
     }
   }
 
   async sessionUpdate(params: SessionNotification): Promise<void> {
+    if (
+      !this.ownsSession(params.sessionId) &&
+      !this.inFlightRestoreIds.has(params.sessionId)
+    ) {
+      writeStderrLine(
+        `[demux] session=${params.sessionId} type=session_update action=dropped reason=session_not_owned`,
+      );
+      return;
+    }
     const entry = this.resolveEntry(params.sessionId);
     const events =
       entry?.events ?? this.resolvePendingRestoreEvents(params.sessionId);
     if (!events) return;
-    const originator = entry?.activePromptOriginatorClientId
-      ? { originatorClientId: entry.activePromptOriginatorClientId }
-      : {};
+    const prepared = this.prepareSessionUpdateFrames(params, entry);
+    for (const frame of prepared.frames) {
+      events.publish(frame);
+    }
+    // Daemon token-burn accounting for LIVE turns only (see method doc). Batch
+    // load-replay routes through seedSessionUpdates, not here, so replayed
+    // history never lands in the current metrics window. Wrapped so a throwing
+    // injected onTokenUsage callback can't skip the critical artifact processing
+    // below — metrics are optional, artifacts are not.
+    try {
+      this.recordLiveTokenUsage(params, entry);
+    } catch {
+      // Metrics callback failed; artifact processing must still run.
+    }
+    if (entry && prepared.artifacts.length > 0) {
+      await this.upsertAndPublishArtifacts(
+        entry,
+        prepared.artifacts,
+        {
+          trustedPublisher: prepared.trustedPublisher,
+        },
+        prepared.turn,
+      );
+    }
+  }
+
+  prepareSessionUpdateFrames(
+    params: SessionNotification,
+    entry?: BridgeClientSessionEntry,
+  ): PreparedSessionUpdateFrames {
+    const turn = {
+      ...(entry?.activePromptId ? { promptId: entry.activePromptId } : {}),
+      ...(entry?.activePromptOriginatorClientId
+        ? { originatorClientId: entry.activePromptOriginatorClientId }
+        : {}),
+    };
+    const frames: Array<Omit<BridgeEvent, 'id' | 'v'>> = [];
     // A2UI-over-MCP: tool_call_update results from an A2UI UI server carry
     // the A2UI command JSON flattened by core (EmbeddedResource -> text, the
     // application/a2ui+json mime is dropped, so detection keys off the
@@ -425,7 +794,7 @@ export class BridgeClient implements Client {
       // One frame per surface: tool results carrying commands for multiple
       // surfaces are split so every consumer sees a single-surface frame.
       for (const surface of a2ui.surfaces) {
-        events.publish({
+        frames.push({
           type: 'session_update',
           data: {
             sessionId: params.sessionId,
@@ -439,7 +808,7 @@ export class BridgeClient implements Client {
               _meta: { serverTimestamp: Date.now(), source: 'a2ui-bridge' },
             },
           },
-          ...originator,
+          ...turn,
         });
       }
       params = a2ui.sanitizedParams;
@@ -460,20 +829,115 @@ export class BridgeClient implements Client {
       typeof originalTs === 'number' && Number.isFinite(originalTs)
         ? originalTs
         : undefined;
-    events.publish({
+    const artifacts = entry?.artifacts
+      ? extractSessionUpdateArtifacts(
+          params,
+          updateMeta,
+          entry.artifacts.inputBatchLimit(),
+          entry.sessionId,
+        )
+      : [];
+    const publishParams = sanitizeSessionUpdateArtifacts(params, updateMeta);
+    frames.push({
       type: 'session_update',
-      data: params,
-      ...originator,
+      data: publishParams,
+      ...turn,
       ...(serverTimestamp !== undefined ? { _meta: { serverTimestamp } } : {}),
     });
+    return {
+      frames,
+      artifacts,
+      trustedPublisher: isTrustedArtifactToolUpdate(params, updateMeta),
+      turn,
+    };
+  }
+
+  async seedSessionUpdates(
+    entry: BridgeClientSessionEntry,
+    updates: SessionUpdate[],
+    options: { ingestArtifacts?: boolean } = {},
+  ): Promise<void> {
+    const frames: Array<Omit<BridgeEvent, 'id' | 'v'>> = [];
+    const artifactBatches: Array<{
+      artifacts: SessionArtifactInput[];
+      trustedPublisher: boolean;
+      turn: Pick<BridgeEvent, 'promptId' | 'originatorClientId'>;
+    }> = [];
+    for (const update of updates) {
+      const prepared = this.prepareSessionUpdateFrames(
+        { sessionId: entry.sessionId, update },
+        entry,
+      );
+      frames.push(...prepared.frames);
+      if (options.ingestArtifacts !== false && prepared.artifacts.length > 0) {
+        artifactBatches.push({
+          artifacts: prepared.artifacts,
+          trustedPublisher: prepared.trustedPublisher,
+          turn: prepared.turn,
+        });
+      }
+    }
+    entry.events.seedReplayEvents(frames);
+    for (const batch of artifactBatches) {
+      await this.upsertAndPublishArtifacts(
+        entry,
+        batch.artifacts,
+        {
+          trustedPublisher: batch.trustedPublisher,
+        },
+        batch.turn,
+      );
+    }
   }
 
   /**
-   * Bounded early-event buffer. Frames are keyed by sessionId; each
-   * entry tracks its `expiresAt` for lazy TTL-based eviction in
-   * `bufferEarlyEvent`. Drained by `drainEarlyEvents` whenever the
-   * bridge registers a session with a matching id. See
-   * MAX_EARLY_EVENT_* constants for capacity bounds.
+   * Daemon token-burn accounting for LIVE model turns. Called only from
+   * `sessionUpdate` (the live session/update fan-in), never from
+   * `seedSessionUpdates` — so batch load-replay never lands historical usage in
+   * the current metrics window. Additionally guarded on a live `entry`: a stray
+   * pending-restore frame (entry not yet registered) is skipped too, so replayed
+   * history can't post a phantom burn spike with no model call.
+   *
+   * Usage rides an otherwise-empty `agent_message_chunk` as `update._meta.usage`
+   * with per-round camelCase increments; subagent frames carry their own usage
+   * (tagged `parentToolCallId`) and are independent turns, so counting each
+   * frame once is the correct total. `_meta`/`usage` are optional and untyped.
+   */
+  private recordLiveTokenUsage(
+    params: SessionNotification,
+    entry: BridgeClientSessionEntry | undefined,
+  ): void {
+    if (!this.onTokenUsage || !entry) return;
+    const updateMeta = (params.update as { _meta?: Record<string, unknown> })
+      ._meta;
+    const usage = updateMeta?.['usage'];
+    if (usage === null || typeof usage !== 'object') return;
+    const inputTokens = (usage as { inputTokens?: unknown }).inputTokens;
+    const outputTokens = (usage as { outputTokens?: unknown }).outputTokens;
+    if (typeof inputTokens !== 'number' && typeof outputTokens !== 'number') {
+      return;
+    }
+    // `_meta.durationMs` (the LLM API round-trip) rides the same frame, as do
+    // the per-round model-API-error / auto-retry increments (absent → 0).
+    const durationMs = updateMeta?.['durationMs'];
+    const apiErrors = updateMeta?.['apiErrors'];
+    const apiRetries = updateMeta?.['apiRetries'];
+    this.onTokenUsage(
+      typeof inputTokens === 'number' ? inputTokens : 0,
+      typeof outputTokens === 'number' ? outputTokens : 0,
+      typeof durationMs === 'number' ? durationMs : undefined,
+      typeof apiErrors === 'number' ? apiErrors : 0,
+      typeof apiRetries === 'number' ? apiRetries : 0,
+    );
+  }
+
+  /**
+   * Bounded early-event buffer. The map is scoped to this BridgeClient and
+   * therefore to one channel; a stale channel cannot seed a fresh channel's
+   * future session. Frames are keyed by sessionId; each entry tracks its
+   * `expiresAt` for lazy TTL-based eviction in `bufferEarlyEvent`. Drained by
+   * `drainEarlyEvents` whenever the bridge registers a session with a matching
+   * id. See MAX_EARLY_EVENT_* constants for capacity bounds.
    */
   private readonly earlyEvents = new Map<
     string,
@@ -506,7 +970,7 @@ export class BridgeClient implements Client {
   /**
    * Allow-list of sessionIds currently being restored via
    * `session/load` / `session/resume`. Bypasses the tombstone check
-   * in `bufferEarlyEvent` so restore-time guardrail events for a
+   * in `bufferEarlyEvent` so restore-time events for a
    * previously-closed id flow through to the future
    * `createSessionEntry -> drainEarlyEvents` call.
    *
@@ -522,9 +986,12 @@ export class BridgeClient implements Client {
 
   /**
    * Handle child->bridge ACP `extMethod` requests (calls that expect a
-   * response, unlike `extNotification`). The only method served today is
-   * `craft/drainMidTurnQueue`: the ACP child calls it between tool batches to
-   * pull any messages the browser queued mid-turn. We splice the per-session
+   * response, unlike `extNotification`). Served methods:
+   * `qwen/control/client_mcp/message` (reverse tool channel),
+   * `qwen/control/create-sub-session` (the `create_sub_session` tool → daemon
+   * spawns a sub-session and, for `'first-turn'`, returns its first-turn
+   * result), and `craft/drainMidTurnQueue`: the ACP child calls the last one
+   * between tool batches to pull any messages the browser queued mid-turn. We splice the per-session
    * queue, return them to the child as the response, and — when non-empty —
    * publish a `mid_turn_message_injected` SSE frame so the browser can move
    * those messages out of its pending queue (a dedupe signal, not a transcript
@@ -537,6 +1004,18 @@ export class BridgeClient implements Client {
     method: string,
     params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
+    // Reverse tool channel (issue #5626, Phase 2): the child's session
+    // `McpClientManager` routes a client-hosted MCP server's
+    // `sendSdkMcpMessage` UP to the parent through this method. We hand the
+    // JSON-RPC `payload` to the per-WS-connection `ClientMcpRegistrar` (looked
+    // up by `server` name), which carries it down the daemon WS to the
+    // extension and returns the correlated response.
+    if (method === SERVE_CONTROL_EXT_METHODS.clientMcpMessage) {
+      return this.handleClientMcpMessage(params);
+    }
+    if (method === SERVE_CONTROL_EXT_METHODS.createSubSession) {
+      return this.handleCreateSubSession(params);
+    }
     if (method !== MID_TURN_QUEUE_DRAIN_METHOD) {
       throw RequestError.methodNotFound(method);
     }
@@ -547,11 +1026,18 @@ export class BridgeClient implements Client {
     // The drain always carries a sessionId; without one we can't route it on a
     // multi-session channel (and `resolveEntry(undefined)` would throw there),
     // so answer with an empty drain rather than poisoning the turn.
-    if (!sessionId) return { messages: [] };
+    if (!sessionId) return { messages: [], hasQueuedPrompt: false };
     const entry = this.resolveEntry(sessionId);
-    if (!entry) return { messages: [] };
+    if (!entry) return { messages: [], hasQueuedPrompt: false };
     const drained = entry.midTurnMessageQueue.splice(0);
     const messages = drained.map((item) => item.text);
+    const hasQueuedPrompt = entry.pendingPromptList.some(
+      (prompt) =>
+        prompt.state === 'queued' && !prompt.abortController.signal.aborted,
+    );
+    if (params['todoStopGuardWatchQueuedPrompt'] === true) {
+      entry.todoStopGuardAwaitingQueuedPrompt = hasQueuedPrompt;
+    }
     if (drained.length > 0) {
       // `publish()` never throws — it returns `undefined` on a closed bus (see
       // EventBus.publish's never-throws contract: "Don't add try/catch wrappers
@@ -574,6 +1060,7 @@ export class BridgeClient implements Client {
       for (const [originatorClientId, texts] of byOriginator) {
         const published = entry.events.publish({
           type: MID_TURN_MESSAGE_INJECTED_EVENT,
+          ...(entry.activePromptId ? { promptId: entry.activePromptId } : {}),
           data: { sessionId: entry.sessionId, messages: texts },
           ...(originatorClientId ? { originatorClientId } : {}),
         });
@@ -584,24 +1071,223 @@ export class BridgeClient implements Client {
         );
       }
     }
-    return { messages };
+    return { messages, hasQueuedPrompt };
   }
 
   /**
-   * Handle child->bridge ACP `extNotification` calls. Six methods are
-   * recognized — `qwen/notify/session/model-update`,
+   * Reverse tool channel (issue #5626, Phase 2) — answer the child's
+   * `qwen/control/client_mcp/message` ext-method. The child's session
+   * `McpClientManager` calls this when its agent drives a client-hosted
+   * (extension) MCP server: `params` carries the advertised `server` name and
+   * the JSON-RPC `payload` (initialize / tools/list / tools/call / a
+   * notification). We resolve the per-WS-connection sender via the injected
+   * `clientMcpSender` lookup, deliver the payload over the daemon WS, and
+   * return the correlated response as `{ payload }`.
+   *
+   * Rejects with ACP `methodNotFound` when no `clientMcpSender` is wired (Mode
+   * A / tests can't host a client MCP server), and `invalidParams` when the
+   * frame is malformed or the named server is no longer hosted (e.g. the
+   * extension disconnected mid-turn) — the agent's `SdkControlClientTransport`
+   * surfaces that as a transport error rather than hanging.
+   */
+  private async handleClientMcpMessage(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (!this.clientMcpSender) {
+      throw RequestError.methodNotFound(
+        SERVE_CONTROL_EXT_METHODS.clientMcpMessage,
+      );
+    }
+    const server = params['server'];
+    if (typeof server !== 'string' || server.length === 0) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`server` must be a non-empty string',
+      );
+    }
+    const payload = params['payload'];
+    if (payload === null || typeof payload !== 'object') {
+      throw RequestError.invalidParams(
+        undefined,
+        '`payload` must be a JSON-RPC message object',
+      );
+    }
+    const send = this.clientMcpSender(server);
+    if (!send) {
+      // The client that hosted this server is gone (WS closed / unregistered).
+      throw RequestError.invalidParams(
+        undefined,
+        `client-hosted MCP server '${server}' is not currently connected`,
+      );
+    }
+    const response = await send(payload);
+    return { payload: response as Record<string, unknown> };
+  }
+
+  /**
+   * Handle the `create_sub_session` tool's request: validate, then forward to
+   * the daemon-host `onCreateSubSession` callback (which spawns a fresh
+   * top-level sub-session and, for `'first-turn'`, waits for its first turn and
+   * returns the result). No host wired → `methodNotFound`, which the tool
+   * surfaces as "daemon-only".
+   */
+  private async handleCreateSubSession(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (!this.onCreateSubSession) {
+      throw RequestError.methodNotFound(
+        SERVE_CONTROL_EXT_METHODS.createSubSession,
+      );
+    }
+    const prompt = params['prompt'];
+    if (typeof prompt !== 'string' || prompt.length === 0) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`prompt` must be a non-empty string',
+      );
+    }
+    // The child is a separate process; this is a trust boundary. Without a cap
+    // it can hand the daemon a multi-MB string to deserialize, copy for the
+    // display name, and dispatch into a new session. Same ceiling the
+    // scheduled-task REST route applies to the prompts it accepts.
+    if (prompt.length > MAX_SUB_SESSION_PROMPT_CHARS) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`prompt\` exceeds the ${MAX_SUB_SESSION_PROMPT_CHARS}-character limit`,
+      );
+    }
+    const completion = params['completion'];
+    if (completion !== 'sent' && completion !== 'first-turn') {
+      throw RequestError.invalidParams(
+        undefined,
+        "`completion` must be 'sent' or 'first-turn'",
+      );
+    }
+    const name = params['name'];
+    if (typeof name === 'string' && name.length > MAX_SUB_SESSION_NAME_CHARS) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`name\` exceeds the ${MAX_SUB_SESSION_NAME_CHARS}-character limit`,
+      );
+    }
+    // `callerSessionId` keys the launcher's per-caller concurrency bucket AND
+    // its depth-1 nesting gate. A child that names a session it does not own
+    // could evade its own cap (a fabricated id starts every bucket at zero) or
+    // exhaust a victim session's; a child that OMITS the field would get an
+    // anonymous per-call bucket and skip the nesting gate entirely. Neither is
+    // acceptable, so it is required and authenticated. Every real caller has
+    // one — the tool runs inside a session's turn.
+    const callerSessionId = params['callerSessionId'];
+    if (
+      typeof callerSessionId !== 'string' ||
+      callerSessionId.length === 0 ||
+      !this.ownsSession(callerSessionId)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`callerSessionId` is required and must name a session owned by this connection',
+      );
+    }
+    const model = params['model'];
+    const result = await this.onCreateSubSession({
+      prompt,
+      completion,
+      ...(typeof model === 'string' && model.length > 0 && model.length <= 128
+        ? { model }
+        : {}),
+      ...(typeof name === 'string' && name.length > 0 ? { name } : {}),
+      callerSessionId,
+    });
+    return {
+      sessionId: result.sessionId,
+      ...(result.result !== undefined ? { result: result.result } : {}),
+      ...(result.stopReason !== undefined
+        ? { stopReason: result.stopReason }
+        : {}),
+      ...(result.parentSessionPersisted !== undefined
+        ? { parentSessionPersisted: result.parentSessionPersisted }
+        : {}),
+    };
+  }
+
+  /**
+   * Handle child->bridge ACP `extNotification` calls. Recognized methods are
+   * `qwen/notify/session/model-update`,
    * `qwen/notify/session/mode-update`,
    * `qwen/notify/session/title-update` (auto/in-process session titles),
+   * `qwen/notify/session/recording-degraded`,
    * `qwen/notify/session/prompt-suggestion` (followup assist),
+   * `qwen/notify/session/artifact-event` (hook artifacts),
    * `qwen/notify/session/terminal-sequence`, and
    * `qwen/notify/session/mcp-budget-event` — each translated into a
-   * session-scoped SSE frame. Unknown methods are dropped silently
-   * for forward-compat.
+   * session-scoped SSE frame. Unknown methods are dropped silently for
+   * forward-compat.
    */
   async extNotification(
     method: string,
     params: Record<string, unknown>,
   ): Promise<void> {
+    if (method === 'qwen/notify/session/generation/event') {
+      const sessionId = params['sessionId'];
+      const requestId = params['requestId'];
+      const event = params['event'];
+      if (
+        params['v'] !== 1 ||
+        typeof sessionId !== 'string' ||
+        typeof requestId !== 'string' ||
+        !event ||
+        typeof event !== 'object' ||
+        Array.isArray(event)
+      ) {
+        return;
+      }
+      const record = event as Record<string, unknown>;
+      if (record['type'] === 'started') {
+        const model = record['model'];
+        const modelSource = record['modelSource'];
+        if (
+          typeof model !== 'string' ||
+          (modelSource !== 'fast' && modelSource !== 'main')
+        ) {
+          return;
+        }
+        this.onGenerationEvent?.(sessionId, {
+          type: 'started',
+          requestId,
+          model,
+          modelSource,
+        });
+        return;
+      }
+      if (record['type'] === 'thinking') {
+        this.onGenerationEvent?.(sessionId, {
+          type: 'thinking',
+          requestId,
+        });
+        return;
+      }
+      if (record['type'] === 'delta') {
+        const seq = record['seq'];
+        const text = record['text'];
+        if (
+          typeof seq !== 'number' ||
+          !Number.isSafeInteger(seq) ||
+          seq < 0 ||
+          typeof text !== 'string' ||
+          text.length === 0
+        ) {
+          return;
+        }
+        this.onGenerationEvent?.(sessionId, {
+          type: 'delta',
+          requestId,
+          seq,
+          text,
+        });
+        return;
+      }
+      return;
+    }
     if (method === 'qwen/notify/session/model-update') {
       this.handleInSessionModelUpdate(params);
       return;
@@ -638,6 +1324,33 @@ export class BridgeClient implements Client {
       }
       return;
     }
+    if (method === 'qwen/notify/session/recording-degraded') {
+      const sessionId = params['sessionId'];
+      if (
+        params['v'] !== 1 ||
+        typeof sessionId !== 'string' ||
+        sessionId.length === 0 ||
+        params['reason'] !== 'write_failed'
+      ) {
+        writeStderrLine(
+          `[demux] session=${typeof sessionId === 'string' ? sessionId : '<missing>'} type=session_recording_degraded action=dropped reason=malformed`,
+        );
+        return;
+      }
+      const entry = this.resolveEntry(sessionId);
+      if (entry && !this.ownsSession(sessionId)) {
+        writeStderrLine(
+          `[demux] session=${sessionId} type=session_recording_degraded action=dropped reason=session_not_owned`,
+        );
+        return;
+      }
+      if (entry) entry.recordingDegraded = true;
+      this.publishExtNotification(sessionId, 'session_recording_degraded', {
+        sessionId,
+        reason: 'write_failed',
+      });
+      return;
+    }
     if (method === 'qwen/notify/session/prompt-suggestion') {
       const sessionId = params['sessionId'];
       const suggestion = params['suggestion'];
@@ -656,6 +1369,9 @@ export class BridgeClient implements Client {
       }
       const entry = this.resolveEntry(sessionId);
       if (!entry) return;
+      // This child-generated promptId identifies a persisted history turn, not
+      // the daemon's admitted HTTP prompt UUID. Keep it in the legacy payload
+      // and do not promote it to the envelope correlation field.
       entry.events.publish({
         type: 'followup_suggestion',
         data: { sessionId, suggestion, promptId },
@@ -668,7 +1384,11 @@ export class BridgeClient implements Client {
       const { v: _v, sessionId: _sid, ...rest } = params;
       void _v;
       void _sid;
-      this.publishExtNotification(sessionId, 'terminal_sequence', rest);
+      this.publishExtNotification(sessionId, 'terminal_sequence', rest, true);
+      return;
+    }
+    if (method === 'qwen/notify/session/artifact-event') {
+      await this.handleArtifactEvent(params);
       return;
     }
     if (method !== 'qwen/notify/session/mcp-budget-event') return;
@@ -695,15 +1415,110 @@ export class BridgeClient implements Client {
     this.publishExtNotification(sessionId, type, rest);
   }
 
+  private async handleArtifactEvent(
+    params: Record<string, unknown>,
+  ): Promise<void> {
+    const sessionId = params['sessionId'];
+    const rawArtifacts = params['artifacts'];
+    if (typeof sessionId !== 'string' || !Array.isArray(rawArtifacts)) {
+      writeStderrLine(
+        `[demux] session=${typeof sessionId === 'string' ? sessionId : '<missing>'} type=artifact_event action=dropped reason=malformed`,
+      );
+      return;
+    }
+    if (
+      !this.ownsSession(sessionId) &&
+      !this.inFlightRestoreIds.has(sessionId)
+    ) {
+      writeStderrLine(
+        `[demux] session=${sessionId} type=artifact_event action=dropped reason=session_not_owned`,
+      );
+      return;
+    }
+    const entry = this.resolveEntry(sessionId);
+    if (!entry) {
+      writeStderrLine(
+        `[demux] session=${sessionId} type=artifact_event action=dropped reason=session_not_found`,
+      );
+      return;
+    }
+    const hookEventName =
+      typeof params['hookEventName'] === 'string'
+        ? params['hookEventName']
+        : undefined;
+    const toolName =
+      typeof params['toolName'] === 'string' ? params['toolName'] : undefined;
+    const toolCallId =
+      typeof params['toolCallId'] === 'string'
+        ? params['toolCallId']
+        : undefined;
+    const artifacts = extractCappedArtifactInputs(
+      rawArtifacts,
+      entry.artifacts.inputBatchLimit(),
+      entry.sessionId,
+      'hook',
+      (artifact) => ({
+        ...artifactPayloadFields(artifact),
+        source: 'hook' as const,
+        hookEventName,
+        toolName,
+        toolCallId,
+      }),
+    );
+    const turn = {
+      ...(entry.activePromptId ? { promptId: entry.activePromptId } : {}),
+      ...(entry.activePromptOriginatorClientId
+        ? { originatorClientId: entry.activePromptOriginatorClientId }
+        : {}),
+    };
+    await this.upsertAndPublishArtifacts(entry, artifacts, undefined, turn);
+  }
+
+  private async upsertAndPublishArtifacts(
+    entry: BridgeClientSessionEntry,
+    artifacts: SessionArtifactInput[],
+    options?: Parameters<SessionArtifactStore['upsertMany']>[1],
+    turn: Pick<BridgeEvent, 'promptId' | 'originatorClientId'> = {},
+  ): Promise<void> {
+    try {
+      const result = await entry.artifacts.upsertMany(artifacts, options);
+      this.publishArtifactChanges(entry, result.changes, turn);
+    } catch (error) {
+      writeStderrLine(
+        `[artifacts] session=${entry.sessionId} action=dropped reason=${JSON.stringify(
+          artifactIngestionErrorReason(error),
+        )}`,
+      );
+    }
+  }
+
+  private publishArtifactChanges(
+    entry: BridgeClientSessionEntry,
+    changes: SessionArtifactChange[],
+    turn: Pick<BridgeEvent, 'promptId' | 'originatorClientId'>,
+  ): void {
+    for (const change of changes) {
+      entry.events.publish({
+        type: 'artifact_changed',
+        data: { sessionId: entry.sessionId, change },
+        ...turn,
+      });
+    }
+  }
+
   private publishExtNotification(
     sessionId: string,
     type: string,
     data: Record<string, unknown>,
+    turnScoped = false,
   ): void {
     const entry = this.resolveEntry(sessionId);
     const frame: Omit<BridgeEvent, 'id' | 'v'> = {
       type,
       data,
+      ...(turnScoped && entry?.activePromptId
+        ? { promptId: entry.activePromptId }
+        : {}),
       ...(entry?.activePromptOriginatorClientId
         ? { originatorClientId: entry.activePromptOriginatorClientId }
         : {}),
@@ -715,7 +1530,7 @@ export class BridgeClient implements Client {
     // No entry yet — buffer for `drainEarlyEvents`. The bridge calls
     // `drainEarlyEvents` immediately after `byId.set(sessionId, entry)`
     // in `createSessionEntry`; if the session never registers (spawn
-    // failure), the entry is GC'd by TTL after EARLY_EVENT_TTL_MS.
+    // failure), the event is GC'd by TTL after EARLY_EVENT_TTL_MS.
     this.bufferEarlyEvent(sessionId, frame);
   }
 
@@ -760,6 +1575,7 @@ export class BridgeClient implements Client {
       // its documented contract we don't wrap it.
       entry.events.publish({
         type: 'model_switched',
+        ...(entry.activePromptId ? { promptId: entry.activePromptId } : {}),
         data: { sessionId, modelId: currentModelId },
         ...(entry.activePromptOriginatorClientId
           ? { originatorClientId: entry.activePromptOriginatorClientId }
@@ -837,6 +1653,7 @@ export class BridgeClient implements Client {
       // per its documented contract we don't wrap it in try/catch.
       entry.events.publish({
         type: 'approval_mode_changed',
+        ...(entry.activePromptId ? { promptId: entry.activePromptId } : {}),
         data: {
           sessionId,
           previous: 'default',
@@ -880,6 +1697,7 @@ export class BridgeClient implements Client {
     // documented contract we don't wrap it in try/catch.
     entry.events.publish({
       type: 'session_update',
+      ...(entry.activePromptId ? { promptId: entry.activePromptId } : {}),
       data: {
         sessionId,
         update: {
@@ -918,14 +1736,14 @@ export class BridgeClient implements Client {
     //
     // Skip the tombstone check for ids currently being restored so a
     // `close -> load same id` sequence within 60s doesn't lose
-    // restore-time guardrail events.
+    // restore-time early events.
     this.sweepExpiredTombstones(now);
     if (
       this.tombstonedSessionIds.has(sessionId) &&
       !this.inFlightRestoreIds.has(sessionId)
     ) {
       writeStderrLine(
-        `qwen serve: dropping mcp guardrail extNotification ` +
+        `qwen serve: dropping early extNotification ` +
           `for tombstoned session ${JSON.stringify(sessionId)} ` +
           `(post-close stale event)`,
       );
@@ -938,7 +1756,7 @@ export class BridgeClient implements Client {
         // Hitting this cap means the daemon is under notification
         // pressure from 64+ concurrent sessions — worth surfacing.
         writeStderrLine(
-          `qwen serve: dropping mcp guardrail extNotification — ` +
+          `qwen serve: dropping early extNotification — ` +
             `early-event buffer at MAX_EARLY_EVENT_SESSIONS ` +
             `(${MAX_EARLY_EVENT_SESSIONS}); possible session-id fanout abuse`,
         );
@@ -949,7 +1767,7 @@ export class BridgeClient implements Client {
     }
     if (buf.frames.length >= MAX_EARLY_EVENTS_PER_SESSION) {
       writeStderrLine(
-        `qwen serve: dropping mcp guardrail extNotification ` +
+        `qwen serve: dropping early extNotification ` +
           `for session ${JSON.stringify(sessionId)} — per-session ` +
           `cap (${MAX_EARLY_EVENTS_PER_SESSION}) reached`,
       );
@@ -996,7 +1814,7 @@ export class BridgeClient implements Client {
    * Mark a sessionId as currently being restored via `session/load` /
    * `session/resume`. While in this set, `bufferEarlyEvent` accepts
    * frames for the id even if it's tombstoned — so restore-time
-   * guardrail events from the freshly-restored child reach
+   * early events from the freshly-restored child reach
    * `drainEarlyEvents` instead of being rejected by the tombstone.
    *
    * Bridge factory calls this BEFORE awaiting the ACP restore call.
@@ -1038,7 +1856,12 @@ export class BridgeClient implements Client {
     this.tombstonedSessionIds.delete(sessionId);
     const buf = this.earlyEvents.get(sessionId);
     if (!buf) return;
-    for (const frame of buf.frames) entry.events.publish(frame);
+    for (const frame of buf.frames) {
+      if (frame.type === 'session_recording_degraded') {
+        entry.recordingDegraded = true;
+      }
+      entry.events.publish(frame);
+    }
     this.earlyEvents.delete(sessionId);
   }
 
@@ -1221,6 +2044,26 @@ export class BridgeClient implements Client {
     // bytes wanted".
     if (typeof params.limit === 'number' && params.limit <= 0) {
       return { content: '' };
+    }
+    if (
+      typeof params.limit === 'number' &&
+      params.limit > 0 &&
+      !Number.isSafeInteger(params.limit)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`limit\` must be a positive integer, got ${params.limit}`,
+      );
+    }
+    if (
+      typeof params.line === 'number' &&
+      params.line > 0 &&
+      !Number.isSafeInteger(params.line)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`line\` must be a positive integer, got ${params.line}`,
+      );
     }
     // BSA0E: cap the file size we'll buffer into RSS at 100 MiB so a
     // request like `{ line: 1, limit: 10 }` against a 500 MB log

@@ -70,6 +70,7 @@ describe('no-AK integration CI wiring', () => {
       'utf8',
     );
     const ubuntuJob = getWorkflowJob(workflow, 'test');
+    const webShellJob = getWorkflowJob(workflow, 'web_shell_e2e_smoke');
     const macosJob = getWorkflowJob(workflow, 'test_macos');
     const windowsJob = getWorkflowJob(workflow, 'test_windows');
 
@@ -101,5 +102,33 @@ describe('no-AK integration CI wiring', () => {
     );
     expect(ubuntuJob).toContain('git merge-base --is-ancestor');
     expect(ubuntuJob).toContain('github.event.pull_request.head.sha');
+    expect(webShellJob).toContain(
+      "name: 'Verify checkout includes expected head commit'",
+    );
+    expect(webShellJob).toContain('git merge-base --is-ancestor');
+    expect(webShellJob).toContain('github.event.pull_request.head.sha');
+  });
+
+  it('keeps the lightweight coverage comment job on the hosted runner', () => {
+    const workflow = readFileSync(
+      path.join(ROOT, '.github/workflows/ci.yml'),
+      'utf8',
+    );
+    const coverageJob = getWorkflowJob(workflow, 'post_coverage_comment');
+
+    expect(coverageJob).toContain("runs-on: 'ubuntu-latest'");
+    expect(coverageJob).not.toContain('ubuntu_runner');
+  });
+
+  it('does not install Linux packages on self-hosted Playwright runners', () => {
+    const workflow = readFileSync(
+      path.join(ROOT, '.github/workflows/ci.yml'),
+      'utf8',
+    );
+    const webShellJob = getWorkflowJob(workflow, 'web_shell_e2e_smoke');
+
+    expect(webShellJob).toContain('ubuntu_runner');
+    expect(webShellJob).toContain("run: 'npx playwright install chromium'");
+    expect(webShellJob).toContain('--with-deps chromium');
   });
 });

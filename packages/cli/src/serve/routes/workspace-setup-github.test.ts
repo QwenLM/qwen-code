@@ -16,7 +16,7 @@ import {
   createWorkspaceFileSystemFactory,
 } from '../fs/index.js';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
-import type { BridgeEvent } from '../event-bus.js';
+import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import type { ServeOptions } from '../types.js';
 import {
   resetHomeEnvBootstrapForTesting,
@@ -89,7 +89,12 @@ function loopbackHost(): string {
 }
 
 async function makeHarness(
-  opts: { token?: string; trusted?: boolean } = {},
+  opts: {
+    token?: string;
+    trusted?: boolean;
+    runtimeEnv?: Readonly<NodeJS.ProcessEnv>;
+    daemonEnv?: Readonly<NodeJS.ProcessEnv>;
+  } = {},
 ): Promise<Harness> {
   const scratch = await fsp.mkdtemp(
     path.join(
@@ -112,7 +117,7 @@ async function makeHarness(
   const events: BridgeEvent[] = [];
   const bridgeEvents: BridgeEvent[] = [];
   const fsFactory = createWorkspaceFileSystemFactory({
-    boundWorkspace: workspace,
+    boundWorkspaces: [workspace],
     trusted: opts.trusted ?? true,
     emit: (event) => events.push(event),
   });
@@ -125,7 +130,20 @@ async function makeHarness(
   const app = createServeApp(
     { ...baseOpts, workspace, token: opts.token },
     undefined,
-    { bridge, fsFactory },
+    {
+      bridge,
+      fsFactory,
+      daemonEnv: opts.daemonEnv ?? {},
+      ...(opts.runtimeEnv
+        ? {
+            primaryRuntimeEnv: {
+              mode: 'runtime-overlay' as const,
+              overlayKeys: Object.keys(opts.runtimeEnv),
+              effectiveEnv: opts.runtimeEnv,
+            },
+          }
+        : {}),
+    },
   );
   return { workspace, scratch, bridgeEvents, app };
 }
@@ -397,6 +415,29 @@ describe('POST /workspace/setup-github', () => {
     expect(setupGithubMocks.setupGithub).toHaveBeenCalledWith(
       expect.objectContaining({
         proxy: 'http://workspace-proxy.example:8080',
+      }),
+    );
+  });
+
+  it('uses the owning runtime environment for proxy fallback', async () => {
+    await teardown(h);
+    h = await makeHarness({
+      token: 'secret',
+      runtimeEnv: { HTTPS_PROXY: 'http://runtime-proxy.example:8080' },
+      daemonEnv: { HTTPS_PROXY: 'http://daemon-proxy.example:8080' },
+    });
+    setupGithubMocks.setupGithub.mockResolvedValueOnce(setupResult());
+
+    const res = await request(h.app)
+      .post('/workspace/setup-github')
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .send({ consent: true });
+
+    expect(res.status).toBe(200);
+    expect(setupGithubMocks.setupGithub).toHaveBeenCalledWith(
+      expect.objectContaining({
+        proxy: 'http://runtime-proxy.example:8080',
       }),
     );
   });

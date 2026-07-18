@@ -22,8 +22,8 @@ type TokenCount = number;
 // Public constants
 // ---------------------------------------------------------------------------
 
-/** Default input context window size: 128 K tokens (power-of-two). */
-export const DEFAULT_TOKEN_LIMIT: TokenCount = 131_072;
+/** Default input context window size: 200 K tokens. */
+export const DEFAULT_TOKEN_LIMIT: TokenCount = 200_000;
 
 // ---------------------------------------------------------------------------
 // Token limit types
@@ -126,6 +126,7 @@ const INPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^minimax-/i, LIMITS['200k']],
 
   // Moonshot / Kimi
+  [/^kimi-k3/, LIMITS['1m']],
   [/^kimi-/, LIMITS['256k']],
 
   // ByteDance Seed-OSS
@@ -161,6 +162,7 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
 
   [/^minimax-m2\.5/i, LIMITS['64k']],
 
+  [/^kimi-k3/, LIMITS['128k']],
   [/^kimi-k2\.5/, LIMITS['32k']],
 ];
 

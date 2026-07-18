@@ -21,6 +21,7 @@ mod scroll;
 // etc.) live elsewhere under CuaDriverCore::Capture and are reached
 // through GetWindowStateTool.
 pub(crate) mod get_screen_size;
+mod get_desktop_state;
 mod get_cursor_position;
 mod move_cursor;
 mod cursor_tools;
@@ -63,6 +64,73 @@ impl ZoomContext {
             self.origin_y + py * self.scale_inv,
         )
     }
+}
+
+/// Input delivery modality — the agent-selected rung of the best-effort-background
+/// ladder, passed per call (never a stored/config setting).
+///
+/// - `Background` (default): post synthetic input to the pid without fronting.
+/// - `Foreground`: briefly front the target window, act, then restore the prior
+///   frontmost (see [`crate::input::skylight::with_foreground_assist`]). The
+///   agent's vision-driven last resort — and the only way `click` reaches a
+///   foreground rung. Orthogonal to addressing (`element_index` vs `x/y`, which
+///   selects AX vs pixel).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum DeliveryMode {
+    #[default]
+    Background,
+    Foreground,
+}
+
+impl DeliveryMode {
+    /// Parse the per-call `delivery_mode` argument. Anything other than an
+    /// explicit case-insensitive `"foreground"` resolves to `Background` — the
+    /// correct default, so an omitted/garbage value never silently fronts.
+    pub fn parse(arg: Option<&str>) -> Self {
+        match arg {
+            Some(s) if s.eq_ignore_ascii_case("foreground") => Self::Foreground,
+            _ => Self::Background,
+        }
+    }
+
+    pub fn is_foreground(self) -> bool { matches!(self, Self::Foreground) }
+}
+
+/// px-focus for the keyboard family (type_text / press_key / hotkey): pixel-click
+/// at (x,y) to establish real renderer focus before a keystroke — the *element px
+/// action* form of a keyboard tool. Reuses ClickTool's exact coordinate
+/// translation + delivery_mode so it lands on the same pixel a px-click would.
+/// `Ok(())` on success; `Err(ToolResult)` short-circuits the caller.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn focus_by_pixel(
+    state: &Arc<ToolState>,
+    pid: i32,
+    window_id: Option<u32>,
+    x: f64,
+    y: f64,
+    foreground: bool,
+    session: Option<String>,
+    session_id: Option<String>,
+    from_zoom: bool,
+) -> Result<(), cua_driver_core::protocol::ToolResult> {
+    use cua_driver_core::tool::Tool;
+    let mut click_args = serde_json::json!({
+        "pid": pid, "x": x, "y": y,
+        "delivery_mode": if foreground { "foreground" } else { "background" },
+    });
+    if let Some(wid) = window_id { click_args["window_id"] = serde_json::json!(wid); }
+    if let Some(s) = session { click_args["session"] = serde_json::json!(s); }
+    if let Some(s) = session_id { click_args["_session_id"] = serde_json::json!(s); }
+    if from_zoom { click_args["from_zoom"] = serde_json::json!(true); }
+    let focus = click::ClickTool::new(state.clone()).invoke(click_args).await;
+    if focus.is_error == Some(true) {
+        return Err(cua_driver_core::protocol::ToolResult::error(format!(
+            "focus pixel-click at ({x:.0},{y:.0}) failed."
+        )));
+    }
+    // Brief settle so the renderer registers focus before the keystrokes.
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    Ok(())
 }
 
 /// Thread-safe per-pid zoom context registry.
@@ -111,20 +179,25 @@ impl ResizeRegistry {
 }
 
 /// Runtime-mutable driver configuration persisted across calls within a session.
+///
+/// `capture_mode` is per-call. `capture_scope` is the persisted default layered
+/// beneath per-MCP-session overrides; `get_desktop_state`, `get_config`, and
+/// `set_config` all resolve the same effective session value. Default `"window"`.
 pub struct DriverConfig {
-    /// Default capture_mode for get_window_state when not specified per-call.
-    pub capture_mode: String,
     /// Max screenshot dimension (0 = no limit). Applied during screenshot/zoom.
     /// Default 1568 matches Swift's `CuaDriverConfig.defaultMaxImageDimension` —
     /// the long edge is downscaled to this before encoding.
     pub max_image_dimension: u32,
+    /// Capture scope: `"window"` (default) or `"desktop"`. Gates
+    /// `get_desktop_state` (full-display capture requires `"desktop"`).
+    pub capture_scope: String,
 }
 
 impl Default for DriverConfig {
     fn default() -> Self {
         Self {
-            capture_mode: "som".to_owned(),
             max_image_dimension: 1568,
+            capture_scope: "window".to_owned(),
         }
     }
 }
@@ -150,35 +223,74 @@ pub fn load_driver_config() -> DriverConfig {
         Ok(v) => v,
         Err(_) => return cfg,  // malformed file — use defaults
     };
-    if let Some(v) = json.get("capture_mode").and_then(|v| v.as_str()) {
-        cfg.capture_mode = v.to_owned();
-    }
+    // `capture_mode` is per-call now; an old on-disk `capture_mode` key is
+    // silently ignored. Load the persisted capture_scope default, accepting
+    // only window|desktop; named sessions may override it in memory.
     if let Some(v) = json.get("max_image_dimension").and_then(|v| v.as_u64()) {
         if let Ok(v32) = u32::try_from(v) {
             cfg.max_image_dimension = v32;
         }
     }
+    if let Some(s) = json.get("capture_scope").and_then(|v| v.as_str()) {
+        if s == "window" || s == "desktop" {
+            cfg.capture_scope = s.to_owned();
+        }
+    }
     cfg
 }
 
-/// Persist a single key/value pair to `~/.cua-driver/config.json`.
+/// Persist config updates to `~/.cua-driver/config.json`.
 /// Merges with any existing file contents so other keys are preserved.
+/// Runs `apply_in_memory` after the atomic rename but before releasing the
+/// process-wide commit lock, keeping concurrent disk and memory commits ordered.
 /// Returns `Err` if the directory cannot be created or the file cannot be written.
-pub fn write_driver_config_key(key: &str, value: &serde_json::Value) -> Result<(), String> {
-    let path = config_file_path();
-    let mut json: serde_json::Value = path
-        .exists()
-        .then(|| std::fs::read_to_string(&path).ok())
-        .flatten()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-    json[key] = value.clone();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let body = serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?;
-    std::fs::write(&path, body).map_err(|e| e.to_string())?;
-    Ok(())
+static DRIVER_CONFIG_COMMIT_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+
+pub(super) fn with_driver_config_commit_lock<T>(
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let _guard = DRIVER_CONFIG_COMMIT_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .map_err(|e| e.to_string())?;
+    operation()
+}
+
+pub fn write_driver_config_updates<T>(
+    updates: &[(&str, serde_json::Value)],
+    apply_in_memory: impl FnOnce() -> T,
+) -> Result<T, String> {
+    write_driver_config_updates_at_path(&config_file_path(), updates, apply_in_memory)
+}
+
+fn write_driver_config_updates_at_path<T>(
+    path: &std::path::Path,
+    updates: &[(&str, serde_json::Value)],
+    apply_in_memory: impl FnOnce() -> T,
+) -> Result<T, String> {
+    with_driver_config_commit_lock(|| {
+        let mut json: serde_json::Value = path
+            .exists()
+            .then(|| std::fs::read_to_string(path).ok())
+            .flatten()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        for (key, value) in updates {
+            json[*key] = value.clone();
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let body = serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?;
+        let temp_path = path.with_extension(format!("json.tmp-{}", std::process::id()));
+        std::fs::write(&temp_path, body).map_err(|e| e.to_string())?;
+        if let Err(e) = std::fs::rename(&temp_path, path) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(e.to_string());
+        }
+        Ok(apply_in_memory())
+    })
 }
 
 /// Per-session config overrides layered over the global persisted `DriverConfig`.
@@ -186,15 +298,15 @@ pub fn write_driver_config_key(key: &str, value: &serde_json::Value) -> Result<(
 /// The cua-driver daemon is one shared process: every `cua-driver mcp` proxy
 /// connects to it and shares its `ToolState`. `DriverConfig` is therefore
 /// multi-tenant AND persisted to disk — so without session scoping, session A's
-/// `set_config capture_mode=vision` clobbers session B's value and flips the
-/// on-disk default under everyone. These overrides fix that: a named MCP session
+/// `set_config` clobbers session B's value and flips the on-disk default under
+/// everyone. These overrides fix that: a named MCP session
 /// gets an in-memory, non-persisted override keyed by its `_session_id`; the
 /// anonymous session (CLI / one-shot `call`) still writes the shared global +
 /// disk. `None` fields mean "fall through to the global layer".
 #[derive(Clone, Default)]
 pub struct ConfigOverrides {
-    pub capture_mode: Option<String>,
     pub max_image_dimension: Option<u32>,
+    pub capture_scope: Option<String>,
 }
 
 /// Thread-safe map of `session_id` → `ConfigOverrides`, mirroring
@@ -220,25 +332,43 @@ impl SessionConfigRegistry {
         }
         let mut map = self.inner.lock().unwrap();
         let entry = map.entry(session.to_owned()).or_default();
-        if delta.capture_mode.is_some() {
-            entry.capture_mode = delta.capture_mode;
-        }
         if delta.max_image_dimension.is_some() {
             entry.max_image_dimension = delta.max_image_dimension;
         }
+        if delta.capture_scope.is_some() {
+            entry.capture_scope = delta.capture_scope;
+        }
     }
 
-    /// Resolve the effective config for `session`, layering its overrides over
-    /// the global `DriverConfig`. `session = None` (anonymous) returns the
-    /// global values verbatim — today's behavior.
-    pub fn effective(&self, session: Option<&str>, global: &DriverConfig) -> (String, u32) {
+    /// Resolve the effective `max_image_dimension` for `session`, layering its
+    /// override over the global `DriverConfig`. `session = None` (anonymous)
+    /// returns the global value verbatim.
+    pub fn effective_max_image_dimension(&self, session: Option<&str>, global: &DriverConfig) -> u32 {
+        let ov = session.and_then(|s| self.inner.lock().unwrap().get(s).cloned());
+        match ov {
+            Some(ov) => ov.max_image_dimension.unwrap_or(global.max_image_dimension),
+            None => global.max_image_dimension,
+        }
+    }
+
+    pub fn effective_capture_scope(&self, session: Option<&str>, global: &DriverConfig) -> String {
+        let ov = session.and_then(|s| self.inner.lock().unwrap().get(s).cloned());
+        ov.and_then(|o| o.capture_scope)
+            .unwrap_or_else(|| global.capture_scope.clone())
+    }
+
+    pub fn effective_config(
+        &self,
+        session: Option<&str>,
+        global: &DriverConfig,
+    ) -> (u32, String) {
         let ov = session.and_then(|s| self.inner.lock().unwrap().get(s).cloned());
         match ov {
             Some(ov) => (
-                ov.capture_mode.unwrap_or_else(|| global.capture_mode.clone()),
                 ov.max_image_dimension.unwrap_or(global.max_image_dimension),
+                ov.capture_scope.unwrap_or_else(|| global.capture_scope.clone()),
             ),
-            None => (global.capture_mode.clone(), global.max_image_dimension),
+            None => (global.max_image_dimension, global.capture_scope.clone()),
         }
     }
 
@@ -264,6 +394,11 @@ pub struct ToolState {
     pub config: Arc<std::sync::RwLock<DriverConfig>>,
     /// Per-MCP-session in-memory config overrides layered over `config`.
     pub session_config: Arc<SessionConfigRegistry>,
+    /// Open CDP connections, one per port, reused across `insert_text` /
+    /// `type_keystrokes` calls instead of reconnecting fresh every time —
+    /// see `CdpSessionCache` for why (Chrome's "allow remote debugging"
+    /// popup fires on every new connection, not once per session).
+    pub cdp_sessions: Arc<crate::browser::CdpSessionCache>,
 }
 
 impl Default for ToolState {
@@ -277,6 +412,7 @@ impl Default for ToolState {
             // `cua-driver config set` changes carry over into MCP sessions.
             config: Arc::new(std::sync::RwLock::new(load_driver_config())),
             session_config: Arc::new(SessionConfigRegistry::new()),
+            cdp_sessions: Arc::new(crate::browser::CdpSessionCache::new()),
         }
     }
 }
@@ -286,6 +422,11 @@ impl Default for ToolState {
 /// variant — same name, stricter args, window-scoped JPEG @ 85% + a text
 /// note telling the caller to use pixel-addressed tools.
 pub fn register_all(registry: &mut ToolRegistry, compat: bool) {
+    if let Err(error) = crate::ax::bindings::set_global_messaging_timeout(
+        crate::ax::bindings::AX_MESSAGING_TIMEOUT_SECS as f32,
+    ) {
+        tracing::warn!(error, "failed to configure process-wide AX messaging timeout");
+    }
     let state = Arc::new(ToolState::default());
     // Share the element cache with the recording-hook layer so it can
     // resolve element_index → window-local screenshot coords for click.png.
@@ -325,11 +466,17 @@ pub fn register_all(registry: &mut ToolRegistry, compat: bool) {
     registry.register(Box::new(hotkey::HotkeyTool::new(state.clone())));
     registry.register(Box::new(set_value::SetValueTool::new(state.clone())));
     registry.register(Box::new(scroll::ScrollTool::new(state.clone())));
-    // `screenshot` removed - see the matching comment in
-    // platform-windows/src/tools/impl_.rs::build_registry. Canonical
-    // screenshot path is `get_window_state` with `capture_mode:"vision"`.
+    // The standalone `screenshot` tool was removed (#1692). The pixel-grounding
+    // screenshot the Claude Code computer-use compat loop relies on now comes
+    // from `get_window_state` (which always returns BOTH the tree AND a
+    // screenshot — perception is mode-agnostic; `capture_mode` is deprecated/
+    // ignored) for a window, or `get_desktop_state` for the whole screen.
+    // `compat` no longer gates a tool swap here — the flag's live purpose is to
+    // register the MCP server under the `cua-computer-use` name, which is what
+    // triggers Claude Code's computer-use beta-tool injection (see cli.rs).
     let _ = compat;
     registry.register(Box::new(get_screen_size::GetScreenSizeTool));
+    registry.register(Box::new(get_desktop_state::GetDesktopStateTool::new(state.clone())));
     registry.register(Box::new(get_cursor_position::GetCursorPositionTool));
     registry.register(Box::new(move_cursor::MoveCursorTool::new(state.clone())));
     registry.register(Box::new(cursor_tools::SetAgentCursorEnabledTool::new(state.clone())));
@@ -372,25 +519,26 @@ pub fn register_all(registry: &mut ToolRegistry, compat: bool) {
 mod session_config_guard_tests {
     use super::*;
     use cua_driver_core::session::fire_session_end;
+    use std::sync::{mpsc, Mutex};
 
-    fn overrides(mode: &str) -> ConfigOverrides {
-        ConfigOverrides { capture_mode: Some(mode.to_owned()), max_image_dimension: None }
+    fn overrides(max_dim: u32) -> ConfigOverrides {
+        ConfigOverrides { max_image_dimension: Some(max_dim), capture_scope: None }
     }
 
     #[test]
     fn ended_session_config_set_is_noop() {
         // THE FIX (config side): an ended session id keys the overrides map, so
         // an in-flight set_config after session_end must not re-create the entry
-        // the reaper's clear hook removed. effective() then falls back to global.
+        // the reaper's clear hook removed. effective then falls back to global.
         let reg = SessionConfigRegistry::new();
         let global = DriverConfig::default();
         let sid = "wb-config-ended-Q9R8S7";
         fire_session_end(sid);
         assert!(cua_driver_core::session::is_session_ended(sid));
 
-        reg.set(sid, overrides("raw"));
-        let (mode, _) = reg.effective(Some(sid), &global);
-        assert_eq!(mode, global.capture_mode, "ended session must not get an override entry");
+        reg.set(sid, overrides(800));
+        let dim = reg.effective_max_image_dimension(Some(sid), &global);
+        assert_eq!(dim, global.max_image_dimension, "ended session must not get an override entry");
     }
 
     #[test]
@@ -399,9 +547,87 @@ mod session_config_guard_tests {
         let global = DriverConfig::default();
         let sid = "wb-config-live-T1U2V3";
         assert!(!cua_driver_core::session::is_session_ended(sid));
-        reg.set(sid, overrides("raw"));
-        let (mode, _) = reg.effective(Some(sid), &global);
-        assert_eq!(mode, "raw", "live session override must apply");
+        reg.set(sid, overrides(800));
+        let dim = reg.effective_max_image_dimension(Some(sid), &global);
+        assert_eq!(dim, 800, "live session override must apply");
+    }
+
+    #[test]
+    fn capture_scope_is_isolated_per_session() {
+        let reg = SessionConfigRegistry::new();
+        let global = DriverConfig::default();
+        let desktop = "wb-scope-desktop-B1C2D3";
+        let window = "wb-scope-window-E4F5G6";
+        reg.set(desktop, ConfigOverrides {
+            max_image_dimension: None,
+            capture_scope: Some("desktop".to_owned()),
+        });
+        reg.set(window, ConfigOverrides {
+            max_image_dimension: None,
+            capture_scope: Some("window".to_owned()),
+        });
+
+        assert_eq!(reg.effective_capture_scope(Some(desktop), &global), "desktop");
+        assert_eq!(reg.effective_capture_scope(Some(window), &global), "window");
+        assert_eq!(reg.effective_capture_scope(None, &global), "window");
+    }
+
+    #[test]
+    fn disk_and_memory_config_commits_keep_the_same_order() {
+        let dir = std::env::temp_dir().join(format!(
+            "qwen-cua-driver-config-order-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let path = dir.join("config.json");
+        let memory = Arc::new(Mutex::new(String::new()));
+        let (a_started_tx, a_started_rx) = mpsc::channel();
+        let (release_a_tx, release_a_rx) = mpsc::channel();
+        let (b_done_tx, b_done_rx) = mpsc::channel();
+
+        let path_a = path.clone();
+        let memory_a = memory.clone();
+        let writer_a = std::thread::spawn(move || {
+            write_driver_config_updates_at_path(
+                &path_a,
+                &[("capture_scope", serde_json::json!("window"))],
+                || {
+                    a_started_tx.send(()).unwrap();
+                    release_a_rx.recv().unwrap();
+                    *memory_a.lock().unwrap() = "window".to_owned();
+                },
+            )
+            .unwrap();
+        });
+        a_started_rx.recv().unwrap();
+
+        let path_b = path.clone();
+        let memory_b = memory.clone();
+        let writer_b = std::thread::spawn(move || {
+            write_driver_config_updates_at_path(
+                &path_b,
+                &[("capture_scope", serde_json::json!("desktop"))],
+                || {
+                    *memory_b.lock().unwrap() = "desktop".to_owned();
+                    b_done_tx.send(()).unwrap();
+                },
+            )
+            .unwrap();
+        });
+
+        let b_overtook_a = b_done_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .is_ok();
+        release_a_tx.send(()).unwrap();
+        writer_a.join().unwrap();
+        writer_b.join().unwrap();
+
+        let disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let memory = memory.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(!b_overtook_a, "a later disk write must wait for the earlier memory commit");
+        assert_eq!(disk["capture_scope"], memory);
     }
 }
 

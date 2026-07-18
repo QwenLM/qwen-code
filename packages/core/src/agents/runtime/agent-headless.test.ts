@@ -35,7 +35,11 @@ import { executeToolCall } from '../../core/nonInteractiveToolExecutor.js';
 import { getInitialChatHistory } from '../../utils/environmentContext.js';
 import type { ToolRegistry } from '../../tools/tool-registry.js';
 import { type AnyDeclarativeTool } from '../../tools/tools.js';
-import { ContextState, AgentHeadless } from './agent-headless.js';
+import {
+  ContextState,
+  AgentHeadless,
+  templateString,
+} from './agent-headless.js';
 import {
   AgentEventEmitter,
   AgentEventType,
@@ -242,6 +246,62 @@ describe('subagent.ts', () => {
     it('should return undefined for missing keys', () => {
       const context = new ContextState();
       expect(context.get('missing')).toBeUndefined();
+    });
+  });
+
+  describe('templateString', () => {
+    it('should replace valid identifier placeholders', () => {
+      const context = new ContextState();
+      context.set('name', 'Agent');
+      context.set('task', 'Testing');
+      const result = templateString(
+        'Hello ${name}, your task is ${task}.',
+        context,
+      );
+      expect(result).toBe('Hello Agent, your task is Testing.');
+    });
+
+    it('should treat ${0} as literal text, not as a placeholder', () => {
+      const context = new ContextState();
+      const result = templateString('Do not write ${0} in your code.', context);
+      expect(result).toBe('Do not write ${0} in your code.');
+    });
+
+    it('should treat ${1} and ${2} as literal text', () => {
+      const context = new ContextState();
+      const result = templateString(
+        'Use {0} and {1}, not ${0} or ${1}.',
+        context,
+      );
+      expect(result).toBe('Use {0} and {1}, not ${0} or ${1}.');
+    });
+
+    it('should still throw for missing valid identifier placeholders', () => {
+      const context = new ContextState();
+      context.set('name', 'Agent');
+      expect(() =>
+        templateString('Hello ${name}, missing ${missing}.', context),
+      ).toThrow('Missing context values for the following keys: missing');
+    });
+
+    it('should handle mixed numeric and identifier placeholders', () => {
+      const context = new ContextState();
+      context.set('var', 'value');
+      // ${var} and ${_private} are valid identifiers; ${0} is literal
+      // ${_private} is missing from context, so it should throw
+      expect(() =>
+        templateString('${var} and ${0} and ${_private}', context),
+      ).toThrow('Missing context values for the following keys: _private');
+    });
+
+    it('should handle ${0} alongside valid placeholders without error', () => {
+      const context = new ContextState();
+      context.set('name', 'Agent');
+      const result = templateString(
+        'Hello ${name}. Do not write ${0} or ${1}.',
+        context,
+      );
+      expect(result).toBe('Hello Agent. Do not write ${0} or ${1}.');
     });
   });
 
@@ -619,6 +679,38 @@ describe('subagent.ts', () => {
         );
         // Env bootstrap is skipped; history is exactly initialMessages.
         expect(history).toEqual(initialMessages);
+      });
+
+      it('should skip env history when initialMessages is an empty array', async () => {
+        const { config } = await createMockConfig();
+        vi.mocked(GeminiChat).mockClear();
+        vi.mocked(getInitialChatHistory).mockClear();
+
+        const promptConfig: PromptConfig = {
+          systemPrompt: 'System ${name}.',
+          initialMessages: [],
+        };
+        const context = new ContextState();
+        context.set('name', 'Agent');
+
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+
+        await scope.execute(context);
+
+        const callArgs = vi.mocked(GeminiChat).mock.calls[0];
+        const generationConfig = getGenerationConfigFromMock();
+
+        expect(generationConfig.systemInstruction).toContain('System Agent.');
+        expect(callArgs[2]).toEqual([]);
+        expect(getInitialChatHistory).not.toHaveBeenCalled();
       });
 
       it('should use renderedSystemPrompt verbatim and bypass templating', async () => {
@@ -1253,6 +1345,79 @@ describe('subagent.ts', () => {
         expect(parts[0].functionResponse?.response?.['error']).toContain(
           'Duplicate provider tool call id "call_1"',
         );
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
+      });
+
+      it('should stop consecutive identical tool calls with fresh ids', async () => {
+        const listDirectoryToolDef: FunctionDeclaration = {
+          name: 'list_directory',
+          description: 'Lists a directory',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([listDirectoryToolDef]),
+          getTool: vi.fn().mockReturnValue(undefined),
+        });
+        const toolConfig: ToolConfig = { tools: ['list_directory'] };
+        const missingPath = '/workspace/project/missing-directory';
+
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            ...Array.from({ length: 5 }, (_, index) => [
+              {
+                id: `call_${index + 1}`,
+                name: 'list_directory',
+                args: { path: missingPath },
+              },
+            ]),
+            'stop',
+          ]),
+        );
+
+        const listDirectoryInvocation = {
+          params: { path: missingPath },
+          getDescription: vi.fn().mockReturnValue('List directory'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent:
+              'Error: ENOENT: no such file or directory, scandir ' +
+              missingPath,
+            returnDisplay: 'Directory not found',
+          }),
+        };
+        const listDirectoryTool = {
+          name: 'list_directory',
+          displayName: 'List Directory',
+          description: 'List directory contents',
+          kind: 'READ' as const,
+          schema: listDirectoryToolDef,
+          build: vi.fn().mockImplementation(() => listDirectoryInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        vi.mocked(
+          (config.getToolRegistry() as unknown as ToolRegistry).getTool,
+        ).mockImplementation((name: string) =>
+          name === 'list_directory' ? listDirectoryTool : undefined,
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(5);
+        expect(listDirectoryInvocation.execute).toHaveBeenCalledTimes(4);
         expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
       });
 

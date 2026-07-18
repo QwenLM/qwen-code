@@ -1,16 +1,16 @@
 import {
-  Component,
   createContext,
   memo,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
-  type ErrorInfo,
   type ReactNode,
 } from 'react';
 import { useTheme } from '../../themeContext';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import type { Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -24,8 +24,10 @@ import {
 import { useI18n } from '../../i18n';
 import {
   useWebShellCustomization,
+  type MarkdownTableMode,
   type MarkdownContentSource,
 } from '../../customization';
+import { ErrorBoundary } from '../ErrorBoundary';
 import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
 import styles from './Markdown.module.css';
 
@@ -38,7 +40,7 @@ interface MarkdownProps {
    * the content settles, avoiding flicker and wasted re-tokenization.
    */
   isStreaming?: boolean;
-  enhanceTables?: boolean;
+  tableMode?: MarkdownTableMode;
 }
 
 const SUPPORTED_LANGUAGES = new Set([
@@ -51,6 +53,7 @@ const SUPPORTED_LANGUAGES = new Set([
   'c',
   'cpp',
   'csharp',
+  'fsharp',
   'ruby',
   'php',
   'swift',
@@ -89,10 +92,13 @@ const SUPPORTED_LANGUAGES = new Set([
   'diff',
 ]);
 
-// Common fence aliases → Shiki's canonical language id. Without this, blocks
-// tagged ```ts / ```js / ```py fall through to the unhighlighted "text" path
-// even though Shiki supports them under their full names.
+// Common fence aliases → Shiki's canonical language id. This keeps shorthand
+// tags like ```ts and punctuation tags like ```c++ highlighted under the
+// language ids Shiki actually supports.
 const LANGUAGE_ALIASES: Record<string, string> = {
+  'c++': 'cpp',
+  'c#': 'csharp',
+  'f#': 'fsharp',
   ts: 'typescript',
   js: 'javascript',
   py: 'python',
@@ -170,7 +176,86 @@ function MermaidBlock({ code }: { code: string }) {
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'diagram' | 'code'>('diagram');
   const [copied, setCopied] = useState(false);
+  const [zoom, setZoom] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [isDragging, setIsDragging] = useState(false);
+  const dragRef = useRef<{
+    startX: number;
+    startY: number;
+    origX: number;
+    origY: number;
+  } | null>(null);
   const mermaidTheme = appTheme === 'light' ? 'default' : 'dark';
+
+  const ZOOM_MIN = 0.5;
+  const ZOOM_MAX = 3;
+  const ZOOM_STEP = 0.25;
+
+  const handleZoomIn = () => {
+    setZoom((z) => Math.min(ZOOM_MAX, Math.round((z + ZOOM_STEP) * 100) / 100));
+  };
+  const handleZoomOut = () => {
+    setZoom((z) => Math.max(ZOOM_MIN, Math.round((z - ZOOM_STEP) * 100) / 100));
+  };
+  const resetZoomAndPan = useCallback(() => {
+    dragRef.current = null;
+    setIsDragging(false);
+    setZoom(1);
+    setOffset({ x: 0, y: 0 });
+  }, []);
+
+  const handleMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      setIsDragging(true);
+      dragRef.current = {
+        startX: e.clientX,
+        startY: e.clientY,
+        origX: offset.x,
+        origY: offset.y,
+      };
+    },
+    [offset],
+  );
+
+  useEffect(() => {
+    if (!isDragging) return;
+
+    const onMouseMove = (e: MouseEvent) => {
+      if (!dragRef.current) return;
+      const dx = e.clientX - dragRef.current.startX;
+      const dy = e.clientY - dragRef.current.startY;
+      // Clamp Y to prevent dragging into overflow-y: hidden clipped area.
+      // X is unclamped — overflow-x: auto provides native horizontal scroll.
+      const PAN_LIMIT = 1500;
+      setOffset({
+        x: dragRef.current.origX + dx,
+        y: Math.max(
+          -PAN_LIMIT,
+          Math.min(PAN_LIMIT, dragRef.current.origY + dy),
+        ),
+      });
+    };
+
+    const onMouseUp = () => {
+      dragRef.current = null;
+      setIsDragging(false);
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+    window.addEventListener('blur', onMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+      window.removeEventListener('blur', onMouseUp);
+    };
+  }, [isDragging]);
+
+  useEffect(() => {
+    setZoom(1);
+    setOffset({ x: 0, y: 0 });
+  }, [code]);
 
   useEffect(() => {
     let cancelled = false;
@@ -186,6 +271,10 @@ function MermaidBlock({ code }: { code: string }) {
             theme: mermaidTheme,
             securityLevel: 'strict',
             suppressErrorRendering: true,
+            flowchart: {
+              wrappingWidth: 300,
+              useMaxWidth: false,
+            },
           });
           lastMermaidTheme = mermaidTheme;
         }
@@ -226,7 +315,9 @@ function MermaidBlock({ code }: { code: string }) {
     return (
       <div className={styles.codeBlock}>
         <div className={styles.codeBlockHeader}>
-          <span className={styles.codeBlockLang}>mermaid (error)</span>
+          <span className={styles.codeBlockLang}>
+            {t('mermaid.errorLabel')}
+          </span>
         </div>
         <pre className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}>
           <code>{code}</code>
@@ -238,8 +329,36 @@ function MermaidBlock({ code }: { code: string }) {
   return (
     <div className={styles.codeBlock}>
       <div className={styles.codeBlockHeader}>
-        <span className={styles.codeBlockLang}>mermaid</span>
+        <span className={styles.codeBlockLang}>{t('mermaid.label')}</span>
         <span className={styles.mermaidActions}>
+          {viewMode === 'diagram' && (
+            <>
+              <button
+                className={styles.codeBlockCopy}
+                onClick={handleZoomOut}
+                title={t('mermaid.zoomOut')}
+                disabled={zoom <= ZOOM_MIN}
+              >
+                {t('mermaid.zoomOut')}
+              </button>
+              <button
+                className={styles.codeBlockCopy}
+                onClick={resetZoomAndPan}
+                title={t('mermaid.zoomReset')}
+                disabled={zoom === 1 && offset.x === 0 && offset.y === 0}
+              >
+                {t('mermaid.zoomReset')}
+              </button>
+              <button
+                className={styles.codeBlockCopy}
+                onClick={handleZoomIn}
+                title={t('mermaid.zoomIn')}
+                disabled={zoom >= ZOOM_MAX}
+              >
+                {t('mermaid.zoomIn')}
+              </button>
+            </>
+          )}
           <button
             className={styles.codeBlockCopy}
             onClick={() =>
@@ -267,9 +386,19 @@ function MermaidBlock({ code }: { code: string }) {
         </div>
       ) : (
         <div
-          className={`${styles.mermaidBlock} ${styles.mermaidInline}`}
-          dangerouslySetInnerHTML={{ __html: svg }}
-        />
+          className={`${styles.mermaidZoomWrapper} ${isDragging ? styles.mermaidDragging : ''}`}
+          onMouseDown={handleMouseDown}
+          onDoubleClick={resetZoomAndPan}
+        >
+          <div
+            className={`${styles.mermaidBlock} ${styles.mermaidInline}`}
+            style={{
+              transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})`,
+              transformOrigin: 'top center',
+            }}
+            dangerouslySetInnerHTML={{ __html: svg }}
+          />
+        </div>
       )}
     </div>
   );
@@ -289,8 +418,9 @@ function CodeBlock({
   const [html, setHtml] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
-  const match = className?.match(/language-(\w+)/);
-  const { label, lang, resolvedLang } = resolveFenceLanguage(match?.[1]);
+  const { label, lang, resolvedLang } = resolveFenceLanguage(
+    extractRawFenceLanguage(className),
+  );
   const code = String(children).replace(/\n$/, '');
   const shikiTheme =
     appTheme === 'light' ? 'github-light-default' : 'github-dark-default';
@@ -409,152 +539,25 @@ function CodeBlock({
   );
 }
 
+function extractRawFenceLanguage(className: string | undefined): string {
+  const token = className?.match(/(?:^|\s)language-([^\s]+)/)?.[1] ?? '';
+  const match = token.match(/^([\w+.#-]+)/);
+  if (!match) return '';
+  const language = match[1] ?? '';
+  const nextChar = token[language.length];
+  return !nextChar || nextChar === '{' || nextChar === ':' ? language : '';
+}
+
 function InlineCode({ children }: { children: ReactNode }) {
   return <code className={styles.inlineCode}>{children}</code>;
 }
 
-function PlainMarkdownTable({
-  children,
-  toggle,
-}: {
-  children?: ReactNode;
-  toggle?: ReactNode;
-}) {
+function PlainMarkdownTable({ children }: { children?: ReactNode }) {
   return (
     <div className={styles.tableWrapper}>
-      {toggle}
       <table className={styles.table}>{children}</table>
     </div>
   );
-}
-
-function TableBasicIcon() {
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <rect x="6" y="6" width="12" height="12" rx="1" />
-      <path d="M6 10h12" />
-      <path d="M6 14h12" />
-      <path d="M12 6v12" />
-    </svg>
-  );
-}
-
-const TableAdvancedIcon = TableBasicIcon;
-
-function ToggleableMarkdownTable({
-  children,
-  tableResetKey,
-}: {
-  children?: ReactNode;
-  tableResetKey: string;
-}) {
-  const [enhanced, setEnhanced] = useState(false);
-  const { t } = useI18n();
-
-  if (enhanced) {
-    const fallbackToggle = (
-      <button
-        className={`${styles.tableToggle} ${styles.tableToggleActive}`}
-        type="button"
-        onClick={() => setEnhanced(false)}
-        title={t('markdownTable.toggleBasic')}
-        aria-label={t('markdownTable.toggleBasic')}
-        aria-pressed={true}
-      >
-        <TableBasicIcon />
-      </button>
-    );
-    const fallback = (
-      <PlainMarkdownTable toggle={fallbackToggle}>
-        {children}
-      </PlainMarkdownTable>
-    );
-    const toolbarToggle = (
-      <button
-        className={`${styles.tableToggle} ${styles.tableToggleInline} ${styles.tableToggleActive}`}
-        type="button"
-        onClick={() => setEnhanced(false)}
-        title={t('markdownTable.toggleBasic')}
-        aria-label={t('markdownTable.toggleBasic')}
-        aria-pressed={true}
-      >
-        <TableBasicIcon />
-      </button>
-    );
-    const plainFallback = <PlainMarkdownTable>{children}</PlainMarkdownTable>;
-    return (
-      <EnhancedMarkdownTableBoundary
-        fallback={fallback}
-        resetKey={tableResetKey}
-      >
-        <EnhancedMarkdownTable
-          fallback={plainFallback}
-          toolbarExtra={toolbarToggle}
-        >
-          {children}
-        </EnhancedMarkdownTable>
-      </EnhancedMarkdownTableBoundary>
-    );
-  }
-
-  const toggleButton = (
-    <button
-      className={styles.tableToggle}
-      type="button"
-      onClick={() => setEnhanced(true)}
-      title={t('markdownTable.toggleAdvanced')}
-      aria-label={t('markdownTable.toggleAdvanced')}
-      aria-pressed={false}
-    >
-      <TableAdvancedIcon />
-    </button>
-  );
-  return (
-    <PlainMarkdownTable toggle={toggleButton}>{children}</PlainMarkdownTable>
-  );
-}
-
-class EnhancedMarkdownTableBoundary extends Component<
-  { children: ReactNode; fallback: ReactNode; resetKey: string },
-  { hasError: boolean; resetKey: string }
-> {
-  state = { hasError: false, resetKey: this.props.resetKey };
-
-  static getDerivedStateFromError() {
-    return { hasError: true };
-  }
-
-  static getDerivedStateFromProps(
-    props: { resetKey: string },
-    state: { resetKey: string },
-  ) {
-    if (props.resetKey !== state.resetKey) {
-      return { hasError: false, resetKey: props.resetKey };
-    }
-    return null;
-  }
-
-  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-    console.error(
-      '[web-shell] enhanced markdown table failed:',
-      error,
-      errorInfo.componentStack,
-    );
-  }
-
-  render() {
-    return this.state.hasError ? this.props.fallback : this.props.children;
-  }
 }
 
 // Carries the streaming flag to CodeBlock via context instead of a closure, so
@@ -563,6 +566,9 @@ class EnhancedMarkdownTableBoundary extends Component<
 // the same CodeBlock instance across the streaming→settled transition
 // (preserving its highlighted `html` state) instead of remounting it.
 const IsStreamingContext = createContext(false);
+const MarkdownSourceContext = createContext<MarkdownContentSource | undefined>(
+  undefined,
+);
 
 function MarkdownCode({
   className,
@@ -578,16 +584,100 @@ function MarkdownCode({
 
   if (isBlock) {
     return (
-      <CodeBlock className={className} isStreaming={isStreaming}>
-        {String(children)}
-      </CodeBlock>
+      <MarkdownFencedCode className={className} isStreaming={isStreaming}>
+        {children}
+      </MarkdownFencedCode>
     );
   }
   return <InlineCode>{children}</InlineCode>;
 }
 
+function MarkdownFencedCode({
+  className,
+  children,
+  isStreaming,
+}: {
+  className?: string;
+  children?: ReactNode;
+  isStreaming?: boolean;
+}) {
+  const source = useContext(MarkdownSourceContext);
+  const appTheme = useTheme();
+  const { markdown } = useWebShellCustomization();
+  const rawCode = String(children);
+  const code = rawCode.replace(/\n$/, '');
+  const fallback = (
+    <CodeBlock className={className} isStreaming={isStreaming}>
+      {rawCode}
+    </CodeBlock>
+  );
+  const language = extractRawFenceLanguage(className);
+  const { resolvedLang: resolvedLanguage } = resolveFenceLanguage(language);
+  const canUseCustomRenderer = !!source && !!className && !!language;
+
+  if (canUseCustomRenderer) {
+    try {
+      const custom = markdown?.renderCodeBlock?.({
+        language,
+        resolvedLanguage,
+        className,
+        code,
+        isStreaming: !!isStreaming,
+        source,
+        theme: appTheme,
+      });
+      if (custom != null && typeof custom !== 'boolean') {
+        return (
+          <ErrorBoundary
+            fallback={fallback}
+            label={`custom code block component render (lang=${language})`}
+            resetKeys={[
+              language,
+              source,
+              appTheme,
+              isStreaming ? 'streaming' : 'settled',
+              code,
+            ]}
+          >
+            {custom}
+          </ErrorBoundary>
+        );
+      }
+    } catch (error) {
+      console.error(
+        '[web-shell] custom code block renderer call failed (lang=%s):',
+        language,
+        error,
+      );
+    }
+  }
+
+  return fallback;
+}
+
 function MarkdownPre({ children }: { children?: ReactNode }) {
   return <>{children}</>;
+}
+
+/** `qwen-session://<id>` links are intercepted and dispatched as a DOM event
+ * (`qwen:open-session`) so the app shell can navigate to the session without
+ * the markdown renderer needing to know about session management. */
+const QWEN_SESSION_SCHEME = /^qwen-session:\/\//i;
+
+/**
+ * react-markdown sanitizes every href through `defaultUrlTransform`, which
+ * allows only `http(s)`, `irc(s)`, `mailto` and `xmpp` and rewrites everything
+ * else to `''`. Without this, `qwen-session://<id>` never reaches
+ * {@link MarkdownLink} with its scheme intact, the interception below is dead
+ * code, and the link renders as an inert anchor.
+ *
+ * Letting the scheme through is safe: `MarkdownLink` never puts it in the DOM.
+ * It renders `href="#"` and dispatches the id as an event, so nothing navigates
+ * to a `qwen-session:` URL — and an unknown scheme is inert in a browser anyway.
+ * Every other href keeps the default sanitizer.
+ */
+export function markdownUrlTransform(url: string): string {
+  return QWEN_SESSION_SCHEME.test(url.trim()) ? url : defaultUrlTransform(url);
 }
 
 function MarkdownLink({
@@ -597,6 +687,25 @@ function MarkdownLink({
   href?: string;
   children?: ReactNode;
 }) {
+  if (href && QWEN_SESSION_SCHEME.test(href.trim())) {
+    const sessionId = href.trim().replace(QWEN_SESSION_SCHEME, '');
+    return (
+      <a
+        href="#"
+        role="button"
+        className={styles.link}
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          window.dispatchEvent(
+            new CustomEvent('qwen:open-session', { detail: sessionId }),
+          );
+        }}
+      >
+        {children}
+      </a>
+    );
+  }
   const safeHref = isSafeHref(href) ? href : undefined;
   return (
     <a
@@ -616,11 +725,11 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
 }
 
 // `code`/`pre`/`a`/`img` are stable references; only `table` is created per
-// call (it closes over enhanceTables/tableResetKey). Recreating the components
+// call (it closes over tableMode/tableResetKey). Recreating the components
 // object for a table reset therefore never changes the `code` element type, so
 // code blocks are not remounted.
 function createComponents(
-  enhanceTables?: boolean,
+  tableMode: MarkdownTableMode = 'basic',
   tableResetKey = '',
 ): Components {
   return {
@@ -629,11 +738,18 @@ function createComponents(
     a: MarkdownLink,
     img: MarkdownImage,
     table({ children }: { children?: ReactNode }) {
-      if (enhanceTables) {
+      if (tableMode === 'advanced') {
+        const fallback = <PlainMarkdownTable>{children}</PlainMarkdownTable>;
         return (
-          <ToggleableMarkdownTable tableResetKey={tableResetKey}>
-            {children}
-          </ToggleableMarkdownTable>
+          <ErrorBoundary
+            fallback={fallback}
+            label="enhanced markdown table"
+            resetKeys={[tableResetKey]}
+          >
+            <EnhancedMarkdownTable fallback={fallback}>
+              {children}
+            </EnhancedMarkdownTable>
+          </ErrorBoundary>
         );
       }
       return <PlainMarkdownTable>{children}</PlainMarkdownTable>;
@@ -647,29 +763,32 @@ export const Markdown = memo(function Markdown({
   content,
   source,
   isStreaming,
-  enhanceTables,
+  tableMode,
 }: MarkdownProps) {
-  const { markdown } = useWebShellCustomization();
+  const { markdown, markdownTableMode } = useWebShellCustomization();
   const sourceMarkdown = source ? markdown : undefined;
   const renderedContent =
     content && source && sourceMarkdown?.transformMarkdown
       ? sourceMarkdown.transformMarkdown(content, { source })
       : content;
+  const effectiveTableMode = isStreaming
+    ? 'basic'
+    : (tableMode ?? markdownTableMode ?? 'basic');
   const components = useMemo(() => {
-    if (enhanceTables) {
-      return createComponents(true, renderedContent);
+    if (effectiveTableMode === 'advanced') {
+      return createComponents('advanced', renderedContent);
     }
     return COMPONENTS_DEFAULT;
-  }, [enhanceTables, renderedContent]);
+  }, [effectiveTableMode, renderedContent]);
   const sourceComponents = sourceMarkdown?.components;
   const renderedComponents = useMemo(() => {
     if (!sourceComponents) return components;
     return {
       ...components,
       ...sourceComponents,
-      ...(enhanceTables ? { table: components.table } : {}),
+      ...(effectiveTableMode === 'advanced' ? { table: components.table } : {}),
     };
-  }, [components, enhanceTables, sourceComponents]);
+  }, [components, effectiveTableMode, sourceComponents]);
 
   if (!content) return null;
   const remarkPlugins = sourceMarkdown?.remarkPlugins
@@ -685,13 +804,16 @@ export const Markdown = memo(function Markdown({
       data-markdown-source={source}
     >
       <IsStreamingContext.Provider value={!!isStreaming}>
-        <ReactMarkdown
-          remarkPlugins={remarkPlugins}
-          rehypePlugins={rehypePlugins}
-          components={renderedComponents}
-        >
-          {renderedContent}
-        </ReactMarkdown>
+        <MarkdownSourceContext.Provider value={source}>
+          <ReactMarkdown
+            remarkPlugins={remarkPlugins}
+            rehypePlugins={rehypePlugins}
+            components={renderedComponents}
+            urlTransform={markdownUrlTransform}
+          >
+            {renderedContent}
+          </ReactMarkdown>
+        </MarkdownSourceContext.Provider>
       </IsStreamingContext.Provider>
     </div>
   );

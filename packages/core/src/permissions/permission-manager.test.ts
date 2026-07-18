@@ -5,7 +5,9 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
+import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import {
   parseRule,
   parseRules,
@@ -539,6 +541,14 @@ describe('resolvePathPattern', () => {
 describe('matchesPathPattern', () => {
   const projectRoot = '/project';
   const cwd = '/project';
+  const withTempRoot = (run: (root: string) => void): void => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
+    try {
+      run(root);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  };
 
   it('matches dotfiles (e.g. .env)', async () => {
     expect(matchesPathPattern('.env', '/project/.env', projectRoot, cwd)).toBe(
@@ -618,6 +628,203 @@ describe('matchesPathPattern', () => {
         cwd,
       ),
     ).toBe(false);
+  });
+
+  it('matches a path after resolving parent-directory traversal', () => {
+    withTempRoot((root) => {
+      const protectedDir = path.join(root, 'protected');
+      const nestedDir = path.join(root, 'workspace', 'nested');
+      fs.mkdirSync(protectedDir);
+      fs.mkdirSync(nestedDir, { recursive: true });
+
+      expect(
+        matchesPathPattern(
+          `/${path.basename(protectedDir)}/**`,
+          `${nestedDir}${path.sep}..${path.sep}..${path.sep}protected${path.sep}new.txt`,
+          root,
+          root,
+          'canonical',
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('matches the canonical target of a symlinked path', () => {
+    withTempRoot((root) => {
+      const protectedDir = path.join(root, 'protected');
+      const link = path.join(root, 'link');
+      fs.mkdirSync(protectedDir);
+      fs.writeFileSync(path.join(protectedDir, 'existing.txt'), 'protected');
+      fs.symlinkSync(protectedDir, link, 'dir');
+
+      expect(
+        matchesPathPattern(
+          '/protected/**',
+          path.join(link, 'existing.txt'),
+          root,
+          root,
+        ),
+      ).toBe(false);
+      expect(
+        matchesPathPattern(
+          '/protected/**',
+          path.join(link, 'existing.txt'),
+          root,
+          root,
+          'canonical',
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('canonicalizes through a file that causes ENOTDIR', () => {
+    withTempRoot((root) => {
+      const protectedDir = path.join(root, 'protected');
+      const link = path.join(root, 'link');
+      fs.mkdirSync(protectedDir);
+      fs.writeFileSync(path.join(protectedDir, 'config.json'), '{}');
+      fs.symlinkSync(protectedDir, link, 'dir');
+
+      expect(
+        matchesPathPattern(
+          '/protected/**',
+          path.join(link, 'config.json', 'nested.txt'),
+          root,
+          root,
+          'canonical',
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('canonicalizes a symlinked project root in restrictive rules', () => {
+    withTempRoot((root) => {
+      const realRoot = path.join(root, 'real');
+      const linkedRoot = path.join(root, 'linked');
+      const protectedDir = path.join(realRoot, 'protected');
+      fs.mkdirSync(protectedDir, { recursive: true });
+      fs.writeFileSync(path.join(protectedDir, 'file.txt'), 'protected');
+      fs.symlinkSync(realRoot, linkedRoot, 'dir');
+
+      expect(
+        matchesPathPattern(
+          '/protected/**',
+          path.join(protectedDir, 'file.txt'),
+          linkedRoot,
+          linkedRoot,
+          'canonical',
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('canonicalizes the nearest existing ancestor for a new path', () => {
+    withTempRoot((root) => {
+      const protectedDir = path.join(root, 'protected');
+      const link = path.join(root, 'link');
+      fs.mkdirSync(protectedDir);
+      fs.symlinkSync(protectedDir, link, 'dir');
+
+      expect(
+        matchesPathPattern(
+          '/protected/**',
+          path.join(link, 'new', 'file.txt'),
+          root,
+          root,
+          'canonical',
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('matches the target of a dangling symlink', () => {
+    withTempRoot((root) => {
+      const protectedDir = path.join(root, 'protected');
+      const target = path.join(protectedDir, 'new.txt');
+      const link = path.join(root, 'link.txt');
+      fs.mkdirSync(protectedDir);
+      fs.symlinkSync(target, link, 'file');
+
+      expect(
+        matchesPathPattern('/protected/**', link, root, root, 'canonical'),
+      ).toBe(true);
+    });
+  });
+
+  it('preserves traversal semantics in a dangling symlink target', () => {
+    withTempRoot((root) => {
+      const projectDir = path.join(root, 'project');
+      const outsideDir = path.join(root, 'outside');
+      fs.mkdirSync(projectDir);
+      fs.mkdirSync(path.join(outsideDir, 'dir'), { recursive: true });
+      fs.mkdirSync(path.join(outsideDir, 'safe'));
+
+      fs.symlinkSync(
+        path.join(outsideDir, 'dir'),
+        path.join(projectDir, 'inner'),
+        'dir',
+      );
+      const link = path.join(projectDir, 'link.txt');
+      fs.symlinkSync(
+        `inner${path.sep}..${path.sep}safe${path.sep}new.txt`,
+        link,
+      );
+
+      expect(
+        matchesPathPattern('/outside/safe/**', link, root, root, 'canonical'),
+      ).toBe(true);
+      expect(
+        matchesPathPattern('/project/safe/**', link, root, root, 'canonical'),
+      ).toBe(false);
+    });
+  });
+
+  it('resolves parent traversal after following a directory symlink', () => {
+    withTempRoot((root) => {
+      const projectDir = path.join(root, 'project');
+      const outsideDir = path.join(root, 'outside');
+      const outsideSafeDir = path.join(outsideDir, 'safe');
+      fs.mkdirSync(path.join(projectDir, 'safe'), { recursive: true });
+      fs.mkdirSync(path.join(outsideDir, 'dir'), { recursive: true });
+      fs.mkdirSync(outsideSafeDir);
+      fs.writeFileSync(path.join(outsideSafeDir, 'file.txt'), 'outside');
+
+      const link = path.join(projectDir, 'link');
+      fs.symlinkSync(path.join(outsideDir, 'dir'), link, 'dir');
+      const filePath = `${link}${path.sep}..${path.sep}safe${path.sep}file.txt`;
+
+      expect(
+        matchesPathPattern(
+          '/outside/safe/**',
+          filePath,
+          root,
+          root,
+          'canonical',
+        ),
+      ).toBe(true);
+      expect(
+        matchesPathPattern(
+          '/project/safe/**',
+          filePath,
+          root,
+          root,
+          'canonical',
+        ),
+      ).toBe(false);
+    });
+  });
+
+  it('preserves matching against the lexical symlink path', () => {
+    withTempRoot((root) => {
+      const protectedDir = path.join(root, 'protected');
+      const link = path.join(root, 'link');
+      fs.mkdirSync(protectedDir);
+      fs.symlinkSync(protectedDir, link, 'dir');
+
+      expect(
+        matchesPathPattern('/link/**', path.join(link, 'new.txt'), root, root),
+      ).toBe(true);
+    });
   });
 });
 
@@ -876,6 +1083,327 @@ describe('matchesRule', () => {
     expect(matchesRule(rule, 'mcp__chrome__use_context')).toBe(true);
     expect(matchesRule(rule, 'mcp__chrome__navigate')).toBe(false);
     expect(matchesRule(rule, 'mcp__other__use_browser')).toBe(false);
+  });
+
+  // ─── Tool(param:value) syntax ───────────────────────────────────────────────
+
+  it('parseRule extracts key:value param matchers', async () => {
+    const r = parseRule('Agent(model:opus)');
+    expect(r.toolName).toBe('agent');
+    expect(r.specifier).toBeUndefined();
+    expect(r.toolParamMatchers).toEqual([
+      { key: 'model', valuePattern: 'opus' },
+    ]);
+  });
+
+  it('parseRule extracts multiple key:value pairs', async () => {
+    const r = parseRule('Agent(model:opus,type:code)');
+    expect(r.toolParamMatchers).toEqual([
+      { key: 'model', valuePattern: 'opus' },
+      { key: 'type', valuePattern: 'code' },
+    ]);
+  });
+
+  it('parseRule handles mixed specifier and param matchers', async () => {
+    const r = parseRule('Agent(coder,model:opus)');
+    expect(r.specifier).toBe('coder');
+    expect(r.toolParamMatchers).toEqual([
+      { key: 'model', valuePattern: 'opus' },
+    ]);
+  });
+
+  it('parseRule supports wildcard in value pattern', async () => {
+    const r = parseRule('Agent(model:*)');
+    expect(r.toolParamMatchers).toEqual([{ key: 'model', valuePattern: '*' }]);
+  });
+
+  it('parseRule does not treat WebFetch domain: as key:value', async () => {
+    const r = parseRule('WebFetch(domain:example.com)');
+    expect(r.specifierKind).toBe('domain');
+    expect(r.toolParamMatchers).toBeUndefined();
+  });
+
+  it('parseRule preserves legacy :* for command specifiers', async () => {
+    const r = parseRule('Bash(git:*)');
+    expect(r.specifier).toBe('git *');
+    expect(r.toolParamMatchers).toBeUndefined();
+  });
+
+  it('matchesRule matches tool with param matcher', async () => {
+    const rule = parseRule('Agent(model:opus)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'opus',
+        },
+      ),
+    ).toBe(true);
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'sonnet',
+        },
+      ),
+    ).toBe(false);
+  });
+
+  it('matchesRule fails when toolParams missing for param matcher rule', async () => {
+    const rule = parseRule('Agent(model:opus)');
+    expect(matchesRule(rule, 'agent')).toBe(false);
+  });
+
+  it('matchesRule supports wildcard value pattern', async () => {
+    const rule = parseRule('Agent(model:*)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'opus',
+        },
+      ),
+    ).toBe(true);
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'sonnet',
+        },
+      ),
+    ).toBe(true);
+    expect(matchesRule(rule, 'agent')).toBe(false); // no toolParams
+  });
+
+  it('matchesRule requires all param matchers to match', async () => {
+    const rule = parseRule('Agent(model:opus,type:code)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'opus',
+          type: 'code',
+        },
+      ),
+    ).toBe(true);
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'opus',
+          type: 'chat',
+        },
+      ),
+    ).toBe(false);
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'opus',
+        },
+      ),
+    ).toBe(false); // missing 'type' param
+  });
+
+  it('matchesRule handles mixed specifier and param matchers', async () => {
+    const rule = parseRule('Agent(coder,model:opus)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        'coder',
+        { model: 'opus' },
+      ),
+    ).toBe(true);
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        'coder',
+        { model: 'sonnet' },
+      ),
+    ).toBe(false); // param mismatch
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        'explore',
+        { model: 'opus' },
+      ),
+    ).toBe(false); // specifier mismatch
+  });
+
+  it('parseRule does not extract key:value for MCP tools (backward compat)', async () => {
+    const r = parseRule('mcp__server__tool(server_name:myserver)');
+    expect(r.toolName).toBe('mcp__server__tool');
+    expect(r.specifier).toBe('server_name:myserver');
+    expect(r.toolParamMatchers).toBeUndefined();
+  });
+
+  it('matchesRule supports partial wildcard patterns', async () => {
+    const rule = parseRule('Agent(model:op*)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'opus',
+        },
+      ),
+    ).toBe(true);
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'opera',
+        },
+      ),
+    ).toBe(true);
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'sonnet',
+        },
+      ),
+    ).toBe(false);
+  });
+
+  it('matchesRule handles multi-wildcard patterns without ReDoS', async () => {
+    const rule = parseRule('Agent(prompt:*x*x*x*x*x*y)');
+    // This should not hang (ReDoS) and should return false for non-matching input
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          prompt: 'a'.repeat(1000),
+        },
+      ),
+    ).toBe(false);
+    // Should match when pattern is present
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          prompt: 'xaxaxaxaxay',
+        },
+      ),
+    ).toBe(true);
+  });
+
+  it('matchesRule coerces number values to string for matching', async () => {
+    const rule = parseRule('Agent(count:42)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          count: 42,
+        },
+      ),
+    ).toBe(true);
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          count: 43,
+        },
+      ),
+    ).toBe(false);
   });
 });
 
@@ -1535,6 +2063,53 @@ describe('PermissionManager', () => {
       ).toBe('deny');
     });
 
+    it('denies an equivalent path containing parent traversal', async () => {
+      expect(
+        await pm.evaluate({
+          toolName: 'edit',
+          filePath: '/project/work/../src/generated/code.ts',
+        }),
+      ).toBe('deny');
+    });
+
+    it('canonicalizes restrictive rules without widening allow rules', async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
+      try {
+        const protectedDir = path.join(root, 'protected');
+        const link = path.join(root, 'link');
+        fs.mkdirSync(protectedDir);
+        fs.writeFileSync(path.join(protectedDir, 'file.txt'), 'protected');
+        fs.symlinkSync(protectedDir, link, 'dir');
+        const filePath = path.join(link, 'file.txt');
+
+        const denyManager = new PermissionManager(
+          makeConfig({
+            permissionsDeny: ['Edit(/protected/**)'],
+            projectRoot: root,
+            cwd: root,
+          }),
+        );
+        denyManager.initialize();
+        expect(await denyManager.evaluate({ toolName: 'edit', filePath })).toBe(
+          'deny',
+        );
+
+        const allowManager = new PermissionManager(
+          makeConfig({
+            permissionsAllow: ['Edit(/protected/**)'],
+            projectRoot: root,
+            cwd: root,
+          }),
+        );
+        allowManager.initialize();
+        expect(
+          await allowManager.evaluate({ toolName: 'edit', filePath }),
+        ).toBe('default');
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    });
+
     it('allows reading in an allowed directory', async () => {
       expect(
         await pm.evaluate({
@@ -1901,6 +2476,33 @@ describe('PermissionManager', () => {
         }),
       ).toBe(true);
     });
+
+    it('matches an ask rule through a symlinked path', () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
+      try {
+        const protectedDir = path.join(root, 'protected');
+        const link = path.join(root, 'link');
+        fs.mkdirSync(protectedDir);
+        fs.symlinkSync(protectedDir, link, 'dir');
+        pm = new PermissionManager(
+          makeConfig({
+            permissionsAsk: ['Edit(/protected/**)'],
+            projectRoot: root,
+            cwd: root,
+          }),
+        );
+        pm.initialize();
+
+        expect(
+          pm.hasMatchingAskRule({
+            toolName: 'edit',
+            filePath: path.join(link, 'file.txt'),
+          }),
+        ).toBe(true);
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    });
   });
 });
 
@@ -2165,6 +2767,90 @@ describe('buildPermissionRules', () => {
       expect(rules).toEqual(['mcp__puppeteer__navigate']);
     });
   });
+
+  describe('with toolParams (stable param serialization)', () => {
+    it('serializes stable params (model, subagent_type) for Agent', async () => {
+      const rules = buildPermissionRules({
+        toolName: 'agent',
+        specifier: 'coder',
+        toolParams: {
+          subagent_type: 'coder',
+          model: 'opus',
+          prompt: 'Fix the bug',
+        },
+      });
+      // prompt is not serialized (not in stableParamKeys)
+      // subagent_type is skipped because it matches specifier
+      expect(rules).toEqual(['Agent(coder,model:opus)']);
+    });
+
+    it('does not serialize volatile params like prompt or query', async () => {
+      const rules = buildPermissionRules({
+        toolName: 'agent',
+        toolParams: {
+          model: 'sonnet',
+          prompt: 'Some long prompt that should not be persisted',
+        },
+      });
+      expect(rules).toEqual(['Agent(model:sonnet)']);
+      // Verify prompt is NOT in the rule string
+      expect(rules[0]).not.toContain('prompt');
+    });
+
+    it('does not serialize sensitive params (no secret leakage)', async () => {
+      const rules = buildPermissionRules({
+        toolName: 'agent',
+        toolParams: {
+          model: 'opus',
+          api_key: 'sk-secret-123',
+          token: 'bearer-xyz',
+        },
+      });
+      // api_key and token are not in stableParamKeys, so not serialized
+      expect(rules).toEqual(['Agent(model:opus)']);
+      expect(rules[0]).not.toContain('secret');
+      expect(rules[0]).not.toContain('bearer');
+    });
+
+    it('generates bare MCP tool name without specifier or params', async () => {
+      const rules = buildPermissionRules({
+        toolName: 'mcp__chrome__navigate',
+        toolParams: {
+          server_name: 'chrome',
+          url: 'https://example.com',
+        },
+      });
+      // MCP tools get bare name — specifier rejection in matchesRule
+      // would make any specifier-carrying rule a dead entry
+      expect(rules).toEqual(['mcp__chrome__navigate']);
+    });
+
+    it('round-trips Agent rule with stable params through parseRule', async () => {
+      const rules = buildPermissionRules({
+        toolName: 'agent',
+        specifier: 'coder',
+        toolParams: { subagent_type: 'coder', model: 'opus' },
+      });
+      expect(rules).toEqual(['Agent(coder,model:opus)']);
+
+      // Parse the generated rule back
+      const parsed = parseRule(rules[0]!);
+      expect(parsed.toolName).toBe('agent');
+      expect(parsed.specifier).toBe('coder');
+      expect(parsed.toolParamMatchers).toEqual([
+        { key: 'model', valuePattern: 'opus' },
+      ]);
+    });
+
+    it('handles number values in toolParams', async () => {
+      const rules = buildPermissionRules({
+        toolName: 'agent',
+        toolParams: { model: 'opus', count: 42 },
+      });
+      // count is not in stableParamKeys, so not serialized
+      expect(rules).toEqual(['Agent(model:opus)']);
+    });
+  });
 });
 
 // ─── buildHumanReadableRuleLabel ─────────────────────────────────────────────
@@ -2340,6 +3026,33 @@ describe('PermissionManager.findMatchingDenyRule', () => {
     });
     // rule.raw preserves the original rule string as written in config
     expect(result).toBe('ShellTool');
+  });
+
+  it('matches a deny rule through a symlinked path', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
+    try {
+      const protectedDir = path.join(root, 'protected');
+      const link = path.join(root, 'link');
+      fs.mkdirSync(protectedDir);
+      fs.symlinkSync(protectedDir, link, 'dir');
+      const pm = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['Edit(/protected/**)'],
+          projectRoot: root,
+          cwd: root,
+        }),
+      );
+      pm.initialize();
+
+      expect(
+        pm.findMatchingDenyRule({
+          toolName: 'edit',
+          filePath: path.join(link, 'file.txt'),
+        }),
+      ).toBe('Edit(/protected/**)');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
@@ -2579,6 +3292,42 @@ describe('PermissionManager — compound shell write attribution', () => {
     ).toBe(false);
   });
 
+  it('does not treat canonical-only allow matches as relevant', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
+    try {
+      const allowedDir = path.join(root, 'allowed');
+      const link = path.join(root, 'link');
+      fs.mkdirSync(allowedDir);
+      fs.writeFileSync(path.join(allowedDir, 'file.txt'), 'allowed');
+      fs.symlinkSync(allowedDir, link, 'dir');
+
+      const pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Edit(/allowed/**)'],
+          cwd: root,
+          projectRoot: root,
+        }),
+      );
+      pm.initialize();
+
+      expect(
+        pm.hasRelevantRules({
+          toolName: 'edit',
+          filePath: path.join(link, 'file.txt'),
+        }),
+      ).toBe(false);
+      expect(
+        pm.hasRelevantRules({
+          toolName: 'run_shell_command',
+          command: `echo allowed > ${path.join(link, 'file.txt')}`,
+          cwd: root,
+        }),
+      ).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('hasRelevantRules sees protected writes after sibling shell-wrapper segments', () => {
     const pm = new PermissionManager(
       makeConfig({
@@ -2677,5 +3426,207 @@ describe('PermissionManager — compound shell write attribution', () => {
         cwd: '/repo',
       }),
     ).toBe('deny');
+  });
+});
+
+// ─── PermissionManager integration tests with toolParams ─────────────────────
+
+describe('PermissionManager — toolParams end-to-end', () => {
+  it('evaluate respects allow rule with param matcher', async () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAllow: ['Agent(coder,model:opus)'],
+      }),
+    );
+    pm.initialize();
+
+    expect(
+      await pm.evaluate({
+        toolName: 'agent',
+        specifier: 'coder',
+        toolParams: { subagent_type: 'coder', model: 'opus' },
+      }),
+    ).toBe('allow');
+  });
+
+  it('evaluate denies when param matcher does not match', async () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAllow: ['Agent(coder,model:opus)'],
+      }),
+    );
+    pm.initialize();
+
+    expect(
+      await pm.evaluate({
+        toolName: 'agent',
+        specifier: 'coder',
+        toolParams: { subagent_type: 'coder', model: 'sonnet' },
+      }),
+    ).not.toBe('allow');
+  });
+
+  it('findMatchingDenyRule matches deny rule with param matcher', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['Agent(model:restricted)'],
+      }),
+    );
+    pm.initialize();
+
+    expect(
+      pm.findMatchingDenyRule({
+        toolName: 'agent',
+        toolParams: { model: 'restricted' },
+      }),
+    ).toBe('Agent(model:restricted)');
+  });
+
+  it('findMatchingDenyRule returns undefined when param does not match', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['Agent(model:restricted)'],
+      }),
+    );
+    pm.initialize();
+
+    expect(
+      pm.findMatchingDenyRule({
+        toolName: 'agent',
+        toolParams: { model: 'opus' },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('hasRelevantRules returns true when param matcher rule exists', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAsk: ['Agent(model:opus)'],
+      }),
+    );
+    pm.initialize();
+
+    expect(
+      pm.hasRelevantRules({
+        toolName: 'agent',
+        toolParams: { model: 'opus' },
+      }),
+    ).toBe(true);
+  });
+
+  it('hasMatchingAskRule returns true when param matcher ask rule matches', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAsk: ['Agent(model:opus)'],
+      }),
+    );
+    pm.initialize();
+
+    expect(
+      pm.hasMatchingAskRule({
+        toolName: 'agent',
+        toolParams: { model: 'opus' },
+      }),
+    ).toBe(true);
+  });
+
+  it('case-insensitive param matching: deny rule blocks different casing', async () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['Agent(model:Sonnet)'],
+      }),
+    );
+    pm.initialize();
+
+    expect(
+      await pm.evaluate({
+        toolName: 'agent',
+        toolParams: { model: 'sonnet' },
+      }),
+    ).toBe('deny');
+  });
+});
+
+// ─── evaluateParamMatchers type guard tests ──────────────────────────────────
+
+describe('matchesRule — param matcher type guards', () => {
+  it('rejects boolean param values', () => {
+    const rule = parseRule('Agent(model:*)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { model: true },
+      ),
+    ).toBe(false);
+  });
+
+  it('rejects null param values', () => {
+    const rule = parseRule('Agent(model:*)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { model: null },
+      ),
+    ).toBe(false);
+  });
+
+  it('rejects undefined param values', () => {
+    const rule = parseRule('Agent(model:*)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { model: undefined },
+      ),
+    ).toBe(false);
+  });
+
+  it('rejects object param values', () => {
+    const rule = parseRule('Agent(model:*)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { model: { nested: 'opus' } },
+      ),
+    ).toBe(false);
+  });
+
+  it('accepts number param values via coercion', () => {
+    const rule = parseRule('Agent(count:42)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { count: 42 },
+      ),
+    ).toBe(true);
   });
 });

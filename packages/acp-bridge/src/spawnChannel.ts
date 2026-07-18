@@ -8,8 +8,9 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import * as os from 'node:os';
 import { Readable, Writable } from 'node:stream';
 import { getHeapStatistics } from 'node:v8';
-import { ndJsonStream } from '@agentclientprotocol/sdk';
 import type { AcpChannelExitInfo, ChannelFactory } from './channel.js';
+import { redactLogCredentials } from './logRedaction.js';
+import { ndJsonStream, type NdJsonStreamHooks } from './ndJsonStream.js';
 import { MissingCliEntryError } from './status.js';
 
 let cachedMemoryArgs: string[] | undefined;
@@ -63,8 +64,9 @@ export function createStderrForwarder(opts: StderrForwarderOptions): {
 
   const flush = (line: string) => {
     if (line.length > 0) {
-      process.stderr.write(prefix + line + '\n');
-      if (onDiagnosticLine) onDiagnosticLine(prefix + line, 'warn');
+      const safe = redactLogCredentials(line);
+      process.stderr.write(prefix + safe + '\n');
+      if (onDiagnosticLine) onDiagnosticLine(prefix + safe, 'warn');
     }
   };
 
@@ -80,7 +82,9 @@ export function createStderrForwarder(opts: StderrForwarderOptions): {
       // Force-flush the unterminated tail if it's grown past the cap
       // — keeps memory bounded against a `\n`-less stderr storm.
       while (buf.length > STDERR_LINE_CAP_CHARS) {
-        const truncated = buf.slice(0, STDERR_LINE_CAP_CHARS) + ' [truncated]';
+        const truncated =
+          redactLogCredentials(buf.slice(0, STDERR_LINE_CAP_CHARS)) +
+          ' [truncated]';
         process.stderr.write(prefix + truncated + '\n');
         if (onDiagnosticLine) onDiagnosticLine(prefix + truncated, 'warn');
         buf = buf.slice(STDERR_LINE_CAP_CHARS);
@@ -99,6 +103,8 @@ export function createStderrForwarder(opts: StderrForwarderOptions): {
 export interface SpawnChannelFactoryOptions {
   onDiagnosticLine?: (line: string, level?: 'info' | 'warn' | 'error') => void;
   extraArgs?: string[];
+  pipeHooks?: NdJsonStreamHooks;
+  sourceEnv?: Readonly<NodeJS.ProcessEnv>;
 }
 
 /**
@@ -114,12 +120,13 @@ export function createSpawnChannelFactory(
   options: SpawnChannelFactoryOptions = {},
 ): ChannelFactory {
   return async (workspaceCwd, childEnvOverrides) => {
-    const cliEntry = process.env['QWEN_CLI_ENTRY'] || process.argv[1];
+    const sourceEnv = options.sourceEnv ?? process.env;
+    const cliEntry = sourceEnv['QWEN_CLI_ENTRY'] || process.argv[1];
     if (!cliEntry) {
       throw new MissingCliEntryError();
     }
     const childEnv = scrubChildEnv(
-      process.env,
+      sourceEnv,
       SCRUBBED_CHILD_ENV_KEYS,
       childEnvOverrides,
     );
@@ -185,7 +192,7 @@ export function createSpawnChannelFactory(
 
     const writable = Writable.toWeb(child.stdin) as WritableStream<Uint8Array>;
     const readable = Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>;
-    const stream = ndJsonStream(writable, readable);
+    const stream = ndJsonStream(writable, readable, options.pipeHooks);
 
     return {
       stream,

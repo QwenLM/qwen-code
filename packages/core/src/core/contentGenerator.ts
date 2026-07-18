@@ -30,6 +30,7 @@ import {
   StrictMissingModelIdError,
 } from '../models/modelConfigErrors.js';
 import { PROVIDER_SOURCED_FIELDS } from '../models/constants.js';
+import type { ReasoningEffort } from './reasoning-effort.js';
 
 /**
  * Interface abstracting the core functionalities for generating content and counting tokens.
@@ -89,6 +90,11 @@ export type ContentGeneratorConfig = {
   maxRetries?: number; // Maximum retries for rate-limit errors
   retryErrorCodes?: number[]; // Additional error codes that trigger rate-limit retry
   enableCacheControl?: boolean; // Enable cache control for DashScope providers
+  // Force `scope: 'global'` on Anthropic cache_control entries even when the
+  // base URL is not an Anthropic-native origin (e.g. proxy providers like
+  // Routify, OpenRouter). Requires the proxy to forward `cache_control` fields
+  // and the `prompt-caching-scope-2026-01-05` beta. See issue #6642.
+  forceGlobalCacheScope?: boolean;
   samplingParams?: {
     top_p?: number;
     top_k?: number;
@@ -104,16 +110,20 @@ export type ContentGeneratorConfig = {
   reasoning?:
     | false
     | {
-        // 'max' is supported by providers that document an extra-strong
-        // reasoning tier — currently DeepSeek's `reasoning_effort` (see
-        // https://api-docs.deepseek.com/zh-cn/api/create-chat-completion).
-        // Real Anthropic only accepts low/medium/high; the Anthropic
-        // generator clamps 'max' down to 'high' (logged once per generator
-        // via debugLogger.warn) when the baseURL doesn't look like a
-        // DeepSeek-compatible endpoint, so configurations targeting
-        // DeepSeek don't 400 when the same auth profile is reused against
-        // api.anthropic.com.
-        effort?: 'low' | 'medium' | 'high' | 'max';
+        // Unified reasoning-effort ladder (see core/reasoning-effort.ts).
+        // Providers accept different subsets and use different wire fields;
+        // each provider adapter maps + clamps this tier onto the active model:
+        //   - 'xhigh'/'max' are extra-strong tiers (DeepSeek `reasoning_effort`,
+        //     Anthropic `output_config.effort` on Opus 4.7+, OpenAI `xhigh`).
+        //   - The default OpenAI-compatible pipeline forwards the tier verbatim
+        //     (no 'max' clamp); Gemini caps at 'high'.
+        //   - Real Anthropic clamps each tier to the active model's supported
+        //     set (Opus 4.7+/5.x accept 'xhigh'/'max'; Opus/Sonnet 4.6 accept
+        //     'max'; older models cap at 'high'), logged once per generator via
+        //     debugLogger.warn, when the baseURL doesn't look like a
+        //     DeepSeek-compatible endpoint, so configs targeting DeepSeek don't
+        //     400 when the same auth profile is reused against api.anthropic.com.
+        effort?: ReasoningEffort;
         budget_tokens?: number;
       };
   proxy?: string | undefined;

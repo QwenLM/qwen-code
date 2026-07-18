@@ -39,7 +39,7 @@ describe('keyMatchers', () => {
     [Command.NAVIGATION_UP]: (key: Key) => key.name === 'up' && !key.shift,
     [Command.NAVIGATION_DOWN]: (key: Key) => key.name === 'down' && !key.shift,
     [Command.ACCEPT_SUGGESTION]: (key: Key) =>
-      key.name === 'tab' || (key.name === 'return' && !key.ctrl),
+      key.name === 'tab' || (key.name === 'return' && !key.ctrl && !key.shift),
     // Completion navigation uses arrows plus readline/Vim-style Ctrl+P/N.
     [Command.COMPLETION_UP]: (key: Key) =>
       (key.name === 'up' && !key.shift) || (key.ctrl && key.name === 'p'),
@@ -48,6 +48,8 @@ describe('keyMatchers', () => {
     [Command.ESCAPE]: (key: Key) => key.name === 'escape',
     [Command.SUBMIT]: (key: Key) =>
       key.name === 'return' && !key.ctrl && !key.meta && !key.paste,
+    [Command.QUEUE_MESSAGE]: (key: Key) =>
+      key.name === 'q' && key.ctrl && !key.meta && !key.shift && !key.paste,
     [Command.NEWLINE]: (key: Key) =>
       key.name === 'return' && (key.ctrl || key.meta || key.paste),
     [Command.VOICE_PUSH_TO_TALK]: (key: Key) =>
@@ -64,7 +66,6 @@ describe('keyMatchers', () => {
     [Command.EXIT]: (key: Key) => key.ctrl && key.name === 'd',
     [Command.SHOW_MORE_LINES]: (key: Key) => key.ctrl && key.name === 's',
     [Command.RETRY_LAST]: (key: Key) => key.ctrl && key.name === 'y',
-    [Command.TOGGLE_COMPACT_MODE]: (key: Key) => key.ctrl && key.name === 'o',
     [Command.TOGGLE_RENDER_MODE]: (key: Key) => key.meta && key.name === 'm',
     [Command.PROMOTE_SHELL_TO_BACKGROUND]: (key: Key) =>
       key.ctrl && key.name === 'b',
@@ -94,6 +95,7 @@ describe('keyMatchers', () => {
     [Command.SCROLL_END]: (key: Key) => key.ctrl && key.name === 'end',
     [Command.TOGGLE_THINKING_EXPANDED]: (key: Key) =>
       key.meta && key.name === 't',
+    [Command.TOGGLE_TRANSCRIPT]: (key: Key) => key.ctrl && key.name === 'o',
   };
 
   // Test data for each command with positive and negative test cases
@@ -202,7 +204,11 @@ describe('keyMatchers', () => {
     {
       command: Command.ACCEPT_SUGGESTION,
       positive: [createKey('tab'), createKey('return')],
-      negative: [createKey('return', { ctrl: true }), createKey('space')],
+      negative: [
+        createKey('return', { ctrl: true }),
+        createKey('return', { shift: true }),
+        createKey('space'),
+      ],
     },
     {
       // Completion navigation uses arrows plus readline/Vim-style Ctrl+P.
@@ -235,6 +241,17 @@ describe('keyMatchers', () => {
         createKey('return', { ctrl: true }),
         createKey('return', { meta: true }),
         createKey('return', { paste: true }),
+      ],
+    },
+    {
+      command: Command.QUEUE_MESSAGE,
+      positive: [createKey('q', { ctrl: true })],
+      negative: [
+        createKey('q'),
+        createKey('q', { ctrl: true, meta: true }),
+        createKey('q', { ctrl: true, shift: true }),
+        createKey('q', { ctrl: true, paste: true }),
+        createKey('return', { ctrl: true }),
       ],
     },
     {
@@ -296,11 +313,6 @@ describe('keyMatchers', () => {
       command: Command.RETRY_LAST,
       positive: [createKey('y', { ctrl: true })],
       negative: [createKey('y'), createKey('r', { ctrl: true })],
-    },
-    {
-      command: Command.TOGGLE_COMPACT_MODE,
-      positive: [createKey('o', { ctrl: true })],
-      negative: [createKey('o'), createKey('p', { ctrl: true })],
     },
 
     // Selection list navigation
@@ -417,6 +429,11 @@ describe('keyMatchers', () => {
       command: Command.TOGGLE_THINKING_EXPANDED,
       positive: [createKey('t', { meta: true })],
       negative: [createKey('t'), createKey('t', { ctrl: true })],
+    },
+    {
+      command: Command.TOGGLE_TRANSCRIPT,
+      positive: [createKey('o', { ctrl: true })],
+      negative: [createKey('o'), createKey('o', { meta: true })],
     },
   ];
 

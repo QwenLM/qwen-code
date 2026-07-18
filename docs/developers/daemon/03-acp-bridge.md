@@ -4,13 +4,13 @@
 
 `packages/acp-bridge/` owns the boundary between the daemon's HTTP layer and the ACP child process. It is consumed by `packages/cli/src/serve/` (the `qwen serve` daemon) and was extracted in #4175 F1 step 3 so future consumers (`channels/base/AcpBridge.ts`, the VS Code IDE companion) can use the same bridge core without reaching into the CLI package.
 
-The bridge provides one `HttpAcpBridge` instance, one `AcpChannel` to the ACP child, multiplexed sessions over that channel, per-session `EventBus`es, a `MultiClientPermissionMediator`, a `BridgeFileSystem` adapter, and ACP-oriented helpers (`spawnOrAttach`, `loadSession`, `resumeSession`, `sendPrompt`, `cancelSession`, `respondToPermission`, plus extMethod RPCs for workspace status and MCP restart).
+Each active `WorkspaceRuntime` owns one `HttpAcpBridge` instance. Production attempts to preheat the primary bridge and retries on first use after failure. A trusted secondary opens its `AcpChannel` and starts its child on demand; an untrusted secondary cannot start ACP. Within the runtime, the bridge provides multiplexed sessions over the channel, per-session `EventBus`es, a `MultiClientPermissionMediator`, a `BridgeFileSystem` adapter, and ACP-oriented helpers (`spawnOrAttach`, `loadSession`, `resumeSession`, `sendPrompt`, `cancelSession`, `respondToPermission`, plus extMethod RPCs for workspace status and MCP restart). Bridges and children are never shared across workspace runtimes.
 
 ## Responsibilities
 
 - Spawn or attach to the ACP child via a pluggable `ChannelFactory`. Default factory: `defaultSpawnChannelFactory` (subprocess `qwen --acp`). Tests inject `inMemoryChannel`.
 - Maintain `aliveChannels` (channel registry) and `byId` (session registry).
-- Multiplex N HTTP-side sessions onto one ACP child via `connection.newSession()`.
+- Multiplex N HTTP-side sessions for one workspace runtime onto its ACP child via `connection.newSession()`.
 - Serialize per-session prompts through `promptQueue` (ACP enforces one active prompt per session).
 - Per-session FIFO for `setSessionModel` calls so concurrent attaches with different models do not race the agent.
 - Per-session `EventBus` that drives `GET /session/:id/events` (see [`10-event-bus.md`](./10-event-bus.md)).
@@ -176,7 +176,7 @@ sequenceDiagram
 
 ## State & Lifecycle
 
-- Bridge construction is synchronous; the first `spawnOrAttach` cold-starts the ACP child.
+- Bridge construction is synchronous. A caller may preheat the channel before the first session; otherwise the first `spawnOrAttach` cold-starts the ACP child. A failed preheat leaves first use free to retry.
 - `defaultEntry` lives for the lifetime of the bridge under `sessionScope: 'single'`; the channel reaps when `sessionIds.size === 0` (after `killSession`) AND `isDying` flips true.
 - `MAX_EVENT_RING_SIZE = 1_000_000` is a soft upper bound on `BridgeOptions.eventRingSize` to catch operator typos before ~500 MB per-session OOMs.
 - `DEFAULT_PERMISSION_TIMEOUT_MS = 5 * 60 * 1000` keeps a wedged permission request from blocking the per-session `promptQueue` forever.
@@ -242,16 +242,20 @@ In addition to the core `spawnOrAttach`, `sendPrompt`, `cancelSession`,
 
 `BridgeSpawnRequest.sessionScope` was renamed from `'per-client'` to
 `'thread'`. `BridgeRestoredSession` now carries `compactedReplay`,
-`liveJournal`, and `lastEventId`. `BridgeClientRequestContext` is the request
-context threaded through bridge calls; it carries `clientId`,
-`fromLoopback: boolean`, and `promptId`.
+`liveJournal`, and `lastEventId`. Those replay fields are a bounded in-memory
+window for live sessions, capped by `BridgeOptions.compactedReplayMaxBytes`
+(default 4 MiB, hard ceiling 256 MiB). If older retained replay was dropped,
+`compactedReplay[0]` is the id-less `history_truncated` marker. The full
+persisted transcript remains on disk and is not exposed by this bridge response.
+`BridgeClientRequestContext` is the request context threaded through bridge
+calls; it carries `clientId`, `fromLoopback: boolean`, and `promptId`.
 
 ## Caveats & Known Limits
 
 - `MCP_RESTART_TIMEOUT_MS = 300_000` (5 min) — the bridge timeout for `/workspace/mcp/:server/restart` is intentionally large because `McpClientManager.MAX_DISCOVERY_TIMEOUT_MS` can be up to 5 min for stdio servers. A shorter deadline would produce false timeouts while the ACP child kept reconnecting in the background.
 - `BridgeOptions.eventRingSize > 1_000_000` throws at construction.
 - `connection.unstable_resumeSession` is exposed through the stable `session_resume` daemon capability; `unstable_session_resume` remains advertised as a deprecated compatibility alias for older SDKs. Clients should feature-detect `session_resume`.
-- The bridge package is `@qwen-code/acp-bridge` and is consumed through re-export shims in `serve/event-bus.ts`, `serve/status.ts`, `serve/httpAcpBridge.ts` for backward compatibility with pre-F1 import paths. New code should import directly.
+- The bridge package is `@qwen-code/acp-bridge`. Current code imports event-bus and status primitives directly from package subpaths; `serve/acp-session-bridge.ts` remains as the CLI-local compatibility facade for the broader bridge surface.
 
 ## References
 

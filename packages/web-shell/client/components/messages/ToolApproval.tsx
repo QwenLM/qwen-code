@@ -10,6 +10,13 @@ interface ToolApprovalProps {
   request: PermissionRequest;
   onConfirm: (id: string, selectedOption: string) => void;
   variant?: 'inline' | 'floating';
+  /**
+   * Whether this instance owns the global keyboard shortcuts (Enter/Escape/j/k/
+   * digits). Defaults to true. Set false when several approvals can be mounted
+   * at once (e.g. split-view panes) so a keypress can't confirm the wrong
+   * session's request from behind or beside the focused one.
+   */
+  keyboardActive?: boolean;
 }
 
 export function parseTitle(title?: string): {
@@ -155,6 +162,7 @@ export function ToolApproval({
   request,
   onConfirm,
   variant = 'inline',
+  keyboardActive = true,
 }: ToolApprovalProps) {
   const { t } = useI18n();
   const displayOptions = useMemo(
@@ -245,6 +253,7 @@ export function ToolApproval({
   );
 
   useEffect(() => {
+    if (!keyboardActive) return;
     const timer = setTimeout(() => {
       window.addEventListener('keydown', handleKeyDown);
     }, 250);
@@ -252,7 +261,7 @@ export function ToolApproval({
       clearTimeout(timer);
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [handleKeyDown]);
+  }, [handleKeyDown, keyboardActive]);
 
   const isExec = isExecKind(request);
   const isAgent = isAgentTool(request.toolName);
@@ -265,6 +274,7 @@ export function ToolApproval({
           ? `${styles.approval} ${styles.floating}`
           : styles.approval
       }
+      data-web-shell-permission-panel
     >
       <div className={styles.header}>
         <span className={styles.icon}>?</span>
@@ -308,6 +318,8 @@ export function ToolApproval({
               className={`${styles.option} ${getOptionClassName(option)} ${
                 isSelected ? styles.optionActive : ''
               }`}
+              data-web-shell-permission-option
+              data-option-id={option.id}
               onClick={() => confirm(option.id)}
             >
               <span className={styles.pointer}>{isSelected ? '›' : ' '}</span>

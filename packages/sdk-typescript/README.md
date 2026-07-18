@@ -64,7 +64,7 @@ Creates a new query session with the Qwen Code.
 | `mcpServers`             | `Record<string, McpServerConfig>`              | -                | MCP (Model Context Protocol) servers to connect. Supports external servers (stdio/SSE/HTTP) and SDK-embedded servers. External servers are configured with transport options like `command`, `args`, `url`, `httpUrl`, etc. SDK servers use `{ type: 'sdk', name: string, instance: Server }`.                                                                                                                                                                                        |
 | `abortController`        | `AbortController`                              | -                | Controller to cancel the query session. Call `abortController.abort()` to terminate the session and cleanup resources.                                                                                                                                                                                                                                                                                                                                                                |
 | `debug`                  | `boolean`                                      | `false`          | Enable debug mode for verbose logging from the CLI process.                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `maxSessionTurns`        | `number`                                       | `-1` (unlimited) | Maximum number of conversation turns before the session automatically terminates. A turn consists of a user message and an assistant response.                                                                                                                                                                                                                                                                                                                                        |
+| `maxSessionTurns`        | `number`                                       | `-1` (unlimited) | Maximum number of conversation turns before the session automatically terminates. Must be an integer. A turn consists of a user message and an assistant response.                                                                                                                                                                                                                                                                                                                    |
 | `coreTools`              | `string[]`                                     | -                | Uses the legacy `coreTools` / CLI `--core-tools` allowlist semantics. If specified, only matching core tools are registered for the session. This is separate from `permissions.allow`, which auto-approves matching tool calls but does not restrict tool registration. Example: `['read_file', 'edit', 'run_shell_command']`.                                                                                                                                                       |
 | `excludeTools`           | `string[]`                                     | -                | Equivalent to `permissions.deny` in settings.json. Excluded tools return a permission error immediately. Takes highest priority over all other permission settings. Supports tool name aliases and pattern matching: tool name (`'write_file'`), shell command prefix (`'Bash(rm *)'`), or path patterns (`'Read(.env)'`, `'Edit(/src/**)'`).                                                                                                                                         |
 | `allowedTools`           | `string[]`                                     | -                | Equivalent to `permissions.allow` in settings.json. Matching tools bypass `canUseTool` callback and execute automatically. Only applies when tool requires confirmation. Supports same pattern matching as `excludeTools`. Example: `['Bash(git status)', 'Bash(npm test)']`.                                                                                                                                                                                                         |
@@ -313,6 +313,45 @@ const result = query({
   },
 });
 ```
+
+### Handling `ask_user_question`
+
+When the model needs a decision from the user it calls the built-in
+`ask_user_question` tool. The SDK surfaces this through the same
+`canUseTool` callback: the tool input contains a `questions` array, and you
+return the collected answers via `updatedInput.answers`. `answers` is an
+object keyed by the question's index (as a string), where each value is the
+label of the chosen option (or free-form text when the user picks "Other").
+
+```typescript
+import { query, type CanUseTool } from '@qwen-code/sdk';
+
+const canUseTool: CanUseTool = async (toolName, input, { signal }) => {
+  if (toolName === 'ask_user_question') {
+    const questions = input.questions as Array<{
+      question: string;
+      header: string;
+      options: Array<{ label: string; description: string }>;
+    }>;
+
+    // Present the questions to the user however your app sees fit, then
+    // build an index-keyed map of their answers.
+    const answers: Record<string, string> = {};
+    for (let i = 0; i < questions.length; i++) {
+      answers[String(i)] = await promptUserToChoose(questions[i]);
+    }
+
+    // Return the answers through `updatedInput.answers` — the CLI forwards
+    // them to the tool so the model receives the user's decisions.
+    return { behavior: 'allow', updatedInput: { ...input, answers } };
+  }
+
+  return { behavior: 'allow', updatedInput: input };
+};
+```
+
+> If you return `allow` without any `answers`, the tool reports that no
+> answer was provided; return `deny` to signal the user declined.
 
 ### With External MCP Servers
 

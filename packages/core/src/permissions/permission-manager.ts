@@ -265,7 +265,8 @@ export class PermissionManager {
    *      to match equivalent shell commands (e.g. `cat` → Read, `curl` → WebFetch).
    */
   private evaluateSingle(ctx: PermissionCheckContext): PermissionDecision {
-    const { toolName, command, cwd, filePath, domain, specifier } = ctx;
+    const { toolName, command, cwd, filePath, domain, specifier, toolParams } =
+      ctx;
 
     // Build path context for resolving relative path patterns
     const pathCtx: PathMatchContext | undefined =
@@ -283,24 +284,27 @@ export class PermissionManager {
       domain,
       pathCtx,
       specifier,
+      toolParams,
     ] as const;
 
     // Compute the base decision from explicit Bash/file/domain rules.
     // Using an IIFE to keep the priority-cascade logic clean.
     const baseDecision: PermissionDecision = (() => {
+      // Restrictive rules follow canonical destinations; allow rules stay
+      // lexical so a symlink cannot widen what the user explicitly allowed.
       // Priority 1: deny rules (session first, then persistent)
       for (const rule of [
         ...this.sessionRules.deny,
         ...this.persistentRules.deny,
       ]) {
-        if (matchesRule(rule, ...matchArgs)) return 'deny';
+        if (matchesRule(rule, ...matchArgs, 'canonical')) return 'deny';
       }
       // Priority 2: ask rules
       for (const rule of [
         ...this.sessionRules.ask,
         ...this.persistentRules.ask,
       ]) {
-        if (matchesRule(rule, ...matchArgs)) return 'ask';
+        if (matchesRule(rule, ...matchArgs, 'canonical')) return 'ask';
       }
       // Priority 3: allow rules
       for (const rule of [
@@ -564,6 +568,7 @@ export class PermissionManager {
     'cron_list',
     'cron_delete',
     'loop_wakeup',
+    'create_sub_session',
     'monitor',
   ]);
 
@@ -618,7 +623,8 @@ export class PermissionManager {
    */
   findMatchingDenyRule(ctx: PermissionCheckContext): string | undefined {
     ctx = this.normalizePermissionContext(ctx);
-    const { toolName, command, cwd, filePath, domain, specifier } = ctx;
+    const { toolName, command, cwd, filePath, domain, specifier, toolParams } =
+      ctx;
 
     const pathCtx: PathMatchContext | undefined =
       this.config.getProjectRoot && this.config.getCwd
@@ -635,13 +641,14 @@ export class PermissionManager {
       domain,
       pathCtx,
       specifier,
+      toolParams,
     ] as const;
 
     for (const rule of [
       ...this.sessionRules.deny,
       ...this.persistentRules.deny,
     ]) {
-      if (matchesRule(rule, ...matchArgs)) {
+      if (matchesRule(rule, ...matchArgs, 'canonical')) {
         return rule.raw;
       }
     }
@@ -696,7 +703,8 @@ export class PermissionManager {
    */
   hasRelevantRules(ctx: PermissionCheckContext): boolean {
     ctx = this.normalizePermissionContext(ctx);
-    const { toolName, command, cwd, filePath, domain, specifier } = ctx;
+    const { toolName, command, cwd, filePath, domain, specifier, toolParams } =
+      ctx;
 
     const pathCtx: PathMatchContext | undefined =
       this.config.getProjectRoot && this.config.getCwd
@@ -706,9 +714,11 @@ export class PermissionManager {
           }
         : undefined;
 
-    const allRules = [
+    const allowRules = [
       ...this.sessionRules.allow,
       ...this.persistentRules.allow,
+    ];
+    const restrictiveRules = [
       ...this.sessionRules.ask,
       ...this.persistentRules.ask,
       ...this.sessionRules.deny,
@@ -741,7 +751,14 @@ export class PermissionManager {
             pathCtx,
             undefined,
           ] as const;
-          return allRules.some((rule) => matchesRule(rule, ...opMatchArgs));
+          return (
+            restrictiveRules.some((rule) =>
+              matchesRule(rule, ...opMatchArgs, undefined, 'canonical'),
+            ) ||
+            allowRules.some((rule) =>
+              matchesRule(rule, ...opMatchArgs, undefined),
+            )
+          );
         })
       ) {
         return true;
@@ -764,9 +781,14 @@ export class PermissionManager {
       domain,
       pathCtx,
       specifier,
+      toolParams,
     ] as const;
 
-    return allRules.some((rule) => matchesRule(rule, ...matchArgs));
+    return (
+      restrictiveRules.some((rule) =>
+        matchesRule(rule, ...matchArgs, 'canonical'),
+      ) || allowRules.some((rule) => matchesRule(rule, ...matchArgs))
+    );
   }
 
   /**
@@ -780,7 +802,8 @@ export class PermissionManager {
    */
   hasMatchingAskRule(ctx: PermissionCheckContext): boolean {
     ctx = this.normalizePermissionContext(ctx);
-    const { toolName, command, cwd, filePath, domain, specifier } = ctx;
+    const { toolName, command, cwd, filePath, domain, specifier, toolParams } =
+      ctx;
 
     const pathCtx: PathMatchContext | undefined =
       this.config.getProjectRoot && this.config.getCwd
@@ -816,7 +839,9 @@ export class PermissionManager {
             pathCtx,
             undefined,
           ] as const;
-          return askRules.some((rule) => matchesRule(rule, ...opMatchArgs));
+          return askRules.some((rule) =>
+            matchesRule(rule, ...opMatchArgs, undefined, 'canonical'),
+          );
         })
       ) {
         return true;
@@ -839,9 +864,12 @@ export class PermissionManager {
       domain,
       pathCtx,
       specifier,
+      toolParams,
     ] as const;
 
-    return askRules.some((rule) => matchesRule(rule, ...matchArgs));
+    return askRules.some((rule) =>
+      matchesRule(rule, ...matchArgs, 'canonical'),
+    );
   }
 
   private hasAskRuleForTool(toolName: string): boolean {

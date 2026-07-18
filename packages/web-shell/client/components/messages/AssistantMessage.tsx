@@ -3,13 +3,22 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react';
 import { Markdown } from './Markdown';
 import { CompactModeContext } from '../../App';
+import {
+  useWebShellCustomization,
+  type WebShellAssistantTurnFooterRenderInfo,
+} from '../../customization';
 import { useI18n } from '../../i18n';
 import { formatTimestamp } from '../MessageTimestamp';
+import type { DaemonSessionGenerationEvent } from '@qwen-code/sdk/daemon';
+import { Button } from '../ui/button';
+import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
+import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './AssistantMessage.module.css';
 
 interface AssistantMessageProps {
@@ -19,6 +28,8 @@ interface AssistantMessageProps {
   onBranchSession?: () => void;
   showFooterActions?: boolean;
   showBranchAction?: boolean;
+  isLocateFlashing?: boolean;
+  customFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
 }
 
 export const AssistantMessage = memo(function AssistantMessage({
@@ -28,10 +39,20 @@ export const AssistantMessage = memo(function AssistantMessage({
   onBranchSession,
   showFooterActions = false,
   showBranchAction = false,
+  isLocateFlashing = false,
+  customFooterInfo,
 }: AssistantMessageProps) {
   const { t } = useI18n();
+  const { renderAssistantTurnFooter } = useWebShellCustomization();
   const [copied, setCopied] = useState(false);
   const showFooter = !!content && !isStreaming && showFooterActions;
+  const customFooter = useMemo(
+    () =>
+      customFooterInfo
+        ? renderAssistantTurnFooter?.(customFooterInfo)
+        : undefined,
+    [customFooterInfo, renderAssistantTurnFooter],
+  );
   const handleCopy = useCallback(() => {
     const write = navigator.clipboard?.writeText(content);
     if (!write) {
@@ -47,16 +68,22 @@ export const AssistantMessage = memo(function AssistantMessage({
   return (
     <div className={styles.message}>
       {content && (
-        <div className={styles.content}>
+        <div
+          className={`${styles.content}${
+            isLocateFlashing ? ` ${flashStyles.flash}` : ''
+          }`}
+        >
           <div className={styles.contentBody}>
             <Markdown
               content={content}
               source="assistant"
               isStreaming={isStreaming}
-              enhanceTables={!isStreaming}
             />
           </div>
         </div>
+      )}
+      {customFooter && (
+        <div className={styles.customFooter}>{customFooter}</div>
       )}
       {showFooter && (
         <div className={styles.messageFooter}>
@@ -158,25 +185,63 @@ function BranchIcon() {
 }
 
 interface ThinkingMessageProps {
+  messageId: string;
   content: string;
   isStreaming?: boolean;
   timestamp?: number;
+  isLocateFlashing?: boolean;
+  generateContent?: SessionContentGenerator;
+}
+
+export type SessionContentGenerator = (
+  prompt: string,
+  opts?: { signal?: AbortSignal },
+) => AsyncGenerator<DaemonSessionGenerationEvent>;
+
+interface ThinkingTranslation {
+  text: string;
+  inputTokens?: number;
+  outputTokens?: number;
+}
+
+const thinkingTranslationCache = new Map<string, ThinkingTranslation>();
+const THINKING_TRANSLATION_CACHE_MAX_ENTRIES = 200;
+
+function cacheThinkingTranslation(
+  key: string,
+  translation: ThinkingTranslation,
+): void {
+  thinkingTranslationCache.delete(key);
+  thinkingTranslationCache.set(key, translation);
+  if (thinkingTranslationCache.size <= THINKING_TRANSLATION_CACHE_MAX_ENTRIES) {
+    return;
+  }
+  const oldestKey = thinkingTranslationCache.keys().next().value;
+  if (oldestKey !== undefined) thinkingTranslationCache.delete(oldestKey);
 }
 
 export const ThinkingMessage = memo(function ThinkingMessage({
+  messageId,
   content,
   isStreaming,
   timestamp,
+  isLocateFlashing = false,
+  generateContent,
 }: ThinkingMessageProps) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const compactMode = useContext(CompactModeContext);
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
-  const thinkingSummaryKey = getThinkingSummaryKey({ isStreaming });
-  const thinkingActive = thinkingSummaryKey === 'thinking.running';
+  const thinkingActive = isStreaming === true;
   const startTimeRef = useRef(timestamp ?? Date.now());
   const sawActiveRef = useRef(thinkingActive);
   const [now, setNow] = useState(() => Date.now());
   const [finishedAt, setFinishedAt] = useState<number | null>(null);
+  const [translationOpen, setTranslationOpen] = useState(false);
+  const [translation, setTranslation] = useState<ThinkingTranslation>();
+  const [translationLoading, setTranslationLoading] = useState(false);
+  const [translationThinking, setTranslationThinking] = useState(false);
+  const [translationError, setTranslationError] = useState(false);
+  const translationAbortRef = useRef<AbortController | undefined>(undefined);
 
   useEffect(() => {
     if (!content || !thinkingActive) return;
@@ -197,45 +262,259 @@ export const ThinkingMessage = memo(function ThinkingMessage({
     }
   }, [content, finishedAt, thinkingActive]);
 
+  const thinkingDurationMs =
+    thinkingActive || finishedAt !== null
+      ? (thinkingActive ? now : finishedAt!) - startTimeRef.current
+      : undefined;
+  const thinkingSummaryKey = getThinkingSummaryKey({
+    isStreaming,
+    durationMs: thinkingDurationMs,
+  });
   const thinkingDuration =
-    thinkingActive || finishedAt
-      ? formatThinkingDuration(
-          (thinkingActive ? now : finishedAt!) - startTimeRef.current,
-        )
+    thinkingDurationMs !== undefined
+      ? formatThinkingDuration(thinkingDurationMs)
       : '';
 
   const handleToggle = useCallback(() => {
     setThinkingExpanded((v) => !v);
   }, []);
 
+  useEffect(
+    () => () => {
+      translationAbortRef.current?.abort();
+    },
+    [],
+  );
+
+  const translate = useCallback(
+    async (force = false) => {
+      if (isStreaming || !generateContent || (translationLoading && !force)) {
+        return;
+      }
+      const cacheKey = `${language}:${messageId}:${content}`;
+      const cached = thinkingTranslationCache.get(cacheKey);
+      if (cached && !force) {
+        cacheThinkingTranslation(cacheKey, cached);
+        setTranslation(cached);
+        return;
+      }
+
+      if (force) thinkingTranslationCache.delete(cacheKey);
+      translationAbortRef.current?.abort();
+      const controller = new AbortController();
+      translationAbortRef.current = controller;
+      setTranslation({ text: '' });
+      setTranslationThinking(false);
+      setTranslationError(false);
+      setTranslationLoading(true);
+      let text = '';
+      let completed = false;
+      try {
+        const targetLanguage =
+          language === 'zh-CN' ? 'Simplified Chinese' : 'English';
+        const prompt = `Translate the following model reasoning into ${targetLanguage}. Preserve its meaning and Markdown formatting. Output only the translation.\n\n${content}`;
+        for await (const event of generateContent(prompt, {
+          signal: controller.signal,
+        })) {
+          if (translationAbortRef.current !== controller) return;
+          if (event.type === 'thinking') {
+            setTranslationThinking(true);
+          } else if (event.type === 'delta') {
+            setTranslationThinking(false);
+            text += event.text;
+            setTranslation({ text });
+          } else if (event.type === 'done') {
+            if (!text.trim()) throw new Error('Translation was empty');
+            completed = true;
+            const result = {
+              text,
+              inputTokens: event.inputTokens,
+              outputTokens: event.outputTokens,
+            };
+            cacheThinkingTranslation(cacheKey, result);
+            setTranslation(result);
+          } else if (event.type === 'error') {
+            throw new Error(event.message);
+          }
+        }
+        if (!completed) throw new Error('Translation stream ended early');
+      } catch {
+        if (!controller.signal.aborted) setTranslationError(true);
+      } finally {
+        if (translationAbortRef.current === controller) {
+          translationAbortRef.current = undefined;
+          setTranslationThinking(false);
+          setTranslationLoading(false);
+        }
+      }
+    },
+    [
+      content,
+      generateContent,
+      isStreaming,
+      language,
+      messageId,
+      translationLoading,
+    ],
+  );
+
+  const handleTranslationOpenChange = useCallback(
+    (open: boolean) => {
+      setTranslationOpen(open);
+      if (open) void translate();
+    },
+    [translate],
+  );
+
+  const handleCancelOrCloseTranslation = useCallback(() => {
+    const controller = translationAbortRef.current;
+    translationAbortRef.current = undefined;
+    controller?.abort();
+    setTranslationThinking(false);
+    setTranslationLoading(false);
+    setTranslationOpen(false);
+  }, []);
+
   return (
-    <div className={styles.message}>
+    <div
+      className={`${styles.message}${
+        isLocateFlashing ? ` ${flashStyles.flash}` : ''
+      }`}
+    >
       {content && !compactMode && (
         <div className={styles.thinking}>
           <div className={styles.thinkingBody}>
-            <button
-              type="button"
-              className={styles.thinkingSummary}
-              onClick={handleToggle}
-              aria-expanded={thinkingExpanded}
-              title={
-                thinkingExpanded ? t('thinking.collapse') : t('thinking.expand')
-              }
+            <div
+              className={`${styles.thinkingHeader}${
+                thinkingExpanded ? ` ${styles.thinkingHeaderExpanded}` : ''
+              }`}
+              onClick={(event) => {
+                if (event.currentTarget.contains(event.target as Node)) {
+                  handleToggle();
+                }
+              }}
             >
-              <span className={styles.thinkingSummaryIcon} aria-hidden="true">
-                <ThinkingDoneIcon />
-              </span>
-              <span
-                className={
-                  thinkingActive
-                    ? `${styles.thinkingSummaryText} ${styles.thinkingSummaryTextActive}`
-                    : styles.thinkingSummaryText
+              <button
+                type="button"
+                className={styles.thinkingSummary}
+                aria-expanded={thinkingExpanded}
+                title={
+                  thinkingExpanded
+                    ? t('thinking.collapse')
+                    : t('thinking.expand')
                 }
               >
-                {t(thinkingSummaryKey, {
-                  duration: thinkingDuration,
-                })}
-              </span>
+                <span className={styles.thinkingSummaryIcon} aria-hidden="true">
+                  <ThinkingDoneIcon />
+                </span>
+                <span
+                  className={
+                    thinkingActive
+                      ? `${styles.thinkingSummaryText} ${styles.thinkingSummaryTextActive}`
+                      : styles.thinkingSummaryText
+                  }
+                >
+                  {t(
+                    thinkingSummaryKey,
+                    thinkingDuration ? { duration: thinkingDuration } : {},
+                  )}
+                </span>
+              </button>
+              {language === 'zh-CN' && !thinkingActive && generateContent && (
+                <Popover
+                  open={translationOpen}
+                  onOpenChange={handleTranslationOpenChange}
+                >
+                  <PopoverTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="xs"
+                      className={styles.translateButton}
+                      title={t('thinking.translate')}
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      {t('thinking.translate')}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent
+                    align="start"
+                    className={styles.translationPopover}
+                  >
+                    <div className={styles.translationTitle}>
+                      {t('thinking.translation')}
+                    </div>
+                    {translationError ? (
+                      <div className={styles.translationError}>
+                        {t('thinking.translationFailed')}
+                      </div>
+                    ) : translation?.text ? (
+                      <div
+                        className={`${styles.thinkingExpandedWrap} ${styles.translationContent}`}
+                      >
+                        <Markdown
+                          content={translation.text}
+                          source="thinking"
+                          isStreaming={translationLoading}
+                        />
+                      </div>
+                    ) : (
+                      <div className={styles.translationPending}>
+                        {t(
+                          translationThinking
+                            ? 'thinking.translationThinking'
+                            : 'thinking.translating',
+                        )}
+                      </div>
+                    )}
+                    <div className={styles.translationFooter}>
+                      <div className={styles.translationUsage}>
+                        {!translationLoading && translation?.text && (
+                          <>
+                            <span>
+                              {t('thinking.inputTokens', {
+                                count: translation.inputTokens ?? '--',
+                              })}
+                            </span>
+                            <span>
+                              {t('thinking.outputTokens', {
+                                count: translation.outputTokens ?? '--',
+                              })}
+                            </span>
+                          </>
+                        )}
+                      </div>
+                      <div className={styles.translationActions}>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="xs"
+                          onClick={() => void translate(true)}
+                        >
+                          {t('thinking.retranslate')}
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="xs"
+                          disabled={
+                            !translationLoading &&
+                            !translation?.text &&
+                            !translationError
+                          }
+                          onClick={handleCancelOrCloseTranslation}
+                        >
+                          {t(
+                            translationLoading
+                              ? 'thinking.cancelTranslation'
+                              : 'thinking.closeTranslation',
+                          )}
+                        </Button>
+                      </div>
+                    </div>
+                  </PopoverContent>
+                </Popover>
+              )}
               <span
                 className={
                   thinkingExpanded
@@ -244,7 +523,7 @@ export const ThinkingMessage = memo(function ThinkingMessage({
                 }
                 aria-hidden="true"
               />
-            </button>
+            </div>
             <div
               className={
                 thinkingExpanded
@@ -271,10 +550,15 @@ export const ThinkingMessage = memo(function ThinkingMessage({
 
 export function getThinkingSummaryKey({
   isStreaming,
+  durationMs,
 }: {
   isStreaming?: boolean;
-}): 'thinking.running' | 'thinking.done' {
-  return isStreaming ? 'thinking.running' : 'thinking.done';
+  durationMs?: number;
+}): 'thinking.running' | 'thinking.done' | 'thinking.doneBriefly' {
+  if (isStreaming) return 'thinking.running';
+  return durationMs !== undefined && durationMs < 1_000
+    ? 'thinking.doneBriefly'
+    : 'thinking.done';
 }
 
 export function formatThinkingDuration(ms: number): string {

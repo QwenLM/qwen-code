@@ -34,15 +34,14 @@ vi.mock('undici', () => {
     }
   }
 
-  class MockProxyAgent {
+  class MockEnvHttpProxyAgent {
     options: UndiciOptions;
-    uri: string;
     constructor(options: UndiciOptions) {
       this.options = options;
-      this.uri = (options as { uri?: string }).uri || '';
+      const httpProxy = (options as { httpProxy?: string }).httpProxy || '';
       // Simulate failure for specifically invalid proxy URLs
-      // Note: Real ProxyAgent accepts credential URLs — only syntactically invalid URIs fail
-      if (this.uri === 'http://invalid-proxy') {
+      // Note: Real EnvHttpProxyAgent accepts credential URLs — only syntactically invalid URIs fail
+      if (httpProxy === 'http://invalid-proxy') {
         throw new Error('Invalid proxy URL: http://user:secret@proxy.local');
       }
     }
@@ -50,7 +49,7 @@ vi.mock('undici', () => {
 
   return {
     Agent: MockAgent,
-    ProxyAgent: MockProxyAgent,
+    EnvHttpProxyAgent: MockEnvHttpProxyAgent,
     fetch: mockUndiciFetch,
   };
 });
@@ -59,6 +58,7 @@ import {
   buildRuntimeFetchOptions,
   extractHostnameFromProxyUrl,
   getOrCreateSharedDispatcher,
+  isTlsVerificationDisabled,
   redactProxyCredentials,
   redactProxyError,
   resetDispatcherCache,
@@ -107,7 +107,7 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     expect((result as { fetch?: unknown }).fetch).toBe(mockUndiciFetch);
   });
 
-  it('uses ProxyAgent with disabled timeouts when proxy is set', () => {
+  it('uses EnvHttpProxyAgent with disabled timeouts when proxy is set', () => {
     const result = buildRuntimeFetchOptions('openai', 'http://proxy.local');
 
     expect(result).toBeDefined();
@@ -117,13 +117,14 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
       result as { fetchOptions?: { dispatcher?: { options?: UndiciOptions } } }
     ).fetchOptions?.dispatcher;
     expect(dispatcher?.options).toMatchObject({
-      uri: 'http://proxy.local',
+      httpProxy: 'http://proxy.local',
+      httpsProxy: 'http://proxy.local',
       headersTimeout: 0,
       bodyTimeout: 0,
     });
   });
 
-  it('returns fetchOptions with ProxyAgent for Anthropic with proxy', () => {
+  it('returns fetchOptions with EnvHttpProxyAgent for Anthropic with proxy', () => {
     const result = buildRuntimeFetchOptions('anthropic', 'http://proxy.local');
 
     expect(result).toBeDefined();
@@ -133,7 +134,8 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
       result as { fetchOptions?: { dispatcher?: { options?: UndiciOptions } } }
     ).fetchOptions?.dispatcher;
     expect(dispatcher?.options).toMatchObject({
-      uri: 'http://proxy.local',
+      httpProxy: 'http://proxy.local',
+      httpsProxy: 'http://proxy.local',
       headersTimeout: 0,
       bodyTimeout: 0,
     });
@@ -141,7 +143,7 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
 
   it('pins fetch to undici when proxy is set so dispatcher and fetch share a version', () => {
     // Regression for `invalid onError method`: Node's built-in fetch (newer
-    // undici) cannot accept a ProxyAgent built from a different undici major.
+    // undici) cannot accept a dispatcher built from a different undici major.
     // The function must hand back the bundled undici's fetch alongside the
     // dispatcher.
     const openaiResult = buildRuntimeFetchOptions(
@@ -280,13 +282,125 @@ describe('getOrCreateSharedDispatcher', () => {
     expect(d1).not.toBe(d2);
   });
 
-  it('shares the same ProxyAgent dispatcher with buildRuntimeFetchOptions when proxy is set', () => {
+  it('shares the same EnvHttpProxyAgent dispatcher with buildRuntimeFetchOptions when proxy is set', () => {
     const shared = getOrCreateSharedDispatcher('http://proxy.local');
     const result = buildRuntimeFetchOptions('openai', 'http://proxy.local');
     const sdkDispatcher = (
       result as { fetchOptions?: { dispatcher?: unknown } }
     ).fetchOptions?.dispatcher;
     expect(sdkDispatcher).toBe(shared);
+  });
+});
+
+describe('TLS verification opt-out (insecure)', () => {
+  const savedEnv = {
+    QWEN_TLS_INSECURE: process.env['QWEN_TLS_INSECURE'],
+    NODE_TLS_REJECT_UNAUTHORIZED: process.env['NODE_TLS_REJECT_UNAUTHORIZED'],
+  };
+
+  beforeEach(() => {
+    resetDispatcherCache();
+    delete process.env['QWEN_TLS_INSECURE'];
+    delete process.env['NODE_TLS_REJECT_UNAUTHORIZED'];
+  });
+
+  afterEach(() => {
+    if (savedEnv.QWEN_TLS_INSECURE === undefined) {
+      delete process.env['QWEN_TLS_INSECURE'];
+    } else {
+      process.env['QWEN_TLS_INSECURE'] = savedEnv.QWEN_TLS_INSECURE;
+    }
+    if (savedEnv.NODE_TLS_REJECT_UNAUTHORIZED === undefined) {
+      delete process.env['NODE_TLS_REJECT_UNAUTHORIZED'];
+    } else {
+      process.env['NODE_TLS_REJECT_UNAUTHORIZED'] =
+        savedEnv.NODE_TLS_REJECT_UNAUTHORIZED;
+    }
+  });
+
+  const getDispatcherOptions = (result: unknown): UndiciOptions | undefined =>
+    (
+      result as {
+        fetchOptions?: { dispatcher?: { options?: UndiciOptions } };
+      }
+    ).fetchOptions?.dispatcher?.options;
+
+  it('does not set connect options on the no-proxy Agent by default', () => {
+    const options = getDispatcherOptions(buildRuntimeFetchOptions('openai'));
+    expect(options?.['connect']).toBeUndefined();
+  });
+
+  it('disables verification on the no-proxy Agent via QWEN_TLS_INSECURE', () => {
+    process.env['QWEN_TLS_INSECURE'] = '1';
+    const options = getDispatcherOptions(buildRuntimeFetchOptions('openai'));
+    expect(options?.['connect']).toEqual({ rejectUnauthorized: false });
+  });
+
+  it('honors NODE_TLS_REJECT_UNAUTHORIZED=0 for parity', () => {
+    process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0';
+    const options = getDispatcherOptions(buildRuntimeFetchOptions('openai'));
+    expect(options?.['connect']).toEqual({ rejectUnauthorized: false });
+  });
+
+  it('ignores falsy QWEN_TLS_INSECURE values', () => {
+    process.env['QWEN_TLS_INSECURE'] = '0';
+    const options = getDispatcherOptions(buildRuntimeFetchOptions('openai'));
+    expect(options?.['connect']).toBeUndefined();
+  });
+
+  it('configures TLS opt-out for direct and proxied requests', () => {
+    process.env['QWEN_TLS_INSECURE'] = '1';
+    const dispatcher = getOrCreateSharedDispatcher(
+      'http://proxy.local',
+    ) as unknown as { options: UndiciOptions };
+    expect(dispatcher.options['requestTls']).toEqual({
+      rejectUnauthorized: false,
+    });
+    expect(dispatcher.options['proxyTls']).toEqual({
+      rejectUnauthorized: false,
+    });
+    expect(dispatcher.options['connect']).toEqual({
+      rejectUnauthorized: false,
+    });
+  });
+
+  it('keeps secure and insecure dispatchers in separate cache entries', () => {
+    const secure = getOrCreateSharedDispatcher('http://proxy.local');
+    process.env['QWEN_TLS_INSECURE'] = '1';
+    const insecure = getOrCreateSharedDispatcher('http://proxy.local');
+    expect(secure).not.toBe(insecure);
+  });
+
+  describe('isTlsVerificationDisabled', () => {
+    it.each(['1', 'true', 'TRUE', 'Yes', 'on', '  1  '])(
+      'treats QWEN_TLS_INSECURE=%j as enabled',
+      (value) => {
+        process.env['QWEN_TLS_INSECURE'] = value;
+        expect(isTlsVerificationDisabled()).toBe(true);
+      },
+    );
+
+    it.each(['0', 'false', 'no', 'off', '', 'enabled'])(
+      'treats QWEN_TLS_INSECURE=%j as disabled',
+      (value) => {
+        process.env['QWEN_TLS_INSECURE'] = value;
+        expect(isTlsVerificationDisabled()).toBe(false);
+      },
+    );
+
+    it('honors NODE_TLS_REJECT_UNAUTHORIZED=0', () => {
+      process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0';
+      expect(isTlsVerificationDisabled()).toBe(true);
+    });
+
+    it('ignores NODE_TLS_REJECT_UNAUTHORIZED values other than "0"', () => {
+      process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '1';
+      expect(isTlsVerificationDisabled()).toBe(false);
+    });
+
+    it('returns false when neither variable is set', () => {
+      expect(isTlsVerificationDisabled()).toBe(false);
+    });
   });
 });
 

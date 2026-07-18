@@ -7,7 +7,7 @@
 ## Responsibilities
 
 - Parse and validate `ServeOptions`: listen address, auth, workspace, session / connection caps, MCP budget / pool, CORS, prompt / SSE / session idle timeouts, rate limit, and related toggles.
-- **Canonicalize** the bound workspace exactly once. The same canonical form is shared by `/capabilities`, the `POST /session` fallback, and the bridge.
+- **Canonicalize** the primary workspace exactly once, and canonicalize every repeated `--workspace` before registering session runtimes. The primary canonical form is shared by `/capabilities.workspaceCwd`, the `POST /session` fallback, and the primary bridge.
 - Reject unsafe or invalid startup configurations: non-loopback bind without token, `--require-auth` without token, `--allow-origin '*'` without token, `mcpBudgetMode='enforce'` without a positive `mcpClientBudget`, a nonexistent or non-directory `--workspace`, and invalid timeout or rate-limit values.
 - Construct the `WorkspaceFileSystem` factory, permission audit publisher, `DaemonStatusProvider`, and `acp-bridge`.
 - Build the Express app, wire middleware (`denyBrowserOriginCors` / `allowOriginCors` -> `hostAllowlist` -> access log -> `bearerAuth` -> rate limit -> JSON parser -> telemetry -> per-route `mutationGate`), and mount session, workspace CRUD, file, device-flow auth, permission vote, and ACP HTTP routes.
@@ -20,20 +20,20 @@
 
 **App factory**: `createServeApp(opts, getPort, deps)` in `packages/cli/src/serve/server.ts`. Builds the Express `Application`. Direct embedders and tests call it without the bootstrap wrapper.
 
-**Capability registry**: `SERVE_CAPABILITY_REGISTRY` in `packages/cli/src/serve/capabilities.ts`. Each tag has a `since` version and optional `modes`. Ten conditional tags (`require_auth`, `mcp_workspace_pool`, `mcp_pool_restart`, `allow_origin`, `prompt_absolute_deadline`, `writer_idle_timeout`, `workspace_settings`, `session_shell_command`, `rate_limit`, `workspace_reload`) are omitted when their corresponding toggle is off. See [`11-capabilities-versioning.md`](./11-capabilities-versioning.md).
+**Capability registry**: `SERVE_CAPABILITY_REGISTRY` in `packages/cli/src/serve/capabilities.ts`. Each tag has a `since` version and optional `modes`. Conditional tags are omitted when their deployment or runtime predicate is false; the registry and predicate map are the source of truth. See [`11-capabilities-versioning.md`](./11-capabilities-versioning.md).
 
 **Middleware** (`packages/cli/src/serve/auth.ts` and `server.ts`):
 
-| Middleware, in registration order           | Purpose                                                                                                                    | Notes                                                                                                             |
-| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `denyBrowserOriginCors` / `allowOriginCors` | Deny all `Origin` headers by default; switch to an allowlist when `--allow-origin <pattern>` is configured.                | See [`12-auth-security.md`](./12-auth-security.md).                                                               |
-| `hostAllowlist(bind, getPort)`              | On loopback, validate `Host` belongs to `localhost`, `127.0.0.1`, `[::1]`, or `host.docker.internal` plus the actual port. | Defense against DNS rebinding. Comparison is case-insensitive and cached per port.                                |
-| Access-log middleware                       | Records method, path, status, durationMs, sessionId, and clientId to `DaemonLogger` when a request finishes.               | Registered **before** `bearerAuth`, so 401 denials are logged too. Skips `/health` and heartbeat.                 |
-| `bearerAuth(token)`                         | SHA-256 plus `timingSafeEqual` constant-time bearer comparison.                                                            | Open passthrough when no token is configured (loopback dev default). `Bearer` scheme is case-insensitive.         |
-| Rate-limit middleware                       | Optional per-tier token bucket for prompt, mutation, and read routes.                                                      | Registered after `bearerAuth` and before JSON parsing; returns 429 before parsing when a bucket is exhausted.     |
-| `express.json({ limit: '10mb' })`           | JSON body parsing.                                                                                                         | Parse errors return 400.                                                                                          |
-| `daemonTelemetryMiddleware`                 | Wraps each HTTP request in an OpenTelemetry span through `withDaemonRequestSpan`.                                          | Attributes include route, sessionId, clientId, and status code.                                                   |
-| `createMutationGate` (per-route)            | Route-level opt-in gate for mutation routes that require token even on loopback.                                           | Returns `401 { code: 'token_required' }`. Not global `app.use`; routes call `mutate({ strict: true })` as needed. |
+| Middleware, in registration order           | Purpose                                                                                                                    | Notes                                                                                                                                                                                   |
+| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `denyBrowserOriginCors` / `allowOriginCors` | Deny all `Origin` headers by default; switch to an allowlist when `--allow-origin <pattern>` is configured.                | See [`12-auth-security.md`](./12-auth-security.md).                                                                                                                                     |
+| `hostAllowlist(bind, getPort)`              | On loopback, validate `Host` belongs to `localhost`, `127.0.0.1`, `[::1]`, or `host.docker.internal` plus the actual port. | Defense against DNS rebinding. Comparison is case-insensitive and cached per port.                                                                                                      |
+| Access-log middleware                       | Records method, path, status, durationMs, sessionId, and clientId to `DaemonLogger` when a request finishes.               | Registered **before** `bearerAuth`, so 401 denials are logged too. Skips `/health` and heartbeat.                                                                                       |
+| `bearerAuth(token)`                         | SHA-256 plus `timingSafeEqual` constant-time bearer comparison.                                                            | Open passthrough when no token is configured (loopback dev default). `Bearer` scheme is case-insensitive.                                                                               |
+| Rate-limit middleware                       | Optional per-tier token bucket for prompt, mutation, and read routes.                                                      | Registered after `bearerAuth` and before JSON parsing; returns 429 before parsing when a bucket is exhausted.                                                                           |
+| `express.json({ limit: '10mb' })`           | JSON body parsing.                                                                                                         | Parse errors return 400.                                                                                                                                                                |
+| `daemonTelemetryMiddleware`                 | Wraps classified daemon API requests that reach this point in an OpenTelemetry span through `withDaemonRequestSpan`.       | Attributes include canonical route, resolved workspace hash, sessionId, clientId, and status code. Earlier auth, rate-limit, and body-parser rejections are outside this span boundary. |
+| `createMutationGate` (per-route)            | Route-level opt-in gate for mutation routes that require token even on loopback.                                           | Returns `401 { code: 'token_required' }`. Not global `app.use`; routes call `mutate({ strict: true })` as needed.                                                                       |
 
 **Subsystems**:
 
@@ -51,11 +51,11 @@
 | `serve/acp-http/`                                                | ACP Streamable HTTP transport (RFD #721), mounted at `/acp`. Seven files implement JSON-RPC POST, SSE GET, DELETE teardown, and shared bridge usage in parallel with the REST surface.                                                                                                                                                                                                                                                                       |
 | `serve/demo.ts`                                                  | Self-contained inline HTML for `GET /demo`: browser debug console with chat UI, event log, and workspace inspector. On loopback without `--require-auth`, it is registered **before** `bearerAuth`; on non-loopback or with `--require-auth`, it is registered **after** `bearerAuth`. Served with CSP `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'` plus `X-Frame-Options: DENY`. |
 
-**Re-export shims** for compatibility with pre-F1 import paths:
+**ACP bridge package imports**:
 
-- `serve/event-bus.ts` -> `@qwen-code/acp-bridge/eventBus`
-- `serve/status.ts` -> `@qwen-code/acp-bridge/status`
-- `serve/httpAcpBridge.ts` -> `@qwen-code/acp-bridge`
+- Event-bus primitives are imported from `@qwen-code/acp-bridge/eventBus`.
+- Status primitives are imported from `@qwen-code/acp-bridge/status`.
+- `serve/acp-session-bridge.ts` remains as the CLI-local compatibility facade for the broader bridge surface.
 
 ## Flow
 
@@ -123,7 +123,7 @@ Calling `createServeApp` directly returns only an `Application`; the embedder ow
 | Env             | `QWEN_SERVE_DEBUG=1`                                                                            | Verbose stderr logs. See [`19-observability.md`](./19-observability.md).                              |
 | Flags           | `--hostname`, `--port`                                                                          | Listen binding.                                                                                       |
 | Flags           | `--token`, `--require-auth`, `--enable-session-shell`                                           | Bearer token, loopback auth hardening, and explicit shell execution switch.                           |
-| Flag            | `--workspace`                                                                                   | Overrides `process.cwd()`.                                                                            |
+| Flag            | `--workspace`                                                                                   | Overrides `process.cwd()`; repeat to register additional isolated workspace runtimes.                 |
 | Flags           | `--max-sessions`, `--max-pending-prompts-per-session`, `--max-connections`, `--event-ring-size` | Bridge / Express caps.                                                                                |
 | Flags           | `--mcp-client-budget=N`, `--mcp-budget-mode={off,warn,enforce}`                                 | Forwarded to the ACP child.                                                                           |
 | Flags           | `--allow-origin`, `--allow-private-auth-base-url`                                               | Browser CORS allowlist and localhost/private auth provider installation switch.                       |

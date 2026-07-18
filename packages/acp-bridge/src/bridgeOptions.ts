@@ -33,6 +33,39 @@ export type DiagnosticLineSink = (
   level?: 'info' | 'warn' | 'error',
 ) => void;
 
+export interface BridgeFreshSessionAdmissionContext {
+  readonly operation: 'spawn' | 'load' | 'resume' | 'branch';
+  readonly workspaceCwd: string;
+  readonly sessionId?: string;
+  readonly sourceSessionId?: string;
+}
+
+export interface BridgeFreshSessionReservation {
+  release(): void;
+}
+
+export type BridgeFreshSessionAdmission = (
+  context: BridgeFreshSessionAdmissionContext,
+) => BridgeFreshSessionReservation | undefined;
+
+export type BridgeSessionLifecycleEvent =
+  | {
+      readonly type: 'registered';
+      readonly sessionId: string;
+      readonly workspaceCwd: string;
+      readonly reason: string;
+    }
+  | {
+      readonly type: 'removed';
+      readonly sessionId: string;
+      readonly workspaceCwd: string;
+      readonly reason: string;
+    };
+
+export type BridgeSessionLifecycle = (
+  event: BridgeSessionLifecycleEvent,
+) => void;
+
 /**
  * Optional injection seam for daemon-host-specific status cells —
  * `process.env` snapshots and the daemon-side preflight checks
@@ -110,6 +143,7 @@ export interface BridgeTelemetry {
     attributes: BridgeTelemetryAttributes,
     fn: () => Promise<T>,
   ): Promise<T>;
+  setActiveSpanAttributes?(attributes: BridgeTelemetryAttributes): void;
   event(name: string, attributes: BridgeTelemetryAttributes): void;
   injectPromptContext<T extends object>(request: T): T;
   metrics?: BridgeTelemetryMetrics;
@@ -148,6 +182,19 @@ export interface BridgeOptions {
    */
   maxSessions?: number;
   /**
+   * Host-level admission hook for fresh session creation across runtimes.
+   * Must be synchronous so callers can reserve before any async child or ACP
+   * side effect starts. Attaches bypass this hook.
+   */
+  freshSessionAdmission?: BridgeFreshSessionAdmission;
+  /**
+   * Host-level live session owner callback. The bridge emits registration
+   * only after a live entry is installed, and removal when that live entry is
+   * removed. Callback failures are diagnostic only and do not fail session
+   * lifecycle operations.
+   */
+  sessionLifecycle?: BridgeSessionLifecycle;
+  /**
    * Per-session SSE replay ring depth. Sets `ringSize` on every
    * `new EventBus(...)` the bridge constructs (both fresh sessions
    * and restored sessions). Defaults to `DEFAULT_RING_SIZE` (8000,
@@ -163,6 +210,14 @@ export interface BridgeOptions {
    * `ringSize × average-event-size` held until the session ends.
    */
   eventRingSize?: number;
+  /**
+   * Per-session cap, in serialized bytes, for the in-memory compacted replay
+   * snapshot returned by `session/load` late attach. This bounds daemon heap
+   * retained for historical replay; the current unfinished live turn remains in
+   * `liveJournal` until its turn boundary. Defaults to 4 MiB. Must be a
+   * positive safe integer; there is no unlimited sentinel.
+   */
+  compactedReplayMaxBytes?: number;
   /**
    * Per-`requestPermission` wall clock. After this many ms with
    * no client vote, the agent's permission promise resolves as
@@ -192,8 +247,8 @@ export interface BridgeOptions {
    */
   maxPendingPromptsPerSession?: number;
   /**
-   * Absolute, **already-canonical** path this daemon is bound to (per
-   * 1 daemon = 1 workspace). `spawnOrAttach` calls whose
+   * Absolute, **already-canonical** path this bridge/runtime is bound to.
+   * `spawnOrAttach` calls whose
    * `workspaceCwd` doesn't canonicalize to this same value throw
    * `WorkspaceMismatchError` (route → 400 with code `workspace_mismatch`).
    *
@@ -366,4 +421,97 @@ export interface BridgeOptions {
    * Default: 1_800_000 (30 minutes). `0` or `Infinity` disables.
    */
   sessionIdleTimeoutMs?: number;
+  /**
+   * Reverse tool channel (issue #5626, Phase 2). Looks up the
+   * `sendSdkMcpMessage`-shaped sender for a client-hosted MCP server by its
+   * advertised `server` name, returning `undefined` when no client currently
+   * hosts it.
+   *
+   * The `qwen --acp` child binds its session `McpClientManager`'s
+   * `sendSdkMcpMessage` to a `qwen/control/client_mcp/message` ext-method
+   * (child → parent). `BridgeClient.extMethod` answers that method by calling
+   * THIS lookup to reach the per-WS-connection `ClientMcpRegistrar` that
+   * carries the JSON-RPC frame down the daemon WS to the extension and returns
+   * the correlated response.
+   *
+   * Backed by a process-scoped registry the serve layer populates on
+   * `mcp_register` and clears on `mcp_unregister` / WS close (see
+   * `cli/src/serve/acp-http/client-mcp-sender-registry.ts`). When omitted
+   * (tests, Mode A consumers, channels / IDE companion), the child never
+   * receives an SDK MCP runtime server, so the method is never called.
+   */
+  clientMcpSender?: ClientMcpMessageSender;
+  /**
+   * Daemon-host seam for the `create_sub_session` tool. When a tool running
+   * inside a child's agent turn asks (over `extMethod`) to spawn a fresh
+   * top-level sub-session and run a prompt in it, the bridge's `extMethod`
+   * dispatch forwards it here. It RETURNS A PROMISE so the `'first-turn'` completion
+   * mode can wait for the sub-session's first turn and return its result to the
+   * caller. Omitted by tests / Mode A / non-daemon embeds — the tool then
+   * reports itself unavailable (daemon-only).
+   */
+  onCreateSubSession?: CreateSubSessionHandler;
 }
+
+/**
+ * Looks up the JSON-RPC sender for a client-hosted MCP server by name. Returns
+ * `undefined` when no client currently advertises `serverName`. The returned
+ * callback delivers `payload` to the client-hosted server and resolves with the
+ * correlated JSON-RPC response. `payload` is typed `unknown` to keep this
+ * package free of an MCP-SDK dependency; the serve layer passes a
+ * `JSONRPCMessage`.
+ */
+export type ClientMcpMessageSender = (
+  serverName: string,
+) => ((payload: unknown) => Promise<unknown>) | undefined;
+
+/** Ceiling on a sub-session prompt arriving over `extMethod`. The child is a
+ * separate process, so this is a trust boundary — mirrors the scheduled-task
+ * REST route's `MAX_PROMPT_LENGTH` and the core tool's own client-side check. */
+export const MAX_SUB_SESSION_PROMPT_CHARS = 100_000;
+
+/** Ceiling on the sub-session display name. It is a label — the launcher
+ * truncates it to 60 chars for display anyway. */
+export const MAX_SUB_SESSION_NAME_CHARS = 200;
+
+/**
+ * Payload the bridge forwards to {@link BridgeOptions.onCreateSubSession} when
+ * the `create_sub_session` tool requests a sub-session.
+ */
+export interface CreateSubSessionInfo {
+  /** Prompt to run in the freshly-spawned sub-session. */
+  prompt: string;
+  /** When the request resolves: `'sent'` = as soon as the prompt is dispatched;
+   * `'first-turn'` = after the sub-session's first turn completes (result
+   * returned). Extensible — more criteria may be added later. */
+  completion: 'sent' | 'first-turn';
+  /** Optional model service id for the sub-session (falls back to default). */
+  model?: string;
+  /** Optional display name for the sub-session in the session list. */
+  name?: string;
+  /**
+   * The calling session's id. REQUIRED, and authenticated against the
+   * connection's owned sessions before it reaches the host — it keys the
+   * per-caller concurrency bucket and the depth-1 nesting gate, so a caller
+   * that could omit it would face neither.
+   */
+  callerSessionId: string;
+}
+
+/** Result the daemon host returns for a create-sub-session request. `result`
+ * (the sub-session's first-turn output) is present only for `'first-turn'`. */
+export interface CreateSubSessionResult {
+  sessionId: string;
+  result?: string;
+  stopReason?: string;
+  /** Whether the parent lineage was durably written to the sub-session's
+   * transcript. `false` = live-only (gone from the persisted list after a
+   * daemon restart). Absent when the spawn carried no parent. */
+  parentSessionPersisted?: boolean;
+}
+
+/** Daemon-host callback that spawns a sub-session and (for `'first-turn'`) waits
+ * for its first turn. Returns a Promise so the tool can block on the result. */
+export type CreateSubSessionHandler = (
+  info: CreateSubSessionInfo,
+) => Promise<CreateSubSessionResult>;

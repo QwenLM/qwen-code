@@ -46,6 +46,20 @@ export type TransportOptions = {
    * When resume is provided, this should match the resume ID.
    */
   sessionId?: string;
+  forkSession?: boolean;
+  maxToolCalls?: number;
+  maxSubagentDepth?: number;
+  includeDirectories?: string[];
+  extraArgs?: string[];
+  extensions?: string[];
+  allowedMcpServerNames?: string[];
+  fallbackModel?: string[];
+  proxy?: string;
+  sandbox?: boolean;
+  safeMode?: boolean;
+  insecure?: boolean;
+  worktree?: boolean;
+  disabledSlashCommands?: string[];
 };
 
 export interface QuerySystemPromptPreset {
@@ -443,6 +457,23 @@ export interface QueryOptions {
   agents?: SubagentConfig[];
 
   /**
+   * Initial reasoning effort tier applied at session start.
+   *
+   * Controls the depth of model reasoning/thinking. Higher tiers produce more
+   * thorough reasoning at the cost of latency and tokens. Provider adapters
+   * clamp the tier to what the active model supports.
+   *
+   * - `'low'`: Minimal reasoning, fastest responses
+   * - `'medium'`: Balanced reasoning and speed
+   * - `'high'`: More thorough reasoning
+   * - `'xhigh'`: Extended reasoning for complex tasks
+   * - `'max'`: Maximum reasoning depth
+   *
+   * Use {@link Query.setEffort} to change the tier at runtime.
+   */
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+  /**
    * Include partial messages in the response stream.
    * When true, the SDK will emit incomplete messages as they are being generated,
    * allowing for real-time streaming of the AI's response.
@@ -464,6 +495,96 @@ export interface QueryOptions {
    * @example '123e4567-e89b-12d3-a456-426614174000'
    */
   sessionId?: string;
+
+  /**
+   * Fork from an existing session instead of starting fresh.
+   * Equivalent to CLI's `--fork-session` flag.
+   * @default false
+   */
+  forkSession?: boolean;
+
+  /**
+   * Maximum cumulative tool calls. -1 means no limit.
+   * Equivalent to CLI's `--max-tool-calls` flag.
+   */
+  maxToolCalls?: number;
+
+  /**
+   * Maximum nesting depth for sub-agents (1-100).
+   * Equivalent to CLI's `--max-subagent-depth` flag.
+   */
+  maxSubagentDepth?: number;
+
+  /**
+   * Additional directories to include in the workspace.
+   * Equivalent to CLI's `--include-directories` flag.
+   */
+  includeDirectories?: string[];
+
+  /**
+   * Additional CLI arguments to pass through directly.
+   * Cannot contain SDK-managed or security-sensitive flags (e.g. `--model`,
+   * `--auth-type`, `--approval-mode`, `--insecure`, `--dangerously-skip-permissions`).
+   */
+  extraArgs?: string[];
+
+  /**
+   * Extensions to enable for this session.
+   * Equivalent to CLI's `--extensions` flag.
+   */
+  extensions?: string[];
+
+  /**
+   * Whitelist of MCP server names to allow.
+   * Equivalent to CLI's `--allowed-mcp-server-names` flag.
+   */
+  allowedMcpServerNames?: string[];
+
+  /**
+   * Fallback model(s) for capacity errors (429/503/529).
+   * Up to 3 models, tried in order when the primary model is unavailable.
+   */
+  fallbackModel?: string[];
+
+  /**
+   * Proxy URL for the Qwen CLI process.
+   * @deprecated Use the "proxy" setting in settings.json instead.
+   */
+  proxy?: string;
+
+  /**
+   * Run in sandbox mode.
+   * Equivalent to CLI's `--sandbox` flag.
+   * @default false
+   */
+  sandbox?: boolean;
+
+  /**
+   * Disable all customizations for troubleshooting.
+   * Equivalent to CLI's `--safe-mode` flag.
+   * @default false
+   */
+  safeMode?: boolean;
+
+  /**
+   * Skip TLS certificate verification for API connections.
+   * Equivalent to CLI's `--insecure` flag.
+   * @default false
+   */
+  insecure?: boolean;
+
+  /**
+   * Enable Git worktree mode.
+   * Equivalent to CLI's `--worktree` flag.
+   * @default false
+   */
+  worktree?: boolean;
+
+  /**
+   * Slash command names to hide/disable.
+   * Equivalent to CLI's `--disabled-slash-commands` flag.
+   */
+  disabledSlashCommands?: string[];
 
   /**
    * Timeout configuration for various SDK operations.

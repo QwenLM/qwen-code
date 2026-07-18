@@ -5,8 +5,10 @@
  */
 
 import {
+  ApprovalMode,
+  APPROVAL_MODES,
+  createDebugLogger,
   ModelsConfig,
-  resolveProviderProtocol,
   tokenLimit,
 } from '@qwen-code/qwen-code-core';
 import type { AuthType } from '@qwen-code/qwen-code-core';
@@ -25,10 +27,14 @@ import {
 } from '../utils/modelConfigUtils.js';
 import type { CliGenerationConfigInputs } from '../utils/modelConfigUtils.js';
 import {
-  formatAcpModelId,
+  buildAcpModelOptions,
+  getCurrentAcpModelId,
   parseAcpBaseModelId,
   sanitizeProviderBaseUrl,
 } from '../utils/acpModelUtils.js';
+import { snapshotProcessEnv } from './env-snapshot.js';
+
+const debugLogger = createDebugLogger('WORKSPACE_PROVIDERS_STATUS');
 
 export type WorkspaceProvidersStatusProvider = (
   workspaceCwd: string,
@@ -53,12 +59,14 @@ function buildWorkspaceProvidersStatus(
   options: WorkspaceProvidersStatusProviderOptions,
 ): ServeWorkspaceProvidersStatus {
   try {
-    const loaded = loadSettings(workspaceCwd);
+    const loaded = loadSettings(
+      workspaceCwd,
+      options.env ? { skipLoadEnvironment: true } : true,
+    );
     const settings = loaded.merged;
-    const env =
-      options.env ?? (process.env as Record<string, string | undefined>);
+    const env = options.env ?? snapshotProcessEnv();
     const selectedAuthType =
-      settings.security?.auth?.selectedType ?? getAuthTypeFromEnv();
+      settings.security?.auth?.selectedType ?? getAuthTypeFromEnv(env);
     const argv: CliGenerationConfigInputs['argv'] = {
       model: options.argv?.model,
       openaiApiKey: options.argv?.openaiApiKey,
@@ -86,24 +94,45 @@ function buildWorkspaceProvidersStatus(
       ''
     ).trim();
     const hasCurrentModel = currentModelId.length > 0;
-    const currentAcpModelId =
-      hasCurrentModel && currentAuth
-        ? formatAcpModelId(currentModelId, currentAuth)
-        : currentModelId || undefined;
-    const currentBaseUrl = resolvedCliConfig.sources['baseUrl']
-      ? resolvedCliConfig.baseUrl || undefined
+    const modelCameFromSettings =
+      !argv.model && settings.model?.name?.trim() === currentModelId;
+    const currentBaseUrl =
+      modelCameFromSettings && settings.model?.baseUrl !== undefined
+        ? settings.model.baseUrl || undefined
+        : resolvedCliConfig.sources['baseUrl']
+          ? resolvedCliConfig.baseUrl || undefined
+          : undefined;
+    const currentRegistryBaseUrl =
+      modelCameFromSettings && currentAuth
+        ? settings.model?.baseUrl !== undefined
+          ? settings.model.baseUrl || null
+          : (modelsConfig.getResolvedModel(currentAuth, currentModelId)
+              ?.registryBaseUrl ?? null)
+        : undefined;
+    const modelOptions = buildAcpModelOptions(
+      modelsConfig.getAllConfiguredModels(),
+    );
+    const currentAcpModelId = hasCurrentModel
+      ? getCurrentAcpModelId(
+          modelOptions,
+          currentModelId,
+          currentAuth,
+          currentRegistryBaseUrl,
+        )
       : undefined;
     const fastModelId =
       typeof settings.fastModel === 'string' && settings.fastModel.length > 0
         ? settings.fastModel
         : undefined;
+    const visionModelId =
+      typeof settings.visionModel === 'string' &&
+      settings.visionModel.length > 0
+        ? settings.visionModel
+        : undefined;
+    const approvalMode = resolveApprovalMode(settings);
     const providers = new Map<string, ServeWorkspaceProviderStatus>();
-    const explicitModelBaseUrls = buildExplicitModelBaseUrls(
-      settings.modelProviders,
-      settings.providerProtocol,
-    );
-
-    for (const model of modelsConfig.getAllConfiguredModels()) {
+    for (const option of modelOptions) {
+      const { model, effectiveModelId, modelId } = option;
       if (model.isRuntimeModel) continue;
       const authType = String(model.authType);
       let provider = providers.get(authType);
@@ -118,20 +147,8 @@ function buildWorkspaceProvidersStatus(
         providers.set(authType, provider);
       }
 
-      const effectiveModelId = model.id;
-      const modelId = formatAcpModelId(effectiveModelId, model.authType);
       const isCurrent =
-        currentAuth === model.authType &&
-        hasCurrentModel &&
-        matchesCurrentModel(currentModelId, effectiveModelId, modelId) &&
-        matchesCurrentBaseUrl(
-          currentBaseUrl,
-          model.baseUrl,
-          model.baseUrl !== undefined &&
-            explicitModelBaseUrls.has(
-              modelBaseUrlKey(authType, effectiveModelId, model.baseUrl),
-            ),
-        );
+        currentAuth === model.authType && currentAcpModelId === modelId;
       const providerModel: ServeWorkspaceProviderModel = {
         modelId,
         baseModelId: parseAcpBaseModelId(effectiveModelId),
@@ -159,6 +176,7 @@ function buildWorkspaceProvidersStatus(
       currentAcpModelId,
       currentBaseUrl,
       fastModelId,
+      visionModelId,
     );
 
     return {
@@ -167,6 +185,7 @@ function buildWorkspaceProvidersStatus(
       initialized: true,
       acpChannelLive,
       ...(current ? { current } : {}),
+      approvalMode,
       providers: [...providers.values()],
       ...(resolvedCliConfig.warnings.length > 0
         ? {
@@ -198,80 +217,22 @@ function buildWorkspaceProvidersStatus(
   }
 }
 
-function matchesCurrentModel(
-  currentModelId: string,
-  baseModelId: string,
-  acpModelId: string,
-): boolean {
-  return currentModelId === baseModelId || currentModelId === acpModelId;
-}
+function resolveApprovalMode(settings: Settings): ApprovalMode {
+  const value = settings.tools?.approvalMode;
+  if (typeof value !== 'string') return ApprovalMode.AUTO;
 
-function matchesCurrentBaseUrl(
-  currentBaseUrl: string | undefined,
-  modelBaseUrl: string | undefined,
-  modelHasExplicitBaseUrl: boolean,
-): boolean {
-  if (!currentBaseUrl) return !modelHasExplicitBaseUrl;
-  return currentBaseUrl === modelBaseUrl;
-}
-
-function buildExplicitModelBaseUrls(
-  modelProviders: Settings['modelProviders'],
-  providerProtocol: Settings['providerProtocol'],
-): Set<string> {
-  const baseUrls = new Set<string>();
-  if (!modelProviders) return baseUrls;
-
-  for (const [providerId, providerConfig] of Object.entries(modelProviders)) {
-    const authType = resolveProviderProtocol(providerId, providerProtocol);
-    if (!authType) continue;
-    const models = readProviderModels(providerConfig);
-    for (const model of models) {
-      if (
-        typeof model.id === 'string' &&
-        typeof model.baseUrl === 'string' &&
-        model.baseUrl.length > 0
-      ) {
-        baseUrls.add(modelBaseUrlKey(authType, model.id, model.baseUrl));
-      }
-    }
-  }
-  return baseUrls;
-}
-
-type ProviderModelBaseUrlConfig = {
-  id?: unknown;
-  baseUrl?: unknown;
-};
-
-function readProviderModels(
-  providerConfig: unknown,
-): ProviderModelBaseUrlConfig[] {
-  if (Array.isArray(providerConfig)) {
-    return providerConfig.filter(isProviderModelBaseUrlConfig);
-  }
-  if (typeof providerConfig !== 'object' || providerConfig === null) {
-    return [];
+  const normalized = value.trim().toLowerCase().replaceAll('_', '-');
+  const mode = normalized === 'autoedit' ? ApprovalMode.AUTO_EDIT : normalized;
+  if ((APPROVAL_MODES as readonly string[]).includes(mode)) {
+    return mode as ApprovalMode;
   }
 
-  const { models } = providerConfig as { models?: unknown };
-  return Array.isArray(models)
-    ? models.filter(isProviderModelBaseUrlConfig)
-    : [];
-}
-
-function isProviderModelBaseUrlConfig(
-  value: unknown,
-): value is ProviderModelBaseUrlConfig {
-  return typeof value === 'object' && value !== null;
-}
-
-function modelBaseUrlKey(
-  authType: string,
-  modelId: string,
-  baseUrl: string,
-): string {
-  return `${authType}\0${modelId}\0${baseUrl}`;
+  if (value.trim().length > 0) {
+    debugLogger.warn(
+      `[workspace-providers-status] unrecognized approvalMode "${value}", falling back to auto`,
+    );
+  }
+  return ApprovalMode.AUTO;
 }
 
 const URL_LIKE_PATTERN = /\b[A-Za-z][A-Za-z\d+.-]*:\/\/[^\s'"`<>]+/g;
@@ -357,12 +318,15 @@ function buildCurrent(
   modelId: string | undefined,
   baseUrl: string | undefined,
   fastModelId: string | undefined,
+  visionModelId: string | undefined,
 ): ServeWorkspaceProviderCurrent | undefined {
-  if (!authType && !modelId && !baseUrl && !fastModelId) return undefined;
+  if (!authType && !modelId && !baseUrl && !fastModelId && !visionModelId)
+    return undefined;
   return {
     ...(authType ? { authType: String(authType) } : {}),
     ...(modelId ? { modelId } : {}),
     ...(baseUrl ? { baseUrl: sanitizeProviderBaseUrl(baseUrl) } : {}),
     ...(fastModelId ? { fastModelId } : {}),
+    ...(visionModelId ? { visionModelId } : {}),
   };
 }

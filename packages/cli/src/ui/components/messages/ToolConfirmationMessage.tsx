@@ -360,6 +360,13 @@ export const ToolConfirmationMessage: React.FC<
           isPending={false}
           availableTerminalHeight={planHeight}
           contentWidth={contentWidth}
+          // Live pending items render inside MainContent's maxHeight +
+          // overflow="hidden" wrapper, and Ink clips the BOTTOM. Without a
+          // height-aware pre-slice, a long plan silently loses its tail
+          // (including the option buttons below). Opt into the same pre-slice
+          // the streaming path uses so the body respects the viewport budget.
+          // See #6867.
+          enforceHeightBudget
         />
       </Box>
     );
@@ -430,6 +437,7 @@ export const ToolConfirmationMessage: React.FC<
       <AskUserQuestionDialog
         confirmationDetails={confirmationDetails}
         isFocused={isFocused}
+        availableWidth={contentWidth}
         onConfirm={onConfirm}
       />
     );

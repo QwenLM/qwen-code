@@ -27,7 +27,7 @@ import {
   type GeminiErrorEventValue,
   type StopFailureErrorType,
   type ActiveGoal,
-  type VisionBridgeResult,
+  type SteerInput,
   GeminiEventType as ServerGeminiEventType,
   SendMessageType,
   createDebugLogger,
@@ -48,11 +48,16 @@ import {
   ToolConfirmationOutcome,
   logApiCancel,
   ApiCancelEvent,
+  detectAutonomousSentinel,
   isSupportedImageMimeType,
   getUnsupportedImageFormatWarning,
   runVisionBridge,
   shouldRunVisionBridge,
+  formatVisionBridgeNotice,
+  formatFullTurnVisionNotice,
+  getFullTurnVisionModelSelector,
   hasImageParts,
+  clampInlineMediaPart,
   splitImageParts,
   generateToolUseSummary,
   getActiveGoal,
@@ -62,6 +67,8 @@ import {
   createDuplicateProviderToolCallResponse,
   markDuplicateProviderToolCallResponseSent,
   findRepeatedDuplicateProviderToolCall,
+  AutonomousLoopTickResolver,
+  refreshMemoryAfterManagedWrite,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -83,9 +90,15 @@ import {
   handleAtCommand,
   resolveAtCommandQuery,
 } from './atCommandProcessor.js';
-import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
+import {
+  findLastSafeSplitPoint,
+  splitFencedMarkdown,
+  getEnclosingFenceInfo,
+} from '../utils/markdownUtilities.js';
+import { fitPendingSlice } from '../utils/pending-rendered-height.js';
 import { useStateAndRef } from './useStateAndRef.js';
-import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
+import { normalizePartList } from '../../utils/nonInteractiveHelpers.js';
+import { isInlineModelOverrideAllowed } from '../../utils/acpModelUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import {
   useReactToolScheduler,
@@ -103,9 +116,39 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import { useDualOutput } from '../../dualOutput/DualOutputContext.js';
 import { recordGoalStatusItem } from '../utils/restoreGoal.js';
+import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import process from 'node:process';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
+
+// The per-turn model override is held in two coupled refs: the model id and a
+// flag marking whether it came from an explicit inline `/model <id> <prompt>`
+// (which must win over skill-tool overrides for the rest of the turn). The two
+// always move together; these helpers are the single place that writes both so
+// the invariant (inline flag true => model id set) can't be broken by editing
+// one ref in isolation, and every set/clear is traceable via debug logs.
+function applyModelOverride(
+  modelOverrideRef: { current: string | undefined },
+  inlineActiveRef: { current: boolean },
+  value: string | undefined,
+  isInline: boolean,
+): void {
+  modelOverrideRef.current = value;
+  inlineActiveRef.current = isInline;
+  debugLogger.debug(
+    `model override ${
+      value === undefined ? 'cleared' : `set to ${value}`
+    } (inline=${isInline})`,
+  );
+}
+
+function clearModelOverride(
+  modelOverrideRef: { current: string | undefined },
+  inlineActiveRef: { current: boolean },
+): void {
+  applyModelOverride(modelOverrideRef, inlineActiveRef, undefined, false);
+}
+
 const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS = 10_000;
 const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE =
   'Mid-turn @ command resolution timed out';
@@ -116,43 +159,9 @@ interface PendingDuplicateToolResponses {
   responseParts: Part[];
 }
 
-/**
- * Build the user-facing notice shown when the vision bridge runs. On success it
- * states which model was used, how many images were converted (and omitted),
- * and discloses the data egress (and endpoint, since auto-select can route to a
- * different host than the primary model). On failure it surfaces the reason.
- *
- * The transcription itself is not shown: it is fed to the primary model and
- * surfaced in its answer, so repeating it here only duplicated the description.
- *
- * @param result The structured result returned by the vision bridge.
- * @returns A notice string for the message history.
- */
-function formatVisionBridgeNotice(result: VisionBridgeResult): string {
-  const modelName = result.modelId ?? 'vision model';
-  const target = result.modelEndpoint
-    ? `${modelName} (${result.modelEndpoint})`
-    : modelName;
-  const egressNote = result.egressOccurred
-    ? ` Your image and prompt/context were sent to ${target}.`
-    : '';
-  // No leading glyph here: the renderer supplies the gutter prefix (🔎 for the
-  // dim notice, ✕ for the error variant). Baking one in too produced a doubled
-  // marker (e.g. `● 🔎 …`).
-  if (result.status === 'failed') {
-    const reason = result.egressOccurred
-      ? 'the vision model request failed'
-      : 'the vision bridge could not run';
-    return `Vision bridge (${modelName}) failed: ${reason}.${egressNote} The image was not interpreted.`;
-  }
-  if (result.status === 'skipped') {
-    return `Vision bridge cancelled.${egressNote}`;
-  }
-  // On success the image was always sent, so disclose egress unconditionally.
-  const omitted =
-    result.omittedCount > 0 ? ` (${result.omittedCount} image(s) omitted)` : '';
-  const header = `Converted ${result.convertedCount} image(s)${omitted} to text via ${target}. Your image and prompt/context were sent to that model.`;
-  return header;
+interface ResolvedSteerMessages {
+  parts: Part[];
+  accept: () => void;
 }
 
 /**
@@ -335,6 +344,15 @@ const EDIT_TOOL_NAMES = new Set([
 ]);
 const STREAM_UPDATE_THROTTLE_MS = 60;
 const STREAM_PENDING_ITEM_MAX_CHARS = 16_384;
+// Rows kept in reserve below the commit budget so the incremental commit fires
+// BEFORE MarkdownDisplay's safety-net clip (which reserves 2). Keeping the
+// pending item's rendered height under the safety budget stops that clip from
+// engaging and hiding a table (or slicing the tail) in step with the commit
+// cycle.
+const STREAM_PENDING_COMMIT_RESERVE_ROWS = 5;
+// Conservative estimate of the rows the composer/footer occupy, used to derive
+// a content-area height from terminalHeight before the live value is known.
+const STREAM_PENDING_COMPOSER_RESERVE_ROWS = 12;
 const LOADING_THOUGHT_DESCRIPTION_MAX_CHARS = 4_096;
 
 type BufferedStreamEvent =
@@ -355,6 +373,24 @@ function clampLoadingThoughtDescription(description: string): string {
   }
 
   return description.slice(0, LOADING_THOUGHT_DESCRIPTION_MAX_CHARS);
+}
+
+/**
+ * Character index just after the `keptLines`-th source line of `text`, or -1 if
+ * there are not that many lines. Converts a fitPendingSlice line count into a
+ * commit boundary; callers pass it through `findLastSafeSplitPoint` so the cut
+ * never lands inside a fenced code block.
+ */
+function charIndexAfterLine(text: string, keptLines: number): number {
+  if (keptLines <= 0) return -1;
+  let count = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '\n') {
+      count++;
+      if (count === keptLines) return i + 1;
+    }
+  }
+  return -1;
 }
 
 /**
@@ -413,6 +449,15 @@ export const useGeminiStream = (
   terminalHeight: number,
   midTurnDrainRef?: React.RefObject<(() => string[]) | null>,
   logger?: Logger | null,
+  // Live content-area height (terminal minus composer/header). Used to bound the
+  // pending item's rendered height so it commits to <Static> before it can grow
+  // tall enough to trigger the scroll-to-top redraw. A ref (not a value) because
+  // it is computed after this hook is called in AppContainer.
+  availableTerminalHeightRef?: React.RefObject<number>,
+  // Live terminal width, paired with the height ref so the commit loop reads
+  // both dimensions consistently across a mid-stream resize.
+  terminalWidthRef?: React.RefObject<number>,
+  midTurnRestoreRef?: React.RefObject<((messages: string[]) => void) | null>,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -501,6 +546,10 @@ export const useGeminiStream = (
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
   const submitPromptOnCompleteRef = useRef<(() => Promise<void>) | null>(null);
   const modelOverrideRef = useRef<string | undefined>(undefined);
+  // True when the current turn's model override came from an explicit inline
+  // `/model <id> <prompt>`. Skill-tool overrides must not clobber a user's
+  // explicit choice mid-turn, so this takes precedence until the next user turn.
+  const inlineModelOverrideActiveRef = useRef<boolean>(false);
   const handledProviderToolCallIdsRef = useRef<Set<string>>(new Set());
   // Scoped to a top-level submit and cleared below before a new user prompt.
   // Repeated duplicate provider ids within that submit are terminal/drop-only.
@@ -791,7 +840,7 @@ export const useGeminiStream = (
     // Log API cancellation
     const prompt_id = config.getSessionId() + '########' + getPromptCount();
     const cancellationEvent = new ApiCancelEvent(
-      config.getModel(),
+      modelOverrideRef.current ?? config.getModel(),
       prompt_id,
       config.getContentGeneratorConfig()?.authType,
       loopWakeupsCancelled > 0 ? loopWakeupsCancelled : undefined,
@@ -864,15 +913,50 @@ export const useGeminiStream = (
       timestamp: number,
       signal: AbortSignal,
     ): Promise<{ parts: PartListUnion | null; shouldProceed: boolean }> => {
-      if (
-        parts === null ||
-        !hasImageParts(parts) ||
-        !shouldRunVisionBridge(config)
-      ) {
+      if (parts === null || !hasImageParts(parts)) {
         return { parts, shouldProceed: true };
+      }
+      if (modelOverrideRef.current?.endsWith('\0')) {
+        return { parts, shouldProceed: true };
+      }
+      if (inlineModelOverrideActiveRef.current) {
+        return { parts, shouldProceed: true };
+      }
+      if (!shouldRunVisionBridge(config)) {
+        return { parts, shouldProceed: true };
+      }
+      if (signal.aborted) {
+        return { parts: null, shouldProceed: false };
       }
 
       debugLogger.debug('vision bridge: gate matched, running conversion');
+      const fullTurnModel = config.getDefaultVisionBridgeModel();
+      if (fullTurnModel?.agentCapable) {
+        const fullTurnParts = (Array.isArray(parts) ? parts : [parts]).map(
+          (part) =>
+            typeof part === 'string'
+              ? { text: part }
+              : clampInlineMediaPart(part),
+        );
+        if (!hasImageParts(fullTurnParts)) {
+          return { parts: fullTurnParts, shouldProceed: true };
+        }
+        applyModelOverride(
+          modelOverrideRef,
+          inlineModelOverrideActiveRef,
+          getFullTurnVisionModelSelector(fullTurnModel),
+          false,
+        );
+        addItem(
+          {
+            type: MessageType.VISION_NOTICE,
+            text: formatFullTurnVisionNotice(fullTurnModel),
+          },
+          timestamp,
+        );
+        return { parts: fullTurnParts, shouldProceed: true };
+      }
+
       const bridgeResult = await runVisionBridge({ config, parts, signal });
       debugLogger.debug(
         `vision bridge: status=${bridgeResult.status} applied=${bridgeResult.applied} model=${bridgeResult.modelId ?? '(none)'}`,
@@ -989,6 +1073,43 @@ export const useGeminiStream = (
               localQueryToSendToGemini = slashCommandResult.content;
               submitPromptOnCompleteRef.current =
                 slashCommandResult.onComplete ?? null;
+              // Per-turn model override (e.g. inline `/model <id> <prompt>`).
+              // Runs after the new-user-turn reset above and before the stream
+              // is sent, so it applies to this turn and — because the reset is
+              // skipped for ToolResult/Retry — persists across the tool loop,
+              // then clears on the next user turn. Re-validate provider identity
+              // here rather than trust the producer: any slash command can set
+              // `modelOverride`, so the consumer enforces that it names a model
+              // on the active provider before redirecting API calls to it.
+              if (slashCommandResult.modelOverride) {
+                if (
+                  isInlineModelOverrideAllowed(
+                    config,
+                    slashCommandResult.modelOverride,
+                  )
+                ) {
+                  applyModelOverride(
+                    modelOverrideRef,
+                    inlineModelOverrideActiveRef,
+                    slashCommandResult.modelOverride,
+                    true,
+                  );
+                } else {
+                  debugLogger.warn(
+                    `ignoring model override '${slashCommandResult.modelOverride}': not a model on the active provider`,
+                  );
+                }
+              }
+
+              const bridgeResult = await applyVisionBridgeIfNeeded(
+                localQueryToSendToGemini,
+                userMessageTimestamp,
+                abortSignal,
+              );
+              if (!bridgeResult.shouldProceed) {
+                return { queryToSend: null, shouldProceed: false };
+              }
+              localQueryToSendToGemini = bridgeResult.parts;
 
               return {
                 queryToSend: localQueryToSendToGemini,
@@ -1036,6 +1157,18 @@ export const useGeminiStream = (
             id: insertedId,
             text: trimmedQuery,
           };
+
+          // Yield via macrotask to let Ink/React flush the user message
+          // render before continuing with @-command processing and API
+          // call. React 19.2.4 (Ink 7.0.3) schedules renders via
+          // MessageChannel.postMessage (a macrotask), so a microtask yield
+          // (await Promise.resolve()) does NOT give React a chance to
+          // render — the continuation runs first. setImmediate fires in
+          // the check phase after I/O events (where MessageChannel
+          // delivers its postMessage), guaranteeing React renders first
+          // without the ~1ms timer overhead of setTimeout(0).
+          // Only needed for non-Cron submissions since Cron skips addItem().
+          await new Promise((r) => setImmediate(r));
         }
 
         // Handle @-commands (which might involve tool calls)
@@ -1151,8 +1284,126 @@ export const useGeminiStream = (
         // multiple times per-second (as streaming occurs). Prior to this change you'd
         // see heavy flickering of the terminal. This ensures that larger messages get
         // broken up so that there are more "statically" rendered.
-        const beforeText = newGeminiMessageBuffer.substring(0, safeSplitPoint);
-        const afterText = newGeminiMessageBuffer.substring(safeSplitPoint);
+        // Repair fences when the split lands inside a code block so the tail
+        // does not render as prose (see splitFencedMarkdown).
+        const { before: beforeText, after: afterText } = splitFencedMarkdown(
+          newGeminiMessageBuffer,
+          safeSplitPoint,
+        );
+        commitItem(
+          {
+            type: nextPendingType,
+            text: beforeText,
+          },
+          userMessageTimestamp,
+        );
+        nextPendingType = 'gemini_content';
+        newGeminiMessageBuffer = afterText;
+      }
+      // Rendered-height-aware incremental commit. Commit whole chunks to
+      // <Static> so the pending (live) item's ESTIMATED rendered height stays
+      // within the viewport budget. Uses the SAME accounting as
+      // MarkdownDisplay's safety-net slice (fitPendingSlice — tables counted as
+      // blocks, wide/CJK lines wrapped) so the two agree and the clip never
+      // engages / flickers in step with the commit cycle.
+      //
+      //  - `while`, not `if`: a single throttled update can append many lines, so
+      //    keep committing until the remainder fits.
+      //  - Commit ONLY at a blank-line block boundary so a table / list / code
+      //    block is never cut into a headerless continuation (which would render
+      //    as raw "| ... |" text). A table that is still streaming (no trailing
+      //    blank line yet) stays pending — bounded in view by MarkdownDisplay's
+      //    clamp — until it is complete, then commits whole.
+      //  - `findLastSafeSplitPoint`: also never cut inside a fenced code block.
+      //  - Conservative fallback when the content-area height is not yet known
+      //    (ref is 0 before the first render populates it): derive from
+      //    terminalHeight so a short terminal does not use an over-large budget.
+      const viewportRows =
+        (availableTerminalHeightRef?.current ?? 0) > 0
+          ? availableTerminalHeightRef!.current
+          : Math.max(4, terminalHeight - STREAM_PENDING_COMPOSER_RESERVE_ROWS);
+      // Read width from the same live ref as the height so a mid-stream resize
+      // is handled consistently; fall back to the render-time width.
+      const commitWidth =
+        (terminalWidthRef?.current ?? 0) > 0
+          ? terminalWidthRef!.current
+          : terminalWidth;
+      const commitRowBudget = Math.max(
+        4,
+        viewportRows - STREAM_PENDING_COMMIT_RESERVE_ROWS,
+      );
+      const tableClampRows = Math.max(2, viewportRows - 3);
+      while (true) {
+        const bufferLines = newGeminiMessageBuffer.split('\n');
+        const { keptLines, clipped } = fitPendingSlice(
+          bufferLines,
+          commitWidth,
+          commitRowBudget,
+          tableClampRows,
+        );
+        if (!clipped) break;
+        // Back up to the last blank line at or before the kept prefix — the only
+        // place it is safe to end a committed chunk without orphaning a block.
+        // Start AT keptLines (not keptLines - 1): when a single block is taller
+        // than the budget, fitPendingSlice charges the whole block and returns
+        // kept = the block's trailing blank line, so the boundary sits exactly at
+        // keptLines. Searching from keptLines - 1 misses it, finds no earlier
+        // blank (the block has none, and the blank before it was already
+        // committed), and stalls — every later block then appends past keptLines,
+        // so nothing ever commits until the stream finalizes and dumps it all at
+        // once. Committing an over-tall completed block to <Static> is fine; only
+        // the live pending frame must stay within the viewport.
+        let boundaryLine = -1;
+        for (let k = Math.min(keptLines, bufferLines.length - 1); k >= 0; k--) {
+          if (bufferLines[k]!.trim() === '') {
+            boundaryLine = k;
+            break;
+          }
+        }
+        let target: number;
+        if (boundaryLine < 0) {
+          // No blank-line boundary at/before the kept prefix. A fenced code
+          // block taller than the viewport never provides one mid-block, so the
+          // whole block would stay pending — frozen on its head — and only land
+          // in scrollback when it finally closes (the "stall then dump" seen on
+          // a 100-line code block). Hard-splitting inside a fence is now safe
+          // (splitFencedMarkdown closes/re-opens the fence and continues the
+          // gutter), so commit the budget-fit prefix and keep streaming. Restrict
+          // this to code blocks: other tall blocks (tables/lists) must stay whole
+          // and are still kept pending.
+          const capIndex = charIndexAfterLine(
+            newGeminiMessageBuffer,
+            keptLines,
+          );
+          const fenceInfo =
+            capIndex > 0
+              ? getEnclosingFenceInfo(newGeminiMessageBuffer, capIndex)
+              : null;
+          // Only hard-split a real code block. Other tall blocks (tables/lists)
+          // must stay whole, and mermaid needs its whole source to render a
+          // diagram — splitting it mid-block would break the render — so both
+          // stay pending until they complete.
+          if (!fenceInfo || fenceInfo.lang?.toLowerCase() === 'mermaid') {
+            break; // no safe boundary yet → keep pending
+          }
+          target = capIndex;
+        } else {
+          target = charIndexAfterLine(newGeminiMessageBuffer, boundaryLine + 1);
+          if (target <= 0) break;
+        }
+        const splitPoint = findLastSafeSplitPoint(
+          newGeminiMessageBuffer,
+          target,
+        );
+        if (splitPoint <= 0 || splitPoint >= newGeminiMessageBuffer.length) {
+          break;
+        }
+        // Repair fences when the split lands inside a code block so the tail
+        // does not render as prose (see splitFencedMarkdown).
+        const { before: beforeText, after: afterText } = splitFencedMarkdown(
+          newGeminiMessageBuffer,
+          splitPoint,
+        );
         commitItem(
           {
             type: nextPendingType,
@@ -1178,7 +1429,15 @@ export const useGeminiStream = (
       });
       return newGeminiMessageBuffer;
     },
-    [commitItem, pendingHistoryItemRef, setPendingHistoryItem],
+    [
+      commitItem,
+      pendingHistoryItemRef,
+      setPendingHistoryItem,
+      terminalWidth,
+      terminalHeight,
+      availableTerminalHeightRef,
+      terminalWidthRef,
+    ],
   );
 
   const mergeThought = useCallback(
@@ -1292,8 +1551,12 @@ export const useGeminiStream = (
           splitPoint > 0 && splitPoint < newThoughtBuffer.length
             ? splitPoint
             : STREAM_PENDING_ITEM_MAX_CHARS;
-        const beforeText = newThoughtBuffer.substring(0, safeSplitPoint);
-        const afterText = newThoughtBuffer.substring(safeSplitPoint);
+        // Repair fences when the split lands inside a code block so the tail
+        // does not render as prose (see splitFencedMarkdown).
+        const { before: beforeText, after: afterText } = splitFencedMarkdown(
+          newThoughtBuffer,
+          safeSplitPoint,
+        );
         addItem(
           buildThoughtItem(pendingThoughtType, beforeText),
           userMessageTimestamp,
@@ -1499,7 +1762,7 @@ export const useGeminiStream = (
         addItem(
           {
             type: 'info',
-            text: `⚠️  ${message}`,
+            text: `⚠  ${message}`,
           },
           userMessageTimestamp,
         );
@@ -1512,19 +1775,24 @@ export const useGeminiStream = (
     [addItem, clearRetryCountdown],
   );
 
+  const autonomousLoopTickResolverRef =
+    useRef<AutonomousLoopTickResolver | null>(null);
+
   const handleChatCompressionEvent = useCallback(
     (
       eventValue: ServerGeminiChatCompressedEvent['value'],
       userMessageTimestamp: number,
     ) => {
+      autonomousLoopTickResolverRef.current?.resetCache();
       if (pendingHistoryItemRef.current) {
         commitItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
       }
+      const activeModel = modelOverrideRef.current ?? config.getModel();
       const reasonClause =
         eventValue?.triggerReason === 'image_overflow'
-          ? `accumulated enough tool screenshots to trigger compaction for ${config.getModel()}`
-          : `approached the input token limit for ${config.getModel()}`;
+          ? `accumulated enough tool screenshots to trigger compaction for ${activeModel}`
+          : `approached the input token limit for ${activeModel}`;
       return addItem(
         {
           type: 'info',
@@ -1560,8 +1828,8 @@ export const useGeminiStream = (
         {
           type: 'error',
           text:
-            `🚫 Session token limit exceeded: ${value.currentTokens.toLocaleString()} tokens > ${value.limit.toLocaleString()} limit.\n\n` +
-            `💡 Solutions:\n` +
+            `✗ Session token limit exceeded: ${value.currentTokens.toLocaleString()} tokens > ${value.limit.toLocaleString()} limit.\n\n` +
+            `★ Solutions:\n` +
             `   • Start a new session: Use /clear command\n` +
             `   • Increase limit: Add "sessionTokenLimit": (e.g., 128000) to your settings.json\n` +
             `   • Compress history: Use /compress command to compress history`,
@@ -1927,6 +2195,33 @@ export const useGeminiStream = (
                 clearRetryCountdown();
               }
               break;
+            case ServerGeminiEventType.ModelFallback: {
+              // The primary model (or a prior fallback) exhausted its retry
+              // budget on a capacity/availability error and the system is
+              // switching to the next fallback model. Discard partial content
+              // from the failed attempt and show a notification.
+              discardBufferedStreamEvents();
+              if (pendingHistoryItemRef.current) {
+                setPendingHistoryItem(null);
+              }
+              commitPendingThought(userMessageTimestamp);
+              thoughtBuffer = '';
+              setThought(null);
+              geminiMessageBuffer = '';
+              toolCallRequests.length = 0;
+              clearRetryCountdown();
+              const fromModel =
+                sanitizeDisplayText(event.fromModel) ?? '(unknown)';
+              const toModel = sanitizeDisplayText(event.toModel) ?? '(unknown)';
+              addItem(
+                {
+                  type: 'notification',
+                  text: `Model ${fromModel} unavailable, falling back to ${toModel}`,
+                },
+                userMessageTimestamp,
+              );
+              break;
+            }
             case ServerGeminiEventType.HookSystemMessage:
               flushBufferedStreamEvents();
               // Display system message from Stop hooks with "Stop says:" prefix
@@ -2056,7 +2351,11 @@ export const useGeminiStream = (
         }
 
         if (executableToolCallRequests.length > 0) {
-          scheduleToolCalls(executableToolCallRequests, signal);
+          scheduleToolCalls(
+            executableToolCallRequests,
+            signal,
+            modelOverrideRef.current,
+          );
         }
       }
       return StreamProcessingStatus.Completed;
@@ -2089,36 +2388,242 @@ export const useGeminiStream = (
     ],
   );
 
+  const resolveSteeredMessages = useCallback(
+    async (
+      messages: string[],
+      signal: AbortSignal,
+    ): Promise<ResolvedSteerMessages | undefined> => {
+      const resolvedMessages: Part[] = [];
+      const resolvedForRecording: Array<{
+        message: string;
+        parts: Part[];
+        sideEffects: Array<() => void>;
+      }> = [];
+      const timestamp = Date.now();
+
+      for (let index = 0; index < messages.length; index += 1) {
+        if (signal.aborted) break;
+
+        const message = messages[index];
+        const sideEffects: Array<() => void> = [];
+        let resolvedQuery: PartListUnion = [{ text: message }];
+        if (isAtCommand(message)) {
+          const timeout = new AbortController();
+          const atCommandSignal = AbortSignal.any([signal, timeout.signal]);
+          const timeoutId = setTimeout(() => {
+            timeout.abort(
+              new Error(MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE),
+            );
+          }, MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS);
+          try {
+            const atCommandResult = await resolveWithAbort(
+              atCommandSignal,
+              () =>
+                resolveAtCommandQuery({
+                  query: message,
+                  config,
+                  onDebugMessage,
+                  messageId: timestamp + index,
+                  signal: atCommandSignal,
+                }),
+            );
+            const shouldSkipMessage =
+              !atCommandResult.shouldProceed &&
+              (atCommandResult.toolDisplays?.length ?? 0) > 0;
+            if (
+              atCommandResult.shouldProceed &&
+              atCommandResult.processedQuery !== null
+            ) {
+              resolvedQuery = atCommandResult.processedQuery;
+            } else if (atCommandResult.toolDisplays?.length) {
+              const toolDisplays = atCommandResult.toolDisplays;
+              const showToolDisplays = () =>
+                addItem(
+                  { type: 'tool_group', tools: toolDisplays },
+                  timestamp + index,
+                );
+              if (shouldSkipMessage) showToolDisplays();
+              else sideEffects.push(showToolDisplays);
+            }
+            if (atCommandResult.recording) {
+              const recordAtCommand = () =>
+                config.getChatRecordingService?.()?.recordAtCommand?.({
+                  filesRead: atCommandResult.recording!.filesRead,
+                  status: atCommandResult.recording!.status,
+                  ...(atCommandResult.recording!.message
+                    ? { message: atCommandResult.recording!.message }
+                    : {}),
+                  userText: message,
+                });
+              if (shouldSkipMessage) recordAtCommand();
+              else sideEffects.push(recordAtCommand);
+            }
+            if (shouldSkipMessage) continue;
+          } catch (error) {
+            const errorMessage = getErrorMessage(error);
+            onDebugMessage(
+              `Failed to resolve mid-turn @ command: ${errorMessage}`,
+            );
+            if (!signal.aborted) {
+              addItem(
+                {
+                  type: MessageType.WARNING,
+                  text: `Could not attach file: ${errorMessage}`,
+                },
+                Date.now(),
+              );
+            }
+            continue;
+          } finally {
+            clearTimeout(timeoutId);
+          }
+          if (signal.aborted) break;
+        }
+
+        const bridgeResult = await applyVisionBridgeIfNeeded(
+          resolvedQuery,
+          timestamp + index,
+          signal,
+        );
+        if (!bridgeResult.shouldProceed) {
+          if (signal.aborted) break;
+          continue;
+        }
+
+        const messageParts = normalizePartList(
+          bridgeResult.parts ?? resolvedQuery,
+        );
+        const formatCheck = checkImageFormatsSupport(messageParts);
+        if (formatCheck.hasUnsupportedFormats) {
+          sideEffects.push(() =>
+            addItem(
+              {
+                type: MessageType.INFO,
+                text: getUnsupportedImageFormatWarning(),
+              },
+              Date.now(),
+            ),
+          );
+        }
+
+        if (resolvedMessages.length > 0 && messageParts.length > 0) {
+          resolvedMessages.push({ text: '\n\n' });
+        }
+        resolvedMessages.push(...messageParts);
+        resolvedForRecording.push({
+          message,
+          parts: messageParts,
+          sideEffects,
+        });
+      }
+
+      if (signal.aborted) return undefined;
+      return {
+        parts: resolvedMessages,
+        accept: () => {
+          for (const { message, parts, sideEffects } of resolvedForRecording) {
+            for (const sideEffect of sideEffects) sideEffect();
+            config
+              .getChatRecordingService?.()
+              ?.recordMidTurnUserMessage(parts, message);
+            addItem(
+              { type: MessageType.NOTIFICATION, text: message },
+              Date.now(),
+            );
+          }
+        },
+      };
+    },
+    [addItem, applyVisionBridgeIfNeeded, config, onDebugMessage],
+  );
+
+  const resolveDrainedSteerMessages = useCallback(
+    async (
+      messages: string[],
+      signal: AbortSignal,
+    ): Promise<SteerInput | undefined> => {
+      try {
+        const resolved = await resolveSteeredMessages(messages, signal);
+        if (signal.aborted) {
+          midTurnRestoreRef?.current?.(messages);
+          return undefined;
+        }
+        if (!resolved || resolved.parts.length === 0) return undefined;
+        let settled = false;
+        return {
+          parts: resolved.parts,
+          accept: () => {
+            if (settled) return;
+            settled = true;
+            resolved.accept();
+          },
+          restore: () => {
+            if (settled) return;
+            settled = true;
+            midTurnRestoreRef?.current?.(messages);
+          },
+        };
+      } catch (error) {
+        midTurnRestoreRef?.current?.(messages);
+        onDebugMessage(
+          `Failed to prepare steer input: ${getErrorMessage(error)}`,
+        );
+        return undefined;
+      }
+    },
+    [midTurnRestoreRef, onDebugMessage, resolveSteeredMessages],
+  );
+
+  const drainSteerAtBoundary = useCallback(
+    async (signal: AbortSignal): Promise<SteerInput | undefined> => {
+      const messages = midTurnDrainRef?.current?.() ?? [];
+      if (messages.length === 0) return undefined;
+      return resolveDrainedSteerMessages(messages, signal);
+    },
+    [midTurnDrainRef, resolveDrainedSteerMessages],
+  );
+
   const submitQuery = useCallback(
     async (
       query: PartListUnion,
       submitType: SendMessageType = SendMessageType.UserQuery,
       prompt_id?: string,
-      metadata?: { notificationDisplayText?: string },
+      metadata?: {
+        notificationDisplayText?: string;
+        onDelivered?: () => void;
+        onDeliveryFailed?: () => void;
+        steerInput?: SteerInput;
+      },
     ) => {
       const allowConcurrentBtwDuringResponse =
         submitType === SendMessageType.UserQuery &&
         streamingState === StreamingState.Responding &&
         typeof query === 'string' &&
         isBtwCommand(query);
+      const isTurnContinuation =
+        submitType === SendMessageType.ToolResult ||
+        submitType === SendMessageType.Steer;
 
       // Prevent concurrent executions of submitQuery, but allow continuations
       // which are part of the same logical flow (tool responses)
       if (
         isSubmittingQueryRef.current &&
-        submitType !== SendMessageType.ToolResult &&
+        !isTurnContinuation &&
         !allowConcurrentBtwDuringResponse
       ) {
+        metadata?.onDeliveryFailed?.();
         return;
       }
 
       if (
         (streamingState === StreamingState.Responding ||
           streamingState === StreamingState.WaitingForConfirmation) &&
-        submitType !== SendMessageType.ToolResult &&
+        !isTurnContinuation &&
         !allowConcurrentBtwDuringResponse
-      )
+      ) {
+        metadata?.onDeliveryFailed?.();
         return;
+      }
 
       // Set the flag to indicate we're now executing
       isSubmittingQueryRef.current = true;
@@ -2143,10 +2648,7 @@ export const useGeminiStream = (
       // ToolResult continuations and same-turn btw concurrencies keep
       // the trackers untouched — they're piggybacking on an in-flight
       // turn that already owns its own snapshot.
-      if (
-        submitType !== SendMessageType.ToolResult &&
-        !allowConcurrentBtwDuringResponse
-      ) {
+      if (!isTurnContinuation && !allowConcurrentBtwDuringResponse) {
         lastTurnUserItemRef.current = null;
         turnSawContentEventRef.current = false;
         handledProviderToolCallIdsRef.current.clear();
@@ -2157,16 +2659,44 @@ export const useGeminiStream = (
 
       const userMessageTimestamp = Date.now();
 
-      // Reset quota error flag when starting a new query (not a continuation)
+      // Reset quota error flag when starting a new query (not a continuation).
+      // Notifications (background agent/shell/monitor completions) are system
+      // events, not new user turns: they must not clear the user's model
+      // override or an in-flight retry countdown — clearing the override here
+      // silently reverted the session to the default model whenever a
+      // background agent finished, and a long history could then overflow the
+      // default model's smaller context window (#7114).
       if (
-        submitType !== SendMessageType.ToolResult &&
+        !isTurnContinuation &&
+        submitType !== SendMessageType.Notification &&
         !allowConcurrentBtwDuringResponse
       ) {
         setModelSwitchedFromQuotaError(false);
-        // Clear model override for new user turns, but preserve it on retry
-        // so the same skill-selected model is used again.
-        if (submitType !== SendMessageType.Retry) {
-          modelOverrideRef.current = undefined;
+        // Clear model override for new user turns. On retry, preserve a
+        // skill-selected override so the same model is used again, but drop an
+        // explicit inline `/model <id> <prompt>` override: that is a one-off
+        // for the original prompt, so a retry reverts to the session model and
+        // lets skill-tool overrides apply again.
+        const droppingInlineOverrideOnRetry =
+          submitType === SendMessageType.Retry &&
+          inlineModelOverrideActiveRef.current;
+        if (
+          submitType !== SendMessageType.Retry ||
+          inlineModelOverrideActiveRef.current
+        ) {
+          // The retry re-sends the same prompt on the session model, which may
+          // differ from the one-shot override. Tell the user so the model
+          // switch isn't silent.
+          if (droppingInlineOverrideOnRetry) {
+            addItem(
+              {
+                type: 'info',
+                text: `Inline model override cleared on retry — retrying on the session model (${config.getModel()}).`,
+              },
+              userMessageTimestamp,
+            );
+          }
+          clearModelOverride(modelOverrideRef, inlineModelOverrideActiveRef);
         }
         // Commit any pending retry error to history (without hint) since the
         // user is starting a new conversation turn.
@@ -2213,6 +2743,7 @@ export const useGeminiStream = (
 
         if (!shouldProceed || queryToSend === null) {
           isSubmittingQueryRef.current = false;
+          metadata?.onDeliveryFailed?.();
           return;
         }
 
@@ -2255,6 +2786,7 @@ export const useGeminiStream = (
                 prompt_id,
                 config.getContentGeneratorConfig()?.authType,
                 queryToSend,
+                modelOverrideRef.current ?? config.getModel(),
               ),
             );
           }
@@ -2275,7 +2807,7 @@ export const useGeminiStream = (
         setIsReceivingContent(false);
         // Reset char counter only on new user queries; tool-result continuations
         // keep accumulating so the token count only goes up within a turn.
-        if (submitType !== SendMessageType.ToolResult) {
+        if (!isTurnContinuation) {
           streamingResponseLengthRef.current = 0;
         }
 
@@ -2304,6 +2836,10 @@ export const useGeminiStream = (
               type: submitType,
               notificationDisplayText: metadata?.notificationDisplayText,
               modelOverride: modelOverrideRef.current,
+              steerInput: metadata?.steerInput,
+              ...(!allowConcurrentBtwDuringResponse && midTurnDrainRef
+                ? { getSteerInput: drainSteerAtBoundary }
+                : {}),
             },
           );
 
@@ -2316,6 +2852,7 @@ export const useGeminiStream = (
           if (processingStatus === StreamProcessingStatus.UserCancelled) {
             submitPromptOnCompleteRef.current = null;
             isSubmittingQueryRef.current = false;
+            metadata?.onDeliveryFailed?.();
             return;
           }
 
@@ -2341,9 +2878,16 @@ export const useGeminiStream = (
           if (retryCountdownTimerRef.current) {
             clearRetryCountdown();
           }
-          if (loopDetectedRef.current) {
+          const loopDetected = loopDetectedRef.current;
+          if (loopDetected) {
             loopDetectedRef.current = false;
             handleLoopDetectedEvent();
+          }
+
+          if (lastPromptErroredRef.current) {
+            metadata?.onDeliveryFailed?.();
+          } else {
+            metadata?.onDelivered?.();
           }
 
           // If the turn was initiated by a submit_prompt with an onComplete
@@ -2377,6 +2921,7 @@ export const useGeminiStream = (
             }
           }
         } catch (error: unknown) {
+          metadata?.onDeliveryFailed?.();
           if (error instanceof UnauthorizedError) {
             onAuthError('Session expired or is unauthorized.');
           } else if (!isNodeError(error) || error.name !== 'AbortError') {
@@ -2427,6 +2972,8 @@ export const useGeminiStream = (
       setPendingRetryErrorItem,
       setPendingThoughtItem,
       dualOutput,
+      drainSteerAtBoundary,
+      midTurnDrainRef,
     ],
   );
 
@@ -2434,10 +2981,10 @@ export const useGeminiStream = (
    * Retries the last failed prompt when the user presses Ctrl+Y.
    *
    * Activation conditions for Ctrl+Y shortcut:
-   * 1. ✅ The last request must have failed (lastPromptErroredRef.current === true)
-   * 2. ✅ Current streaming state must NOT be "Responding" (avoid interrupting ongoing stream)
-   * 3. ✅ Current streaming state must NOT be "WaitingForConfirmation" (avoid conflicting with tool confirmation flow)
-   * 4. ✅ There must be a stored lastPrompt in lastPromptRef.current
+   * 1. ✓ The last request must have failed (lastPromptErroredRef.current === true)
+   * 2. ✓ Current streaming state must NOT be "Responding" (avoid interrupting ongoing stream)
+   * 3. ✓ Current streaming state must NOT be "WaitingForConfirmation" (avoid conflicting with tool confirmation flow)
+   * 4. ✓ There must be a stored lastPrompt in lastPromptRef.current
    *
    * When conditions are not met:
    * - If streaming is active (Responding/WaitingForConfirmation): silently return without action
@@ -2492,8 +3039,17 @@ export const useGeminiStream = (
         newApprovalMode === ApprovalMode.AUTO_EDIT
       ) {
         let awaitingApprovalCalls = toolCalls.filter(
-          (call): call is TrackedWaitingToolCall =>
-            call.status === 'awaiting_approval',
+          (call): call is TrackedWaitingToolCall => {
+            if (call.status !== 'awaiting_approval') {
+              return false;
+            }
+            const { confirmationDetails } = call;
+            return !(
+              confirmationDetails &&
+              'hideAlwaysAllow' in confirmationDetails &&
+              confirmationDetails.hideAlwaysAllow === true
+            );
+          },
         );
 
         // For AUTO_EDIT mode, only approve edit tools (edit/replace, write_file, notebook_edit)
@@ -2641,20 +3197,33 @@ export const useGeminiStream = (
           !processedMemoryToolsRef.current.has(t.request.callId),
       );
 
-      if (newSuccessfulMemorySaves.length > 0) {
-        // Perform the refresh only if there are new ones.
-        void performMemoryRefresh();
-        // Mark them as processed so we don't do this again on the next render.
-        newSuccessfulMemorySaves.forEach((t) =>
-          processedMemoryToolsRef.current.add(t.request.callId),
-        );
-      }
-
       const geminiTools = completedAndReadyToSubmitTools.filter(
         (t) =>
           !t.request.isClientInitiated &&
           !historyCallIdsWithResponse.has(t.request.callId),
       );
+      const didRefreshManagedMemory = await refreshMemoryAfterManagedWrite(
+        config,
+        completedAndReadyToSubmitTools.map((toolCall) => ({
+          toolName: toolCall.request.name,
+          args: toolCall.request.args as Record<string, unknown>,
+          status: toolCall.status,
+        })),
+        { logContext: 'interactive memory tool batch' },
+      );
+      if (newSuccessfulMemorySaves.length > 0) {
+        if (!didRefreshManagedMemory) {
+          // Perform the legacy save_memory refresh only when the managed-memory
+          // write refresh did not already rebuild and publish a fresher state.
+          void performMemoryRefresh().catch((err) => {
+            debugLogger.warn(`save_memory refresh failed: ${err}`);
+          });
+        }
+        // Mark them as processed so we don't do this again on the next render.
+        newSuccessfulMemorySaves.forEach((t) =>
+          processedMemoryToolsRef.current.add(t.request.callId),
+        );
+      }
       const completedCallIds = new Set(
         completedAndReadyToSubmitTools.map(
           (toolCall) => toolCall.request.callId,
@@ -2744,9 +3313,32 @@ export const useGeminiStream = (
       // Persist model override from skill tool results (last one wins).
       // Uses `in` so that undefined (from inherit/no-model skills) clears a
       // prior override, while non-skill tools (field absent) leave it intact.
+      // An explicit inline `/model <id> <prompt>` override wins for the whole
+      // turn, so skip skill-tool writes (including the undefined-clears case)
+      // while it is active.
       for (const toolCall of geminiTools) {
         if ('modelOverride' in toolCall.response) {
-          modelOverrideRef.current = toolCall.response.modelOverride;
+          if (
+            inlineModelOverrideActiveRef.current ||
+            modelOverrideRef.current?.endsWith('\0')
+          ) {
+            debugLogger.debug(
+              `skill-tool model override (${String(
+                toolCall.response.modelOverride,
+              )}) blocked: ${
+                inlineModelOverrideActiveRef.current
+                  ? 'inline override active'
+                  : 'full-turn override active'
+              }`,
+            );
+          } else {
+            applyModelOverride(
+              modelOverrideRef,
+              inlineModelOverrideActiveRef,
+              toolCall.response.modelOverride,
+              false,
+            );
+          }
         }
       }
 
@@ -2854,15 +3446,15 @@ export const useGeminiStream = (
         return;
       }
 
-      // Mid-turn queue drain: inject queued user messages alongside tool
-      // results so the model sees them in the next API call.
+      // Drain steerable user messages at this sampling boundary and append
+      // them after the tool responses as genuine user content.
       // Skip if the turn was cancelled — messages stay in queue for next turn.
       const drained =
         turnCancelledRef.current || abortControllerRef.current?.signal.aborted
           ? []
           : (midTurnDrainRef?.current?.() ?? []);
+      let drainedSteer: SteerInput | undefined;
       if (drained.length > 0) {
-        const midTurnTimestamp = Date.now();
         const midTurnAbort =
           abortControllerRef.current ?? new AbortController();
         const shouldTrackMidTurnAbort = !abortControllerRef.current;
@@ -2870,119 +3462,12 @@ export const useGeminiStream = (
           auxiliaryAbortRefsRef.current.add(midTurnAbort);
         }
         try {
-          for (let index = 0; index < drained.length; index += 1) {
-            if (midTurnAbort.signal.aborted) {
-              break;
-            }
-            const msg = drained[index];
-            let resolvedMidTurnQuery: PartListUnion = [{ text: msg }];
-            if (isAtCommand(msg)) {
-              const atCommandTimeout = new AbortController();
-              const atCommandSignal = AbortSignal.any([
-                midTurnAbort.signal,
-                atCommandTimeout.signal,
-              ]);
-              const atCommandTimeoutId = setTimeout(() => {
-                atCommandTimeout.abort(
-                  new Error(MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE),
-                );
-              }, MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS);
-              try {
-                const atCommandResult = await resolveWithAbort(
-                  atCommandSignal,
-                  () =>
-                    resolveAtCommandQuery({
-                      query: msg,
-                      config,
-                      onDebugMessage,
-                      messageId: midTurnTimestamp + index,
-                      signal: atCommandSignal,
-                    }),
-                );
-                const shouldSkipMidTurnMessage =
-                  !atCommandResult.shouldProceed &&
-                  (atCommandResult.toolDisplays?.length ?? 0) > 0;
-                if (
-                  atCommandResult.shouldProceed &&
-                  atCommandResult.processedQuery !== null
-                ) {
-                  resolvedMidTurnQuery = atCommandResult.processedQuery;
-                } else if (atCommandResult.toolDisplays?.length) {
-                  addItem(
-                    { type: 'tool_group', tools: atCommandResult.toolDisplays },
-                    midTurnTimestamp + index,
-                  );
-                }
-                if (atCommandResult.recording) {
-                  config.getChatRecordingService?.()?.recordAtCommand?.({
-                    filesRead: atCommandResult.recording.filesRead,
-                    status: atCommandResult.recording.status,
-                    ...(atCommandResult.recording.message
-                      ? { message: atCommandResult.recording.message }
-                      : {}),
-                    userText: msg,
-                  });
-                }
-                if (shouldSkipMidTurnMessage) {
-                  continue;
-                }
-              } catch (error) {
-                const errorMessage = getErrorMessage(error);
-                onDebugMessage(
-                  `Failed to resolve mid-turn @ command: ${errorMessage}`,
-                );
-                if (!midTurnAbort.signal.aborted) {
-                  addItem(
-                    {
-                      type: MessageType.WARNING,
-                      text: `Could not attach file: ${errorMessage}`,
-                    },
-                    Date.now(),
-                  );
-                }
-                continue;
-              } finally {
-                clearTimeout(atCommandTimeoutId);
-              }
-              if (midTurnAbort.signal.aborted) {
-                break;
-              }
-            }
-
-            const bridgeResult = await applyVisionBridgeIfNeeded(
-              resolvedMidTurnQuery,
-              midTurnTimestamp + index,
-              midTurnAbort.signal,
-            );
-            if (!bridgeResult.shouldProceed) {
-              if (midTurnAbort.signal.aborted) {
-                break;
-              }
-              continue;
-            }
-            resolvedMidTurnQuery = bridgeResult.parts ?? resolvedMidTurnQuery;
-
-            const midTurnUserMessageParts = prefixMidTurnUserMessageParts(
-              resolvedMidTurnQuery,
-              msg,
-            );
-            const formatCheck = checkImageFormatsSupport(
-              midTurnUserMessageParts,
-            );
-            if (formatCheck.hasUnsupportedFormats) {
-              addItem(
-                {
-                  type: MessageType.INFO,
-                  text: getUnsupportedImageFormatWarning(),
-                },
-                Date.now(),
-              );
-            }
-            responsesToSend.push(...midTurnUserMessageParts);
-            config
-              .getChatRecordingService?.()
-              ?.recordMidTurnUserMessage(midTurnUserMessageParts, msg);
-            addItem({ type: MessageType.NOTIFICATION, text: msg }, Date.now());
+          drainedSteer = await resolveDrainedSteerMessages(
+            drained,
+            midTurnAbort.signal,
+          );
+          if (drainedSteer) {
+            responsesToSend.push(...drainedSteer.parts);
           }
         } finally {
           if (shouldTrackMidTurnAbort) {
@@ -2996,10 +3481,15 @@ export const useGeminiStream = (
         turnCancelledRef.current ||
         abortControllerRef.current?.signal.aborted
       ) {
+        drainedSteer?.restore();
         return;
       }
 
-      submitQuery(responsesToSend, SendMessageType.ToolResult, promptId);
+      void submitQuery(responsesToSend, SendMessageType.ToolResult, promptId, {
+        steerInput: drainedSteer,
+        onDelivered: drainedSteer?.accept,
+        onDeliveryFailed: drainedSteer?.restore,
+      });
     },
     [
       submitQuery,
@@ -3011,8 +3501,7 @@ export const useGeminiStream = (
       midTurnDrainRef,
       addItem,
       dualOutput,
-      onDebugMessage,
-      applyVisionBridgeIfNeeded,
+      resolveDrainedSteerMessages,
     ],
   );
 
@@ -3126,9 +3615,16 @@ export const useGeminiStream = (
       displayText: string;
       modelText: string;
       sendMessageType: SendMessageType;
+      onDelivered?: () => void;
+      onDeliveryFailed?: () => void;
     }>
   >([]);
   const [notificationTrigger, setNotificationTrigger] = useState(0);
+
+  const getAutonomousLoopTickResolver = useCallback(() => {
+    autonomousLoopTickResolverRef.current ??= new AutonomousLoopTickResolver();
+    return autonomousLoopTickResolverRef.current;
+  }, []);
   const notificationQueueSessionIdRef = useRef(sessionStates.sessionId);
 
   useEffect(() => {
@@ -3137,6 +3633,7 @@ export const useGeminiStream = (
     }
     notificationQueueSessionIdRef.current = sessionStates.sessionId;
     notificationQueueRef.current = [];
+    autonomousLoopTickResolverRef.current?.resetCache();
   }, [sessionStates.sessionId]);
 
   // Current sessionId for the cron effect, read through a ref so the
@@ -3188,12 +3685,34 @@ export const useGeminiStream = (
       // already ran scheduler.stop(), so do not (re)install onFire.
       if (stopped) return;
       scheduler.start(
-        (job: { prompt: string; cronExpr?: string; missed?: boolean }) => {
-          const label = job.prompt.slice(0, 40);
+        (job: {
+          id?: string;
+          prompt: string;
+          cronExpr?: string;
+          missed?: boolean;
+        }) => {
           const source = job.cronExpr === '@wakeup' ? 'Loop' : 'Cron';
+          const autonomousMode = detectAutonomousSentinel(job.prompt);
+          let label = job.prompt.slice(0, 40);
+          let modelText = job.prompt;
+          if (autonomousMode) {
+            if (job.missed) return;
+            const resolver = getAutonomousLoopTickResolver();
+            const tick = resolver.resolveAutonomous(autonomousMode);
+            label = 'Autonomous loop tick';
+            modelText = tick.modelText;
+            notificationQueueRef.current.push({
+              displayText: `${job.missed ? 'Missed' : source}: ${label}`,
+              modelText,
+              sendMessageType: SendMessageType.Cron,
+              onDelivered: () => resolver.markDelivered(),
+            });
+            setNotificationTrigger((n) => n + 1);
+            return;
+          }
           notificationQueueRef.current.push({
             displayText: `${job.missed ? 'Missed' : source}: ${label}`,
-            modelText: job.prompt,
+            modelText,
             sendMessageType: SendMessageType.Cron,
           });
           setNotificationTrigger((n) => n + 1);
@@ -3209,7 +3728,7 @@ export const useGeminiStream = (
         process.stderr.write(summary + '\n');
       }
     };
-  }, [config, isConfigInitialized]);
+  }, [config, getAutonomousLoopTickResolver, isConfigInitialized]);
 
   // Register background agent notification callback onto the shared queue.
   useEffect(() => {
@@ -3289,6 +3808,8 @@ export const useGeminiStream = (
         );
         submitQuery(item.modelText, item.sendMessageType, undefined, {
           notificationDisplayText: item.displayText,
+          onDelivered: item.onDelivered,
+          onDeliveryFailed: item.onDeliveryFailed,
         });
         return;
       }

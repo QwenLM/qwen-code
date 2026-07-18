@@ -2,12 +2,13 @@ import OpenAI from 'openai';
 import type { GenerateContentConfig } from '@google/genai';
 import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
-import { DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES } from '../constants.js';
+import { DEFAULT_MAX_RETRIES, resolveRequestTimeout } from '../constants.js';
 import type { OpenAICompatibleProvider } from './types.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import {
   tokenLimit,
   hasExplicitOutputLimit,
+  defaultOutputCeiling,
   parsePositiveIntegerEnvValue,
 } from '../../tokenLimits.js';
 
@@ -77,9 +78,9 @@ export class DefaultOpenAICompatibleProvider
     const {
       apiKey,
       baseUrl,
-      timeout = DEFAULT_TIMEOUT,
       maxRetries = DEFAULT_MAX_RETRIES,
     } = this.contentGeneratorConfig;
+    const timeout = resolveRequestTimeout(this.contentGeneratorConfig.timeout);
     const defaultHeaders = this.buildHeaders();
     // Configure fetch options for proxy support and timeout handling.
     // With proxy, dispatcher timeouts are disabled so SDK timeout controls the
@@ -139,7 +140,8 @@ export class DefaultOpenAICompatibleProvider
    *      configured value entirely (backend may support larger limits)
    * 2. If user didn't configure max_tokens:
    *    - Check QWEN_CODE_MAX_OUTPUT_TOKENS env var first
-   *    - Otherwise use the model's output limit
+   *    - Otherwise use the model's output limit, clipped to
+   *      OUTPUT_TOKEN_CEILING (64K)
    * 3. If model has no specific limit (tokenLimit returns default):
    *    - Use DEFAULT_OUTPUT_TOKEN_LIMIT
    *
@@ -183,7 +185,10 @@ export class DefaultOpenAICompatibleProvider
         effectiveMaxTokens = userMaxTokens;
       }
     } else {
-      // No explicit user config — check env var, then use the model limit.
+      // No explicit user config — check env var, then use the model limit
+      // clipped to the flat output ceiling (models advertising huge output
+      // limits must not request the whole window; users who need more set
+      // max_tokens explicitly).
       const envMaxTokens = parsePositiveIntegerEnvValue(
         process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
       );
@@ -192,7 +197,7 @@ export class DefaultOpenAICompatibleProvider
           ? Math.min(envMaxTokens, modelLimit)
           : envMaxTokens;
       } else {
-        effectiveMaxTokens = modelLimit;
+        effectiveMaxTokens = defaultOutputCeiling(request.model);
       }
     }
 

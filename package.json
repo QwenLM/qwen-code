@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.19.2",
+  "version": "0.19.11",
   "engines": {
     "node": ">=22.0.0"
   },
@@ -11,6 +11,7 @@
     "packages/channels/telegram",
     "packages/channels/weixin",
     "packages/channels/dingtalk",
+    "packages/channels/wecom",
     "packages/channels/feishu",
     "packages/channels/qqbot",
     "packages/channels/plugin-example",
@@ -21,7 +22,7 @@
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.19.2"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.19.11"
   },
   "scripts": {
     "start": "node scripts/start.js",
@@ -39,6 +40,7 @@
     "bundle": "npm run generate && node esbuild.config.js && node scripts/copy_bundle_assets.js",
     "test": "cross-env NODE_OPTIONS=\"--max-old-space-size=3072\" npm run test --workspaces --if-present --parallel",
     "test:ci": "cross-env NODE_OPTIONS=\"--max-old-space-size=3072\" npm run test:ci --workspaces --if-present --parallel && npm run test:scripts",
+    "test:release": "cross-env NODE_OPTIONS=\"--max-old-space-size=3072\" npm run test:ci --workspaces --if-present --parallel -- --coverage.enabled=false && npm run test:scripts",
     "test:scripts": "vitest run --config ./scripts/tests/vitest.config.ts",
     "test:e2e": "cross-env VERBOSE=true KEEP_OUTPUT=true npm run test:integration:sandbox:none",
     "test:integration:all": "npm run test:integration:sandbox:none && npm run test:integration:sandbox:docker && npm run test:integration:sandbox:podman",
@@ -61,15 +63,16 @@
     "lint:ci": "eslint . --ext .ts,.tsx --max-warnings 0 && eslint integration-tests --max-warnings 0",
     "lint:sdk:python": "python3 -m ruff check --config packages/sdk-python/pyproject.toml packages/sdk-python",
     "lint:all": "node scripts/lint.js",
+    "audit:runtime:critical": "npm audit --omit=dev --audit-level=critical",
     "format": "prettier --experimental-cli --write .",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "typecheck:sdk:python": "python3 -m mypy --config-file packages/sdk-python/pyproject.toml packages/sdk-python/src",
     "smoke:sdk:python": "python3 packages/sdk-python/scripts/smoke_real.py",
     "build:sdk:python": "python3 -m build packages/sdk-python",
     "check-i18n": "npm run check-i18n --workspace=packages/cli",
-    "preflight": "npm run clean && npm ci && npm run format && npm run lint:ci && npm run build && npm run typecheck && npm run test:ci",
+    "preflight": "npm run clean && npm ci && npm run format && npm run lint:ci && npm run build && npm run typecheck && npm run test:ci && npm run check:serve-fast-path-bundle",
     "postinstall": "patch-package",
-    "prepare": "husky && npm run build && npm run bundle",
+    "prepare": "node scripts/prepare.js",
     "prepare:package": "node scripts/prepare-package.js",
     "package:hosted-installation": "node scripts/build-hosted-installation-assets.js",
     "package:standalone": "node scripts/create-standalone-package.js",
@@ -80,6 +83,7 @@
     "telemetry": "node scripts/telemetry.js",
     "check:lockfile": "node scripts/check-lockfile.js",
     "check:desktop-isolation": "node scripts/check-desktop-isolation.js",
+    "check:serve-fast-path-bundle": "node scripts/clean-package-build-artifacts.js && npm run build -- --cli-only && cross-env DEV=true npm run bundle && node scripts/check-serve-fast-path-bundle.js",
     "desktop-openwork-sync": "bun run scripts/desktop-openwork-sync.ts",
     "clean": "node scripts/clean.js",
     "pre-commit": "node scripts/pre-commit.js"
@@ -106,6 +110,7 @@
     "LICENSE"
   ],
   "devDependencies": {
+    "@types/chrome": "^0.1.32",
     "@types/marked": "^5.0.2",
     "@types/mime-types": "^3.0.1",
     "@types/minimatch": "^5.1.2",
@@ -145,12 +150,13 @@
     "tsx": "^4.20.3",
     "typescript-eslint": "^8.30.1",
     "vitest": "^3.2.4",
+    "yaml": "^2.8.1",
     "yargs": "^17.7.2"
   },
   "dependencies": {
     "@testing-library/dom": "^10.4.1",
     "ink": "^7.0.3",
-    "simple-git": "^3.28.0"
+    "simple-git": "^3.36.0"
   },
   "optionalDependencies": {
     "@lydell/node-pty": "1.2.0-beta.10",

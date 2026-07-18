@@ -31,6 +31,7 @@ import type {
   ChatCompressionEvent,
   InvalidChunkEvent,
   ContentRetryEvent,
+  ProtocolTagSanitizedEvent,
   ApiRetryEvent,
   ContentRetryFailureEvent,
   ConversationFinishedEvent,
@@ -487,6 +488,7 @@ export class QwenLogger {
       properties: {
         prompt_id: event.prompt_id,
         prompt_length: event.prompt_length,
+        ...(event.model ? { model: event.model } : {}),
       },
     });
 
@@ -953,6 +955,21 @@ export class QwenLogger {
         error_type: event.error_type,
         attempt_number: event.attempt_number,
         retry_delay_ms: event.retry_delay_ms,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logProtocolTagSanitizedEvent(event: ProtocolTagSanitizedEvent): void {
+    const rumEvent = this.createActionEvent('misc', 'protocol_tag_sanitized', {
+      properties: {
+        model: event.model,
+        prompt_id: event.prompt_id ?? '',
+        response_id: event.response_id ?? '',
+        tag_name: event.tag_name,
+        tool_call_count: event.tool_call_count,
       },
     });
 

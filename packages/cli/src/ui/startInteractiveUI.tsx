@@ -14,6 +14,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import type { InitializationResult } from '../core/initializer.js';
+import type { ExtensionRefreshState } from '../config/extension-refresh-state.js';
 import { DualOutputBridge } from '../dualOutput/DualOutputBridge.js';
 import { DualOutputContext } from '../dualOutput/DualOutputContext.js';
 import { RemoteInputWatcher } from '../remoteInput/RemoteInputWatcher.js';
@@ -26,15 +27,14 @@ import { VimModeProvider } from './contexts/VimModeContext.js';
 import { AgentViewProvider } from './contexts/AgentViewContext.js';
 import { BackgroundTaskViewProvider } from './contexts/BackgroundTaskViewContext.js';
 import { useKittyKeyboardProtocol } from './hooks/useKittyKeyboardProtocol.js';
-import { checkForUpdates } from './utils/updateCheck.js';
 import { disableKittyProtocol } from './utils/kittyProtocolDetector.js';
 import { installTerminalRedrawOptimizer } from './utils/terminalRedrawOptimizer.js';
 import { installSynchronizedOutput } from './utils/synchronizedOutput.js';
-import { handleAutoUpdate } from '../utils/handleAutoUpdate.js';
 import { registerCleanup } from '../utils/cleanup.js';
 import { stopAndGetCapturedInput } from '../utils/earlyInputCapture.js';
 import { profileCheckpoint } from '../utils/startupProfiler.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { startPostRenderPrefetches } from '../startup/startup-prefetch.js';
 import {
   computeWindowTitle,
   writeTerminalTitle,
@@ -43,12 +43,24 @@ import { getCliVersion } from '../utils/version.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
+// The tool scheduler only runs a pressure check after a tool call, so a long
+// interactive conversation with no tool calls would never reclaim and could
+// grow toward the V8 heap limit. This interval closes that gap.
+const PRESSURE_CHECK_INTERVAL_MS = 30_000;
+
+export interface StartInteractiveUIOptions {
+  postRenderConnectIde?: boolean;
+  postRenderInitializeTelemetry?: boolean;
+  extensionRefreshState?: ExtensionRefreshState;
+}
+
 export async function startInteractiveUI(
   config: Config,
   settings: LoadedSettings,
   startupWarnings: string[],
   workspaceRoot: string = process.cwd(),
   initializationResult: InitializationResult,
+  options: StartInteractiveUIOptions = {},
 ) {
   const version = await getCliVersion();
   setWindowTitle(settings, basename(workspaceRoot));
@@ -159,6 +171,7 @@ export async function startInteractiveUI(
                         startupWarnings={startupWarnings}
                         version={version}
                         initializationResult={initializationResult}
+                        extensionRefreshState={options.extensionRefreshState}
                       />
                     </BackgroundTaskViewProvider>
                   </AgentViewProvider>
@@ -172,6 +185,13 @@ export async function startInteractiveUI(
   };
 
   const useVP = settings.merged.ui?.useTerminalBuffer ?? false;
+  const stdoutMaxListeners = process.stdout.getMaxListeners();
+  if (useVP) {
+    // Visible VP rows each subscribe to resize through Ink's useBoxMetrics.
+    // Node's default warning writes into the alternate screen and shifts mouse
+    // coordinates even though these listeners are owned and cleaned up.
+    process.stdout.setMaxListeners(0);
+  }
   const instance = render(
     process.env['DEBUG'] ? (
       <React.StrictMode>
@@ -196,27 +216,53 @@ export async function startInteractiveUI(
   // `input_enabled` checkpoints that complete the first-screen picture.
   profileCheckpoint('first_paint');
 
-  // Check for updates only if enableAutoUpdate is not explicitly disabled.
-  // Using !== false ensures updates are enabled by default when undefined.
-  if (settings.merged.general?.enableAutoUpdate !== false) {
-    checkForUpdates()
-      .then((info) => {
-        handleAutoUpdate(info, settings, config.getProjectRoot());
-      })
-      .catch((err) => {
-        // Silently ignore update check errors.
-        debugLogger.warn(`Update check failed: ${err}`);
-      });
+  startPostRenderPrefetches(config, settings, {
+    connectIde: options.postRenderConnectIde ?? false,
+    initializeTelemetry:
+      options.postRenderInitializeTelemetry ??
+      config.isTelemetryInitializationDeferred(),
+  });
+
+  // Periodic memory-pressure check for the interactive session. The interval
+  // is unref'd (can't keep the loop alive on its own) and cleared on cleanup.
+  const pressureMonitor = config.getMemoryPressureMonitor?.();
+  let pressureCheckTimer: NodeJS.Timeout | undefined;
+  if (pressureMonitor) {
+    pressureCheckTimer = setInterval(() => {
+      try {
+        pressureMonitor.performCheck();
+      } catch {
+        // Best-effort: a failing pressure check must not break the UI loop.
+      }
+    }, PRESSURE_CHECK_INTERVAL_MS);
+    pressureCheckTimer.unref?.();
   }
 
   registerCleanup(async () => {
+    if (pressureCheckTimer) clearInterval(pressureCheckTimer);
+    // Best-effort reclaim before unmounting the React tree. Runs the
+    // synchronous cache-eviction step (and schedules compact_history) so a
+    // near-limit heap is not pushed over the edge by React reconciliation
+    // during unmount.
+    try {
+      pressureMonitor?.performCheck();
+    } catch {
+      // Best-effort: ignore.
+    }
     remoteInputWatcher?.shutdown();
     await dualOutputBridge?.shutdown();
-    // Explicitly disable the Kitty keyboard protocol before unmounting Ink so
-    // that the disable escape sequence is written while stdout is still fully
-    // operational, preventing garbled terminal output after the app exits.
-    disableKittyProtocol();
     instance.unmount();
+    // Pop the Kitty keyboard protocol only after Ink has unmounted. The
+    // protocol was enabled on the main screen before render, and the kitty
+    // spec tracks keyboard flags per screen: with alternateScreen enabled, a
+    // pop written before unmount lands on the alternate screen's (empty)
+    // stack, unmount then leaves the alternate screen, and the main screen's
+    // flags stay set — the user's shell keeps receiving kitty escape codes
+    // (e.g. "9;5u" on Ctrl-C) after exit.
+    disableKittyProtocol();
+    if (useVP) {
+      process.stdout.setMaxListeners(stdoutMaxListeners);
+    }
     restoreSynchronizedOutput();
     restoreTerminalRedrawOptimizer();
   });

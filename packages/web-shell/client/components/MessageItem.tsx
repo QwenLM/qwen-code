@@ -5,11 +5,16 @@ import type {
   PermissionRequest,
   TodoItem,
 } from '../adapters/types';
+import type { WebShellAssistantTurnFooterRenderInfo } from '../customization';
 import { useI18n } from '../i18n';
 import { ErrorBoundary } from './ErrorBoundary';
 import { MessageTimestamp } from './MessageTimestamp';
 import { UserMessage } from './messages/UserMessage';
-import { AssistantMessage, ThinkingMessage } from './messages/AssistantMessage';
+import {
+  AssistantMessage,
+  ThinkingMessage,
+  type SessionContentGenerator,
+} from './messages/AssistantMessage';
 import { SystemMessage } from './messages/SystemMessage';
 import { ToolGroup } from './messages/ToolGroup';
 import { PlanMessage } from './messages/PlanMessage';
@@ -30,7 +35,9 @@ interface MessageItemProps {
   onBranchSession?: () => void;
   showAssistantActions?: boolean;
   showAssistantBranch?: boolean;
-  shellOutputMaxLines: number;
+  isLocateFlashing?: boolean;
+  assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
+  generateContent?: SessionContentGenerator;
 }
 
 export const MessageItem = memo(function MessageItem({
@@ -44,13 +51,21 @@ export const MessageItem = memo(function MessageItem({
   onBranchSession,
   showAssistantActions = false,
   showAssistantBranch = false,
-  shellOutputMaxLines,
+  isLocateFlashing = false,
+  assistantTurnFooterInfo,
+  generateContent,
 }: MessageItemProps) {
+  const { t } = useI18n();
   const body = ((): ReactElement | null => {
     switch (message.role) {
       case 'user':
         return (
-          <UserMessage content={message.content} images={message.images} />
+          <UserMessage
+            content={message.content}
+            images={message.images}
+            inputAnnotations={message.inputAnnotations}
+            isLocateFlashing={isLocateFlashing}
+          />
         );
       case 'assistant':
         return (
@@ -61,14 +76,19 @@ export const MessageItem = memo(function MessageItem({
             onBranchSession={onBranchSession}
             showFooterActions={showAssistantActions}
             showBranchAction={showAssistantBranch}
+            isLocateFlashing={isLocateFlashing}
+            customFooterInfo={assistantTurnFooterInfo}
           />
         );
       case 'thinking':
         return (
           <ThinkingMessage
+            messageId={message.id}
             content={message.content}
             isStreaming={message.isStreaming}
             timestamp={message.timestamp}
+            isLocateFlashing={isLocateFlashing}
+            generateContent={generateContent}
           />
         );
       case 'tool_group':
@@ -77,11 +97,17 @@ export const MessageItem = memo(function MessageItem({
             tools={message.tools}
             pendingApproval={pendingApproval}
             workspaceCwd={workspaceCwd}
-            shellOutputMaxLines={shellOutputMaxLines}
+            isLocateFlashing={isLocateFlashing}
           />
         );
       case 'plan':
-        return <PlanMessage id={message.id} todos={message.todos} />;
+        return (
+          <PlanMessage
+            id={message.id}
+            todos={message.todos}
+            isLocateFlashing={isLocateFlashing}
+          />
+        );
       case 'system':
         return (
           <SystemMessage
@@ -149,15 +175,42 @@ export const MessageItem = memo(function MessageItem({
     </ErrorBoundary>
   );
 
+  // Re-enable text selection on every message row so users can long-press /
+  // drag-select reply text. The blanket `html * { user-select: none }` in
+  // standalone.css disables selection on UI chrome (native-app feel); this
+  // attribute opts the message subtree back in, including descendants
+  // (Markdown body, code blocks, tool panels, sub-messages).
+  //
+  // `display: contents` keeps this wrapper out of layout: several parents
+  // (e.g. MessageTimestamp's chat row) are flex containers whose items used
+  // to be the message body itself. A plain div here becomes the flex item
+  // instead and shrinks to its content width, squeezing user chat bubbles
+  // (whose max-width: 80% then resolves against the shrunken wrapper) so
+  // even short messages wrap mid-word. The user-select re-enable rule
+  // matches `[data-user-selectable] *`, so the boxless wrapper does not
+  // affect it.
+  const selectableSafeBody = (
+    <div data-user-selectable="true" style={{ display: 'contents' }}>
+      {safeBody}
+    </div>
+  );
+
   if (message.role === 'assistant') {
     if (showAssistantActions) {
-      return safeBody;
+      return selectableSafeBody;
     }
     return (
       <MessageTimestamp timestamp={message.timestamp}>
-        {safeBody}
+        {selectableSafeBody}
       </MessageTimestamp>
     );
+  }
+
+  // The cancellation marker is a right-aligned, full-width turn-terminal row;
+  // a hover timestamp would overlap its text, so skip the MessageTimestamp
+  // wrapper. The data-user-selectable div is still applied for consistency.
+  if (message.role === 'system' && message.source === 'prompt_cancelled') {
+    return selectableSafeBody;
   }
 
   return (
@@ -165,9 +218,9 @@ export const MessageItem = memo(function MessageItem({
       timestamp={message.timestamp}
       chatMode={message.role === 'user'}
       copyText={message.role === 'user' ? message.content : undefined}
-      copyTitle="Copy"
+      copyTitle={t('common.copy')}
     >
-      {safeBody}
+      {selectableSafeBody}
     </MessageTimestamp>
   );
 }, areMessageItemPropsEqual);
@@ -212,8 +265,32 @@ function areMessageItemPropsEqual(
   if (prev.onBranchSession !== next.onBranchSession) return false;
   if (prev.showAssistantActions !== next.showAssistantActions) return false;
   if (prev.showAssistantBranch !== next.showAssistantBranch) return false;
-  if (prev.shellOutputMaxLines !== next.shellOutputMaxLines) return false;
+  if (prev.isLocateFlashing !== next.isLocateFlashing) return false;
+  if (prev.generateContent !== next.generateContent) return false;
+  if (
+    !areAssistantTurnFooterInfosEqual(
+      prev.assistantTurnFooterInfo,
+      next.assistantTurnFooterInfo,
+    )
+  ) {
+    return false;
+  }
   return areMessagesEqual(prev.message, next.message);
+}
+
+function areAssistantTurnFooterInfosEqual(
+  prev?: WebShellAssistantTurnFooterRenderInfo,
+  next?: WebShellAssistantTurnFooterRenderInfo,
+): boolean {
+  if (prev === next) return true;
+  if (!prev || !next) return false;
+  return (
+    prev.turnId === next.turnId &&
+    prev.message.id === next.message.id &&
+    prev.message.content === next.message.content &&
+    prev.message.isStreaming === next.message.isStreaming &&
+    prev.message.timestamp === next.message.timestamp
+  );
 }
 
 function areMessagesEqual(prev: Message, next: Message): boolean {

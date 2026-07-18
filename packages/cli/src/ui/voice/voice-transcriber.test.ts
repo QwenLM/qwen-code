@@ -72,6 +72,32 @@ describe('voice-transcriber', () => {
     });
   });
 
+  it('uses the supplied env snapshot for model API keys', () => {
+    vi.stubEnv('DASHSCOPE_API_KEY', 'process-key');
+    const config = createConfig([
+      {
+        id: 'qwen3-asr-flash',
+        label: 'Qwen ASR',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://dashscope.example/v1',
+        envKey: 'DASHSCOPE_API_KEY',
+      },
+    ]);
+
+    expect(
+      resolveVoiceTranscriptionConfig({
+        config,
+        settings: createSettings(),
+        voiceModel: 'qwen3-asr-flash',
+        env: { DASHSCOPE_API_KEY: 'runtime-key' },
+      }),
+    ).toEqual({
+      model: 'qwen3-asr-flash',
+      baseUrl: 'https://dashscope.example/v1',
+      apiKey: 'runtime-key',
+    });
+  });
+
   it('routes known voice models by model id instead of user protocol', () => {
     expect(resolveVoiceTransport('qwen3-asr-flash')).toBe('qwen-asr-chat');
     expect(resolveVoiceTransport('qwen3-asr-flash-2026-02-10')).toBe(
@@ -519,6 +545,8 @@ describe('voice-transcriber', () => {
   });
 
   it('rejects voice model hosts that resolve to private-network IPs', async () => {
+    const onEgress = vi.fn();
+
     await expect(
       transcribeVoiceAudio(
         { data: new Uint8Array([1, 2, 3]), mimeType: 'audio/wav' },
@@ -536,9 +564,11 @@ describe('voice-transcriber', () => {
           voiceModel: 'qwen3-asr-flash',
           lookupHost: vi.fn().mockResolvedValue({ address: '10.0.0.8' }),
           fetchFn: vi.fn(),
+          onEgress,
         },
       ),
     ).rejects.toThrow(/private-network address/);
+    expect(onEgress).not.toHaveBeenCalled();
   });
 
   it('rejects private-network IP literal voice URLs during network checks', async () => {
@@ -580,6 +610,22 @@ describe('voice-transcriber', () => {
         },
       ),
     ).rejects.toThrow(/DNS lookup failed for asr\.example/);
+  });
+
+  it('aborts a pending DNS safety lookup', async () => {
+    const controller = new AbortController();
+    const check = assertVoiceBaseUrlNetworkAllowed(
+      {
+        model: 'qwen3-asr-flash',
+        baseUrl: 'https://asr.example/v1',
+      },
+      () => new Promise(() => undefined),
+      controller.signal,
+    );
+
+    controller.abort(new Error('Workspace runtime was removed'));
+
+    await expect(check).rejects.toThrow('Workspace runtime was removed');
   });
 
   it('allows localhost voice URLs for development', () => {
@@ -693,6 +739,7 @@ describe('voice-transcriber', () => {
   });
 
   it('posts audio to chat/completions as input_audio content', async () => {
+    const onEgress = vi.fn();
     const fetchFn = vi.fn().mockResolvedValue({
       ok: true,
       json: vi.fn().mockResolvedValue({
@@ -716,10 +763,12 @@ describe('voice-transcriber', () => {
         voiceModel: 'qwen3-asr-flash',
         lookupHost: lookupPublicHost,
         fetchFn,
+        onEgress,
       },
     );
 
     expect(text).toBe('hello world');
+    expect(onEgress).toHaveBeenCalledOnce();
     const [url, init] = fetchFn.mock.calls[0];
     expect(url).toBe('https://dashscope.example/v1/chat/completions');
     expect(init.method).toBe('POST');

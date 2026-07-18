@@ -20,12 +20,17 @@ import type { PipelineConfig, RequestContext } from './types.js';
 import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
+import { reconcileMaxTokens } from '../tokenLimits.js';
 import {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   MAX_STREAM_IDLE_TIMEOUT_MS,
   QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
 } from './constants.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { getToolCallPreparations } from '../tool-call-preparation.js';
+import { InvalidStreamError } from '../invalid-stream-error.js';
+import { logProtocolTagSanitized } from '../../telemetry/loggers.js';
+import { ProtocolTagSanitizedEvent } from '../../telemetry/types.js';
 
 const debugLogger = createDebugLogger('OPENAI_PIPELINE');
 
@@ -56,10 +61,102 @@ export class StreamInactivityTimeoutError extends Error {
     readonly streamLifetimeMs: number,
   ) {
     super(
-      `No stream activity for ${idleMs}ms after ${chunksReceived} chunks (stream lifetime: ${streamLifetimeMs}ms)`,
+      `No stream activity for ${idleMs}ms after ${chunksReceived} chunks ` +
+        `(stream lifetime: ${streamLifetimeMs}ms). Set ` +
+        `${QWEN_STREAM_IDLE_TIMEOUT_MS_ENV} to increase this window ` +
+        `(or 0 to disable it).`,
     );
     this.name = 'StreamInactivityTimeoutError';
   }
+}
+
+/**
+ * Maximum bytes of response body to include in NonSSEResponseError diagnostics.
+ */
+const NON_SSE_BODY_PREFIX_LIMIT = 512;
+
+/**
+ * Content-type prefixes that are compatible with SSE streaming. Anything
+ * outside this set (e.g. `text/html`) indicates the upstream did not return
+ * an SSE stream — typically a gateway/proxy interception page.
+ */
+function isSSECompatibleContentType(contentType: string | null): boolean {
+  if (!contentType) return true; // absence → assume SSE (SDK default)
+  const mediaType = (contentType.split(';')[0] ?? '').trim().toLowerCase();
+  return (
+    mediaType === 'text/event-stream' ||
+    mediaType === 'application/x-ndjson' ||
+    mediaType === 'application/stream+json'
+  );
+}
+
+/**
+ * Thrown when the HTTP 200 response to a streaming request has a content-type
+ * incompatible with SSE (e.g. `text/html` from a gateway block page). Carries
+ * bounded diagnostic metadata so the user/maintainer can distinguish "model
+ * returned empty stream" from "upstream returned a non-SSE page".
+ */
+export class NonSSEResponseError extends Error {
+  readonly status: number;
+  readonly request_id: string | null;
+
+  constructor(
+    readonly contentType: string | null,
+    readonly httpStatus: number,
+    readonly bodyPrefix: string,
+    readonly requestId: string | null,
+  ) {
+    const preview = bodyPrefix.length > 0 ? ` Body prefix: ${bodyPrefix}` : '';
+    super(
+      `Streaming request received a non-SSE response ` +
+        `(HTTP ${httpStatus}, Content-Type: ${contentType || 'unknown'}).` +
+        `${preview}`,
+    );
+    this.name = 'NonSSEResponseError';
+    this.status = httpStatus;
+    this.request_id = requestId;
+  }
+}
+
+/**
+ * Provider-specific output-budget keys that stand in for `max_tokens` on the
+ * wire (e.g. GPT-5 / o-series use `max_completion_tokens`). When a user's
+ * samplingParams already carries one of these, the window clamp must not also
+ * inject `max_tokens`: sending the pair double-specifies the output budget and
+ * some endpoints reject it.
+ */
+const PROVIDER_OUTPUT_BUDGET_KEYS = ['max_completion_tokens', 'max_new_tokens'];
+
+function hasProviderOutputBudgetKey(samplingParams: {
+  [key: string]: unknown;
+}): boolean {
+  return PROVIDER_OUTPUT_BUDGET_KEYS.some(
+    (key) => samplingParams[key] !== undefined,
+  );
+}
+
+/**
+ * Clamp any provider-specific output-budget key (e.g. `max_completion_tokens`)
+ * to the window's remaining room, mutating and returning the passed object.
+ * An output budget is subject to `prompt + output ≤ window` regardless of the
+ * key it travels under, so we shrink the key's value to `requestMaxTokens` when
+ * it exceeds it — but we clamp the value in place rather than injecting a
+ * separate `max_tokens`, which would double-specify the budget and be rejected
+ * by endpoints like the o-series. When there is room (or no clamp value is
+ * available), the user's value passes through unchanged.
+ */
+function clampProviderOutputBudgetKeys(
+  samplingParams: { [key: string]: unknown },
+  requestMaxTokens: number | undefined,
+): { [key: string]: unknown } {
+  if (typeof requestMaxTokens !== 'number') return samplingParams;
+  for (const key of PROVIDER_OUTPUT_BUDGET_KEYS) {
+    const value = samplingParams[key];
+    if (typeof value === 'number' && value > requestMaxTokens) {
+      samplingParams[key] = requestMaxTokens;
+    }
+  }
+  return samplingParams;
 }
 
 /**
@@ -253,9 +350,72 @@ export class ContentGenerationPipeline {
           // Stage 1: Create OpenAI stream. Wrapped in try so a network /
           // DNS / proxy error during the SDK call still cleans up the
           // per-request child (same pattern as the non-streaming path).
-          stream = (await this.client.chat.completions.create(openaiRequest, {
-            signal: perRequestAc.signal,
-          })) as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
+          //
+          // Use withResponse() to access HTTP response headers — this allows
+          // early detection of non-SSE responses (e.g. gateway block pages
+          // returning text/html with HTTP 200).
+          const createPromise = this.client.chat.completions.create(
+            openaiRequest,
+            { signal: perRequestAc.signal },
+          );
+
+          // withResponse() is available on APIPromise (the OpenAI SDK's
+          // extended Promise). If unavailable (e.g. a mock), fall back.
+          if (
+            typeof (createPromise as { withResponse?: unknown })
+              .withResponse === 'function'
+          ) {
+            const {
+              data,
+              response: httpResponse,
+              request_id,
+            } = await (
+              createPromise as unknown as {
+                withResponse(): Promise<{
+                  data: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
+                  response: Response;
+                  request_id: string | null;
+                }>;
+              }
+            ).withResponse();
+            stream = data;
+
+            // Validate content-type: a non-SSE content-type on a streaming
+            // request means the upstream (gateway/proxy) returned something
+            // other than an event stream — surface it immediately.
+            const contentType =
+              httpResponse.headers.get('content-type') ?? null;
+            if (!isSSECompatibleContentType(contentType)) {
+              // Read a bounded prefix of the body for diagnostics. The body
+              // may already be consumed by the SDK's stream parser; in that
+              // case we fall through with an empty prefix.
+              let bodyPrefix = '';
+              try {
+                if (httpResponse.body) {
+                  const reader = httpResponse.body.getReader();
+                  const { value } = await reader.read();
+                  reader.releaseLock();
+                  if (value) {
+                    bodyPrefix = new TextDecoder()
+                      .decode(value)
+                      .slice(0, NON_SSE_BODY_PREFIX_LIMIT);
+                  }
+                }
+              } catch {
+                // Body already consumed by the SDK — expected; proceed
+                // without the prefix.
+              }
+              throw new NonSSEResponseError(
+                contentType,
+                httpResponse.status,
+                bodyPrefix,
+                request_id,
+              );
+            }
+          } else {
+            stream =
+              (await createPromise) as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
+          }
         } catch (e) {
           perRequestAc.abort();
           throw e;
@@ -284,6 +444,7 @@ export class ContentGenerationPipeline {
           guarded,
           context,
           request,
+          userPromptId,
         );
         async function* drainThenCleanup(): AsyncGenerator<GenerateContentResponse> {
           try {
@@ -303,16 +464,14 @@ export class ContentGenerationPipeline {
    * 1. Convert OpenAI chunks to Gemini format while preserving original chunks
    * 2. Filter empty responses
    * 3. Handle chunk merging for providers that send finishReason and usageMetadata separately
-   * 4. Collect both formats for logging
-   * 5. Handle success/error logging
+   * 4. Handle success/error logging
    */
   private async *processStreamWithLogging(
     stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
     context: RequestContext,
     request: GenerateContentParameters,
+    userPromptId: string,
   ): AsyncGenerator<GenerateContentResponse> {
-    const collectedGeminiResponses: GenerateContentResponse[] = [];
-
     // State for handling chunk merging.
     // pendingFinishResponse holds a finish chunk waiting to be merged with
     // a subsequent usage-metadata chunk before yielding.
@@ -322,6 +481,32 @@ export class ContentGenerationPipeline {
     // function-call parts from the finish chunk).
     let pendingFinishResponse: GenerateContentResponse | null = null;
     let finishYielded = false;
+    let pendingFinishProtocolTagSanitized:
+      | NonNullable<RequestContext['protocolTagSanitized']>
+      | undefined;
+    const logPendingProtocolTagSanitized = (
+      response: GenerateContentResponse,
+      sanitization:
+        | NonNullable<RequestContext['protocolTagSanitized']>
+        | undefined,
+    ) => {
+      if (!sanitization) return;
+      const event = new ProtocolTagSanitizedEvent({
+        model: context.model,
+        promptId: userPromptId,
+        responseId: response.responseId,
+        tagName: sanitization.tagName,
+        toolCallCount: sanitization.toolCallCount,
+      });
+      debugLogger.warn('Sanitized a model protocol tag', {
+        model: event.model,
+        promptId: event.prompt_id,
+        responseId: event.response_id,
+        tagName: event.tag_name,
+        toolCallCount: event.tool_call_count,
+      });
+      logProtocolTagSanitized(this.config.cliConfig, event);
+    };
 
     try {
       // Stage 2a: Convert and yield each chunk while preserving original
@@ -342,13 +527,34 @@ export class ContentGenerationPipeline {
           context,
         );
 
+        const sanitization = context.protocolTagSanitized;
+        if (sanitization) {
+          context.protocolTagSanitized = undefined;
+        }
+
         // Stage 2b: Filter empty responses to avoid downstream issues
         if (
           response.candidates?.[0]?.content?.parts?.length === 0 &&
           !response.candidates?.[0]?.finishReason &&
-          !response.usageMetadata
+          !response.usageMetadata &&
+          // Preparation-only responses must reach ACP before arguments complete.
+          getToolCallPreparations(response).length === 0
         ) {
           continue;
+        }
+
+        if (
+          pendingFinishProtocolTagSanitized &&
+          pendingFinishResponse &&
+          !response.candidates?.[0]?.finishReason &&
+          response.candidates?.some(
+            (candidate) => (candidate.content?.parts?.length ?? 0) > 0,
+          )
+        ) {
+          throw new InvalidStreamError(
+            'Model response continued after a finish reason.',
+            'PROTOCOL_TAG_LEAK',
+          );
         }
 
         // Stage 2c: Handle chunk merging for providers that send
@@ -370,13 +576,20 @@ export class ContentGenerationPipeline {
               pending.usageMetadata = response.usageMetadata;
             }
           }
-          collectedGeminiResponses.push(response);
           continue;
+        }
+
+        if (
+          !pendingFinishResponse &&
+          response.candidates?.[0]?.finishReason &&
+          sanitization
+        ) {
+          pendingFinishProtocolTagSanitized = sanitization;
         }
 
         const shouldYield = this.handleChunkMerging(
           response,
-          collectedGeminiResponses,
+          pendingFinishResponse,
           (mergedResponse) => {
             pendingFinishResponse = mergedResponse;
           },
@@ -385,26 +598,76 @@ export class ContentGenerationPipeline {
         if (shouldYield) {
           // If we have a pending finish response, yield it instead
           if (pendingFinishResponse) {
+            logPendingProtocolTagSanitized(
+              pendingFinishResponse,
+              pendingFinishProtocolTagSanitized,
+            );
             yield pendingFinishResponse;
             finishYielded = true;
             // Keep pendingFinishResponse alive so late-arriving usage
             // metadata can still be merged (see finishYielded block above).
           } else {
+            logPendingProtocolTagSanitized(response, sanitization);
             yield response;
           }
         }
       }
 
+      if (
+        context.pendingThinkingTagCandidate &&
+        !context.pendingThinkingTagCandidate.closingTagName &&
+        !/\S/.test(context.pendingThinkingTagCandidate.text)
+      ) {
+        const pendingParts = context.pendingUntrustedResponseParts;
+        context.pendingThinkingTagCandidate = undefined;
+        context.pendingUntrustedResponseParts = undefined;
+        if (pendingParts?.length) {
+          const response = new GenerateContentResponse();
+          response.candidates = [
+            {
+              content: { parts: pendingParts, role: 'model' },
+              index: 0,
+            },
+          ];
+          yield response;
+        }
+      } else if (context.pendingThinkingTagCandidate) {
+        throw new InvalidStreamError(
+          'Model response leaked thinking tags.',
+          'PROTOCOL_TAG_LEAK',
+        );
+      }
+
       // Stage 2d: If there's still a pending finish response at the end
       // (e.g. no usage chunk arrived after the finish chunk), yield it.
       if (pendingFinishResponse && !finishYielded) {
+        logPendingProtocolTagSanitized(
+          pendingFinishResponse,
+          pendingFinishProtocolTagSanitized,
+        );
         yield pendingFinishResponse;
       }
     } catch (error) {
+      if (error instanceof InvalidStreamError) {
+        throw error;
+      }
+
       // Re-throw StreamContentError directly so it can be handled by
       // the caller's retry logic (e.g., TPM throttling retry in sendMessageStream)
       if (error instanceof StreamContentError) {
         throw redactProxyError(error);
+      }
+
+      if (
+        context.pendingThinkingTagCandidate?.closingTagName &&
+        request.config?.abortSignal?.aborted !== true
+      ) {
+        context.pendingThinkingTagCandidate = undefined;
+        context.pendingUntrustedResponseParts = undefined;
+        throw new InvalidStreamError(
+          'Model response leaked thinking tags.',
+          'PROTOCOL_TAG_LEAK',
+        );
       }
 
       // Bypass handleError: it strips `code` from timeout errors, which would
@@ -431,56 +694,44 @@ export class ContentGenerationPipeline {
    * finishReason and the most up-to-date usage information from any provider pattern.
    *
    * @param response Current Gemini response
-   * @param collectedGeminiResponses Array to collect responses for logging
+   * @param pendingFinishResponse Finish response currently held for merging
    * @param setPendingFinish Callback to set pending finish response
    * @returns true if the response should be yielded, false if it should be held for merging
    */
   private handleChunkMerging(
     response: GenerateContentResponse,
-    collectedGeminiResponses: GenerateContentResponse[],
+    pendingFinishResponse: GenerateContentResponse | null,
     setPendingFinish: (response: GenerateContentResponse) => void,
   ): boolean {
     const isFinishChunk = response.candidates?.[0]?.finishReason;
 
-    // Check if we have a pending finish response from previous chunks
-    const hasPendingFinish =
-      collectedGeminiResponses.length > 0 &&
-      collectedGeminiResponses[collectedGeminiResponses.length - 1]
-        .candidates?.[0]?.finishReason;
-
     if (isFinishChunk) {
-      if (hasPendingFinish) {
+      if (pendingFinishResponse) {
         // Duplicate finish chunk (e.g. from OpenRouter providers that send two
-        // finish_reason chunks for tool calls). The streaming tool call parser
-        // was already reset after the first finish chunk, so the second one
-        // carries no functionCall parts. Merge only usageMetadata and keep the
-        // candidates (including functionCall parts) from the first finish chunk.
-        const lastResponse =
-          collectedGeminiResponses[collectedGeminiResponses.length - 1];
+        // finish_reason chunks for tool calls). The first finish response owns
+        // the candidates, including functionCall parts. Merge only usageMetadata
+        // from later finish chunks.
         if (response.usageMetadata) {
-          lastResponse.usageMetadata = response.usageMetadata;
+          pendingFinishResponse.usageMetadata = response.usageMetadata;
         }
-        setPendingFinish(lastResponse);
+        setPendingFinish(pendingFinishResponse);
       } else {
         // This is a finish reason chunk
-        collectedGeminiResponses.push(response);
         setPendingFinish(response);
       }
       return false; // Don't yield yet, wait for potential subsequent chunks to merge
-    } else if (hasPendingFinish) {
+    } else if (pendingFinishResponse) {
       // We have a pending finish chunk, merge this chunk's data into it
-      const lastResponse =
-        collectedGeminiResponses[collectedGeminiResponses.length - 1];
       const mergedResponse = new GenerateContentResponse();
 
       // Keep the finish reason from the previous chunk
-      mergedResponse.candidates = lastResponse.candidates;
+      mergedResponse.candidates = pendingFinishResponse.candidates;
 
       // Merge usage metadata if this chunk has it
       if (response.usageMetadata) {
         mergedResponse.usageMetadata = response.usageMetadata;
       } else {
-        mergedResponse.usageMetadata = lastResponse.usageMetadata;
+        mergedResponse.usageMetadata = pendingFinishResponse.usageMetadata;
       }
 
       // Copy other essential properties from the current response
@@ -489,16 +740,11 @@ export class ContentGenerationPipeline {
       mergedResponse.modelVersion = response.modelVersion;
       mergedResponse.promptFeedback = response.promptFeedback;
 
-      // Update the collected responses with the merged response
-      collectedGeminiResponses[collectedGeminiResponses.length - 1] =
-        mergedResponse;
-
       setPendingFinish(mergedResponse);
       return true; // Yield the merged response
     }
 
-    // Normal chunk - collect and yield
-    collectedGeminiResponses.push(response);
+    // Normal chunk
     return true;
   }
 
@@ -540,6 +786,20 @@ export class ContentGenerationPipeline {
           request.config.tools,
           this.contentGeneratorConfig.schemaCompliance ?? 'auto',
         );
+
+      // Map Gemini-style toolConfig.functionCallingConfig.mode to OpenAI's
+      // tool_choice so structured side queries (e.g. the AUTO-mode
+      // classifier's respond_in_schema) can force the model to emit a tool
+      // call instead of free-texting. Without this, thinking-heavy models
+      // may consume the tiny output budget on reasoning and skip the tool.
+      const fcMode = request.config?.toolConfig?.functionCallingConfig?.mode;
+      if (fcMode === 'ANY') {
+        (baseRequest as unknown as Record<string, unknown>)['tool_choice'] =
+          'required';
+      } else if (fcMode === 'NONE') {
+        (baseRequest as unknown as Record<string, unknown>)['tool_choice'] =
+          'none';
+      }
     }
 
     // Let provider enhance the request (e.g., add metadata, cache control)
@@ -581,13 +841,39 @@ export class ContentGenerationPipeline {
       // start with `qwen` but is the most common hybrid-thinking model
       // for first-time users, so it must be covered.
       const model = (context.model ?? '').toLowerCase();
-      if (
-        DashScopeOpenAICompatibleProvider.isDashScopeProvider(
-          this.contentGeneratorConfig,
-        ) &&
-        (model.startsWith('qwen') || model === 'coder-model')
-      ) {
-        typed['enable_thinking'] = false;
+      if (model.startsWith('qwen') || model === 'coder-model') {
+        if (
+          DashScopeOpenAICompatibleProvider.isDashScopeProvider(
+            this.contentGeneratorConfig,
+          )
+        ) {
+          typed['enable_thinking'] = false;
+        } else {
+          // Non-DashScope OpenAI-compatible servers (vLLM, SGLang, ...) render
+          // the model's chat template server-side and read the thinking switch
+          // from `chat_template_kwargs`, not a top-level `enable_thinking`
+          // (which they silently ignore). Send it there so hybrid qwen models
+          // actually stop emitting <think> when reasoning is disabled — e.g.
+          // the auto-mode permission classifier's short structured-output
+          // calls, which otherwise spend their small token budget on thinking
+          // and fail closed. Servers that don't recognise `chat_template_kwargs`
+          // ignore the unknown field, so the switch is a harmless no-op there.
+          //
+          // Drop any top-level `enable_thinking` a provider preset injected via
+          // extra_body (provider-config.ts emits it for models configured with
+          // `enableThinking: true`): leaving it would contradict the
+          // `chat_template_kwargs` opt-out on servers that honour both, and
+          // keeps this path from leaking the qwen-specific field top-level.
+          delete typed['enable_thinking'];
+          const existing = (typed['chat_template_kwargs'] ?? {}) as Record<
+            string,
+            unknown
+          >;
+          typed['chat_template_kwargs'] = {
+            ...existing,
+            enable_thinking: false,
+          };
+        }
       }
       // Strip reasoning config — extra_body could inject it, overriding
       // buildReasoningConfig's decision to return {} for disabled thinking.
@@ -654,9 +940,36 @@ export class ContentGenerationPipeline {
     // When samplingParams is set, its keys pass through to the wire verbatim.
     // This lets users target provider-specific parameter names
     // (e.g. `max_completion_tokens` for GPT-5 / o-series) without a client release.
-    // When absent, the historical default behavior applies.
+    // No output budget escapes the window clamp, whatever key it travels under:
+    //   - max_tokens is a ceiling, not an exemption — when both a config
+    //     max_tokens and the (clamped) request maxOutputTokens are present the
+    //     smaller wins; when samplingParams omits max_tokens the clamped request
+    //     value is injected.
+    //   - A provider-specific output-budget key (max_completion_tokens,
+    //     max_new_tokens) is clamped in place to the window instead — we do NOT
+    //     also inject max_tokens, since sending the pair double-specifies the
+    //     budget and some endpoints (o-series) reject it. Its value only shrinks
+    //     when the window is tight; when there is room it passes through as-is.
+    // So `prompt + max_tokens ≤ window` holds for samplingParams users too,
+    // matching the Anthropic path.
     if (configSamplingParams !== undefined) {
-      return { ...configSamplingParams };
+      const requestMaxTokens = request.config?.maxOutputTokens;
+      const maxTokens =
+        reconcileMaxTokens(configSamplingParams.max_tokens, requestMaxTokens) ??
+        configSamplingParams.max_tokens ??
+        (hasProviderOutputBudgetKey(configSamplingParams)
+          ? undefined
+          : requestMaxTokens);
+      // Single exit: whatever the branch decided about max_tokens, any
+      // provider-specific output-budget key in the result is clamped to the
+      // window too — a config carrying both max_tokens and e.g.
+      // max_completion_tokens must not leak the provider key unclamped.
+      return clampProviderOutputBudgetKeys(
+        maxTokens !== undefined
+          ? { ...configSamplingParams, max_tokens: maxTokens }
+          : { ...configSamplingParams },
+        requestMaxTokens,
+      );
     }
 
     const params: Record<string, unknown> = {

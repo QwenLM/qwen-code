@@ -192,8 +192,7 @@ describe('handleAutoUpdate', () => {
     });
 
     expect(emitSpy).toHaveBeenCalledWith('update-failed', {
-      message:
-        'Automatic update failed. Please try updating manually. (command: npm i -g @qwen-code/qwen-code@2.0.0, stderr: An error occurred)',
+      message: 'Automatic update failed. Please try updating manually.',
     });
   });
 
@@ -216,8 +215,7 @@ describe('handleAutoUpdate', () => {
     });
 
     expect(emitSpy).toHaveBeenCalledWith('update-failed', {
-      message:
-        'Automatic update failed. Please try updating manually. (error: Spawn error)',
+      message: 'Automatic update failed. Please try updating manually.',
     });
   });
 
@@ -239,7 +237,7 @@ describe('handleAutoUpdate', () => {
         'npm i -g @qwen-code/qwen-code@nightly',
       ]),
       {
-        stdio: 'pipe',
+        stdio: ['pipe', 'ignore', 'pipe'],
       },
     );
   });

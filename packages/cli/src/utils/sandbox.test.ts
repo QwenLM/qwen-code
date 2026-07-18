@@ -4,10 +4,150 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+import { EventEmitter } from 'node:events';
+import { pathToFileURL } from 'node:url';
+import { FatalSandboxError, QWEN_DIR } from '@qwen-code/qwen-code-core';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+const spawnMock = vi.hoisted(() => vi.fn());
+const execSyncMock = vi.hoisted(() => vi.fn());
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    default: {
+      ...actual,
+      execSync: execSyncMock,
+      spawn: spawnMock,
+    },
+    execSync: execSyncMock,
+    spawn: spawnMock,
+  };
+});
+
 import { isContainerPathWithinWorkdir } from './sandbox-path.js';
+import {
+  getSandboxPassthroughEnvArgs,
+  resolveSeatbeltProfileFile,
+  start_sandbox,
+} from './sandbox.js';
 import { parseSandboxImageName } from './sandboxImageName.js';
 import { parseSandboxMountSpec } from './sandboxMounts.js';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+});
+
+describe('resolveSeatbeltProfileFile', () => {
+  it('strips the chunks segment from bundled seatbelt profile paths', () => {
+    const bundleDir = path.resolve(path.sep, 'tmp', 'qwen', 'lib');
+    const chunkUrl = pathToFileURL(
+      path.join(bundleDir, 'chunks', 'sandbox-AAAA.js'),
+    ).toString();
+
+    expect(resolveSeatbeltProfileFile('permissive-open', chunkUrl)).toBe(
+      path.join(bundleDir, 'sandbox-macos-permissive-open.sb'),
+    );
+  });
+
+  it('keeps source-mode seatbelt profile paths next to the module', () => {
+    const utilsDir = path.resolve(
+      path.sep,
+      'repo',
+      'packages',
+      'cli',
+      'src',
+      'utils',
+    );
+    const sourceUrl = pathToFileURL(
+      path.join(utilsDir, 'sandbox.ts'),
+    ).toString();
+
+    expect(resolveSeatbeltProfileFile('restrictive-closed', sourceUrl)).toBe(
+      path.join(utilsDir, 'sandbox-macos-restrictive-closed.sb'),
+    );
+  });
+
+  it('keeps custom seatbelt profiles under project settings', () => {
+    const bundleDir = path.resolve(path.sep, 'tmp', 'qwen', 'lib');
+    const chunkUrl = pathToFileURL(
+      path.join(bundleDir, 'chunks', 'sandbox-AAAA.js'),
+    ).toString();
+
+    expect(resolveSeatbeltProfileFile('project-profile', chunkUrl)).toBe(
+      path.join(QWEN_DIR, 'sandbox-macos-project-profile.sb'),
+    );
+  });
+
+  it('throws missing file errors with the resolved seatbelt profile path', async () => {
+    vi.stubEnv('SEATBELT_PROFILE', 'permissive-open');
+    vi.spyOn(fs, 'existsSync').mockReturnValue(false);
+
+    const expectedPath = resolveSeatbeltProfileFile('permissive-open');
+
+    await expect(
+      start_sandbox({ command: 'sandbox-exec', image: '' }),
+    ).rejects.toThrow(
+      new FatalSandboxError(
+        `Missing macos seatbelt profile file '${expectedPath}'`,
+      ),
+    );
+  });
+
+  it.each([
+    ['managed ACP', '1', true],
+    ['ordinary', undefined, false],
+  ])(
+    'handles Electron Node mode for a %s seatbelt re-exec',
+    async (_name, marker, expected) => {
+      vi.stubEnv('QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE', marker ?? '');
+      vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+      vi.spyOn(fs, 'mkdirSync').mockReturnValue(undefined);
+      vi.spyOn(fs, 'realpathSync').mockImplementation(
+        (filePath) => String(filePath) || '/tmp',
+      );
+      execSyncMock.mockReturnValue(Buffer.from('/tmp/cache\n'));
+
+      const child = new EventEmitter();
+      spawnMock.mockReturnValue(child);
+      const result = start_sandbox(
+        { command: 'sandbox-exec', image: '' },
+        [],
+        undefined,
+        [process.execPath, '/path/to/cli.js', '--acp'],
+      );
+
+      const args = spawnMock.mock.calls[0]?.[1] as string[];
+      expect(args.at(-1)?.includes('ELECTRON_RUN_AS_NODE=1')).toBe(expected);
+
+      child.emit('close', 0);
+      await expect(result).resolves.toBe(0);
+    },
+  );
+});
+
+describe('getSandboxPassthroughEnvArgs', () => {
+  it('passes update relaunch state into container sandboxes', () => {
+    expect(
+      getSandboxPassthroughEnvArgs({
+        QWEN_CODE_SKIP_UPDATE_CHECK_ONCE: 'true',
+        QWEN_CODE_CUSTOM_SANDBOX_IMAGE: 'example.com/qwen:1.0.0',
+        QWEN_CODE_HOST_UPDATE_RELAUNCH: 'false',
+      }),
+    ).toEqual([
+      '--env',
+      'QWEN_CODE_SKIP_UPDATE_CHECK_ONCE=true',
+      '--env',
+      'QWEN_CODE_CUSTOM_SANDBOX_IMAGE=example.com/qwen:1.0.0',
+      '--env',
+      'QWEN_CODE_HOST_UPDATE_RELAUNCH=false',
+    ]);
+  });
+});
 
 describe('isContainerPathWithinWorkdir', () => {
   it('allows the workdir itself', () => {

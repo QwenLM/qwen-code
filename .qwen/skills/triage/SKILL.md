@@ -26,7 +26,7 @@ Run staged admission via `gh`. Post comment after each stage.
 
 ```bash
 gh issue view "$NUM" --repo "$REPO" --json number,title,body,author,labels,comments,url
-gh pr view "$NUM" --repo "$REPO" --json number,title,body,author,labels,additions,deletions,changedFiles,baseRefName,headRefName,isCrossRepository,isDraft,reviewDecision,url
+gh pr view "$NUM" --repo "$REPO" --json number,title,body,author,labels,additions,deletions,changedFiles,baseRefName,headRefName,headRefOid,isCrossRepository,isDraft,reviewDecision,url
 gh label list --repo "$REPO" --limit 200
 ```
 
@@ -43,6 +43,14 @@ gh label list --repo "$REPO" --limit 200
   `refactor(scope):`, `refactor(scope)!:`, case-insensitive). Review it as usual,
   but escalate to the maintainer in place of approval. See `references/pr-workflow.md`
   Stage 3 for the deterministic check.
+- **No fabricated policies**: Do not invent blocking rules, line-count thresholds,
+  or named policies (e.g. "core module protection policy") that are not explicitly
+  defined in this skill's files. If a concern about scale or scope arises, raise it
+  as a question in the Stage 1 comment — never as a block or CHANGES_REQUESTED.
+  The escalation criteria are those defined in `references/pr-workflow.md`
+  (Stage 0, Stage 1b, and Stage 1c). Escalation means notifying the
+  maintainer, not rejecting the PR, except where Stage 0 Tier 1 explicitly
+  prescribes a `CHANGES_REQUESTED` review for large core refactors.
 
 ## Duplicate Guard
 
@@ -62,6 +70,8 @@ Bilingual: English first, Chinese in `<details>`. @mention author when blocking.
 
 - **Issue**: one comment, Stage 2 updates it in place. Key-point bullet format.
 - **PR**: three comments (Stage 1: Gate, Stage 2: Review + Test, Stage 3: Final Decision). Key-point bullet format.
+
+**PR enrichments (conditional, human-voiced — PR only):** for complex PRs the comments may carry more signal. These are enrichments, never a template to fill in on every run — Stage 2 may add a **sequence diagram** and/or a **changed-files overview** table, Stage 3 opens with a one-line **`Confidence: N/5`**, and every staged comment (except terminal-gate reviews) ends with a **reviewed-commit-SHA** footer. Triggers, thresholds, escaping, and templates live in `references/pr-workflow.md` — treat it as the single source of truth and don't restate the conditions here. Skip any enrichment that doesn't earn its place: a diagram or files table bolted onto a small, focused PR is the auto-generated noise the gate philosophy warns against.
 
 ## ⛔ Mandatory Pre-flight Checks (DO NOT SKIP)
 

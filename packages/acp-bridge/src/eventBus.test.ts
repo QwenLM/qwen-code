@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  DEFAULT_MAX_QUEUED_BYTES,
   EventBus,
   EVENT_SCHEMA_VERSION,
   type BridgeEvent,
@@ -24,6 +25,14 @@ async function collect(
 }
 
 describe('EventBus', () => {
+  beforeEach(() => {
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('assigns monotonic ids and the right schema version', () => {
     const bus = new EventBus();
     const a = bus.publish({ type: 'foo', data: 1 });
@@ -32,6 +41,24 @@ describe('EventBus', () => {
     expect(b?.id).toBe(2);
     expect(a?.v).toBe(EVENT_SCHEMA_VERSION);
     expect(bus.lastEventId).toBe(2);
+  });
+
+  it('rejects invalid maxQueuedBytes options', () => {
+    expect(
+      () => new EventBus(100, undefined, undefined, { maxQueuedBytes: 0 }),
+    ).toThrow(TypeError);
+    expect(
+      () =>
+        new EventBus(100, undefined, undefined, {
+          maxQueuedBytes: Number.POSITIVE_INFINITY,
+        }),
+    ).toThrow(TypeError);
+    expect(
+      () =>
+        new EventBus(100, undefined, undefined, {
+          maxQueuedBytes: Number.MAX_SAFE_INTEGER + 1,
+        }),
+    ).toThrow(TypeError);
   });
 
   it('stamps published events with serverTimestamp metadata', () => {
@@ -68,26 +95,28 @@ describe('EventBus', () => {
     // Need to start consuming before publishing so the subscriber is
     // registered in the loop below.
     setTimeout(() => {
-      bus.publish({ type: 'foo', data: 'a' });
+      bus.publish({ type: 'foo', data: 'a', promptId: 'prompt-live' });
       bus.publish({ type: 'foo', data: 'b' });
     }, 5);
 
     const events = await collect(iter, 2);
     expect(events.map((e) => e.data)).toEqual(['a', 'b']);
+    expect(events.map((e) => e.promptId)).toEqual(['prompt-live', undefined]);
     abort.abort();
   });
 
   it('replays events newer than lastEventId from the ring', async () => {
     const bus = new EventBus();
-    bus.publish({ type: 'foo', data: 'a' });
-    bus.publish({ type: 'foo', data: 'b' });
-    bus.publish({ type: 'foo', data: 'c' });
+    bus.publish({ type: 'foo', data: 'a', promptId: 'prompt-a' });
+    bus.publish({ type: 'foo', data: 'b', promptId: 'prompt-b' });
+    bus.publish({ type: 'foo', data: 'c', promptId: 'prompt-c' });
 
     const abort = new AbortController();
     const iter = bus.subscribe({ lastEventId: 1, signal: abort.signal });
     const events = await collect(iter, 2);
     expect(events.map((e) => e.id)).toEqual([2, 3]);
     expect(events.map((e) => e.data)).toEqual(['b', 'c']);
+    expect(events.map((e) => e.promptId)).toEqual(['prompt-b', 'prompt-c']);
     abort.abort();
   });
 
@@ -167,6 +196,23 @@ describe('EventBus', () => {
     expect(collected[1]?.data).toBe(2);
     expect(collected[2]?.type).toBe('slow_client_warning');
     expect(collected[3]?.type).toBe('client_evicted');
+    expect(collected[3]?.data).toMatchObject({
+      reason: 'queue_overflow',
+      queueSize: 2,
+      maxQueued: 2,
+      maxQueuedBytes: DEFAULT_MAX_QUEUED_BYTES,
+    });
+    expect(
+      (collected[3]?.data as { queuedBytes?: number }).queuedBytes,
+    ).toBeGreaterThan(0);
+    expect(
+      (collected[3]?.data as { eventBytes?: number }).eventBytes,
+    ).toBeUndefined();
+    expect(process.stderr.write).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'qwen serve: EventBus subscriber evicted {"reason":"queue_overflow"',
+      ),
+    );
     expect(bus.subscriberCount).toBe(0);
     abort.abort();
   });
@@ -189,7 +235,48 @@ describe('EventBus', () => {
     }
     const warnings = collected.filter((e) => e.type === 'slow_client_warning');
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]?.data).toMatchObject({ maxQueued: 8 });
+    expect(warnings[0]?.data).toMatchObject({
+      maxQueued: 8,
+      threshold: 'frames',
+    });
+    expect(process.stderr.write).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'qwen serve: EventBus slow_client_warning {"queueSize":6,"maxQueued":8',
+      ),
+    );
+    abort.abort();
+  });
+
+  it('reports frames_and_bytes when both warning thresholds are crossed', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 1200,
+    });
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 4, signal: abort.signal });
+
+    for (let i = 1; i <= 3; i++) {
+      bus.publish({
+        type: 'foo',
+        data: 'x'.repeat(300),
+        _meta: { serverTimestamp: i },
+      });
+    }
+
+    const collected: BridgeEvent[] = [];
+    const it = iter[Symbol.asyncIterator]();
+    for (let i = 0; i < 4; i++) collected.push((await it.next()).value);
+
+    const warning = collected.find((e) => e.type === 'slow_client_warning');
+    expect(warning?.data).toMatchObject({
+      queueSize: 3,
+      maxQueued: 4,
+      maxQueuedBytes: 1200,
+      threshold: 'frames_and_bytes',
+      lastEventId: 3,
+    });
+    expect(
+      (warning?.data as { queuedBytes?: number }).queuedBytes,
+    ).toBeGreaterThanOrEqual(900);
     abort.abort();
   });
 
@@ -245,6 +332,365 @@ describe('EventBus', () => {
     for (let i = 8; i <= 13; i++) bus.publish({ type: 'foo', data: i });
     const secondEpisode: BridgeEvent[] = [];
     for (let i = 0; i < 7; i++) secondEpisode.push((await it.next()).value);
+    expect(
+      secondEpisode.filter((e) => e.type === 'slow_client_warning'),
+    ).toHaveLength(1);
+    abort.abort();
+  });
+
+  it('does not rearm slow_client_warning until frame and byte backlogs both reset', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 16000,
+    });
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 8, signal: abort.signal });
+    const it = iter[Symbol.asyncIterator]();
+
+    for (let i = 1; i <= 6; i++) {
+      bus.publish({
+        type: 'foo',
+        data: 'x'.repeat(2400),
+        _meta: { serverTimestamp: i },
+      });
+    }
+
+    const partiallyDrained: BridgeEvent[] = [];
+    for (let i = 0; i < 3; i++) {
+      partiallyDrained.push((await it.next()).value);
+    }
+    expect(
+      partiallyDrained.filter((e) => e.type === 'slow_client_warning'),
+    ).toHaveLength(0);
+
+    for (let i = 7; i <= 9; i++) {
+      bus.publish({
+        type: 'foo',
+        data: 'y'.repeat(2400),
+        _meta: { serverTimestamp: i },
+      });
+    }
+
+    const afterPartialDrain: BridgeEvent[] = [];
+    for (let i = 0; i < 7; i++) {
+      afterPartialDrain.push((await it.next()).value);
+    }
+    expect(
+      afterPartialDrain.filter((e) => e.type === 'slow_client_warning'),
+    ).toHaveLength(1);
+
+    bus.publish({
+      type: 'foo',
+      data: 'small',
+      _meta: { serverTimestamp: 10 },
+    });
+    expect((await it.next()).value.data).toBe('small');
+
+    for (let i = 11; i <= 16; i++) {
+      bus.publish({
+        type: 'foo',
+        data: 'z'.repeat(2400),
+        _meta: { serverTimestamp: i },
+      });
+    }
+
+    const afterFullReset: BridgeEvent[] = [];
+    for (let i = 0; i < 7; i++) {
+      afterFullReset.push((await it.next()).value);
+    }
+    expect(
+      afterFullReset.filter((e) => e.type === 'slow_client_warning'),
+    ).toHaveLength(1);
+    abort.abort();
+  });
+
+  it('evicts a slow subscriber when live queued bytes overflow', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 1200,
+    });
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 100, signal: abort.signal });
+
+    bus.publish({
+      type: 'foo',
+      data: 'x'.repeat(1000),
+      _meta: { serverTimestamp: 1 },
+    });
+    bus.publish({
+      type: 'foo',
+      data: 'y'.repeat(1000),
+      _meta: { serverTimestamp: 2 },
+    });
+
+    const collected: BridgeEvent[] = [];
+    for await (const e of iter) collected.push(e);
+
+    const live = collected.filter((e) => e.type === 'foo');
+    const evicted = collected.find((e) => e.type === 'client_evicted');
+    expect(live).toHaveLength(1);
+    expect(evicted).toBeDefined();
+    expect(evicted!.id).toBeUndefined();
+    expect(evicted!.data).toMatchObject({
+      reason: 'queue_bytes_overflow',
+      droppedAfter: 2,
+      queueSize: 1,
+      maxQueued: 100,
+      maxQueuedBytes: 1200,
+    });
+    expect(
+      (evicted!.data as { queuedBytes?: number }).queuedBytes,
+    ).toBeGreaterThan(0);
+    expect(
+      (evicted!.data as { eventBytes?: number }).eventBytes,
+    ).toBeGreaterThan(0);
+    expect(process.stderr.write).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'qwen serve: EventBus subscriber evicted {"reason":"queue_bytes_overflow"',
+      ),
+    );
+    expect(bus.subscriberCount).toBe(0);
+    abort.abort();
+  });
+
+  it('keeps sibling subscribers alive after one subscriber is byte-evicted', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 1200,
+    });
+    const slowAbort = new AbortController();
+    const fastAbort = new AbortController();
+    const slowIter = bus.subscribe({
+      maxQueued: 100,
+      signal: slowAbort.signal,
+    });
+    const fastIter = bus.subscribe({
+      maxQueued: 100,
+      signal: fastAbort.signal,
+    });
+    const fastIt = fastIter[Symbol.asyncIterator]();
+
+    const fastFirst = fastIt.next();
+    bus.publish({
+      type: 'foo',
+      data: 'x'.repeat(1000),
+      _meta: { serverTimestamp: 1 },
+    });
+    expect((await fastFirst).value.data).toBe('x'.repeat(1000));
+
+    const fastSecond = fastIt.next();
+    bus.publish({
+      type: 'foo',
+      data: 'y'.repeat(1000),
+      _meta: { serverTimestamp: 2 },
+    });
+    expect((await fastSecond).value.data).toBe('y'.repeat(1000));
+
+    const slowEvents: BridgeEvent[] = [];
+    for await (const e of slowIter) slowEvents.push(e);
+    expect(
+      slowEvents.find((e) => e.type === 'client_evicted')?.data,
+    ).toMatchObject({
+      reason: 'queue_bytes_overflow',
+      droppedAfter: 2,
+    });
+    expect(bus.subscriberCount).toBe(1);
+
+    const fastThird = fastIt.next();
+    bus.publish({
+      type: 'foo',
+      data: 'tail',
+      _meta: { serverTimestamp: 3 },
+    });
+    expect((await fastThird).value.data).toBe('tail');
+
+    await fastIt.return?.();
+    slowAbort.abort();
+    fastAbort.abort();
+  });
+
+  it('allows one oversized live event on an empty queue before byte eviction', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 256,
+    });
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 100, signal: abort.signal });
+
+    bus.publish({
+      type: 'foo',
+      data: 'x'.repeat(1024),
+      _meta: { serverTimestamp: 1 },
+    });
+    bus.publish({
+      type: 'foo',
+      data: 'tail',
+      _meta: { serverTimestamp: 2 },
+    });
+
+    const collected: BridgeEvent[] = [];
+    for await (const e of iter) collected.push(e);
+
+    expect(collected[0]?.type).toBe('foo');
+    const warning = collected.find((e) => e.type === 'slow_client_warning');
+    expect(warning).toBeDefined();
+    expect(warning!.id).toBeUndefined();
+    expect(warning!.data).toMatchObject({
+      queueSize: 1,
+      maxQueued: 100,
+      maxQueuedBytes: 256,
+      threshold: 'bytes',
+      lastEventId: 1,
+    });
+    expect(
+      (warning!.data as { queuedBytes?: number }).queuedBytes,
+    ).toBeGreaterThan(256);
+
+    const evicted = collected.find((e) => e.type === 'client_evicted');
+    expect(evicted?.data).toMatchObject({
+      reason: 'queue_bytes_overflow',
+      droppedAfter: 2,
+    });
+    abort.abort();
+  });
+
+  it('does not size events that are delivered directly to a waiting subscriber', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 1,
+    });
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 100, signal: abort.signal });
+    const it = iter[Symbol.asyncIterator]();
+    const next = it.next();
+    const circular: Record<string, unknown> = {};
+    circular['self'] = circular;
+
+    expect(() => bus.publish({ type: 'foo', data: circular })).not.toThrow();
+
+    const delivered = await next;
+    expect(delivered.done).toBe(false);
+    expect(delivered.value.type).toBe('foo');
+    await it.return?.();
+    abort.abort();
+  });
+
+  it('does not poison queued bytes when buffered event sizing fails', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 256,
+    });
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 100, signal: abort.signal });
+    const it = iter[Symbol.asyncIterator]();
+    const circular: Record<string, unknown> = {};
+    circular['self'] = circular;
+
+    expect(() => {
+      bus.publish({
+        type: 'foo',
+        data: circular,
+        _meta: { serverTimestamp: 1 },
+      });
+      bus.publish({
+        type: 'foo',
+        data: 'tail',
+        _meta: { serverTimestamp: 2 },
+      });
+    }).not.toThrow();
+
+    const first = await it.next();
+    const second = await it.next();
+    expect(first.done).toBe(false);
+    expect(first.value.type).toBe('foo');
+    expect(second.done).toBe(false);
+    expect(second.value.type).toBe('foo');
+    expect(second.value.data).toBe('tail');
+    expect(process.stderr.write).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'qwen serve: EventBus event sizing failed {"type":"foo"}',
+      ),
+    );
+    expect(bus.subscriberCount).toBe(1);
+    await it.return?.();
+    abort.abort();
+  });
+
+  it('does not count replay frames toward queued bytes', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 64,
+    });
+    for (let i = 1; i <= 3; i++) {
+      bus.publish({
+        type: 'replay',
+        data: 'x'.repeat(512),
+        _meta: { serverTimestamp: i },
+      });
+    }
+
+    const abort = new AbortController();
+    const iter = bus.subscribe({
+      lastEventId: 0,
+      maxQueued: 2,
+      signal: abort.signal,
+    });
+    bus.publish({
+      type: 'live',
+      data: 'y'.repeat(512),
+      _meta: { serverTimestamp: 4 },
+    });
+
+    const events: BridgeEvent[] = [];
+    for await (const e of iter) {
+      events.push(e);
+      if (events.length === 5) break;
+    }
+
+    expect(events.find((e) => e.type === 'client_evicted')).toBeUndefined();
+    expect(events.filter((e) => e.type === 'replay')).toHaveLength(3);
+    expect(events.find((e) => e.type === 'replay_complete')).toBeDefined();
+    expect(events.at(-1)?.type).toBe('live');
+    abort.abort();
+  });
+
+  it('rearms byte-based slow_client_warning after queued bytes drain', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 1200,
+    });
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 100, signal: abort.signal });
+    const it = iter[Symbol.asyncIterator]();
+
+    bus.publish({
+      type: 'foo',
+      data: 'x'.repeat(1000),
+      _meta: { serverTimestamp: 1 },
+    });
+    const firstEpisode: BridgeEvent[] = [];
+    firstEpisode.push((await it.next()).value);
+    firstEpisode.push((await it.next()).value);
+    expect(
+      firstEpisode.filter((e) => e.type === 'slow_client_warning'),
+    ).toHaveLength(1);
+
+    // A large event can jump from fully drained to above the byte warn
+    // threshold; that single publish must not both re-arm and warn.
+    bus.publish({
+      type: 'foo',
+      data: 'y'.repeat(1000),
+      _meta: { serverTimestamp: 2 },
+    });
+    expect((await it.next()).value.data).toBe('y'.repeat(1000));
+
+    bus.publish({
+      type: 'foo',
+      data: 'reset',
+      _meta: { serverTimestamp: 3 },
+    });
+    expect((await it.next()).value.data).toBe('reset');
+
+    bus.publish({
+      type: 'foo',
+      data: 'z'.repeat(1000),
+      _meta: { serverTimestamp: 4 },
+    });
+    const secondEpisode: BridgeEvent[] = [];
+    secondEpisode.push((await it.next()).value);
+    secondEpisode.push((await it.next()).value);
     expect(
       secondEpisode.filter((e) => e.type === 'slow_client_warning'),
     ).toHaveLength(1);

@@ -36,9 +36,13 @@ import { useContext, act } from 'react';
 import {
   AppContainer,
   dedupeNewestFirst,
+  getSpeculativeToolResult,
   getNextRenderMode,
+  isInputActiveForState,
   isRenderModeToggleKey,
   mergeStartupWarnings,
+  shouldAutoOpenSkillReview,
+  shouldDrainMessageQueue,
 } from './AppContainer.js';
 import {
   formatSessionWindowTitle,
@@ -65,6 +69,8 @@ import {
 import {
   type HistoryItem,
   type HistoryItemWithoutId,
+  MessageType,
+  StreamingState,
   ToolCallStatus,
 } from './types.js';
 import type { RestoreOption } from './components/RewindSelector.js';
@@ -410,8 +416,29 @@ describe('AppContainer State Management', () => {
     } as InitializationResult;
   });
 
+  describe('speculative tool results', () => {
+    it('renders error envelopes as failed tools', () => {
+      expect(
+        getSpeculativeToolResult({
+          error: 'Command timed out.\npartial output',
+        }),
+      ).toEqual({
+        text: 'Command timed out.\npartial output',
+        status: ToolCallStatus.Error,
+      });
+    });
+
+    it('keeps output envelopes successful', () => {
+      expect(getSpeculativeToolResult({ output: 'done' })).toEqual({
+        text: 'done',
+        status: ToolCallStatus.Success,
+      });
+    });
+  });
+
   afterEach(() => {
     cleanup();
+    vi.useRealTimers();
   });
 
   const rewindUserItem = (
@@ -549,6 +576,94 @@ describe('AppContainer State Management', () => {
   };
 
   describe('Basic Rendering', () => {
+    it('continues quitting when cancelling the active request fails', () => {
+      vi.useFakeTimers();
+      const cancelOngoingRequest = vi.fn(() => {
+        throw new Error('cancel failed');
+      });
+      const requestShutdown = vi.fn();
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: StreamingState.Responding,
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest,
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue({
+        initialize: vi.fn().mockResolvedValue(undefined),
+        setTools: vi.fn().mockResolvedValue(undefined),
+        isInitialized: vi.fn().mockReturnValue(false),
+        requestShutdown,
+      } as unknown as GeminiClient);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      const slashCommandActions = mockedUseSlashCommandProcessor.mock.calls.at(
+        -1,
+      )?.[12] as { quit: (messages: HistoryItem[]) => void };
+      const timerCount = vi.getTimerCount();
+      expect(() => slashCommandActions.quit([])).not.toThrow();
+
+      expect(cancelOngoingRequest).toHaveBeenCalledOnce();
+      expect(requestShutdown).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(timerCount + 1);
+    });
+
+    it('shows recording failures as warnings and unsubscribes on unmount', async () => {
+      const addItem = vi.fn();
+      mockedUseHistory.mockReturnValue({
+        history: [],
+        addItem,
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      let listener:
+        | ((event: { sessionId: string; error: Error }) => void)
+        | undefined;
+      const unsubscribe = vi.fn();
+      vi.spyOn(mockConfig, 'onChatRecordingFailure').mockImplementation(
+        (nextListener) => {
+          listener = nextListener;
+          return unsubscribe;
+        },
+      );
+
+      const { unmount } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      await act(async () => {
+        listener?.({ sessionId: 's-1', error: new Error('EACCES') });
+      });
+
+      expect(addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.WARNING,
+          text: expect.stringContaining('Session recording stopped'),
+        }),
+        expect.any(Number),
+      );
+      unmount();
+      expect(unsubscribe).toHaveBeenCalledOnce();
+    });
+
     it('renders without crashing with minimal props', () => {
       expect(() => {
         render(
@@ -823,6 +938,90 @@ describe('AppContainer State Management', () => {
       }).not.toThrow();
     });
 
+    it('keeps input active while compression is processing', () => {
+      expect(
+        isInputActiveForState({
+          initError: null,
+          isProcessing: true,
+          hasPendingCompression: true,
+          streamingState: StreamingState.Idle,
+        }),
+      ).toBe(true);
+
+      expect(
+        isInputActiveForState({
+          initError: null,
+          isProcessing: true,
+          hasPendingCompression: false,
+          streamingState: StreamingState.Idle,
+        }),
+      ).toBe(false);
+    });
+
+    it('does not drain queued messages while compression is processing', () => {
+      expect(
+        shouldDrainMessageQueue({
+          isConfigInitialized: true,
+          streamingState: StreamingState.Idle,
+          isProcessing: true,
+          dialogsVisible: false,
+          messageQueueLength: 1,
+        }),
+      ).toBe(false);
+
+      expect(
+        shouldDrainMessageQueue({
+          isConfigInitialized: true,
+          streamingState: StreamingState.Idle,
+          isProcessing: false,
+          dialogsVisible: false,
+          messageQueueLength: 1,
+        }),
+      ).toBe(true);
+    });
+
+    it('marks Ctrl+Q submissions to wait for the idle boundary', () => {
+      const mockQueueMessage = vi.fn();
+      const mockSubmitQuery = vi.fn();
+
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'responding',
+        submitQuery: mockSubmitQuery,
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      capturedUIActions.handleFinalSubmit('/btw next turn', {
+        deferUntilIdle: true,
+      });
+
+      expect(mockQueueMessage).toHaveBeenCalledWith('/btw next turn', true);
+      expect(mockSubmitQuery).not.toHaveBeenCalled();
+    });
+
     it('submits /btw immediately instead of queueing while responding', () => {
       const mockSubmitQuery = vi.fn();
       const mockQueueMessage = vi.fn();
@@ -916,6 +1115,56 @@ describe('AppContainer State Management', () => {
           commandContext: {},
           shellConfirmationRequest: null,
           confirmationRequest: null,
+        });
+        mockedUseMessageQueue.mockReturnValue({
+          messageQueue: [],
+          addMessage: mockQueueMessage,
+          clearQueue: vi.fn(),
+          getQueuedMessagesText: vi.fn().mockReturnValue(''),
+          popAllMessages: vi.fn().mockReturnValue(null),
+          drainQueue: vi.fn().mockReturnValue([]),
+          popNextSegment: vi.fn().mockReturnValue(null),
+        });
+
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+
+        capturedUIActions.handleFinalSubmit(command);
+
+        expect(mockHandleSlashCommand).toHaveBeenCalledWith('/quit');
+        expect(mockQueueMessage).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['/quit', '/exit'])(
+      'routes "%s" immediately while responding',
+      (command) => {
+        const mockHandleSlashCommand = vi.fn();
+        const mockQueueMessage = vi.fn();
+        mockedUseSlashCommandProcessor.mockReturnValue({
+          handleSlashCommand: mockHandleSlashCommand,
+          slashCommands: [],
+          pendingHistoryItems: [],
+          commandContext: {},
+          shellConfirmationRequest: null,
+          confirmationRequest: null,
+        });
+        mockedUseGeminiStream.mockReturnValue({
+          streamingState: StreamingState.Responding,
+          submitQuery: vi.fn(),
+          initError: null,
+          pendingHistoryItems: [],
+          thought: null,
+          cancelOngoingRequest: vi.fn(),
+          retryLastPrompt: vi.fn(),
+          streamingResponseLengthRef: { current: 0 },
+          isReceivingContent: false,
         });
         mockedUseMessageQueue.mockReturnValue({
           messageQueue: [],
@@ -2586,12 +2835,15 @@ describe('AppContainer State Management', () => {
         },
       } as unknown as LoadedSettings;
 
-      let titleRecordedCallback: ((customTitle: string) => void) | undefined;
-      let registeredTitleRecordedCallback:
-        | ((customTitle: string) => void)
-        | undefined;
+      type TitleRecordedCallback = (
+        customTitle: string,
+        source: string,
+        sessionId: string,
+      ) => void;
+      let titleRecordedCallback: TitleRecordedCallback | undefined;
+      let registeredTitleRecordedCallback: TitleRecordedCallback | undefined;
       const setTitleRecordedCallback = vi.fn(
-        (callback: ((customTitle: string) => void) | undefined) => {
+        (callback: TitleRecordedCallback | undefined) => {
           titleRecordedCallback = callback;
           if (callback) {
             registeredTitleRecordedCallback = callback;
@@ -2645,8 +2897,13 @@ describe('AppContainer State Management', () => {
       expect(registeredTitleRecordedCallback).toStrictEqual(
         expect.any(Function),
       );
+      const currentSessionId = mockConfig.getSessionId();
       await act(async () => {
-        registeredTitleRecordedCallback!('Fix terminal title');
+        registeredTitleRecordedCallback!(
+          'Fix terminal title',
+          'manual',
+          currentSessionId,
+        );
       });
       // The initial render wrote the default title; after the callback
       // the next writeTerminalTitle call (when effects flush) should
@@ -2681,13 +2938,14 @@ describe('AppContainer State Management', () => {
       } as unknown as LoadedSettings;
 
       const existingCallback = vi.fn();
-      let titleRecordedCallback:
-        | ((customTitle: string, source: string) => void)
-        | undefined;
+      type TitleRecordedCallback = (
+        customTitle: string,
+        source: string,
+        sessionId: string,
+      ) => void;
+      let titleRecordedCallback: TitleRecordedCallback | undefined;
       const setTitleRecordedCallback = vi.fn(
-        (
-          callback: ((customTitle: string, source: string) => void) | undefined,
-        ) => {
+        (callback: TitleRecordedCallback | undefined) => {
           titleRecordedCallback = callback;
         },
       );
@@ -2730,12 +2988,25 @@ describe('AppContainer State Management', () => {
 
       // Invoke the chained callback — it should call both the existing
       // ACP callback AND the new setSessionName setter
+      const currentSessionId = mockConfig.getSessionId();
       await act(async () => {
-        titleRecordedCallback!('Test title', 'rename');
+        titleRecordedCallback!('Test title', 'rename', currentSessionId);
       });
 
       // The existing ACP callback was called (preserved by chaining)
-      expect(existingCallback).toHaveBeenCalledWith('Test title', 'rename');
+      expect(existingCallback).toHaveBeenCalledWith(
+        'Test title',
+        'rename',
+        currentSessionId,
+      );
+      await act(async () => {
+        titleRecordedCallback!('Stale title', 'auto', 'old-session-id');
+      });
+      expect(existingCallback).toHaveBeenLastCalledWith(
+        'Stale title',
+        'auto',
+        'old-session-id',
+      );
 
       unmount();
       // After unmount, the callback should be restored to the original
@@ -3448,106 +3719,123 @@ describe('AppContainer State Management', () => {
       // structurally present.
       expect(abortSpy).not.toHaveBeenCalled();
     });
-    describe('Ctrl+O compact mode toggle (issue #3899)', () => {
-      const ctrlOKey: Key = {
-        name: 'o',
-        ctrl: true,
+  });
+
+  describe('Transcript (Ctrl+O) integration', () => {
+    // The frozen transcript (TranscriptView) renders its title row as the
+    // literal "Transcript"; the main view never does, so its presence in the
+    // rendered frame is a reliable open/closed signal.
+    const TRANSCRIPT_MARKER = 'Transcript';
+
+    const makeKey = (overrides: Partial<Key>): Key =>
+      ({
+        name: '',
+        ctrl: false,
         meta: false,
         shift: false,
         paste: false,
-        sequence: '',
-      };
+        sequence: '',
+        ...overrides,
+      }) as Key;
 
-      // The global handler is the one that calls compactToggleHasVisualEffect.
-      // Mirrors the discriminator pattern used by the renderMode test above.
-      const findGlobalKeypressHandler = () =>
-        mockedUseKeypress.mock.calls
-          .map((call) => call[0])
-          .reverse()
-          .find(
-            (handler): handler is (key: Key) => void =>
-              typeof handler === 'function' &&
-              handler.toString().includes('compactToggleHasVisualEffect'),
-          );
+    // The global keypress handler owns Ctrl+O / the transcript close keys; it is
+    // the registered useKeypress handler whose body references TOGGLE_TRANSCRIPT.
+    const getGlobalKeypress = () =>
+      mockedUseKeypress.mock.calls
+        .map((call) => call[0])
+        .reverse()
+        .find(
+          (handler): handler is (key: Key) => void =>
+            typeof handler === 'function' &&
+            handler.toString().includes('TOGGLE_TRANSCRIPT'),
+        ) as ((key: Key) => void) | undefined;
 
-      it('skips refreshStatic on Ctrl+O when history has no tool_group/thought items', () => {
-        mockedUseHistory.mockReturnValue({
-          history: [
-            { type: 'user', id: 1, text: 'hi' },
-            { type: 'gemini', id: 2, text: 'hello' },
-          ],
-          addItem: vi.fn(),
-          updateItem: vi.fn(),
-          clearItems: vi.fn(),
-          loadHistory: vi.fn(),
-          truncateToItem: vi.fn(),
-        });
+    const ctrlO = makeKey({ name: 'o', ctrl: true, sequence: '\x0f' });
 
-        render(
-          <AppContainer
-            config={mockConfig}
-            settings={mockSettings}
-            version="1.0.0"
-            initializationResult={mockInitResult}
-          />,
-        );
-        mockStdout.write.mockClear();
+    const renderApp = () =>
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
 
-        const handler = findGlobalKeypressHandler();
-        expect(handler).toBeDefined();
-        handler!(ctrlOKey);
+    it('Ctrl+O installs the TranscriptView in the rendered tree', () => {
+      const { lastFrame } = renderApp();
+      const handleKeypress = getGlobalKeypress();
+      expect(handleKeypress).toBeDefined();
+      // Baseline: the marker also confirms the main view doesn't render it.
+      expect(lastFrame()).not.toContain(TRANSCRIPT_MARKER);
+      act(() => handleKeypress!(ctrlO));
+      expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
+    });
 
-        // refreshStatic writes ansiEscapes.clearTerminal — its absence
-        // proves we took the no-op short-circuit.
-        expect(mockStdout.write).not.toHaveBeenCalledWith(
-          ansiEscapes.clearTerminal,
-        );
+    it.each([
+      ['Esc', makeKey({ name: 'escape', sequence: '\x1b' })],
+      ['q', makeKey({ name: 'q', sequence: 'q' })],
+      ['Ctrl+C', makeKey({ name: 'c', ctrl: true, sequence: '\x03' })],
+      ['Ctrl+D', makeKey({ name: 'd', ctrl: true, sequence: '\x04' })],
+      // Ctrl+O is the toggle: pressing it again while open also closes.
+      ['Ctrl+O', ctrlO],
+    ])('%s while open removes the TranscriptView', (_label, closeKey) => {
+      const { lastFrame } = renderApp();
+      const handleKeypress = getGlobalKeypress()!;
+      act(() => handleKeypress(ctrlO));
+      expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
+      act(() => handleKeypress(closeKey));
+      expect(lastFrame()).not.toContain(TRANSCRIPT_MARKER);
+    });
+
+    it.each([
+      ['Ctrl+Q', makeKey({ name: 'q', ctrl: true, sequence: '\x11' })],
+      ['Alt+Q', makeKey({ name: 'q', meta: true, sequence: '\x1bq' })],
+      ['Shift+Q', makeKey({ name: 'q', shift: true, sequence: 'Q' })],
+    ])(
+      '%s does NOT close the transcript (bare-q modifier guard)',
+      (_l, modQ) => {
+        const { lastFrame } = renderApp();
+        const handleKeypress = getGlobalKeypress()!;
+        act(() => handleKeypress(ctrlO));
+        expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
+        act(() => handleKeypress(modQ));
+        // Only a bare `q` closes; modified variants stay swallowed but open.
+        expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
+      },
+    );
+
+    it('swallows arbitrary keys while open and keeps the transcript open', () => {
+      const { lastFrame } = renderApp();
+      const handleKeypress = getGlobalKeypress()!;
+      act(() => handleKeypress(ctrlO));
+      expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
+      expect(() =>
+        act(() => handleKeypress(makeKey({ name: 'x', sequence: 'x' }))),
+      ).not.toThrow();
+      expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
+    });
+
+    it('auto-closes when a blocking confirmation appears (anti-deadlock)', () => {
+      // A blocking prompt would be invisible behind the alt-screen transcript;
+      // the needsBlockingInput effect must close it on the same commit.
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'waiting_for_confirmation',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
       });
-
-      it('skips refreshStatic on Ctrl+O when history contains only tool_group (no visual effect)', () => {
-        mockedUseHistory.mockReturnValue({
-          history: [
-            { type: 'user', id: 1, text: 'run ls' },
-            {
-              type: 'tool_group',
-              id: 2,
-              tools: [
-                {
-                  callId: 'c1',
-                  name: 'shell',
-                  description: 'shell description',
-                  status: ToolCallStatus.Success,
-                  resultDisplay: undefined,
-                  confirmationDetails: undefined,
-                },
-              ],
-            },
-          ],
-          addItem: vi.fn(),
-          updateItem: vi.fn(),
-          clearItems: vi.fn(),
-          loadHistory: vi.fn(),
-          truncateToItem: vi.fn(),
-        });
-
-        render(
-          <AppContainer
-            config={mockConfig}
-            settings={mockSettings}
-            version="1.0.0"
-            initializationResult={mockInitResult}
-          />,
-        );
-        mockStdout.write.mockClear();
-
-        const handler = findGlobalKeypressHandler();
-        expect(handler).toBeDefined();
-        handler!(ctrlOKey);
-
-        expect(mockStdout.write).not.toHaveBeenCalledWith(
-          ansiEscapes.clearTerminal,
-        );
-      });
+      const { lastFrame } = renderApp();
+      const handleKeypress = getGlobalKeypress()!;
+      act(() => handleKeypress(ctrlO));
+      // openTranscript sets the freeze, but the anti-deadlock effect tears it
+      // back down on the same commit, so it never stays visible.
+      expect(lastFrame()).not.toContain(TRANSCRIPT_MARKER);
     });
   });
 
@@ -4066,6 +4354,83 @@ describe('AppContainer State Management', () => {
       capturedUIActions.openRewindSelector();
 
       expect(mockAddItemDisabled).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Skill review auto-open gating (shouldAutoOpenSkillReview)', () => {
+    const pending = {
+      taskId: 'skill-task-1',
+      skills: [
+        {
+          name: 'auto-skill-alpha',
+          description: 'does alpha',
+          stagedManifestPath: '/tmp/staged/auto-skill-alpha/SKILL.md',
+        },
+      ],
+    };
+
+    /** The baseline where every gate is satisfied and the dialog opens. */
+    const openable = {
+      pending,
+      streamingState: StreamingState.Idle,
+      isMemoryDialogOpen: false,
+      autoSkillEnabled: true,
+      dismissedTaskIds: new Set<string>(),
+    };
+
+    it('opens when idle with an undismissed pending batch and auto-skill on', () => {
+      expect(shouldAutoOpenSkillReview(openable)).toBe(true);
+    });
+
+    it('does NOT open while auto-skill is disabled (the turn-off flow)', () => {
+      // The state right after "Turn off auto-generated skills": the batch
+      // stays pending (turn-off closes without dismissing), so only the live
+      // flag keeps it from re-popping.
+      expect(
+        shouldAutoOpenSkillReview({ ...openable, autoSkillEnabled: false }),
+      ).toBe(false);
+    });
+
+    it('does NOT open over an open /memory dialog', () => {
+      expect(
+        shouldAutoOpenSkillReview({ ...openable, isMemoryDialogOpen: true }),
+      ).toBe(false);
+    });
+
+    it('opens again once /memory closes with auto-skill re-enabled', () => {
+      // The re-enable flow: same inputs as the case above except /memory has
+      // been closed (the effect re-runs on isMemoryDialogOpen for exactly
+      // this transition), so the pending batch resurfaces.
+      expect(
+        shouldAutoOpenSkillReview({ ...openable, isMemoryDialogOpen: false }),
+      ).toBe(true);
+    });
+
+    it('does NOT reopen a batch the user dismissed with Esc', () => {
+      expect(
+        shouldAutoOpenSkillReview({
+          ...openable,
+          dismissedTaskIds: new Set([pending.taskId]),
+        }),
+      ).toBe(false);
+    });
+
+    it('does NOT open while streaming or with no pending skills', () => {
+      expect(
+        shouldAutoOpenSkillReview({
+          ...openable,
+          streamingState: StreamingState.Responding,
+        }),
+      ).toBe(false);
+      expect(shouldAutoOpenSkillReview({ ...openable, pending: null })).toBe(
+        false,
+      );
+      expect(
+        shouldAutoOpenSkillReview({
+          ...openable,
+          pending: { taskId: 'skill-task-1', skills: [] },
+        }),
+      ).toBe(false);
     });
   });
 });

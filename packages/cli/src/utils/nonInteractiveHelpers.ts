@@ -15,10 +15,14 @@ import type {
   McpToolProgressData,
 } from '@qwen-code/qwen-code-core';
 import {
+  ApprovalMode,
   OutputFormat,
   ToolErrorType,
   createDebugLogger,
+  getArenaSystemReminder,
   getMCPServerStatus,
+  getPlanModeSystemReminder,
+  isShellProgressData,
 } from '@qwen-code/qwen-code-core';
 import type { Part, PartListUnion } from '@google/genai';
 import type {
@@ -131,6 +135,39 @@ export function computeUsageFromMetrics(metrics: SessionMetrics): Usage {
   return usage;
 }
 
+export function buildInitialSystemReminders(config: Config): Part[] {
+  const reminders: Part[] = [];
+
+  if (config.getApprovalMode() === ApprovalMode.PLAN) {
+    reminders.push({ text: getPlanModeSystemReminder(config.getSdkMode?.()) });
+  }
+
+  const arenaManager = config.getArenaManager?.();
+  if (arenaManager) {
+    try {
+      const sessionDir = arenaManager.getArenaSessionDir();
+      const configPath = `${sessionDir}/config.json`;
+      reminders.push({ text: getArenaSystemReminder(configPath) });
+    } catch {
+      // Arena config not yet initialized; match the regular send path.
+    }
+  }
+
+  return reminders;
+}
+
+export function insertAfterFunctionResponses(
+  parts: Part[],
+  additions: Part[],
+): Part[] {
+  const firstNonFunctionResponse = parts.findIndex(
+    (part) => !part.functionResponse,
+  );
+  const insertAt =
+    firstNonFunctionResponse === -1 ? parts.length : firstNonFunctionResponse;
+  return [...parts.slice(0, insertAt), ...additions, ...parts.slice(insertAt)];
+}
+
 /**
  * Load slash command names using getAvailableCommands
  *
@@ -236,9 +273,10 @@ function isMcpToolProgressData(
 
 /**
  * Creates a generic output update handler for tools with canUpdateOutput=true.
- * This handler forwards MCP progress data (McpToolProgressData) as tool_progress
- * stream events via the adapter. Progress events are only emitted when the adapter
- * supports partial messages (i.e., includePartialMessages is true).
+ * This handler forwards MCP progress data (McpToolProgressData) and shell
+ * liveness heartbeats (ShellProgressData) as tool_progress stream events via
+ * the adapter. Progress events are only emitted when the adapter supports
+ * partial messages (i.e., includePartialMessages is true).
  *
  * @param request - Tool call request info
  * @param adapter - The adapter instance for emitting messages
@@ -254,7 +292,7 @@ export function createToolProgressHandler(
     _callId: string,
     output: ToolResultDisplay,
   ) => {
-    if (isMcpToolProgressData(output)) {
+    if (isMcpToolProgressData(output) || isShellProgressData(output)) {
       adapter.emitToolProgress(request, output);
     }
   };
@@ -556,39 +594,11 @@ export function functionResponsePartsToString(parts: Part[]): string {
   return parts
     .map((part) => {
       if ('functionResponse' in part) {
-        const content = part.functionResponse?.response?.['output'] ?? '';
+        const response = part.functionResponse?.response;
+        const content = response?.['output'] ?? response?.['error'] ?? '';
         return content;
       }
       return JSON.stringify(part);
     })
     .join('');
-}
-
-/**
- * Extracts content from a tool call response for inclusion in tool_result blocks.
- * Uses functionResponsePartsToString to properly handle functionResponse parts,
- * which correctly extracts output content from functionResponse objects rather
- * than simply concatenating text or JSON.stringify.
- *
- * @param response - Tool call response information
- * @returns String content for the tool_result block, or undefined if no content available
- */
-export function toolResultContent(
-  response: ToolCallResponseInfo,
-): string | undefined {
-  if (
-    typeof response.resultDisplay === 'string' &&
-    response.resultDisplay.trim().length > 0
-  ) {
-    return response.resultDisplay;
-  }
-  if (response.responseParts && response.responseParts.length > 0) {
-    // Always use functionResponsePartsToString to properly handle
-    // functionResponse parts that contain output content
-    return functionResponsePartsToString(response.responseParts);
-  }
-  if (response.error) {
-    return response.error.message;
-  }
-  return undefined;
 }

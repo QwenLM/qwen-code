@@ -1036,6 +1036,41 @@ describe('StreamJsonOutputAdapter', () => {
       expect(stdoutWriteSpy).not.toHaveBeenCalled();
     });
 
+    it('should emit shell heartbeats as tool_progress stream events', () => {
+      adapter = new StreamJsonOutputAdapter(mockConfig, true);
+      stdoutWriteSpy.mockClear();
+
+      adapter.emitToolProgress(
+        { ...mockRequest, name: 'run_shell_command' },
+        {
+          type: 'shell_progress',
+          elapsedMs: 10_000,
+          lastOutputAgeMs: 4_000,
+          totalLines: 12,
+          totalBytes: 512,
+          timeoutMs: 120_000,
+        },
+      );
+
+      expect(stdoutWriteSpy).toHaveBeenCalledTimes(1);
+      const output = stdoutWriteSpy.mock.calls[0][0] as string;
+      const parsed = JSON.parse(output);
+
+      expect(parsed.type).toBe('stream_event');
+      expect(parsed.event).toEqual({
+        type: 'tool_progress',
+        tool_use_id: 'tool-call-1',
+        content: {
+          type: 'shell_progress',
+          elapsedMs: 10_000,
+          lastOutputAgeMs: 4_000,
+          totalLines: 12,
+          totalBytes: 512,
+          timeoutMs: 120_000,
+        },
+      });
+    });
+
     it('should emit multiple tool_progress events for sequential progress updates', () => {
       adapter = new StreamJsonOutputAdapter(mockConfig, true);
       stdoutWriteSpy.mockClear();

@@ -497,7 +497,7 @@ export function parseGitDiff(stdout: string): Map<string, Hunk[]> {
  * masse so multi-byte sequences like `\346\226\207` (文) round-trip
  * correctly even though we never set quotepath=true ourselves.
  */
-function unquoteCStylePath(s: string): string {
+export function unquoteCStylePath(s: string): string {
   if (!s.startsWith('"') || !s.endsWith('"') || s.length < 2) return s;
   const inner = s.slice(1, -1);
   // Build raw bytes first so octal `\NNN` sequences (each one byte of a

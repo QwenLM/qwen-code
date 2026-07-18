@@ -100,11 +100,22 @@ export { useDaemonSessions as useSessions } from './daemon/index.js';
 /** Available slash-command skills. */
 export { useDaemonSkills as useSkills } from './daemon/index.js';
 
+/** Consolidated daemon status report (`GET /daemon/status`). */
+export { useDaemonStatusReport as useStatusReport } from './daemon/index.js';
+/** Options for `useStatusReport` (detail level + resource load flags). */
+export type { DaemonStatusReportOptions as StatusReportOptions } from './daemon/index.js';
+
+/** Aggregate token-usage dashboard (`GET /usage/dashboard`). */
+export { useDaemonUsageDashboard as useUsageDashboard } from './daemon/index.js';
+/** Options for `useUsageDashboard` (heatmap window + resource load flags). */
+export type { DaemonUsageDashboardOptions as UsageDashboardOptions } from './daemon/index.js';
+
 /** Registered tools and their configuration. */
 export { useDaemonTools as useTools } from './daemon/index.js';
 
 /** Workspace settings (read/write). */
 export { useDaemonSettings as useSettings } from './daemon/index.js';
+export { useDaemonProviders as useProviders } from './daemon/index.js';
 
 // ── Workspace Hooks ───────────────────────────────────────────────
 
@@ -125,6 +136,9 @@ export { useDaemonWorkspaceEventSignals as useWorkspaceEventSignals } from './da
 /** Raw transcript blocks from the SSE stream. For custom message conversion. */
 export { useDaemonTranscriptBlocks as useTranscriptBlocks } from './daemon/session/index.js';
 
+/** Load older persisted transcript pages for the active session. */
+export { useDaemonTranscriptHistory as useTranscriptHistory } from './daemon/session/index.js';
+
 /** Full transcript state including block index and progress tracking. */
 export { useDaemonTranscriptState as useTranscriptState } from './daemon/session/index.js';
 
@@ -140,10 +154,22 @@ export { useDaemonFollowupSuggestion } from './daemon/index.js';
 /** Notifies when the daemon drains browser-queued messages into the running turn. */
 export { useDaemonMidTurnInjected } from './daemon/index.js';
 
+/** Notifies when the daemon's pending prompt queue changes (added/started/completed). */
+export {
+  getPendingPromptVersion,
+  getPendingPromptEvents,
+  consumePendingPromptEvents,
+  subscribePendingPromptEvents,
+  subscribePendingPromptVersion,
+} from './daemon/index.js';
+
 // ── Constants ─────────────────────────────────────────────────────
 
 /** Ordered list of approval modes for cycling: `['auto', 'suggest', 'ask']`. */
 export { DAEMON_APPROVAL_MODES } from './daemon/index.js';
+
+/** HTTP statuses that mean the requested daemon session no longer exists. */
+export { isMissingSessionHttpStatus } from './daemon/index.js';
 
 /** Canonical Agent (sub-agent) tool name + predicate for permission UIs. */
 export { AGENT_TOOL_NAME, isAgentTool } from './constants/toolNames.js';
@@ -175,6 +201,7 @@ export type {
   DaemonSessionNotice,
   /** Props accepted by `<DaemonSessionProvider>`. */
   DaemonSessionProviderProps,
+  DaemonTranscriptHistory,
   /** Streaming lifecycle: `'idle' | 'waiting' | 'responding' | 'thinking'`. */
   DaemonStreamingState,
   /** Prompt submission status: `'idle' | 'waiting' | 'streaming'`. */
@@ -203,8 +230,14 @@ export type {
   DaemonSessionStatsStatus,
   /** Per-tool call count, success/fail, and duration within a stats response. */
   DaemonSessionStatsToolByName,
+  /** Options for pending prompt queue actions scoped to a session. */
+  PendingPromptActionOptions,
   /** Options for `sendPrompt()`: optimistic message, image attachments. */
   SendPromptOptions,
+  /** Options for non-blocking `submitPrompt()`. */
+  SubmitPromptOptions,
+  /** Result of non-blocking `submitPrompt()`: the daemon-assigned promptId. */
+  SubmitPromptResult,
 } from './daemon/index.js';
 
 // ── Types: Todos ─────────────────────────────────────────────────
@@ -252,6 +285,14 @@ export type {
   DaemonGlobOptions,
   /** Glob match result containing matched file paths. */
   DaemonGlobResult,
+  /** A durable scheduled task (cron) as returned by the daemon. */
+  DaemonScheduledTask,
+  /** One recorded fire in a scheduled task's run history. */
+  DaemonScheduledTaskRun,
+  /** Request body for creating a scheduled task. */
+  DaemonCreateScheduledTaskRequest,
+  /** Partial-update body for a scheduled task. */
+  DaemonUpdateScheduledTaskRequest,
   /** Memory file scope: `'workspace' | 'global'`. */
   DaemonContextFileScope,
 } from './daemon/index.js';
@@ -261,6 +302,34 @@ export type {
 export type {
   /** Session list entry: id, title, timestamps, client count, active prompt flag. */
   DaemonSessionSummary,
+  /** Daemon status report envelope from `GET /daemon/status`. */
+  DaemonStatusReport,
+  /** Status report detail level: `'summary' | 'full'`. */
+  DaemonStatusReportDetail,
+  /** One triage finding in the daemon status rollup. */
+  DaemonStatusReportIssue,
+  /** Overall daemon health rollup: `'ok' | 'warning' | 'error'`. */
+  DaemonStatusReportLevel,
+  /** Per-section workspace diagnostics in a `detail=full` report. */
+  DaemonStatusReportSection,
+  /** Per-session diagnostics row in a `detail=full` report. */
+  DaemonStatusReportSession,
+  /** One time-bucketed sample in the Daemon Status metrics series (charts). */
+  DaemonMetricsSeriesBucket,
+  /** Usage-dashboard summary window: `today` | `week` (7D) | `month` (30D). */
+  DaemonUsageRange,
+  /** Aggregate token-usage dashboard payload (`GET /usage/dashboard`). */
+  DaemonUsageDashboard,
+  /** Flattened summary totals in the usage dashboard. */
+  DaemonUsageDashboardTotals,
+  /** One model's token share of the range. */
+  DaemonUsageModelShare,
+  /** One skill's invocation count over the range. */
+  DaemonUsageSkillCall,
+  /** One day's tokens + sessions for the daily charts. */
+  DaemonUsageDailyPoint,
+  /** One heatmap cell: tokens (intensity) + cache-read rate. */
+  DaemonUsageHeatmapDay,
   /** Full agent detail including system prompt, tools, and run config. */
   DaemonWorkspaceAgentDetail,
   /** Agent list entry: name, description, level, model, builtin flag. */
@@ -287,6 +356,13 @@ export type {
   DaemonWorkspaceSettingsStatus,
   /** Result of POST /workspace/settings. */
   DaemonSettingUpdateResult,
+  /** Configured model providers returned by GET /workspace/providers. */
+  DaemonWorkspaceProvidersStatus,
+  DaemonWorkspaceProviderStatus,
+  DaemonWorkspaceProviderModel,
+  /** Request/result for DELETE /workspace/models. */
+  DaemonModelDeleteRequest,
+  DaemonModelDeleteResult,
 } from './daemon/index.js';
 
 // ── Types: SDK Transcript Blocks (low-level) ─────────────────────

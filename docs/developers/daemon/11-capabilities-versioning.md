@@ -2,11 +2,11 @@
 
 ## Overview
 
-`GET /capabilities` is the daemon preflight endpoint. Every SDK client should read it before calling any other route so it can learn which protocol version the daemon speaks, which feature tags are enabled, and which workspace the daemon is bound to. The contract:
+`GET /capabilities` is the daemon preflight endpoint. Every SDK client should read it before calling any other route so it can learn which protocol version the daemon speaks, which feature tags are enabled, and which workspace runtimes the daemon accepts. The contract:
 
 - **There is one protocol version: `v1`.** `SERVE_PROTOCOL_VERSION = 'v1'` and `SUPPORTED_SERVE_PROTOCOL_VERSIONS = ['v1']`. v1 is additive internally; breaking frame-shape changes are reserved for v2.
 - **Each tag has a `since` version.** Future v2 daemons can advertise both v1 and v2 tags.
-- **Some tags are conditional.** Ten tags (`require_auth`, `mcp_workspace_pool`, `mcp_pool_restart`, `allow_origin`, `prompt_absolute_deadline`, `writer_idle_timeout`, `workspace_settings`, `session_shell_command`, `rate_limit`, `workspace_reload`) are advertised only when the corresponding deployment toggle is enabled. Tag presence means the behavior exists.
+- **Some tags are conditional.** Tags listed in `CONDITIONAL_SERVE_FEATURES` are advertised only when the corresponding deployment toggle is enabled. Tag presence means the behavior exists.
 - **Capability tag = behavior contract.** Adding new behavior under an existing tag can silently break clients that preflighted the old tag. New behavior needs a new tag.
 
 The complete registry lives in `packages/cli/src/serve/capabilities.ts`.
@@ -30,12 +30,13 @@ The complete registry lives in `packages/cli/src/serve/capabilities.ts`.
   mode: 'http-bridge',
   features: ServeFeature[],
   workspaceCwd: string,
+  workspaces?: Array<{ id: string, cwd: string, primary: boolean, trusted: boolean }>,
   protocol?: { current: 'v1', supported: ['v1'] },
   policy?: { permission: PermissionPolicy },
 }
 ```
 
-`workspaceCwd` is the canonical workspace bound at daemon boot (see [`02-serve-runtime.md`](./02-serve-runtime.md)). `policy.permission` is the active mediator policy.
+`workspaceCwd` is the canonical primary workspace path (see [`02-serve-runtime.md`](./02-serve-runtime.md)). Current daemons use `workspaces[]` as the registered runtime catalog; `multi_workspace_sessions` indicates that more than one runtime is active. `policy.permission` is the active mediator policy.
 
 ### `ServeCapabilityDescriptor`
 
@@ -46,10 +47,12 @@ interface ServeCapabilityDescriptor {
 }
 ```
 
-Two v1 tags use `modes`:
+Four v1 tags use `modes`:
 
 - `mcp_guardrails: { since: 'v1', modes: ['warn', 'enforce'] }` - clients should preflight `'enforce'` before relying on refusal behavior.
 - `permission_mediation: { since: 'v1', modes: ['first-responder', 'designated', 'consensus', 'local-only'] }` - this is the build-time supported set; the active policy is in `policy.permission`.
+- `workspace_voice_transcription: { since: 'v1', modes: ['batch'] }` - the transcription path the daemon offers.
+- `voice_transcribe: { since: 'v1', modes: ['streaming', 'batch'] }` - the two transcription paths available on the `/voice/stream` WebSocket.
 
 ### Conditional tags
 
@@ -72,9 +75,25 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
       typeof t.writerIdleTimeoutMs === 'number' && t.writerIdleTimeoutMs > 0,
   ],
   ['workspace_settings', (t) => t.persistSettingAvailable === true],
+  ['workspace_voice', (t) => t.persistSettingAvailable === true],
+  [
+    'workspace_voice_transcription',
+    (t) => t.voiceTranscriptionAvailable === true,
+  ],
   ['session_shell_command', (t) => t.sessionShellCommandEnabled === true],
+  [
+    'multi_workspace_session_rewind',
+    (t) => t.multiWorkspaceSessionsEnabled === true,
+  ],
+  [
+    'multi_workspace_session_shell',
+    (t) =>
+      t.multiWorkspaceSessionsEnabled === true &&
+      t.sessionShellCommandEnabled === true,
+  ],
   ['rate_limit', (t) => t.rateLimit === true],
   ['workspace_reload', (t) => t.reloadAvailable === true],
+  ['voice_transcribe', (t) => t.voiceWsAvailable !== false],
 ]);
 ```
 
@@ -85,11 +104,11 @@ The `Map` stores membership and predicate together. Adding a new conditional tag
 
 Baseline tags are not present in the `Map` and are advertised unconditionally. This is intentionally represented by absence rather than by a separate Set.
 
-### 67 tags (v1, grouped by domain)
+### v1 tags grouped by domain
 
-Foundation: `health`, `capabilities`.
+Foundation: `health`, `daemon_status`, `capabilities`.
 
-Sessions: `session_create`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume`, `session_list`, `session_prompt`, `session_cancel`, `session_events`, `session_set_model`, `session_close`, `session_metadata`, `session_context`, `session_context_usage`, `session_supported_commands`, `session_tasks`, `session_stats`, `session_lsp`, `session_status`, `session_approval_mode_control`, `session_recap`, `session_btw`, **`session_shell_command`** (conditional), `session_language`, `session_rewind`, `session_hooks`, `session_branch`.
+Sessions: `session_create`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume`, `session_list`, `session_info`, `session_prompt`, `session_cancel`, `session_events`, `session_set_model`, `session_close`, `session_metadata`, `session_archive`, `session_export`, `session_transcript`, `session_context`, `session_context_usage`, `session_supported_commands`, `session_tasks`, `session_stats`, `session_lsp`, `session_status`, `session_approval_mode_control`, `session_recap`, `session_btw`, **`session_shell_command`** (conditional), `session_language`, `session_rewind`, `session_hooks`, `session_branch`.
 
 Streaming: `slow_client_warning`, `typed_event_schema`.
 
@@ -99,7 +118,11 @@ Permissions: `session_permission_vote`, `permission_vote`, **`permission_mediati
 
 Workspace read-only snapshots: `workspace_mcp`, `workspace_skills`, `workspace_providers`, `workspace_env`, `workspace_preflight`, `workspace_hooks`, `workspace_extensions`.
 
-Workspace mutation (Wave 4+): `workspace_memory`, `workspace_agents`, `workspace_agent_generate`, `workspace_tool_toggle`, **`workspace_settings`** (conditional), `workspace_init`, `workspace_mcp_restart`, `workspace_mcp_manage`, `workspace_file_read`, `workspace_file_bytes`, `workspace_file_write`, **`workspace_reload`** (conditional).
+Extension management: `extension_management_v2` adds the global `/extensions/*` catalog/mutation/operation contract and the workspace activation projection. It is separate from the published `workspace_extensions` compatibility surface and from `workspace_qualified_rest_core`.
+
+Workspace-qualified session reads: `workspace_persisted_transcript`, `workspace_session_export`, `workspace_archived_session_export`. The active and archived export tags are independent from each other and from `session_export` and `workspace_qualified_rest_core`, so clients must pre-flight the exact storage state they intend to export. Persisted transcript paging permits an untrusted secondary under its bounded read policy; both full export paths remain trusted-only.
+
+Workspace mutation (Wave 4+): `workspace_memory`, `workspace_agents`, `workspace_agent_generate`, `workspace_tool_toggle`, **`workspace_settings`** (conditional), `workspace_permissions`, `workspace_init`, `workspace_github_setup`, `workspace_trust`, `workspace_mcp_restart`, `workspace_mcp_manage`, `workspace_file_read`, `workspace_file_bytes`, `workspace_file_write`, **`workspace_reload`** (conditional).
 
 MCP guardrails: **`mcp_guardrails`** (`modes: ['warn', 'enforce']`), `mcp_guardrail_events`, `mcp_server_runtime_mutation`, **`mcp_workspace_pool`** (conditional), **`mcp_pool_restart`** (conditional).
 
@@ -107,7 +130,18 @@ Prompt control: **`prompt_absolute_deadline`** (conditional), **`writer_idle_tim
 
 Auth: `auth_provider_install`, `auth_device_flow`, **`require_auth`** (conditional), **`allow_origin`** (conditional).
 
+Voice: **`workspace_voice`** (conditional), **`workspace_voice_transcription`** (conditional, `modes: ['batch']`), **`voice_transcribe`** (conditional, `modes: ['streaming', 'batch']`).
+
 Rate limiting: **`rate_limit`** (conditional).
+
+Multi-workspace session routing: **`multi_workspace_sessions`** (conditional),
+**`multi_workspace_session_rewind`** (conditional), and
+**`multi_workspace_session_shell`** (conditional). A client may use rewind for
+a primary session with `session_rewind`; a secondary live session additionally
+requires `multi_workspace_session_rewind`. Shell uses the equivalent
+`session_shell_command` plus `multi_workspace_session_shell` pairing for a
+secondary session. ACP-native clients continue to use the `_qwen.methods`
+returned by initialize; no ACP rewind vendor method is advertised.
 
 Bold tags have `modes` or are conditional.
 
@@ -156,21 +190,26 @@ sequenceDiagram
 ## Dependencies
 
 - Read by `packages/cli/src/serve/server.ts` when building `/capabilities` responses.
-- Toggle input comes from `runQwenServe` / `createServeApp`: `{ requireAuth, mcpPoolActive, allowOriginActive, promptDeadlineMs, writerIdleTimeoutMs, persistSettingAvailable, sessionShellCommandEnabled, rateLimit, reloadAvailable }`.
+- Toggle input comes from `runQwenServe` / `createServeApp`, including
+  authentication, MCP, origin, prompt, settings, shell, rate-limit, reload, and
+  live workspace-runtime-count state.
 - The active `permission` policy in the envelope comes from `BridgeOptions.permissionPolicy`, which itself reads `settings.json` `policy.permissionStrategy`.
 
 ## Configuration
 
-| Source                     | Knob                                                            | Effect on capabilities                                                                                                        |
-| -------------------------- | --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| CLI flag                   | `--require-auth`                                                | Advertises `require_auth`.                                                                                                    |
-| Env                        | `QWEN_SERVE_NO_MCP_POOL=1`                                      | Stops advertising `mcp_workspace_pool` and `mcp_pool_restart`; MCP events no longer stamp `scope: 'workspace'`.               |
-| CLI flag                   | `--mcp-client-budget=N`, `--mcp-budget-mode={off,warn,enforce}` | Does not change the tag set (`mcp_guardrails` is always advertised), but changes per-server reservation and refusal behavior. |
-| CLI flag / env             | `--rate-limit` / `QWEN_SERVE_RATE_LIMIT=1`                      | Advertises `rate_limit`.                                                                                                      |
-| Embedded option            | `persistSettingAvailable`                                       | Advertises `workspace_settings`.                                                                                              |
-| CLI flag / embedded option | `--enable-session-shell` / `sessionShellCommandEnabled`         | Advertises `session_shell_command`.                                                                                           |
-| Embedded option            | `reloadAvailable`                                               | Advertises `workspace_reload`.                                                                                                |
-| `settings.json`            | `policy.permissionStrategy`                                     | Sets envelope `policy.permission`.                                                                                            |
+| Source                     | Knob                                                            | Effect on capabilities                                                                                                                                                 |
+| -------------------------- | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CLI flag                   | `--require-auth`                                                | Advertises `require_auth`.                                                                                                                                             |
+| Env                        | `QWEN_SERVE_NO_MCP_POOL=1`                                      | Stops advertising `mcp_workspace_pool` and `mcp_pool_restart`; MCP events no longer stamp `scope: 'workspace'`.                                                        |
+| CLI flag                   | `--mcp-client-budget=N`, `--mcp-budget-mode={off,warn,enforce}` | Does not change the tag set (`mcp_guardrails` is always advertised), but changes per-server reservation and refusal behavior.                                          |
+| CLI flag / env             | `--rate-limit` / `QWEN_SERVE_RATE_LIMIT=1`                      | Advertises `rate_limit`.                                                                                                                                               |
+| Embedded option            | `persistSettingAvailable`                                       | Advertises `workspace_settings` and `workspace_voice`.                                                                                                                 |
+| Embedded option            | `voiceTranscriptionAvailable`                                   | Advertises `workspace_voice_transcription`.                                                                                                                            |
+| CLI flag / embedded option | `--enable-session-shell` / `sessionShellCommandEnabled`         | Advertises `session_shell_command`.                                                                                                                                    |
+| Runtime state              | More than one registered workspace runtime                      | Advertises `multi_workspace_sessions` and `multi_workspace_session_rewind`; also advertises `multi_workspace_session_shell` when session shell is effectively enabled. |
+| Embedded option            | `reloadAvailable`                                               | Advertises `workspace_reload`.                                                                                                                                         |
+| Embedded option            | `voiceWsAvailable`                                              | Advertises `voice_transcribe`.                                                                                                                                         |
+| `settings.json`            | `policy.permissionStrategy`                                     | Sets envelope `policy.permission`.                                                                                                                                     |
 
 ## Caveats and known limits
 

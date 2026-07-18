@@ -9,8 +9,11 @@ import { enableCommand, handleEnable } from './enable.js';
 import yargs from 'yargs';
 import { SettingScope } from '../../config/settings.js';
 
-const mockEnableExtension = vi.hoisted(() => vi.fn());
+const mockEnableExtension = vi.hoisted(() =>
+  vi.fn().mockResolvedValue({ warnings: [] }),
+);
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
+const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 
 vi.mock('./utils.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./utils.js')>();
@@ -39,7 +42,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: mockWriteStdoutLine,
-  writeStderrLine: vi.fn(),
+  writeStderrLine: mockWriteStderrLine,
   clearScreen: vi.fn(),
 }));
 
@@ -82,6 +85,21 @@ describe('extensions enable command', () => {
 describe('handleEnable', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockEnableExtension.mockResolvedValue({ warnings: [] });
+  });
+
+  it('prints committed activation warnings', async () => {
+    mockEnableExtension.mockResolvedValueOnce({
+      warnings: [
+        { code: 'extension_runtime_refresh_failed', error: 'refresh failed' },
+      ],
+    });
+
+    await handleEnable({ name: 'test-extension', scope: 'user' });
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      'extension_runtime_refresh_failed: refresh failed',
+    );
   });
 
   it('should enable an extension with user scope', async () => {

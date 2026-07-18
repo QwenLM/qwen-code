@@ -179,6 +179,24 @@ export function buildWorktreeNotice(
   );
 }
 
+/**
+ * Notice for a sub-agent pinned to a caller-owned worktree via `working_dir`.
+ *
+ * Deliberately narrower than {@link buildWorktreeNotice}: that one describes a
+ * freshly provisioned copy of the parent's tree, so it asks the agent to
+ * translate inherited paths and to re-read files the parent may have touched.
+ * A pinned worktree is instead the code the agent was asked to work on, and its
+ * cwd already IS that directory — telling it to prefix absolute paths or to
+ * translate the parent's paths would contradict the caller's own instructions.
+ */
+export function buildPinnedWorktreeNotice(worktreeCwd: string): string {
+  return (
+    `Your working directory is ${worktreeCwd}, a git worktree checked out to the code you have been asked to work on. ` +
+    `Relative paths, shell commands, and searches already resolve there — do not \`cd\` elsewhere and do not prefix paths with the parent's directory. ` +
+    `Do not operate on the parent's checkout.`
+  );
+}
+
 export function buildChildMessage(directive: string): string {
   return `<${FORK_BOILERPLATE_TAG}>
 STOP. READ THIS FIRST.

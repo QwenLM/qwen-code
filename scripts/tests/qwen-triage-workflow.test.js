@@ -23,7 +23,53 @@ function step(name) {
   return match?.[0] ?? '';
 }
 
+function job(name) {
+  const start = workflow.indexOf(`\n  ${name}:`);
+  if (start === -1) {
+    return '';
+  }
+  const nextJob = workflow.slice(start + 1).search(/\n {2}\S/);
+  return nextJob === -1
+    ? workflow.slice(start)
+    : workflow.slice(start, start + 1 + nextJob);
+}
+
 describe('qwen-triage tmux workflow', () => {
+  it('does not require fork PR authors to have write permission for automatic triage', () => {
+    const precheckJob = job('precheck-pr');
+    const authorizeJob = job('authorize');
+    const authorizeStep = step('Check principal write permission');
+
+    expect(precheckJob).toContain("contents: 'read'");
+    expect(precheckJob).toContain("pull-requests: 'read'");
+    expect(precheckJob).toContain("issues: 'write'");
+    expect(authorizeJob).toContain(
+      "needs.precheck-pr.outputs.decision == 'allow_triage'",
+    );
+    expect(authorizeStep).toContain(
+      'if [ "$EVENT_NAME" = "pull_request_target" ]; then',
+    );
+    expect(authorizeStep).toContain(
+      'echo "should_run=true" >> "$GITHUB_OUTPUT"',
+    );
+    expect(authorizeStep).toContain(
+      'Automatic PR triage allowed for PR #${PR_NUMBER} after same-repo/precheck gate.',
+    );
+    expect(authorizeStep).not.toContain(
+      'pull_request_target) principal="$PR_AUTHOR"',
+    );
+  });
+
+  it('requires open issues or PRs for comment-triggered triage', () => {
+    const authorizeJob = job('authorize');
+    const triageJob = job('triage');
+    const tmuxJob = job('tmux-testing');
+
+    expect(authorizeJob).toContain("github.event.issue.state == 'open'");
+    expect(triageJob).toContain("github.event.issue.state == 'open'");
+    expect(tmuxJob).toContain("github.event.issue.state == 'open'");
+  });
+
   it('escapes embedded tmux artifacts without bash pattern replacement ampersands', () => {
     const postStep = step('Post tmux result comment');
 
@@ -64,6 +110,44 @@ describe('qwen-triage tmux workflow', () => {
     expect(cleanStep).toContain('rm -f /tmp/stage-*.md');
     expect(cleanStep).toContain('echo "stale agent state cleaned"');
     expect(runStep).toContain("QWEN_HOME: '${{ runner.temp }}/qwen-home'");
+  });
+
+  it('passes triage output through env before bash reads it', () => {
+    const checkStep = step('Check triage response');
+
+    expect(checkStep).toContain(
+      "RESPONSE: '${{ steps.triage.outputs.summary }}'",
+    );
+    expect(checkStep).not.toContain(
+      'RESPONSE="${{ steps.triage.outputs.summary }}"',
+    );
+    expect(checkStep).toContain('if [[ -z "${RESPONSE}"');
+  });
+
+  it('notifies the author when a manual triage re-run posts no review', () => {
+    const notifyStep = step('Notify silent triage re-run');
+
+    expect(notifyStep).toContain("github.event_name == 'issue_comment'");
+    expect(notifyStep).toContain('github.event.issue.pull_request');
+    expect(notifyStep).toContain(
+      "startsWith(github.event.comment.body, '@qwen-code /triage')",
+    );
+    expect(notifyStep).toContain('--method GET');
+    expect(notifyStep).toContain('--paginate');
+    expect(notifyStep).toContain('any(.[][];');
+    expect(notifyStep).toContain('.user.login == $bot');
+    expect(notifyStep).toContain('.submitted_at != null');
+    expect(notifyStep).toContain('.submitted_at >= $since');
+    expect(notifyStep).not.toContain('.state == "APPROVED"');
+    expect(notifyStep).toContain('HAS_REVIEW=false');
+    expect(notifyStep).toContain(
+      'gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments"',
+    );
+    expect(notifyStep).toContain('<!-- qwen-triage stage=rerun-summary -->');
+    expect(notifyStep).toContain(
+      'Triage re-run completed without a new review.',
+    );
+    expect(notifyStep).not.toContain('-X PATCH');
   });
 
   it('reports timeout and infra-error without claiming the flow was exercised', () => {

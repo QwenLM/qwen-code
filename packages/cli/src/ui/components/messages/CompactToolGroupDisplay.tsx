@@ -6,18 +6,29 @@
 
 import type React from 'react';
 import { Box, Text } from 'ink';
+import stringWidth from 'string-width';
+import wrapAnsi from 'wrap-ansi';
 import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import type { AnsiOutputDisplay } from '@qwen-code/qwen-code-core';
 import { ToolDisplayNames } from '@qwen-code/qwen-code-core';
+import { t } from '../../../i18n/index.js';
 import { SHELL_COMMAND_NAME } from '../../constants.js';
-import { ToolStatusIndicator } from '../shared/ToolStatusIndicator.js';
+import {
+  STATUS_INDICATOR_WIDTH,
+  ToolStatusIndicator,
+} from '../shared/ToolStatusIndicator.js';
 import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
+import { formatDuration } from '../../utils/formatters.js';
 
 interface CompactToolGroupDisplayProps {
   toolCalls: IndividualToolCallDisplay[];
   contentWidth: number;
 }
+
+const COMPACT_GROUP_HORIZONTAL_PADDING = 2;
+const ELAPSED_TIME_MARGIN_LEFT = 1;
+const EXECUTING_ELAPSED_TIME_RESERVED_LABEL = '99h 59m 59s';
 
 // Priority: Confirming > Executing > Error > Canceled > Pending > Success
 export function getOverallStatus(
@@ -61,6 +72,32 @@ function getShellTimeoutMs(
   return undefined;
 }
 
+function isToolGroupActive(status: ToolCallStatus): boolean {
+  return (
+    status === ToolCallStatus.Executing ||
+    status === ToolCallStatus.Pending ||
+    status === ToolCallStatus.Confirming
+  );
+}
+
+function getElapsedTimeReservedWidth(
+  tool: IndividualToolCallDisplay,
+  status: ToolCallStatus,
+): number {
+  if (status !== ToolCallStatus.Executing) return 0;
+
+  const timeoutMs = getShellTimeoutMs(tool);
+  let label = EXECUTING_ELAPSED_TIME_RESERVED_LABEL;
+  if (timeoutMs != null && timeoutMs > 0) {
+    const maxElapsedStr = formatDuration(timeoutMs, {
+      hideTrailingZeros: true,
+    });
+    label = `(${maxElapsedStr} · timeout ${maxElapsedStr})`;
+  }
+
+  return ELAPSED_TIME_MARGIN_LEFT + stringWidth(label);
+}
+
 type ToolCategory =
   | 'read'
   | 'edit'
@@ -95,61 +132,91 @@ const TOOL_NAME_TO_CATEGORY: Record<string, ToolCategory> = {
   TodoWrite: 'other',
 };
 
+type SummaryForms = { one: string; many: string };
 type CategoryTemplate = {
+  // Count-based phrasing (i18n keys; also the English source strings).
+  // `{{count}}` is interpolated via t() so every locale supplies a natural
+  // phrase — keep these as literals here so they stay greppable and aligned
+  // with the locale files. Used for the multi-tool case and the single-tool
+  // case that has no usable description.
+  past: SummaryForms;
+  active: SummaryForms;
+  // Bare verb prefixed to a concrete single-tool description ("Read a.ts").
+  // Intentionally NOT run through t(): the description it precedes is a raw,
+  // language-neutral file path or command, and single-word verb keys would
+  // collide with unrelated existing i18n entries. English matches upstream
+  // behavior (#6448); the localized count phrases above still cover the
+  // multi-tool and no-description paths.
   pastVerb: string;
   activeVerb: string;
-  singular: string;
-  plural: string;
 };
 
 const CATEGORY_TEMPLATES: Record<ToolCategory, CategoryTemplate> = {
   read: {
+    past: { one: 'Read {{count}} file', many: 'Read {{count}} files' },
+    active: { one: 'Reading {{count}} file', many: 'Reading {{count}} files' },
     pastVerb: 'Read',
     activeVerb: 'Reading',
-    singular: 'file',
-    plural: 'files',
   },
   edit: {
+    past: { one: 'Edited {{count}} file', many: 'Edited {{count}} files' },
+    active: { one: 'Editing {{count}} file', many: 'Editing {{count}} files' },
     pastVerb: 'Edited',
     activeVerb: 'Editing',
-    singular: 'file',
-    plural: 'files',
   },
   write: {
+    past: { one: 'Wrote {{count}} file', many: 'Wrote {{count}} files' },
+    active: { one: 'Writing {{count}} file', many: 'Writing {{count}} files' },
     pastVerb: 'Wrote',
     activeVerb: 'Writing',
-    singular: 'file',
-    plural: 'files',
   },
   search: {
+    past: {
+      one: 'Searched {{count}} pattern',
+      many: 'Searched {{count}} patterns',
+    },
+    active: {
+      one: 'Searching {{count}} pattern',
+      many: 'Searching {{count}} patterns',
+    },
     pastVerb: 'Searched',
     activeVerb: 'Searching',
-    singular: 'pattern',
-    plural: 'patterns',
   },
   list: {
+    past: {
+      one: 'Listed {{count}} directory',
+      many: 'Listed {{count}} directories',
+    },
+    active: {
+      one: 'Listing {{count}} directory',
+      many: 'Listing {{count}} directories',
+    },
     pastVerb: 'Listed',
     activeVerb: 'Listing',
-    singular: 'directory',
-    plural: 'directories',
   },
   command: {
+    past: { one: 'Ran {{count}} command', many: 'Ran {{count}} commands' },
+    active: {
+      one: 'Running {{count}} command',
+      many: 'Running {{count}} commands',
+    },
     pastVerb: 'Ran',
     activeVerb: 'Running',
-    singular: 'command',
-    plural: 'commands',
   },
   agent: {
+    past: { one: 'Ran {{count}} agent', many: 'Ran {{count}} agents' },
+    active: {
+      one: 'Running {{count}} agent',
+      many: 'Running {{count}} agents',
+    },
     pastVerb: 'Ran',
     activeVerb: 'Running',
-    singular: 'agent',
-    plural: 'agents',
   },
   other: {
+    past: { one: 'Used {{count}} tool', many: 'Used {{count}} tools' },
+    active: { one: 'Using {{count}} tool', many: 'Using {{count}} tools' },
     pastVerb: 'Used',
     activeVerb: 'Using',
-    singular: 'tool',
-    plural: 'tools',
   },
 };
 
@@ -190,13 +257,78 @@ export function isCollapsibleTool(toolName: string): boolean {
 }
 
 /**
+ * Strip ANSI control sequences and reject JSON-looking error fallbacks.
+ *
+ * When a tool call errors, `useReactToolScheduler` sets description to
+ * `JSON.stringify(request.args)` which produces `{...}` blobs. Return
+ * `undefined` for those so the caller falls back to count format.
+ */
+function safeDescription(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+
+  /* eslint-disable no-control-regex */
+  // Strip all common ANSI escape sequences: OSC, charset, CSI, and single-byte ESC
+  const stripped = raw.replace(
+    /\x1b\][^\x07]*\x07|\x1b[()][A-Z0-9]|\x1b\[[0-9;]*[a-zA-Z]|\x1b./g,
+    '',
+  );
+  // Replace all C0 control characters (including \n, \r) with spaces
+  const cleaned = stripped.replace(/[\x00-\x1f\x7f]/g, ' ').trim();
+  /* eslint-enable no-control-regex */
+
+  // Reject JSON blobs (error fallback from args) without rejecting legitimate
+  // paths such as "[id].tsx" or "{draft}.md".
+  if (cleaned.startsWith('{') || cleaned.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(cleaned) as unknown;
+      if (typeof parsed === 'object' && parsed !== null) return undefined;
+    } catch {
+      // The description only resembles JSON, so keep it.
+    }
+  }
+
+  return cleaned || undefined;
+}
+
+function getActiveToolHint(
+  toolCalls: IndividualToolCallDisplay[],
+): string | undefined {
+  if (toolCalls.length < 2) return undefined;
+
+  const statuses = [
+    ToolCallStatus.Confirming,
+    ToolCallStatus.Executing,
+    ToolCallStatus.Pending,
+  ];
+  for (const status of statuses) {
+    for (let index = toolCalls.length - 1; index >= 0; index--) {
+      const tool = toolCalls[index];
+      if (tool.status === status) {
+        const category = getToolCategory(tool.name);
+        const usesCountSummary = toolCalls.some(
+          (candidate, candidateIndex) =>
+            candidateIndex !== index &&
+            getToolCategory(candidate.name) === category,
+        );
+        return usesCountSummary ? safeDescription(tool.description) : undefined;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+/**
  * Build a semantic summary line from a batch of tool calls.
  *
- * Single tool  → "Read 1 file" / "Ran 1 command"
- * Multi  same  → "Read 3 files"
- * Multi mixed  → "Read 3 files, edited 2 files, ran 1 command"
+ * Single tool (with description) → "Read a.ts" / "Ran ls -la"
+ * Single tool (no description)   → "Read 1 file" / "Ran 1 command"
+ * Multi  same                    → "Read 3 files"
+ * Multi mixed                    → "Read 2 files, ran npm test"
  *
  * Uses past tense when all tools are done, present progressive when active.
+ * Falls back to count format when description is missing, cleans to empty,
+ * or parses as a JSON object or array (e.g. error args).
  */
 export function buildToolSummary(
   toolCalls: IndividualToolCallDisplay[],
@@ -204,32 +336,78 @@ export function buildToolSummary(
 ): string {
   if (toolCalls.length === 0) return '';
 
-  // Group by category and count
-  const counts = new Map<ToolCategory, number>();
+  // Group by category to preserve tool references for description access
+  const toolsByCategory = new Map<ToolCategory, IndividualToolCallDisplay[]>();
 
   for (const tool of toolCalls) {
     const cat = getToolCategory(tool.name);
-    counts.set(cat, (counts.get(cat) ?? 0) + 1);
+    const arr = toolsByCategory.get(cat) ?? [];
+    arr.push(tool);
+    toolsByCategory.set(cat, arr);
   }
 
   const parts: string[] = [];
   for (const cat of CATEGORY_ORDER) {
-    const count = counts.get(cat);
-    if (!count) continue;
+    const tools = toolsByCategory.get(cat);
+    if (!tools || tools.length === 0) continue;
 
     const template = CATEGORY_TEMPLATES[cat];
-    const verb = isActive ? template.activeVerb : template.pastVerb;
-    const lower = parts.length > 0;
-    const v = lower ? verb.toLowerCase() : verb;
-
-    if (count === 1) {
-      parts.push(`${v} 1 ${template.singular}`);
+    let part: string;
+    if (tools.length === 1) {
+      const safeDesc = safeDescription(tools[0].description);
+      if (safeDesc !== undefined) {
+        // Single tool with a concrete description: show it ("Read a.ts").
+        // Verb is English (see CategoryTemplate note) but the description is
+        // language-neutral, so the line reads correctly in every locale.
+        const verb = isActive ? template.activeVerb : template.pastVerb;
+        part = `${verb} ${safeDesc}`;
+      } else {
+        // No usable description → localized count phrase ("Read 1 file").
+        part = t(isActive ? template.active.one : template.past.one, {
+          count: '1',
+        });
+      }
     } else {
-      parts.push(`${v} ${count} ${template.plural}`);
+      // Multiple tools of one category → localized plural count phrase.
+      const forms = isActive ? template.active : template.past;
+      part = t(forms.many, { count: String(tools.length) });
     }
+    // Lowercase the leading character for every part after the first ("Read 3
+    // files, edited 2 files"). Operating on the first char only keeps already-
+    // lowercase nouns intact and is a no-op for caseless scripts (e.g. CJK).
+    if (parts.length > 0) {
+      part = part.charAt(0).toLowerCase() + part.slice(1);
+    }
+    parts.push(part);
   }
 
   return parts.join(', ');
+}
+
+export function estimateCompactToolGroupHeight(
+  toolCalls: IndividualToolCallDisplay[],
+  contentWidth: number,
+): number {
+  if (toolCalls.length === 0) return 0;
+
+  const overallStatus = getOverallStatus(toolCalls);
+  const activeTool = getActiveTool(toolCalls);
+  const isActive = isToolGroupActive(overallStatus);
+  const summary = `${buildToolSummary(toolCalls, isActive)}${isActive ? '…' : ''}`;
+  const hint = getActiveToolHint(toolCalls);
+  const summaryWidth = Math.max(
+    1,
+    contentWidth -
+      COMPACT_GROUP_HORIZONTAL_PADDING -
+      STATUS_INDICATOR_WIDTH -
+      getElapsedTimeReservedWidth(activeTool, overallStatus),
+  );
+  const wrappedSummary = wrapAnsi(summary, summaryWidth, {
+    hard: true,
+    trim: false,
+  });
+
+  return Math.max(1, wrappedSummary.split('\n').length) + (hint ? 1 : 0);
 }
 
 export const CompactToolGroupDisplay: React.FC<
@@ -239,17 +417,15 @@ export const CompactToolGroupDisplay: React.FC<
 
   const overallStatus = getOverallStatus(toolCalls);
   const activeTool = getActiveTool(toolCalls);
-  const isActive =
-    overallStatus === ToolCallStatus.Executing ||
-    overallStatus === ToolCallStatus.Pending ||
-    overallStatus === ToolCallStatus.Confirming;
+  const isActive = isToolGroupActive(overallStatus);
+  const hint = getActiveToolHint(toolCalls);
 
   return (
     <Box flexDirection="column" width={contentWidth} paddingX={1} gap={0}>
       <Box flexDirection="row">
         <ToolStatusIndicator status={overallStatus} name={activeTool.name} />
         <Box flexGrow={1}>
-          <Text wrap="truncate-end" bold>
+          <Text wrap="wrap" bold>
             {buildToolSummary(toolCalls, isActive)}
             {isActive && <Text key="ellipsis">…</Text>}
           </Text>
@@ -260,6 +436,13 @@ export const CompactToolGroupDisplay: React.FC<
           timeoutMs={getShellTimeoutMs(activeTool)}
         />
       </Box>
+      {hint && (
+        <Box paddingLeft={STATUS_INDICATOR_WIDTH}>
+          <Text dimColor wrap="truncate-end">
+            ⎿ {hint}
+          </Text>
+        </Box>
+      )}
     </Box>
   );
 };

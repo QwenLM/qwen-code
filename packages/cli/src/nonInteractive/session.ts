@@ -8,7 +8,12 @@ import type {
   Config,
   ConfigInitializeOptions,
 } from '@qwen-code/qwen-code-core';
-import { createDebugLogger, SendMessageType } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  buildSessionRecoveryPlanFromApiHistory,
+  SendMessageType,
+  TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
+} from '@qwen-code/qwen-code-core';
 import { StreamJsonInputReader } from './io/StreamJsonInputReader.js';
 import { StreamJsonOutputAdapter } from './io/StreamJsonOutputAdapter.js';
 import { ControlContext } from './control/ControlContext.js';
@@ -38,6 +43,10 @@ import {
   finalizeStartupProfile,
   profileCheckpoint,
 } from '../utils/startupProfiler.js';
+import {
+  settleChatRecording,
+  subscribeToHeadlessChatRecordingFailures,
+} from '../utils/chat-recording-failure.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_SESSION');
 
@@ -61,6 +70,8 @@ class Session {
   private userMessageQueue: CLIUserMessage[] = [];
   private monitorStartedQueue: MonitorStartedQueueItem[] = [];
   private monitorQueue: MonitorQueueItem[] = [];
+  private pendingContinueTurn: boolean = false;
+  private continueTurnInProgress: boolean = false;
   private abortController: AbortController;
   private config: Config;
   private sessionId: string;
@@ -79,6 +90,7 @@ class Session {
   private monitorNotificationsRegistered: boolean = false;
   private monitorRegistrationsRegistered: boolean = false;
   private settings: LoadedSettings;
+  private readonly unsubscribeRecordingFailure: () => void;
 
   // Single initialization promise that resolves when session is ready for user messages.
   // Created lazily once initialization actually starts.
@@ -101,6 +113,10 @@ class Session {
     this.outputAdapter = new StreamJsonOutputAdapter(
       config,
       config.getIncludePartialMessages(),
+    );
+    this.unsubscribeRecordingFailure = subscribeToHeadlessChatRecordingFailures(
+      config,
+      this.outputAdapter,
     );
 
     this.setupSignalHandlers();
@@ -280,6 +296,7 @@ class Session {
       settings: this.settings,
       permissionMode: this.config.getApprovalMode(),
       onInterrupt: () => this.handleInterrupt(),
+      onContinueLastTurn: () => this.requestContinueLastTurn(),
     });
     this.dispatcher = new ControlDispatcher(this.controlContext);
     this.controlService = new ControlService(
@@ -461,6 +478,112 @@ class Session {
     }
   }
 
+  /**
+   * Handle a continue_last_turn control request: classify the last turn
+   * from chat history and, when it was interrupted, schedule a
+   * continuation turn on the work queue. Returns the control reply
+   * payload; the continuation itself runs serialized with user messages.
+   */
+  private async requestContinueLastTurn(): Promise<Record<string, unknown>> {
+    await this.waitForInitialization();
+
+    if (this.isShuttingDown || this.abortController.signal.aborted) {
+      debugLogger.debug(
+        '[Session] continue_last_turn rejected: session is shutting down',
+      );
+      return { accepted: false, interruption: 'none' };
+    }
+
+    const geminiClient = this.config.getGeminiClient();
+    if (!geminiClient || !geminiClient.isInitialized()) {
+      debugLogger.debug(
+        '[Session] continue_last_turn rejected: gemini client is not ready',
+      );
+      return { accepted: false, interruption: 'none' };
+    }
+
+    const chat = geminiClient.getChat();
+    const historyTail =
+      chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
+      chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT);
+    const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
+      sessionId: this.sessionId,
+      apiHistory: historyTail,
+    });
+    debugLogger.info('[Session] requestContinueLastTurn recovery', {
+      sessionId: this.sessionId,
+      kind: recoveryPlan.kind,
+    });
+    if (!recoveryPlan.continuation) {
+      debugLogger.debug(
+        '[Session] continue_last_turn rejected: no interrupted turn',
+      );
+      return { accepted: false, interruption: 'none' };
+    }
+    const interruption =
+      recoveryPlan.kind === 'interrupted_prompt'
+        ? 'interrupted_prompt'
+        : 'interrupted_turn';
+    if (this.pendingContinueTurn || this.continueTurnInProgress) {
+      debugLogger.debug(
+        '[Session] continue_last_turn rejected: continuation already pending',
+        { kind: recoveryPlan.kind },
+      );
+      return { accepted: false, interruption };
+    }
+
+    this.pendingContinueTurn = true;
+    this.ensureProcessingStarted();
+    debugLogger.info('[Session] continue_last_turn accepted', {
+      sessionId: this.sessionId,
+      kind: recoveryPlan.kind,
+    });
+    return { accepted: true, interruption };
+  }
+
+  /**
+   * Run a scheduled continuation turn. The authoritative interruption
+   * re-detection happens inside runNonInteractive (history may have moved
+   * since the request was accepted); a turn that became clean by then is
+   * a no-op result message.
+   */
+  private async processContinueTurn(): Promise<void> {
+    this.continueTurnInProgress = true;
+    let resultAlreadyEmitted = false;
+    try {
+      await this.waitForInitialization();
+
+      const promptId = this.getNextPromptId();
+      await runNonInteractive(this.config, this.settings, '', promptId, {
+        abortController: this.abortController,
+        adapter: this.outputAdapter,
+        controlService: this.controlService ?? undefined,
+        continueInterrupted: true,
+        captureMonitorNotifications: false,
+        captureMonitorRegistrations: false,
+        onResultEmitted: () => {
+          resultAlreadyEmitted = true;
+        },
+      });
+    } catch (error) {
+      debugLogger.error('[Session] Continue turn execution error:', error);
+      const message = error instanceof Error ? error.message : String(error);
+      if (resultAlreadyEmitted) {
+        // A result was already flushed before the failure, so we can't emit a
+        // terminal error result without breaking the one-result contract.
+        // Surface a structured diagnostic instead of a silent stop so SDK
+        // consumers still see that the continuation failed mid-stream.
+        this.outputAdapter.emitSystemMessage('continue_turn_failed', {
+          error: message,
+        });
+        return;
+      }
+      throw new Error(`Continue turn failed: ${message}`, { cause: error });
+    } finally {
+      this.continueTurnInProgress = false;
+    }
+  }
+
   private async processMonitorNotificationBatch(
     batch: MonitorQueueItem[],
   ): Promise<void> {
@@ -501,19 +624,31 @@ class Session {
     }
 
     while (
-      (this.userMessageQueue.length > 0 ||
+      (this.pendingContinueTurn ||
+        this.userMessageQueue.length > 0 ||
         this.monitorStartedQueue.length > 0 ||
         this.monitorQueue.length > 0) &&
       !this.isShuttingDown &&
       !this.abortController.signal.aborted
     ) {
+      if (this.pendingContinueTurn) {
+        this.pendingContinueTurn = false;
+        try {
+          await this.processContinueTurn();
+        } catch (error) {
+          debugLogger.error('[Session] Error processing continue turn:', error);
+          await this.emitErrorResult(error);
+        }
+        continue;
+      }
+
       if (this.userMessageQueue.length > 0) {
         const userMessage = this.userMessageQueue.shift()!;
         try {
           await this.processUserMessage(userMessage);
         } catch (error) {
           debugLogger.error('[Session] Error processing user message:', error);
-          this.emitErrorResult(error);
+          await this.emitErrorResult(error);
         }
         continue;
       }
@@ -535,7 +670,7 @@ class Session {
           '[Session] Error processing monitor notification batch:',
           error,
         );
-        this.emitErrorResult(error);
+        await this.emitErrorResult(error);
       }
     }
   }
@@ -563,7 +698,8 @@ class Session {
     this.processingPromise = this.processPendingWork().finally(() => {
       this.processingPromise = null;
       if (
-        (this.userMessageQueue.length > 0 ||
+        (this.pendingContinueTurn ||
+          this.userMessageQueue.length > 0 ||
           this.monitorStartedQueue.length > 0 ||
           this.monitorQueue.length > 0) &&
         !this.isShuttingDown &&
@@ -574,12 +710,13 @@ class Session {
     });
   }
 
-  private emitErrorResult(
+  private async emitErrorResult(
     error: unknown,
     numTurns: number = 0,
     durationMs: number = 0,
     apiDurationMs: number = 0,
-  ): void {
+  ): Promise<void> {
+    await settleChatRecording(this.config, { finalize: false });
     const message = error instanceof Error ? error.message : String(error);
     this.outputAdapter.emitResult({
       isError: true,
@@ -642,6 +779,17 @@ class Session {
       } catch (error) {
         debugLogger.error('[Session] Error in user message processing:', error);
       }
+    }
+
+    // 4. A continuation accepted before shutdown may never have run: the work
+    // loop's `!isShuttingDown` guard skips it once shutdown begins, so an SDK
+    // consumer that received `{ accepted: true }` would wait forever. Emit a
+    // terminal error result so it learns the continuation was abandoned.
+    if (this.pendingContinueTurn) {
+      this.pendingContinueTurn = false;
+      await this.emitErrorResult(
+        new Error('Continuation abandoned: session shut down before it ran'),
+      );
     }
   }
 
@@ -708,6 +856,10 @@ class Session {
       process.removeListener('SIGTERM', this.shutdownHandler);
       this.shutdownHandler = null;
     }
+  }
+
+  dispose(): void {
+    this.unsubscribeRecordingFailure();
   }
 
   /**
@@ -852,5 +1004,10 @@ export async function runNonInteractiveStreamJson(
   }
 
   const manager = new Session(config, initialPrompt, settings);
-  await manager.run();
+  try {
+    await manager.run();
+  } finally {
+    await settleChatRecording(config, { finalize: true });
+    manager.dispose();
+  }
 }

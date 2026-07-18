@@ -78,6 +78,7 @@ export class Query implements AsyncIterable<SDKMessage> {
   readonly initialized: Promise<void>;
   private closed = false;
   private messageRouterStarted = false;
+  private transportReadFinalized = false;
 
   private firstResultReceivedPromise?: Promise<void>;
   private firstResultReceivedResolve?: () => void;
@@ -92,8 +93,11 @@ export class Query implements AsyncIterable<SDKMessage> {
   ) {
     this.transport = transport;
     this.options = options;
-    // Use sessionId from options if provided (for SDK-CLI alignment), otherwise generate one
-    this.sessionId = options.resume ?? options.sessionId ?? randomUUID();
+    // When forkSession is true, sessionId is a fresh UUID (computed in createQuery)
+    // that should be used instead of the resume (source) session ID
+    this.sessionId = options.forkSession
+      ? (options.sessionId ?? randomUUID())
+      : (options.resume ?? options.sessionId ?? randomUUID());
     this.inputStream = new Stream<SDKMessage>();
     this.abortController = options.abortController ?? new AbortController();
     this.isSingleTurn = singleTurn;
@@ -305,6 +309,7 @@ export class Query implements AsyncIterable<SDKMessage> {
             ? mcpServersForCli
             : undefined,
         agents: this.options.agents,
+        effort: this.options.effort,
       });
       logger.info('Query initialized successfully');
     } catch (error) {
@@ -330,13 +335,13 @@ export class Query implements AsyncIterable<SDKMessage> {
           }
         }
 
-        if (this.abortController.signal.aborted) {
-          this.inputStream.error(new AbortError('Query aborted'));
-        } else {
-          this.inputStream.done();
-        }
+        this.finishTransportRead();
       } catch (error) {
-        this.inputStream.error(
+        // A transport-level crash (not clean EOF) must still reject every
+        // pending control + MCP request, otherwise continueLastTurn() and MCP
+        // callers hang until their timeout (MCP responses have none). Route
+        // through finishTransportRead so the real error propagates.
+        this.finishTransportRead(
           error instanceof Error ? error : new Error(String(error)),
         );
       }
@@ -394,6 +399,55 @@ export class Query implements AsyncIterable<SDKMessage> {
 
     logger.warn('Unknown message type:', message);
     this.inputStream.enqueue(message as SDKMessage);
+  }
+
+  private finishTransportRead(error?: Error): void {
+    // Idempotent: close() and the transport-read loop can both reach here.
+    if (this.transportReadFinalized) {
+      return;
+    }
+    this.transportReadFinalized = true;
+
+    const rejectionError =
+      error ??
+      this.transport.exitError ??
+      new Error('Transport closed before control response');
+
+    // Surface a single correlatable line when the transport dies with work
+    // still in flight (e.g. the CLI subprocess crashes mid-continuation):
+    // otherwise oncall sees only scattered rejected promises with no anchor.
+    const pendingCount =
+      this.pendingControlRequests.size + this.pendingMcpResponses.size;
+    if (pendingCount > 0) {
+      logger.error('Transport finalized with pending requests rejected', {
+        pendingControl: this.pendingControlRequests.size,
+        pendingMcp: this.pendingMcpResponses.size,
+        error: rejectionError.message,
+      });
+    }
+
+    for (const pending of this.pendingControlRequests.values()) {
+      pending.abortController.abort();
+      clearTimeout(pending.timeout);
+      pending.reject(rejectionError);
+    }
+    this.pendingControlRequests.clear();
+
+    for (const pending of this.pendingMcpResponses.values()) {
+      pending.reject(rejectionError);
+    }
+    this.pendingMcpResponses.clear();
+
+    // Skip stream finalization if close() already settled the stream.
+    if (this.inputStream.hasError === undefined) {
+      if (this.abortController.signal.aborted) {
+        this.inputStream.error(new AbortError('Query aborted'));
+      } else if (error) {
+        this.inputStream.error(error);
+      } else {
+        this.inputStream.done();
+      }
+    }
   }
 
   private async handleControlRequest(
@@ -900,6 +954,14 @@ export class Query implements AsyncIterable<SDKMessage> {
     await this.sendControlRequest(ControlRequestType.INTERRUPT);
   }
 
+  /**
+   * Continue the most recent unfinished turn without appending a synthetic user
+   * message. Output arrives as regular messages on this Query's async iterator.
+   */
+  async continueLastTurn(): Promise<Record<string, unknown> | null> {
+    return this.sendControlRequest(ControlRequestType.CONTINUE_LAST_TURN);
+  }
+
   async setPermissionMode(mode: string): Promise<void> {
     await this.sendControlRequest(ControlRequestType.SET_PERMISSION_MODE, {
       mode,
@@ -922,6 +984,47 @@ export class Query implements AsyncIterable<SDKMessage> {
   ): Promise<Record<string, unknown> | null> {
     return this.sendControlRequest(ControlRequestType.GET_CONTEXT_USAGE, {
       show_details: showDetails,
+    });
+  }
+
+  /**
+   * Set the reasoning effort tier at runtime.
+   *
+   * @param effort - One of 'low', 'medium', 'high', 'xhigh', 'max'
+   * @returns `true` if the effort was applied, `false` if it was a no-op (e.g. thinking disabled)
+   */
+  async setEffort(
+    effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max',
+  ): Promise<boolean> {
+    const response = await this.sendControlRequest(
+      ControlRequestType.SET_EFFORT,
+      { effort },
+    );
+    return Boolean((response as Record<string, unknown> | null)?.applied);
+  }
+
+  /**
+   * Get the list of models available for the current auth type.
+   *
+   * @returns Promise resolving to available models data
+   * @throws Error if query is closed
+   */
+  async getAvailableModels(): Promise<Record<string, unknown> | null> {
+    return this.sendControlRequest(ControlRequestType.GET_AVAILABLE_MODELS);
+  }
+
+  /**
+   * Get usage dashboard data from the CLI.
+   *
+   * @param range - Time range for usage data: 'today' (default), 'week', 'month', 'all'
+   * @returns Promise resolving to usage dashboard data
+   * @throws Error if query is closed
+   */
+  async getUsageInfo(
+    range?: 'today' | 'week' | 'month' | 'all',
+  ): Promise<Record<string, unknown> | null> {
+    return this.sendControlRequest(ControlRequestType.GET_USAGE_INFO, {
+      ...(range ? { range } : {}),
     });
   }
 

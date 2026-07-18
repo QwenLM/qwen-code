@@ -29,11 +29,7 @@
 import type React from 'react';
 import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Text } from 'ink';
-import {
-  DEFAULT_BUILTIN_SUBAGENT_TYPE as CORE_DEFAULT_SUBAGENT_TYPE,
-  ToolDisplayNames,
-  ToolNames,
-} from '@qwen-code/qwen-code-core';
+import { DEFAULT_BUILTIN_SUBAGENT_TYPE as CORE_DEFAULT_SUBAGENT_TYPE } from '@qwen-code/qwen-code-core';
 import { localizeToolDisplayName } from '../../../i18n/index.js';
 import {
   useBackgroundTaskViewActions,
@@ -42,12 +38,26 @@ import {
 import { ConfigContext } from '../../contexts/ConfigContext.js';
 import { theme } from '../../semantic-colors.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
-import { escapeAnsiCtrlCodes } from '../../utils/textUtils.js';
+import {
+  escapeAnsiCtrlCodes,
+  sanitizeMultilineForDisplay,
+} from '../../utils/textUtils.js';
+import { TOOL_DISPLAY_BY_NAME } from '../../utils/tool-display-map.js';
 import type {
   AgentDialogEntry,
   DialogEntry,
 } from '../../hooks/useBackgroundTaskView.js';
-import { isLiveAgentPanelVisibleEntry } from './liveAgentPanelVisibility.js';
+import {
+  isLiveAgentPanelVisibleEntry,
+  LIVE_AGENT_PANEL_MAX_ROWS,
+} from './liveAgentPanelVisibility.js';
+import {
+  type AgentTreeInfo,
+  computeAgentTreeInfo,
+  panelDisplayOrder,
+  statusGlyph,
+  treeRowPrefix,
+} from './agent-forest.js';
 
 interface LiveAgentPanelProps {
   /**
@@ -64,7 +74,10 @@ interface LiveAgentPanelProps {
   width?: number;
 }
 
-const DEFAULT_MAX_ROWS = 12;
+// Sourced from liveAgentPanelVisibility so the composer's panel-focus
+// keyboard handler windows its candidate list identically — see the
+// constant's doc for the lockstep contract.
+const DEFAULT_MAX_ROWS = LIVE_AGENT_PANEL_MAX_ROWS;
 // Re-export under a panel-local alias so the source of truth stays
 // in `subagents/builtin-agents.ts` (a backend rename of the default
 // type would otherwise silently re-introduce the redundant
@@ -92,10 +105,9 @@ function isAgentEntry(entry: DialogEntry): entry is AgentDialogEntry {
   return entry.kind === 'agent';
 }
 
-// Bullet glyphs mirror Claude Code's CoordinatorTaskPanel — `○` for
-// active slots (running / paused) so the row reads as a uniform list,
-// terminal states keep distinct check / cross marks so they're easy
-// to scan at a glance.
+// Glyph vocabulary lives in agent-forest's statusGlyph (shared with the
+// dialog's Sub-agents roster so the two surfaces can't drift); this adds
+// the panel's color mapping plus the synthesized-row special case on top.
 function statusIcon(entry: AgentDialogEntry & { synthesized?: boolean }): {
   glyph: string;
   color: string;
@@ -106,34 +118,20 @@ function statusIcon(entry: AgentDialogEntry & { synthesized?: boolean }): {
     // we don't lie about success.
     return { glyph: '·', color: theme.text.secondary };
   }
+  const glyph = statusGlyph(entry.status);
   switch (entry.status) {
     case 'running':
-      return { glyph: '○', color: theme.status.warning };
     case 'paused':
-      return { glyph: '⏸', color: theme.status.warning };
-    case 'completed':
-      return { glyph: '✔', color: theme.status.success };
-    case 'failed':
-      return { glyph: '✖', color: theme.status.error };
     case 'cancelled':
-      return { glyph: '✖', color: theme.status.warning };
+      return { glyph, color: theme.status.warning };
+    case 'completed':
+      return { glyph, color: theme.status.success };
+    case 'failed':
+      return { glyph, color: theme.status.error };
     default:
-      return { glyph: '○', color: theme.text.secondary };
+      return { glyph, color: theme.text.secondary };
   }
 }
-
-// Internal-tool-name → user-facing display-name lookup
-// (`run_shell_command` → `Shell`, `glob` → `Glob`, …). Mirrors the
-// same map BackgroundTasksDialog uses so the two surfaces stay
-// vocabulary-consistent — without it the panel would surface raw
-// internal identifiers like `run_shell_command` while the dialog
-// shows `Shell` for the same agent.
-const TOOL_DISPLAY_BY_NAME: Record<string, string> = Object.fromEntries(
-  (Object.keys(ToolNames) as Array<keyof typeof ToolNames>).map((key) => [
-    ToolNames[key],
-    ToolDisplayNames[key],
-  ]),
-);
 
 function activityLabel(entry: AgentDialogEntry): string {
   const last = entry.recentActivities?.at(-1);
@@ -399,7 +397,14 @@ const LiveAgentPanelBody: React.FC<{
 
   if (visibleAgents.length === 0) return null;
 
-  const visibleAgentsAsc = [...visibleAgents].reverse();
+  // Snapshot order is newest-first (dialog convention); panelDisplayOrder
+  // renders oldest-first with each nested agent grouped under its parent
+  // (and keeps the composer's panel-focus keyboard handler in lockstep).
+  // Tree metadata is computed on the full visible set (not the maxRows
+  // window) so a row's indent doesn't shift when the window scrolls past
+  // its parent.
+  const visibleAgentsAsc = panelDisplayOrder(visibleAgents);
+  const treeInfo = computeAgentTreeInfo(visibleAgentsAsc);
   const overflow = Math.max(0, visibleAgentsAsc.length - maxRows);
   const visible =
     overflow > 0 ? visibleAgentsAsc.slice(-maxRows) : visibleAgentsAsc;
@@ -430,6 +435,7 @@ const LiveAgentPanelBody: React.FC<{
           entry={entry}
           now={now}
           selected={focused && clampedIndex === idx + 1}
+          tree={treeInfo.get(entry.agentId)}
         />
       ))}
       {focused && (
@@ -447,16 +453,19 @@ const AgentRow: React.FC<{
   entry: AgentDialogEntry;
   now: number;
   selected?: boolean;
-}> = ({ entry, now, selected = false }) => {
+  tree?: AgentTreeInfo;
+}> = ({ entry, now, selected = false, tree }) => {
   const { glyph, color } = statusIcon(entry);
   // ANSI sanitize every user-controlled string before it reaches Ink.
   // `subagentType` comes from subagent config (user-authored or model-
   // chosen) and `recentActivities[].description` is LLM-generated;
   // both can carry terminal control sequences that would otherwise
   // bleed through Ink's `<Text>` and corrupt the panel chrome.
-  // HistoryItemDisplay applies the same `escapeAnsiCtrlCodes` to its
-  // user-facing content for the same reason.
-  const label = escapeAnsiCtrlCodes(descriptionWithoutPrefix(entry));
+  // `sanitizeMultilineForDisplay` (not just `escapeAnsiCtrlCodes`): the
+  // task description is model-generated and bare C0 controls (\r, BS, BEL)
+  // pass through the ANSI-sequence escape — matches the `activity` line
+  // below and the hardened dialog Progress rows.
+  const label = sanitizeMultilineForDisplay(descriptionWithoutPrefix(entry));
   // Note: foreground vs background is intentionally not surfaced here.
   // BackgroundTasksDialog tags foreground rows with `[blocking]`
   // (formerly `[in turn]`) to warn that cancelling will end the
@@ -464,7 +473,11 @@ const AgentRow: React.FC<{
   // cancel. The glance panel has no cancel surface, so the marker
   // reads as ambient noise. Keep the dialog as the place that
   // surfaces the flavor distinction.
-  const activity = escapeAnsiCtrlCodes(activityLabel(entry));
+  // `sanitizeMultilineForDisplay` (not just `escapeAnsiCtrlCodes`): the
+  // activity description is LLM-generated and bare C0 controls (\r, BS,
+  // BEL) pass through the ANSI-sequence escape — matches the hardened
+  // dialog Progress rows and ToolMessage approval context.
+  const activity = sanitizeMultilineForDisplay(activityLabel(entry));
   const elapsed = elapsedLabel(entry, now);
   const showType =
     entry.subagentType !== undefined &&
@@ -473,8 +486,8 @@ const AgentRow: React.FC<{
     ? escapeAnsiCtrlCodes(entry.subagentType ?? '')
     : '';
   const tokenSuffix =
-    entry.stats?.totalTokens && entry.stats.totalTokens > 0
-      ? ` · ${formatTokenCount(entry.stats.totalTokens)} tokens`
+    entry.stats?.outputTokens && entry.stats.outputTokens > 0
+      ? ` · ${formatTokenCount(entry.stats.outputTokens)} tokens`
       : '';
 
   // Layout (Claude Code's CoordinatorTaskPanel visual + our
@@ -497,6 +510,15 @@ const AgentRow: React.FC<{
   //   between the description and the right-pinned elapsed.
   const tail = ` ▶ ${elapsed}${tokenSuffix}`;
   const prefix = selected ? '▸ ' : '  ';
+  // Tree gutter (indent + ↳) comes from the shared agent-forest helper so
+  // the panel and the dialog list can't drift; the orphan additionally
+  // says who launched it.
+  const treePrefix = treeRowPrefix(entry, tree);
+  const orphanNote = tree?.orphaned
+    ? entry.parentName
+      ? ` · from ${escapeAnsiCtrlCodes(entry.parentName)}`
+      : ' · nested'
+    : '';
   return (
     <Box flexDirection="row">
       <Box flexShrink={0}>
@@ -506,6 +528,9 @@ const AgentRow: React.FC<{
       </Box>
       <Box flexShrink={1}>
         <Text wrap="truncate-end">
+          {treePrefix !== '' && (
+            <Text color={theme.text.secondary}>{treePrefix}</Text>
+          )}
           <Text color={color}>{`${glyph} `}</Text>
           {showType && (
             <>
@@ -517,6 +542,7 @@ const AgentRow: React.FC<{
           {activity && (
             <Text color={theme.text.secondary}>{` (${activity})`}</Text>
           )}
+          {orphanNote && <Text color={theme.text.secondary}>{orphanNote}</Text>}
         </Text>
       </Box>
       <Box flexShrink={0}>

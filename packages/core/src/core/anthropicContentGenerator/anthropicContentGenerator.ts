@@ -20,6 +20,10 @@ import type {
   ContentGenerator,
   ContentGeneratorConfig,
 } from '../contentGenerator.js';
+import {
+  clampReasoningEffort,
+  type ReasoningEffort,
+} from '../reasoning-effort.js';
 type Message = Anthropic.Message;
 type MessageCreateParamsNonStreaming =
   Anthropic.MessageCreateParamsNonStreaming;
@@ -33,15 +37,18 @@ import {
   buildRuntimeFetchOptions,
   redactProxyError,
 } from '../../utils/runtimeFetchOptions.js';
-import { DEFAULT_TIMEOUT } from '../openaiContentGenerator/constants.js';
+import { resolveRequestTimeout } from '../openaiContentGenerator/constants.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
 import {
   tokenLimit,
   hasExplicitOutputLimit,
+  defaultOutputCeiling,
+  reconcileMaxTokens,
   parsePositiveIntegerEnvValue,
 } from '../tokenLimits.js';
+import { setToolCallPreparations } from '../tool-call-preparation.js';
 
 const debugLogger = createDebugLogger('ANTHROPIC');
 
@@ -86,6 +93,106 @@ function isDeepSeekAnthropicProvider(
   if (isDeepSeekAnthropicHostname(contentGeneratorConfig)) return true;
   const model = (contentGeneratorConfig.model ?? '').toLowerCase();
   return model.includes('deepseek');
+}
+
+// Single source of truth for the Claude family list. Both the `ClaudeModelFamily`
+// union and the model-id regex are derived from this array, so adding a family
+// updates the type and the parser together — a maintainer can't update one and
+// silently leave the other (and the `as ClaudeModelFamily` cast) stale.
+const CLAUDE_MODEL_FAMILIES = [
+  'opus',
+  'sonnet',
+  'haiku',
+  'fable',
+  'mythos',
+] as const;
+type ClaudeModelFamily = (typeof CLAUDE_MODEL_FAMILIES)[number];
+
+interface ParsedClaudeModelVersion {
+  family: ClaudeModelFamily;
+  major: number;
+  minor: number;
+}
+
+/**
+ * Parse a Claude model id into `{ family, major, minor }`, or `null` for
+ * non-Claude / unversioned ids. The single source of truth for the capability
+ * gating below — both `anthropicSupportedEffortTiers` and
+ * `modelSupportsAdaptiveThinking` consume this so the family list and the
+ * version-parsing rules can't drift apart when Anthropic ships a new family.
+ *
+ * The regex is unanchored so reseller-prefixed ids (`bedrock/…`, `vertex_ai/…`,
+ * `idealab:…`) match the same Anthropic models on the wire. The minor-version
+ * group is capped at one or two digits with a trailing `(?!\d)` so an 8-digit
+ * date suffix (`claude-opus-4-20250514` = Opus 4.0) is not mis-parsed as a giant
+ * minor version. The `{1,2}` cap alone is not enough — `\d{1,2}` is greedy and
+ * still matches `20` from `20250514`; it's the trailing `(?!\d)` negative
+ * lookahead that does the real work, forcing the engine to backtrack past any
+ * digit-followed match so the optional minor group fails to match entirely.
+ * Both together make dated ids with no real minor resolve to `minor = 0`
+ * (otherwise `minor` would wrongly clear `atLeast(4, 6)` / `atLeast(4, 7)` gates
+ * the model doesn't support — a server 400). Dated ids that do carry a minor,
+ * like `claude-opus-4-7-20251101`, still resolve to minor `7`; a bare major
+ * (`claude-opus-5`) resolves to minor `0`.
+ */
+function parseClaudeModelVersion(
+  model: string,
+): ParsedClaudeModelVersion | null {
+  const match = model
+    .toLowerCase()
+    .match(
+      new RegExp(
+        `claude-(${CLAUDE_MODEL_FAMILIES.join(
+          '|',
+        )})-(\\d+)(?:-(\\d{1,2})(?!\\d))?`,
+      ),
+    );
+  if (!match) {
+    return null;
+  }
+  return {
+    family: match[1] as ClaudeModelFamily,
+    major: Number.parseInt(match[2], 10),
+    minor: match[3] ? Number.parseInt(match[3], 10) : 0,
+  };
+}
+
+/**
+ * The reasoning-effort tiers a real Anthropic model accepts on
+ * `output_config.effort`. Every effort-capable model takes low/medium/high; the
+ * extra-strong tiers are gated by model version per the Anthropic docs
+ * (https://platform.claude.com/docs/en/build-with-claude/effort):
+ *   - `max`:   Opus/Sonnet 4.6+ and every 5.x family (Fable 5, Mythos 5, …).
+ *   - `xhigh`: Opus 4.7+ and every 5.x family (NOT Sonnet 4.6 / Opus 4.6).
+ *
+ * Unknown/unversioned ids fall back to low/medium/high so we never send a tier
+ * the server might 400 on. Effort levels above what the model supports are
+ * clamped by the caller via clampReasoningEffort.
+ */
+function anthropicSupportedEffortTiers(model: string): ReasoningEffort[] {
+  const tiers: ReasoningEffort[] = ['low', 'medium', 'high'];
+  const parsed = parseClaudeModelVersion(model);
+  if (!parsed) {
+    return tiers;
+  }
+  const { family, major, minor } = parsed;
+  const atLeast = (maj: number, min: number) =>
+    major > maj || (major === maj && minor >= min);
+
+  // xhigh: Opus 4.7+ and all 5.x families.
+  if (major >= 5 || (family === 'opus' && atLeast(4, 7))) {
+    tiers.push('xhigh');
+  }
+  // max: 4.6+ (opus/sonnet only) and all 5.x families. The 4.x branch is
+  // family-guarded to match the documented support above — haiku 4.x never
+  // gains `max` (a server 400), while every 5.x family still does via major>=5.
+  if (
+    major >= 5 ||
+    ((family === 'opus' || family === 'sonnet') && atLeast(4, 6))
+  ) {
+    tiers.push('max');
+  }
+  return tiers;
 }
 
 /**
@@ -153,10 +260,11 @@ type AnthropicThinkingParam =
 
 type MessageCreateParamsWithThinking = MessageCreateParamsNonStreaming & {
   thinking?: AnthropicThinkingParam;
-  // Anthropic beta feature: output_config.effort (requires beta header effort-2025-11-24)
-  // This is not yet represented in the official SDK types we depend on. The
-  // 'max' tier is a DeepSeek extension (see contentGenerator.ts comment).
-  output_config?: { effort: 'low' | 'medium' | 'high' | 'max' };
+  // Anthropic beta feature: output_config.effort (requires beta header
+  // effort-2025-11-24), not yet represented in the official SDK types we depend
+  // on. Accepts the full ladder; xhigh/max are gated per model via
+  // anthropicSupportedEffortTiers + clampReasoningEffort.
+  output_config?: { effort: ReasoningEffort };
 };
 
 export class AnthropicContentGenerator implements ContentGenerator {
@@ -165,6 +273,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
   // Latch so the 'max' clamp warning fires once per generator lifetime
   // instead of on every request that needs the downgrade.
   private effortClampWarned = false;
+  private budgetDropWarned = false;
+  private temperatureDropWarned = false;
 
   constructor(
     private contentGeneratorConfig: ContentGeneratorConfig,
@@ -209,7 +319,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
         ? { authToken: contentGeneratorConfig.apiKey, apiKey: null }
         : { apiKey: contentGeneratorConfig.apiKey, authToken: null }),
       baseURL,
-      timeout: contentGeneratorConfig.timeout || DEFAULT_TIMEOUT,
+      timeout: resolveRequestTimeout(contentGeneratorConfig.timeout),
       maxRetries: contentGeneratorConfig.maxRetries,
       defaultHeaders,
       ...runtimeOptions,
@@ -410,7 +520,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // the body actually carries a `cache_control: { …, scope: 'global' }`
     // entry. The converter emits those entries on the system text block
     // and the last tool entry when `useGlobalCacheScope` is true (gated
-    // on `enableCacheControl !== false` AND Anthropic-native baseURL).
+    // on `enableCacheControl !== false` AND (Anthropic-native baseURL OR `forceGlobalCacheScope`)).
     // Scan the assembled request body for that field rather than
     // re-deriving the gate here, so:
     //   1. The beta and the body-side field share a single source of
@@ -432,8 +542,10 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
   /**
    * Whether to ATTACH the body-side `scope: 'global'` field on
-   * `cache_control` entries this request. Requires both
-   * `enableCacheControl !== false` AND an Anthropic-native baseURL.
+   * `cache_control` entries this request. Requires
+   * `enableCacheControl !== false` AND either an Anthropic-native baseURL
+   * OR `forceGlobalCacheScope` (opt-in for proxy providers that forward
+   * the `prompt-caching-scope-2026-01-05` beta; see issue #6642).
    * Computed per request: `Config.handleModelChange()` hot-updates
    * `enableCacheControl` in-place on the qwen-oauth path (without
    * recreating the ContentGenerator); non-qwen-oauth providers refresh
@@ -450,9 +562,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
    * to attach scope to, beta correctly suppressed).
    */
   private useGlobalCacheScope(): boolean {
+    if (this.contentGeneratorConfig.enableCacheControl === false) {
+      return false;
+    }
     return (
-      this.contentGeneratorConfig.enableCacheControl !== false &&
-      isAnthropicNativeBaseUrl(this.contentGeneratorConfig)
+      isAnthropicNativeBaseUrl(this.contentGeneratorConfig) ||
+      this.contentGeneratorConfig.forceGlobalCacheScope === true
     );
   }
 
@@ -540,6 +655,11 @@ export class AnthropicContentGenerator implements ContentGenerator {
     //                    ArenaManager / forkedAgent).
     const deepseekThinkingOn = isDeepSeek && !!thinking;
     const stripAssistantThinking = isDeepSeek && !thinking;
+    const dropUnsignedAssistantThinking =
+      !isDeepSeek &&
+      !!thinking &&
+      this.modelSupportsAdaptiveThinking() &&
+      !isAnthropicNativeBaseUrl(this.contentGeneratorConfig);
 
     // Sample the live cache-control flags once per request and forward
     // them to the converter (body-side `cache_control`). The converter's
@@ -549,9 +669,9 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // ContentGenerator. (Non-qwen-oauth providers refresh via generator
     // recreation, so `baseUrl` is captured fresh at construct time, not
     // mutated mid-session — defensive per-request reads on both fields
-    // cover both paths.) `useGlobalCacheScope` is a strict subset of
-    // `enableCacheControl` (true only when caching is on AND the resolved
-    // baseURL is Anthropic-native) and governs whether the body's
+    // cover both paths.) `useGlobalCacheScope` requires
+    // `enableCacheControl` (true only when caching is on AND either the resolved
+    // baseURL is Anthropic-native OR `forceGlobalCacheScope` is set) and governs whether the body's
     // `cache_control` entries carry `scope: 'global'`. The matching
     // `prompt-caching-scope-2026-01-05` beta isn't passed through this
     // sample — `buildPerRequestHeaders` instead scans the assembled body
@@ -564,11 +684,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const { system, messages } = this.converter.convertGeminiRequestToAnthropic(
       request,
       {
-        // Both run together: normalization fills missing signatures so the
-        // injection pass treats those blocks as already-present, and the
-        // injection adds a synthetic block on tool_use turns lacking one.
+        // DeepSeek normalization and injection run together. Proxy-hosted
+        // Claude uses the separate unsigned-thinking cleanup below because an
+        // empty string cannot replace Claude's opaque signature.
         normalizeAssistantThinkingSignature: deepseekThinkingOn,
         injectThinkingOnToolUseTurns: deepseekThinkingOn,
+        dropUnsignedAssistantThinking,
         stripAssistantThinking,
         enableCacheControl,
         useGlobalCacheScope,
@@ -582,6 +703,15 @@ export class AnthropicContentGenerator implements ContentGenerator {
         )
       : undefined;
 
+    // Map Gemini-style toolConfig.functionCallingConfig.mode to Anthropic's
+    // tool_choice. Without this, the API defaults to tool_choice=auto and
+    // the model may legitimately skip tool calls — a problem for structured
+    // side queries (e.g. the AUTO-mode classifier's respond_in_schema) where
+    // the model must emit a tool call. Adaptive-thinking models (Claude
+    // 4.6+) compound this by consuming output budget on server-driven
+    // thinking before any tool_use, making forced tool_choice essential.
+    const toolChoice = this.resolveToolChoice(request, tools);
+
     return {
       model: this.contentGeneratorConfig.model,
       system,
@@ -590,6 +720,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       ...sampling,
       ...(thinking ? { thinking } : {}),
       ...(outputConfig ? { output_config: outputConfig } : {}),
+      ...(toolChoice ? { tool_choice: toolChoice } : {}),
     };
   }
 
@@ -613,8 +744,20 @@ export class AnthropicContentGenerator implements ContentGenerator {
       return configValue !== undefined ? configValue : requestValue;
     };
 
-    // Apply output token limit logic consistent with OpenAI providers
-    const userMaxTokens = getParam<number>('max_tokens', 'maxOutputTokens');
+    // Apply output token limit logic consistent with OpenAI providers.
+    // A config-level max_tokens is a ceiling, not an exemption from the
+    // window clamp: when the request also carries a (clamped)
+    // maxOutputTokens, the smaller of the two goes on the wire so
+    // `prompt + max_tokens ≤ window` holds for samplingParams users too.
+    const configMaxTokens = configSamplingParams?.max_tokens as
+      | number
+      | undefined
+      | null;
+    const requestMaxTokens = requestConfig.maxOutputTokens;
+    const userMaxTokens =
+      reconcileMaxTokens(configMaxTokens, requestMaxTokens) ??
+      configMaxTokens ??
+      requestMaxTokens;
     const modelId = this.contentGeneratorConfig.model;
     const modelLimit = tokenLimit(modelId, 'output');
     const isKnownModel = hasExplicitOutputLimit(modelId);
@@ -625,7 +768,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
         ? Math.min(userMaxTokens, modelLimit)
         : userMaxTokens;
     } else {
-      // No explicit user config — check env var, then use the model limit.
+      // No explicit user config — check env var, then use the model limit
+      // clipped to the flat output ceiling.
       const envMaxTokens = parsePositiveIntegerEnvValue(
         process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
       );
@@ -634,13 +778,31 @@ export class AnthropicContentGenerator implements ContentGenerator {
           ? Math.min(envMaxTokens, modelLimit)
           : envMaxTokens;
       } else {
-        maxTokens = modelLimit;
+        maxTokens = defaultOutputCeiling(modelId);
       }
+    }
+
+    // Claude 4.8+ deprecated temperature — the server rejects it with a 400.
+    // Omit the parameter entirely for those models; older models keep the
+    // default of 1 (Anthropic's documented neutral value).
+    const temperatureDropped = this.modelRejectsTemperature();
+    if (temperatureDropped && !this.temperatureDropWarned) {
+      const userTemp = getParam<number>('temperature', 'temperature');
+      if (userTemp !== undefined) {
+        debugLogger.warn(
+          `temperature=${userTemp} is not supported by '${
+            this.contentGeneratorConfig.model ?? 'unknown'
+          }' (deprecated on 4.8+); ignoring.`,
+        );
+      }
+      this.temperatureDropWarned = true;
     }
 
     return {
       max_tokens: maxTokens,
-      temperature: getParam<number>('temperature', 'temperature') ?? 1,
+      ...(temperatureDropped
+        ? {}
+        : { temperature: getParam<number>('temperature', 'temperature') ?? 1 }),
       top_p: getParam<number>('top_p', 'topP'),
       top_k: getParam<number>('top_k', 'topK'),
     };
@@ -664,7 +826,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
    */
   private resolveEffectiveEffort(
     request: GenerateContentParameters,
-  ): 'low' | 'medium' | 'high' | 'max' | undefined {
+  ): ReasoningEffort | undefined {
     if (request.config?.thinkingConfig?.includeThoughts === false) {
       return undefined;
     }
@@ -676,49 +838,102 @@ export class AnthropicContentGenerator implements ContentGenerator {
     if (effort === undefined) {
       return undefined;
     }
-    if (
-      effort === 'max' &&
-      !isDeepSeekAnthropicHostname(this.contentGeneratorConfig)
-    ) {
-      if (!this.effortClampWarned) {
+    if (isDeepSeekAnthropicHostname(this.contentGeneratorConfig)) {
+      // DeepSeek's anthropic-compatible output_config.effort accepts only
+      // high/max. Mirror the DeepSeek OpenAI adapter (deepseek.ts): low/medium
+      // lift to high and xhigh groups to max, so a low/medium request is not
+      // passed through verbatim (which the endpoint would 400 on). Warn once
+      // when the requested tier is remapped — mirroring the real-Anthropic
+      // clamp path below — so a `/effort low` silently running at `high` is
+      // visible in debug logs.
+      const mapped: ReasoningEffort =
+        effort === 'xhigh' || effort === 'max' ? 'max' : 'high';
+      if (mapped !== effort && !this.effortClampWarned) {
         debugLogger.warn(
-          "reasoning.effort='max' is a DeepSeek extension; clamping to " +
-            "'high' for non-DeepSeek anthropic provider to avoid HTTP 400.",
+          `reasoning.effort='${effort}' is not accepted by the DeepSeek ` +
+            `anthropic-compatible endpoint; using '${mapped}'.`,
         );
         this.effortClampWarned = true;
       }
-      return 'high';
+      return mapped;
     }
-    return effort;
+    // Real Anthropic: clamp the requested tier to what this model actually
+    // accepts. Opus 4.7/4.8 and the 5.x families take xhigh/max natively;
+    // older models (Opus 4.6 / Sonnet 4.6 lack xhigh, Opus 4.5 lacks both)
+    // clamp so we never 400 on an unsupported enum.
+    const supported = anthropicSupportedEffortTiers(
+      this.contentGeneratorConfig.model ?? '',
+    );
+    const clamped = clampReasoningEffort(effort, supported);
+    if (clamped !== effort && !this.effortClampWarned) {
+      debugLogger.warn(
+        `reasoning.effort='${effort}' is not supported by '${
+          this.contentGeneratorConfig.model ?? 'unknown'
+        }'; using '${clamped}'.`,
+      );
+      this.effortClampWarned = true;
+    }
+    return clamped;
   }
 
   /**
    * Check if the current model supports adaptive thinking (type: 'adaptive').
    * Claude 4.6+ models require adaptive thinking; older models use the
-   * budget-based config. Uses numeric major/minor comparison rather than a
-   * single-digit character class so that future families (haiku, opus-4-10,
-   * opus-5-1, …) are recognized instead of silently falling back to the
-   * budget path and tripping HTTP 400 with `budget_tokens` they don't
-   * accept.
-   *
-   * The regex is intentionally unanchored so reseller-prefixed model names
-   * also match (`bedrock/claude-opus-4-7`, `vertex_ai/claude-sonnet-4-6@…`,
-   * `idealab:claude-opus-4-6`, etc.) — those route to the same Anthropic
-   * models on the wire and need the same thinking shape. Do not tighten to
-   * `^claude-` without also covering those naming conventions.
+   * budget-based config. Shares `parseClaudeModelVersion` with
+   * `anthropicSupportedEffortTiers` so the family list and the date-suffix guard
+   * stay in lockstep — a model parsed for effort gating is parsed identically
+   * here for the thinking shape.
    */
   private modelSupportsAdaptiveThinking(): boolean {
-    const model = (this.contentGeneratorConfig.model || '').toLowerCase();
-    const match = model.match(/claude-(?:opus|sonnet|haiku)-(\d+)-(\d+)/);
-    if (!match) return false;
-    const major = Number.parseInt(match[1], 10);
-    const minor = Number.parseInt(match[2], 10);
+    const parsed = parseClaudeModelVersion(
+      this.contentGeneratorConfig.model || '',
+    );
+    if (!parsed) return false;
+    const { major, minor } = parsed;
     return major > 4 || (major === 4 && minor >= 6);
+  }
+
+  /**
+   * Whether the model rejects the manual `thinking: { type: 'enabled',
+   * budget_tokens: N }` shape with a 400. Opus 4.7+ and every 5.x family
+   * (Fable 5, Mythos 5, Sonnet 5, …) dropped manual extended thinking in favor
+   * of adaptive thinking, so a budget-tokens-shaped request errors on those
+   * models — they must use `{ type: 'adaptive' }` with `output_config.effort`
+   * instead (https://platform.claude.com/docs/en/build-with-claude/effort).
+   * Opus 4.5/4.6 and Sonnet 4.6 still accept `budget_tokens` (deprecated on
+   * 4.6), and unknown/unversioned ids keep the manual escape hatch, so both
+   * return false. Shares `parseClaudeModelVersion` with the effort/adaptive
+   * gates so the version rules can't drift.
+   */
+  private modelRejectsManualThinking(): boolean {
+    const parsed = parseClaudeModelVersion(
+      this.contentGeneratorConfig.model || '',
+    );
+    if (!parsed) return false;
+    const { major, minor } = parsed;
+    return major > 4 || (major === 4 && minor >= 7);
+  }
+
+  /**
+   * Whether the model rejects the `temperature` sampling parameter with a 400.
+   * Claude Opus 4.8+ deprecated temperature — the server controls sampling
+   * determinism internally and responds with
+   * `"temperature is deprecated for this model."` when the parameter is sent.
+   * Older models (4.7 and below) and unknown/unversioned ids still accept it,
+   * so both return false.
+   */
+  private modelRejectsTemperature(): boolean {
+    const parsed = parseClaudeModelVersion(
+      this.contentGeneratorConfig.model || '',
+    );
+    if (!parsed) return false;
+    const { major, minor } = parsed;
+    return major > 4 || (major === 4 && minor >= 8);
   }
 
   private buildThinkingConfig(
     request: GenerateContentParameters,
-    effectiveEffort: 'low' | 'medium' | 'high' | 'max' | undefined,
+    effectiveEffort: ReasoningEffort | undefined,
   ): AnthropicThinkingParam | undefined {
     if (request.config?.thinkingConfig?.includeThoughts === false) {
       return undefined;
@@ -730,26 +945,46 @@ export class AnthropicContentGenerator implements ContentGenerator {
       return undefined;
     }
 
-    // Explicit budget_tokens is an escape hatch from the effort ladder:
-    // honor exactly what the user asked for. This deliberately does NOT
-    // re-clamp the value to track the (possibly clamped) effort label —
-    // a user who set `{ effort: 'max', budget_tokens: 128_000 }` against
-    // real api.anthropic.com will see `output_config.effort: 'high'`
-    // (clamped) but `thinking.budget_tokens: 128_000` (preserved). That
-    // wire-shape mismatch is intentional: the clamp protects against
-    // unknown-enum 400s on the effort field, but the budget field is
-    // just an integer the server accepts within its context window, so
-    // an explicit override stays explicit. The default ladder below is
-    // what stays consistent with the clamped effort.
+    // Explicit budget_tokens is an escape hatch from the effort ladder: honor
+    // exactly what the user asked for, without re-clamping to track the
+    // (possibly clamped) effort label — the budget field is just an integer the
+    // server accepts within its context window, so an explicit override stays
+    // explicit. This only applies to models that still accept the manual
+    // `{ type: 'enabled', budget_tokens }` shape (Opus 4.5/4.6, Sonnet 4.6,
+    // older 4.x, and unknown/unversioned ids). Opus 4.7+ and every 5.x family
+    // reject manual thinking with a 400 and require adaptive thinking, so on
+    // those models the budget is dropped and `output_config.effort` governs
+    // thinking depth instead
+    // (https://platform.claude.com/docs/en/build-with-claude/effort).
     //
-    // Checked before the adaptive-thinking branch so an explicit budget
-    // isn't silently dropped on Claude 4.6+ models — adaptive omits
+    // Checked before the adaptive-thinking branch so an explicit budget isn't
+    // silently dropped on models that DO still honor it — adaptive omits
     // `budget_tokens` entirely, which would discard the user override.
-    if (reasoning?.budget_tokens !== undefined) {
+    if (
+      reasoning?.budget_tokens !== undefined &&
+      !this.modelRejectsManualThinking()
+    ) {
       return {
         type: 'enabled',
         budget_tokens: reasoning.budget_tokens,
       };
+    }
+
+    // A model that rejects manual thinking (Opus 4.7+, every 5.x) discards an
+    // explicit budget_tokens in favor of adaptive thinking + output_config.
+    // effort. Every other clamp in this PR leaves a one-time trace; mirror that
+    // here so the dropped user override isn't silently invisible.
+    if (
+      reasoning?.budget_tokens !== undefined &&
+      this.modelRejectsManualThinking() &&
+      !this.budgetDropWarned
+    ) {
+      debugLogger.warn(
+        `reasoning.budget_tokens=${reasoning.budget_tokens} is ignored on '${
+          this.contentGeneratorConfig.model ?? 'unknown'
+        }' (Opus 4.7+/5.x use adaptive thinking); output_config.effort governs thinking depth instead.`,
+      );
+      this.budgetDropWarned = true;
     }
 
     // Models that support adaptive thinking use { type: 'adaptive' } without
@@ -759,20 +994,21 @@ export class AnthropicContentGenerator implements ContentGenerator {
       return { type: 'adaptive' };
     }
 
-    // When using interleaved thinking with tools, this budget token limit is the entire context window(200k tokens).
-    // 'max' is the DeepSeek-specific extra-strong tier; bump the budget
-    // accordingly so any client-side budgeting matches the spirit of the
-    // server-side label. resolveEffectiveEffort already clamps 'max' to
-    // 'high' on non-DeepSeek anthropic backends so the budget here stays
-    // consistent with the effort label written into output_config.
+    // Budget path for non-adaptive (pre-4.6) models. resolveEffectiveEffort has
+    // already clamped the tier to what the model accepts, so map each tier to a
+    // budget that matches the spirit of the effort label written into
+    // output_config. xhigh/max only reach here on DeepSeek-anthropic backends
+    // (real pre-4.6 Anthropic models clamp them away).
     const budgetTokens =
       effectiveEffort === 'low'
         ? 16_000
         : effectiveEffort === 'max'
           ? 128_000
-          : effectiveEffort === 'high'
-            ? 64_000
-            : 32_000;
+          : effectiveEffort === 'xhigh'
+            ? 96_000
+            : effectiveEffort === 'high'
+              ? 64_000
+              : 32_000;
 
     return {
       type: 'enabled',
@@ -782,16 +1018,41 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
   private buildOutputConfig(
     request: GenerateContentParameters,
-    effectiveEffort: 'low' | 'medium' | 'high' | 'max' | undefined,
-  ): { effort: 'low' | 'medium' | 'high' | 'max' } | undefined {
+    effectiveEffort: ReasoningEffort | undefined,
+  ): { effort: ReasoningEffort } | undefined {
     // resolveEffectiveEffort already returns undefined when:
     //   - per-request includeThoughts is false (side queries)
     //   - reasoning is disabled or unset
     //   - the user didn't set an effort
-    // and clamps DeepSeek-only 'max' to 'high' on stricter anthropic
-    // backends. Just consume the value here.
+    // and clamps the tier to what the current model supports. Just consume the
+    // value here.
     if (effectiveEffort === undefined) return undefined;
     return { effort: effectiveEffort };
+  }
+
+  /**
+   * Translate the Gemini-style `toolConfig.functionCallingConfig.mode` on
+   * the request into an Anthropic `tool_choice` value.
+   *
+   * Mapping:
+   *   mode 'ANY'  → `{ type: 'any' }`   (model must call at least one tool)
+   *   mode 'NONE' or 'AUTO' or absent → undefined (Anthropic has no
+   *     `tool_choice: { type: 'none' }`; to prevent tool calls the caller
+   *     should omit `tools` entirely)
+   *
+   * Only emitted when `tools` is non-empty — Anthropic rejects requests
+   * that carry `tool_choice` without a `tools` array.
+   */
+  private resolveToolChoice(
+    request: GenerateContentParameters,
+    tools: Anthropic.Tool[] | undefined,
+  ): NonNullable<MessageCreateParamsNonStreaming['tool_choice']> | undefined {
+    if (!tools || tools.length === 0) return undefined;
+    const mode = request.config?.toolConfig?.functionCallingConfig?.mode;
+    if (mode === 'ANY') {
+      return { type: 'any' };
+    }
+    return undefined;
   }
 
   private async *redactStreamErrors(
@@ -836,18 +1097,20 @@ export class AnthropicContentGenerator implements ContentGenerator {
         case 'content_block_start': {
           const index = event.index ?? 0;
           const type = String(event.content_block.type || 'text');
+          const id =
+            'id' in event.content_block ? event.content_block.id : undefined;
+          const name =
+            'name' in event.content_block
+              ? event.content_block.name
+              : undefined;
           const initialInput =
             type === 'tool_use' && 'input' in event.content_block
               ? JSON.stringify(event.content_block.input)
               : '';
           blocks.set(index, {
             type,
-            id:
-              'id' in event.content_block ? event.content_block.id : undefined,
-            name:
-              'name' in event.content_block
-                ? event.content_block.name
-                : undefined,
+            id,
+            name,
             inputJson: initialInput !== '{}' ? initialInput : '',
             signature:
               type === 'thinking' &&
@@ -856,6 +1119,18 @@ export class AnthropicContentGenerator implements ContentGenerator {
                 ? event.content_block.signature
                 : '',
           });
+          if (
+            type === 'tool_use' &&
+            typeof id === 'string' &&
+            id.length > 0 &&
+            typeof name === 'string' &&
+            name.length > 0
+          ) {
+            const chunk = this.buildGeminiChunk(undefined, messageId, model);
+            setToolCallPreparations(chunk, [{ callId: id, toolName: name }]);
+            collectedResponses.push(chunk);
+            yield chunk;
+          }
           break;
         }
         case 'content_block_delta': {

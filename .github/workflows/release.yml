@@ -57,7 +57,7 @@ jobs:
 
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
         with:
           ref: '${{ github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
@@ -98,6 +98,7 @@ jobs:
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
+          QWEN_SKIP_PREPARE: '1'
         run: |-
           npm ci --no-audit --progress=false
 
@@ -153,7 +154,7 @@ jobs:
 
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
         with:
           ref: '${{ github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
@@ -168,6 +169,7 @@ jobs:
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
+          QWEN_SKIP_PREPARE: '1'
         run: |-
           npm ci --no-audit --progress=false
 
@@ -179,6 +181,10 @@ jobs:
         run: |-
           npm run lint:ci
 
+      - name: 'Check Serve Fast Path Bundle'
+        run: |-
+          npm run check:serve-fast-path-bundle
+
       - name: 'Build Project'
         run: |-
           npm run build
@@ -189,7 +195,7 @@ jobs:
 
       - name: 'Run Workspace Tests'
         run: |-
-          npm run test:ci
+          npm run test:release
 
   integration_none:
     name: 'Integration Tests (No Sandbox)'
@@ -206,7 +212,7 @@ jobs:
 
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
         with:
           ref: '${{ github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
@@ -221,8 +227,14 @@ jobs:
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
+          QWEN_SKIP_PREPARE: '1'
         run: |-
           npm ci --no-audit --progress=false
+
+      - name: 'Build Bundle'
+        run: |-
+          npm run build
+          npm run bundle
 
       - name: 'Run CLI Integration Tests'
         run: |-
@@ -247,7 +259,7 @@ jobs:
 
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
         with:
           ref: '${{ github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
@@ -262,8 +274,14 @@ jobs:
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
+          QWEN_SKIP_PREPARE: '1'
         run: |-
           npm ci --no-audit --progress=false
+
+      - name: 'Build Bundle'
+        run: |-
+          npm run build
+          npm run bundle
 
       - name: 'Set up Docker'
         uses: 'docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5' # ratchet:docker/setup-buildx-action@v4
@@ -324,12 +342,10 @@ jobs:
       contents: 'write'
       packages: 'write'
       id-token: 'write'
-      pull-requests: 'write'
-      issues: 'write'
 
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
         with:
           # Persist the bot PAT for release-branch pushes so downstream CI
           # workflows are triggered.
@@ -349,6 +365,7 @@ jobs:
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
+          QWEN_SKIP_PREPARE: '1'
         run: |-
           npm ci --no-audit --progress=false
 
@@ -356,6 +373,7 @@ jobs:
         run: |-
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config core.hooksPath .husky
 
       - name: 'Create and switch to a release branch'
         id: 'release_branch'
@@ -403,6 +421,7 @@ jobs:
         env:
           QWEN_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
         run: |-
+          npm run build
           npm run bundle
           npm run prepare:package
 
@@ -443,7 +462,7 @@ jobs:
         if: |-
           ${{ needs.prepare.outputs.is_dry_run == 'false' }}
         env:
-          # CI_BOT_PAT required: GITHUB_TOKEN events cannot trigger downstream workflows (sync-release-to-oss.yml).
+          # CI_BOT_PAT required: GITHUB_TOKEN events cannot trigger downstream release-event workflows.
           GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           RELEASE_BRANCH: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
           RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
@@ -465,93 +484,6 @@ jobs:
             --notes-start-tag "${PREVIOUS_RELEASE_TAG}" \
             --generate-notes \
             ${PRERELEASE_FLAG}
-
-      - name: 'Regenerate CHANGELOG.md'
-        # Stable releases only: nightly/preview ship daily and would drown out
-        # the changelog. The just-created GitHub Release is already queryable,
-        # so the generator picks it up. The release branch was already pushed
-        # above, so push this follow-up commit too — otherwise the PR opened
-        # below (whose head is the remote branch) would not include it.
-        #
-        # Non-blocking by design: the only realistic failures are transient
-        # (the gh API read or the git push). The changelog is rebuilt from the
-        # full release history on every run, so a skipped update self-heals on
-        # the next stable release — never worth blocking the version-bump PR to
-        # main that follows.
-        if: |-
-          ${{ needs.prepare.outputs.is_dry_run == 'false' && needs.prepare.outputs.is_nightly == 'false' && needs.prepare.outputs.is_preview == 'false' }}
-        continue-on-error: true
-        env:
-          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
-          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
-          BRANCH_NAME: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
-        run: |-
-          set -euo pipefail
-          node scripts/generate-changelog.js
-          git add CHANGELOG.md
-          if git diff --cached --quiet -- CHANGELOG.md; then
-            echo "CHANGELOG.md already up to date."
-          else
-            git commit -m "docs(changelog): sync for ${RELEASE_TAG}"
-            git push origin "${BRANCH_NAME}"
-          fi
-
-      - name: 'Create PR to merge release branch into main'
-        if: |-
-          ${{ needs.prepare.outputs.is_dry_run == 'false' && needs.prepare.outputs.is_nightly == 'false' && needs.prepare.outputs.is_preview == 'false' }}
-        id: 'pr'
-        env:
-          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
-          RELEASE_BRANCH: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
-          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
-        run: |-
-          set -euo pipefail
-
-          pr_url="$(gh pr list --head "${RELEASE_BRANCH}" --base main --json url --jq '.[0].url')"
-          if [[ -z "${pr_url}" ]]; then
-            pr_url="$(gh pr create \
-              --base main \
-              --head "${RELEASE_BRANCH}" \
-              --label 'skip-changelog' \
-              --title "chore(release): ${RELEASE_TAG}" \
-              --body "Automated release PR for ${RELEASE_TAG}. Syncs package.json versions and CHANGELOG.md on main.")"
-          fi
-
-          echo "PR_URL=${pr_url}" >> "${GITHUB_OUTPUT}"
-
-      - name: 'Approve release PR'
-        if: |-
-          ${{ needs.prepare.outputs.is_dry_run == 'false' && needs.prepare.outputs.is_nightly == 'false' && needs.prepare.outputs.is_preview == 'false' }}
-        env:
-          # Separate bot account from the PR author (CI_BOT_PAT) so GitHub
-          # allows the approval; covers one of the two required reviews.
-          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
-          PR_URL: '${{ steps.pr.outputs.PR_URL }}'
-        run: |-
-          set -euo pipefail
-          gh pr review "${PR_URL}" --approve --body "Automated approval for the release version bump."
-
-      - name: 'Enable auto-merge for release PR'
-        if: |-
-          ${{ needs.prepare.outputs.is_dry_run == 'false' && needs.prepare.outputs.is_nightly == 'false' && needs.prepare.outputs.is_preview == 'false' }}
-        env:
-          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
-          PR_URL: '${{ steps.pr.outputs.PR_URL }}'
-          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
-        run: |-
-          set -euo pipefail
-          # Keep [skip ci] only on the squash commit that lands on main. The
-          # release branch commit and PR title intentionally omit it so tag-push
-          # workflows and PR metadata stay unaffected.
-          #
-          # No --delete-branch: main has a merge queue, and gh rejects
-          # --delete-branch when one is enabled (the queue owns the merge, so
-          # head-branch deletion is governed by the repo's
-          # "Automatically delete head branches" setting instead).
-          gh pr merge "${PR_URL}" \
-            --squash \
-            --auto \
-            --subject "chore(release): ${RELEASE_TAG} [skip ci]"
 
   notify_failure:
     name: 'Notify Release Failure'
@@ -590,6 +522,7 @@ jobs:
           DETAILS_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
           BUG_LABEL: 'type/bug'
           READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
+          AUTOFIX_APPROVED_LABEL: 'autofix/approved'
           PREPARE_RESULT: '${{ needs.prepare.result }}'
           QUALITY_RESULT: '${{ needs.quality.result }}'
           INTEGRATION_NONE_RESULT: '${{ needs.integration_none.result }}'
@@ -640,6 +573,9 @@ jobs:
             | jq -c --arg tag "${RELEASE_TAG}" \
               '[ .[] | select(.title | startswith("Release Failed for " + $tag + " on ")) ] | (map(select(.author.login == "github-actions[bot]"))[0] // .[0]) // empty'
           )"
+          gh label create "${AUTOFIX_APPROVED_LABEL}" --repo "${GH_REPO}" \
+            --description 'Maintainer explicitly approved this issue for autonomous autofix' \
+            --color '0e8a16' 2> /dev/null || true
           if [[ -n "${existing_issue}" ]]; then
             issue_number="$(jq -r '.number' <<<"${existing_issue}")"
             issue_url="$(jq -r '.url' <<<"${existing_issue}")"
@@ -669,18 +605,23 @@ jobs:
               fi
               # Ensure the fallback labels are present so that, if the dispatch
               # below fails, the scheduled ready-for-agent scan can still find it.
+              # Safe to auto-apply approval: release-failure issue content is
+              # fully CI-generated, not user-controlled issue text.
               gh issue edit "${issue_number}" --repo "${GH_REPO}" \
-                --add-label "${BUG_LABEL},${READY_FOR_AGENT_LABEL}" \
-                || echo "::warning::Failed to ensure ${BUG_LABEL}/${READY_FOR_AGENT_LABEL} on issue #${issue_number}."
+                --add-label "${BUG_LABEL},${READY_FOR_AGENT_LABEL},${AUTOFIX_APPROVED_LABEL}" \
+                || echo "::warning::Failed to ensure ${BUG_LABEL}/${READY_FOR_AGENT_LABEL}/${AUTOFIX_APPROVED_LABEL} on issue #${issue_number}."
             fi
           fi
 
           if [[ -z "${existing_issue}" ]]; then
+            # Safe to auto-apply approval: release-failure issue content is
+            # fully CI-generated, not user-controlled issue text.
             issue_url="$(gh issue create --repo "${GH_REPO}" \
               --title "Release Failed for ${RELEASE_TAG} on $(date -u +'%Y-%m-%d')" \
               --body-file "${body_file}" \
               --label "${BUG_LABEL}" \
-              --label "${READY_FOR_AGENT_LABEL}")"
+              --label "${READY_FOR_AGENT_LABEL}" \
+              --label "${AUTOFIX_APPROVED_LABEL}")"
             issue_number="${issue_url##*/}"
           fi
 

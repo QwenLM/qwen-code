@@ -36,6 +36,23 @@ describe('BuiltinAgentRegistry', () => {
       expect(generalAgent).toBeDefined();
       expect(generalAgent?.description).toContain('General-purpose agent');
     });
+
+    it('should let the Explore agent inherit the main model', () => {
+      const exploreAgent = BuiltinAgentRegistry.getBuiltinAgent('Explore');
+
+      expect(exploreAgent).toBeDefined();
+      expect(exploreAgent?.model).toBeUndefined();
+    });
+
+    // Regression for #7126: Explore is a read-only search worker that
+    // typically runs as a subagent with no human in the loop. An
+    // interactive question tool would block the pipeline forever.
+    it('should not give the Explore agent the interactive question tool', () => {
+      const exploreAgent = BuiltinAgentRegistry.getBuiltinAgent('Explore');
+
+      expect(exploreAgent?.tools).toBeDefined();
+      expect(exploreAgent?.tools).not.toContain('ask_user_question');
+    });
   });
 
   describe('getBuiltinAgent', () => {

@@ -12,7 +12,9 @@
       "@qwen-code/acp-bridge": ["../acp-bridge/src/index.ts"],
       "@qwen-code/acp-bridge/*": ["../acp-bridge/src/*"],
       "@qwen-code/audio-capture": ["../audio-capture/src/index.ts"],
-      "@qwen-code/audio-capture/*": ["../audio-capture/src/*"]
+      "@qwen-code/audio-capture/*": ["../audio-capture/src/*"],
+      "@qwen-code/sdk": ["../sdk-typescript/src/index.ts"],
+      "@qwen-code/sdk/*": ["../sdk-typescript/src/*"]
     }
   },
   "include": [
@@ -99,10 +101,12 @@
     { "path": "../core" },
     { "path": "../acp-bridge" },
     { "path": "../audio-capture" },
+    { "path": "../sdk-typescript/tsconfig.reference.json" },
     { "path": "../channels/base" },
     { "path": "../channels/telegram" },
     { "path": "../channels/weixin" },
     { "path": "../channels/dingtalk" },
+    { "path": "../channels/wecom" },
     { "path": "../channels/feishu" }
   ]
 }

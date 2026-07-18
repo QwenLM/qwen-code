@@ -18,7 +18,7 @@
 //! `recording.rs` — a registry-free, platform-pluggable hook set with no
 //! reverse coupling from core into the platform crates.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -51,14 +51,33 @@ fn is_trackable(id: &str) -> bool {
 /// be idempotent because the overlay Remove + recording stop must run exactly
 /// once. Growth is bounded (one short string per ended session over the
 /// daemon's lifetime); eviction is a deliberate non-blocking follow-up.
-static ENDED_SESSIONS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static ENDED_SESSIONS: OnceLock<Mutex<HashMap<String, SessionEndReason>>> = OnceLock::new();
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionEndReason {
+    Explicit,
+    IdleTimeout,
+    ConnectionClosed,
+    Unknown,
+}
+
+impl SessionEndReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit_end",
+            Self::IdleTimeout => "idle_timeout",
+            Self::ConnectionClosed => "connection_closed",
+            Self::Unknown => "unknown",
+        }
+    }
+}
 
 fn hooks() -> &'static Mutex<Vec<SessionEndHook>> {
     SESSION_END_HOOKS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-fn ended_sessions() -> &'static Mutex<HashSet<String>> {
-    ENDED_SESSIONS.get_or_init(|| Mutex::new(HashSet::new()))
+fn ended_sessions() -> &'static Mutex<HashMap<String, SessionEndReason>> {
+    ENDED_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Register a callback invoked with the disconnecting `session_id` whenever a
@@ -78,14 +97,19 @@ pub fn register_session_end_hook(hook: impl Fn(&str) + Send + Sync + 'static) {
 /// stray legacy `session_end` (mixed-version rollout) so cursor-remove +
 /// recording-stop run exactly once. No-op when no hooks are registered.
 pub fn fire_session_end(session_id: &str) {
+    fire_session_end_with_reason(session_id, SessionEndReason::Unknown);
+}
+
+pub fn fire_session_end_with_reason(session_id: &str, reason: SessionEndReason) {
     // Mark-then-fan-out under a short critical section, releasing the lock
     // before running hooks (hooks may be slow / re-entrant and must not hold
     // the dedupe lock).
     {
         let mut ended = ended_sessions().lock().unwrap();
-        if !ended.insert(session_id.to_owned()) {
+        if ended.contains_key(session_id) {
             return; // already ended — idempotent no-op.
         }
+        ended.insert(session_id.to_owned(), reason);
     }
     for hook in hooks().lock().unwrap().iter() {
         hook(session_id);
@@ -96,7 +120,28 @@ pub fn fire_session_end(session_id: &str) {
 /// daemon-side authority for "this session is permanently gone"; the macOS
 /// overlay keeps its own render-side tombstone keyed on the same id.
 pub fn is_session_ended(session_id: &str) -> bool {
-    ended_sessions().lock().unwrap().contains(session_id)
+    ended_sessions().lock().unwrap().contains_key(session_id)
+}
+
+pub fn session_end_reason(session_id: &str) -> Option<SessionEndReason> {
+    ended_sessions().lock().unwrap().get(session_id).copied()
+}
+
+/// Revive a previously-ended session id by clearing its tombstone, so a fresh
+/// `start_session` with a recycled id works as a caller would expect: the id
+/// becomes live again and its actions stop being rejected by the resurrection
+/// guard. Returns whether the id had actually been ended (i.e. was revived).
+///
+/// This is the deliberate, EXPLICIT counterpart to the resurrection guard. The
+/// guard exists so a *stray late action* on a dead id can't silently re-create
+/// session-owned state; reviving requires an explicit `start_session` re-declare
+/// of the same id, which is exactly what a caller reusing an id intends. No-op
+/// for the anonymous fallback (`"default"` / empty), which is never tracked.
+pub fn revive_session(session_id: &str) -> bool {
+    if !is_trackable(session_id) {
+        return false;
+    }
+    ended_sessions().lock().unwrap().remove(session_id).is_some()
 }
 
 /// Record activity for an explicit session id, resetting its idle-TTL clock.
@@ -123,32 +168,7 @@ pub fn end_session(session_id: &str) {
         return;
     }
     activity().lock().unwrap().remove(session_id);
-    fire_session_end(session_id);
-}
-
-/// Revive a session that a prior `end_session` / idle-TTL sweep marked ended,
-/// so an explicit `start_session` can resume a run after an idle gap.
-///
-/// Without this, an idle-reaped session is permanently dead: `is_session_ended`
-/// stays true forever (the tombstone is never cleared), `touch_session` no-ops
-/// on an ended id, and the daemon's resurrection guard rejects every subsequent
-/// `call` with "session ended; tool call ignored" — including `start_session`
-/// itself. Clearing the tombstone and re-arming the idle-TTL clock makes the id
-/// usable again. No-op for the anonymous fallback.
-pub fn revive_session(session_id: &str) {
-    if !is_trackable(session_id) {
-        return;
-    }
-    // Clear the permanent tombstone so `is_session_ended` reads false again and
-    // the daemon's resurrection guard stops rejecting calls for this id. A
-    // later `end_session` re-fires the cleanup hooks (fire_session_end is keyed
-    // on this set), which is correct — it's a fresh lifecycle for the id.
-    ended_sessions().lock().unwrap().remove(session_id);
-    // Re-arm the idle-TTL clock so the revived session is tracked again.
-    activity()
-        .lock()
-        .unwrap()
-        .insert(session_id.to_owned(), Instant::now());
+    fire_session_end_with_reason(session_id, SessionEndReason::Explicit);
 }
 
 /// End every session whose last activity is older than `ttl`, returning the ids
@@ -167,7 +187,8 @@ pub fn evict_idle(ttl: Duration) -> Vec<String> {
             .collect()
     };
     for id in &stale {
-        end_session(id);
+        activity().lock().unwrap().remove(id);
+        fire_session_end_with_reason(id, SessionEndReason::IdleTimeout);
     }
     stale
 }
@@ -182,14 +203,6 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
-
-    /// Serialize tests that invoke the process-global `evict_idle(ZERO)` sweep,
-    /// so one test's zero-TTL reap can't re-end a session another test just
-    /// (re)touched — they share `SESSION_ACTIVITY` / `ENDED_SESSIONS`.
-    static SWEEP_TEST_LOCK: Mutex<()> = Mutex::new(());
-    fn sweep_lock() -> std::sync::MutexGuard<'static, ()> {
-        SWEEP_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    }
 
     #[test]
     fn fire_session_end_is_idempotent_per_id() {
@@ -208,6 +221,7 @@ mod tests {
         assert!(!is_session_ended(sid));
         fire_session_end(sid);
         assert!(is_session_ended(sid));
+        assert_eq!(session_end_reason(sid), Some(SessionEndReason::Unknown));
         // Second + third fire for the same id must be no-ops.
         fire_session_end(sid);
         fire_session_end(sid);
@@ -220,7 +234,6 @@ mod tests {
 
     #[test]
     fn touch_then_evict_by_ttl() {
-        let _sweep = sweep_lock();
         let sid = "test-ttl-session-DDEEFF";
         touch_session(sid);
         // A huge TTL leaves it alone (just touched).
@@ -229,11 +242,11 @@ mod tests {
         let evicted = evict_idle(Duration::ZERO);
         assert!(evicted.iter().any(|s| s == sid), "zero-TTL must evict a touched session");
         assert!(is_session_ended(sid), "evicted session is ended");
+        assert_eq!(session_end_reason(sid), Some(SessionEndReason::IdleTimeout));
     }
 
     #[test]
     fn anonymous_ids_are_never_tracked() {
-        let _sweep = sweep_lock();
         touch_session("default");
         touch_session("");
         // Neither shows up under a zero-TTL sweep (they were never inserted).
@@ -243,32 +256,35 @@ mod tests {
 
     #[test]
     fn end_session_is_explicit_teardown() {
-        let _sweep = sweep_lock();
         let sid = "test-end-session-112233";
         touch_session(sid);
         end_session(sid);
         assert!(is_session_ended(sid));
+        assert_eq!(session_end_reason(sid), Some(SessionEndReason::Explicit));
         // Its TTL entry is gone, so a later sweep doesn't re-fire for it.
         assert!(!evict_idle(Duration::ZERO).iter().any(|s| s == sid));
     }
 
     #[test]
-    fn revive_resumes_an_ended_session() {
-        let _sweep = sweep_lock();
-        let sid = "test-revive-session-778899";
+    fn revive_clears_the_tombstone_for_an_ended_id() {
+        let sid = "test-revive-session-445566";
         touch_session(sid);
         end_session(sid);
-        assert!(is_session_ended(sid), "precondition: session is ended");
-        // Revive must clear the tombstone so the id is usable again...
-        revive_session(sid);
-        assert!(!is_session_ended(sid), "revive must un-end the session");
-        // ...and re-arm the idle-TTL so the session is tracked again: a fresh
-        // zero-TTL sweep should be able to reclaim it (proving it's live, not
-        // stuck in limbo).
-        assert!(
-            evict_idle(Duration::ZERO).iter().any(|s| s == sid),
-            "a revived session must be tracked again (re-armed TTL)"
-        );
-        assert!(is_session_ended(sid), "and can be ended again after revival");
+        assert!(is_session_ended(sid), "ended id is tombstoned");
+
+        // Explicit re-declare revives it: tombstone cleared, returns true.
+        assert!(revive_session(sid), "revive reports the id was ended");
+        assert!(!is_session_ended(sid), "revived id is live again");
+
+        // Reviving a live (or never-ended) id is a no-op returning false.
+        assert!(!revive_session(sid), "reviving a live id is a no-op");
+        assert!(!revive_session("test-never-ended-778899"));
+    }
+
+    #[test]
+    fn revive_is_noop_for_anonymous_ids() {
+        // The anonymous fallback is never tracked, so there is nothing to revive.
+        assert!(!revive_session("default"));
+        assert!(!revive_session(""));
     }
 }

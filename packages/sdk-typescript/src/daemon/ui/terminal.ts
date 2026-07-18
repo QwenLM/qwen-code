@@ -58,6 +58,12 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
         `metadata: ${event.displayName ?? '(no display name)'}`,
         '36',
       );
+    case 'session.artifact.changed':
+      return terminalLine(
+        'artifact',
+        `${event.change.action} ${event.change.artifact?.title ?? event.change.artifactId}`,
+        '36',
+      );
     case 'session.approval_mode.changed':
       return terminalLine(
         'approval-mode',
@@ -103,7 +109,9 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
     case 'workspace.memory.changed':
       return terminalLine(
         'memory',
-        `${event.mode} ${event.scope} ${event.filePath} +${event.bytesWritten}b`,
+        event.scope === 'managed'
+          ? (event.source ?? 'managed_memory')
+          : `${event.mode} ${event.scope} ${event.filePath} +${event.bytesWritten}b`,
         '36',
       );
     case 'workspace.agent.changed':
@@ -168,6 +176,8 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
         `${event.serverName} restart refused: ${event.reason}`,
         '33',
       );
+    case 'workspace.mcp.server_changed':
+      return terminalLine('mcp', `${event.serverName} ${event.action}`, '36');
     case 'workspace.extensions.changed':
       if (event.status === 'failed') {
         return terminalLine(

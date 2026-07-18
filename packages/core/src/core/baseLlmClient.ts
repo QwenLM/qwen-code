@@ -14,8 +14,12 @@ import type {
   Tool,
   Schema,
 } from '@google/genai';
+import { FunctionCallingConfigMode } from '@google/genai';
 import type { Config } from '../config/config.js';
-import type { ContentGenerator } from './contentGenerator.js';
+import type {
+  ContentGenerator,
+  ContentGeneratorConfig,
+} from './contentGenerator.js';
 import { AuthType, createContentGenerator } from './contentGenerator.js';
 import type { ResolvedModelConfig } from '../models/types.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
@@ -33,10 +37,23 @@ import { logApiRetry } from '../telemetry/loggers.js';
 import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
 import { getResponseText } from '../utils/partUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
+import { slimCompactionInput } from '../services/compactionInputSlimming.js';
 
 const DEFAULT_MAX_ATTEMPTS = 7;
 
 const debugLogger = createDebugLogger('BASE_LLM_CLIENT');
+
+function splitModelBaseUrl(model: string): { model: string; baseUrl?: string } {
+  const idx = model.indexOf('\0');
+  if (idx < 0) return { model };
+  const modelPart = model.slice(0, idx);
+  if (!modelPart) return { model: modelPart };
+  return {
+    model: modelPart,
+    baseUrl: model.slice(idx + 1) || undefined,
+  };
+}
 
 /**
  * The pair of generator and retry-authType to use for a request targeting
@@ -48,6 +65,7 @@ const debugLogger = createDebugLogger('BASE_LLM_CLIENT');
  */
 export interface ResolvedGeneratorForModel {
   contentGenerator: ContentGenerator;
+  contentGeneratorConfig: ContentGeneratorConfig;
   retryAuthType: string | undefined;
   retryErrorCodes?: readonly number[];
   model: string;
@@ -189,7 +207,7 @@ export class BaseLlmClient {
    */
   private readonly perModelGeneratorCache = new Map<
     string,
-    Promise<ContentGenerator>
+    Promise<RuntimeContentGeneratorView>
   >();
 
   constructor(
@@ -235,10 +253,15 @@ export class BaseLlmClient {
 
     const {
       contentGenerator,
+      contentGeneratorConfig,
       retryAuthType,
       retryErrorCodes,
       model: requestModel,
     } = await this.resolveForModel(model);
+    const requestContents = slimCompactionInput(
+      contents,
+      contentGeneratorConfig.modalities,
+    ).slimmedHistory;
 
     try {
       const apiCall = () =>
@@ -248,8 +271,17 @@ export class BaseLlmClient {
             config: {
               ...requestConfig,
               tools,
+              // Force the model to call the respond_in_schema tool rather
+              // than free-texting. Without this, Anthropic-native and
+              // some OpenAI-compat providers default to tool_choice=auto
+              // and may skip the tool call entirely — especially
+              // adaptive-thinking models that consume the tiny output
+              // budget on thinking before producing any tool_use.
+              toolConfig: {
+                functionCallingConfig: { mode: FunctionCallingConfigMode.ANY },
+              },
             },
-            contents,
+            contents: requestContents,
           },
           promptId ?? '',
         );
@@ -353,16 +385,21 @@ export class BaseLlmClient {
 
     const {
       contentGenerator,
+      contentGeneratorConfig,
       retryAuthType,
       retryErrorCodes,
       model: requestModel,
     } = await this.resolveForModel(model, { failClosed: options.failClosed });
+    const requestContents = slimCompactionInput(
+      contents,
+      contentGeneratorConfig.modalities,
+    ).slimmedHistory;
 
     try {
       const request = {
         model: requestModel,
         config: requestConfig,
-        contents,
+        contents: requestContents,
       };
 
       // Both branches resolve to the same `{ text, usage }` shape so a single
@@ -504,31 +541,44 @@ export class BaseLlmClient {
     model: string,
     opts?: { failClosed?: boolean },
   ): Promise<ResolvedGeneratorForModel> {
-    const selector = this.resolveModelSelector(model);
-    const requestModel = selector?.modelId ?? this.config.getModel() ?? model;
-    const mainModel = this.config.getModel() ?? model;
+    const requested = splitModelBaseUrl(model);
+    const selector = this.resolveModelSelector(requested.model);
+    const requestModel =
+      selector?.modelId ?? this.config.getModel() ?? requested.model;
+    const mainModel = this.config.getModel() ?? requested.model;
     const mainGeneratorConfig = this.config.getContentGeneratorConfig();
     const mainAuthType = mainGeneratorConfig?.authType;
+    const mainBaseUrl = mainGeneratorConfig?.baseUrl;
     const mainRetryErrorCodes = mainGeneratorConfig?.retryErrorCodes;
+    const matchesMainBaseUrl =
+      requested.baseUrl === undefined || requested.baseUrl === mainBaseUrl;
 
     if (
       requestModel === mainModel &&
-      (!selector?.authType || selector.authType === mainAuthType)
+      (!selector?.authType || selector.authType === mainAuthType) &&
+      matchesMainBaseUrl
     ) {
       return {
         contentGenerator: this.getCurrentContentGenerator(),
+        contentGeneratorConfig: mainGeneratorConfig,
         retryAuthType: mainAuthType,
         retryErrorCodes: mainRetryErrorCodes,
         model: requestModel,
       };
     }
 
-    const contentGenerator = await this.createContentGeneratorForModel(
-      model,
+    const { contentGenerator, contentGeneratorConfig } =
+      await this.createRuntimeViewForModel(
+        requested.model,
+        selector,
+        opts?.failClosed ?? false,
+        requested.baseUrl,
+      );
+    const resolvedModel = this.resolveModelAcrossAuthTypes(
+      requested.model,
       selector,
-      opts?.failClosed ?? false,
+      requested.baseUrl,
     );
-    const resolvedModel = this.resolveModelAcrossAuthTypes(model, selector);
     const retryAuthType =
       resolvedModel?.authType ?? mainAuthType ?? AuthType.USE_OPENAI;
     const retryErrorCodes =
@@ -536,6 +586,7 @@ export class BaseLlmClient {
 
     return {
       contentGenerator,
+      contentGeneratorConfig,
       retryAuthType,
       retryErrorCodes,
       model: resolvedModel?.id ?? requestModel,
@@ -558,14 +609,19 @@ export class BaseLlmClient {
   private resolveModelAcrossAuthTypes(
     model: string,
     selector: ResolvedModelId | undefined,
+    modelBaseUrl?: string,
   ): ResolvedModelConfig | undefined {
     const modelsConfig = this.config.getModelsConfig?.();
     if (!modelsConfig) return undefined;
     if (!selector) return undefined;
     const modelId = selector.modelId;
+    const getResolvedModel = (authType: AuthType) =>
+      modelBaseUrl === undefined
+        ? modelsConfig.getResolvedModel(authType, modelId)
+        : modelsConfig.getResolvedModel(authType, modelId, modelBaseUrl);
 
     if (selector.authType) {
-      return modelsConfig.getResolvedModel(selector.authType, modelId);
+      return getResolvedModel(selector.authType);
     }
 
     const allAuthTypes: AuthType[] = [
@@ -578,38 +634,67 @@ export class BaseLlmClient {
 
     const mainAuthType = this.config.getContentGeneratorConfig()?.authType;
     if (mainAuthType) {
-      const resolved = modelsConfig.getResolvedModel(mainAuthType, modelId);
+      const resolved = getResolvedModel(mainAuthType);
       if (resolved) return resolved;
     }
 
     for (const authType of allAuthTypes) {
       if (authType === mainAuthType) continue;
-      const resolved = modelsConfig.getResolvedModel(authType, modelId);
+      const resolved = getResolvedModel(authType);
       if (resolved) return resolved;
     }
 
     return undefined;
   }
 
-  private async createContentGeneratorForModel(
+  private async createRuntimeViewForModel(
     model: string,
     selector: ResolvedModelId | undefined,
     failClosed = false,
-  ): Promise<ContentGenerator> {
-    const cacheKey = selector
-      ? `${selector.authType ?? ''}:${selector.modelId}`
+    modelBaseUrl?: string,
+  ): Promise<RuntimeContentGeneratorView> {
+    const routeKey = selector
+      ? modelBaseUrl === undefined
+        ? `${selector.authType ?? ''}:${selector.modelId}`
+        : `${selector.authType ?? ''}:${selector.modelId}\0${modelBaseUrl}`
       : model;
+    const cacheKey = routeKey;
     const cached = this.perModelGeneratorCache.get(cacheKey);
-    if (cached) return cached;
+    const normalizeGeneratorError = (err: unknown) =>
+      err instanceof Error
+        ? err
+        : new Error(
+            `Failed to create content generator for model "${model}": ${String(err)}`,
+          );
+    const fallbackAfterGeneratorError = (
+      err: unknown,
+    ): RuntimeContentGeneratorView => {
+      if (failClosed) throw normalizeGeneratorError(err);
+      debugLogger.warn(
+        `Failed to create content generator for model "${model}", falling back to main generator.`,
+        err instanceof Error ? err.message : String(err),
+      );
+      return {
+        contentGenerator: this.getCurrentContentGenerator(),
+        contentGeneratorConfig: this.config.getContentGeneratorConfig(),
+      };
+    };
+    if (cached) return cached.catch(fallbackAfterGeneratorError);
 
-    const resolvedModel = this.resolveModelAcrossAuthTypes(model, selector);
+    const resolvedModel = this.resolveModelAcrossAuthTypes(
+      model,
+      selector,
+      modelBaseUrl,
+    );
 
     if (!resolvedModel) {
       // failClosed callers (vision bridge) must NOT silently run on the main
       // generator — that would send image payloads to the text-only primary.
       if (failClosed) {
+        const baseUrlMessage =
+          modelBaseUrl === undefined ? '' : ` at baseUrl "${modelBaseUrl}"`;
         throw new Error(
-          `Model "${model}" is not registered across any auth type; ` +
+          `Model "${model}"${baseUrlMessage} is not registered across any auth type; ` +
             `refusing to fall back to the main generator.`,
         );
       }
@@ -620,7 +705,10 @@ export class BaseLlmClient {
       // runtime view from AsyncLocalStorage, which can differ between calls
       // (e.g. inside a subagent vs. on the main session). Caching here would
       // pin the first-call view's generator under this selector key.
-      return this.getCurrentContentGenerator();
+      return {
+        contentGenerator: this.getCurrentContentGenerator(),
+        contentGeneratorConfig: this.config.getContentGeneratorConfig(),
+      };
     }
 
     const generatorPromise = (async () => {
@@ -637,29 +725,27 @@ export class BaseLlmClient {
             baseUrl: resolvedModel.baseUrl,
           },
         );
-
-        return await createContentGenerator(targetConfig, this.config);
+        if (resolvedModel.capabilities?.vision) {
+          targetConfig.modalities = {
+            ...targetConfig.modalities,
+            image: true,
+          };
+        }
+        return {
+          contentGenerator: await createContentGenerator(
+            targetConfig,
+            this.config,
+          ),
+          contentGeneratorConfig: targetConfig,
+        };
       } catch (err: unknown) {
         this.perModelGeneratorCache.delete(cacheKey);
-        if (failClosed) {
-          // Surface the creation failure rather than routing image payloads at
-          // the main (text-only) generator. The caller fails the conversion.
-          throw err instanceof Error
-            ? err
-            : new Error(
-                `Failed to create content generator for model "${model}": ${String(err)}`,
-              );
-        }
-        debugLogger.warn(
-          `Failed to create content generator for model "${model}", falling back to main generator.`,
-          err instanceof Error ? err.message : String(err),
-        );
-        return this.getCurrentContentGenerator();
+        throw normalizeGeneratorError(err);
       }
     })();
 
     this.perModelGeneratorCache.set(cacheKey, generatorPromise);
-    return generatorPromise;
+    return generatorPromise.catch(fallbackAfterGeneratorError);
   }
 
   private resolveModelSelector(model: string): ResolvedModelId | undefined {

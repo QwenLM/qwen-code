@@ -5,13 +5,16 @@
  */
 
 import type { Argv, CommandModule } from 'yargs';
+import type { ServeChannelSelection } from '../serve/types.js';
+import { normalizeServeChannelSelection } from '../serve/channel-selection.js';
 // Type-only imports — no runtime cost. The serve module pulls in express +
 // body-parser + qs + the daemon transport stack; static-importing it from
 // here would tax every `qwen` invocation (interactive, mcp, channel, etc.)
 // with ~50ms of cold ESM resolution. The runtime import is deferred to the
 // handler below so it only loads when the user actually runs `qwen serve`.
 import { writeStderrLine } from '../utils/stdioHelpers.js';
-import { DEFAULT_RING_SIZE } from '../serve/event-bus.js';
+import { DEFAULT_RING_SIZE } from '@qwen-code/acp-bridge/eventBus';
+import { DEFAULT_COMPACTED_REPLAY_MAX_BYTES } from '@qwen-code/acp-bridge/replayWindowLimits';
 import {
   ApprovalMode,
   MCP_BUDGET_WARN_FRACTION,
@@ -94,12 +97,16 @@ interface ServeArgs {
   hostname: string;
   token?: string;
   'max-sessions': number;
+  'max-total-sessions'?: number;
   'max-pending-prompts-per-session': number;
   'max-connections': number;
   'event-ring-size': number;
-  workspace?: string;
+  'compacted-replay-max-bytes': number;
+  workspace?: string | string[];
   'require-auth': boolean;
   'enable-session-shell': boolean;
+  'tls-cert'?: string;
+  'tls-key'?: string;
   web: boolean;
   open: boolean;
   // Read from the kebab-case key only — the camelCase mirror that yargs
@@ -122,6 +129,13 @@ interface ServeArgs {
   'rate-limit-read'?: number;
   'rate-limit-window-ms'?: number;
   experimentalLsp?: boolean;
+  channel?: string[];
+}
+
+function primaryWorkspaceArg(
+  workspace: string | string[] | undefined,
+): string | undefined {
+  return Array.isArray(workspace) ? workspace[0] : workspace;
 }
 
 export const serveCommand: CommandModule<unknown, ServeArgs> = {
@@ -154,6 +168,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Cap on concurrent live sessions. New spawn requests beyond this return 503; ' +
           'attach to existing sessions still works. Set to 0 to disable.',
       })
+      .option('max-total-sessions', {
+        type: 'number',
+        description:
+          'Non-negative integer cap on concurrent live sessions across all ' +
+          'workspace runtimes. Set to 0 to disable.',
+      })
       .option('max-pending-prompts-per-session', {
         type: 'number',
         default: 5,
@@ -163,12 +183,13 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       })
       .option('workspace', {
         type: 'string',
+        array: true,
+        requiresArg: true,
         description:
-          'Absolute workspace path this daemon binds to. ' +
+          'Absolute workspace path to register with this daemon. ' +
           'POST /session requests with a mismatched cwd return 400 workspace_mismatch. ' +
           'Defaults to process.cwd() when omitted. ' +
-          'For multi-workspace deployments, run one `qwen serve` per workspace ' +
-          'on separate ports (or behind an external orchestrator).',
+          'Repeat to register isolated workspace runtimes; the first is primary.',
       })
       .option('max-connections', {
         type: 'number',
@@ -195,11 +216,30 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Enable direct POST /session/:id/shell execution. Requires a bearer token and a session-bound client id on each call.',
       })
+      .option('tls-cert', {
+        type: 'string',
+        description:
+          'Path to a PEM certificate file. Serve over HTTPS instead of HTTP. ' +
+          'Required for secure-context browser APIs (voice input/getUserMedia, ' +
+          'WebRTC) when accessed over a LAN IP. Must be used together with ' +
+          '--tls-key. Generate a local cert with mkcert.',
+      })
+      .option('tls-key', {
+        type: 'string',
+        description:
+          'Path to a PEM private key file. Must be used together with --tls-cert.',
+      })
       .option('experimental-lsp', {
         type: 'boolean',
         default: false,
         description:
           'Forward the experimental LSP opt-in to spawned agent sessions.',
+      })
+      .option('channel', {
+        type: 'string',
+        array: true,
+        description:
+          'Experimental: start a daemon-managed channel worker for the named channel. Repeat to select multiple channels, or use --channel all.',
       })
       .option('web', {
         type: 'boolean',
@@ -227,14 +267,22 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'headroom at the cost of a few hundred KB extra RAM per session. ' +
           'Must be a positive finite integer.',
       })
+      .option('compacted-replay-max-bytes', {
+        type: 'number',
+        default: DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
+        description:
+          'Per-session in-memory compacted replay snapshot byte cap for ' +
+          '`POST /session/:id/load` late attaches. Larger = more recent ' +
+          'history in load snapshots at higher heap cost. Must be a positive ' +
+          'safe integer no larger than 256 MiB.',
+      })
       .option('http-bridge', {
         type: 'boolean',
         default: true,
         description:
-          'Stage 1 mode: one `qwen --acp` child per daemon (the daemon binds to ' +
-          'one workspace at boot, multiplexing N sessions onto that child via ' +
-          "the agent's native `newSession()`). Stage 2 native in-process mode " +
-          'is not yet implemented; this flag will become opt-in then.',
+          'HTTP bridge mode: attempt to preheat one primary `qwen --acp` child; trusted ' +
+          'secondaries start one on demand. Stage 2 native in-process mode is ' +
+          'not yet implemented; this flag will become opt-in then.',
       })
       .option('mcp-client-budget', {
         type: 'number',
@@ -354,6 +402,15 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'deployment.',
       );
     }
+    let channelSelection: ServeChannelSelection | undefined;
+    try {
+      channelSelection = normalizeServeChannelSelection(argv.channel);
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      process.exit(1);
+    }
     // Validate budget + mode combination at boot, before we
     // lazy-load the serve module. Yargs already constrains `choices`
     // for mcp-budget-mode, so we only have to police the budget value
@@ -416,7 +473,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     // a deployment that's wide-open at boot. Suppress with
     // QWEN_CODE_SUPPRESS_YOLO_WARNING=1.
     try {
-      const loaded = loadSettings(argv.workspace ?? process.cwd());
+      const loaded = loadSettings(
+        primaryWorkspaceArg(argv.workspace) ?? process.cwd(),
+      );
       const merged = loaded.merged;
       const approvalMode = merged.tools?.approvalMode;
       const sandbox = merged.tools?.sandbox;
@@ -499,13 +558,21 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         token: argv.token,
         mode: 'http-bridge',
         maxSessions: argv['max-sessions'],
+        ...(argv['max-total-sessions'] !== undefined
+          ? { maxTotalSessions: argv['max-total-sessions'] }
+          : {}),
         maxPendingPromptsPerSession,
         maxConnections: argv['max-connections'],
         eventRingSize: argv['event-ring-size'],
+        compactedReplayMaxBytes: argv['compacted-replay-max-bytes'],
         workspace: argv.workspace,
         requireAuth: argv['require-auth'],
         enableSessionShell: argv['enable-session-shell'],
         serveWebShell: argv.web,
+        ...(argv['tls-cert'] !== undefined
+          ? { tlsCert: argv['tls-cert'] }
+          : {}),
+        ...(argv['tls-key'] !== undefined ? { tlsKey: argv['tls-key'] } : {}),
         allowPrivateAuthBaseUrl: argv['allow-private-auth-base-url'],
         mcpClientBudget,
         mcpBudgetMode: resolvedMcpMode,
@@ -539,6 +606,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         ...(rateLimitRead !== undefined ? { rateLimitRead } : {}),
         ...(rateLimitWindowMs !== undefined ? { rateLimitWindowMs } : {}),
         ...(argv.experimentalLsp === true ? { experimentalLsp: true } : {}),
+        ...(channelSelection !== undefined ? { channelSelection } : {}),
       });
       // Open the Web Shell in a browser once the listener is up (best-effort;
       // never throws — see maybeOpenWebShellBrowser).

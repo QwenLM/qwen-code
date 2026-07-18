@@ -8,6 +8,7 @@ import type {
   DaemonPromptCancelledTranscriptBlock,
   DaemonShellTranscriptBlock,
   DaemonStatusTranscriptBlock,
+  DaemonTextDeltaMeta,
   DaemonTextTranscriptBlock,
   DaemonToolTranscriptBlock,
   DaemonTranscriptBlock,
@@ -96,11 +97,19 @@ export function appendLocalUserTranscriptMessage(
   text: string,
   opts: DaemonTranscriptReducerOptions & {
     images?: Array<{ data: string; mimeType: string }>;
+    meta?: DaemonTextDeltaMeta;
   } = {},
 ): DaemonTranscriptState {
   const next = cloneTranscriptState(state, opts);
   finishAssistant(next);
-  const block = createTextBlock(next, 'user', text);
+  const block = createTextBlock(
+    next,
+    'user',
+    text,
+    undefined,
+    undefined,
+    opts.meta,
+  );
   if (opts.images && opts.images.length > 0) {
     (block as DaemonTextTranscriptBlock).images = [...opts.images];
   }
@@ -108,6 +117,19 @@ export function appendLocalUserTranscriptMessage(
   next.activeUserBlockId = block.id;
   return trimTranscriptState(next);
 }
+
+// Freeze retained blocks at the dispatch boundary to catch consumers that
+// mutate a COW-shared blocks array in place (see reduceDaemonTranscriptEvents).
+// This is a dev/CI safety net; in production it is pure O(blocks) overhead on
+// every dispatch and the reducer's own mutation discipline (takeBlocksOwnership)
+// does not depend on it, so skip it there. App bundlers statically replace
+// `process.env.NODE_ENV`, folding the check to `false`. The `typeof process`
+// guard keeps an unbundled browser consumer from throwing a ReferenceError —
+// this module sits on the browser-hostile `daemon/ui` surface and Vite lib
+// builds preserve `process.env.NODE_ENV` in their output — matching the
+// existing SDK idiom (see ProcessTransport, cliPath).
+const FREEZE_TRANSCRIPT_BLOCKS =
+  typeof process !== 'undefined' && process.env.NODE_ENV !== 'production';
 
 export function reduceDaemonTranscriptEvents(
   state: DaemonTranscriptState,
@@ -127,7 +149,9 @@ export function reduceDaemonTranscriptEvents(
   // poisoning future snapshots. Internal reducer mutation goes through
   // `takeBlocksOwnership` which copies BEFORE mutating, so the frozen
   // shared reference is never touched in-place by the next dispatch.
-  Object.freeze(result.blocks);
+  if (FREEZE_TRANSCRIPT_BLOCKS) {
+    Object.freeze(result.blocks);
+  }
   return result;
 }
 
@@ -293,6 +317,7 @@ function applyDaemonTranscriptEvent(
       next.approvalMode = event.next;
       break;
     case 'session.metadata.changed':
+    case 'session.artifact.changed':
     case 'session.available_commands':
       // Intentional no-op against `blocks[]`.
       break;
@@ -347,6 +372,7 @@ function applyDaemonTranscriptEvent(
     case 'workspace.mcp.child_refused':
     case 'workspace.mcp.server_restarted':
     case 'workspace.mcp.server_restart_refused':
+    case 'workspace.mcp.server_changed':
     case 'auth.device_flow.started':
     case 'auth.device_flow.throttled':
     case 'auth.device_flow.authorized':
@@ -1015,6 +1041,9 @@ function appendStatusBlock(
     ...(event?.type === 'error' && event.code ? { code: event.code } : {}),
     ...(event?.type === 'error' && event.promptId
       ? { promptId: event.promptId }
+      : {}),
+    ...(event?.type === 'error' && event.errorKind
+      ? { errorKind: event.errorKind }
       : {}),
     ...(event?.type === 'error' && event.source
       ? { source: event.source }

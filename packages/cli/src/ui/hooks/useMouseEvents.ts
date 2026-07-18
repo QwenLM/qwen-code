@@ -8,52 +8,105 @@
  * out of the KeypressContext pipeline, call each handler, restore on cleanup.
  */
 
-import { useEffect, useRef, useCallback } from 'react';
+import { useContext, useEffect, useRef, useCallback } from 'react';
 import { useStdin, useStdout } from 'ink';
 import {
   enableMouseEvents,
   disableMouseEvents,
   type MouseEvent,
+  type MouseTracking,
 } from '../utils/mouse.js';
 import { useKeypressContext } from '../contexts/KeypressContext.js';
+import { SettingsContext } from '../contexts/SettingsContext.js';
 
 export type MouseHandler = (event: MouseEvent) => void;
 
+export interface MouseEventsOptions {
+  /** Subscribe + enable SGR mouse mode only while this is true. */
+  isActive: boolean;
+  /**
+   * Tracking level to request. `'button'` (?1002h) reports press/drag/release;
+   * `'any'` (?1003h) additionally reports bare motion, needed for hover. The
+   * effective terminal level is the highest any active subscriber requests.
+   */
+  tracking?: MouseTracking;
+  /**
+   * Opt out of the VP gate. By default mouse tracking is enabled only in VP
+   * mode (`ui.useTerminalBuffer`), so non-VP keeps native terminal scrollback.
+   * Set true for surfaces that own the wheel regardless — e.g. the VP viewport
+   * (ScrollableList) — where there is no main-screen native scrollback to
+   * protect.
+   */
+  bypassVpGate?: boolean;
+}
+
+// Per-terminal reference counts, split by tracking level. The effective level
+// is the highest requested: any active subscriber asking for 'any' (hover)
+// upgrades the terminal to ?1003h; otherwise ?1002h. `active` records what is
+// currently enabled on the terminal so a level switch disables the old mode
+// before enabling the new one (1002 and 1003 are mutually exclusive).
 type MouseModeEntry = {
-  refs: number;
+  button: number;
+  any: number;
+  active: MouseTracking | null;
 };
 
 const mouseModeRefs = new Map<NodeJS.WriteStream, MouseModeEntry>();
 
+function effectiveTracking(entry: MouseModeEntry): MouseTracking | null {
+  if (entry.any > 0) return 'any';
+  if (entry.button > 0) return 'button';
+  return null;
+}
+
+// Bring the terminal's enabled mode in line with the desired effective level,
+// writing escape sequences only when the level actually changes.
+function reconcileMouseMode(
+  stdout: NodeJS.WriteStream,
+  entry: MouseModeEntry,
+): void {
+  const desired = effectiveTracking(entry);
+  if (desired === entry.active) return;
+  if (entry.active) disableMouseEvents(stdout, entry.active);
+  if (desired) enableMouseEvents(stdout, desired);
+  entry.active = desired;
+}
+
 const disableAllMouseModes = () => {
-  for (const stdout of mouseModeRefs.keys()) {
-    disableMouseEvents(stdout);
+  for (const [stdout, entry] of mouseModeRefs) {
+    if (entry.active) disableMouseEvents(stdout, entry.active);
   }
   mouseModeRefs.clear();
 };
 
-function acquireMouseMode(stdout: NodeJS.WriteStream): void {
-  const entry = mouseModeRefs.get(stdout);
-  if (entry) {
-    entry.refs += 1;
-    return;
+function acquireMouseMode(
+  stdout: NodeJS.WriteStream,
+  tracking: MouseTracking,
+): void {
+  let entry = mouseModeRefs.get(stdout);
+  if (!entry) {
+    if (mouseModeRefs.size === 0) {
+      process.on('exit', disableAllMouseModes);
+    }
+    entry = { button: 0, any: 0, active: null };
+    mouseModeRefs.set(stdout, entry);
   }
-
-  enableMouseEvents(stdout);
-  if (mouseModeRefs.size === 0) {
-    process.on('exit', disableAllMouseModes);
-  }
-  mouseModeRefs.set(stdout, { refs: 1 });
+  entry[tracking] += 1;
+  reconcileMouseMode(stdout, entry);
 }
 
-function releaseMouseMode(stdout: NodeJS.WriteStream): void {
+function releaseMouseMode(
+  stdout: NodeJS.WriteStream,
+  tracking: MouseTracking,
+): void {
   const entry = mouseModeRefs.get(stdout);
   if (!entry) return;
 
-  entry.refs -= 1;
-  if (entry.refs <= 0) {
+  entry[tracking] = Math.max(0, entry[tracking] - 1);
+  reconcileMouseMode(stdout, entry);
+
+  if (entry.button === 0 && entry.any === 0) {
     mouseModeRefs.delete(stdout);
-    disableMouseEvents(stdout);
     if (mouseModeRefs.size === 0) {
       process.removeListener('exit', disableAllMouseModes);
     }
@@ -63,12 +116,14 @@ function releaseMouseMode(stdout: NodeJS.WriteStream): void {
 /**
  * Subscribes to SGR mouse events while `isActive` is true.
  *
- * On activation: writes `?1002h ?1006h` to enable button-event tracking and
- * SGR coordinates. KeypressContext's readline pipeline receives the SGR
- * fragments, reconstructs the full sequence, parses it, and forwards the
- * parsed MouseEvent to subscribers registered via `subscribeMouse`. On
- * cleanup (or when `isActive` flips false): writes `?1006l ?1002l` to
- * restore the terminal.
+ * On activation: enables SGR mouse tracking at the requested `tracking` level
+ * (`'button'` → `?1002h`, `'any'` → `?1003h` for hover) plus `?1006h` for SGR
+ * coordinates. KeypressContext's readline pipeline receives the SGR fragments,
+ * reconstructs the full sequence, parses it, and forwards the parsed
+ * MouseEvent to subscribers registered via `subscribeMouse`. On cleanup (or
+ * when `isActive` flips false): disables the mode to restore the terminal.
+ * Reference counts are shared per terminal across all subscribers; the
+ * effective level is the highest any active subscriber requests.
  *
  * Earlier versions used ink's `useInput` to receive mouse events, but
  * readline's `emitKeypressEvents` drains stdin in flowing mode before
@@ -80,26 +135,46 @@ function releaseMouseMode(stdout: NodeJS.WriteStream): void {
  */
 export function useMouseEvents(
   handler: MouseHandler,
-  { isActive }: { isActive: boolean },
+  { isActive, tracking = 'button', bypassVpGate = false }: MouseEventsOptions,
 ): void {
   const { isRawModeSupported } = useStdin();
   const { stdout } = useStdout();
   const { subscribeMouse, unsubscribeMouse } = useKeypressContext();
 
+  // VP gate: enabling SGR mouse tracking (?1002h) makes the host terminal stop
+  // doing native scrollback on the wheel. That is only acceptable when the app
+  // itself owns the wheel — i.e. in VP mode (ScrollableList) or on an
+  // alternate-screen surface (a modal) that has no native scrollback to begin
+  // with. On the non-VP main screen, holding mouse tracking just hijacks the
+  // wheel (Terminal.app diverts it away from scrollback), so by DEFAULT mouse
+  // tracking is denied outside VP. Surfaces that legitimately consume the wheel
+  // pass `bypassVpGate` to opt in. This keeps the non-VP transcript scrollable
+  // no matter how many click/hover subscribers are added later.
+  const settings = useContext(SettingsContext);
+  const isVpMode = settings?.merged.ui?.useTerminalBuffer ?? false;
+  const vpGateOpen = isVpMode || bypassVpGate;
+
   const handlerRef = useRef(handler);
   handlerRef.current = handler;
 
-  const enabled = isActive && isRawModeSupported;
+  // Never write SGR mouse-mode escapes (?1002h ?1006h) unless stdout is a TTY.
+  // `isRawModeSupported` only reflects stdin; with stdout piped/redirected
+  // (`qwen | tee log`) an active, raw-mode-capable surface — e.g. the non-TTY
+  // transcript's focused ScrollableList (`bypassVpGate`) — would otherwise emit
+  // raw control bytes into the captured output. Mirrors AlternateScreen's
+  // `process.stdout.isTTY` guard so the non-TTY fallback stays byte-clean.
+  const enabled =
+    isActive && isRawModeSupported && vpGateOpen && Boolean(stdout.isTTY);
 
   useEffect(() => {
     if (!enabled) return;
 
-    acquireMouseMode(stdout);
+    acquireMouseMode(stdout, tracking);
 
     return () => {
-      releaseMouseMode(stdout);
+      releaseMouseMode(stdout, tracking);
     };
-  }, [enabled, stdout]);
+  }, [enabled, stdout, tracking]);
 
   const mouseCallback = useCallback((event: MouseEvent) => {
     handlerRef.current(event);

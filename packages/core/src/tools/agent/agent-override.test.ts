@@ -4,8 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { Config, ApprovalMode } from '../../config/config.js';
+import { isPlanModeBlocked } from '../../core/permissionFlow.js';
+import type { ToolCallConfirmationDetails } from '../tools.js';
 import {
   createApprovalModeOverride,
   hasRebuiltToolRegistry,
@@ -16,6 +18,7 @@ import { ToolNames } from '../tool-names.js';
 import { EditTool } from '../edit.js';
 import { WriteFileTool } from '../write-file.js';
 import { ReadFileTool } from '../read-file.js';
+import { recordBlock } from '../../permissions/denialTracking.js';
 
 /**
  * Regression: Object.create(parent) is not enough to isolate a subagent's
@@ -40,7 +43,32 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     model: 'test-model',
     usageStatisticsEnabled: false,
     bareMode: true,
+    // Pin a DEFAULT baseline: these tests exercise override isolation and the
+    // DEFAULT→AUTO rule strip/restore transitions, so they must not depend on
+    // the constructor's default approval mode (which is now AUTO).
+    approvalMode: ApprovalMode.DEFAULT,
   };
+
+  async function createParentWithRegistry(): Promise<Config> {
+    const parent = new Config(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+    return parent;
+  }
+
+  function attachFakePermissionManager(parent: Config) {
+    const stripDangerousRulesForAutoMode = vi.fn();
+    const restoreDangerousRules = vi.fn();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).permissionManager = {
+      stripDangerousRulesForAutoMode,
+      restoreDangerousRules,
+    };
+    return { stripDangerousRulesForAutoMode, restoreDangerousRules };
+  }
 
   it('returns a Config whose registry is a distinct instance from the parent', async () => {
     const parent = new Config(baseParams);
@@ -152,6 +180,214 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     expect(boundConfig.getApprovalMode()).toBe(ApprovalMode.YOLO);
   });
 
+  it('lets a plan-mode override leave plan mode without changing the parent', async () => {
+    const parent = await createParentWithRegistry();
+
+    const { config: child } = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.PLAN,
+    );
+
+    expect(child.getApprovalMode()).toBe(ApprovalMode.PLAN);
+
+    child.setApprovalMode(ApprovalMode.DEFAULT);
+
+    expect(child.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
+    expect(parent.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
+  });
+
+  it('stops plan-mode blocking exec tools after a child override exits plan mode', async () => {
+    const parent = await createParentWithRegistry();
+
+    const { config: child } = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.PLAN,
+    );
+
+    child.setApprovalMode(ApprovalMode.DEFAULT);
+
+    const execDetails = {
+      type: 'exec',
+    } as unknown as ToolCallConfirmationDetails;
+    expect(child.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
+    const isPlanMode = child.getApprovalMode() === ApprovalMode.PLAN;
+
+    expect(isPlanModeBlocked(isPlanMode, false, false, execDetails)).toBe(
+      false,
+    );
+  });
+
+  it('isolates child approval-mode revisions from a parent in plan mode', async () => {
+    const parent = await createParentWithRegistry();
+    vi.spyOn(parent, 'isTrustedFolder').mockReturnValue(true);
+    parent.setApprovalMode(ApprovalMode.YOLO);
+    parent.setApprovalMode(ApprovalMode.PLAN);
+    const parentRevision = parent.getApprovalModeRevision();
+    expect(parent.getPrePlanMode()).toBe(ApprovalMode.YOLO);
+
+    const { config: child } = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.PLAN,
+    );
+
+    expect(child.getPrePlanMode()).toBe(ApprovalMode.YOLO);
+    expect(child.getApprovalModeRevision()).toBe(0);
+
+    child.setApprovalMode(ApprovalMode.DEFAULT);
+    child.setApprovalMode(ApprovalMode.PLAN);
+
+    expect(child.getApprovalMode()).toBe(ApprovalMode.PLAN);
+    expect(child.getApprovalModeRevision()).toBe(2);
+    expect(parent.getApprovalMode()).toBe(ApprovalMode.PLAN);
+    expect(parent.getApprovalModeRevision()).toBe(parentRevision);
+  });
+
+  it('starts child AUTO denial state independent from the parent', async () => {
+    const parent = await createParentWithRegistry();
+    parent.setAutoModeDenialState(recordBlock(parent.getAutoModeDenialState()));
+    const parentDenialState = parent.getAutoModeDenialState();
+
+    const { config: child } = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.DEFAULT,
+    );
+
+    expect(child.getAutoModeDenialState()).toEqual({
+      consecutiveBlock: 0,
+      consecutiveUnavailable: 0,
+      totalBlock: 0,
+      totalUnavailable: 0,
+    });
+    expect(child.getAutoModeDenialState()).not.toBe(parentDenialState);
+  });
+
+  it('uses the parent current mode as pre-plan mode when a non-plan parent creates a plan child', async () => {
+    const parent = await createParentWithRegistry();
+    vi.spyOn(parent, 'isTrustedFolder').mockReturnValue(true);
+    parent.setApprovalMode(ApprovalMode.AUTO_EDIT);
+
+    const { config: child } = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.PLAN,
+    );
+
+    expect(child.getPrePlanMode()).toBe(ApprovalMode.AUTO_EDIT);
+  });
+
+  it('restores AUTO rules when an AUTO child finishes still in AUTO mode', async () => {
+    const parent = await createParentWithRegistry();
+    const { stripDangerousRulesForAutoMode, restoreDangerousRules } =
+      attachFakePermissionManager(parent);
+
+    const { cleanup } = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.AUTO,
+    );
+
+    expect(stripDangerousRulesForAutoMode).toHaveBeenCalledTimes(1);
+
+    cleanup();
+    expect(restoreDangerousRules).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not need cleanup restore after a child leaves AUTO mode itself', async () => {
+    const parent = await createParentWithRegistry();
+    const { stripDangerousRulesForAutoMode, restoreDangerousRules } =
+      attachFakePermissionManager(parent);
+
+    const { config: child, cleanup } = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.AUTO,
+    );
+
+    expect(stripDangerousRulesForAutoMode).toHaveBeenCalledTimes(1);
+
+    child.setApprovalMode(ApprovalMode.DEFAULT);
+    expect(restoreDangerousRules).toHaveBeenCalledTimes(1);
+
+    cleanup();
+    expect(restoreDangerousRules).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not restore AUTO rules on cleanup when the parent is already in AUTO mode', async () => {
+    const parent = await createParentWithRegistry();
+    const { stripDangerousRulesForAutoMode, restoreDangerousRules } =
+      attachFakePermissionManager(parent);
+    vi.spyOn(parent, 'isTrustedFolder').mockReturnValue(true);
+    parent.setApprovalMode(ApprovalMode.AUTO);
+
+    const { cleanup } = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.AUTO,
+    );
+
+    expect(stripDangerousRulesForAutoMode).toHaveBeenCalledTimes(1);
+
+    cleanup();
+    expect(restoreDangerousRules).not.toHaveBeenCalled();
+  });
+
+  it('does not restore AUTO rules when a child leaves AUTO while the parent stays in AUTO', async () => {
+    const parent = await createParentWithRegistry();
+    const { stripDangerousRulesForAutoMode, restoreDangerousRules } =
+      attachFakePermissionManager(parent);
+    vi.spyOn(parent, 'isTrustedFolder').mockReturnValue(true);
+    parent.setApprovalMode(ApprovalMode.AUTO);
+
+    const { config: child, cleanup } = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.AUTO,
+    );
+
+    child.setApprovalMode(ApprovalMode.DEFAULT);
+
+    expect(stripDangerousRulesForAutoMode).toHaveBeenCalledTimes(1);
+    expect(restoreDangerousRules).not.toHaveBeenCalled();
+
+    cleanup();
+    expect(restoreDangerousRules).not.toHaveBeenCalled();
+  });
+
+  it('restores the inherited permission manager when AUTO-parent mode changes throw', async () => {
+    const parent = await createParentWithRegistry();
+    attachFakePermissionManager(parent);
+    const parentPermissionManager = parent.getPermissionManager();
+    const trustSpy = vi.spyOn(parent, 'isTrustedFolder').mockReturnValue(true);
+    parent.setApprovalMode(ApprovalMode.AUTO);
+
+    const { config: child } = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.AUTO,
+    );
+
+    trustSpy.mockReturnValue(false);
+
+    expect(() => child.setApprovalMode(ApprovalMode.AUTO_EDIT)).toThrow(
+      'Cannot enable privileged approval modes in an untrusted folder.',
+    );
+    expect(child.getPermissionManager()).toBe(parentPermissionManager);
+    expect(
+      Object.prototype.hasOwnProperty.call(child, 'permissionManager'),
+    ).toBe(false);
+  });
+
+  it('restores AUTO rules when a non-AUTO child enters AUTO and finishes there', async () => {
+    const parent = await createParentWithRegistry();
+    const { stripDangerousRulesForAutoMode, restoreDangerousRules } =
+      attachFakePermissionManager(parent);
+
+    const { config: child, cleanup } = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.PLAN,
+    );
+
+    child.setApprovalMode(ApprovalMode.AUTO);
+    expect(stripDangerousRulesForAutoMode).toHaveBeenCalledTimes(1);
+
+    cleanup();
+    expect(restoreDangerousRules).toHaveBeenCalledTimes(1);
+  });
+
   it('copies discovered tools from the parent registry without re-discovering', async () => {
     const parent = new Config(baseParams);
     const parentRegistry = await parent.createToolRegistry(undefined, {
@@ -233,6 +469,7 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
           model: 'agent-model',
           maxSessionTurns: 7,
           maxToolCalls: 11,
+          maxSubagentDepth: 2,
         },
       },
     );
@@ -243,11 +480,24 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     expect(child.getModel()).toBe('agent-model');
     expect(child.getMaxSessionTurns()).toBe(7);
     expect(child.getMaxToolCalls()).toBe(11);
+    // Launch-time nesting cap survives resume even when the resuming
+    // session's own cap differs (codex review).
+    expect(child.getMaxSubagentDepth()).toBe(2);
 
     await child.getToolRegistry().warmAll();
     expect(child.getToolRegistry().getAllToolNames()).not.toContain(
       ToolNames.WRITE_FILE,
     );
+  });
+
+  it('rejects fractional maxSessionTurns from persisted launch flags', async () => {
+    const parent = await createParentWithRegistry();
+
+    await expect(
+      createApprovalModeOverride(parent, ApprovalMode.DEFAULT, {
+        persistedCliFlags: { maxSessionTurns: 0.5 },
+      }),
+    ).rejects.toThrow(/maxSessionTurns: must be an integer/);
   });
 
   describe('TOOL_REGISTRY_REBUILT marker propagation', () => {

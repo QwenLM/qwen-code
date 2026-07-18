@@ -25,8 +25,7 @@ import { theme } from '../../semantic-colors.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
 import {
   buildBackgroundEntryLabel,
-  ToolDisplayNames,
-  ToolNames,
+  MAX_RECENT_ACTIVITIES,
   type AgentTask,
   type BackgroundApproval,
   type MonitorTask,
@@ -36,26 +35,38 @@ import {
 import { ToolConfirmationMessage } from '../messages/ToolConfirmationMessage.js';
 import { WorkflowSaveOverlay } from './workflow-save-overlay.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
-import { escapeAnsiCtrlCodes } from '../../utils/textUtils.js';
+import {
+  escapeAnsiCtrlCodes,
+  getCachedStringWidth,
+  sanitizeMultilineForDisplay,
+} from '../../utils/textUtils.js';
+import { TOOL_DISPLAY_BY_NAME } from '../../utils/tool-display-map.js';
 import {
   type AgentDialogEntry,
   type DialogEntry,
   type DreamDialogEntry,
+  compareActiveThenTerminal,
   entryId,
 } from '../../hooks/useBackgroundTaskView.js';
 import { localizeToolDisplayName, t } from '../../../i18n/index.js';
+import {
+  ancestorChain,
+  computeAgentTreeInfo,
+  computeUserBlockingIds,
+  statusGlyph,
+  treeRowPrefix,
+} from './agent-forest.js';
 
 // `DialogEntry['status']` widens the shell status union with the agent-only
 // `paused` state, so dialog handlers can switch on a single combined enum.
 type EntryStatus = DialogEntry['status'];
 
-// Tool-name → display-name lookup (`run_shell_command` → `Shell`).
-const TOOL_DISPLAY_BY_NAME: Record<string, string> = Object.fromEntries(
-  (Object.keys(ToolNames) as Array<keyof typeof ToolNames>).map((key) => [
-    ToolNames[key],
-    ToolDisplayNames[key],
-  ]),
-);
+// Bounds MaxSizedBox's per-tick layout work when a live activity carries a
+// pathological description (e.g. a heredoc script). A very large terminal
+// could in principle display more than this, so on such a description the
+// live row is truncated with an ellipsis; the cap trades that rare edge for
+// a hard ceiling on wrap-layout cost.
+const MAX_LIVE_LABEL_CHARS = 4096;
 
 function formatActivityLabel(name: string, description: string | undefined) {
   const display = localizeToolDisplayName(TOOL_DISPLAY_BY_NAME[name] ?? name);
@@ -170,13 +181,16 @@ function terminalStatusPresentation(
 const FOREGROUND_ROW_PREFIX = '[blocking]';
 const SHELL_ROW_PREFIX = '[shell]';
 
-function rowLabel(entry: DialogEntry): string {
+function rowLabel(entry: DialogEntry, userBlocking: boolean): string {
   switch (entry.kind) {
     case 'agent': {
       const label = buildBackgroundEntryLabel(entry, { includePrefix: false });
-      const base = entry.isBackgrounded
-        ? label
-        : `${FOREGROUND_ROW_PREFIX} ${label}`;
+      // `[blocking]` warns that cancelling ends the USER's turn. That is
+      // only true when the whole ancestor chain is foreground — a nested
+      // foreground child awaited by a background parent blocks that
+      // parent, not the user. The caller resolves the verdict via
+      // computeUserBlockingIds.
+      const base = userBlocking ? `${FOREGROUND_ROW_PREFIX} ${label}` : label;
       // Flag agents with a parked approval so the user can spot which row to
       // open from the list without entering each detail view.
       return entry.pendingApprovals?.length
@@ -214,6 +228,35 @@ function rowLabel(entry: DialogEntry): string {
   }
 }
 
+/**
+ * The detail view's Parent line for a nested agent: a breadcrumb of the
+ * present ancestor chain (`main › researcher — <description>`), rooted at
+ * '…' when the chain breaks before the top level, or the launch-time
+ * `parentName` when the immediate parent is already gone. Undefined for
+ * top-level agents (they get no Parent section).
+ */
+function formatParentBreadcrumb(
+  entry: AgentDialogEntry,
+  lookup: (id: string) => AgentTask | undefined,
+): string | undefined {
+  if (entry.parentAgentId == null) return undefined;
+  const { chain, terminatedBy } = ancestorChain(entry, lookup);
+  if (chain.length === 0) {
+    return `${entry.parentName ?? t('unknown agent')} · ${t('no longer running')}`;
+  }
+  // ancestorChain returns nearest-first; the breadcrumb reads root-first.
+  const rootFirst = [...chain].reverse();
+  const crumbs = [
+    terminatedBy === 'root' ? 'main' : '…',
+    ...rootFirst.map((p) => p.subagentType ?? 'agent'),
+  ].join(' › ');
+  const immediateParent = chain[0];
+  const desc = immediateParent.description
+    ? ` — ${immediateParent.description}`
+    : '';
+  return `${crumbs}${desc}`;
+}
+
 function elapsedFor(entry: { startTime: number; endTime?: number }): string {
   const elapsedMs = Math.max(
     0,
@@ -232,7 +275,11 @@ function elapsedFor(entry: { startTime: number; endTime?: number }): string {
 // others needed ellipsis, breaking the left-column alignment of the prefix.
 function truncateToWidth(text: string, maxWidth: number): string {
   if (maxWidth <= 0) return '';
-  if (stringWidth(text) <= maxWidth) return text;
+  // Cache the full-string measurement: the detail view re-renders every
+  // second and this runs once per (unchanged) history row. The per-char
+  // loop below only executes on the rare row that actually needs an
+  // ellipsis, so it stays on the uncached primitive.
+  if (getCachedStringWidth(text) <= maxWidth) return text;
   const ellipsis = '…';
   const ellipsisWidth = stringWidth(ellipsis);
   const target = Math.max(0, maxWidth - ellipsisWidth);
@@ -295,6 +342,14 @@ const ListBody: React.FC<{
   const hiddenBelow = entries.length - windowEnd;
   const visible = entries.slice(windowStart, windowEnd);
 
+  // Nested-agent affordances, computed over the FULL roster (not the
+  // window) so indent and the [blocking] verdict don't change as the
+  // selection scrolls a parent out of view. The entries arrive already
+  // grouped depth-first (useBackgroundTaskView applies
+  // reorderChildrenUnderParents), so indentation lines up with position.
+  const treeInfo = computeAgentTreeInfo(entries);
+  const blockingIds = computeUserBlockingIds(entries);
+
   return (
     <Box flexDirection="column">
       <Box paddingX={1}>
@@ -318,13 +373,25 @@ const ListBody: React.FC<{
             : terminal
               ? terminal.labelColor
               : theme.text.primary;
+          const treePrefix =
+            entry.kind === 'agent'
+              ? treeRowPrefix(entry, treeInfo.get(entry.agentId))
+              : '';
           return (
             <Box key={entryId(entry)} flexDirection="row" paddingX={1}>
               <Text color={isSelected ? theme.text.accent : undefined}>
                 {isSelected ? '> ' : '  '}
               </Text>
+              {treePrefix !== '' && (
+                <Text color={theme.text.secondary}>{treePrefix}</Text>
+              )}
               <Text color={labelColor}>
-                {escapeAnsiCtrlCodes(rowLabel(entry))}
+                {escapeAnsiCtrlCodes(
+                  rowLabel(
+                    entry,
+                    entry.kind === 'agent' && blockingIds.has(entry.agentId),
+                  ),
+                )}
               </Text>
             </Box>
           );
@@ -588,27 +655,58 @@ const AgentDetailBody: React.FC<{
   maxHeight: number;
   maxWidth: number;
 }> = ({ entry, maxHeight, maxWidth }) => {
+  const config = useConfig();
   const title = escapeAnsiCtrlCodes(
     `${entry.subagentType ?? 'Agent'} \u203A ${buildBackgroundEntryLabel(entry, { includePrefix: false })}`,
   );
 
   const terminal = terminalStatusPresentation(entry.status);
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
-  if (entry.stats?.totalTokens) {
+  if (entry.stats?.outputTokens) {
     dimSubtitleParts.push(
       t('{{count}} tokens', {
-        count: formatTokenCount(entry.stats.totalTokens),
+        count: formatTokenCount(entry.stats.outputTokens),
       }),
     );
   }
   if (entry.stats?.toolUses !== undefined) {
     dimSubtitleParts.push(formatToolUseCount(entry.stats.toolUses));
   }
+  // Nesting badge: launch depth is 0-based, user-facing levels are 1-based
+  // (a top-level sub-agent is level 1 and gets no badge).
+  if ((entry.depth ?? 0) > 0) {
+    dimSubtitleParts.push(
+      t('nested \u00B7 level {{level}} of {{max}}', {
+        level: String((entry.depth ?? 0) + 1),
+        max: String(config.getMaxSubagentDepth()),
+      }),
+    );
+  }
+
+  // Parent breadcrumb + live children, resolved from the registry at
+  // render time (the detail body re-renders on activity ticks, so both
+  // stay current). Every lookup tolerates eviction: a missing ancestor
+  // truncates the breadcrumb with '\u2026', a fully-gone parent falls back to
+  // the launch-time parentName captured at registration.
+  const registry = config.getBackgroundTaskRegistry();
+  const parentLine = formatParentBreadcrumb(entry, (id) => registry.get(id));
+  // Same active-first / newest-first ordering as the main roster: getAll()
+  // is insertion-ordered, so without the sort a parent with more than five
+  // children would hide its still-running newest child behind its oldest
+  // completed ones.
+  const childAgents = registry
+    .getAll()
+    .filter((task) => task.parentAgentId === entry.agentId)
+    .sort(compareActiveThenTerminal);
+  const visibleChildAgents = childAgents.slice(0, 5);
+  const hiddenChildCount = childAgents.length - visibleChildAgents.length;
 
   // Registry stores activities newest-last; keep that order so the live
-  // row sits at the bottom of the Progress block. Cap at 5 in case the
-  // registry ever raises its buffer.
-  const activities = (entry.recentActivities ?? []).slice(-5);
+  // row sits at the bottom of the Progress block. Re-cap defensively in
+  // case a resume path ever restores an oversized buffer.
+  const activities = (entry.recentActivities ?? []).slice(
+    -MAX_RECENT_ACTIVITIES,
+  );
   const blockedReason = entry.resumeBlockedReason;
   const hasError = Boolean(entry.error);
   const hasBlockedReason = Boolean(blockedReason);
@@ -623,6 +721,53 @@ const AgentDetailBody: React.FC<{
     visiblePromptLines[lastIdx] =
       `${visiblePromptLines[lastIdx].trimEnd()}\u2026`;
   }
+
+  // The live row (the newest activity) is the whole reason to open this
+  // view, so it always renders in full and wraps. The older history rows
+  // are one-line context. `MaxSizedBox` clips from the *bottom*, so a full
+  // 10-row history would push the live command \u2014 and the Transcript pointer
+  // below it \u2014 off a short terminal, inverting what this view is for. Budget
+  // the always-valuable sections first, then give what's left to the history,
+  // dropping the OLDEST rows first so the live row survives (issue #6569).
+  const liveActivity =
+    activities.length > 0 ? activities[activities.length - 1] : undefined;
+  const historyActivities = activities.slice(0, -1);
+  const liveFullLabel = liveActivity
+    ? sanitizeMultilineForDisplay(
+        formatActivityLabel(liveActivity.name, liveActivity.description),
+      )
+    : '';
+  const liveLabel =
+    liveFullLabel.length > MAX_LIVE_LABEL_CHARS
+      ? `${liveFullLabel.slice(0, MAX_LIVE_LABEL_CHARS)}\u2026`
+      : liveFullLabel;
+  const wrappedRows = (text: string) =>
+    maxWidth > 0
+      ? Math.max(1, Math.ceil(getCachedStringWidth(text) / maxWidth))
+      : 1;
+  // Reserve height for every section that is NOT a history row. Each
+  // `<Box />` spacer is one line, each bold header is one line.
+  let reservedLines = 2; // title + subtitle (no leading spacer)
+  if (parentLine !== undefined) reservedLines += 3; // spacer + header + path
+  if (visibleChildAgents.length > 0) {
+    reservedLines +=
+      2 + visibleChildAgents.length + (hiddenChildCount > 0 ? 1 : 0);
+  }
+  if (liveActivity) reservedLines += 2 + wrappedRows(`> ${liveLabel}`);
+  if (entry.outputFile) {
+    reservedLines += 2 + wrappedRows(`  ${entry.outputFile}`);
+  }
+  if (visiblePromptLines.length > 0) {
+    reservedLines += 2 + visiblePromptLines.length;
+  }
+  // Terminal-state sections (rare, and mutually exclusive with an active
+  // live command); a small fixed reserve keeps the estimate conservative.
+  if (hasBlockedReason) reservedLines += 3;
+  if (hasError) reservedLines += 3;
+  const historyBudget = Math.max(0, maxHeight - reservedLines);
+  const shownHistory = historyActivities.slice(
+    Math.max(0, historyActivities.length - historyBudget),
+  );
 
   return (
     <MaxSizedBox
@@ -646,6 +791,52 @@ const AgentDetailBody: React.FC<{
         </Text>
       </Box>
 
+      {parentLine !== undefined && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold dimColor>
+              {t('Parent')}
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.text.secondary} wrap="truncate-end">
+              {`  ${escapeAnsiCtrlCodes(parentLine)}`}
+            </Text>
+          </Box>
+        </Fragment>
+      )}
+
+      {visibleChildAgents.length > 0 && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold dimColor>
+              {t('Sub-agents')}
+              <Text
+                color={theme.text.secondary}
+              >{` (${childAgents.length})`}</Text>
+            </Text>
+          </Box>
+          {visibleChildAgents.map((child) => (
+            <Box key={child.agentId}>
+              <Text color={theme.text.secondary} wrap="truncate-end">
+                {`  ${statusGlyph(child.status)} ${escapeAnsiCtrlCodes(
+                  `${child.subagentType ?? 'agent'} \u2014 ${child.description}`,
+                )} \u00B7 ${elapsedFor(child)}`}
+              </Text>
+            </Box>
+          ))}
+          {hiddenChildCount > 0 && (
+            <Box>
+              <Text color={theme.text.secondary}>
+                {`  \u2026 ${t('{{count}} more', { count: String(hiddenChildCount) })}`}
+              </Text>
+            </Box>
+          )}
+        </Fragment>
+      )}
+
       {activities.length > 0 && (
         <Fragment>
           <Box />
@@ -654,28 +845,63 @@ const AgentDetailBody: React.FC<{
               {t('Progress')}
             </Text>
           </Box>
-          {activities.map((a, i) => {
-            const isLast = i === activities.length - 1;
+          {shownHistory.map((a, i) => {
             // ASCII `>` is unambiguously one cell wide in every terminal
-            // font, so `> ` (2 cells) aligns with a two-space indent on the
-            // other rows. Unicode chevrons rendered with inconsistent width
-            // broke alignment in some fonts.
-            const prefix = isLast ? '> ' : '  ';
+            // font, so `> ` (2 cells) aligns with the two-space indent on
+            // the history rows. Unicode chevrons rendered with inconsistent
+            // width broke alignment in some fonts. History rows stay one
+            // line; only the live row below wraps.
+            const prefix = '  ';
+            // `sanitizeMultilineForDisplay` (not just `escapeAnsiCtrlCodes`)
+            // because bare C0 controls (\r, BS, BEL, DEL) pass through the
+            // ANSI-sequence escape and could still corrupt the row.
+            const fullLabel = sanitizeMultilineForDisplay(
+              formatActivityLabel(a.name, a.description),
+            );
             const label = truncateToWidth(
-              escapeAnsiCtrlCodes(formatActivityLabel(a.name, a.description)),
-              Math.max(0, maxWidth - stringWidth(prefix)),
+              fullLabel,
+              Math.max(0, maxWidth - getCachedStringWidth(prefix)),
             );
             return (
               <Box key={`${a.at}-${i}`}>
-                <Text
-                  color={isLast ? theme.text.primary : theme.text.secondary}
-                >
+                <Text color={theme.text.secondary}>
                   {prefix}
                   {label}
                 </Text>
               </Box>
             );
           })}
+          {liveActivity && (
+            // The live row is the one the user opens this view to inspect
+            // ("is this command stuck or still reasonable?"), so it renders
+            // in full and wraps; the height budget above keeps it and the
+            // Transcript pointer on-screen by trimming older history first.
+            // Prefix and label must be ONE string child: MaxSizedBox's wrap
+            // layout drops the prefix's trailing space when they arrive as
+            // separate segments (`> Shell` → `>Shell`).
+            <Box key="live">
+              <Text color={theme.text.primary}>{`> ${liveLabel}`}</Text>
+            </Box>
+          )}
+        </Fragment>
+      )}
+
+      {entry.outputFile && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold dimColor>
+              {t('Transcript')}
+            </Text>
+          </Box>
+          <Box>
+            {/* `wrap="wrap"`, not `truncate-end`: a real transcript path is
+                ~130 chars and only exists to be copied / `tail -f`'d, so
+                truncating it withholds the one string the section is for. */}
+            <Text color={theme.text.secondary} wrap="wrap">
+              {`  ${escapeAnsiCtrlCodes(entry.outputFile)}`}
+            </Text>
+          </Box>
         </Fragment>
       )}
 
@@ -1102,11 +1328,14 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   } = useBackgroundTaskViewActions();
   const config = useConfig();
 
-  // Progress and Prompt are each self-capped at 5 rows inside DetailBody,
-  // so the body never grows unbounded. Use all available height (minus the
-  // dialog chrome) as the MaxSizedBox budget so nothing gets clipped just
-  // because the terminal is short. Chrome = border(2) + title(1) + two
-  // marginTops(2) + hint(1) = 6 rows.
+  // Progress (up to 10 rows + the wrapped live row), Transcript (3 rows:
+  // spacer + label + path) and Prompt (5 rows) are each bounded inside
+  // DetailBody, so the body never grows unbounded. DetailBody also budgets
+  // this height across those sections so the live row and Transcript survive
+  // a short terminal. Pass all available height (minus the dialog chrome) as
+  // the MaxSizedBox budget so nothing gets clipped just because the terminal
+  // is short. Chrome = border(2) + title(1) + two marginTops(2) + hint(1) = 6
+  // rows.
   const detailContentHeight = Math.max(10, availableTerminalHeight - 6);
   // Rounded border + paddingX=1 on the outer Box ≈ 4 horizontal cells.
   const detailContentWidth = Math.max(10, terminalWidth - 4);
@@ -1320,9 +1549,15 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       selectedEntry.kind === 'agent' && selectedEntry.status === 'paused';
     if (!isCancelable && !isAbandonable) return;
     const entryKey = entryId(selectedEntry);
-    const isForegroundAgent =
-      selectedEntry.kind === 'agent' && !selectedEntry.isBackgrounded;
-    if (isForegroundAgent && pendingCancelEntryId !== entryKey) {
+    // Two-step confirm only when cancelling would end the USER's turn —
+    // the same chain-aware verdict as the `[blocking]` row prefix. A
+    // foreground child awaited by a *background* parent unblocks that
+    // parent, not the user, so it cancels on the first press like any
+    // background entry.
+    const isUserBlockingAgent =
+      selectedEntry.kind === 'agent' &&
+      computeUserBlockingIds(entries).has(selectedEntry.agentId);
+    if (isUserBlockingAgent && pendingCancelEntryId !== entryKey) {
       setPendingCancelEntryId(entryKey);
       return;
     }

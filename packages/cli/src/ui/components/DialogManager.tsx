@@ -30,6 +30,7 @@ import { ArenaSelectDialog } from './arena/ArenaSelectDialog.js';
 import { ArenaStopDialog } from './arena/ArenaStopDialog.js';
 import { ArenaStatusDialog } from './arena/ArenaStatusDialog.js';
 import { ApprovalModeDialog } from './ApprovalModeDialog.js';
+import { EffortDialog } from './EffortDialog.js';
 import { theme } from '../semantic-colors.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
@@ -271,6 +272,8 @@ export const DialogManager = ({
         isFastModelMode={uiState.isFastModelMode}
         isVoiceModelMode={uiState.isVoiceModelMode}
         isVisionModelMode={uiState.isVisionModelMode}
+        persistScope={uiState.modelDialogPersistScope}
+        availableTerminalHeight={listDialogHeight}
       />
     );
   }
@@ -300,6 +303,7 @@ export const DialogManager = ({
           }}
           onRestartRequest={() => process.exit(0)}
           availableTerminalHeight={listDialogHeight}
+          width={mainAreaWidth}
           config={config}
         />
       </Box>
@@ -342,6 +346,16 @@ export const DialogManager = ({
           currentMode={currentMode}
           onSelect={uiActions.handleApprovalModeSelect}
           availableTerminalHeight={constrainedDialogHeight}
+        />
+      </Box>
+    );
+  }
+  if (uiState.isEffortDialogOpen) {
+    return (
+      <Box flexDirection="column">
+        <EffortDialog
+          currentEffort={config.getReasoningEffort()}
+          onSelect={uiActions.handleEffortSelect}
         />
       </Box>
     );

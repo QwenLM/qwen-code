@@ -19,6 +19,7 @@ import { runSideQuery } from '../utils/sideQuery.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   estimateContentChars,
   resolveCompactionTuning,
@@ -39,6 +40,8 @@ import {
   type SubagentSnapshot,
 } from './postCompactAttachments.js';
 
+const debugLogger = createDebugLogger('COMPRESSION');
+
 /**
  * Hard cap on the compression sideQuery output (summary text only, since
  * thinking is disabled). Mirrors claude-code's MAX_OUTPUT_TOKENS_FOR_SUMMARY
@@ -47,20 +50,12 @@ import {
 export const COMPACT_MAX_OUTPUT_TOKENS = 20_000;
 
 /**
- * Default proportional auto-compaction threshold. Used as a small-window
- * fallback / safety net inside computeThresholds — when the window is so
- * small that the absolute branch becomes degenerate, the proportional
- * branch keeps the trigger usable.
+ * Default proportional auto-compaction threshold — the preferred trigger and an
+ * upper bound on how high it can sit. See computeThresholds for how it combines
+ * with the absolute ceiling (it governs large windows; the ceiling governs
+ * smaller ones).
  */
-export const DEFAULT_PCT = 0.7;
-
-/**
- * Offset from DEFAULT_PCT used to position the warn tier proportionally
- * (warn-pct = 0.7 - 0.1 = 0.6). Three-tier ladder makes warn fire
- * meaningfully before auto on small windows where the absolute formula
- * would otherwise compress warn flush against auto.
- */
-export const WARN_PCT_OFFSET = 0.1;
+export const DEFAULT_PCT = 0.85;
 
 /**
  * Token budget reserved from the window for compression output. Matches
@@ -145,37 +140,56 @@ export interface CompactionThresholds {
 /**
  * Compute the three-tier threshold ladder for a given context window.
  *
- * Each tier is `max(proportional, absolute)`:
- *   auto = max(DEFAULT_PCT * window,                       effectiveWindow - AUTOCOMPACT_BUFFER)
- *   warn = max((DEFAULT_PCT - WARN_PCT_OFFSET) * window,   auto - WARN_BUFFER)
- *   hard = min(window, max(effectiveWindow - HARD_BUFFER,  auto + HARD_BUFFER))
+ * The absolute term (effectiveWindow - AUTOCOMPACT_BUFFER) is a *ceiling* —
+ * "compact by here, or the summarization side-query has no room to run" — so
+ * it is combined with the proportional preference via `min`, not `max`:
+ *   auto = absoluteCeiling > 0 ? min(pct * window, absoluteCeiling) : pct * window
+ *   warn = max(0, auto - WARN_BUFFER)
+ *   hard = min(window, max(effectiveWindow - HARD_BUFFER, auto + HARD_BUFFER))
  *
- * Small windows (where the absolute branch goes negative) automatically
- * fall back to the proportional branch. Large windows are dominated by
- * the absolute branch, capping wasted reservation to ~33K instead of 30%
- * of the window.
+ * So large windows compact at ~pct (never crowding the ceiling), smaller
+ * windows compact at the ceiling (leaving room for the summary), and a window
+ * too small for even the ceiling (≤ SUMMARY_RESERVE + AUTOCOMPACT_BUFFER) falls
+ * back to the proportional value as a floor. This mirrors claude-code
+ * (autoCompact.ts), which combines its percentage override with the absolute
+ * ceiling via Math.min. `pct` defaults to DEFAULT_PCT.
  *
  * Pure function — no I/O, no shared state — safe to call repeatedly.
  */
-export function computeThresholds(window: number): CompactionThresholds {
+export function computeThresholds(
+  window: number,
+  pct?: number,
+): CompactionThresholds {
+  const effectivePct = Math.min(
+    1,
+    Math.max(0, pct !== undefined && Number.isFinite(pct) ? pct : DEFAULT_PCT),
+  );
   // Clamp to 0 for tiny windows (window < SUMMARY_RESERVE) so the surfaced
-  // value in `/context` stays meaningful. The Math.max guards on auto/warn/hard
-  // below absorb the floor — clamping does not shift those outputs because
-  // each is `max(proportional, absolute)` and the proportional branch
-  // dominates whenever the absolute branch goes negative.
+  // value in `/context` stays meaningful.
   const effectiveWindow = Math.max(0, window - SUMMARY_RESERVE);
 
-  const absAuto = effectiveWindow - AUTOCOMPACT_BUFFER;
-  const auto = Math.max(DEFAULT_PCT * window, absAuto);
+  // The absolute term is a ceiling: compact before the prompt leaves too little
+  // room for the summarization side-query (which needs up to SUMMARY_RESERVE of
+  // output). Combine it with the proportional preference via `min`. When the
+  // window is so small the ceiling is non-positive, fall back to the
+  // proportional value as a floor so the trigger stays usable.
+  const proportional = effectivePct * window;
+  const absoluteCeiling = effectiveWindow - AUTOCOMPACT_BUFFER;
+  const auto =
+    absoluteCeiling > 0
+      ? Math.min(proportional, absoluteCeiling)
+      : proportional;
 
-  const absWarn = auto - WARN_BUFFER;
-  const warn = Math.max((DEFAULT_PCT - WARN_PCT_OFFSET) * window, absWarn);
+  // Warn fires WARN_BUFFER below auto (claude-code positions its warning tier
+  // the same way, relative to the auto threshold).
+  const warn = Math.max(0, auto - WARN_BUFFER);
 
-  const rawHard = effectiveWindow - HARD_BUFFER;
-  // Guarantee hard > auto so compaction doesn't wait until the last moment.
-  // For tiny/zero windows where auto is already at the proportional floor,
-  // clamp hard to the window itself so it never exceeds the actual limit.
-  const hard = Math.min(window, Math.max(rawHard, auto + HARD_BUFFER));
+  // hard is the last-ditch force-compaction point: the window edge (hardEdge),
+  // but never below auto + HARD_BUFFER so it stays a distinct tier above auto on
+  // degenerate small windows (where auto is the proportional floor and can
+  // exceed hardEdge). Clamp to the window so hard never exceeds the actual limit.
+  const hardEdge = effectiveWindow - HARD_BUFFER;
+  const hard = Math.min(window, Math.max(hardEdge, auto + HARD_BUFFER));
 
   return { warn, auto, hard, effectiveWindow };
 }
@@ -337,10 +351,17 @@ export class ChatCompressionService {
     }
 
     if (!force) {
+      // Thresholds run against the FULL window: the send-path output clamp
+      // guarantees `prompt + max_tokens ≤ window`, so no output budget needs
+      // to be reserved out of the window here (this replaced the
+      // #5957/#6266 reservedOutputTokens machinery).
       const contextLimit =
         config.getContentGeneratorConfig()?.contextWindowSize ??
         DEFAULT_TOKEN_LIMIT;
-      const { auto } = computeThresholds(contextLimit);
+      const { auto } = computeThresholds(
+        contextLimit,
+        config.getAutoCompactThreshold(),
+      );
       // Order of preference for the effective-token estimate:
       //   1. Caller already computed it (sendMessageStream hard-tier rescue)
       //   2. Compute it here from history + pending user message
@@ -375,6 +396,10 @@ export class ChatCompressionService {
           countToolResponseImages(chat.getHistoryShallow(true)) >=
             tuning.screenshotTriggerThreshold;
         if (!screenshotOverflow) {
+          debugLogger.debug(
+            `[compaction] cheap-gate NOOP: effectiveTokens=${effectiveTokens}, ` +
+              `auto=${auto}, contextLimit=${contextLimit}`,
+          );
           return {
             newHistory: null,
             info: {
@@ -389,7 +414,7 @@ export class ChatCompressionService {
       }
     }
 
-    // Compression only reads the existing history while deciding the split and
+    // Compression reads existing history plus any pending tool result while
     // preparing the side-query payload. Avoid `getHistory(true)` here: long
     // tool-heavy sessions can make a defensive deep clone larger than the
     // remaining V8 heap headroom at exactly the moment compaction is trying to
@@ -462,10 +487,27 @@ export class ChatCompressionService {
       }
     }
 
+    // A tool result is still pending when automatic compaction runs before
+    // sendMessageStream commits the current user turn to chat history. Include
+    // it in the side-query so Anthropic-compatible providers see it immediately
+    // after the preceding tool_use block.
+    const pendingToolResult = opts.pendingUserMessage?.parts?.some(
+      (part) => !!part.functionResponse,
+    );
+    const sideQueryHistory = pendingToolResult
+      ? [...curatedHistory, opts.pendingUserMessage!]
+      : curatedHistory;
+    const pendingToolResultTokenCount = pendingToolResult
+      ? estimateContentTokens(
+          [opts.pendingUserMessage!],
+          slimmingConfig.imageTokenEstimate,
+        )
+      : 0;
+
     // Slim the side-query input: replace inlineData with placeholders.
     // The original history (with images) is preserved separately for
     // the post-compact image restoration block.
-    const slim = slimCompactionInput(curatedHistory);
+    const slim = slimCompactionInput(sideQueryHistory);
     if (slim.stats.imagesStripped > 0 || slim.stats.documentsStripped > 0) {
       config
         .getDebugLogger()
@@ -705,10 +747,14 @@ export class ChatCompressionService {
         compressionOutputTokenCount > 0
       ) {
         canCalculateNewTokenCount = true;
+        const compressedHistoryTokenCount = Math.max(
+          0,
+          compressionInputTokenCount - 1000 - pendingToolResultTokenCount,
+        );
         newTokenCount = Math.max(
           0,
           originalTokenCount -
-            (compressionInputTokenCount - 1000) +
+            compressedHistoryTokenCount +
             compressionOutputTokenCount,
         );
         // The composer injects file-restoration blocks (up to

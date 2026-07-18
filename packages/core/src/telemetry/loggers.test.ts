@@ -38,6 +38,8 @@ import {
   EVENT_EXTENSION_DISABLE,
   EVENT_EXTENSION_INSTALL,
   EVENT_EXTENSION_UNINSTALL,
+  EVENT_TOOL_OUTPUT_TRUNCATED,
+  EVENT_PROTOCOL_TAG_SANITIZED,
 } from './constants.js';
 import {
   logApiRequest,
@@ -59,8 +61,10 @@ import {
   logHookCall,
   logApiError,
   logApiRetry,
+  logProtocolTagSanitized,
 } from './loggers.js';
 import * as metrics from './metrics.js';
+import { apiActivityTracker } from './api-activity-tracker.js';
 import { QwenLogger } from './qwen-logger/qwen-logger.js';
 import * as sdk from './sdk.js';
 import * as tokenUsageService from '../services/tokenUsageService.js';
@@ -85,6 +89,7 @@ import {
   HookCallEvent,
   ApiErrorEvent,
   ApiRetryEvent,
+  ProtocolTagSanitizedEvent,
 } from './types.js';
 import { FileOperation } from './metrics.js';
 import type {
@@ -94,6 +99,7 @@ import type {
 import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
 import * as uiTelemetry from './uiTelemetry.js';
 import { makeFakeConfig } from '../test-utils/config.js';
+import { runWithChatRecordingSuppressed } from '../utils/chat-recording-suppression-context.js';
 
 describe('loggers', () => {
   const mockLogger = {
@@ -153,6 +159,42 @@ describe('loggers', () => {
       expect(metrics.recordChatCompressionMetrics).toHaveBeenCalledWith(
         mockConfig,
         { tokens_before: 9001, tokens_after: 9000 },
+      );
+    });
+  });
+
+  describe('logProtocolTagSanitized', () => {
+    it('emits a privacy-safe handled event to QwenLogger and OpenTelemetry', () => {
+      const config = makeFakeConfig({ sessionId: 'test-session-id' });
+      vi.spyOn(QwenLogger.prototype, 'logProtocolTagSanitizedEvent');
+      const event = new ProtocolTagSanitizedEvent({
+        model: 'test-model',
+        promptId: 'prompt-id',
+        responseId: 'response-id',
+        tagName: 'think',
+        toolCallCount: 2,
+      });
+
+      logProtocolTagSanitized(config, event);
+
+      expect(
+        QwenLogger.prototype.logProtocolTagSanitizedEvent,
+      ).toHaveBeenCalledWith(event);
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'Suppressed a standalone closing think tag and preserved 2 tool call(s).',
+        attributes: {
+          'session.id': 'test-session-id',
+          'event.name': EVENT_PROTOCOL_TAG_SANITIZED,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+          model: 'test-model',
+          prompt_id: 'prompt-id',
+          response_id: 'response-id',
+          tag_name: 'think',
+          tool_call_count: 2,
+        },
+      });
+      expect(JSON.stringify(mockLogger.emit.mock.calls[0])).not.toMatch(
+        /response_text|reasoning|tool_name|arguments/,
       );
     });
   });
@@ -249,6 +291,32 @@ describe('loggers', () => {
           prompt: 'test-prompt',
           prompt_id: 'prompt-id-8',
           auth_type: 'vertex-ai',
+        },
+      });
+    });
+
+    it('should include the model attribute when set (e.g. inline override)', () => {
+      const event = new UserPromptEvent(
+        11,
+        'prompt-id-model',
+        AuthType.USE_OPENAI,
+        'test-prompt',
+        'qwen-max',
+      );
+
+      logUserPrompt(mockConfig, event);
+
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'User prompt. Length: 11.',
+        attributes: {
+          'session.id': 'test-session-id',
+          'event.name': EVENT_USER_PROMPT,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+          prompt_length: 11,
+          prompt: 'test-prompt',
+          prompt_id: 'prompt-id-model',
+          auth_type: 'openai',
+          model: 'qwen-max',
         },
       });
     });
@@ -479,6 +547,30 @@ describe('loggers', () => {
 
       expect(mockRecordUiTelemetryEvent).toHaveBeenCalled();
     });
+
+    it('suppresses chatRecordingService writes inside hidden runs', () => {
+      const mockRecordUiTelemetryEvent = vi.fn();
+      const configWithRecording = {
+        getSessionId: () => 'test-session-id',
+        getUsageStatisticsEnabled: () => false,
+        getChatRecordingService: () => ({
+          recordUiTelemetryEvent: mockRecordUiTelemetryEvent,
+        }),
+      } as unknown as Config;
+
+      const event = new ApiResponseEvent(
+        'resp-id',
+        'test-model',
+        50,
+        'user_query',
+      );
+      runWithChatRecordingSuppressed(() => {
+        logApiResponse(configWithRecording, event);
+      });
+
+      expect(mockRecordUiTelemetryEvent).not.toHaveBeenCalled();
+      expect(mockUiEvent.addEvent).toHaveBeenCalled();
+    });
   });
 
   describe('logApiError skips chatRecordingService for internal prompt IDs', () => {
@@ -525,6 +617,33 @@ describe('loggers', () => {
       logApiError(configWithRecording, event);
 
       expect(mockRecordUiTelemetryEvent).toHaveBeenCalled();
+    });
+
+    it('increments the api-activity error counter for the daemon health chart', () => {
+      apiActivityTracker.drain(); // isolate from other cases (global singleton)
+      const event = new ApiErrorEvent({
+        model: 'test-model',
+        durationMs: 100,
+        promptId: 'user_query',
+        errorMessage: 'boom',
+      });
+      logApiError(makeFakeConfig({ sessionId: 'test-session-id' }), event);
+      expect(apiActivityTracker.peek()).toEqual({ errors: 1, retries: 0 });
+    });
+
+    it('counts the error even when the OTel SDK is not initialized', () => {
+      vi.spyOn(sdk, 'isTelemetrySdkInitialized').mockReturnValue(false);
+      apiActivityTracker.drain();
+      const event = new ApiErrorEvent({
+        model: 'test-model',
+        durationMs: 100,
+        promptId: 'user_query',
+        errorMessage: 'boom',
+      });
+      logApiError(makeFakeConfig({ sessionId: 's' }), event);
+      // The daemon health chart is independent of OTel export state — the
+      // counter is bumped before the SDK guard, mirroring logApiRetry.
+      expect(apiActivityTracker.peek().errors).toBe(1);
     });
   });
 
@@ -1390,7 +1509,7 @@ describe('loggers', () => {
         body: 'Tool output truncated for test-tool.',
         attributes: {
           'session.id': 'test-session-id',
-          'event.name': 'tool_output_truncated',
+          'event.name': EVENT_TOOL_OUTPUT_TRUNCATED,
           'event.timestamp': '2025-01-01T00:00:00.000Z',
           eventName: 'tool_output_truncated',
           prompt_id: 'prompt-id-1',
@@ -1860,6 +1979,21 @@ describe('loggers', () => {
       expect(mockQwenLogger.logApiRetryEvent).toHaveBeenCalledWith(event);
       expect(mockLogger.emit).not.toHaveBeenCalled();
       expect(metrics.recordApiRetry).not.toHaveBeenCalled();
+    });
+
+    it('increments the api-activity retry counter for the daemon health chart', () => {
+      apiActivityTracker.drain(); // isolate from other cases (global singleton)
+      const mockConfig = makeFakeConfig({ sessionId: 'test-session-id' });
+      logApiRetry(mockConfig, buildEvent());
+      expect(apiActivityTracker.peek()).toEqual({ errors: 0, retries: 1 });
+    });
+
+    it('counts the retry even when the OTel SDK is not initialized', () => {
+      vi.spyOn(sdk, 'isTelemetrySdkInitialized').mockReturnValue(false);
+      apiActivityTracker.drain();
+      logApiRetry(makeFakeConfig({ sessionId: 's' }), buildEvent());
+      // The daemon health chart is independent of OTel export state.
+      expect(apiActivityTracker.peek().retries).toBe(1);
     });
   });
 });
