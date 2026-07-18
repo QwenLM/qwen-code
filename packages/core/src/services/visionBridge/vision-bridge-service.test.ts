@@ -9,6 +9,8 @@ import type { Part } from '@google/genai';
 import {
   formatVisionBridgeNoticeDisplay,
   formatVisionBridgeNotice,
+  formatFullTurnVisionNotice,
+  getFullTurnVisionModelSelector,
   isVisionBridgeNoticeDisplay,
   runVisionBridge,
   selectVisionBridgeModel,
@@ -330,7 +332,8 @@ describe('runVisionBridge', () => {
       'openai:qwen3-vl-plus\0https://dashscope.aliyuncs.com/compatible-mode/v1',
     );
     expect(result.modelId).toBe('openai:qwen3-vl-plus');
-    expect(textOf(result.parts)).toContain('by openai:qwen3-vl-plus');
+    expect(textOf(result.parts)).toContain('by qwen3-vl-plus');
+    expect(textOf(result.parts)).not.toContain('by openai:qwen3-vl-plus');
     expect(textOf(result.parts)).not.toContain('\0');
   });
 
@@ -792,6 +795,28 @@ describe('formatVisionBridgeNotice', () => {
     ).toContain('qwen3-vl-plus (dashscope.aliyuncs.com)');
   });
 
+  it('hides auth-qualified routing prefixes from user-facing notices', () => {
+    expect(
+      formatVisionBridgeNotice({
+        applied: true,
+        status: 'ok',
+        convertedCount: 1,
+        omittedCount: 0,
+        modelId: 'openai:qwen3-vl-plus',
+        modelEndpoint: 'dashscope.aliyuncs.com',
+        egressOccurred: true,
+      }),
+    ).toContain('via qwen3-vl-plus (dashscope.aliyuncs.com)');
+
+    expect(
+      formatFullTurnVisionNotice({
+        id: 'openai:qwen3-vl-plus',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        agentCapable: true,
+      }),
+    ).toContain('to qwen3-vl-plus (dashscope.aliyuncs.com)');
+  });
+
   it('does not claim egress for a success result without egress', () => {
     const notice = formatVisionBridgeNotice({
       applied: true,
@@ -892,7 +917,7 @@ describe('selectVisionBridgeModel (same-provider only)', () => {
     // dashscope endpoint and must win.
     expect(
       selectVisionBridgeModel('qwen-text-max', models, { baseUrl: dashscope }),
-    ).toEqual({ id: 'qwen3.7-plus', baseUrl: dashscope });
+    ).toEqual({ id: 'openai:qwen3.7-plus', baseUrl: dashscope });
   });
 
   it('never reaches across providers: undefined when the only vision model is on a different endpoint', () => {
@@ -925,7 +950,7 @@ describe('selectVisionBridgeModel (same-provider only)', () => {
       ],
       { authType: 'openai' },
     );
-    expect(picked?.id).toBe('vision-same');
+    expect(picked?.id).toBe('openai:vision-same');
   });
 
   it('returns undefined when the provider identity is unknown', () => {
@@ -948,6 +973,116 @@ describe('selectVisionBridgeModel (same-provider only)', () => {
     );
     expect(picked?.id).toBe('custom-text-name');
   });
+
+  it('marks only explicit agent-capable image models for full-turn routing', () => {
+    const picked = selectVisionBridgeModel(
+      'primary',
+      [
+        { id: 'primary', authType: 'openai', baseUrl: dashscope },
+        {
+          id: 'vision-agent',
+          authType: 'openai',
+          baseUrl: dashscope,
+          modalities: { image: true },
+          capabilities: { agent: true },
+        },
+      ],
+      { baseUrl: dashscope },
+    );
+
+    expect(picked).toEqual({
+      id: 'openai:vision-agent',
+      baseUrl: dashscope,
+      agentCapable: true,
+    });
+    expect(getFullTurnVisionModelSelector(picked!)).toBe(
+      `openai:vision-agent\0${dashscope}\0`,
+    );
+    expect(formatFullTurnVisionNotice(picked!)).toMatch(
+      /retries and tool continuations/i,
+    );
+
+    expect(
+      selectVisionBridgeModel(
+        'primary',
+        [
+          { id: 'primary', baseUrl: dashscope },
+          {
+            id: 'vision-only',
+            baseUrl: dashscope,
+            modalities: { image: true },
+          },
+        ],
+        { baseUrl: dashscope },
+      )?.agentCapable,
+    ).toBeUndefined();
+  });
+
+  it.each([false, true])(
+    'rejects an agent route whose exact identity collides with a non-vision entry (reversed=%s)',
+    (reversed) => {
+      const routeEntries: VisionModelCandidate[] = [
+        {
+          id: 'vision-agent',
+          authType: 'openai',
+          baseUrl: dashscope,
+          modalities: { image: true },
+          capabilities: { agent: true },
+        },
+        {
+          id: 'vision-agent',
+          authType: 'openai',
+          baseUrl: dashscope,
+          modalities: { image: false },
+        },
+      ];
+
+      expect(
+        selectVisionBridgeModel(
+          'primary',
+          [
+            { id: 'primary', authType: 'openai', baseUrl: dashscope },
+            ...(reversed ? routeEntries.reverse() : routeEntries),
+          ],
+          { authType: 'openai', baseUrl: dashscope },
+        ),
+      ).toBeUndefined();
+    },
+  );
+
+  it.each([
+    [false, 'openai:shared-vision'],
+    [true, 'anthropic:shared-vision'],
+  ])(
+    'auth-qualifies a cross-auth same-endpoint route (reversed=%s)',
+    (reversed, expectedId) => {
+      const routeEntries: VisionModelCandidate[] = [
+        {
+          id: 'shared-vision',
+          authType: 'openai',
+          baseUrl: dashscope,
+          isVision: true,
+        },
+        {
+          id: 'shared-vision',
+          authType: 'anthropic',
+          baseUrl: dashscope,
+          isVision: true,
+        },
+      ];
+
+      const picked = selectVisionBridgeModel(
+        'primary',
+        [
+          { id: 'primary', authType: 'openai', baseUrl: dashscope },
+          ...(reversed ? routeEntries.reverse() : routeEntries),
+        ],
+        { authType: 'openai', baseUrl: dashscope },
+      );
+
+      expect(picked).toEqual({ id: expectedId, baseUrl: dashscope });
+    },
+  );
 });
 
 describe('isImageCapable', () => {

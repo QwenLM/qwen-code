@@ -69,6 +69,7 @@ import {
   createInputAnnotationsFromComposerTags,
   getComposerTagIconUrl,
   getComposerTagSerialized,
+  isBuiltinComposerTagIconUrl,
 } from '../utils/composerTag';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import { isSafeImageSrc } from '../components/messages/Markdown';
@@ -678,7 +679,10 @@ class ComposerTagWidget extends WidgetType {
     const tagLabel = this.tag.kind ? '' : rawTagLabel;
     const iconUrl = this.tag.iconUrl ?? getComposerTagIconUrl(this.tag.kind);
     const safeIconUrl =
-      iconUrl && isSafeImageSrc(iconUrl) ? iconUrl : undefined;
+      iconUrl &&
+      (isBuiltinComposerTagIconUrl(iconUrl) || isSafeImageSrc(iconUrl))
+        ? iconUrl
+        : undefined;
     let customContent: ReactNode | null | undefined;
     try {
       customContent = this.tag.renderContent?.({
@@ -1036,6 +1040,7 @@ export interface UseComposerCoreOptions {
     commitAccepted?: ComposerSubmitCommit,
     metadata?: ComposerSubmitMetadata,
   ) => boolean | void;
+  onInputTextChange?: (text: string) => void;
   onCycleMode?: () => void;
   onToggleShortcuts?: () => void;
   disabled?: boolean;
@@ -1185,6 +1190,7 @@ export function useComposerCore(
 ): UseComposerCoreReturn {
   const {
     onSubmit,
+    onInputTextChange,
     onCycleMode,
     onToggleShortcuts,
     disabled = false,
@@ -1219,6 +1225,8 @@ export function useComposerCore(
   const viewRef = useRef<EditorView | null>(null);
   const onSubmitRef = useRef(onSubmit);
   onSubmitRef.current = onSubmit;
+  const onInputTextChangeRef = useRef(onInputTextChange);
+  onInputTextChangeRef.current = onInputTextChange;
   const onCycleModeRef = useRef(onCycleMode);
   onCycleModeRef.current = onCycleMode;
   const onToggleShortcutsRef = useRef(onToggleShortcuts);
@@ -2310,6 +2318,7 @@ export function useComposerCore(
         EditorView.updateListener.of((update) => {
           if (update.docChanged) {
             const text = update.state.doc.toString();
+            onInputTextChangeRef.current?.(text);
             const followup = followupStateRef.current;
             const followupCompletion = getFollowupCompletion(
               text,

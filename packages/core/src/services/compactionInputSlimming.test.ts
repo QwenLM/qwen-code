@@ -333,6 +333,29 @@ describe('compactionInputSlimming', () => {
       });
     });
 
+    it('preserves media supported by the target modalities', () => {
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            { inlineData: { mimeType: 'image/png', data: 'IMAGE' } },
+            { inlineData: { mimeType: 'application/pdf', data: 'PDF' } },
+          ],
+        },
+      ];
+
+      const result = slimCompactionInput(history, { pdf: true });
+
+      expect(result.slimmedHistory[0]!.parts).toEqual([
+        { text: '[image: image/png]' },
+        { inlineData: { mimeType: 'application/pdf', data: 'PDF' } },
+      ]);
+      expect(result.stats).toEqual({
+        imagesStripped: 1,
+        documentsStripped: 0,
+      });
+    });
+
     it('replaces fileData parts using the same placeholder logic', () => {
       const history: Content[] = [
         {

@@ -427,6 +427,39 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
+  it('treats Suggestion-level review findings as actionable feedback', () => {
+    // AGENTS.md: Suggestions ARE addressed during a PR's first ~5 review
+    // rounds; only past that are they deferred with a recorded reason. The
+    // loop's MAX_ROUNDS cap is that same boundary, so every round the loop
+    // runs is within the address-Suggestions window — the scan and the
+    // feedback rendering must NOT filter `**[Suggestion]**` /review comments.
+    expect(workflow).not.toContain('QWEN_SUGGESTION_FILTER');
+    // The filter REGEX (escaped form only ever appears in filter code, not in
+    // prose comments) must be gone from both the scan and the feedback render.
+    expect(workflow).not.toContain('\\*\\*\\[Suggestion\\]\\*\\*');
+    // The agent-facing policy lives in the SKILL: implement valuable
+    // suggestions, decline only with a recorded per-finding reason.
+    const skill = readAutofixSkill();
+    expect(skill).toContain('never');
+    expect(skill).toContain('drop one silently');
+  });
+
+  it('requires bilingual bodies for files posted verbatim as PR comments', () => {
+    const skill = readAutofixSkill();
+    // Comment bodies mirror the repository's PR-body convention: English
+    // content ending with a complete collapsed Chinese translation.
+    expect(skill).toContain('<summary>中文说明</summary>');
+    expect(skill).toMatch(
+      /`address-summary\.md`, `no-action\.md`, and `e2e-report\.md`/,
+    );
+    // failure/handoff excerpts are byte-truncated into handoff comments; a
+    // severed <details> tag would swallow the rest of the comment, so those
+    // two files must stay English-only.
+    expect(skill).toContain(
+      'Keep `failure.md` and `handoff.md` English-only WITHOUT a details block',
+    );
+  });
+
   it('includes issue-level comments in review feedback scanning', () => {
     const reviewScanStep =
       workflow.match(

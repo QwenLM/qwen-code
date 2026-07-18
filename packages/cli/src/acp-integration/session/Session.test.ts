@@ -3331,6 +3331,187 @@ describe('Session', () => {
       expect(sent.some((part) => 'inlineData' in part)).toBe(false);
     });
 
+    it('routes an agent-capable image prompt for that ACP prompt only', async () => {
+      const runtimeView = {
+        contentGenerator: {},
+        contentGeneratorConfig: {
+          model: 'vision-agent',
+          modalities: { image: true },
+        },
+        model: 'vision-agent',
+      };
+      const executeSpy = vi.fn().mockImplementation(async () => {
+        expect(core.getRuntimeContentGenerator()).toBe(runtimeView);
+        return {
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        };
+      });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: 'read_file',
+        kind: core.Kind.Read,
+        build: vi.fn().mockReturnValue({
+          params: { path: '/tmp/test.txt' },
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: executeSpy,
+        }),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'vision-agent',
+        baseUrl: 'https://vision.example.com/v1',
+        agentCapable: true,
+      });
+      const resolveForModel = vi.fn().mockResolvedValue(runtimeView);
+      mockConfig.getBaseLlmClient = vi.fn().mockReturnValue({
+        resolveForModel,
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'call-1',
+                    name: 'read_file',
+                    args: { path: '/tmp/test.txt' },
+                  },
+                ],
+              },
+            },
+          ]),
+        )
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'look at this' },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'iVBORw0KGgo=',
+          },
+        ],
+      });
+
+      expect(runVisionBridgeSpy).not.toHaveBeenCalled();
+      expect(firstSentMessage().some((part) => 'inlineData' in part)).toBe(
+        true,
+      );
+      expect(mockChat.sendMessageStream).toHaveBeenNthCalledWith(
+        1,
+        'vision-agent\0https://vision.example.com/v1\0',
+        expect.any(Object),
+        expect.any(String),
+      );
+      expect(mockChat.sendMessageStream).toHaveBeenNthCalledWith(
+        2,
+        'vision-agent\0https://vision.example.com/v1\0',
+        expect.any(Object),
+        expect.any(String),
+      );
+      expect(resolveForModel).toHaveBeenCalledWith(
+        'vision-agent\0https://vision.example.com/v1',
+        { failClosed: true },
+      );
+      expect(executeSpy).toHaveBeenCalledOnce();
+      expect(
+        agentMessageChunks().some((chunk) =>
+          chunk.includes('Routing this image turn'),
+        ),
+      ).toBe(true);
+      expect(mockGeminiClient.tryCompressChat).not.toHaveBeenCalled();
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'next text turn' }],
+      });
+      expect(mockChat.sendMessageStream).toHaveBeenNthCalledWith(
+        3,
+        'qwen3-code-plus',
+        expect.any(Object),
+        expect.any(String),
+      );
+      expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledOnce();
+    });
+
+    it('clamps full-turn images before selecting the ACP route', async () => {
+      const ENV_KEY = 'QWEN_CODE_MAX_INLINE_MEDIA_BYTES';
+      const original = process.env[ENV_KEY];
+      process.env[ENV_KEY] = '8';
+      try {
+        mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+        mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+          id: 'vision-agent',
+          baseUrl: 'https://vision.example.com/v1',
+          agentCapable: true,
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        const oversized = 'QUJDREVGR0hJSktMTU5PUFFSU1Q=';
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'only oversized' },
+            { type: 'image', mimeType: 'image/png', data: oversized },
+          ],
+        });
+
+        const firstCall = vi.mocked(mockChat.sendMessageStream).mock.calls[0];
+        expect(firstCall?.[0]).toBe('qwen3-code-plus');
+        const firstMessage = firstCall?.[1].message;
+        expect(
+          Array.isArray(firstMessage) &&
+            firstMessage.some(
+              (part) => typeof part !== 'string' && 'inlineData' in part,
+            ),
+        ).toBe(false);
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'one usable image' },
+            { type: 'image', mimeType: 'image/png', data: 'QUJD' },
+            { type: 'image', mimeType: 'image/png', data: oversized },
+          ],
+        });
+
+        const secondCall = vi.mocked(mockChat.sendMessageStream).mock.calls[1];
+        expect(secondCall?.[0]).toBe(
+          'vision-agent\0https://vision.example.com/v1\0',
+        );
+        const sentParts = secondCall?.[1].message;
+        if (!Array.isArray(sentParts)) {
+          throw new Error('Expected structured message parts');
+        }
+        expect(sentParts[1]).toEqual({
+          inlineData: { mimeType: 'image/png', data: 'QUJD' },
+        });
+        expect(sentParts[2]).not.toHaveProperty('inlineData');
+        expect(sentParts[2]).toEqual(
+          expect.objectContaining({ text: expect.stringMatching(/omitted/i) }),
+        );
+        expect(runVisionBridgeSpy).not.toHaveBeenCalled();
+        expect(
+          agentMessageChunks().filter((chunk) =>
+            chunk.includes('Routing this image turn'),
+          ),
+        ).toHaveLength(1);
+      } finally {
+        if (original === undefined) delete process.env[ENV_KEY];
+        else process.env[ENV_KEY] = original;
+      }
+    });
+
     it('strips image parts when the vision bridge is cancelled before applying', async () => {
       mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
       mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
@@ -5194,6 +5375,12 @@ describe('Session', () => {
 
         mockToolRegistry.getTool.mockReturnValue(tool);
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+        mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+          id: 'vision-agent',
+          baseUrl: 'https://vision.example.com/v1',
+          agentCapable: true,
+        });
         mockClient.extMethod = vi.fn().mockResolvedValue({
           items: [
             {
@@ -5271,9 +5458,13 @@ describe('Session', () => {
           audioFallbackPart,
         ];
         const secondCall = vi.mocked(mockChat.sendMessageStream).mock.calls[1];
+        expect(secondCall?.[0]).toBe(
+          'vision-agent\0https://vision.example.com/v1\0',
+        );
         expect(secondCall?.[1].message).toEqual(
           expect.arrayContaining(midTurnParts),
         );
+        expect(runVisionBridgeSpy).not.toHaveBeenCalled();
         expect(secondCall?.[1].message).not.toEqual(
           expect.arrayContaining([
             {

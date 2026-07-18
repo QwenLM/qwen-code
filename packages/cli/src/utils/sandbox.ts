@@ -297,6 +297,9 @@ export async function start_sandbox(
       'sh',
       '-c',
       [
+        ...(process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'] === '1'
+          ? ['ELECTRON_RUN_AS_NODE=1']
+          : []),
         `SANDBOX=sandbox-exec`,
         `NODE_OPTIONS="${nodeOptions}"`,
         ...finalArgv.map((arg) => quote([arg])),
