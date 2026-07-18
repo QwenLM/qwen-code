@@ -35,6 +35,29 @@ const request: PermissionRequest = {
   },
 };
 
+const multiRequest: PermissionRequest = {
+  id: 'req-multi',
+  content: [],
+  options: [
+    { id: 'submit', label: 'Submit', kind: 'allow_once' },
+    { id: 'cancel', label: 'Cancel', kind: 'reject_once' },
+  ],
+  rawInput: {
+    questions: [
+      {
+        question: 'Pick options',
+        header: 'Options',
+        options: [
+          { label: 'Option A', description: 'a' },
+          { label: 'Option B', description: 'b' },
+          { label: 'Option C', description: 'c' },
+        ],
+        multiSelect: true,
+      },
+    ],
+  },
+};
+
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 let onConfirm: ReturnType<typeof vi.fn>;
@@ -50,12 +73,15 @@ afterEach(() => {
   container = null;
 });
 
-function rerender(keyboardActive?: boolean): void {
+function rerender(
+  keyboardActive?: boolean,
+  req: PermissionRequest = request,
+): void {
   act(() =>
     root!.render(
       <I18nProvider language="en">
         <AskUserQuestion
-          request={request}
+          request={req}
           onConfirm={onConfirm}
           keyboardActive={keyboardActive}
         />
@@ -64,11 +90,14 @@ function rerender(keyboardActive?: boolean): void {
   );
 }
 
-function render(keyboardActive?: boolean): void {
+function render(
+  keyboardActive?: boolean,
+  req: PermissionRequest = request,
+): void {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
-  rerender(keyboardActive);
+  rerender(keyboardActive, req);
 }
 
 function optionButtons(): HTMLButtonElement[] {
@@ -286,5 +315,46 @@ describe('AskUserQuestion accessibility', () => {
     );
     act(() => submit.click());
     expect(onConfirm).toHaveBeenCalledWith('req-1', 'submit', { '0': 'Blue' });
+  });
+});
+
+describe('AskUserQuestion multi-select', () => {
+  it('uses group + toggle-button semantics, not radiogroup', () => {
+    render(undefined, multiRequest);
+    const panel = container!.querySelector('[data-web-shell-ask-panel]')!;
+    expect(panel.querySelector('[role="group"]')).not.toBeNull();
+    expect(panel.querySelector('[role="radiogroup"]')).toBeNull();
+
+    // Multi-select options are toggle buttons (aria-pressed), not radios.
+    const opts = optionButtons();
+    expect(opts[0]!.getAttribute('aria-pressed')).toBe('true'); // default: first
+    expect(opts[0]!.hasAttribute('aria-checked')).toBe(false);
+    expect(opts[0]!.getAttribute('role')).not.toBe('radio');
+  });
+
+  it('toggles options and submits the joined selection', () => {
+    render(undefined, multiRequest);
+    const opts = optionButtons();
+    // First option is selected by default.
+    expect(opts[0]!.getAttribute('aria-pressed')).toBe('true');
+    expect(opts[1]!.getAttribute('aria-pressed')).toBe('false');
+
+    // Toggle Option B on, then Option A off.
+    act(() => {
+      opts[1]!.click();
+    });
+    expect(opts[1]!.getAttribute('aria-pressed')).toBe('true');
+    act(() => {
+      opts[0]!.click();
+    });
+    expect(opts[0]!.getAttribute('aria-pressed')).toBe('false');
+
+    // Submit → only Option B remains, joined into the answer.
+    act(() => {
+      submitButton()!.click();
+    });
+    expect(onConfirm).toHaveBeenCalledWith('req-multi', 'submit', {
+      '0': 'Option B',
+    });
   });
 });

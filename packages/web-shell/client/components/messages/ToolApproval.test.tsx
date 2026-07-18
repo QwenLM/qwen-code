@@ -23,6 +23,21 @@ const request: PermissionRequest = {
   ],
 };
 
+const execRequest: PermissionRequest = {
+  id: 'req-exec',
+  content: [],
+  toolName: 'run_shell_command',
+  title: 'run_shell_command',
+  options: [
+    { id: 'proceed', label: 'Proceed', kind: 'allow_once' },
+    { id: 'reject', label: 'Reject', kind: 'reject_once' },
+  ],
+  rawInput: {
+    command: 'rm -rf /tmp/data',
+    description: 'Delete temporary data',
+  },
+};
+
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 let onConfirm: ReturnType<typeof vi.fn>;
@@ -38,12 +53,15 @@ afterEach(() => {
   container = null;
 });
 
-function rerender(keyboardActive?: boolean): void {
+function rerender(
+  keyboardActive?: boolean,
+  req: PermissionRequest = request,
+): void {
   act(() =>
     root!.render(
       <I18nProvider language="en">
         <ToolApproval
-          request={request}
+          request={req}
           onConfirm={onConfirm}
           keyboardActive={keyboardActive}
         />
@@ -52,11 +70,14 @@ function rerender(keyboardActive?: boolean): void {
   );
 }
 
-function render(keyboardActive?: boolean): void {
+function render(
+  keyboardActive?: boolean,
+  req: PermissionRequest = request,
+): void {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
-  rerender(keyboardActive);
+  rerender(keyboardActive, req);
 }
 
 function optionButtons(): HTMLButtonElement[] {
@@ -84,6 +105,37 @@ describe('ToolApproval accessibility', () => {
     expect(opts.every((o) => o.tagName === 'BUTTON')).toBe(true);
     // Exactly one option is in the tab order (roving tabindex).
     expect(opts.filter((o) => o.tabIndex === 0)).toHaveLength(1);
+  });
+
+  it('exposes the options as radios in a radiogroup (single-select)', () => {
+    render(undefined);
+    const panel = container!.querySelector(
+      '[data-web-shell-permission-panel]',
+    )!;
+    expect(panel.querySelector('[role="radiogroup"]')).not.toBeNull();
+
+    const opts = optionButtons();
+    // The safe default (reject, index 0) is the checked radio.
+    expect(opts[0]!.getAttribute('role')).toBe('radio');
+    expect(opts[0]!.getAttribute('aria-checked')).toBe('true');
+    expect(opts[1]!.getAttribute('aria-checked')).toBe('false');
+  });
+
+  it('exposes the command and description to assistive tech', () => {
+    render(undefined, execRequest);
+    const panel = container!.querySelector(
+      '[data-web-shell-permission-panel]',
+    )!;
+    const describedby = panel.getAttribute('aria-describedby');
+    expect(describedby).toBeTruthy();
+
+    // SR users must hear WHAT will run, not just the question — the referenced
+    // elements include the command and the description.
+    const texts = describedby!
+      .split(' ')
+      .map((id) => document.getElementById(id)?.textContent ?? '');
+    expect(texts.some((t) => t.includes('rm -rf /tmp/data'))).toBe(true);
+    expect(texts.some((t) => t.includes('Delete temporary data'))).toBe(true);
   });
 
   it('focuses the safe-default option when keyboardActive (the default)', () => {

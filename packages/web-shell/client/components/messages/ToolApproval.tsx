@@ -191,6 +191,8 @@ export function ToolApproval({
   const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const headingId = useId();
   const questionId = useId();
+  const descId = useId();
+  const commandId = useId();
 
   useEffect(() => {
     const safeDefaultIndex = getSafeDefaultIndex(
@@ -322,7 +324,11 @@ export function ToolApproval({
       data-web-shell-permission-panel
       role="alertdialog"
       aria-labelledby={headingId}
-      aria-describedby={questionId}
+      // Expose the question, the tool description, and the command/content to
+      // assistive tech — SR users must hear WHAT will run (e.g. `rm -rf …`), not
+      // just "Allow run_shell_command?", before confirming. Ids whose elements
+      // aren't rendered (no description / no command) are simply ignored.
+      aria-describedby={`${questionId} ${descId} ${commandId}`}
       onKeyDown={handleKeyDown}
     >
       <div className={styles.header}>
@@ -335,19 +341,19 @@ export function ToolApproval({
       </div>
 
       {descriptionText && (
-        <div className={styles.desc} title={descriptionText}>
+        <div className={styles.desc} id={descId} title={descriptionText}>
           {descriptionText}
         </div>
       )}
 
       {isExec && command ? (
         <div className={styles.code}>
-          <pre className={styles.codeBlock} title={command}>
+          <pre className={styles.codeBlock} id={commandId} title={command}>
             {command}
           </pre>
         </div>
       ) : contentText && contentText !== request.title ? (
-        <pre className={styles.content} title={contentText}>
+        <pre className={styles.content} id={commandId} title={contentText}>
           {contentText}
         </pre>
       ) : null}
@@ -356,10 +362,11 @@ export function ToolApproval({
         {questionText}
       </div>
 
-      {/* No role/label here: the alertdialog already exposes the question via
-          aria-describedby, so labelling the option container with the same text
-          would make screen readers speak the question twice. */}
-      <div className={styles.options}>
+      {/* radiogroup semantics — the approval choice is single-select. No label
+          on the group: the alertdialog already exposes the question via
+          aria-describedby, so labelling the container with the same text would
+          make screen readers speak the question twice. */}
+      <div className={styles.options} role="radiogroup">
         {displayOptions.map((option, i) => {
           const isSelected = i === selected;
           const i18nKey = getOptionI18nKey(option);
@@ -377,6 +384,8 @@ export function ToolApproval({
               data-web-shell-permission-option
               data-option-id={option.id}
               tabIndex={isSelected ? 0 : -1}
+              role="radio"
+              aria-checked={isSelected}
               aria-keyshortcuts={String(i + 1)}
               onClick={() => confirm(option.id)}
               onFocus={() => {
