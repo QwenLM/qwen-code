@@ -1823,6 +1823,18 @@ describe('getGitWorkingTreeStatus', () => {
     expect(status).toMatchObject({ operation: 'rebase' });
   });
 
+  it('detects an in-progress rebase (rebase-apply dir, e.g. git am)', async () => {
+    await fs.writeFile(path.join(repo, 'a.txt'), 'one\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'init');
+    // `git am` (and an interrupted `git rebase --apply`) creates rebase-apply;
+    // detectGitOperation maps it to 'rebase' too.
+    await fs.mkdir(path.join(repo, '.git', 'rebase-apply'));
+
+    const status = await getGitWorkingTreeStatus(repo);
+    expect(status).toMatchObject({ operation: 'rebase' });
+  });
+
   it('detects an in-progress cherry-pick', async () => {
     await fs.writeFile(path.join(repo, 'a.txt'), 'one\n');
     await git(repo, 'add', '.');

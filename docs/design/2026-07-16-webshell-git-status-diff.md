@@ -438,12 +438,12 @@ M]`）和 porcelain 行（统计 staged / unstaged / untracked）。解析逻辑
     防止 git 允许的原始控制字节 / 转义注入。
   - `available === false` 时显示占位文案（非仓库 / HEAD 缺失 / transient
     state），对齐 `diffCommand.ts` 的提示语义。
-  - 通过 `activePanel` 机制注册（新增一个 panel 值，如 `'diff'`），复用现有
-    打开 / 关闭 / 焦点管理逻辑。
+  - 通过 `diffWorkspaceCwd` 状态打开：设为目标 workspace 的 cwd 即打开弹窗，
+    设回 `undefined` 关闭（不复用 `activePanel`，见 Phase 2“调研修正”）。
 - `/diff` 命令本地化：在 Web Shell 中把 `/diff` 从 ACP 透传改为本地实现——
   打开 `GitDiffDialog`（对齐 CLI 交互模式打开 `DiffDialog` 的行为）。在
-  `App.tsx` 的命令分发处识别 `/diff` 并 `setActivePanel('diff')`，不再发给
-  daemon。`getLocalCommands` 中补 `diff` 的补全项与 `local.diff` 文案。
+  `App.tsx` 的命令分发处识别 `/diff` 并 `setDiffWorkspaceCwd(<active cwd>)`，
+  不再发给 daemon。`getLocalCommands` 中补 `diff` 的补全项与 `local.diff` 文案。
 
 ### 6. 刷新策略（第一层的新鲜度）
 
