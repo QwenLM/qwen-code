@@ -11,7 +11,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  checkAcpImportBoundary,
   checkServeFastPathBundle,
+  findAcpImportBoundaryOffenders,
   findServeFastPathBundleOffenders,
   formatServeFastPathBundleOffenders,
   normalizeMetafilePath,
@@ -32,6 +34,9 @@ function makeMetafile(outputs) {
       }),
       'dist/chunks/run-qwen-serve.js': output({
         inputs: ['packages/cli/src/serve/run-qwen-serve.ts'],
+      }),
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
       }),
       ...outputs,
     },
@@ -411,6 +416,78 @@ describe('serve fast-path bundle check', () => {
           stdio: 'pipe',
         }),
       ).toThrow(/Missing esbuild metafile/);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('ACP import boundary check', () => {
+  it('reports TUI packages reached through static imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+        imports: [staticImport('dist/chunks/tui.js')],
+      }),
+      'dist/chunks/tui.js': output({
+        bytes: 250_000,
+        inputs: [
+          'node_modules/ink/build/index.js',
+          'node_modules/react/index.js',
+          'node_modules/react-reconciler/index.js',
+          'node_modules/yoga-layout/dist/src/index.js',
+        ],
+      }),
+    });
+
+    expect(findAcpImportBoundaryOffenders(metafile)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: 'Ink TUI runtime' }),
+        expect.objectContaining({ label: 'React runtime' }),
+        expect.objectContaining({ label: 'React reconciler runtime' }),
+        expect.objectContaining({ label: 'Yoga layout runtime' }),
+      ]),
+    );
+  });
+
+  it('allows TUI packages behind dynamic imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+        imports: [dynamicImport('dist/chunks/tui.js')],
+      }),
+      'dist/chunks/tui.js': output({
+        inputs: ['node_modules/ink/build/index.js'],
+      }),
+    });
+
+    expect(findAcpImportBoundaryOffenders(metafile)).toEqual([]);
+  });
+
+  it('reads a metafile path and returns ACP boundary offenders', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'acp-import-boundary-'));
+    try {
+      const metafilePath = writeMetafile(
+        tempDir,
+        makeMetafile({
+          'dist/chunks/acp-agent.js': output({
+            inputs: [
+              'packages/cli/src/acp-integration/acpAgent.ts',
+              'node_modules/ink/build/index.js',
+            ],
+          }),
+        }),
+      );
+
+      expect(checkAcpImportBoundary({ metafilePath })).toEqual({
+        ok: false,
+        offenders: [
+          expect.objectContaining({
+            label: 'Ink TUI runtime',
+            matchedInput: 'node_modules/ink/build/index.js',
+          }),
+        ],
+      });
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

@@ -17,7 +17,6 @@ import {
   APPROVAL_MODES,
   ApprovalMode as ApprovalModeEnum,
 } from '@qwen-code/qwen-code-core';
-import { emitAutoModeEntryNotices } from '../hooks/useAutoAcceptIndicator.js';
 import { formatApprovalModeName } from '../utils/approvalModeDisplay.js';
 
 /**
@@ -92,6 +91,9 @@ export const approvalModeCommand: SlashCommand = {
       priorMode !== ApprovalModeEnum.AUTO &&
       config
     ) {
+      const { emitAutoModeEntryNotices } = await import(
+        '../hooks/useAutoAcceptIndicator.js'
+      );
       emitAutoModeEntryNotices({
         config,
         settings,
