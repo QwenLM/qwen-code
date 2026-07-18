@@ -123,14 +123,28 @@ const USER_AGENT_SUFFIX = `(${process.platform}; ${process.arch})`;
  * permission rules, the confirmation dialog, preapproval, and the network
  * request all see the same destination host — an ask/deny rule for
  * raw.githubusercontent.com must match the request that actually goes there.
+ * Matching is on the parsed hostname (github.com, or its www form) and an
+ * /owner/repo/blob/... path shape: a lookalike host merely containing
+ * "github.com" as a substring, or "github.com"/"/blob/" appearing in the
+ * path or query of an unrelated URL, must never trigger the rewrite.
  */
 export function rewriteGitHubBlobUrl(url: string): string {
-  if (url.includes('github.com') && url.includes('/blob/')) {
-    return url
-      .replace('github.com', 'raw.githubusercontent.com')
-      .replace('/blob/', '/');
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    if (host !== 'github.com' && host !== 'www.github.com') {
+      return url;
+    }
+    const rawPath = parsed.pathname.replace(/^(\/[^/]+\/[^/]+)\/blob\//, '$1/');
+    if (rawPath === parsed.pathname) {
+      return url;
+    }
+    parsed.hostname = 'raw.githubusercontent.com';
+    parsed.pathname = rawPath;
+    return parsed.toString();
+  } catch {
+    return url;
   }
-  return url;
 }
 
 function hostnameOf(url: string): string {
@@ -511,7 +525,7 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
       if (
         preapproved &&
         entry.contentType.includes('text/markdown') &&
-        entry.content.length < MAX_CONTENT_CHARS
+        entry.content.length <= MAX_CONTENT_CHARS
       ) {
         return {
           llmContent: `${header}\n\n${entry.content}${binaryNote}`,

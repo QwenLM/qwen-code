@@ -160,7 +160,11 @@ const { HOSTNAME_ONLY, PATH_PREFIXES } = (() => {
       hosts.add(stripWww(entry));
     } else {
       const host = stripWww(entry.slice(0, slash));
-      const prefix = entry.slice(slash);
+      // Stored lowercased; lookups lowercase too. GitHub owner names are
+      // case-insensitive and unique regardless of case, so this cannot match
+      // a different owner — and a casing mismatch would only cost the
+      // passthrough optimization (an unnecessary summarization pass).
+      const prefix = entry.slice(slash).toLowerCase();
       const prefixes = paths.get(host);
       if (prefixes) {
         prefixes.push(prefix);
@@ -179,9 +183,10 @@ export function isPreapprovedHost(hostname: string, pathname: string): boolean {
   }
   const prefixes = PATH_PREFIXES.get(host);
   if (prefixes) {
+    const path = pathname.toLowerCase();
     for (const prefix of prefixes) {
       // Path-segment boundary: "/QwenLM" must not match "/QwenLM-evil/x".
-      if (pathname === prefix || pathname.startsWith(prefix + '/')) {
+      if (path === prefix || path.startsWith(prefix + '/')) {
         return true;
       }
     }

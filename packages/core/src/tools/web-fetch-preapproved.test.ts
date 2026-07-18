@@ -54,6 +54,14 @@ describe('isPreapprovedHost', () => {
   it('enforces path segment boundaries', () => {
     expect(isPreapprovedHost('github.com', '/QwenLM-evil/malware')).toBe(false);
   });
+
+  it('matches path prefixes case-insensitively', () => {
+    // GitHub owner names are case-insensitive and unique regardless of case,
+    // so /qwenlm/... is the same owner as the /QwenLM entry.
+    expect(isPreapprovedHost('github.com', '/qwenlm/qwen-code')).toBe(true);
+    expect(isPreapprovedHost('github.com', '/QWENLM/qwen-code')).toBe(true);
+    expect(isPreapprovedHost('github.com', '/qwenlm-evil/malware')).toBe(false);
+  });
 });
 
 describe('isPreapprovedUrl', () => {

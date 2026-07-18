@@ -305,6 +305,24 @@ describe('fetchWithPolicy retry', () => {
     }
   });
 
+  it('retries once on 429 and returns the successful second response', async () => {
+    let calls = 0;
+    globalThis.fetch = vi.fn(async () => {
+      calls++;
+      return calls === 1
+        ? new Response('rate limited', { status: 429 })
+        : new Response('recovered', { status: 200 });
+    }) as typeof fetch;
+
+    const result = await fetchWithPolicy('https://example.com/limited', opts);
+    expect(calls).toBe(2);
+    expect(result.kind).toBe('response');
+    if (result.kind === 'response') {
+      expect(result.status).toBe(200);
+      expect(result.body.toString()).toBe('recovered');
+    }
+  });
+
   it('returns the original 403 when the retry also fails', async () => {
     let calls = 0;
     globalThis.fetch = vi.fn(async () => {

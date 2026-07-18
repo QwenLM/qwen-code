@@ -8,7 +8,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { WebFetchTool, clearWebFetchCache } from './web-fetch.js';
+import {
+  WebFetchTool,
+  clearWebFetchCache,
+  rewriteGitHubBlobUrl,
+} from './web-fetch.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import { ToolConfirmationOutcome } from './tools.js';
@@ -1394,5 +1398,51 @@ describe('WebFetchTool', () => {
       // setApprovalMode should NOT be called — onConfirm is a no-op
       expect(setApprovalMode).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('rewriteGitHubBlobUrl', () => {
+  it('rewrites github.com blob URLs to the raw host', () => {
+    expect(
+      rewriteGitHubBlobUrl('https://github.com/owner/repo/blob/main/README.md'),
+    ).toBe('https://raw.githubusercontent.com/owner/repo/main/README.md');
+  });
+
+  it('rewrites www.github.com blob URLs too', () => {
+    expect(
+      rewriteGitHubBlobUrl('https://www.github.com/owner/repo/blob/main/f.ts'),
+    ).toBe('https://raw.githubusercontent.com/owner/repo/main/f.ts');
+  });
+
+  it('only removes the /blob/ path segment, not later occurrences', () => {
+    expect(
+      rewriteGitHubBlobUrl(
+        'https://github.com/owner/repo/blob/main/docs/blob/x.md',
+      ),
+    ).toBe('https://raw.githubusercontent.com/owner/repo/main/docs/blob/x.md');
+  });
+
+  it('never rewrites lookalike hosts containing github.com as a substring', () => {
+    const url = 'https://evil-github.com/owner/repo/blob/main/secret.txt';
+    expect(rewriteGitHubBlobUrl(url)).toBe(url);
+  });
+
+  it('never rewrites subdomains of github.com', () => {
+    const url = 'https://gist.github.com/owner/repo/blob/main/f.txt';
+    expect(rewriteGitHubBlobUrl(url)).toBe(url);
+  });
+
+  it('never rewrites URLs with github.com or /blob/ only in the path', () => {
+    const url = 'https://example.com/github.com/blob/README.md';
+    expect(rewriteGitHubBlobUrl(url)).toBe(url);
+  });
+
+  it('leaves non-blob github URLs and unparseable input untouched', () => {
+    const plain = 'https://github.com/owner/repo/pull/1';
+    expect(rewriteGitHubBlobUrl(plain)).toBe(plain);
+    // /blob/ must sit after /owner/repo/, not at the path root.
+    const shallow = 'https://github.com/blob/main/f.txt';
+    expect(rewriteGitHubBlobUrl(shallow)).toBe(shallow);
+    expect(rewriteGitHubBlobUrl('not a url')).toBe('not a url');
   });
 });
