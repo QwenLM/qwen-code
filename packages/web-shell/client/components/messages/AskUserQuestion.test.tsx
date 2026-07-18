@@ -240,6 +240,21 @@ describe('AskUserQuestion accessibility', () => {
     expect(document.activeElement).toBe(opts[1]);
   });
 
+  it('restores focus to the "Other" trigger when re-activated', () => {
+    // Covers the focus effect's customRef branch (idx === options.length): when
+    // the "Other" option is current and a covering panel closes, focus must
+    // return to its trigger rather than falling back to body/an option.
+    render(undefined);
+    const opts = optionButtons(); // [Red, Blue, "Other" trigger]
+    pressKey(opts[0]!, 'End'); // End → last item = the "Other" trigger
+    expect(document.activeElement).toBe(opts[2]);
+
+    rerender(false);
+    rerender(true);
+
+    expect(document.activeElement).toBe(opts[2]);
+  });
+
   it('advances on rapid repeated ArrowDown without a re-render in between', () => {
     // Regression: moveSelection must write selectedIdxRef synchronously, else a
     // held key (repeating faster than React re-renders) reads a stale ref and

@@ -138,6 +138,19 @@ describe('ToolApproval accessibility', () => {
     expect(texts.some((t) => t.includes('Delete temporary data'))).toBe(true);
   });
 
+  it('emits no dangling aria-describedby references', () => {
+    // Basic approval: no command, no description. describedby must reference
+    // only elements that actually render — a dangling IDREF is an axe-core
+    // aria-valid-attr-value violation.
+    render(undefined);
+    const panel = container!.querySelector(
+      '[data-web-shell-permission-panel]',
+    )!;
+    const ids = panel.getAttribute('aria-describedby')!.split(' ');
+    expect(ids.length).toBeGreaterThan(0);
+    ids.forEach((id) => expect(document.getElementById(id)).not.toBeNull());
+  });
+
   it('focuses the safe-default option when keyboardActive (the default)', () => {
     render(undefined);
     // Reject sorts first and is the safe default.

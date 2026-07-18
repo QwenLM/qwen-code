@@ -308,6 +308,9 @@ export function ToolApproval({
   const isExec = isExecKind(request);
   const isAgent = isAgentTool(request.toolName);
   const command = getCommandFromRawInput(request);
+  const showsCommandBlock = Boolean(
+    (isExec && command) || (contentText && contentText !== request.title),
+  );
   const questionText = isAgent
     ? t('approval.launchAgentQuestion')
     : isExec
@@ -326,9 +329,16 @@ export function ToolApproval({
       aria-labelledby={headingId}
       // Expose the question, the tool description, and the command/content to
       // assistive tech — SR users must hear WHAT will run (e.g. `rm -rf …`), not
-      // just "Allow run_shell_command?", before confirming. Ids whose elements
-      // aren't rendered (no description / no command) are simply ignored.
-      aria-describedby={`${questionId} ${descId} ${commandId}`}
+      // just "Allow run_shell_command?", before confirming. Only reference ids
+      // whose elements actually render, so there are no dangling ARIA IDREFs
+      // (axe-core aria-valid-attr-value) when description/command are absent.
+      aria-describedby={[
+        questionId,
+        descriptionText ? descId : null,
+        showsCommandBlock ? commandId : null,
+      ]
+        .filter(Boolean)
+        .join(' ')}
       onKeyDown={handleKeyDown}
     >
       <div className={styles.header}>
