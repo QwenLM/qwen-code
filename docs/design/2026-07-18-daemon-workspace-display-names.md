@@ -58,7 +58,10 @@ daemons that omit both the field and capability tag.
   and routing by id/cwd rather than display name.
 - Capability/status and SDK tests cover the additive field, request shapes,
   and `workspace_display_name` advertisement.
+- A browser screenshot verifies that the PR branch serves the real Web Shell.
 - An end-to-end daemon recording demonstrates register, read, update, clear,
   and restart persistence for the PR.
+
+![Workspace display-name Web Shell](../assets/workspace-display-name-web-shell.jpg)
 
 ![Workspace display-name daemon E2E](../assets/workspace-display-name-e2e.gif)
