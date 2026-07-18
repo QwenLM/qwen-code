@@ -26,6 +26,7 @@ import type {
   ChannelWebhookTask,
 } from './ChannelWebhookTask.js';
 import { SessionRouter } from './SessionRouter.js';
+import { isChannelProactiveDeliveryError } from './ChannelProactiveDeliveryError.js';
 
 // Concrete test implementation
 class TestChannel extends ChannelBase {
@@ -354,6 +355,23 @@ describe('ChannelBase', () => {
   }
 
   describe('proactive delivery boundary', () => {
+    it('recognizes a typed delivery error from another module instance', () => {
+      expect(
+        isChannelProactiveDeliveryError({
+          code: 'channel_proactive_delivery_error',
+          disposition: 'permanent',
+          message: 'recipient is invalid',
+        }),
+      ).toBe(true);
+      expect(
+        isChannelProactiveDeliveryError({
+          code: 'channel_proactive_delivery_error',
+          disposition: 'unknown',
+          message: 'recipient is invalid',
+        }),
+      ).toBe(false);
+    });
+
     it('delivers through the adapter proactive path', async () => {
       const ch = createChannel();
       ch.proactiveSupported = true;

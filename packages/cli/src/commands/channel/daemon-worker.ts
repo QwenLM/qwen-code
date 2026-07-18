@@ -12,7 +12,7 @@ import {
 import { loadSettings } from '../../config/settings.js';
 import {
   DaemonChannelBridge,
-  ChannelProactiveDeliveryError,
+  isChannelProactiveDeliveryError,
   sanitizeLogText,
   SessionRouter,
 } from '@qwen-code/channel-base';
@@ -1097,7 +1097,7 @@ function classifyChannelDeliveryError(
   error: unknown,
 ): ChannelDeliveryErrorCode {
   if (
-    error instanceof ChannelProactiveDeliveryError &&
+    isChannelProactiveDeliveryError(error) &&
     error.disposition === 'permanent'
   ) {
     return 'channel_delivery_invalid';

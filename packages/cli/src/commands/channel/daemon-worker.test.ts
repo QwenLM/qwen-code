@@ -93,8 +93,22 @@ const MockChannelProactiveDeliveryError = vi.hoisted(
         message: string,
       ) {
         super(message);
+        this.code = 'channel_proactive_delivery_error' as const;
       }
+
+      readonly code: 'channel_proactive_delivery_error';
     },
+);
+const mockIsChannelProactiveDeliveryError = vi.hoisted(() =>
+  vi.fn(
+    (error: unknown) =>
+      typeof error === 'object' &&
+      error !== null &&
+      (error as { code?: unknown }).code ===
+        'channel_proactive_delivery_error' &&
+      ((error as { disposition?: unknown }).disposition === 'permanent' ||
+        (error as { disposition?: unknown }).disposition === 'transient'),
+  ),
 );
 const mockDefaultDaemonClientCapabilities = vi.hoisted(() =>
   vi.fn().mockResolvedValue({
@@ -222,6 +236,7 @@ vi.mock('./durable-loop-controller.js', () => ({
 vi.mock('@qwen-code/channel-base', () => ({
   DaemonChannelBridge: mockDaemonChannelBridge,
   ChannelProactiveDeliveryError: MockChannelProactiveDeliveryError,
+  isChannelProactiveDeliveryError: mockIsChannelProactiveDeliveryError,
   sanitizeLogText: mockSanitizeLogText,
   SessionRouter: mockSessionRouter,
 }));
@@ -2454,6 +2469,71 @@ describe('daemonWorkerCommand', () => {
           code: 'channel_delivery_invalid',
           error:
             'DingTalk proactive send failed: invalid direct recipient <redacted>',
+        });
+      });
+
+      process.emit('SIGTERM', 'SIGTERM');
+      await handler;
+      expect(exit).toHaveBeenCalledWith(0);
+    } finally {
+      restoreSend();
+    }
+  });
+
+  it('classifies a permanent delivery error from another module instance', async () => {
+    const foreignError = Object.assign(new Error('recipient is invalid'), {
+      code: 'channel_proactive_delivery_error',
+      disposition: 'permanent',
+    });
+    const exit = mockProcessExitNoThrow();
+    const send = vi.fn();
+    const restoreSend = stubProcessSend(send as NodeJS.Process['send']);
+    mockCreateChannel.mockResolvedValueOnce({
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn(),
+      name: 'telegram',
+      validateWebhookTask: vi.fn(),
+      deliverProactive: vi.fn().mockRejectedValue(foreignError),
+    });
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+    const existingMessageListeners = process.listeners('message');
+
+    try {
+      const handler = daemonWorkerCommand.handler({
+        channel: ['telegram'],
+        _: [],
+        $0: 'qwen',
+      });
+      await vi.waitFor(() => {
+        expect(send).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'ready' }),
+        );
+      });
+      send.mockClear();
+
+      const listener = process
+        .listeners('message')
+        .find((candidate) => !existingMessageListeners.includes(candidate));
+      (listener as ((message: unknown) => void) | undefined)?.({
+        type: 'channel_delivery',
+        id: 'ipc-delivery-foreign',
+        expiresAt: Date.now() + 1000,
+        request: {
+          ...deliveryRequest,
+          channelName: 'telegram',
+          target: { ...deliveryRequest.target, channelName: 'telegram' },
+        },
+      });
+
+      await vi.waitFor(() => {
+        expect(send).toHaveBeenCalledWith({
+          type: 'channel_delivery_result',
+          id: 'ipc-delivery-foreign',
+          ok: false,
+          code: 'channel_delivery_invalid',
+          error: 'recipient is invalid',
         });
       });
 

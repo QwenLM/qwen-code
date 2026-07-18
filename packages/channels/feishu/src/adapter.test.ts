@@ -1321,6 +1321,83 @@ describe('FeishuChannel', () => {
       );
     });
 
+    it('refreshes a stale token once and retries the proactive send', async () => {
+      const channel = createTestableChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'stale-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockResolvedValueOnce(new Response('stale', { status: 401 }))
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              tenant_access_token: 'fresh-token',
+              expire: 3600,
+            }),
+            { status: 200 },
+          ),
+        )
+        .mockResolvedValueOnce(new Response('{}', { status: 200 }));
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+      await channel.pushLoop(
+        {
+          channelName: 'test',
+          senderId: 'ou_user',
+          chatId: 'oc_chat_id',
+        },
+        'hello',
+      );
+
+      expect(fetchSpy).toHaveBeenCalledTimes(3);
+      expect(fetchSpy.mock.calls[2]?.[1]).toEqual(
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            Authorization: 'Bearer fresh-token',
+          }),
+        }),
+      );
+    });
+
+    it('classifies a repeated 401 after token refresh as permanent', async () => {
+      const channel = createTestableChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'stale-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      vi.spyOn(global, 'fetch')
+        .mockResolvedValueOnce(new Response('stale', { status: 401 }))
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              tenant_access_token: 'fresh-token',
+              expire: 3600,
+            }),
+            { status: 200 },
+          ),
+        )
+        .mockResolvedValueOnce(new Response('unauthorized', { status: 401 }));
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+      await expect(
+        channel.pushLoop(
+          {
+            channelName: 'test',
+            senderId: 'ou_user',
+            chatId: 'oc_chat_id',
+          },
+          'hello',
+        ),
+      ).rejects.toEqual(
+        expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
+          disposition: 'permanent',
+          message: 'Feishu sendMessage failed: HTTP 401',
+        }),
+      );
+    });
+
     it('sends proactive loop output to direct chats', async () => {
       const channel = createTestableChannel();
       (channel as unknown as Record<string, unknown>)['tokenCache'] = {

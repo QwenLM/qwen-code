@@ -283,7 +283,10 @@ minute. `channel_delivery_invalid` is permanent; worker unavailability,
 timeouts, queue pressure, and generic delivery failure are retried. Adapters
 classify platform responses with a typed proactive-delivery error: ordinary
 HTTP 4xx and invalid recipients are permanent, while 408, 429, 5xx, rate limits,
-and transport failures are transient.
+and transport failures are transient. Feishu refreshes a stale tenant token and
+retries one 401 in-adapter; a repeated 401 is permanent. The typed error carries
+a stable structural code so extension Channels remain classifiable even when
+they load a separate copy of the base package.
 
 Where a platform supports an idempotency key, the adapter should use
 `deliveryId`. Without platform support, a timeout after the remote platform

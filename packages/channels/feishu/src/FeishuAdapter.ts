@@ -691,7 +691,7 @@ export class FeishuChannel extends ChannelBase {
     text: string,
     throwOnFailure: boolean,
   ): Promise<void> {
-    const token = await this.getTenantAccessToken();
+    let token = await this.getTenantAccessToken();
     if (!token) {
       process.stderr.write(
         `[Feishu:${this.name}] Cannot send: no access token.\n`,
@@ -720,49 +720,65 @@ export class FeishuChannel extends ChannelBase {
         content: JSON.stringify(card),
       };
 
-      try {
-        const resp = await fetch(
-          `${BASE_URL}/im/v1/messages?receive_id_type=chat_id`,
-          {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${token}`,
-              'Content-Type': 'application/json',
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const resp = await fetch(
+            `${BASE_URL}/im/v1/messages?receive_id_type=chat_id`,
+            {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${token}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify(body),
+              signal: AbortSignal.timeout(15_000),
             },
-            body: JSON.stringify(body),
-            signal: AbortSignal.timeout(15_000),
-          },
-        );
+          );
 
-        if (!resp.ok) {
-          if (resp.status === 401) this.tokenCache = undefined;
+          if (resp.ok) break;
+
           const detail = await resp.text().catch(() => '');
           process.stderr.write(
             `[Feishu:${this.name}] sendMessage failed: HTTP ${resp.status} ${detail}\n`,
           );
+          if (resp.status === 401) {
+            this.tokenCache = undefined;
+            if (attempt === 0) {
+              const refreshedToken = await this.getTenantAccessToken();
+              if (refreshedToken) {
+                token = refreshedToken;
+                continue;
+              }
+            }
+          }
           if (throwOnFailure) {
             throw new ChannelProactiveDeliveryError(
-              resp.status === 408 || resp.status === 429 || resp.status >= 500
+              resp.status === 408 ||
+              resp.status === 429 ||
+              resp.status >= 500 ||
+              (resp.status === 401 && attempt === 0)
                 ? 'transient'
                 : 'permanent',
               `Feishu sendMessage failed: HTTP ${resp.status}`,
             );
           }
-        }
-      } catch (err) {
-        if (
-          throwOnFailure &&
-          err instanceof Error &&
-          (err instanceof ChannelProactiveDeliveryError ||
-            err.message.startsWith('Feishu sendMessage failed:'))
-        ) {
-          throw err;
-        }
-        process.stderr.write(
-          `[Feishu:${this.name}] sendMessage error: ${err}\n`,
-        );
-        if (throwOnFailure) {
-          throw err;
+          break;
+        } catch (err) {
+          if (
+            throwOnFailure &&
+            err instanceof Error &&
+            (err instanceof ChannelProactiveDeliveryError ||
+              err.message.startsWith('Feishu sendMessage failed:'))
+          ) {
+            throw err;
+          }
+          process.stderr.write(
+            `[Feishu:${this.name}] sendMessage error: ${err}\n`,
+          );
+          if (throwOnFailure) {
+            throw err;
+          }
+          break;
         }
       }
     }
