@@ -469,7 +469,7 @@ describe('qwen-autofix workflow', () => {
     // against stale assumptions. The recheck runs BEFORE the PR branch is
     // even checked out, and a failed fetch discards too (unknown ≠ eligible).
     expect(prepareBranchAndFeedbackStep).toContain(
-      '--json state,author,isCrossRepository,baseRefName,headRefName',
+      '--json state,author,isCrossRepository,baseRefName,headRefName,labels',
     );
     expect(prepareBranchAndFeedbackStep).toContain(
       'target no longer eligible (${INELIGIBLE}) — discarding without action or marker',
@@ -482,9 +482,15 @@ describe('qwen-autofix workflow', () => {
     // The discard path must publish the outputs later gates read, and the
     // eligibility conditions cover the full scan shape.
     expect(prepareBranchAndFeedbackStep).toContain('"${LIVE_STATE}" != "OPEN"');
+    // Engagement labels are honored LIVE: a takeover label exempts a
+    // human-authored PR from the bot-author requirement, and a skip label
+    // applied while queued withdraws consent before the secret-bearing run.
     expect(prepareBranchAndFeedbackStep).toContain(
-      '"${LIVE_AUTHOR}" != "${AUTOFIX_BOT}"',
+      '"${LIVE_AUTHOR}" != "${AUTOFIX_BOT}" && "${LIVE_TAKEOVER}" != "true"',
     );
+    expect(prepareBranchAndFeedbackStep).toContain('"${LIVE_SKIP}" == "true"');
+    expect(workflow).toContain("TAKEOVER_LABEL: 'autofix/takeover'");
+    expect(workflow).toContain("SKIP_LABEL: 'autofix/skip'");
     expect(prepareBranchAndFeedbackStep).toContain(
       '"${LIVE_XREPO}" != "false"',
     );

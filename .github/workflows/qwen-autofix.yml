@@ -80,6 +80,12 @@ env:
   # Upper bound on review targets emitted per scan (fan-out defense-in-depth;
   # excess is logged and deferred to the next scan).
   MAX_TARGETS_PER_SCAN: '10'
+  # Maintainer-facing engagement labels (applying labels requires GitHub
+  # triage+, so the permission gate is GitHub's own): TAKEOVER opts a PR —
+  # including a human-authored one — into the loop; SKIP opts any PR out
+  # everywhere, and wins when both are present.
+  TAKEOVER_LABEL: 'autofix/takeover'
+  SKIP_LABEL: 'autofix/skip'
   # Do not claim more issues when too many existing autofix PRs are still open.
   MAX_OPEN_AUTOFIX_PRS: '5'
 
@@ -1385,15 +1391,22 @@ jobs:
           # UNKNOWN and discards too (fail closed — the next scan re-emits a
           # still-valid target).
           PR_LIVE="$(gh pr view "${PR}" --repo "${REPO}" \
-            --json state,author,isCrossRepository,baseRefName,headRefName 2> /dev/null || echo '{}')"
+            --json state,author,isCrossRepository,baseRefName,headRefName,labels 2> /dev/null || echo '{}')"
           LIVE_STATE="$(jq -r '.state // ""' <<< "${PR_LIVE}")"
           LIVE_AUTHOR="$(jq -r '.author.login // ""' <<< "${PR_LIVE}")"
           LIVE_XREPO="$(jq -r 'if has("isCrossRepository") then .isCrossRepository else true end' <<< "${PR_LIVE}")"
           LIVE_BASE="$(jq -r '.baseRefName // ""' <<< "${PR_LIVE}")"
           LIVE_BRANCH="$(jq -r '.headRefName // ""' <<< "${PR_LIVE}")"
+          # Engagement labels are re-read LIVE too: a takeover label grants a
+          # human-authored PR the author exemption, and a skip label applied
+          # while this job sat queued withdraws consent — both must hold at
+          # the moment the secret-bearing run starts, not at scan time.
+          LIVE_TAKEOVER="$(jq -r --arg t "${TAKEOVER_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${PR_LIVE}")"
+          LIVE_SKIP="$(jq -r --arg t "${SKIP_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${PR_LIVE}")"
           INELIGIBLE=''
           if [[ "${LIVE_STATE}" != "OPEN" ]]; then INELIGIBLE="state='${LIVE_STATE:-unknown}'"
-          elif [[ "${LIVE_AUTHOR}" != "${AUTOFIX_BOT}" ]]; then INELIGIBLE="author='${LIVE_AUTHOR:-unknown}'"
+          elif [[ "${LIVE_SKIP}" == "true" ]]; then INELIGIBLE="${SKIP_LABEL} label present"
+          elif [[ "${LIVE_AUTHOR}" != "${AUTOFIX_BOT}" && "${LIVE_TAKEOVER}" != "true" ]]; then INELIGIBLE="author='${LIVE_AUTHOR:-unknown}' without ${TAKEOVER_LABEL}"
           elif [[ "${LIVE_XREPO}" != "false" ]]; then INELIGIBLE='fork head'
           elif [[ "${LIVE_BASE}" != "main" ]]; then INELIGIBLE="base='${LIVE_BASE:-unknown}'"
           elif [[ "${LIVE_BRANCH}" != "${BRANCH}" ]]; then INELIGIBLE="head branch is now '${LIVE_BRANCH:-unknown}'"
