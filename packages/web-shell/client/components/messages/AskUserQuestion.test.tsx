@@ -166,6 +166,38 @@ describe('AskUserQuestion accessibility', () => {
     expect(onConfirm).toHaveBeenCalledWith('req-1', 'submit', { '0': 'Blue' });
   });
 
+  it('Home/End change the single-select answer too (radiogroup contract)', () => {
+    render(undefined);
+    const opts = optionButtons();
+    pressKey(opts[0]!, 'ArrowDown'); // -> Blue, answer=Blue
+    expect(opts[1]!.getAttribute('aria-checked')).toBe('true');
+
+    // Home jumps to the first option and commits it as the answer.
+    pressKey(opts[1]!, 'Home');
+    expect(document.activeElement).toBe(opts[0]);
+    expect(opts[0]!.getAttribute('aria-checked')).toBe('true');
+    expect(opts[1]!.getAttribute('aria-checked')).toBe('false');
+
+    act(() => {
+      submitButton()!.click();
+    });
+    expect(onConfirm).toHaveBeenCalledWith('req-1', 'submit', { '0': 'Red' });
+  });
+
+  it('moving to "Other" clears the regular single-select answer', () => {
+    render(undefined);
+    const opts = optionButtons(); // [Red, Blue, "Other" trigger]
+    pressKey(opts[0]!, 'ArrowDown'); // -> Blue, checked
+    expect(opts[1]!.getAttribute('aria-checked')).toBe('true');
+
+    // Arrow onto "Other": no regular option may stay checked while focus is on
+    // "Other" (the custom answer isn't committed until the user types it).
+    pressKey(opts[1]!, 'ArrowDown'); // -> Other
+    expect(document.activeElement).toBe(opts[2]);
+    expect(opts[0]!.getAttribute('aria-checked')).toBe('false');
+    expect(opts[1]!.getAttribute('aria-checked')).toBe('false');
+  });
+
   it('names the expanded dialog with both the tool name and the question', () => {
     render(undefined);
     const panel = container!.querySelector('[data-web-shell-ask-panel]')!;

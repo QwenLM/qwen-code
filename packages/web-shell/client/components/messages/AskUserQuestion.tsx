@@ -214,30 +214,45 @@ export function AskUserQuestion({
     [current, isMulti, focusCustomInput, handleToggle, handleSelectOption],
   );
 
+  // Move the selection to a specific option index, keeping focus, the roving
+  // tabindex, and — for single-select — the committed answer in sync, so
+  // aria-checked follows focus per the radiogroup contract. Moving to a regular
+  // option commits it as the answer; moving to "Other" clears the regular
+  // answer (the custom answer isn't committed until the user types it). Shared
+  // by arrow navigation and Home/End so every path behaves identically.
+  const selectIndex = useCallback(
+    (idx: number) => {
+      if (!current) return;
+      selectedIdxRef.current = idx;
+      setSelectedIdx(idx);
+      if (idx === current.options.length) {
+        customRef.current?.focus();
+        if (!isMulti) {
+          setAnswers((prev) => {
+            if (!(currentIdx in prev)) return prev;
+            const cleared = { ...prev };
+            delete cleared[currentIdx];
+            return cleared;
+          });
+        }
+      } else {
+        optionRefs.current[idx]?.focus();
+        if (!isMulti) handleSelectOption(idx);
+      }
+    },
+    [current, currentIdx, isMulti, handleSelectOption],
+  );
+
   const moveSelection = useCallback(
     (delta: number) => {
       if (!current) return;
       const total = current.options.length + 1;
       // Compute from the ref (kept in sync) so rapid key repeats advance
-      // correctly before re-render, and keep the state updater pure (no focus()
-      // side effect inside it).
+      // correctly before re-render.
       const base = selectedIdxRef.current ?? 0;
-      const next = (base + delta + total) % total;
-      selectedIdxRef.current = next;
-      setSelectedIdx(next);
-      if (next === current.options.length) {
-        customRef.current?.focus();
-      } else {
-        optionRefs.current[next]?.focus();
-        // Single-select radiogroup: arrow keys change the selection, not just
-        // the focus, so aria-checked (bound to `answers`) follows the option the
-        // user moved to and Submit sends that option. The "Other" row is
-        // excluded — arrowing to it focuses its trigger; the input opens on
-        // Enter, not on arrow.
-        if (!isMulti) handleSelectOption(next);
-      }
+      selectIndex((base + delta + total) % total);
     },
-    [current, isMulti, handleSelectOption],
+    [current, selectIndex],
   );
 
   // Focus-scoped keyboard nav (fires only while focus is inside this question):
@@ -267,16 +282,10 @@ export function AskUserQuestion({
         moveSelection(-1);
       } else if (e.key === 'Home') {
         e.preventDefault();
-        selectedIdxRef.current = 0;
-        setSelectedIdx(0);
-        optionRefs.current[0]?.focus();
+        selectIndex(0);
       } else if (e.key === 'End') {
         e.preventDefault();
-        const last = total - 1;
-        selectedIdxRef.current = last;
-        setSelectedIdx(last);
-        if (last === current.options.length) customRef.current?.focus();
-        else optionRefs.current[last]?.focus();
+        selectIndex(total - 1);
       } else if (e.key === 'Escape') {
         e.preventDefault();
         handleCancel();
@@ -288,7 +297,7 @@ export function AskUserQuestion({
         }
       }
     },
-    [current, moveSelection, handleCancel, chooseOption],
+    [current, moveSelection, selectIndex, handleCancel, chooseOption],
   );
 
   // Pull focus to the current option (or the custom input while editing) when
