@@ -760,6 +760,15 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain(
       '--json headRefName,statusCheckRollup,createdAt,labels',
     );
+    // Command-style comments are instructions, not feedback — excluded at
+    // ALL FOUR feedback sites (scan count via $cf; NEWEST, LIVE_NEW, and
+    // the renderer inline) so /triage-, /review-, and /takeover-style
+    // invocations never burn an agent cycle on a no-action report.
+    expect(reviewScanJob).toContain("COMMAND_FILTER='^\\s*@qwen-code /'");
+    expect(reviewScanJob).toContain('test($cf) | not');
+    expect(workflow.split('test("^\\\\s*@qwen-code /") | not').length - 1).toBe(
+      3,
+    );
   });
 
   it('raises the round cap to TAKEOVER_MAX_ROUNDS while the label is present', () => {

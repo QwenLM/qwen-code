@@ -1597,13 +1597,20 @@ jobs:
             # (triage stages, coverage reports, legacy suggestion summaries,
             # force-push reminders).
             BOT_COMMENT_FILTER='<!-- (autofix-eval|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) '
+            # Command-style comments (@qwen-code /takeover, /triage, /review …)
+            # are INSTRUCTIONS to tooling, not review feedback on the diff:
+            # counting them as actionable burns a full agent cycle to post a
+            # no-action report about the command itself (and the takeover
+            # command would self-trigger such a round on every engagement).
+            COMMAND_FILTER='^\s*@qwen-code /'
             N_ISSUE_COMMENTS="$(jq --arg wm "${EFF_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
-              --argjson trust "${TRUSTED_ASSOC}" --arg bf "${BOT_COMMENT_FILTER}" '
+              --argjson trust "${TRUSTED_ASSOC}" --arg bf "${BOT_COMMENT_FILTER}" --arg cf "${COMMAND_FILTER}" '
               [ .[]
                 | select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
-                | select((.body // "") | test($bf) | not) ] | length' \
+                | select((.body // "") | test($bf) | not)
+                | select((.body // "") | test($cf) | not) ] | length' \
               "${WORKDIR}/ic.json")"
 
             # mergeable: GitHub may report UNKNOWN until it recomputes; treat only
@@ -1833,7 +1840,8 @@ jobs:
             + (.[2] | map(select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
-              | select((.body // "") | test("<!-- (autofix-eval|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not) | .created_at))
+              | select((.body // "") | test("<!-- (autofix-eval|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                | select((.body // "") | test("^\\s*@qwen-code /") | not) | .created_at))
             + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
               | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
               | select((.completedAt // .updatedAt // "") > $wm)
@@ -1895,7 +1903,8 @@ jobs:
               + (.[2] | map(select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
-                | select((.body // "") | test("<!-- (autofix-eval|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)) | length)
+                | select((.body // "") | test("<!-- (autofix-eval|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                | select((.body // "") | test("^\\s*@qwen-code /") | not)) | length)
               + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
                 | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
                 | select((.completedAt // .updatedAt // "") > $wm)) | length)' \
@@ -1949,6 +1958,7 @@ jobs:
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
               | select((.body // "") | test("<!-- (autofix-eval|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                | select((.body // "") | test("^\\s*@qwen-code /") | not)
               | "- @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
               "${WORKDIR}/ic.json"
             echo
