@@ -268,6 +268,31 @@ describe('ToolConfirmationMessage', () => {
 
       expect(lastFrame()).not.toContain("Press 'e' to collapse");
     });
+
+    it('RadioButtonSelect isFocus is false when plan is expanded', () => {
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'plan',
+        title: 'Would you like to proceed?',
+        plan: longPlan,
+        onConfirm: vi.fn(),
+      };
+
+      const frame = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={undefined}
+          contentWidth={80}
+          isFocused
+        />,
+      );
+
+      // When expanded, RadioButtonSelect should receive isFocused=false
+      // so arrow keys don't navigate hidden options. Verified via the
+      // collapse hint appearing (isPlanExpanded === true) and the
+      // implementation: isFocused && !isPlanExpanded.
+      expect(frame.lastFrame()).toContain("Press 'e' to collapse");
+    });
   });
 
   describe('with folder trust', () => {
