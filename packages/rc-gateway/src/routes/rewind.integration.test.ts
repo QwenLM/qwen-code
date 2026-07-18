@@ -5,7 +5,6 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import express from 'express';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
@@ -14,10 +13,11 @@ import { join } from 'node:path';
 import { startStubDaemon, type StubDaemon } from '../testing/stubDaemon.js';
 import { DaemonClient } from '@qwen-code/sdk';
 import { resolveChatsDir } from '../sessions/chatsPath.js';
-import { createRewindRoute } from './rewind.js';
-import { createSessionEventsRoute } from './sessionEvents.js';
-import { ConnectionRegistry } from '../connectionRegistry.js';
+import { createGatewayApp } from '../server.js';
+import { TokenStore } from '../tokenStore.js';
+import { PairingService } from '../pairing.js';
 import { SessionWal, decodeSegment } from '../wal.js';
+import type { OwnerEvent } from '../ownerEvents.js';
 
 const CWD = '/rewind-integration/ws';
 const SESSION_ID = '22222222222222222222222222222222';
@@ -67,8 +67,16 @@ afterEach(async () => {
 });
 
 describe('rewind integration', () => {
-  it('attach -> rewind -> marker on the live stream -> late reconnect replays across it', async () => {
+  it('attach (real SESSION_READ mount) -> rewind (real OWNER auth mount) -> WAL marker + owner-bus frame both carry the correct truncatedEventId; a write-scope token is refused', async () => {
+    // 3 single-record user turns (u0, u1, u2) written directly to the parent
+    // transcript, so `resolveTurn`'s `userTurnIndices` is exactly [0, 1, 2] —
+    // the record-array index IS the turn number. Rewinding to toTurn: 1 must
+    // therefore yield truncatedEventId 1 (userTurnIndices[1]); this is the
+    // value turnResolver.ts computes, not anything read back post hoc from the
+    // response.
     await writeTranscript(3);
+    const EXPECTED_TRUNCATED_EVENT_ID = 1;
+
     stub = await startStubDaemon({
       frames: [
         { id: 1, type: 'session_update', data: { text: 'one' } },
@@ -79,39 +87,100 @@ describe('rewind integration', () => {
     });
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
 
-    const app = express();
-    app.use(express.json());
-    app.use((req, _res, next) => {
-      req.rcClient = { id: 'owner-1', scopes: ['owner'] };
-      next();
+    // Real app: real TokenStore, real requireScope(OWNER)/bearerResolve mount
+    // (server.ts wires POST /session/:id/rewind behind requireScope(OWNER),
+    // GET /session/:id/events behind requireScope(SESSION_READ)) — no
+    // hand-rolled express() app and no req.rcClient injection.
+    const store = await TokenStore.open(join(runtimeBase, 'tokens.json'));
+    const { token: ownerToken, id: ownerTokenId } = await store.issue(
+      ['owner'],
+      'owner-1',
+    );
+    const { token: writeToken } = await store.issue(['write'], 'writer-1');
+
+    const gw = createGatewayApp({
+      daemon,
+      store,
+      pairing: new PairingService(),
+      auditPath: join(runtimeBase, 'audit.log'),
+      walDir,
     });
-    const registry = new ConnectionRegistry();
-    app.get(
-      '/session/:id/events',
-      createSessionEventsRoute(daemon, registry, undefined, undefined, walDir),
-    );
-    app.post(
-      '/session/:id/rewind',
-      createRewindRoute(daemon, async () => CWD, { walDir }),
-    );
+    // The owner-event bus is the production emit surface for the
+    // session_rewound marker (createGatewayApp wires `bus: ownerEvents` into
+    // the rewind route). Subscribing here mirrors agents.integration.test.ts's
+    // pattern of observing real gateway-internal fan-out, not a hand-rolled
+    // stand-in bus.
+    const ownerFrames: OwnerEvent[] = [];
+    gw.ownerEvents.subscribe((e) => ownerFrames.push(e));
+
     server = await new Promise((resolve) => {
-      const s = app.listen(0, '127.0.0.1', () => resolve(s));
+      const s = gw.app.listen(0, '127.0.0.1', () => resolve(s));
     });
     const { port } = server.address() as AddressInfo;
     const baseUrl = `http://127.0.0.1:${port}`;
 
-    // 1. Attach and drain the live stream once so its 2 daemon frames land
-    //    in the WAL (createSessionEventsRoute appends every frame it relays).
+    // 1. Attach and drain the live stream once, through the real
+    //    requireScope(SESSION_READ) mount, proving the OWNER token also
+    //    carries session:read (via SCOPE_IMPLIES) and the real bearer auth
+    //    resolves it.
+    //
+    //    NOTE: unlike a hand-wired `createSessionEventsRoute(..., walDir)`,
+    //    createGatewayApp's own mount of GET /session/:id/events passes
+    //    `walDir: undefined` (server.ts's comment: "Omitted in production
+    //    today — ... currently-dark wiring path"). So through the REAL app,
+    //    this attach does NOT append the daemon's frames to the WAL, and a
+    //    later reconnect cannot replay a rewind marker from it either. Only
+    //    the rewind route itself is wired with `deps.walDir`. Asserting a
+    //    WAL-replay-across-rewind here would mean re-introducing a
+    //    hand-wired walDir into the events route — the same "test exercises
+    //    a path production doesn't have" defect this rewrite is fixing for
+    //    auth. So the WAL/marker assertions below are checked directly (via
+    //    decodeSegment) and via the owner-bus frame instead of via a second
+    //    SSE reconnect.
     const attachRes = await fetch(`${baseUrl}/session/${SESSION_ID}/events`, {
-      headers: { Accept: 'text/event-stream' },
+      headers: {
+        Accept: 'text/event-stream',
+        Authorization: `Bearer ${ownerToken}`,
+      },
     });
     expect(attachRes.status).toBe(200);
     await attachRes.text(); // stub ends the stream after its 2 frames
 
-    // 2. Rewind to turn 1.
+    // 1b. A write-scope token issuing the SAME rewind request through the
+    //     SAME mounted route must be refused. This proves requireScope(OWNER)
+    //     is actually in the request path — a write-scope token carries
+    //     `session:read` (via SCOPE_IMPLIES) but never `owner`, so this can
+    //     only pass if the real auth mount is exercised, not bypassed.
+    const forbiddenRes = await fetch(
+      `${baseUrl}/session/${SESSION_ID}/rewind`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${writeToken}`,
+        },
+        body: JSON.stringify({ toTurn: 1 }),
+      },
+    );
+    expect(forbiddenRes.status).toBe(403);
+    // No daemon call, no WAL marker: the write-scope attempt must be a total
+    // no-op, not a partial rewind. Through the real app the events attach
+    // above never wrote to the WAL (see note above), so the WAL is still
+    // empty at this point.
+    const walAfterForbidden = new SessionWal({
+      dir: walDir,
+      sessionId: SESSION_ID,
+    });
+    expect(walAfterForbidden.count()).toBe(0);
+    walAfterForbidden.close();
+
+    // 2. Rewind to turn 1, with the OWNER token, through the real mount.
     const rewindRes = await fetch(`${baseUrl}/session/${SESSION_ID}/rewind`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${ownerToken}`,
+      },
       body: JSON.stringify({ toTurn: 1 }),
     });
     expect(rewindRes.status).toBe(202);
@@ -120,31 +189,41 @@ describe('rewind integration', () => {
       truncatedEventId: number;
     };
     expect(rewindBody.toTurn).toBe(1);
+    expect(rewindBody.truncatedEventId).toBe(EXPECTED_TRUNCATED_EVENT_ID);
 
-    // 3. Exactly one session_rewound marker exists in the WAL, positioned
-    //    after the 2 relayed frames.
+    // 3. Exactly one session_rewound marker exists in the WAL (the rewind
+    //    route itself is wired with `deps.walDir`, unlike the events route).
     const wal = new SessionWal({ dir: walDir, sessionId: SESSION_ID });
-    expect(wal.count()).toBe(3);
-    expect(wal.latestId()).toBe(3);
+    expect(wal.count()).toBe(1);
+    expect(wal.latestId()).toBe(1);
     wal.close();
     const frames = [...decodeSegment(join(walDir, 'wal', `${SESSION_ID}.log`))];
     const marker = frames.find((f) => f.type === 'session_rewound');
     expect(marker).toBeDefined();
-    expect(marker!.id).toBe(3);
-    expect((marker!.data as { toTurn: number }).toTurn).toBe(1);
+    expect(marker!.id).toBe(1);
+    expect(
+      (marker!.data as { toTurn: number; truncatedEventId: number }).toTurn,
+    ).toBe(1);
+    expect(
+      (marker!.data as { toTurn: number; truncatedEventId: number })
+        .truncatedEventId,
+    ).toBe(EXPECTED_TRUNCATED_EVENT_ID);
 
-    // 4. A late reconnect with Last-Event-ID: 1 replays events 2 and 3
-    //    (the second daemon frame, then the marker) from the WAL, without
-    //    the daemon stub needing to be asked again for those two ids.
-    const lateRes = await fetch(`${baseUrl}/session/${SESSION_ID}/events`, {
-      headers: {
-        Accept: 'text/event-stream',
-        'Last-Event-ID': '1',
-      },
+    // 4. The SAME marker, on the owner-bus production emit surface
+    //    (createGatewayApp's `bus: ownerEvents` wiring), also carries the
+    //    correct truncatedEventId, and its rewoundByTokenId is the
+    //    AUTHENTICATED owner token's id — never anything from the request
+    //    body — tying the real-auth actor to the real-marker coordinate.
+    const ownerMarker = ownerFrames.find(
+      (f): f is Extract<OwnerEvent, { type: 'session_event' }> =>
+        f.type === 'session_event' && f.event.type === 'session_rewound',
+    );
+    expect(ownerMarker).toBeDefined();
+    expect(ownerMarker!.sessionId).toBe(SESSION_ID);
+    expect(ownerMarker!.event.data).toMatchObject({
+      toTurn: 1,
+      truncatedEventId: EXPECTED_TRUNCATED_EVENT_ID,
+      rewoundByTokenId: ownerTokenId,
     });
-    expect(lateRes.status).toBe(200);
-    const replayed = await lateRes.text();
-    expect(replayed).toContain('"type":"session_rewound"');
-    expect(replayed).toContain('"toTurn":1');
   });
 });
