@@ -1161,9 +1161,7 @@ jobs:
               # a PR that exhausted its rounds continues under management —
               # no label churn needed. The watermark is untouched: feedback
               # already addressed is never replayed.
-              gh pr comment "${PR}" --repo "${REPO}" --body "🔄 Takeover re-armed: the round counter starts a fresh window (previous rounds no longer count toward the cap); management continues. / 已重新武装：轮次计数开启新窗口（此前轮次不再计入上限），托管继续。
-
-          <!-- takeover-ack engaged -->"
+              gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🔄 Takeover re-armed: the round counter starts a fresh window (previous rounds no longer count toward the cap); management continues.\n\n<details>\n<summary>中文说明</summary>\n\n🔄 已重新武装：轮次计数开启新窗口（此前轮次不再计入上限），托管继续。\n\n</details>\n\n<!-- takeover-ack engaged -->')"
               echo "🔄 re-armed ${TAKEOVER_LABEL} window on #${PR}"
             else
               gh pr edit "${PR}" --repo "${REPO}" --add-label "${TAKEOVER_LABEL}"
@@ -1211,14 +1209,13 @@ jobs:
             echo "::error::CI_DEV_BOT_PAT authenticates as '${bot_actor:-unknown}'; expected ${AUTOFIX_BOT}."
             exit 1
           fi
+          # Bilingual with COLLAPSED Chinese (project convention), built via
+          # printf so no workflow indentation leaks into the markdown (4+
+          # leading spaces would render the marker line as a code block).
           if [[ "${ACK}" == 'engaged' ]]; then
-            BODY="🤝 Takeover engaged: the autofix loop now manages this PR — it will address new review feedback and resolve base conflicts until the label is removed or the round cap is reached. Remove the \\`${TAKEOVER_LABEL}\\` label to release. / 已接管：autofix 循环现在管理此 PR —— 将持续处理新的评审反馈与 base 冲突，直到移除标签或达到轮次上限。移除 \\`${TAKEOVER_LABEL}\\` 标签即可释放。
-
-          <!-- takeover-ack engaged -->"
+            BODY="$(printf '🤝 Takeover engaged: the autofix loop now manages this PR — it will address new review feedback and resolve base conflicts until the label is removed or the round cap is reached. Remove the `%s` label (or comment `%s stop`) to release.\n\n<details>\n<summary>中文说明</summary>\n\n🤝 已接管：autofix 循环现在管理此 PR —— 将持续处理新的评审反馈与 base 冲突，直到移除标签或达到轮次上限。移除 `%s` 标签（或评论 `%s stop`）即可释放。\n\n</details>\n\n<!-- takeover-ack engaged -->' "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}")"
           else
-            BODY="👋 Takeover released: the autofix loop will no longer engage this PR (an in-flight round, if any, completes its bounded work). Re-apply \\`${TAKEOVER_LABEL}\\` to re-engage. / 已释放：autofix 循环不再介入此 PR（在飞的一轮如有，将完成其有界工作）。重新打上 \\`${TAKEOVER_LABEL}\\` 标签即可再次接管。
-
-          <!-- takeover-ack released -->"
+            BODY="$(printf '👋 Takeover released: the autofix loop will no longer engage this PR (an in-flight round, if any, completes its bounded work). Re-apply `%s` (or comment `%s`) to re-engage.\n\n<details>\n<summary>中文说明</summary>\n\n👋 已释放：autofix 循环不再介入此 PR（在飞的一轮如有，将完成其有界工作）。重新打上 `%s` 标签（或评论 `%s`）即可再次接管。\n\n</details>\n\n<!-- takeover-ack released -->' "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}")"
           fi
           gh pr comment "${PR}" --repo "${REPO}" --body "${BODY}"
 
@@ -1442,9 +1439,7 @@ jobs:
                     | select((.body // "") | contains("<!-- takeover-cap-reached -->"))
                     | select((.created_at // "") > $rt) ] | length' "${WORKDIR}/ic.json")"
                 if [[ "${CAP_NOTICED}" == "0" ]]; then
-                  if ! gh pr comment "${PR}" --repo "${REPO}" --body "⏸️ Takeover paused: this PR reached its round cap (${ROUND}/${EFF_MAX_ROUNDS}). Comment \\`${TAKEOVER_COMMAND}\\` to re-arm a fresh window and continue management, or \\`${TAKEOVER_COMMAND} stop\\` to release. / 托管已暂停：本 PR 达到轮次上限（${ROUND}/${EFF_MAX_ROUNDS}）。评论 \\`${TAKEOVER_COMMAND}\\` 可重新武装、开启新窗口继续托管；或评论 \\`${TAKEOVER_COMMAND} stop\\` 释放。
-
-            <!-- takeover-cap-reached -->"; then
+                  if ! gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '⏸️ Takeover paused: this PR reached its round cap (%s/%s). Comment `%s` to re-arm a fresh window and continue management, or `%s stop` to release.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ 托管已暂停：本 PR 达到轮次上限（%s/%s）。评论 `%s` 可重新武装、开启新窗口继续托管；或评论 `%s stop` 释放。\n\n</details>\n\n<!-- takeover-cap-reached -->' "${ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}" "${ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}")"; then
                     echo "::warning::cap-paused notice failed for #${PR}; will retry next scan"
                   fi
                 fi

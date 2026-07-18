@@ -607,6 +607,9 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain("${{ needs.route.outputs.takeover_ack != '' }}");
     expect(workflow).toContain('<!-- takeover-ack engaged -->');
     expect(workflow).toContain('<!-- takeover-ack released -->');
+    // Every takeover-flow comment is bilingual with COLLAPSED Chinese
+    // (project convention): engage ack, release ack, re-arm ack, cap pause.
+    expect(workflow.split('<summary>中文说明</summary>').length - 1).toBe(4);
     expect(workflow).toMatch(
       /takeover-ack:[\s\S]*?CI_DEV_BOT_PAT identity[\s\S]*?gh pr comment "\$\{PR\}"/,
     );
@@ -881,7 +884,7 @@ describe('qwen-autofix workflow', () => {
     // the accepted path only records the toggle for the takeover-command
     // job.
     const cmdBranch = routeStep.match(
-      /if \[\[ "\$\{EVENT_NAME\}" == 'issue_comment' \]\]; then([\s\S]*?)\n              fi/,
+      /if \[\[ "\$\{EVENT_NAME\}" == 'issue_comment' \]\]; then([\s\S]*?)\n {14}fi/,
     )?.[1];
     expect(cmdBranch).toBeTruthy();
     expect(cmdBranch).not.toContain('DO_REVIEW=true');
@@ -904,10 +907,10 @@ describe('qwen-autofix workflow', () => {
     // API: author and write+ pass, read-permission strangers do not, bodies
     // with extra text do not, non-PR comments and closed PRs do not.
     const sanitize = routeStep.match(
-      /(sanitize_number\(\) \{[\s\S]*?\n          \})/,
+      /(sanitize_number\(\) \{[\s\S]*?\n {10}\})/,
     )?.[1];
     const cmdBranch = routeStep.match(
-      /(if \[\[ "\$\{EVENT_NAME\}" == 'issue_comment' \]\]; then[\s\S]*?\n              fi)/,
+      /(if \[\[ "\$\{EVENT_NAME\}" == 'issue_comment' \]\]; then[\s\S]*?\n {14}fi)/,
     )?.[1];
     expect(sanitize).toBeTruthy();
     expect(cmdBranch).toBeTruthy();
