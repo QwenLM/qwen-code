@@ -515,6 +515,12 @@ export function AskUserQuestion({
                       className={`${styles.option} ${
                         isCustomActive ? styles.optionActive : ''
                       } ${hasCustomValue ? styles.optionSelected : ''}`}
+                      // The whole row is clickable (it carries cursor:pointer via
+                      // styles.option), so clicks on the padding — not just the
+                      // inner trigger/input — activate the "Other" option. The
+                      // trigger button has no onClick of its own; its click (and
+                      // native Enter/Space activation) bubbles up to here.
+                      onClick={() => chooseOption(current.options.length)}
                     >
                       <span className={styles.pointer} aria-hidden="true">
                         {isCustomActive ? '›' : ' '}
@@ -543,6 +549,10 @@ export function AskUserQuestion({
                               [currentIdx]: e.target.value,
                             })
                           }
+                          // Clicking inside the input positions the caret; don't
+                          // let it bubble to the row's onClick and re-trigger the
+                          // option choice.
+                          onClick={(e) => e.stopPropagation()}
                           onFocus={() => setSelectedIdx(current.options.length)}
                           onBlur={() => setCustomFocused(false)}
                           autoFocus
@@ -566,7 +576,6 @@ export function AskUserQuestion({
                               ? String(current.options.length + 1)
                               : undefined
                           }
-                          onClick={() => chooseOption(current.options.length)}
                           onFocus={() => setSelectedIdx(current.options.length)}
                         >
                           {customInputs[currentIdx] ||

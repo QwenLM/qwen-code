@@ -198,6 +198,17 @@ describe('AskUserQuestion accessibility', () => {
     expect(opts[1]!.getAttribute('aria-checked')).toBe('false');
   });
 
+  it('clicking the "Other" row padding (not just the trigger) opens the input', () => {
+    render(undefined);
+    const trigger = optionButtons()[2]; // custom trigger button
+    const row = trigger.parentElement!; // the .option wrapper (cursor:pointer)
+    // A mouse user clicking the row's padding area must also activate "Other".
+    act(() => {
+      row.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(container!.querySelector('input')).not.toBeNull();
+  });
+
   it('names the expanded dialog with both the tool name and the question', () => {
     render(undefined);
     const panel = container!.querySelector('[data-web-shell-ask-panel]')!;
