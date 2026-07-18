@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync(
@@ -93,6 +96,77 @@ describe('fleet shepherd workflow', () => {
     expect(workflow).toContain('gh issue edit');
     expect(workflow).toContain('gh issue create');
     expect(workflow).toContain('do not edit by hand');
+  });
+
+  it('gates reruns across ALL failed jobs, with the ids from the jobs API', () => {
+    // `gh run rerun --failed` reruns every failed job, so the gate must parse
+    // failing tests from every failed job's logs — not just the flagging one —
+    // and must not depend on parsing job ids out of a details URL at all.
+    expect(workflow).toContain(
+      '.jobs[] | select(.conclusion == "failure") | .databaseId',
+    );
+    expect(workflow).not.toContain("grep -oE '/job/[0-9]+'");
+    expect(workflow).toContain('across ALL the run\'s failed jobs');
+    expect(workflow).toContain(
+      'no failing tests parsed from any failed job',
+    );
+  });
+
+  it('behaviorally replays the log parser and the flake gate under bash', () => {
+    // Extract the EXACT pipelines from the workflow so this test fails if
+    // either drifts, then execute them on fixtures.
+    const parse = workflow.match(
+      /grep -oE 'FAIL\[\[:space:\]\]\+\[\^ \]\+\\\.test\\\.\[a-z\]\+' \| awk '\{print \$NF\}'/,
+    )?.[0];
+    expect(parse).toBeTruthy();
+    const innerFilter = workflow.match(
+      /grep -vE '\^\[\[:space:\]\]\*\(#\|\$\)' "\$\{FLAKE_FILE\}"/,
+    )?.[0];
+    expect(innerFilter).toBeTruthy();
+
+    // Parser: vitest failure lines → failing test file paths.
+    const log = [
+      ' ❯ some progress noise',
+      ' FAIL  src/utils/shell-ast-parser-lazy.test.ts > lazy runtime > loads',
+      'FAIL  src/services/cronScheduler.test.ts > durable ownership',
+      ' ✓ src/passing.test.ts (10 tests)',
+    ].join('\n');
+    const parsed = execFileSync('bash', ['-c', `${parse} | sort -u`], {
+      input: log,
+      encoding: 'utf8',
+    })
+      .trim()
+      .split('\n');
+    expect(parsed).toEqual([
+      'src/services/cronScheduler.test.ts',
+      'src/utils/shell-ast-parser-lazy.test.ts',
+    ]);
+
+    // Gate: every parsed test must match the committed registry; one unknown
+    // blocks; an empty parse never green-lights.
+    const gate = (fails) => {
+      const f = join(tmpdir(), `shepherd-gate-${process.pid}-${Math.random().toString(36).slice(2)}.txt`);
+      writeFileSync(f, fails.length ? fails.join('\n') + '\n' : '');
+      const script = [
+        `FLAKE_FILE='.github/known-flakes.txt';`,
+        `if [[ ! -s '${f}' ]]; then echo SKIP;`,
+        `elif grep -vE -f <(${innerFilter}) '${f}' > /dev/null; then echo BLOCK;`,
+        `else echo RERUN; fi`,
+      ].join(' ');
+      return execFileSync('bash', ['-c', script], { encoding: 'utf8' }).trim();
+    };
+    expect(gate(['src/utils/shell-ast-parser-lazy.test.ts'])).toBe('RERUN');
+    expect(
+      gate([
+        'src/services/cronScheduler.test.ts',
+        'src/serve/workspace-registration-store.test.ts',
+      ]),
+    ).toBe('RERUN');
+    expect(
+      gate(['src/utils/shell-ast-parser-lazy.test.ts', 'src/gemini.test.tsx']),
+    ).toBe('BLOCK');
+    expect(gate(['packages/x/brand-new.test.ts'])).toBe('BLOCK');
+    expect(gate([])).toBe('SKIP');
   });
 
   it('ships a non-empty flake registry of valid regexes', () => {
