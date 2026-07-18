@@ -12557,6 +12557,35 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
   });
 
   it.each(['loadSession', 'unstable_resumeSession'] as const)(
+    '%s rejects a live session owned by another workspace with invalid params',
+    async (method) => {
+      bindRestoreMocks({ sessionExists: true });
+      const { agent, agentPromise } = await spawnAgent();
+
+      await agent.loadSession({
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+      });
+
+      const request = {
+        cwd: '/tmp/other',
+        sessionId: 'persisted-1',
+        ...(method === 'loadSession' ? { mcpServers: [] } : {}),
+      };
+      await expect(agent[method](request)).rejects.toMatchObject({
+        code: -32602,
+        data: { errorKind: 'invalid_params' },
+        message: 'The live session belongs to another workspace.',
+      });
+      expect(loadCliConfig).toHaveBeenCalledTimes(1);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
+
+  it.each(['loadSession', 'unstable_resumeSession'] as const)(
     '%s preserves writer integrity errors for an existing live session',
     async (method) => {
       const innerConfig = bindRestoreMocks({ sessionExists: true });

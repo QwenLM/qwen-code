@@ -3702,7 +3702,11 @@ class QwenAgent implements Agent {
       if (
         path.resolve(liveConfig.getTargetDir()) !== path.resolve(params.cwd)
       ) {
-        throw new Error('The live session belongs to another workspace.');
+        throw new RequestError(
+          -32602,
+          'The live session belongs to another workspace.',
+          { errorKind: 'invalid_params' },
+        );
       }
       await assertConfigCanStartTurn(liveConfig);
       return {
@@ -3846,7 +3850,11 @@ class QwenAgent implements Agent {
       if (
         path.resolve(liveConfig.getTargetDir()) !== path.resolve(params.cwd)
       ) {
-        throw new Error('The live session belongs to another workspace.');
+        throw new RequestError(
+          -32602,
+          'The live session belongs to another workspace.',
+          { errorKind: 'invalid_params' },
+        );
       }
       await assertConfigCanStartTurn(liveConfig);
       return {
