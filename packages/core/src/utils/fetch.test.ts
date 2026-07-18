@@ -348,26 +348,27 @@ describe('fetchWithPolicy retry', () => {
     if (result.kind === 'response') expect(result.status).toBe(403);
   });
 
-  it('retries once on transient network errors (ECONNRESET)', async () => {
-    let calls = 0;
-    globalThis.fetch = vi.fn(async () => {
-      calls++;
-      if (calls === 1) {
-        const err = new TypeError('fetch failed') as TypeError & {
-          cause?: unknown;
-        };
-        err.cause = Object.assign(new Error('socket hang up'), {
-          code: 'ECONNRESET',
-        });
-        throw err;
-      }
-      return new Response('ok', { status: 200 });
-    }) as typeof fetch;
+  it.each(['ECONNRESET', 'EAI_AGAIN'])(
+    'retries once on transient network errors (%s)',
+    async (code) => {
+      let calls = 0;
+      globalThis.fetch = vi.fn(async () => {
+        calls++;
+        if (calls === 1) {
+          const err = new TypeError('fetch failed') as TypeError & {
+            cause?: unknown;
+          };
+          err.cause = Object.assign(new Error('transient failure'), { code });
+          throw err;
+        }
+        return new Response('ok', { status: 200 });
+      }) as typeof fetch;
 
-    const result = await fetchWithPolicy('https://example.com/reset', opts);
-    expect(calls).toBe(2);
-    if (result.kind === 'response') expect(result.status).toBe(200);
-  });
+      const result = await fetchWithPolicy('https://example.com/reset', opts);
+      expect(calls).toBe(2);
+      if (result.kind === 'response') expect(result.status).toBe(200);
+    },
+  );
 
   it('does not retry deterministic statuses like 404', async () => {
     let calls = 0;

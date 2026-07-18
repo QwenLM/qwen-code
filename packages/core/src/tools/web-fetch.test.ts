@@ -881,6 +881,29 @@ describe('WebFetchTool', () => {
       expect(mockGenerateContent).not.toHaveBeenCalled();
     });
 
+    it('should treat printable octet-stream bodies as text, not .bin', async () => {
+      // The reverse mislabel: .log/.patch text behind a misconfigured server.
+      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
+        okResponse({
+          contentType: 'application/octet-stream',
+          body: Buffer.from('commit 3f1a\nAuthor: dev\n\n    fix: patch\n'),
+        }),
+      );
+      let receivedContent = '';
+      mockGenerateContent.mockImplementation((options) => {
+        receivedContent = options.contents[0].parts[0].text;
+        return Promise.resolve({ text: 'A git log' });
+      });
+
+      const result = await new WebFetchTool(mockConfig)
+        .build({ url: 'https://example.com/raw', prompt: 'what is this?' })
+        .execute(new AbortController().signal);
+
+      expect(receivedContent).toContain('fix: patch');
+      expect(result.llmContent).not.toContain('[Binary content');
+      expect(result.resultFilePaths).toBeUndefined();
+    });
+
     it('should return an error when binary persistence fails', async () => {
       vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
         okResponse({ contentType: 'application/pdf', body: pdfBytes }),

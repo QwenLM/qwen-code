@@ -346,6 +346,13 @@ export async function extractPDFText(
         signal: options?.signal,
       });
 
+    // execCommand reports a signal-killed child as timedOut (killed +
+    // SIGTERM); check the caller's abort first so a user cancel is not
+    // misreported as a 30s timeout.
+    if (options?.signal?.aborted) {
+      return { success: false, error: 'PDF text extraction was cancelled.' };
+    }
+
     if (timedOut) {
       return {
         success: false,

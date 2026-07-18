@@ -18,6 +18,7 @@ import { MAX_SESSION_BYTES } from '../utils/truncation.js';
 import {
   formatByteSize,
   isBinaryContentType,
+  looksLikeText,
   persistBinaryContent,
   sniffFileKind,
 } from '../utils/binary-content.js';
@@ -49,6 +50,9 @@ const CACHE_TTL_MS = 15 * 60 * 1000;
 const CACHE_CAPACITY = 32;
 // mnemonist's LRUCache has no byte-size accounting; refusing to cache huge
 // conversions bounds worst-case memory at CACHE_CAPACITY * this limit.
+// Belt-and-braces today: every cached content path pre-truncates to
+// ~MAX_CONTENT_CHARS, so this only bites if a future path caches
+// untruncated content.
 const MAX_CACHEABLE_CHARS = 2 * 1024 * 1024;
 
 interface CacheEntry {
@@ -163,7 +167,7 @@ function readHintForPath(persistedPath: string): string {
   if (persistedPath.endsWith('.pdf')) {
     return ` Use ${ToolNames.READ_FILE} to examine it (reads PDFs natively; pass pages for large files).`;
   }
-  if (/\.(png|jpe?g|gif|webp|svg)$/.test(persistedPath)) {
+  if (/\.(png|jpe?g|gif|webp)$/.test(persistedPath)) {
     return ` Use ${ToolNames.READ_FILE} to view it.`;
   }
   return '';
@@ -384,12 +388,27 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
     // no Content-Type was sent at all, trust a RECOGNIZED filename/URL
     // extension (including a literal .bin) — but never the 'bin' fallback
     // (unknown is not binary), and svg is textual.
-    const isBinary =
+    let isBinary =
       isBinaryContentType(contentType) ||
       sniff.magicMatched ||
       (!contentType &&
         sniff.extensionSource === 'name' &&
         sniff.extension !== 'svg');
+    // The reverse mislabel also happens: plain text (.txt/.log/.patch behind
+    // misconfigured servers) served as application/octet-stream. With no
+    // magic match and no recognized filename extension, a printable body is
+    // summarized as text instead of persisted as an opaque .bin the model
+    // can do nothing with; NUL bytes or invalid UTF-8 keep it binary.
+    if (
+      isBinary &&
+      (contentType.split(';')[0] ?? '').trim().toLowerCase() ===
+        'application/octet-stream' &&
+      !sniff.magicMatched &&
+      sniff.extensionSource === 'fallback' &&
+      looksLikeText(response.body)
+    ) {
+      isBinary = false;
+    }
 
     let persistedPath: string | undefined;
     let persistedSize: number | undefined;

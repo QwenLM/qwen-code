@@ -12,6 +12,7 @@ import {
   extensionForMimeType,
   formatByteSize,
   isBinaryContentType,
+  looksLikeText,
   persistBinaryContent,
   sniffFileKind,
 } from './binary-content.js';
@@ -46,8 +47,20 @@ describe('isBinaryContentType', () => {
     ['application/octet-stream', true],
     ['image/png', true],
     ['audio/mpeg', true],
+    ['video/mp4', true],
+    ['application/vnd.oasis.opendocument.text', true],
   ])('%s → %s', (contentType, expected) => {
     expect(isBinaryContentType(contentType)).toBe(expected);
+  });
+});
+
+describe('looksLikeText', () => {
+  it('accepts printable UTF-8, rejects NUL bytes and invalid sequences', () => {
+    expect(looksLikeText(Buffer.from('plain text\nwith 中文 too\n'))).toBe(
+      true,
+    );
+    expect(looksLikeText(Buffer.from([0x68, 0x00, 0x69]))).toBe(false);
+    expect(looksLikeText(Buffer.alloc(64, 0x81))).toBe(false);
   });
 });
 

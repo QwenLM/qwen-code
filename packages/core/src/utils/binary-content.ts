@@ -281,6 +281,23 @@ export function sniffFileKind(
   };
 }
 
+/**
+ * Cheap "is this actually text?" heuristic for mislabeled bodies: NUL bytes
+ * (present in virtually every real binary format, and in UTF-16) or invalid
+ * UTF-8 in the leading window mean binary. A small replacement-char
+ * allowance covers a multi-byte sequence cut at the window edge.
+ */
+export function looksLikeText(bytes: Buffer): boolean {
+  const window = bytes.subarray(0, 8192);
+  if (window.includes(0)) return false;
+  const decoded = new TextDecoder('utf-8').decode(window);
+  let bad = 0;
+  for (let i = 0; i < decoded.length; i++) {
+    if (decoded[i] === '�' && ++bad > 2) return false;
+  }
+  return true;
+}
+
 export type PersistBinaryResult =
   | { filepath: string; size: number; ext: string }
   | { error: string };
