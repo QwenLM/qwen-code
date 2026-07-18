@@ -185,6 +185,7 @@ describe('EnhancedErrorHandler', () => {
       expect(debugLoggerSpy.error).toHaveBeenCalledWith(
         'OpenAI API Error:',
         stringError,
+        expect.objectContaining({ model: 'test-model' }),
       );
     });
 
@@ -334,6 +335,7 @@ describe('EnhancedErrorHandler', () => {
       expect(debugLoggerSpy.error).toHaveBeenCalledWith(
         'OpenAI API Error:',
         'Original error message',
+        expect.objectContaining({ model: 'test-model' }),
       );
     });
 
@@ -349,6 +351,7 @@ describe('EnhancedErrorHandler', () => {
       expect(debugLoggerSpy.error).toHaveBeenCalledWith(
         'OpenAI API Error:',
         'Connection error. (cause: ECONNREFUSED: fetch failed)',
+        expect.objectContaining({ model: 'test-model' }),
       );
     });
 
