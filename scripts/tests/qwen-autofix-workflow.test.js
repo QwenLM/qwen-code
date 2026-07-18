@@ -645,6 +645,48 @@ describe('qwen-autofix workflow', () => {
     expect(pick([], [])).toEqual([]);
   });
 
+  it('raises the round cap to TAKEOVER_MAX_ROUNDS while the label is present', () => {
+    // Large managed PRs routinely need dozens of feedback rounds — that is
+    // the point of takeover — so the unattended MAX_ROUNDS would strangle
+    // it. The circuit breaker stays, sized for delegated work; removing the
+    // label restores the strict cap on the next scan.
+    expect(workflow).toContain("TAKEOVER_MAX_ROUNDS: '50'");
+    expect(reviewScanJob).toContain('"${ROUND}" -ge "${EFF_MAX_ROUNDS}"');
+    // The effective cap travels in the matrix target and SHADOWS the
+    // workflow-level MAX_ROUNDS inside the address job, so every round
+    // message, marker, and cap gate uses it consistently.
+    expect(reviewScanJob).toContain('max_rounds: $mr');
+    expect(workflow).toContain("MAX_ROUNDS: '${{ matrix.target.max_rounds }}'");
+    // Replay the cap selection VERBATIM: takeover-labeled → 50, plain → 5.
+    const capSelect = reviewScanJob.match(
+      /(HAS_TAKEOVER="\$\(jq[\s\S]*?EFF_MAX_ROUNDS="\$\{TAKEOVER_MAX_ROUNDS\}")/,
+    )?.[1];
+    expect(capSelect).toBeTruthy();
+    const cap = (labels) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `PR_META='${JSON.stringify({ labels: labels.map((name) => ({ name })) })}'\n${capSelect.replace(/\n {12}/g, '\n')}\nprintf '%s' "$EFF_MAX_ROUNDS"`,
+        ],
+        {
+          env: {
+            ...process.env,
+            MAX_ROUNDS: '5',
+            TAKEOVER_MAX_ROUNDS: '50',
+            TAKEOVER_LABEL: 'autofix/takeover',
+          },
+          encoding: 'utf8',
+        },
+      )
+        .split('\n')
+        .at(-1);
+    expect(cap(['autofix/takeover'])).toBe('50');
+    expect(cap(['autofix/takeover', 'unrelated'])).toBe('50');
+    expect(cap([])).toBe('5');
+    expect(cap(['unrelated'])).toBe('5');
+  });
+
   it('behaviorally validates forced targets against author, takeover, and skip', () => {
     // Extract the forced-PR OK predicate VERBATIM and replay it: the bot's
     // own PRs pass; a human PR passes only with the takeover label; skip

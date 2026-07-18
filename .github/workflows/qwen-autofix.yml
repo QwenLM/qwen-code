@@ -110,6 +110,12 @@ env:
   # Comment-command sugar over TAKEOVER_LABEL ('<cmd>' applies it, '<cmd>
   # stop' removes it). Matched EXACTLY against the trimmed comment body.
   TAKEOVER_COMMAND: '@qwen-code /takeover'
+  # Round cap while TAKEOVER_LABEL is present. Large managed PRs routinely
+  # need dozens of feedback rounds — that is the point of takeover — so the
+  # unattended cap (MAX_ROUNDS) would strangle it. The circuit breaker stays
+  # (a bot↔review-bot ping-pong is still bounded), it is just sized for
+  # explicitly delegated work; removing the label restores the strict cap.
+  TAKEOVER_MAX_ROUNDS: '50'
   # Do not claim more issues when too many existing autofix PRs are still open.
   MAX_OPEN_AUTOFIX_PRS: '5'
 
@@ -1319,11 +1325,15 @@ jobs:
               echo "⏳ #${PR}: review-address already in flight or queued — skipping"
               continue
             fi
-            # One PR fetch for the branch name, check rollup, and creation time (the
-            # watermark floor below) — avoids extra round-trips per candidate PR.
+            # One PR fetch for the branch name, check rollup, creation time
+            # (the watermark floor below), and labels (the effective round
+            # cap) — avoids extra round-trips per candidate PR.
             PR_META="$(gh pr view "${PR}" --repo "${REPO}" \
-              --json headRefName,statusCheckRollup,createdAt 2> /dev/null || echo '{}')"
+              --json headRefName,statusCheckRollup,createdAt,labels 2> /dev/null || echo '{}')"
             BRANCH="$(jq -r '.headRefName // ""' <<< "${PR_META}")"
+            HAS_TAKEOVER="$(jq -r --arg t "${TAKEOVER_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${PR_META}")"
+            EFF_MAX_ROUNDS="${MAX_ROUNDS}"
+            [[ "${HAS_TAKEOVER}" == "true" ]] && EFF_MAX_ROUNDS="${TAKEOVER_MAX_ROUNDS}"
             if [[ -z "${BRANCH}" ]]; then
               # Metadata fetch failed (transient API error / rate limit). Skip rather
               # than fall through with an empty branch, which would make the address
@@ -1396,8 +1406,8 @@ jobs:
               EFF_WM="${CREATED_WM}"
             fi
 
-            if [[ "${ROUND}" -ge "${MAX_ROUNDS}" ]]; then
-              echo "🚧 #${PR}: hit MAX_ROUNDS (${ROUND}/${MAX_ROUNDS}) — leaving for a human"
+            if [[ "${ROUND}" -ge "${EFF_MAX_ROUNDS}" ]]; then
+              echo "🚧 #${PR}: hit the round cap (${ROUND}/${EFF_MAX_ROUNDS}) — leaving for a human"
               continue
             fi
             N_FAILED_CHECKS="$(jq --arg wm "${EFF_WM}" '
@@ -1462,8 +1472,8 @@ jobs:
             echo "🔎 #${PR}: ${N_REVIEWS} review(s) + ${N_COMMENTS} inline + ${N_ISSUE_COMMENTS} issue comment(s) + ${N_FAILED_CHECKS} failed check(s) new, conflict=${HAS_CONFLICT}, round=${ROUND}"
             TARGETS="$(jq -c \
               --arg pr "${PR}" --arg branch "${BRANCH}" --arg issue "${ISSUE}" \
-              --arg round "${ROUND}" --arg wm "${EFF_WM}" \
-              '. + [{pr: $pr, branch: $branch, issue: $issue, round: $round, watermark: $wm}]' \
+              --arg round "${ROUND}" --arg wm "${EFF_WM}" --arg mr "${EFF_MAX_ROUNDS}" \
+              '. + [{pr: $pr, branch: $branch, issue: $issue, round: $round, watermark: $wm, max_rounds: $mr}]' \
               <<< "${TARGETS}")"
             # Fan out: emit EVERY eligible PR up to the per-scan budget. The
             # address matrix bounds simultaneity (max-parallel) and the per-PR
@@ -1515,6 +1525,10 @@ jobs:
       ISSUE: '${{ matrix.target.issue }}'
       ROUND: '${{ matrix.target.round }}'
       WATERMARK: '${{ matrix.target.watermark }}'
+      # The scan computed the effective cap from the takeover label (50 for
+      # managed PRs, 5 otherwise); shadowing the workflow-level MAX_ROUNDS
+      # makes every round message, marker, and cap gate in this job use it.
+      MAX_ROUNDS: '${{ matrix.target.max_rounds }}'
     steps:
       # SECURITY: checkout trusted base code first. The PR branch is checked
       # out later in "Prepare branch and feedback" after the trusted CLI bundle
