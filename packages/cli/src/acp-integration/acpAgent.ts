@@ -283,6 +283,8 @@ import {
 } from '@qwen-code/acp-bridge/status';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
 import {
+  CHANNEL_STARTUP_PROFILE_META_KEY,
+  CHANNEL_STARTUP_PROFILE_VERSION,
   CLIENT_MCP_OVER_WS_CONFIG_FLAG,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_META_KEY,
@@ -293,6 +295,12 @@ import {
   type ClientMcpOverWsRuntimeConfig,
   type BridgeLoadReplayEnvelope,
 } from '@qwen-code/acp-bridge/bridgeTypes';
+import {
+  beginAcpBootstrapConfigProfiling,
+  buildAndFreezeAcpStartupProfile,
+  endAcpBootstrapConfigProfiling,
+  markAcpStartup,
+} from '../utils/acp-startup-profiler.js';
 import { isValidServerName } from '../serve/validate-server-name.js';
 import { MAX_REMEMBER_CONTENT_BYTES } from '../serve/workspace-memory-remember-constants.js';
 import { computeCpuPercent } from '../serve/daemon-metrics-ring.js';
@@ -2546,16 +2554,21 @@ export async function runAcpAgent(
   const bootstrapClientMcpSender: SendSdkMcpMessage = (serverName, message) =>
     deliverClientMcpMessage(acpConnection, serverName, message);
 
-  await config.initialize({
-    skipGeminiInitialization: true,
-    // Bootstrap skips MCP discovery — each session runs its own
-    // pool-routed discovery, so bootstrap-level spawns would be
-    // redundant subprocess leaks (W119).
-    skipMcpDiscovery: true,
-    // Bind the workspace-level manager's SDK callback so a runtime-added
-    // client-hosted MCP server (#5626) round-trips over the parent WS.
-    sendSdkMcpMessage: bootstrapClientMcpSender,
-  });
+  beginAcpBootstrapConfigProfiling();
+  try {
+    await config.initialize({
+      skipGeminiInitialization: true,
+      // Bootstrap skips MCP discovery — each session runs its own
+      // pool-routed discovery, so bootstrap-level spawns would be
+      // redundant subprocess leaks (W119).
+      skipMcpDiscovery: true,
+      // Bind the workspace-level manager's SDK callback so a runtime-added
+      // client-hosted MCP server (#5626) round-trips over the parent WS.
+      sendSdkMcpMessage: bootstrapClientMcpSender,
+    });
+  } finally {
+    endAcpBootstrapConfigProfiling();
+  }
   const eventLoopMonitor = startEventLoopLagMonitor({
     onNewMaxStall: (maxMs) => {
       console.error(`[perf] acp agent event loop stall: max=${maxMs}ms`);
@@ -2564,6 +2577,7 @@ export async function runAcpAgent(
 
   let agentInstance: QwenAgent | undefined;
   let connection: AgentSideConnection;
+  markAcpStartup('transportSetupStart');
   try {
     const stdout = Writable.toWeb(process.stdout) as WritableStream;
     const stdin = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
@@ -2580,6 +2594,7 @@ export async function runAcpAgent(
       agentInstance = new QwenAgent(config, settings, argv, conn);
       return agentInstance;
     }, stream);
+    markAcpStartup('transportSetupEnd');
   } catch (err) {
     eventLoopMonitor.dispose();
     throw err;
@@ -3345,11 +3360,12 @@ class QwenAgent implements Agent {
   }
 
   async initialize(args: InitializeRequest): Promise<InitializeResponse> {
+    markAcpStartup('initializeHandlerStart');
     this.clientCapabilities = args.clientCapabilities;
     const authMethods = buildAuthMethods();
     const version = process.env['CLI_VERSION'] || process.version;
 
-    return {
+    const response: InitializeResponse = {
       protocolVersion: PROTOCOL_VERSION,
       agentInfo: {
         name: 'qwen-code',
@@ -3377,6 +3393,30 @@ class QwenAgent implements Agent {
         },
       },
     };
+    markAcpStartup('initializeHandlerEnd');
+    markAcpStartup('responseBuilt');
+    let startupProfile;
+    try {
+      startupProfile = buildAndFreezeAcpStartupProfile();
+    } catch {
+      startupProfile = undefined;
+    }
+    const requestedProfile = args._meta?.[CHANNEL_STARTUP_PROFILE_META_KEY];
+    const profileRequested =
+      requestedProfile !== null &&
+      typeof requestedProfile === 'object' &&
+      !Array.isArray(requestedProfile) &&
+      (requestedProfile as Record<string, unknown>)['v'] ===
+        CHANNEL_STARTUP_PROFILE_VERSION;
+
+    return profileRequested && startupProfile
+      ? {
+          ...response,
+          _meta: {
+            [CHANNEL_STARTUP_PROFILE_META_KEY]: startupProfile,
+          },
+        }
+      : response;
   }
 
   async authenticate({ methodId }: AuthenticateRequest): Promise<void> {
