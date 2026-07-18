@@ -576,9 +576,11 @@ describe('AppContainer State Management', () => {
   };
 
   describe('Basic Rendering', () => {
-    it('cancels an active request before quitting', () => {
+    it('continues quitting when cancelling the active request fails', () => {
       vi.useFakeTimers();
-      const cancelOngoingRequest = vi.fn();
+      const cancelOngoingRequest = vi.fn(() => {
+        throw new Error('cancel failed');
+      });
       const requestShutdown = vi.fn();
       mockedUseGeminiStream.mockReturnValue({
         streamingState: StreamingState.Responding,
@@ -610,10 +612,12 @@ describe('AppContainer State Management', () => {
       const slashCommandActions = mockedUseSlashCommandProcessor.mock.calls.at(
         -1,
       )?.[12] as { quit: (messages: HistoryItem[]) => void };
-      slashCommandActions.quit([]);
+      const timerCount = vi.getTimerCount();
+      expect(() => slashCommandActions.quit([])).not.toThrow();
 
       expect(cancelOngoingRequest).toHaveBeenCalledOnce();
       expect(requestShutdown).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(timerCount + 1);
     });
 
     it('shows recording failures as warnings and unsubscribes on unmount', async () => {
