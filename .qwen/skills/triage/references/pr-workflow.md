@@ -78,6 +78,12 @@ Only approve when you're genuinely confident.
 
 Default posture: **skepticism**. Burden of proof is on the author. Distinguish **observed failures** (linked issue, reproduction, before/after) from **theoretical hardening** ("could theoretically send X" with no evidence it ever has). Volume ≠ value — an AI bot can produce 20 plausible PRs in a day. If being "too strict" feels uncomfortable, that is the gate working correctly.
 
+The workflow runs `.github/scripts/pr-intake.mjs` before invoking this skill. It
+mechanically requires linked issues for `fix:` and `feat:` PRs, dogfooding plans
+and evidence for internally authored `feat:` PRs, and planning/split details
+above 2,000 changed lines. A fully documented oversized PR is labeled `TBD` and
+stops for a maintainer decision. Do not duplicate or override that gate here.
+
 ### Stage 0: Core Module Protection (two-tier check)
 
 Core infrastructure: files matching `packages/core/src/**`, `packages/*/src/auth/**`, `packages/*/src/providers/**`, `packages/*/src/models/**`, `packages/*/src/config/**`, `packages/*/src/tools/**`, `packages/*/src/services/**`, or cross-package changes spanning multiple `packages/*/`.

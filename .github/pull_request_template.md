@@ -23,7 +23,7 @@ Non–user-visible (refactor, types, docs): commands and output below; write N/A
 
 ### How to verify
 
-<!-- How you reproduced it and what a reviewer should confirm — steps if needed, expected vs observed behavior. Focus on outcomes; paste logs or test output when helpful. -->
+<!-- How you reproduced it and what a reviewer should confirm — steps if needed, expected vs observed behavior. Internal feat: PRs must include a concrete user-perspective dogfooding flow. Focus on outcomes; paste logs or test output when helpful. -->
 
 ### Evidence (Before & After)
 
@@ -48,6 +48,8 @@ Non–user-visible (refactor, types, docs): commands and output below; write N/A
 - Main risk or tradeoff:
 - Not validated / out of scope:
 - Breaking changes / migration notes:
+- Planning issue for changes over 2,000 lines: N/A
+- Why this change cannot be split: N/A
 
 ## Linked Issues
 

@@ -35,6 +35,30 @@ function job(name) {
 }
 
 describe('qwen-triage tmux workflow', () => {
+  it('runs deterministic PR intake before the AI triage step', () => {
+    const intakeStep = step('Run deterministic PR intake');
+    const triageStep = step('Run Qwen Triage');
+    const checkStep = step('Check triage response');
+
+    expect(
+      workflow.indexOf("name: 'Run deterministic PR intake'"),
+    ).toBeLessThan(workflow.indexOf("name: 'Run Qwen Triage'"));
+    expect(workflow).toContain(
+      "types: ['opened', 'ready_for_review', 'edited', 'synchronize']",
+    );
+    expect(intakeStep).toContain(
+      'node .github/scripts/pr-intake.mjs --pr "$pr_json"',
+    );
+    expect(intakeStep).toContain("--add-label 'TBD'");
+    expect(intakeStep).toContain('upsert_comment');
+    expect(intakeStep).toContain('exit 1');
+    expect(triageStep).toContain("steps.intake.outputs.decision == 'allow'");
+    expect(triageStep).toContain(
+      "steps.intake.outputs.decision == 'not_applicable'",
+    );
+    expect(checkStep).toContain("steps.intake.outputs.decision == 'allow'");
+  });
+
   it('does not require fork PR authors to have write permission for automatic triage', () => {
     const precheckJob = job('precheck-pr');
     const authorizeJob = job('authorize');
