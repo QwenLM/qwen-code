@@ -245,6 +245,35 @@ describe('classifyCi — a superseded run does not outvote the latest verdict', 
     );
     expect(got.class).toBe('all_pass');
   });
+
+  it('falls back to started_at when completed_at is absent', () => {
+    // The winning run is listed SECOND on purpose: with the fallback dropped
+    // (`completed_at ?? ''`) both stamps collapse to '' and first-seen keeps
+    // the name — so a fixture that lists the success first passes with or
+    // without the fallback and pins nothing. Listed second, the success can
+    // win only through its `started_at`.
+    const got = classifyCi(
+      [
+        {
+          name: 'route',
+          status: 'completed',
+          conclusion: 'cancelled',
+          completed_at: null,
+          started_at: '2026-07-18T15:10:00Z',
+        },
+        {
+          name: 'route',
+          status: 'completed',
+          conclusion: 'success',
+          completed_at: null,
+          started_at: '2026-07-18T15:30:00Z',
+        },
+      ],
+      [],
+    );
+    expect(got.class).toBe('all_pass');
+    expect(got.failedCheckNames).toEqual([]);
+  });
 });
 
 const {
