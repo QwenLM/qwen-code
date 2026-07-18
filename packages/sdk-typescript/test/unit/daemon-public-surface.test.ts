@@ -21,6 +21,14 @@ import {
 import type {
   DaemonClientEvictedData,
   DaemonClientEvictedEvent,
+  DaemonChannelControlState,
+  DaemonChannelControlTransition,
+  DaemonChannelSelection,
+  DaemonChannelSetResult,
+  DaemonChannelStartupAttemptFailure,
+  DaemonChannelStartupFailure,
+  DaemonChannelStopResult,
+  DaemonChannelWorkerStartErrorResponse,
   DaemonControlEvent,
   DaemonEvent,
   DaemonEventEnvelope,
@@ -60,6 +68,8 @@ import type {
   DaemonSessionDiedEvent,
   DaemonSessionEvent,
   DaemonSessionRecapResult,
+  DaemonSessionRecordingDegradedData,
+  DaemonSessionRecordingDegradedEvent,
   DaemonSessionUpdateData,
   DaemonSessionUpdateEvent,
   DaemonSessionViewState,
@@ -105,6 +115,11 @@ import type {
   DaemonWorkspaceVoiceUpdate,
   KnownDaemonEvent,
 } from '../../src/index.js';
+import type {
+  DaemonChannelStartupAttemptFailure as DaemonEntryChannelStartupAttemptFailure,
+  DaemonChannelStartupFailure as DaemonEntryChannelStartupFailure,
+  DaemonChannelWorkerStartErrorResponse as DaemonEntryChannelWorkerStartErrorResponse,
+} from '../../src/daemon/index.js';
 
 describe('public SDK entry — typed daemon event surface (#4217)', () => {
   it('exports the runtime narrow + reducer surface', () => {
@@ -172,6 +187,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonModelSwitchedEvent>().not.toBeNever();
     expectTypeOf<DaemonModelSwitchFailedEvent>().not.toBeNever();
     expectTypeOf<DaemonSessionDiedEvent>().not.toBeNever();
+    expectTypeOf<DaemonSessionRecordingDegradedEvent>().not.toBeNever();
     expectTypeOf<DaemonClientEvictedEvent>().not.toBeNever();
     expectTypeOf<DaemonHistoryTruncatedEvent>().not.toBeNever();
     expectTypeOf<DaemonStreamErrorEvent>().not.toBeNever();
@@ -187,7 +203,19 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonModelSwitchedData>().not.toBeNever();
     expectTypeOf<DaemonModelSwitchFailedData>().not.toBeNever();
     expectTypeOf<DaemonSessionDiedData>().not.toBeNever();
+    expectTypeOf<DaemonSessionRecordingDegradedData>().not.toBeNever();
     expectTypeOf<DaemonClientEvictedData>().not.toBeNever();
+    expectTypeOf<DaemonChannelSelection>().not.toBeNever();
+    expectTypeOf<DaemonChannelControlTransition>().not.toBeNever();
+    expectTypeOf<DaemonChannelControlState>().not.toBeNever();
+    expectTypeOf<DaemonChannelSetResult>().not.toBeNever();
+    expectTypeOf<DaemonChannelStartupFailure>().not.toBeNever();
+    expectTypeOf<DaemonChannelStartupAttemptFailure>().not.toBeNever();
+    expectTypeOf<DaemonChannelStopResult>().not.toBeNever();
+    expectTypeOf<DaemonChannelWorkerStartErrorResponse>().not.toBeNever();
+    expectTypeOf<DaemonChannelStartupFailure>().toEqualTypeOf<DaemonEntryChannelStartupFailure>();
+    expectTypeOf<DaemonChannelStartupAttemptFailure>().toEqualTypeOf<DaemonEntryChannelStartupAttemptFailure>();
+    expectTypeOf<DaemonChannelWorkerStartErrorResponse>().toEqualTypeOf<DaemonEntryChannelWorkerStartErrorResponse>();
     expectTypeOf<DaemonHistoryTruncatedData>().not.toBeNever();
     expectTypeOf<DaemonStreamErrorData>().not.toBeNever();
     expectTypeOf<DaemonPermissionOption>().not.toBeNever();

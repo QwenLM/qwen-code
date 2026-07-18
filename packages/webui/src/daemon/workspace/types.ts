@@ -19,7 +19,10 @@ import type {
   DaemonDeviceFlowStartResult,
   DaemonDeviceFlowState,
   ExtensionMutationResponse,
+  ExtensionInteractionResponse,
+  ExtensionInteractionResponseResult,
   ExtensionOperationStatus,
+  ExtensionActiveOperations,
   ExtensionRefreshResponse,
   ExtensionScopeRequest,
   ExtensionInstallRequest,
@@ -29,6 +32,9 @@ import type {
   DaemonMcpRestartResult,
   DaemonMcpManageAction,
   DaemonMcpManageResult,
+  DaemonRuntimeMcpAddRequest,
+  DaemonRuntimeMcpAddResult,
+  DaemonRuntimeMcpRemoveResult,
   DaemonUpdateAgentRequest,
   DaemonWorkspaceAgentDetail,
   DaemonWorkspaceAgentsStatus,
@@ -41,15 +47,23 @@ import type {
   DaemonWorkspaceFileWriteRequest,
   DaemonWorkspaceFileWriteResult,
   DaemonWorkspaceMcpStatus,
+  DaemonWorkspaceMcpInitializeResult,
   DaemonWorkspaceMcpToolsStatus,
   DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMemoryStatus,
+  DaemonWorkspaceRemovalResult,
   DaemonWorkspacePreflightStatus,
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillsStatus,
+  DaemonSkillToggleResult,
+  DaemonSkillInstallRequest,
+  DaemonSkillMutationResult,
+  DaemonSkillScope,
   DaemonWorkspaceToolsStatus,
   DaemonWorkspaceSettingsStatus,
   DaemonSettingUpdateResult,
+  DaemonModelDeleteRequest,
+  DaemonModelDeleteResult,
   DaemonSessionGroup,
   DaemonSessionGroupCatalog,
   DaemonSessionGroupInput,
@@ -206,6 +220,13 @@ export interface DaemonScheduledTask {
   /** Bounded, newest-last history of recent fires. Empty for tasks that have
    * not fired (and, by nature, for one-shots — they are deleted on fire). */
   runs: DaemonScheduledTaskRun[];
+  /** The registered workspace this task belongs to, when the aggregated
+   * multi-workspace view tagged it client-side. Absent (single-workspace) means
+   * the primary workspace. `workspaceId` targets its workspace-qualified route;
+   * `workspaceCwd` labels the card. The daemon never sends these — they are
+   * attached by the client after a per-workspace fetch. */
+  workspaceId?: string;
+  workspaceCwd?: string;
 }
 
 export interface DaemonCreateScheduledTaskRequest {
@@ -235,6 +256,55 @@ export interface DaemonAddWorkspaceResult {
   primary: boolean;
   trusted: boolean;
   persisted?: boolean;
+}
+
+/**
+ * One session's active `/goal`. Goals live in the owning session's memory and
+ * only advance while it is resident, so this list covers exactly the goals that
+ * are actually running — a session that isn't loaded contributes nothing.
+ */
+export interface DaemonGoal {
+  /** The session driving this goal; its transcript is the goal's history. */
+  sessionId: string;
+  /** The session's label, or null — the UI falls back to the id. */
+  displayName: string | null;
+  condition: string;
+  /** Judge turns completed; 0 before the first stop-hook evaluation. */
+  iterations: number;
+  setAt: number;
+  /** The judge's verdict on the most recent turn, when it has run. */
+  lastReason?: string;
+  /**
+   * The owning session is mid-turn. For a goal session that is almost always
+   * the loop working, but a manual prompt in the same session sets it too.
+   */
+  hasActivePrompt: boolean;
+}
+
+/** The `GET /goals` payload. */
+export interface DaemonGoalList {
+  goals: DaemonGoal[];
+  /**
+   * Sessions whose goal could not be probed (wedged or dying child). Their
+   * goals are missing from `goals`, so a non-zero count means this list is
+   * incomplete rather than empty.
+   */
+  droppedCount: number;
+}
+
+export interface DaemonWorkspacePathSuggestion {
+  name: string;
+  path: string;
+}
+
+export interface DaemonWorkspacePathSuggestions {
+  kind: 'workspace-path-suggestions';
+  /** Directory the suggestions were listed from. */
+  dir: string;
+  /** Path separator of the daemon host, for appending on accept. */
+  sep: string;
+  suggestions: DaemonWorkspacePathSuggestion[];
+  truncated: boolean;
 }
 
 export interface DaemonWorkspaceActions {
@@ -279,6 +349,8 @@ export interface DaemonWorkspaceActions {
 
   // MCP
   loadMcpStatus(): Promise<DaemonWorkspaceMcpStatus>;
+  initializeMcp(): Promise<DaemonWorkspaceMcpInitializeResult>;
+  reloadMcp(): Promise<DaemonWorkspaceMcpInitializeResult>;
   loadMcpTools(serverName: string): Promise<DaemonWorkspaceMcpToolsStatus>;
   loadMcpResources(
     serverName: string,
@@ -288,6 +360,10 @@ export interface DaemonWorkspaceActions {
     serverName: string,
     action: DaemonMcpManageAction,
   ): Promise<DaemonMcpManageResult>;
+  addRuntimeMcpServer(
+    request: DaemonRuntimeMcpAddRequest,
+  ): Promise<DaemonRuntimeMcpAddResult>;
+  removeRuntimeMcpServer(name: string): Promise<DaemonRuntimeMcpRemoveResult>;
 
   // Daemon status (read-only)
   loadDaemonStatus(
@@ -300,8 +376,19 @@ export interface DaemonWorkspaceActions {
     heatmapDays?: number;
   }): Promise<DaemonUsageDashboard>;
 
-  // Skills (read-only)
+  // Skills
   loadSkillsStatus(): Promise<DaemonWorkspaceSkillsStatus>;
+  setWorkspaceSkillEnabled(
+    skillName: string,
+    enabled: boolean,
+  ): Promise<DaemonSkillToggleResult>;
+  installWorkspaceSkill(
+    request: DaemonSkillInstallRequest,
+  ): Promise<DaemonSkillMutationResult>;
+  deleteWorkspaceSkill(
+    skillName: string,
+    scope: DaemonSkillScope,
+  ): Promise<DaemonSkillMutationResult>;
 
   // Extensions
   loadExtensionsStatus(): Promise<DaemonWorkspaceExtensionsStatus>;
@@ -313,9 +400,12 @@ export interface DaemonWorkspaceActions {
   // Settings
   loadSettingsStatus(): Promise<DaemonWorkspaceSettingsStatus>;
   setWorkspaceSetting(
-    scope: 'workspace',
+    scope: 'workspace' | 'user',
     key: string,
     value: unknown,
+    options?: {
+      mcpServerMutation?: { operation: 'set' | 'remove'; name: string };
+    },
   ): Promise<DaemonSettingUpdateResult>;
 
   // Memory
@@ -350,19 +440,34 @@ export interface DaemonWorkspaceActions {
   stat(filePath: string): Promise<DaemonFileStat>;
   listDirectory(dirPath: string): Promise<DaemonDirectoryListing>;
 
-  // Scheduled tasks (durable cron)
-  listScheduledTasks(): Promise<DaemonScheduledTask[]>;
+  // Scheduled tasks (durable cron). The optional `workspaceId` targets a
+  // registered non-primary workspace's own cron file via the workspace-qualified
+  // route; omit it (or pass the primary's) to hit the primary `/scheduled-tasks`
+  // surface. The aggregated Web Shell view fans `listScheduledTasks` out over
+  // every trusted workspace and threads each task's `workspaceId` back into the
+  // mutations.
+  listScheduledTasks(workspaceId?: string): Promise<DaemonScheduledTask[]>;
   createScheduledTask(
     req: DaemonCreateScheduledTaskRequest,
+    workspaceId?: string,
   ): Promise<DaemonScheduledTask>;
   updateScheduledTask(
     id: string,
     patch: DaemonUpdateScheduledTaskRequest,
+    workspaceId?: string,
   ): Promise<DaemonScheduledTask>;
   /** Record a manual run (updates lastFiredAt + appends a 'manual' run). The
    * prompt itself is executed by the caller in the task's bound session. */
-  runScheduledTask(id: string): Promise<DaemonScheduledTask>;
-  deleteScheduledTask(id: string): Promise<void>;
+  runScheduledTask(
+    id: string,
+    workspaceId?: string,
+  ): Promise<DaemonScheduledTask>;
+  deleteScheduledTask(id: string, workspaceId?: string): Promise<void>;
+
+  // Goals (session-scoped Stop hooks, listed workspace-wide)
+  listGoals(): Promise<DaemonGoalList>;
+  /** Drop a session's goal hook. No-op when that session has no active goal. */
+  clearGoal(sessionId: string): Promise<{ cleared: boolean }>;
 
   // Providers / env (read-only diagnostics)
   loadProviders(): Promise<DaemonWorkspaceProvidersStatus>;
@@ -387,6 +492,13 @@ export interface DaemonWorkspaceActions {
   extensionOperationStatus(
     operationId: string,
   ): Promise<ExtensionOperationStatus>;
+  activeExtensionOperations(): Promise<ExtensionActiveOperations>;
+  respondToExtensionInteraction(
+    operationId: string,
+    interactionId: string,
+    response: ExtensionInteractionResponse,
+    clientId?: string,
+  ): Promise<ExtensionInteractionResponseResult>;
   checkExtensionUpdates(
     clientId?: string,
   ): Promise<ExtensionUpdateCheckResponse>;
@@ -424,10 +536,20 @@ export interface DaemonWorkspaceActions {
   installAuthProvider(
     req: DaemonAuthProviderInstallRequest,
   ): Promise<DaemonAuthProviderInstallResult>;
+  deleteModel(
+    target: DaemonModelDeleteRequest,
+  ): Promise<DaemonModelDeleteResult>;
 
   // Workspace management
   addWorkspace(
     cwd: string,
     options?: { persist?: boolean },
   ): Promise<DaemonAddWorkspaceResult>;
+  suggestWorkspacePaths(
+    prefix: string,
+  ): Promise<DaemonWorkspacePathSuggestions>;
+  removeWorkspace(
+    workspaceId: string,
+    options?: { force?: boolean; timeoutMs?: number },
+  ): Promise<DaemonWorkspaceRemovalResult>;
 }

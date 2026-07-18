@@ -42,6 +42,7 @@ export enum Command {
 
   // Text input
   SUBMIT = 'submit',
+  QUEUE_MESSAGE = 'queueMessage',
   NEWLINE = 'newline',
   VOICE_PUSH_TO_TALK = 'voicePushToTalk',
 
@@ -171,7 +172,10 @@ export const defaultKeyBindings: KeyBindingConfig = {
   ],
 
   // Auto-completion
-  [Command.ACCEPT_SUGGESTION]: [{ key: 'tab' }, { key: 'return', ctrl: false }],
+  [Command.ACCEPT_SUGGESTION]: [
+    { key: 'tab' },
+    { key: 'return', ctrl: false, shift: false },
+  ],
   // Completion navigation: arrows + readline/Vim-style Ctrl+P/Ctrl+N
   [Command.COMPLETION_UP]: [
     { key: 'up', shift: false },
@@ -192,6 +196,9 @@ export const defaultKeyBindings: KeyBindingConfig = {
       paste: false,
       shift: false,
     },
+  ],
+  [Command.QUEUE_MESSAGE]: [
+    { key: 'q', ctrl: true, command: false, shift: false, paste: false },
   ],
   // Split into multiple data-driven bindings
   // Now also includes shift+enter for multi-line input

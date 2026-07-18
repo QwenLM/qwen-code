@@ -292,6 +292,7 @@ export interface MediatorDeps {
 interface MediatorPending {
   readonly requestId: string;
   readonly sessionId: string;
+  readonly promptId: string | undefined;
   /** Captured at request issue time so live-reload of the daemon
    * policy doesn't change the rules under in-flight requests. */
   readonly policy: PermissionPolicy;
@@ -319,6 +320,7 @@ interface MediatorPending {
 interface PermissionResolutionRecord {
   readonly requestId: string;
   readonly sessionId: string;
+  readonly promptId: string | undefined;
   readonly resolution: PermissionResolution;
   /** Voter's clientId (or undefined for timeout / session-closed paths)
    *  — replayed onto `permission_already_resolved` so late SSE
@@ -358,8 +360,8 @@ export class MultiClientPermissionMediator implements PermissionMediator {
    * an identical line (the unanimity condition is the NORMAL
    * operating mode for M=2, not a rare edge); a busy session with
    * many tool calls would produce dozens of duplicate stderr lines
-   * within seconds. One emit per mediator (= per daemon lifetime
-   * since the bridge constructs one) is enough to make the
+   * within seconds. One emit per mediator (= per bridge/runtime lifetime
+   * since each bridge constructs one) is enough to make the
    * configuration visible without spam.
    */
   private unanimityBreadcrumbEmitted = false;
@@ -428,6 +430,7 @@ export class MultiClientPermissionMediator implements PermissionMediator {
       const pending: MediatorPending = {
         requestId: record.requestId,
         sessionId: record.sessionId,
+        promptId: record.promptId,
         policy,
         originatorClientId: record.originatorClientId,
         allowedOptionIds: record.allowedOptionIds,
@@ -570,6 +573,7 @@ export class MultiClientPermissionMediator implements PermissionMediator {
             : CANCEL_VOTE_SENTINEL;
         this.safeEmit(prior.sessionId, {
           type: 'permission_already_resolved',
+          ...(prior.promptId ? { promptId: prior.promptId } : {}),
           data: {
             requestId: prior.requestId,
             sessionId: prior.sessionId,
@@ -780,6 +784,7 @@ export class MultiClientPermissionMediator implements PermissionMediator {
     );
     this.safeEmit(pending.sessionId, {
       type: 'permission_partial_vote',
+      ...(pending.promptId ? { promptId: pending.promptId } : {}),
       data: {
         requestId: pending.requestId,
         sessionId: pending.sessionId,
@@ -871,6 +876,7 @@ export class MultiClientPermissionMediator implements PermissionMediator {
     );
     this.safeEmit(pending.sessionId, {
       type: 'permission_forbidden',
+      ...(pending.promptId ? { promptId: pending.promptId } : {}),
       data: {
         requestId: pending.requestId,
         sessionId: pending.sessionId,
@@ -1019,6 +1025,7 @@ export class MultiClientPermissionMediator implements PermissionMediator {
     // wire-shape preservation.
     this.safeEmit(pending.sessionId, {
       type: 'permission_resolved',
+      ...(pending.promptId ? { promptId: pending.promptId } : {}),
       data: {
         requestId: pending.requestId,
         outcome: this.toAcpOutcome(resolution),
@@ -1046,6 +1053,7 @@ export class MultiClientPermissionMediator implements PermissionMediator {
     this.rememberResolved({
       requestId: pending.requestId,
       sessionId: pending.sessionId,
+      promptId: pending.promptId,
       resolution,
       resolverClientId,
     });
@@ -1181,6 +1189,7 @@ export class MultiClientPermissionMediator implements PermissionMediator {
     return {
       requestId: pending.requestId,
       sessionId: pending.sessionId,
+      ...(pending.promptId ? { promptId: pending.promptId } : {}),
       originatorClientId: pending.originatorClientId,
       allowedOptionIds: pending.allowedOptionIds,
       issuedAtMs: pending.issuedAtMs,

@@ -19,6 +19,7 @@ export const SESSION_TRANSCRIPT_DEFAULT_LIMIT = 100;
 export const SESSION_TRANSCRIPT_MAX_LIMIT = 500;
 export const SESSION_TRANSCRIPT_CURSOR_VERSION = 1 as const;
 export const SESSION_TRANSCRIPT_MAX_INDEX_BYTES = 256 * 1024 * 1024;
+export const SESSION_TRANSCRIPT_MAX_PAGE_BYTES = 4 * 1024 * 1024;
 
 export class InvalidSessionTranscriptCursorError extends Error {
   constructor(message = 'Invalid transcript cursor') {
@@ -47,12 +48,27 @@ export class SessionTranscriptTooLargeError extends Error {
   }
 }
 
+export class SessionTranscriptPageTooLargeError extends Error {
+  constructor(
+    readonly sessionId: string,
+    readonly pageBytes: number,
+    readonly maxBytes: number,
+  ) {
+    super(
+      `Transcript page for session ${sessionId} exceeds the page budget (${pageBytes} bytes, max ${maxBytes} bytes)`,
+    );
+    this.name = 'SessionTranscriptPageTooLargeError';
+  }
+}
+
 export interface SessionTranscriptCursorState {
   v: typeof SESSION_TRANSCRIPT_CURSOR_VERSION;
   sessionId: string;
   fileIdentity: SessionTranscriptFileIdentity;
   snapshotSize: number;
   position: number;
+  /** Omitted for legacy oldest-to-newest cursors. */
+  direction?: 'backward';
   leafUuid: string;
   startTime: string;
   lastUpdated: string;
@@ -61,7 +77,10 @@ export interface SessionTranscriptCursorState {
 
 export interface SessionTranscriptReadPageOptions {
   cursor?: string;
+  /** Start a newest-to-oldest snapshot immediately before this active record. */
+  beforeRecordId?: string;
   limit?: number;
+  maxBytes?: number;
 }
 
 export interface SessionTranscriptRecordPage {
@@ -70,6 +89,7 @@ export interface SessionTranscriptRecordPage {
   records: ChatRecord[];
   gaps: HistoryGap[];
   hasMore: boolean;
+  direction?: 'backward';
   nextCursorState?: SessionTranscriptCursorState;
   replay?: unknown;
   startTime: string;
@@ -90,6 +110,8 @@ interface RecordSegment {
 
 interface UuidIndexEntry {
   parentUuid: string | null;
+  type: ChatRecord['type'];
+  subtype?: ChatRecord['subtype'];
   segments: RecordSegment[];
 }
 
@@ -167,6 +189,7 @@ function cursorPayload(
     },
     snapshotSize: state.snapshotSize,
     position: state.position,
+    ...(state.direction === 'backward' ? { direction: 'backward' } : {}),
     leafUuid: state.leafUuid,
     startTime: state.startTime,
     lastUpdated: state.lastUpdated,
@@ -240,25 +263,22 @@ function getCursorHmacKey(workspaceCwd: string): Buffer {
   return key;
 }
 
-function signCursorPayload(
+function signCursorPayloadWithKey(
   payload: Record<string, unknown>,
-  workspaceCwd: string,
+  key: Uint8Array,
 ): string {
   return crypto
-    .createHmac('sha256', getCursorHmacKey(workspaceCwd))
+    .createHmac('sha256', key)
     .update(JSON.stringify(payload))
     .digest('base64url');
 }
 
-function hasValidCursorMac(
+function hasValidCursorMacWithKey(
   payload: Record<string, unknown>,
   mac: string,
-  workspaceCwd: string,
+  key: Uint8Array,
 ): boolean {
-  const expected = Buffer.from(
-    signCursorPayload(payload, workspaceCwd),
-    'utf8',
-  );
+  const expected = Buffer.from(signCursorPayloadWithKey(payload, key), 'utf8');
   const actual = Buffer.from(mac, 'utf8');
   return (
     expected.length === actual.length &&
@@ -268,28 +288,21 @@ function hasValidCursorMac(
 
 function encodeCursorState(
   state: SessionTranscriptCursorState,
-  workspaceCwd: string,
+  key: Uint8Array,
 ): string {
   const payload = cursorPayload(state);
   return Buffer.from(
     JSON.stringify({
       ...payload,
-      mac: signCursorPayload(payload, workspaceCwd),
+      mac: signCursorPayloadWithKey(payload, key),
     }),
     'utf8',
   ).toString('base64url');
 }
 
-export function encodeSessionTranscriptCursor(
-  state: SessionTranscriptCursorState,
-  workspaceCwd: string,
-): string {
-  return encodeCursorState(state, workspaceCwd);
-}
-
-export function decodeSessionTranscriptCursor(
+function decodeCursorState(
   cursor: string,
-  workspaceCwd: string,
+  key: Uint8Array,
 ): SessionTranscriptCursorState {
   try {
     const decoded = Buffer.from(cursor, 'base64url').toString('utf8');
@@ -306,6 +319,8 @@ export function decodeSessionTranscriptCursor(
       !isFiniteNonNegativeInteger(fileIdentity['ino']) ||
       !isFiniteNonNegativeInteger(parsed['snapshotSize']) ||
       !isFiniteNonNegativeInteger(parsed['position']) ||
+      (parsed['direction'] !== undefined &&
+        parsed['direction'] !== 'backward') ||
       typeof parsed['leafUuid'] !== 'string' ||
       typeof parsed['startTime'] !== 'string' ||
       typeof parsed['lastUpdated'] !== 'string' ||
@@ -323,12 +338,15 @@ export function decodeSessionTranscriptCursor(
       },
       snapshotSize: parsed['snapshotSize'],
       position: parsed['position'],
+      ...(parsed['direction'] === 'backward'
+        ? { direction: 'backward' as const }
+        : {}),
       leafUuid: parsed['leafUuid'],
       startTime: parsed['startTime'],
       lastUpdated: parsed['lastUpdated'],
       ...(parsed['replay'] !== undefined ? { replay: parsed['replay'] } : {}),
     };
-    if (!hasValidCursorMac(cursorPayload(state), parsed['mac'], workspaceCwd)) {
+    if (!hasValidCursorMacWithKey(cursorPayload(state), parsed['mac'], key)) {
       debugLogger.debug(
         `cursor decode failed: mac mismatch session=${state.sessionId} ` +
           `position=${state.position} snapshotSize=${state.snapshotSize}`,
@@ -353,6 +371,41 @@ export function decodeSessionTranscriptCursor(
   }
 }
 
+export class SessionTranscriptCursorCodec {
+  private readonly key: Buffer;
+
+  constructor(key: Uint8Array) {
+    if (key.byteLength !== CURSOR_HMAC_KEY_BYTES) {
+      throw new RangeError(
+        `Transcript cursor signing key must be ${CURSOR_HMAC_KEY_BYTES} bytes`,
+      );
+    }
+    this.key = Buffer.from(key);
+  }
+
+  encode(state: SessionTranscriptCursorState): string {
+    return encodeCursorState(state, this.key);
+  }
+
+  decode(cursor: string): SessionTranscriptCursorState {
+    return decodeCursorState(cursor, this.key);
+  }
+}
+
+export function encodeSessionTranscriptCursor(
+  state: SessionTranscriptCursorState,
+  workspaceCwd: string,
+): string {
+  return encodeCursorState(state, getCursorHmacKey(workspaceCwd));
+}
+
+export function decodeSessionTranscriptCursor(
+  cursor: string,
+  workspaceCwd: string,
+): SessionTranscriptCursorState {
+  return decodeCursorState(cursor, getCursorHmacKey(workspaceCwd));
+}
+
 function normalizeLimit(limit: number | undefined): number {
   if (limit === undefined) return SESSION_TRANSCRIPT_DEFAULT_LIMIT;
   if (
@@ -365,6 +418,122 @@ function normalizeLimit(limit: number | undefined): number {
     );
   }
   return limit;
+}
+
+function normalizeMaxBytes(maxBytes: number | undefined): number | undefined {
+  if (maxBytes === undefined) return undefined;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) {
+    throw new RangeError(
+      'Transcript page byte limit must be a positive integer',
+    );
+  }
+  return maxBytes;
+}
+
+function recordSegmentBytes(index: TranscriptIndex, uuid: string): number {
+  const entry = index.byUuid.get(uuid);
+  return (
+    entry?.segments.reduce((total, segment) => total + segment.length, 0) ?? 0
+  );
+}
+
+function selectPageUuids(
+  index: TranscriptIndex,
+  sessionId: string,
+  position: number,
+  limit: number,
+  maxBytes: number | undefined,
+): string[] {
+  const candidates = index.activeUuids.slice(position, position + limit);
+  if (maxBytes === undefined) return candidates;
+
+  const selected: string[] = [];
+  let selectedBytes = 0;
+  for (const uuid of candidates) {
+    const bytes = recordSegmentBytes(index, uuid);
+    if (selected.length === 0 && bytes > maxBytes) {
+      throw new SessionTranscriptPageTooLargeError(sessionId, bytes, maxBytes);
+    }
+    if (selectedBytes + bytes > maxBytes) break;
+    selected.push(uuid);
+    selectedBytes += bytes;
+  }
+  return selected;
+}
+
+function isReplayTurnStart(index: TranscriptIndex, uuid: string): boolean {
+  const entry = index.byUuid.get(uuid);
+  return entry?.type === 'user' && entry.subtype !== 'mid_turn_user_message';
+}
+
+function selectBackwardPageUuids(
+  index: TranscriptIndex,
+  sessionId: string,
+  position: number,
+  limit: number,
+  maxBytes: number | undefined,
+): { uuids: string[]; nextPosition: number } {
+  let start = Math.max(0, position - limit);
+  for (let i = start; i < position; i++) {
+    if (isReplayTurnStart(index, index.activeUuids[i]!)) {
+      start = i;
+      break;
+    }
+  }
+  while (start > 0 && !isReplayTurnStart(index, index.activeUuids[start]!)) {
+    start--;
+  }
+
+  let selectedStart = position;
+  let selectedBytes = 0;
+  for (let i = position - 1; i >= start; i--) {
+    const uuid = index.activeUuids[i]!;
+    const bytes = recordSegmentBytes(index, uuid);
+    if (
+      selectedStart === position &&
+      maxBytes !== undefined &&
+      bytes > maxBytes
+    ) {
+      throw new SessionTranscriptPageTooLargeError(sessionId, bytes, maxBytes);
+    }
+    if (maxBytes !== undefined && selectedBytes + bytes > maxBytes) break;
+    selectedStart = i;
+    selectedBytes += bytes;
+  }
+
+  let alignedToReplayBoundary = false;
+  for (let i = selectedStart; i < position; i++) {
+    if (isReplayTurnStart(index, index.activeUuids[i]!)) {
+      selectedStart = i;
+      alignedToReplayBoundary = true;
+      break;
+    }
+  }
+  if (!alignedToReplayBoundary) {
+    while (
+      selectedStart > 0 &&
+      !isReplayTurnStart(index, index.activeUuids[selectedStart]!)
+    ) {
+      selectedStart--;
+    }
+    if (maxBytes !== undefined) {
+      const alignedBytes = index.activeUuids
+        .slice(selectedStart, position)
+        .reduce((total, uuid) => total + recordSegmentBytes(index, uuid), 0);
+      if (alignedBytes > maxBytes) {
+        throw new SessionTranscriptPageTooLargeError(
+          sessionId,
+          alignedBytes,
+          maxBytes,
+        );
+      }
+    }
+  }
+
+  return {
+    uuids: index.activeUuids.slice(selectedStart, position),
+    nextPosition: selectedStart,
+  };
 }
 
 function fileIdentityFromStats(stats: fs.Stats): SessionTranscriptFileIdentity {
@@ -703,6 +872,10 @@ async function buildIndex(params: {
         } else {
           byUuid.set(record.uuid, {
             parentUuid: record.parentUuid,
+            type: record.type,
+            ...(record.subtype !== undefined
+              ? { subtype: record.subtype }
+              : {}),
             segments: [segment],
           });
         }
@@ -834,7 +1007,10 @@ async function getCachedIndex(params: {
 export class SessionTranscriptReader {
   private readonly storage: Storage;
 
-  constructor(private readonly workspaceCwd: string) {
+  constructor(
+    private readonly workspaceCwd: string,
+    private readonly cursorCodec?: SessionTranscriptCursorCodec,
+  ) {
     this.storage = new Storage(workspaceCwd);
   }
 
@@ -855,10 +1031,15 @@ export class SessionTranscriptReader {
     options: SessionTranscriptReadPageOptions = {},
   ): Promise<SessionTranscriptRecordPage> {
     const limit = normalizeLimit(options.limit);
+    const maxBytes = normalizeMaxBytes(options.maxBytes);
     const cursor =
       options.cursor !== undefined
-        ? decodeSessionTranscriptCursor(options.cursor, this.workspaceCwd)
+        ? (this.cursorCodec?.decode(options.cursor) ??
+          decodeSessionTranscriptCursor(options.cursor, this.workspaceCwd))
         : undefined;
+    if (cursor && options.beforeRecordId !== undefined) {
+      throw new InvalidSessionTranscriptCursorError();
+    }
     if (cursor && cursor.sessionId !== sessionId) {
       debugLogger.debug(
         `cursor session mismatch requested=${sessionId} cursor=${cursor.sessionId}`,
@@ -898,7 +1079,19 @@ export class SessionTranscriptReader {
       throw new SessionTranscriptSnapshotUnavailableError(sessionId);
     }
 
-    const position = cursor?.position ?? 0;
+    const direction =
+      cursor?.direction ??
+      (options.beforeRecordId !== undefined ? 'backward' : 'forward');
+    let position = cursor?.position ?? 0;
+    if (!cursor && options.beforeRecordId !== undefined) {
+      if (options.beforeRecordId.length === 0) {
+        throw new InvalidSessionTranscriptCursorError();
+      }
+      position = index.activeUuids.indexOf(options.beforeRecordId);
+      if (position < 0) {
+        throw new InvalidSessionTranscriptCursorError();
+      }
+    }
     if (position > index.activeUuids.length) {
       debugLogger.debug(
         `cursor position out of range session=${sessionId} ` +
@@ -906,10 +1099,20 @@ export class SessionTranscriptReader {
       );
       throw new InvalidSessionTranscriptCursorError();
     }
-    const nextPosition = Math.min(position + limit, index.activeUuids.length);
-    const pageUuids = index.activeUuids.slice(position, nextPosition);
+    const backwardPage =
+      direction === 'backward'
+        ? selectBackwardPageUuids(index, sessionId, position, limit, maxBytes)
+        : undefined;
+    const pageUuids =
+      backwardPage?.uuids ??
+      selectPageUuids(index, sessionId, position, limit, maxBytes);
+    const nextPosition =
+      backwardPage?.nextPosition ?? position + pageUuids.length;
     const records = await readAggregatedRecords(index, pageUuids);
-    const hasMore = nextPosition < index.activeUuids.length;
+    const hasMore =
+      direction === 'backward'
+        ? nextPosition > 0
+        : nextPosition < index.activeUuids.length;
     const nextCursorState: SessionTranscriptCursorState | undefined = hasMore
       ? {
           v: SESSION_TRANSCRIPT_CURSOR_VERSION,
@@ -917,6 +1120,9 @@ export class SessionTranscriptReader {
           fileIdentity,
           snapshotSize,
           position: nextPosition,
+          ...(direction === 'backward'
+            ? { direction: 'backward' as const }
+            : {}),
           leafUuid: index.leafUuid,
           startTime: index.startTime,
           lastUpdated: index.lastUpdated,
@@ -935,6 +1141,7 @@ export class SessionTranscriptReader {
       records,
       gaps: index.gaps,
       hasMore,
+      ...(direction === 'backward' ? { direction: 'backward' as const } : {}),
       ...(nextCursorState ? { nextCursorState } : {}),
       ...(cursor?.replay !== undefined ? { replay: cursor.replay } : {}),
       startTime: index.startTime,

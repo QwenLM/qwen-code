@@ -472,6 +472,7 @@ export default {
 
   // Settings enum options
   'Auto (detect from system)': 'Automático (detectar do sistema)',
+  'Auto (follow user input)': 'Automático (seguir entrada do usuário)',
   'Auto (detect terminal theme)': 'Automático (detectar tema do terminal)',
   Auto: 'Automático',
   Text: 'Texto',
@@ -606,7 +607,7 @@ export default {
     'Inclua o nome da extensão para desinstalar como um argumento posicional.',
   'Enables an extension.': 'Ativa uma extensão.',
   'The name of the extension to enable.': 'O nome da extensão para ativar.',
-  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
+  'The scope to enable the extension in. If not set, will be enabled in all scopes.':
     'O escopo para ativar a extensão. Se não definido, será ativada em todos os escopos.',
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
     'Extensão "{{name}}" ativada com sucesso para o escopo "{{scope}}".',
@@ -616,7 +617,7 @@ export default {
     'Escopo inválido: {{scope}}. Use um de {{scopes}}.',
   'Disables an extension.': 'Desativa uma extensão.',
   'The name of the extension to disable.': 'O nome da extensão para desativar.',
-  'The scope to disable the extenison in.':
+  'The scope to disable the extension in.':
     'O escopo para desativar a extensão.',
   'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
     'Extensão "{{name}}" desativada com sucesso para o escopo "{{scope}}".',
@@ -2170,6 +2171,16 @@ export default {
     'Não foi possível atualizar automaticamente esta instalação independente. Reinstale de:',
   'Manual update required. Please reinstall Qwen Code.':
     'Atualização manual necessária. Reinstale o Qwen Code.',
+  'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.':
+    'Esta sessão usa a imagem de sandbox personalizada {{image}}. Atualize a imagem e reinicie o Qwen Code.',
+  'Update Qwen Code on the host, then restart the sandbox.':
+    'Atualize o Qwen Code no host e reinicie o sandbox.',
+  'The update will be installed after you exit this session.':
+    'A atualização será instalada após você sair desta sessão.',
+  'Run /update to install the update on the host.':
+    'Execute /update para instalar a atualização no host.',
+  'Run /update to install the update.':
+    'Execute /update para instalar a atualização.',
 
   // ============================================================================
   // reload-plugins command
@@ -2200,4 +2211,8 @@ export default {
     'Failed to refresh extension content. Run /reload-plugins to apply updates.',
   'Extension reload did not complete. Run /reload-plugins to try again.':
     'Extension reload did not complete. Run /reload-plugins to try again.',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.':
+    'A gravação da sessão foi interrompida após uma falha de escrita. As novas mensagens da sessão afetada não serão salvas. Verifique o espaço em disco e as permissões e inicie uma nova sessão para retomar a gravação. Consulte o log de depuração para obter detalhes.',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
+    'A gravação da sessão foi interrompida após uma falha de escrita. As novas mensagens da sessão afetada não serão salvas. Verifique o espaço em disco e as permissões e execute `/clear` para iniciar uma nova sessão gravada. Consulte o log de depuração para obter detalhes.',
 };

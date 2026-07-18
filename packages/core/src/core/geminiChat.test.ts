@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type OpenAI from 'openai';
 import type {
   Content,
   GenerateContentConfig,
@@ -23,6 +24,8 @@ import {
 import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
 import { classifyRetryError } from '../utils/retryErrorClassification.js';
 import { StreamContentError } from './openaiContentGenerator/pipeline.js';
+import { OpenAIContentGenerator } from './openaiContentGenerator/openaiContentGenerator.js';
+import type { OpenAICompatibleProvider } from './openaiContentGenerator/provider/index.js';
 import type { Config } from '../config/config.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
@@ -37,6 +40,10 @@ import {
 } from '../services/tokenEstimation.js';
 import { SYSTEM_REMINDER_OPEN } from '../utils/environmentContext.js';
 import { SessionStartSource } from '../hooks/types.js';
+import {
+  getToolCallPreparations,
+  setToolCallPreparations,
+} from './tool-call-preparation.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -78,14 +85,20 @@ vi.mock('../utils/retry.js', async (importOriginal) => {
   };
 });
 
-const { mockLogContentRetry, mockLogContentRetryFailure } = vi.hoisted(() => ({
+const {
+  mockLogContentRetry,
+  mockLogContentRetryFailure,
+  mockLogProtocolTagSanitized,
+} = vi.hoisted(() => ({
   mockLogContentRetry: vi.fn(),
   mockLogContentRetryFailure: vi.fn(),
+  mockLogProtocolTagSanitized: vi.fn(),
 }));
 
 vi.mock('../telemetry/loggers.js', () => ({
   logContentRetry: mockLogContentRetry,
   logContentRetryFailure: mockLogContentRetryFailure,
+  logProtocolTagSanitized: mockLogProtocolTagSanitized,
   // Real ChatCompressionService.compress() calls logChatCompression on
   // every attempt; the R3.4 integration test exercises that path, so the
   // mock has to expose it (no-op).
@@ -171,6 +184,7 @@ describe('GeminiChat', async () => {
         getTool: vi.fn(),
       }),
       getContentGenerator: vi.fn().mockReturnValue(mockContentGenerator),
+      getEffectiveInputModalities: vi.fn().mockReturnValue({ image: true }),
       getBaseLlmClient: vi.fn().mockReturnValue(undefined),
       getModelFallbacks: vi.fn().mockReturnValue([]),
       getChatCompression: vi.fn().mockReturnValue(undefined),
@@ -998,6 +1012,88 @@ describe('GeminiChat', async () => {
       ).resolves.not.toThrow();
     });
 
+    it('uses the normalized function call ID for preparation metadata', async () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'first request' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-1',
+                name: 'read_file',
+                args: { file_path: 'a.txt' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'read_file',
+                response: { output: 'first result' },
+              },
+            },
+          ],
+        },
+      ]);
+      const preparationResponse = {
+        candidates: [{ content: { role: 'model', parts: [] } }],
+      } as unknown as GenerateContentResponse;
+      setToolCallPreparations(preparationResponse, [
+        { callId: 'call-1', toolName: 'read_file' },
+      ]);
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield preparationResponse;
+          yield {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [
+                    {
+                      functionCall: {
+                        id: 'call-1',
+                        name: 'read_file',
+                        args: { file_path: 'b.txt' },
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'second request' },
+        'prompt-normalized-preparation-id',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) events.push(event);
+
+      const preparation = events
+        .filter((event) => event.type === StreamEventType.CHUNK)
+        .flatMap((event) => getToolCallPreparations(event.value))[0];
+      const functionCall = events.find(
+        (event) =>
+          event.type === StreamEventType.CHUNK &&
+          event.value.functionCalls?.length,
+      );
+      expect(preparation?.callId).toBe('call-1__qwen_dup_2');
+      expect(
+        functionCall?.type === StreamEventType.CHUNK
+          ? functionCall.value.functionCalls?.[0]?.id
+          : undefined,
+      ).toBe(preparation?.callId);
+    });
+
     it('persists partial assistant turn when stream throws after a tool_use chunk', async () => {
       // Weak-network scenario: Anthropic-compatible providers emit the
       // `functionCall` part on `content_block_stop`; the SSE may then drop
@@ -1296,15 +1392,439 @@ describe('GeminiChat', async () => {
       });
     });
 
-    it('should succeed when there is finish reason and response text', async () => {
-      // Setup: Stream with both finish reason and text content
+    it('should retry semantically empty responses after a tool result', async () => {
+      vi.useFakeTimers();
+      try {
+        const recordAssistantTurn = vi.fn();
+        const chatWithRecording = new GeminiChat(
+          mockConfig,
+          config,
+          [],
+          {
+            recordAssistantTurn,
+            recordChatCompression: vi.fn(),
+          } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+          uiTelemetryService,
+        );
+        chatWithRecording.setHistory([
+          { role: 'user', parts: [{ text: 'inspect the project' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  args: { path: '/tmp/example' },
+                },
+              },
+            ],
+          },
+        ]);
+
+        const responses: GenerateContentResponse[][] = [
+          [stopResponse([{ thought: true, text: 'I should keep working.' }])],
+          [
+            stopResponse([
+              { thought: true, text: 'I should still keep working.' },
+              { text: '(empty content)' },
+            ]),
+          ],
+          [
+            {
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      { thought: true, text: 'One more attempt.' },
+                      { text: '(empty ' },
+                    ],
+                  },
+                },
+              ],
+            } as GenerateContentResponse,
+            stopResponse([{ text: 'content)' }]),
+          ],
+          [stopResponse([{ text: 'Finished the analysis.' }])],
+        ];
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () =>
+          (async function* () {
+            yield* responses.shift()!;
+          })(),
+        );
+
+        const stream = await chatWithRecording.sendMessageStream(
+          'test-model',
+          {
+            message: [
+              {
+                functionResponse: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  response: { output: 'file contents' },
+                },
+              },
+            ],
+          },
+          'prompt-id-tool-result-empty-response',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 15_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(4);
+        expect(
+          events.some((event) => event.type === StreamEventType.RETRY),
+        ).toBe(true);
+        const lastRetryIndex = events.findLastIndex(
+          (event) => event.type === StreamEventType.RETRY,
+        );
+        const finishIndex = events.findIndex(
+          (event) =>
+            event.type === StreamEventType.CHUNK &&
+            Boolean(event.value.candidates?.[0]?.finishReason),
+        );
+        expect(finishIndex).toBeGreaterThan(lastRetryIndex);
+        expect(
+          events
+            .slice(lastRetryIndex + 1)
+            .some(
+              (event) =>
+                event.type === StreamEventType.CHUNK &&
+                event.value.candidates?.[0]?.content?.parts?.some(
+                  (part) => part.text === '(empty content)',
+                ),
+            ),
+        ).toBe(false);
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(3);
+        expect(mockLogContentRetry).toHaveBeenLastCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            error_type: 'NO_TOOL_RESULT_PROGRESS',
+            model: 'test-model',
+          }),
+        );
+        expect(recordAssistantTurn).toHaveBeenCalledOnce();
+        expect(recordAssistantTurn).toHaveBeenCalledWith(
+          expect.objectContaining({
+            message: [{ text: 'Finished the analysis.' }],
+          }),
+        );
+        const history = chatWithRecording.getHistory();
+        expect(history).toHaveLength(4);
+        expect(history.at(-1)).toEqual({
+          role: 'model',
+          parts: [{ text: 'Finished the analysis.' }],
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should surface the last empty tool result continuation after retry exhaustion', async () => {
+      vi.useFakeTimers();
+      try {
+        chat.setHistory([
+          { role: 'user', parts: [{ text: 'inspect the project' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  args: { path: '/tmp/example' },
+                },
+              },
+            ],
+          },
+        ]);
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () =>
+          streamResponse(
+            stopResponse([{ thought: true, text: 'I should keep working.' }]),
+          ),
+        );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          {
+            message: [
+              {
+                functionResponse: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  response: { output: 'file contents' },
+                },
+              },
+            ],
+          },
+          'prompt-id-tool-result-empty-response-exhausted',
+        );
+        const collecting = (async () => {
+          for await (const _ of stream) {
+            // consume stream
+          }
+        })();
+        const resultPromise = collecting.then(
+          () => {
+            throw new Error('Expected stream to reject');
+          },
+          (error: unknown) => {
+            expect(error).toMatchObject({
+              message:
+                'Model stream ended after a tool result without visible progress.',
+              type: 'NO_TOOL_RESULT_PROGRESS',
+            });
+          },
+        );
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(35_000);
+        await resultPromise;
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(5);
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(4);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should not retry tool result continuations that make another tool call', async () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'inspect the project' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_read_file',
+                name: 'read_file',
+                args: { path: '/tmp/example' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamResponse(
+          stopResponse([
+            {
+              functionCall: {
+                id: 'call_list_files',
+                name: 'list_files',
+                args: { path: '/tmp' },
+              },
+            },
+          ]),
+        ),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        {
+          message: [
+            {
+              functionResponse: {
+                id: 'call_read_file',
+                name: 'read_file',
+                response: { output: 'file contents' },
+              },
+            },
+          ],
+        },
+        'prompt-id-tool-result-next-tool-call',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) events.push(event);
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+        false,
+      );
+      expect(
+        events.some(
+          (event) =>
+            event.type === StreamEventType.CHUNK &&
+            event.value.candidates?.[0]?.content?.parts?.some(
+              (part) => part.functionCall?.id === 'call_list_files',
+            ),
+        ),
+      ).toBe(true);
+    });
+
+    it('should escalate thought-only MAX_TOKENS responses after a tool result', async () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'inspect the project' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_read_file',
+                name: 'read_file',
+                args: { path: '/tmp/example' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      const responses = [
+        streamResponse({
+          candidates: [
+            {
+              content: {
+                parts: [{ thought: true, text: 'I need more tokens.' }],
+              },
+              finishReason: 'MAX_TOKENS',
+            },
+          ],
+        } as GenerateContentResponse),
+        streamResponse(stopResponse([{ text: 'Finished the analysis.' }])),
+      ];
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => responses.shift()!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-pro',
+        {
+          message: [
+            {
+              functionResponse: {
+                id: 'call_read_file',
+                name: 'read_file',
+                response: { output: 'file contents' },
+              },
+            },
+          ],
+        },
+        'prompt-id-tool-result-max-tokens',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) events.push(event);
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        2,
+      );
+      const calls = vi.mocked(mockContentGenerator.generateContentStream).mock
+        .calls;
+      expect(calls[1]![0].config?.maxOutputTokens).toBeGreaterThan(
+        calls[0]![0].config?.maxOutputTokens ?? 0,
+      );
+      expect(
+        events.some(
+          (event) =>
+            event.type === StreamEventType.RETRY &&
+            event.maxOutputTokensEscalated !== undefined,
+        ),
+      ).toBe(true);
+      expect(chat.getHistory().at(-1)).toEqual({
+        role: 'model',
+        parts: [{ text: 'Finished the analysis.' }],
+      });
+    });
+
+    it('should not escalate thought-only MAX_TOKENS responses when max tokens are user-set', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+          authType: AuthType.USE_GEMINI,
+          model: 'test-model',
+          samplingParams: { max_tokens: 1024 },
+        });
+        chat.setHistory([
+          { role: 'user', parts: [{ text: 'inspect the project' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  args: { path: '/tmp/example' },
+                },
+              },
+            ],
+          },
+        ]);
+
+        const responses = [
+          streamResponse({
+            candidates: [
+              {
+                content: {
+                  parts: [{ thought: true, text: 'I need more tokens.' }],
+                },
+                finishReason: 'MAX_TOKENS',
+              },
+            ],
+          } as GenerateContentResponse),
+          streamResponse(stopResponse([{ text: 'Finished the analysis.' }])),
+        ];
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => responses.shift()!);
+
+        const stream = await chat.sendMessageStream(
+          'gemini-pro',
+          {
+            message: [
+              {
+                functionResponse: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  response: { output: 'file contents' },
+                },
+              },
+            ],
+          },
+          'prompt-id-tool-result-user-max-tokens',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 5_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        expect(
+          events.some(
+            (event) =>
+              event.type === StreamEventType.RETRY &&
+              event.maxOutputTokensEscalated !== undefined,
+          ),
+        ).toBe(false);
+        expect(mockLogContentRetry).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            error_type: 'NO_TOOL_RESULT_PROGRESS_MAX_TOKENS',
+            model: 'gemini-pro',
+          }),
+        );
+        expect(chat.getHistory().at(-1)).toEqual({
+          role: 'model',
+          parts: [{ text: 'Finished the analysis.' }],
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should preserve (empty content) outside tool result continuations', async () => {
       const validStream = (async function* () {
         yield {
           candidates: [
             {
               content: {
                 role: 'model',
-                parts: [{ text: 'valid response' }],
+                parts: [{ text: '(empty content)' }],
               },
               finishReason: 'STOP',
             },
@@ -1330,6 +1850,10 @@ describe('GeminiChat', async () => {
           }
         })(),
       ).resolves.not.toThrow();
+      expect(chat.getHistory().at(-1)).toEqual({
+        role: 'model',
+        parts: [{ text: '(empty content)' }],
+      });
     });
 
     it('should not lose finish reason when last chunk only has usage metadata', async () => {
@@ -1881,6 +2405,103 @@ describe('GeminiChat', async () => {
         }
       },
     );
+
+    it('sanitizes a standalone closing thinking tag without retrying valid tool calls', async () => {
+      const recordAssistantTurn = vi.fn();
+      const chatWithRecording = new GeminiChat(
+        mockConfig,
+        config,
+        [],
+        {
+          recordAssistantTurn,
+          recordChatCompression: vi.fn(),
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
+      const create = vi.fn().mockImplementation(async () =>
+        (async function* () {
+          yield {
+            id: 'sanitized-protocol-tag',
+            created: 1,
+            model: 'test-model',
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  reasoning_content: 'hidden reasoning',
+                  content: '\n</think>\n',
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: 'call_read',
+                      type: 'function',
+                      function: { name: 'read_file', arguments: '{}' },
+                    },
+                  ],
+                },
+                finish_reason: 'tool_calls',
+              },
+            ],
+          } as unknown as OpenAI.Chat.ChatCompletionChunk;
+        })(),
+      );
+      const provider = {
+        buildClient: () =>
+          ({ chat: { completions: { create } } }) as unknown as OpenAI,
+        buildRequest: (request: OpenAI.Chat.ChatCompletionCreateParams) =>
+          request,
+        buildHeaders: () => ({}),
+        getDefaultGenerationConfig: () => ({}),
+      } as OpenAICompatibleProvider;
+      const generator = new OpenAIContentGenerator(
+        { model: 'test-model', authType: AuthType.USE_OPENAI },
+        mockConfig,
+        provider,
+      );
+      vi.mocked(mockConfig.getContentGenerator).mockReturnValue(generator);
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+      });
+
+      const stream = await chatWithRecording.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-sanitized-protocol-tag',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) events.push(event);
+      const parts = events.flatMap((event) =>
+        event.type === StreamEventType.CHUNK
+          ? (event.value.candidates?.[0]?.content?.parts ?? [])
+          : [],
+      );
+
+      expect(create).toHaveBeenCalledTimes(1);
+      expect(mockLogContentRetry).not.toHaveBeenCalled();
+      expect(mockLogProtocolTagSanitized).toHaveBeenCalledTimes(1);
+      expect(mockLogProtocolTagSanitized).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          model: 'test-model',
+          prompt_id: 'prompt-id-sanitized-protocol-tag',
+          response_id: 'sanitized-protocol-tag',
+          tag_name: 'think',
+          tool_call_count: 1,
+        }),
+      );
+      expect(parts).toContainEqual({
+        functionCall: { id: 'call_read', name: 'read_file', args: {} },
+      });
+      expect(parts.some((part) => part.text?.includes('</think>'))).toBe(false);
+      expect(JSON.stringify(chatWithRecording.getHistory())).not.toContain(
+        '</think>',
+      );
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(
+        JSON.stringify(recordAssistantTurn.mock.calls[0]?.[0].message),
+      ).not.toContain('</think>');
+    });
 
     it('falls back to coerced totalTokenCount when promptTokenCount is hostile', async () => {
       const response = (async function* () {
@@ -4729,53 +5350,97 @@ describe('GeminiChat', async () => {
       }
     });
 
-    it('should keep protocol tag leak retries at the existing budget', async () => {
-      vi.useFakeTimers();
-      try {
-        vi.mocked(
-          mockContentGenerator.generateContentStream,
-        ).mockImplementation(async () =>
-          (async function* () {
-            yield {
-              candidates: [
-                {
-                  content: {
-                    parts: [
-                      {
-                        text: '<analysis>hidden</analysis><summary>leaked</summary>',
-                      },
-                    ],
+    it.each([
+      {
+        name: 'protocol tag leaks',
+        errorType: 'PROTOCOL_TAG_LEAK',
+        delta: {
+          reasoning_content: 'hidden reasoning',
+          content: '</think> leaked visible reasoning',
+        },
+        finishReason: 'stop',
+        retryCount: 2,
+      },
+      {
+        name: 'malformed tool calls',
+        errorType: 'MALFORMED_TOOL_CALL',
+        delta: {
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_without_name',
+              type: 'function',
+              function: { arguments: '{}' },
+            },
+          ],
+        },
+        finishReason: 'tool_calls',
+        retryCount: 4,
+      },
+    ] as const)(
+      'should retry $name through the OpenAI pipeline',
+      async (testCase) => {
+        vi.useFakeTimers();
+        try {
+          const create = vi.fn().mockImplementation(async () =>
+            (async function* () {
+              yield {
+                id: 'protocol-tag-leak',
+                created: 1,
+                model: 'test-model',
+                choices: [
+                  {
+                    index: 0,
+                    delta: testCase.delta,
+                    finish_reason: testCase.finishReason,
                   },
-                  finishReason: 'STOP',
-                },
-              ],
-            } as unknown as GenerateContentResponse;
-          })(),
-        );
-
-        const stream = await chat.sendMessageStream(
-          'test-model',
-          { message: 'test' },
-          'prompt-id-protocol-leak-budget',
-        );
-        await expectStreamExhaustion(stream);
-
-        expect(
-          mockContentGenerator.generateContentStream,
-        ).toHaveBeenCalledTimes(3);
-        expect(mockLogContentRetry).toHaveBeenCalledTimes(2);
-        expect(mockLogContentRetryFailure).toHaveBeenCalledWith(
-          mockConfig,
-          expect.objectContaining({
-            total_attempts: 3,
-            final_error_type: 'PROTOCOL_TAG_LEAK',
+                ],
+              } as unknown as OpenAI.Chat.ChatCompletionChunk;
+            })(),
+          );
+          const provider = {
+            buildClient: () =>
+              ({ chat: { completions: { create } } }) as unknown as OpenAI,
+            buildRequest: (request: OpenAI.Chat.ChatCompletionCreateParams) =>
+              request,
+            buildHeaders: () => ({}),
+            getDefaultGenerationConfig: () => ({}),
+          } as OpenAICompatibleProvider;
+          const generator = new OpenAIContentGenerator(
+            { model: 'test-model', authType: AuthType.USE_OPENAI },
+            mockConfig,
+            provider,
+          );
+          vi.mocked(mockConfig.getContentGenerator).mockReturnValue(generator);
+          vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
             model: 'test-model',
-          }),
-        );
-      } finally {
-        vi.useRealTimers();
-      }
-    });
+            authType: AuthType.USE_OPENAI,
+          });
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            `prompt-id-${testCase.errorType.toLowerCase()}-budget`,
+          );
+          await expectStreamExhaustion(stream);
+
+          expect(create).toHaveBeenCalledTimes(testCase.retryCount + 1);
+          expect(mockLogContentRetry).toHaveBeenCalledTimes(
+            testCase.retryCount,
+          );
+          expect(mockLogContentRetryFailure).toHaveBeenCalledWith(
+            mockConfig,
+            expect.objectContaining({
+              total_attempts: testCase.retryCount + 1,
+              final_error_type: testCase.errorType,
+              model: 'test-model',
+            }),
+          );
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
 
     it('keeps invalid stream retry budgets independent across error types', async () => {
       vi.useFakeTimers();
@@ -5144,11 +5809,222 @@ describe('GeminiChat', async () => {
       }
     });
 
-    it('tries the next fallback when a fallback fails before emitting output', async () => {
+    it('uses one exact image route across retries and filters history for the next target', async () => {
+      const capacityError = Object.assign(
+        new Error('temporarily unavailable'),
+        {
+          status: 503,
+        },
+      );
+      const routeGenerateContentStream = vi
+        .fn()
+        .mockRejectedValueOnce(capacityError)
+        .mockResolvedValueOnce(
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: { parts: [{ text: 'seen' }] },
+                  finishReason: 'STOP',
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })(),
+        );
+      const routeGenerator = {
+        ...mockContentGenerator,
+        generateContentStream: routeGenerateContentStream,
+      } as ContentGenerator;
+      const routeSelector =
+        'openai:vision-agent\0https://vision.example.com/v1';
+      const selector = `${routeSelector}\0`;
+      const resolveForModel = vi.fn().mockResolvedValue({
+        contentGenerator: routeGenerator,
+        contentGeneratorConfig: {
+          model: 'vision-agent',
+          authType: AuthType.USE_OPENAI,
+          maxRetries: 1,
+          modalities: { image: true },
+        },
+        retryAuthType: AuthType.USE_OPENAI,
+        model: 'vision-agent',
+      });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel,
+      } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+      vi.mocked(mockConfig.getEffectiveInputModalities).mockReturnValue({
+        pdf: true,
+      });
+      chat = new GeminiChat(
+        mockConfig,
+        config,
+        [
+          {
+            role: 'user',
+            parts: [
+              { text: 'prior question' },
+              {
+                inlineData: {
+                  mimeType: 'application/pdf',
+                  data: 'prior-pdf',
+                },
+              },
+            ],
+          },
+          { role: 'model', parts: [{ text: 'prior answer' }] },
+        ],
+        undefined,
+        uiTelemetryService,
+      );
+      const tryCompress = vi.spyOn(chat, 'tryCompress');
+      mockRetryWithBackoff.mockImplementation(async (apiCall, options) => {
+        try {
+          return await apiCall();
+        } catch (error) {
+          expect(options?.shouldRetryOnError?.(error)).toBe(true);
+          return apiCall();
+        }
+      });
+
+      const stream = await chat.sendMessageStream(
+        selector,
+        {
+          message: [
+            { text: 'inspect' },
+            {
+              inlineData: {
+                mimeType: 'image/png',
+                data: 'private-image',
+              },
+            },
+          ],
+        },
+        'prompt-exact-route-retry',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(resolveForModel).toHaveBeenCalledOnce();
+      expect(resolveForModel).toHaveBeenCalledWith(routeSelector, {
+        failClosed: true,
+      });
+      expect(tryCompress).not.toHaveBeenCalled();
+      expect(routeGenerateContentStream).toHaveBeenCalledTimes(2);
+      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
+      const routeRequest = JSON.stringify(
+        routeGenerateContentStream.mock.calls.at(-1)?.[0],
+      );
+      expect(routeRequest).toContain('"model":"vision-agent"');
+      expect(routeRequest).toContain('private-image');
+      expect(routeRequest).toContain('[document: application/pdf]');
+      expect(routeRequest).not.toContain('prior-pdf');
+
+      vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mockResolvedValueOnce(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { parts: [{ text: 'primary follow-up' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+      const primaryStream = await chat.sendMessageStream(
+        'test-model',
+        {
+          message: [
+            { text: 'continue on primary' },
+            {
+              inlineData: {
+                mimeType: 'application/pdf',
+                data: 'current-pdf',
+              },
+            },
+          ],
+        },
+        'prompt-after-exact-route',
+      );
+      for await (const _ of primaryStream) {
+        /* consume */
+      }
+
+      const primaryRequest = JSON.stringify(
+        vi.mocked(mockContentGenerator.generateContentStream).mock
+          .calls[0]?.[0],
+      );
+      expect(primaryRequest).toContain('[image: image/png]');
+      expect(primaryRequest).not.toContain('private-image');
+      expect(primaryRequest).toContain('prior-pdf');
+      expect(primaryRequest).toContain('current-pdf');
+      const history = JSON.stringify(chat.getHistory());
+      expect(history).toContain('private-image');
+      expect(history).toContain('prior-pdf');
+      expect(history).toContain('current-pdf');
+    });
+
+    it('fails an exact image route without entering the fallback chain', async () => {
+      const capacityError = Object.assign(new Error('vision unavailable'), {
+        status: 503,
+      });
+      const routeGenerator = {
+        ...mockContentGenerator,
+        generateContentStream: vi.fn().mockRejectedValue(capacityError),
+      } as ContentGenerator;
+      const selector = 'openai:vision-agent\0https://vision.example.com/v1\0';
+      const resolveForModel = vi.fn().mockResolvedValue({
+        contentGenerator: routeGenerator,
+        contentGeneratorConfig: {
+          model: 'vision-agent',
+          authType: AuthType.USE_OPENAI,
+          maxRetries: 0,
+          modalities: { image: true },
+        },
+        retryAuthType: AuthType.USE_OPENAI,
+        model: 'vision-agent',
+      });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel,
+      } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+      vi.mocked(mockConfig.getModelFallbacks).mockReturnValue([
+        'ordinary-fallback',
+      ]);
+
+      const stream = await chat.sendMessageStream(
+        selector,
+        {
+          message: [
+            {
+              inlineData: { mimeType: 'image/png', data: 'private-image' },
+            },
+          ],
+        },
+        'prompt-exact-route-failure',
+      );
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            /* consume */
+          }
+        })(),
+      ).rejects.toBe(capacityError);
+
+      expect(resolveForModel).toHaveBeenCalledOnce();
+      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
+    });
+
+    it('tries the next fallback when a fallback emits only preparation metadata', async () => {
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         authType: AuthType.USE_GEMINI,
         model: 'test-model',
         maxRetries: 0,
+      });
+      vi.mocked(mockConfig.getEffectiveInputModalities).mockReturnValue({
+        image: true,
       });
       vi.mocked(mockConfig.getModelFallbacks).mockReturnValue([
         'fallback-a',
@@ -5172,6 +6048,7 @@ describe('GeminiChat', async () => {
           contentGenerator: makeFallbackGenerator(
             fallbackAGenerateContentStream,
           ),
+          contentGeneratorConfig: { modalities: {} },
           retryAuthType: AuthType.USE_GEMINI,
           retryErrorCodes: undefined,
           model: 'fallback-a',
@@ -5180,6 +6057,7 @@ describe('GeminiChat', async () => {
           contentGenerator: makeFallbackGenerator(
             fallbackBGenerateContentStream,
           ),
+          contentGeneratorConfig: { modalities: { image: true } },
           retryAuthType: AuthType.USE_GEMINI,
           retryErrorCodes: undefined,
           model: 'fallback-b',
@@ -5197,7 +6075,18 @@ describe('GeminiChat', async () => {
       vi.mocked(
         mockContentGenerator.generateContentStream,
       ).mockRejectedValueOnce(capacityError);
-      fallbackAGenerateContentStream.mockRejectedValueOnce(capacityError);
+      const preparationResponse = {
+        candidates: [{ content: { parts: [] } }],
+      } as unknown as GenerateContentResponse;
+      setToolCallPreparations(preparationResponse, [
+        { callId: 'call-fallback-a', toolName: 'read_file' },
+      ]);
+      fallbackAGenerateContentStream.mockResolvedValueOnce(
+        (async function* () {
+          yield preparationResponse;
+          throw capacityError;
+        })(),
+      );
       fallbackBGenerateContentStream.mockResolvedValueOnce(
         (async function* () {
           yield {
@@ -5213,7 +6102,17 @@ describe('GeminiChat', async () => {
 
       const stream = await chat.sendMessageStream(
         'test-model',
-        { message: 'test' },
+        {
+          message: [
+            { text: 'test' },
+            {
+              inlineData: {
+                mimeType: 'image/png',
+                data: 'fallback-image',
+              },
+            },
+          ],
+        },
         'prompt-two-fallbacks',
       );
       const events: StreamEvent[] = [];
@@ -5249,6 +6148,12 @@ describe('GeminiChat', async () => {
       expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
         1,
       );
+      expect(
+        JSON.stringify(fallbackAGenerateContentStream.mock.calls[0]?.[0]),
+      ).not.toContain('fallback-image');
+      expect(
+        JSON.stringify(fallbackBGenerateContentStream.mock.calls[0]?.[0]),
+      ).toContain('fallback-image');
       expect(fallbackAGenerateContentStream).toHaveBeenCalledTimes(1);
       expect(fallbackBGenerateContentStream).toHaveBeenCalledTimes(1);
       expect(
@@ -5956,6 +6861,136 @@ describe('GeminiChat', async () => {
       ).toBe(true);
     });
 
+    it('retries a transport stream error after yielding only tool preparation metadata', async () => {
+      vi.useFakeTimers();
+      try {
+        const transportError = Object.assign(new TypeError('terminated'), {
+          cause: Object.assign(new Error('other side closed'), {
+            code: 'UND_ERR_SOCKET',
+          }),
+        });
+        const preparationResponse = {
+          candidates: [{ content: { parts: [] } }],
+        } as unknown as GenerateContentResponse;
+        setToolCallPreparations(preparationResponse, [
+          { callId: 'call-preparing', toolName: 'read_file' },
+        ]);
+
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield preparationResponse;
+              throw transportError;
+            })(),
+          )
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'Recovered after preparation' }],
+                    },
+                    finishReason: 'STOP',
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+            })(),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-after-preparation',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 5_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        expect(
+          events.filter((event) => event.type === StreamEventType.RETRY),
+        ).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('falls back after yielding only tool preparation metadata', async () => {
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_GEMINI,
+        model: 'test-model',
+        maxRetries: 0,
+      });
+      vi.mocked(mockConfig.getModelFallbacks).mockReturnValue([
+        'fallback-model',
+      ]);
+
+      const fallbackGenerateContentStream = vi.fn().mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { parts: [{ text: 'Recovered with fallback' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+      const resolveForModel = vi.fn().mockResolvedValue({
+        contentGenerator: {
+          generateContent: vi.fn(),
+          generateContentStream: fallbackGenerateContentStream,
+          countTokens: vi.fn(),
+          embedContent: vi.fn(),
+          batchEmbedContents: vi.fn(),
+          useSummarizedThinking: vi.fn().mockReturnValue(false),
+        } as unknown as ContentGenerator,
+        retryAuthType: AuthType.USE_GEMINI,
+        retryErrorCodes: undefined,
+        model: 'fallback-model',
+      });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel,
+      } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+
+      const capacityError = Object.assign(
+        new StreamContentError(
+          '{"error":{"code":"429","message":"Throttling"}}',
+        ),
+        { status: 429 },
+      );
+      const preparationResponse = {
+        candidates: [{ content: { parts: [] } }],
+      } as unknown as GenerateContentResponse;
+      setToolCallPreparations(preparationResponse, [
+        { callId: 'call-fallback', toolName: 'read_file' },
+      ]);
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield preparationResponse;
+          throw capacityError;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-fallback-after-preparation',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) events.push(event);
+
+      expect(resolveForModel).toHaveBeenCalledWith('fallback-model', {
+        failClosed: true,
+      });
+      expect(fallbackGenerateContentStream).toHaveBeenCalledOnce();
+      expect(
+        events.filter((event) => event.type === StreamEventType.MODEL_FALLBACK),
+      ).toHaveLength(1);
+    });
+
     it('classifies every allow-listed stream transport code as retryable transport', () => {
       // Drift guard: the stream allow-list is a hand-curated subset of the
       // classifier's transport codes. If a code is renamed/removed there, or
@@ -6197,17 +7232,6 @@ describe('GeminiChat', async () => {
         vi.useRealTimers();
       }
     });
-
-    // NOTE: no test for the InvalidStreamError content-retry branch
-    // (geminiChat.ts ~line 1399). Verified unreachable for that error
-    // class: `isTransientStreamError` and `isContentError` are the
-    // same predicate (`error instanceof InvalidStreamError`), so the
-    // transient branch above always either `continue`s or `break`s
-    // before control reaches the content branch. The
-    // `popPartialIfPushed()` call there is preserved as
-    // defense-in-depth for a future error class that should diverge
-    // the predicates; see the comment block at that call site for
-    // the full analysis.
 
     it('rolls back the chat-recording entry too when the retry succeeds', async () => {
       // The in-memory rollback test above asserts `this.history` ends
@@ -8595,7 +9619,7 @@ describe('GeminiChat', async () => {
     }
 
     function invalidStream(
-      type: 'NO_FINISH_REASON' | 'PROTOCOL_TAG_LEAK',
+      type: InvalidStreamError['type'],
     ): AsyncGenerator<GenerateContentResponse> {
       return {
         [Symbol.asyncIterator]() {
@@ -9907,8 +10931,6 @@ describe('GeminiChat', async () => {
           invalidStream('PROTOCOL_TAG_LEAK'),
           invalidStream('PROTOCOL_TAG_LEAK'),
           invalidStream('PROTOCOL_TAG_LEAK'),
-          invalidStream('PROTOCOL_TAG_LEAK'),
-          invalidStream('PROTOCOL_TAG_LEAK'),
         ];
         let callIndex = 0;
         vi.mocked(
@@ -10255,26 +11277,11 @@ describe('GeminiChat', async () => {
       expect(mergedText).toBe('BCD');
     });
 
-    it('flushes the JSONL record when escalated stream throws mid-tool_use', async () => {
-      // Critical regression for the max-tokens escalation path:
-      // 1) initial stream succeeds with text + MAX_TOKENS → triggers
-      //    escalation, no partial set, deferred record clean.
-      // 2) escalated stream throws AFTER yielding a functionCall chunk
-      //    → processStreamResponse pushes a partial model[fc] into
-      //    `this.history` and stashes a NEW `pendingPartialAssistantRecord`.
-      // 3) The throw escapes through the for-await on the escalated
-      //    stream, propagates past the (now-passed) retry loop, and
-      //    lands in the outer `finally` block.
-      //
-      // BEFORE the fix: the flush only ran BEFORE the escalation block,
-      // so the new record set in step 2 was never appended to JSONL —
-      // live history disagreed with disk; `--resume` rehydrated a
-      // truncated transcript and `repairOrphanedToolUseTurnsInHistory`
-      // had nothing to repair, leaving the React scheduler's late real
-      // result as a permanent orphan.
-      //
-      // AFTER the fix: the flush is in `finally`, so the record lands
-      // on disk regardless of which stream raised.
+    it('rolls back an escalated partial tool call when the stream fails', async () => {
+      // The escalated attempt pushes a partial model[functionCall] and
+      // stages its recording before the stream failure surfaces. Both must
+      // be rolled back so later sends and resumed sessions do not repair an
+      // incomplete call with a synthetic result.
       const recordAssistantTurn = vi.fn();
       const chatWithRecording = new GeminiChat(
         mockConfig,
@@ -10334,20 +11341,10 @@ describe('GeminiChat', async () => {
         })(),
       ).rejects.toThrow(/synthetic mid-tool_use cut/);
 
-      // In-memory: the partial functionCall pushed by the escalated
-      // processStreamResponse must be in history.
-      const history = chatWithRecording.getHistory();
-      const partialModel = history.findLast((h) => h.role === 'model');
-      expect(
-        partialModel?.parts?.some(
-          (p) => p.functionCall?.id === 'call_escalation_throw',
-        ),
-      ).toBe(true);
+      expect(chatWithRecording.getHistory()).toEqual([
+        { role: 'user', parts: [{ text: 'kick off' }] },
+      ]);
 
-      // JSONL: at least one record must mention the partial functionCall
-      // (the escalation throw flushed it). Without the finally-block
-      // flush, this assertion would fail and the durable transcript
-      // would silently lose a tool_use that's still live in memory.
       const recordedHasPartial = recordAssistantTurn.mock.calls.some((call) => {
         const message = (
           call[0] as {
@@ -10358,7 +11355,7 @@ describe('GeminiChat', async () => {
           (p) => p.functionCall?.id === 'call_escalation_throw',
         );
       });
-      expect(recordedHasPartial).toBe(true);
+      expect(recordedHasPartial).toBe(false);
     });
   });
 

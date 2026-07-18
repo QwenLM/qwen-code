@@ -411,7 +411,7 @@ claude code 的机制是"**存储层保留完整、显示层按 `verbose` 截断
 > - **新增** core helper `packages/core/src/utils/generateContentResponseUtilities.ts` 的 `getToolResponseDisplayText(parts)`（读 `functionResponse.response.output` + 遍历 nested `functionResponse.parts` 媒体占位、空/缺失返回 `undefined`；**不二次截断**；规则见 §4.9 改动点 1）；
 > - **改** `packages/cli/src/ui/types.ts`：`IndividualToolCallDisplay` 加 `detailedDisplay?: string`（派生、不持久化）；
 > - **改** `packages/cli/src/ui/hooks/useReactToolScheduler.ts`（live 提取，`success` 分支派生 `detailedDisplay`）、`packages/cli/src/ui/utils/resumeHistoryUtils.ts`（resume 提取，`tool_result` 分支从 `responseParts ?? message.parts` 派生）、`packages/cli/src/ui/components/messages/ToolMessage.tsx` + `ToolGroupMessage.tsx`（渲染拆分：`ToolGroupMessage` 下传 `fullDetail`，`ToolMessage` 仅 `fullDetail && isCollapsibleTool && detailedDisplay` 切数据源）；
-> - **不改** `packages/cli/src/acp-integration/session/HistoryReplayer.ts` / `emitters/ToolCallEmitter.ts`——ACP `content[]` 已含完整 `output`（见上表），TUI transcript 不经此路，无需改动；
+> - **不改** `packages/cli/src/acp-integration/session/history-replayer.ts` / `emitters/tool-call-emitter.ts`——ACP `content[]` 已含完整 `output`（见上表），TUI transcript 不经此路，无需改动；
 > - **不改** 持久化 schema（`serializeToolResponse` / `chatRecordingService` / ACP 协议字段）——完整明细已天然存于 `responseParts`，新字段为派生值。
 
 ### C. 新增

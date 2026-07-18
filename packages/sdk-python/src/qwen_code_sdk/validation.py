@@ -17,6 +17,69 @@ _VALID_AUTH_TYPES = {"openai", "anthropic", "qwen-oauth", "gemini", "vertex-ai"}
 _VALID_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 
 
+_RESERVED_CLI_FLAGS = frozenset(
+    {
+        "--input-format",
+        "--output-format",
+        "-o",
+        "--channel",
+        "--model",
+        "-m",
+        "--auth-type",
+        "--fallback-model",
+        "--approval-mode",
+        "--yolo",
+        "-y",
+        "--insecure",
+        "--no-insecure",
+        "--core-tools",
+        "--exclude-tools",
+        "--allowed-tools",
+        "--max-tool-calls",
+        "--max-subagent-depth",
+        "--resume",
+        "-r",
+        "--continue",
+        "-c",
+        "--session-id",
+        "--fork-session",
+        "--max-session-turns",
+        "--system-prompt",
+        "--append-system-prompt",
+        "--include-directories",
+        "--add-dir",
+        "--allowed-mcp-server-names",
+        "--extensions",
+        "-e",
+        "--proxy",
+        "--sandbox",
+        "--no-sandbox",
+        "-s",
+        "--sandbox-image",
+        "--sandbox-session-id",
+        "--safe-mode",
+        "--no-safe-mode",
+        "--worktree",
+        "--disabled-slash-commands",
+        "--include-partial-messages",
+        "--chat-recording",
+        "--openai-logging",
+        "--openai-logging-dir",
+        "--openai-base-url",
+        "--openai-api-key",
+        "--mcp-config",
+        "--prompt",
+        "-p",
+        "--prompt-interactive",
+        "-i",
+        "--json-schema",
+        "--json-fd",
+        "--json-file",
+        "--input-file",
+    }
+)
+
+
 def validate_query_options(options: QueryOptions) -> None:
     if (
         options.permission_mode
@@ -49,7 +112,11 @@ def validate_query_options(options: QueryOptions) -> None:
             "or resume for a specific session ID."
         )
 
-    if options.session_id and (options.resume or options.continue_session):
+    if (
+        options.session_id
+        and (options.resume or options.continue_session)
+        and not options.fork_session
+    ):
         raise ValidationError(
             "Cannot use session_id with resume or continue_session. "
             "session_id starts a new session, "
@@ -62,7 +129,16 @@ def validate_query_options(options: QueryOptions) -> None:
     if options.resume:
         validate_session_id(options.resume, "resume")
 
-    if options.max_session_turns is not None and options.max_session_turns < -1:
+    if options.fork_session and not (options.resume or options.continue_session):
+        raise ValidationError(
+            "fork_session requires resume or continue_session to be set"
+        )
+
+    if options.max_session_turns is not None and (
+        isinstance(options.max_session_turns, bool)
+        or not isinstance(options.max_session_turns, int)
+        or options.max_session_turns < -1
+    ):
         raise ValidationError("max_session_turns must be -1 or a non-negative integer")
 
     if (
@@ -71,11 +147,62 @@ def validate_query_options(options: QueryOptions) -> None:
     ):
         raise ValidationError("path_to_qwen_executable cannot be empty")
 
+    if options.max_tool_calls is not None and options.max_tool_calls < -1:
+        raise ValidationError("max_tool_calls must be -1 or a non-negative integer")
+
+    if options.max_subagent_depth is not None and not (
+        1 <= options.max_subagent_depth <= 100
+    ):
+        raise ValidationError("max_subagent_depth must be between 1 and 100")
+
+    if options.agents:
+        for i, agent in enumerate(options.agents):
+            for field in ("name", "description", "systemPrompt"):
+                if not agent.get(field):
+                    raise ValidationError(
+                        f"agents[{i}] is missing required field: {field}"
+                    )
+
     if options.mcp_servers:
+        for name, config in options.mcp_servers.items():
+            if not isinstance(config, dict):
+                raise ValidationError(f"mcp_servers['{name}'] must be a mapping")
+
+    if options.extra_args:
+        for arg in options.extra_args:
+            if not arg:
+                raise ValidationError("extra_args items cannot be empty")
+            flag = arg.split("=", 1)[0]
+            if flag in _RESERVED_CLI_FLAGS:
+                raise ValidationError(
+                    f"extra_args cannot contain reserved flag: {flag}"
+                )
+
+    for field_name in (
+        "include_directories",
+        "extensions",
+        "allowed_mcp_server_names",
+        "disabled_slash_commands",
+    ):
+        field_value = getattr(options, field_name, None)
+        if field_value:
+            for item in field_value:
+                if "," in str(item):
+                    raise ValidationError(f"{field_name} items cannot contain commas")
+
+    if options.fallback_model:
+        for item in options.fallback_model:
+            if "," in item:
+                raise ValidationError("fallback_model items cannot contain commas")
+
+    if options.fallback_model and len(options.fallback_model) > 3:
         raise ValidationError(
-            "mcp_servers is not supported in Python SDK v1. "
-            "Remove the mcp_servers option or use the TypeScript SDK."
+            "fallback_model supports a maximum of 3 models. "
+            f"Got {len(options.fallback_model)}."
         )
+
+    if options.proxy is not None and not options.proxy.strip():
+        raise ValidationError("proxy cannot be empty")
 
 
 def _validate_optional_callable(

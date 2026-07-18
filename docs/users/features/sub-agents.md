@@ -14,16 +14,16 @@ Subagents are independent AI assistants that:
 
 ## Fork Subagent
 
-In addition to named subagents, Qwen Code supports **forking** — selected explicitly with `subagent_type: "fork"` (available in interactive sessions). A fork inherits the parent's full conversation context and runs detached in the background. Omitting `subagent_type` does **not** fork; it launches the general-purpose subagent, which runs to completion and returns its result inline.
+In addition to named subagents, Qwen Code supports **forking** — selected explicitly with `subagent_type: "fork"` (available in interactive sessions). A fork inherits the parent's full conversation context and runs detached in the background. Omitting `subagent_type` does **not** fork; it launches the general-purpose subagent. Top-level named subagents run in the background by default and deliver their results through completion notifications. Set `run_in_background: false` when the current turn must wait for the result inline.
 
 ### How Fork Differs from Named Subagents
 
-|               | Named Subagent                    | Fork Subagent                                         |
-| ------------- | --------------------------------- | ----------------------------------------------------- |
-| Context       | Starts fresh, no parent history   | Inherits parent's full conversation history           |
-| System prompt | Uses its own configured prompt    | Uses parent's exact system prompt (for cache sharing) |
-| Execution     | Blocks the parent until done      | Runs in background, parent continues immediately      |
-| Use case      | Specialized tasks (testing, docs) | Parallel tasks that need the current context          |
+|               | Named Subagent                                                 | Fork Subagent                                         |
+| ------------- | -------------------------------------------------------------- | ----------------------------------------------------- |
+| Context       | Starts fresh, no parent history                                | Inherits parent's full conversation history           |
+| System prompt | Uses its own configured prompt                                 | Uses parent's exact system prompt (for cache sharing) |
+| Execution     | Background by default; supports an explicit foreground opt-out | Always detached; parent continues immediately         |
+| Use case      | Specialized tasks (testing, docs)                              | Parallel tasks that need the current context          |
 
 ### When Fork is Used
 
@@ -61,7 +61,7 @@ Fork children cannot create further forks. This is enforced at runtime — if a 
 1. **Configuration**: You create Subagents configurations that define their behavior, tools, and system prompts
 2. **Delegation**: The main AI can automatically delegate tasks to appropriate Subagents — or fork itself (`subagent_type: "fork"`) when it wants to inherit the full conversation context and discard the intermediate output
 3. **Execution**: Subagents work independently, using their configured tools to complete tasks
-4. **Results**: They return results and execution summaries back to the main conversation
+4. **Results**: Background runs notify the main conversation when they finish; foreground opt-outs return results inline
 
 ## Getting Started
 
@@ -193,6 +193,27 @@ model under another configured auth type, such as `openai:deepseek-v4-flash`.
 When the selector resolves to another auth type, Qwen Code creates a dedicated
 runtime provider for that subagent request and sends the provider only the bare
 model ID.
+
+The built-in Explore agent inherits the main session model by default. To
+select a different model for only that built-in agent, configure
+`agents.builtin.exploreModel` in `settings.json` and restart Qwen Code:
+
+Earlier versions used `fastModel` for Explore by default. To preserve that
+behavior, set `agents.builtin.exploreModel` to `fast`.
+
+```json
+{
+  "agents": {
+    "builtin": {
+      "exploreModel": "fast"
+    }
+  }
+}
+```
+
+This setting accepts the same selectors described above. It is applied only
+when Qwen Code resolves the built-in Explore definition; a session, project,
+user, or extension agent named Explore keeps its own `model` setting.
 
 #### Permission Mode
 

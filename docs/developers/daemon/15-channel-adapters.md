@@ -7,9 +7,9 @@
 There are two current host modes:
 
 - `qwen channel start [name]` is the standalone ACP-backed channel service. It passes adapters an `AcpBridge` implementation of `ChannelAgentBridge`.
-- `qwen serve --channel <name>` and `qwen serve --channel all` are experimental daemon-managed modes. `qwen serve` starts one out-of-process channel worker, the worker connects to the daemon through the SDK, and adapters receive a `DaemonChannelBridge`-backed `ChannelAgentBridge` facade.
+- `qwen serve --channel <name>` and `qwen serve --channel all` are experimental daemon-managed modes. Named selections are grouped by owning workspace and `qwen serve` starts one out-of-process worker per owning runtime; each worker connects to the daemon through the SDK and adapters receive a `DaemonChannelBridge`-backed `ChannelAgentBridge` facade. `--channel all` remains a primary-only selection.
 
-In daemon-managed mode, each channel maps inbound chat traffic to daemon sessions under a configurable `SessionScope` (`user`, `thread`, or `single`). The adapter delegates to `DaemonChannelBridge`, which delegates to the SDK's `DaemonSessionClient` (see [`13-sdk-daemon-client.md`](./13-sdk-daemon-client.md)). Channel workers remain primary-workspace only in Phase 2a, so every selected channel's `cwd` must resolve to the daemon primary workspace.
+In daemon-managed mode, each channel maps inbound chat traffic to daemon sessions under a configurable `SessionScope` (`user`, `thread`, or `single`). The adapter delegates to `DaemonChannelBridge`, which delegates to the SDK's `DaemonSessionClient` (see [`13-sdk-daemon-client.md`](./13-sdk-daemon-client.md)). Every named channel must resolve to one registered, trusted workspace. The worker uses that runtime's canonical cwd, `QWEN_DAEMON_WORKSPACE`, and environment overlay; ownership resolution never falls back to primary.
 
 ### Webhook-triggered channel tasks
 
@@ -168,14 +168,15 @@ sequenceDiagram
 - `shutdown()` closes every active session and the underlying transport (the channel's WebSocket / long-poll).
 - DingTalk's WebSocket stream supports server-push; WeChat's long-poll requires a backoff strategy on idle responses; Telegram's long-poll has a built-in `timeout` parameter.
 
-### Settings reload (`POST /workspace/channel/reload`)
+### Runtime selection and settings reload
 
-The daemon reads channel settings from `settings.json` once, when the channel worker starts (`packages/cli/src/commands/channel/daemon-worker.ts` → `loadSettings` → `loadChannelsConfig`). To apply changes without a full daemon restart, the daemon exposes `POST /workspace/channel/reload` (strict mutation gate; SDK `DaemonClient.reloadChannelWorker()`; CLI `qwen channel reload`):
+The long-lived `ChannelWorkerManager` owns the committed daemon selection and workspace-grouped supervisors. A daemon may boot without `--channel`; the first strict-gated `PUT /workspace/channel` dynamically loads the channel runtime, reserves the service pidfile, resolves workspace ownership, and starts the selected workers. `GET /workspace/channel` reads the manager snapshot and `DELETE /workspace/channel` stops it idempotently. SDK helpers are `getChannelWorkerControl()`, `setChannelWorkerSelection()`, and `stopChannelWorker()`; the CLI entry is `qwen channel set` plus remote `status` and `stop` variants.
 
-- The route calls `ChannelWorkerSupervisor.restart()` (`packages/cli/src/serve/channel-worker-supervisor.ts`), which stops the current worker child and relaunches it. The relaunched worker re-reads `settings.json`, so channel tokens, `proxy`, and per-channel `model` all take effect.
-- Concurrent reloads coalesce onto a single stop+relaunch. `restart()` also resets the crash-restart budget, so a worker parked in `failed` recovers on an explicit reload.
-- If the relaunch fails (for example, settings were edited into an invalid state), the channels stay down, the route returns 5xx with the latest snapshot, and `GET /daemon/status` reports `failed`.
-- The `channel_reload` capability and the route are advertised only when the daemon was started with `--channel`. Adding a brand-new channel name to a `--channel <names>` selection still requires a daemon restart; `--channel all` picks up newly-configured channels on reload.
+The daemon reads channel settings from `settings.json` when each worker starts (`packages/cli/src/commands/channel/daemon-worker.ts` → `loadSettings` → `loadChannelsConfig`). `POST /workspace/channel/reload` re-reads those settings and force-reconciles the committed selection. All lifecycle mutations share one FIFO lane. Unchanged workspace groups survive ordinary selection replacement; changed groups stop and start sequentially while the serve-owned PID lease remains held.
+
+If a replacement fails, newly started workers are stopped and old workers are restored before the request returns. A supervisor that cannot observe exit after SIGTERM and SIGKILL retains its child reference and fails stop; the manager keeps the PID lease and never starts a second worker. Webhook configuration and routing change only when selection commit succeeds. Runtime selections are process-local and disappear on daemon restart.
+
+Adapter `connect()` failures are reported separately from worker lifecycle errors. The worker sends each bounded, credential-redacted failure over startup IPC and waits for a supervisor acknowledgement before trying the next adapter. A partially connected worker remains running and exposes `startupFailures` in its snapshot. If every adapter in a dynamic attempt fails, the `502 channel_worker_start_failed` response carries workspace-annotated attempted failures while `state` reflects the rollback result; subsequent GET responses do not retain the attempt. Daemon boot with no connected adapter remains fail-fast. The optional adapter `code` is diagnostic only, and the current `phase` is `connect`.
 
 ## Dependencies
 
@@ -211,8 +212,10 @@ Channel-specific keys layer on top (DingTalk: `streamCredentials`; WeChat: `ilin
 - `packages/channels/base/src/DaemonChannelBridge.ts`
 - `packages/channels/base/src/ChannelBase.ts`
 - `packages/channels/base/src/types.ts`
-- `packages/cli/src/serve/channel-worker-supervisor.ts` (worker supervision + `restart()`)
-- `packages/cli/src/serve/routes/workspace-channel-control.ts` (`POST /workspace/channel/reload`)
+- `packages/cli/src/serve/channel-worker-manager.ts` (selection lifecycle + serialization)
+- `packages/cli/src/serve/channel-worker-group.ts` (workspace-differential reconcile)
+- `packages/cli/src/serve/channel-worker-supervisor.ts` (child supervision)
+- `packages/cli/src/serve/routes/workspace-channel-control.ts` (GET/PUT/DELETE/reload resource)
 - `packages/channels/dingtalk/src/DingtalkAdapter.ts`
 - `packages/channels/weixin/src/WeixinAdapter.ts`
 - `packages/channels/telegram/src/TelegramAdapter.ts`

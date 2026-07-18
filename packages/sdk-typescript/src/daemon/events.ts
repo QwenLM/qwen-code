@@ -42,6 +42,7 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'session_died',
   'session_closed',
   'session_metadata_updated',
+  'session_recording_degraded',
   'artifact_changed',
   MID_TURN_MESSAGE_INJECTED_EVENT,
   PENDING_PROMPT_ADDED_EVENT,
@@ -96,6 +97,7 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'github_setup_completed',
   'mcp_server_restarted',
   'mcp_server_restart_refused',
+  'mcp_server_changed',
   'settings_reloaded',
   // Runtime MCP server add/remove events. Fired by
   // `POST /workspace/mcp/servers` on success (including replace and
@@ -153,6 +155,7 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   // Carries `currentModelId` and `currentApprovalMode` so reconnecting
   // clients can seed their reducer without an extra round-trip.
   'session_snapshot',
+  'git_branch_changed',
 ] as const;
 
 const DAEMON_KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set<string>(
@@ -739,7 +742,12 @@ export interface DaemonMcpServerRestartedData {
  */
 export interface DaemonMcpServerRestartRefusedData {
   serverName: string;
-  reason: 'in_flight' | 'disabled' | 'budget_would_exceed' | 'restart_failed';
+  reason:
+    | 'in_flight'
+    | 'disabled'
+    | 'budget_would_exceed'
+    | 'authentication_required'
+    | 'restart_failed';
   originatorClientId?: string;
   entryIndex?: number;
   details?: string;
@@ -836,6 +844,23 @@ export type DaemonMcpServerRemovedEvent = DaemonEventEnvelope<
   DaemonMcpServerRemovedData
 >;
 
+export interface DaemonMcpServerChangedData {
+  readonly serverName: string;
+  readonly action:
+    | 'approve'
+    | 'enable'
+    | 'disable'
+    | 'authenticate'
+    | 'clear-auth';
+  readonly originatorClientId?: string;
+  [key: string]: unknown;
+}
+
+export type DaemonMcpServerChangedEvent = DaemonEventEnvelope<
+  'mcp_server_changed',
+  DaemonMcpServerChangedData
+>;
+
 export interface DaemonExtensionsChangedData {
   readonly refreshed: number;
   readonly failed: number;
@@ -862,6 +887,13 @@ export interface DaemonSessionSnapshotData {
   sessionId: string;
   currentModelId: string | null;
   currentApprovalMode: string | null;
+  recordingDegraded?: boolean;
+  [key: string]: unknown;
+}
+
+export interface DaemonSessionRecordingDegradedData {
+  sessionId: string;
+  reason: 'write_failed';
   [key: string]: unknown;
 }
 export type DaemonSessionUpdateEvent = DaemonEventEnvelope<
@@ -1076,6 +1108,10 @@ export type DaemonSessionSnapshotEvent = DaemonEventEnvelope<
   'session_snapshot',
   DaemonSessionSnapshotData
 >;
+export type DaemonSessionRecordingDegradedEvent = DaemonEventEnvelope<
+  'session_recording_degraded',
+  DaemonSessionRecordingDegradedData
+>;
 export type DaemonSessionBranchedEvent = DaemonEventEnvelope<
   'session_branched',
   DaemonSessionBranchedData
@@ -1095,6 +1131,7 @@ export type DaemonSessionEvent =
   | DaemonSessionDiedEvent
   | DaemonSessionClosedEvent
   | DaemonSessionMetadataUpdatedEvent
+  | DaemonSessionRecordingDegradedEvent
   | DaemonArtifactChangedEvent
   | DaemonMidTurnMessageInjectedEvent
   | DaemonPendingPromptEvent
@@ -1145,7 +1182,8 @@ export type DaemonWorkspaceMutationEvent =
   | DaemonMemoryChangedEvent
   | DaemonAgentChangedEvent
   | DaemonTrustChangeRequestedEvent
-  | DaemonExtensionsChangedEvent;
+  | DaemonExtensionsChangedEvent
+  | DaemonMcpServerChangedEvent;
 
 /**
  * Daemon assist push events — non-terminal UX hints emitted by the ACP
@@ -1182,6 +1220,7 @@ export interface DaemonSessionViewState {
   alive: boolean;
   currentModelId?: string;
   displayName?: string;
+  recordingDegraded: boolean;
   pendingPermissions: Record<string, DaemonPermissionRequestData>;
   lastSessionUpdate?: DaemonSessionUpdateData;
   lastModelSwitchFailure?: DaemonModelSwitchFailedData;
@@ -1403,6 +1442,7 @@ const RESYNC_PASSTHROUGH_TYPES = new Set<KnownDaemonEvent['type']>([
   'session_closed',
   'client_evicted',
   'stream_error',
+  'session_recording_degraded',
   // A5 (#4511): the snapshot is a full-state authoritative frame, not a
   // delta, so it is safe to apply during resync — and it is exactly what
   // lets a client that reconnected past the ring recover currentModelId /
@@ -1420,6 +1460,7 @@ export function createDaemonSessionViewState(
     sessionId: seed.sessionId,
     currentModelId: seed.currentModelId,
     displayName: seed.displayName,
+    recordingDegraded: seed.recordingDegraded ?? false,
     lastSessionUpdate: seed.lastSessionUpdate,
     lastModelSwitchFailure: seed.lastModelSwitchFailure,
     terminalEvent: seed.terminalEvent,
@@ -1558,6 +1599,10 @@ export function asKnownDaemonEvent(
       return isSessionMetadataUpdatedData(event.data)
         ? (event as DaemonSessionMetadataUpdatedEvent)
         : undefined;
+    case 'session_recording_degraded':
+      return isSessionRecordingDegradedData(event.data)
+        ? (event as DaemonSessionRecordingDegradedEvent)
+        : undefined;
     case 'artifact_changed':
       return isArtifactChangedData(event.data)
         ? (event as DaemonArtifactChangedEvent)
@@ -1668,6 +1713,10 @@ export function asKnownDaemonEvent(
     case 'mcp_server_restart_refused':
       return isMcpServerRestartRefusedData(event.data)
         ? (event as DaemonMcpServerRestartRefusedEvent)
+        : undefined;
+    case 'mcp_server_changed':
+      return isMcpServerChangedData(event.data)
+        ? (event as DaemonMcpServerChangedEvent)
         : undefined;
     case 'settings_reloaded':
       return event.data != null && typeof event.data === 'object'
@@ -2089,6 +2138,7 @@ export function reduceDaemonSessionEvent(
     // reduced session-view state.
     case 'mcp_server_added':
     case 'mcp_server_removed':
+    case 'mcp_server_changed':
     case 'settings_reloaded':
     case 'extensions_changed':
     case 'artifact_changed':
@@ -2113,6 +2163,15 @@ export function reduceDaemonSessionEvent(
         ...(event.data.currentApprovalMode != null
           ? { approvalMode: event.data.currentApprovalMode }
           : {}),
+        ...(event.data.recordingDegraded !== undefined
+          ? { recordingDegraded: event.data.recordingDegraded }
+          : {}),
+      };
+    case 'session_recording_degraded':
+      return {
+        ...base,
+        sessionId: event.data.sessionId,
+        recordingDegraded: true,
       };
     case 'session_branched':
       return {
@@ -2931,6 +2990,7 @@ const MCP_RESTART_REFUSED_REASONS: ReadonlySet<string> = new Set([
   'in_flight',
   'disabled',
   'budget_would_exceed',
+  'authentication_required',
   // Pool-mode hard restart failure (entry's `client.connect()` or
   // rediscover threw). Carried alongside the soft-skip reasons so
   // SDK reducers maintain a single union for narrowing the event's
@@ -3013,6 +3073,21 @@ function isMcpServerRemovedData(
   return true;
 }
 
+function isMcpServerChangedData(
+  value: unknown,
+): value is DaemonMcpServerChangedData {
+  if (!isRecord(value) || !isNonEmptyString(value['serverName'])) {
+    return false;
+  }
+  return (
+    value['action'] === 'approve' ||
+    value['action'] === 'enable' ||
+    value['action'] === 'disable' ||
+    value['action'] === 'authenticate' ||
+    value['action'] === 'clear-auth'
+  );
+}
+
 function isExtensionsChangedData(
   value: unknown,
 ): value is DaemonExtensionsChangedData {
@@ -3067,9 +3142,21 @@ function isSessionSnapshotData(
   if (!isRecord(value) || !isNonEmptyString(value['sessionId'])) return false;
   const model = value['currentModelId'];
   const mode = value['currentApprovalMode'];
+  const recordingDegraded = value['recordingDegraded'];
   return (
     (model === null || typeof model === 'string') &&
-    (mode === null || typeof mode === 'string')
+    (mode === null || typeof mode === 'string') &&
+    (recordingDegraded === undefined || typeof recordingDegraded === 'boolean')
+  );
+}
+
+function isSessionRecordingDegradedData(
+  value: unknown,
+): value is DaemonSessionRecordingDegradedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['sessionId']) &&
+    value['reason'] === 'write_failed'
   );
 }
 

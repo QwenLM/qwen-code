@@ -48,6 +48,7 @@ import {
   reconcileMaxTokens,
   parsePositiveIntegerEnvValue,
 } from '../tokenLimits.js';
+import { setToolCallPreparations } from '../tool-call-preparation.js';
 
 const debugLogger = createDebugLogger('ANTHROPIC');
 
@@ -654,6 +655,11 @@ export class AnthropicContentGenerator implements ContentGenerator {
     //                    ArenaManager / forkedAgent).
     const deepseekThinkingOn = isDeepSeek && !!thinking;
     const stripAssistantThinking = isDeepSeek && !thinking;
+    const dropUnsignedAssistantThinking =
+      !isDeepSeek &&
+      !!thinking &&
+      this.modelSupportsAdaptiveThinking() &&
+      !isAnthropicNativeBaseUrl(this.contentGeneratorConfig);
 
     // Sample the live cache-control flags once per request and forward
     // them to the converter (body-side `cache_control`). The converter's
@@ -678,11 +684,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const { system, messages } = this.converter.convertGeminiRequestToAnthropic(
       request,
       {
-        // Both run together: normalization fills missing signatures so the
-        // injection pass treats those blocks as already-present, and the
-        // injection adds a synthetic block on tool_use turns lacking one.
+        // DeepSeek normalization and injection run together. Proxy-hosted
+        // Claude uses the separate unsigned-thinking cleanup below because an
+        // empty string cannot replace Claude's opaque signature.
         normalizeAssistantThinkingSignature: deepseekThinkingOn,
         injectThinkingOnToolUseTurns: deepseekThinkingOn,
+        dropUnsignedAssistantThinking,
         stripAssistantThinking,
         enableCacheControl,
         useGlobalCacheScope,
@@ -696,6 +703,15 @@ export class AnthropicContentGenerator implements ContentGenerator {
         )
       : undefined;
 
+    // Map Gemini-style toolConfig.functionCallingConfig.mode to Anthropic's
+    // tool_choice. Without this, the API defaults to tool_choice=auto and
+    // the model may legitimately skip tool calls — a problem for structured
+    // side queries (e.g. the AUTO-mode classifier's respond_in_schema) where
+    // the model must emit a tool call. Adaptive-thinking models (Claude
+    // 4.6+) compound this by consuming output budget on server-driven
+    // thinking before any tool_use, making forced tool_choice essential.
+    const toolChoice = this.resolveToolChoice(request, tools);
+
     return {
       model: this.contentGeneratorConfig.model,
       system,
@@ -704,6 +720,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       ...sampling,
       ...(thinking ? { thinking } : {}),
       ...(outputConfig ? { output_config: outputConfig } : {}),
+      ...(toolChoice ? { tool_choice: toolChoice } : {}),
     };
   }
 
@@ -1013,6 +1030,31 @@ export class AnthropicContentGenerator implements ContentGenerator {
     return { effort: effectiveEffort };
   }
 
+  /**
+   * Translate the Gemini-style `toolConfig.functionCallingConfig.mode` on
+   * the request into an Anthropic `tool_choice` value.
+   *
+   * Mapping:
+   *   mode 'ANY'  → `{ type: 'any' }`   (model must call at least one tool)
+   *   mode 'NONE' or 'AUTO' or absent → undefined (Anthropic has no
+   *     `tool_choice: { type: 'none' }`; to prevent tool calls the caller
+   *     should omit `tools` entirely)
+   *
+   * Only emitted when `tools` is non-empty — Anthropic rejects requests
+   * that carry `tool_choice` without a `tools` array.
+   */
+  private resolveToolChoice(
+    request: GenerateContentParameters,
+    tools: Anthropic.Tool[] | undefined,
+  ): NonNullable<MessageCreateParamsNonStreaming['tool_choice']> | undefined {
+    if (!tools || tools.length === 0) return undefined;
+    const mode = request.config?.toolConfig?.functionCallingConfig?.mode;
+    if (mode === 'ANY') {
+      return { type: 'any' };
+    }
+    return undefined;
+  }
+
   private async *redactStreamErrors(
     stream: AsyncIterable<RawMessageStreamEvent>,
   ): AsyncGenerator<RawMessageStreamEvent> {
@@ -1055,18 +1097,20 @@ export class AnthropicContentGenerator implements ContentGenerator {
         case 'content_block_start': {
           const index = event.index ?? 0;
           const type = String(event.content_block.type || 'text');
+          const id =
+            'id' in event.content_block ? event.content_block.id : undefined;
+          const name =
+            'name' in event.content_block
+              ? event.content_block.name
+              : undefined;
           const initialInput =
             type === 'tool_use' && 'input' in event.content_block
               ? JSON.stringify(event.content_block.input)
               : '';
           blocks.set(index, {
             type,
-            id:
-              'id' in event.content_block ? event.content_block.id : undefined,
-            name:
-              'name' in event.content_block
-                ? event.content_block.name
-                : undefined,
+            id,
+            name,
             inputJson: initialInput !== '{}' ? initialInput : '',
             signature:
               type === 'thinking' &&
@@ -1075,6 +1119,18 @@ export class AnthropicContentGenerator implements ContentGenerator {
                 ? event.content_block.signature
                 : '',
           });
+          if (
+            type === 'tool_use' &&
+            typeof id === 'string' &&
+            id.length > 0 &&
+            typeof name === 'string' &&
+            name.length > 0
+          ) {
+            const chunk = this.buildGeminiChunk(undefined, messageId, model);
+            setToolCallPreparations(chunk, [{ callId: id, toolName: name }]);
+            collectedResponses.push(chunk);
+            yield chunk;
+          }
           break;
         }
         case 'content_block_delta': {

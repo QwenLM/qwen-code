@@ -15,10 +15,10 @@ export const FORK_SUBAGENT_TYPE = 'fork';
  *
  * Forking is an explicit choice — the caller selects it with
  * `subagent_type: "fork"`. Omitting `subagent_type` always resolves to the
- * general-purpose subagent (awaitable, returns its result inline), never a
- * fork. This preserves the long-standing "omit ⇒ awaitable subagent" contract
- * that skills and callers depend on. When fork is unavailable, an explicit
- * `subagent_type: "fork"` also falls back to the general-purpose subagent.
+ * general-purpose subagent, never a fork. Regular top-level subagents run in
+ * the background by default; callers can set `run_in_background: false` for an
+ * inline result. When fork is unavailable, an explicit `subagent_type: "fork"`
+ * falls back to the general-purpose subagent.
  */
 export function isForkSubagentEnabled(config: Config): boolean {
   return config.isInteractive();
@@ -208,7 +208,7 @@ RULES (non-negotiable):
 2. Do NOT converse, ask questions, or suggest next steps
 3. Do NOT editorialize or add meta-commentary
 4. USE your tools directly: Bash, Read, Write, etc.
-5. If you modify files, commit your changes before reporting. Include the commit hash in your report.
+5. If you modify files, report the files changed and verification performed. Do NOT create a commit unless the directive explicitly asks you to.
 6. Do NOT emit text between tool calls. Use tools silently, then report once at the end.
 7. Stay strictly within your directive's scope. If you discover related systems outside your scope, mention them in one sentence at most — other workers cover those areas.
 8. Keep your report under 500 words unless the directive specifies otherwise. Be factual and concise.
@@ -219,7 +219,8 @@ Output format (plain text labels, not markdown headers):
   Scope: <echo back your assigned scope in one sentence>
   Result: <the answer or key findings, limited to the scope above>
   Key files: <relevant file paths — include for research tasks>
-  Files changed: <list with commit hash — include only if you modified files>
+  Files changed: <list — include only if you modified files>
+  Verification: <checks performed and their outcome — include only if you modified files>
   Issues: <list — include only if there are issues to flag>
 </${FORK_BOILERPLATE_TAG}>
 

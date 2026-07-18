@@ -16,14 +16,15 @@ import { StickyTodoList } from '../components/StickyTodoList.js';
 import { BtwMessage } from '../components/messages/BtwMessage.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { StreamingState } from '../types.js';
-import { getStickyTodoMaxVisibleItems } from '../utils/todoSnapshot.js';
+import { getStickyTodoMaxVisibleItemsForMode } from '../utils/todoSnapshot.js';
 import { getDialogMaxHeight } from '../utils/layoutUtils.js';
 
 export const ScreenReaderAppLayout: React.FC = () => {
   const uiState = useUIState();
   const stickyTodoWidth = Math.min(uiState.mainAreaWidth, 64);
-  const stickyTodoMaxVisibleItems = getStickyTodoMaxVisibleItems(
+  const stickyTodoMaxVisibleItems = getStickyTodoMaxVisibleItemsForMode(
     uiState.terminalHeight,
+    uiState.useTerminalBuffer,
   );
   const dialogMaxHeight = getDialogMaxHeight(
     uiState.terminalHeight,
@@ -34,7 +35,7 @@ export const ScreenReaderAppLayout: React.FC = () => {
     uiState.stickyTodos !== null &&
     !uiState.dialogsVisible &&
     !uiState.isFeedbackDialogOpen &&
-    uiState.streamingState !== StreamingState.WaitingForConfirmation;
+    uiState.streamingState === StreamingState.Responding;
 
   return (
     <Box flexDirection="column" width="90%" height="100%">

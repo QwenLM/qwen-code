@@ -100,6 +100,7 @@ export interface Envelope {
   senderId: string;
   senderName: string;
   chatId: string;
+  chatName?: string;
   text: string;
   threadId?: string;
   /** Platform-specific message ID for response correlation. */
@@ -133,6 +134,40 @@ export interface SessionTarget {
   chatId: string;
   threadId?: string;
   isGroup?: boolean;
+}
+
+export interface ObservedChannelIdentity {
+  id: string;
+  label: string;
+}
+
+export interface ObservedChannelContactObservation {
+  user: ObservedChannelIdentity;
+  group?: ObservedChannelIdentity;
+  topic?: ObservedChannelIdentity;
+}
+
+export interface ObservedChannelContact extends ObservedChannelIdentity {
+  channelName: string;
+  lastObservedAt: string;
+}
+
+export interface ObservedChannelRelatedContact extends ObservedChannelIdentity {
+  lastObservedAt: string;
+}
+
+export interface ObservedChannelTopic extends ObservedChannelRelatedContact {
+  users: ObservedChannelRelatedContact[];
+}
+
+export interface ObservedChannelGroup extends ObservedChannelContact {
+  users: ObservedChannelRelatedContact[];
+  topics: ObservedChannelTopic[];
+}
+
+export interface ObservedChannelContactGraph {
+  users: ObservedChannelContact[];
+  groups: ObservedChannelGroup[];
 }
 
 export interface ChannelTaskLifecycleBase {
@@ -197,31 +232,71 @@ export interface ChannelMemoryTarget {
   threadId?: string;
 }
 
-export interface ChannelMemoryWriteResult {
-  changed: boolean;
-  filePath?: string;
+export interface ChannelMemoryEntry {
+  id: string;
+  text: string;
+  createdAt?: string;
+  updatedAt?: string;
+  createdBy?: string;
 }
 
 export interface ChannelMemoryCallbacks {
   readChannelMemory(target: ChannelMemoryTarget): Promise<string>;
-  appendChannelMemory(
+  listChannelMemoryEntries(
     target: ChannelMemoryTarget,
-    text: string,
-  ): Promise<ChannelMemoryWriteResult>;
-  clearChannelMemory(
+  ): Promise<ChannelMemoryEntry[]>;
+  addChannelMemoryEntries(
     target: ChannelMemoryTarget,
-  ): Promise<ChannelMemoryWriteResult>;
+    texts: readonly string[],
+    createdBy?: string,
+  ): Promise<{
+    changed: boolean;
+    added: ChannelMemoryEntry[];
+    duplicateIds: string[];
+  }>;
+  updateChannelMemoryEntry(
+    target: ChannelMemoryTarget,
+    mutation: { id: string; text: string; expectedText?: string },
+  ): Promise<{ changed: boolean; entry?: ChannelMemoryEntry }>;
+  removeChannelMemoryEntries(
+    target: ChannelMemoryTarget,
+    mutation: {
+      ids: readonly string[];
+      expectedTextById?: Readonly<Record<string, string>>;
+    },
+  ): Promise<{ changed: boolean; removed: ChannelMemoryEntry[] }>;
+  clearChannelMemory(target: ChannelMemoryTarget): Promise<{
+    changed: boolean;
+  }>;
 }
 
-export interface ChannelMemoryIntentClassifierResult {
-  intent: 'remember' | 'list' | 'clear_all' | 'none';
-  memory?: string;
-  confidence: number;
-}
+export type ChannelMemoryIntentClassifierResult =
+  | {
+      intent: 'remember';
+      memory: string;
+      memories?: never;
+      confidence: number;
+    }
+  | {
+      intent: 'remember';
+      memory?: never;
+      memories: string[];
+      confidence: number;
+    }
+  | { intent: 'list'; targetIds?: string[]; confidence: number }
+  | { intent: 'inspect' | 'remove'; targetIds: string[]; confidence: number }
+  | {
+      intent: 'update';
+      targetIds: string[];
+      memory: string;
+      confidence: number;
+    }
+  | { intent: 'clear_all' | 'none'; confidence: number };
 
 export interface ChannelMemoryIntentClassifier {
   classifyChannelMemoryIntent(
     text: string,
+    entries?: readonly ChannelMemoryEntry[],
   ): Promise<ChannelMemoryIntentClassifierResult>;
 }
 

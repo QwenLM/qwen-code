@@ -210,6 +210,7 @@ async function defaultLookupHost(
 export async function assertVoiceBaseUrlNetworkAllowed(
   voiceConfig: VoiceTranscriptionConfig,
   lookupHost?: VoiceHostLookup,
+  abortSignal?: AbortSignal,
 ): Promise<void> {
   const hostname = normalizeHostname(new URL(voiceConfig.baseUrl).hostname);
   if (isLoopbackHost(hostname)) {
@@ -224,12 +225,33 @@ export async function assertVoiceBaseUrlNetworkAllowed(
     return;
   }
   let result: { address: string } | Array<{ address: string }>;
+  let onAbort: (() => void) | undefined;
   try {
-    result = await (lookupHost ?? defaultLookupHost)(hostname);
+    if (abortSignal?.aborted) {
+      throw abortSignal.reason;
+    }
+    const lookup = (lookupHost ?? defaultLookupHost)(hostname);
+    result = abortSignal
+      ? await Promise.race([
+          lookup,
+          new Promise<never>((_resolve, reject) => {
+            onAbort = () => reject(abortSignal.reason);
+            if (abortSignal.aborted) onAbort();
+            else abortSignal.addEventListener('abort', onAbort, { once: true });
+          }),
+        ])
+      : await lookup;
   } catch {
+    if (abortSignal?.aborted) {
+      throw abortSignal.reason instanceof Error
+        ? abortSignal.reason
+        : new Error('Voice request was aborted.');
+    }
     throw new Error(
       `Voice model '${voiceConfig.model}': DNS lookup failed for ${hostname}. Cannot verify network safety.`,
     );
+  } finally {
+    if (onAbort) abortSignal?.removeEventListener('abort', onAbort);
   }
   const records = Array.isArray(result) ? result : [result];
   if (records.some((record) => isPrivateNetworkIp(record.address))) {
@@ -616,7 +638,11 @@ export async function transcribeVoiceAudio(
   args: TranscribeVoiceAudioArgs,
 ): Promise<string> {
   const voiceConfig = resolveVoiceTranscriptionConfig(args);
-  await assertVoiceBaseUrlNetworkAllowed(voiceConfig, args.lookupHost);
+  await assertVoiceBaseUrlNetworkAllowed(
+    voiceConfig,
+    args.lookupHost,
+    args.abortSignal,
+  );
   const fetchFn = args.fetchFn ?? fetch;
   const language = resolveLanguageCode(readVoiceLanguage(args.settings));
   const keytermsContext = buildKeytermsContext(args.settings);

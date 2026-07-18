@@ -410,6 +410,23 @@ describe('InputPrompt', () => {
     unmount();
   });
 
+  it('queues the prompt for the next turn on Ctrl+Q', async () => {
+    props.buffer.setText('send this later');
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+    act(() => {
+      stdin.write('\x11');
+    });
+
+    await waitFor(() => {
+      expect(props.onSubmit).toHaveBeenCalledWith('send this later', {
+        deferUntilIdle: true,
+      });
+    });
+    expect(props.buffer.setText).toHaveBeenCalledWith('');
+    unmount();
+  });
+
   it('expands large paste placeholders before stashing', () => {
     const pending = new Map([
       ['[Pasted Content 1200 chars]', 'full pasted content'],

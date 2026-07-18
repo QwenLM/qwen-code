@@ -3,6 +3,7 @@ import type {
   ActiveGoal,
   SubagentConfig,
   McpToolProgressData,
+  ShellProgressData,
 } from '@qwen-code/qwen-code-core';
 
 /**
@@ -134,6 +135,7 @@ export interface CLISystemMessage {
   subtype: string;
   uuid: string;
   session_id: string;
+  parent_tool_use_id?: string | null;
   data?: unknown;
   cwd?: string;
   tools?: string[];
@@ -244,7 +246,7 @@ export interface MessageStopStreamEvent {
 export interface ToolProgressStreamEvent {
   type: 'tool_progress';
   tool_use_id: string;
-  content: McpToolProgressData;
+  content: McpToolProgressData | ShellProgressData;
 }
 
 export interface ActiveGoalStreamEvent {

@@ -954,6 +954,8 @@ export function endToolExecutionSpan(
      * user cancels.
      */
     cancelled?: boolean;
+    /** Extra span attributes recorded verbatim alongside the standard set. */
+    attributes?: Attributes;
   },
 ): void {
   const spanId = getSpanId(span);
@@ -970,7 +972,14 @@ export function endToolExecutionSpan(
 
   try {
     const duration = Date.now() - spanCtx.startTime;
-    const endAttributes: Attributes = { duration_ms: duration };
+    // Apply caller-supplied attributes FIRST so the canonical keys written
+    // below (duration_ms, success, error) always win a key collision — a
+    // passthrough attribute must never mask the span's own outcome fields.
+    const endAttributes: Attributes = {};
+    if (metadata?.attributes) {
+      Object.assign(endAttributes, metadata.attributes);
+    }
+    endAttributes['duration_ms'] = duration;
 
     if (metadata) {
       if (metadata.success !== undefined)

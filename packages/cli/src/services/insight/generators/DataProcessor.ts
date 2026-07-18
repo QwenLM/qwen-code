@@ -1028,6 +1028,8 @@ None captured`;
     // Initialize data structures
     const heatmap: HeatMapData = {};
     const activeHours: { [hour: number]: number } = {};
+    // Real timestamp of the most recent user interaction, for latestActiveTime.
+    let latestActiveTimestamp: Date | null = null;
     const sessionStartTimes: { [sessionId: string]: Date } = {};
     const sessionEndTimes: { [sessionId: string]: Date } = {};
     let totalMessages = 0;
@@ -1067,6 +1069,14 @@ None captured`;
 
               // Update active hours
               activeHours[hour] = (activeHours[hour] || 0) + 1;
+
+              // Track the most recent activity for latestActiveTime.
+              if (
+                latestActiveTimestamp === null ||
+                timestamp > latestActiveTimestamp
+              ) {
+                latestActiveTimestamp = timestamp;
+              }
             }
 
             // Track session times
@@ -1166,19 +1176,16 @@ None captured`;
 
     const totalHours = Math.round(totalDurationMs / (1000 * 60 * 60));
 
-    // Calculate latest active time
-    let latestActiveTime: string | null = null;
-    let latestTimestamp = new Date(0);
-    for (const dateStr in heatmap) {
-      const date = new Date(dateStr);
-      if (date > latestTimestamp) {
-        latestTimestamp = date;
-        latestActiveTime = date.toLocaleTimeString([], {
+    // Format the most recent activity's wall-clock time. (This previously
+    // iterated the date-only heatmap keys, so `new Date(key)` was UTC midnight
+    // and the derived time was a constant — the timezone offset — rather than
+    // the real last-active time.)
+    const latestActiveTime: string | null = latestActiveTimestamp
+      ? latestActiveTimestamp.toLocaleTimeString([], {
           hour: '2-digit',
           minute: '2-digit',
-        });
-      }
-    }
+        })
+      : null;
 
     // Calculate top tools
     const topTools = Object.entries(toolUsage)

@@ -41,6 +41,16 @@ export function daemonSessionRoutesPath(workspaceCwd: string): string {
   );
 }
 
+export function daemonObservedContactsPath(workspaceCwd: string): string {
+  return path.join(
+    Storage.getGlobalQwenDir(),
+    'channels',
+    'daemon',
+    hashDaemonWorkspace(workspaceCwd),
+    'observed-contacts.json',
+  );
+}
+
 export function channelLoopPath(): string {
   return path.join(Storage.getGlobalQwenDir(), 'channels', 'cron.json');
 }

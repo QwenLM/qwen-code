@@ -104,6 +104,7 @@ describe('activate', () => {
           version: '1.1.0',
         },
       },
+      extensionMode: vscode.ExtensionMode.Production,
     } as unknown as vscode.ExtensionContext;
   });
 
@@ -123,6 +124,20 @@ describe('activate', () => {
     expect(showInformationMessageMock).toHaveBeenCalledWith(
       'Qwen Code Companion extension successfully installed.',
     );
+  });
+
+  it('writes production logs to the Qwen Code Companion output channel', async () => {
+    const appendLine = vi.fn();
+    vi.mocked(vscode.window.createOutputChannel).mockReturnValue({
+      appendLine,
+    } as unknown as vscode.LogOutputChannel);
+
+    await activate(context);
+
+    expect(vscode.window.createOutputChannel).toHaveBeenCalledWith(
+      'Qwen Code Companion',
+    );
+    expect(appendLine).toHaveBeenCalledWith('[INFO] Extension activated');
   });
 
   it('launches Qwen Code with the full multi-root workspace env', async () => {

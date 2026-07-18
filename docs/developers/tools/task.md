@@ -13,7 +13,7 @@ Use `agent` to launch a specialized subagent to handle complex, multi-step tasks
 - `description` (string, required): A short (3-5 word) description of the task for user visibility and tracking purposes.
 - `prompt` (string, required): The detailed task prompt for the subagent to execute. Should contain comprehensive instructions for autonomous execution.
 - `subagent_type` (string, optional): The type of specialized agent to use for this task. Defaults to `general-purpose` if omitted.
-- `run_in_background` (boolean, optional): Set to `true` to run the agent in the background. You will be notified when it completes.
+- `run_in_background` (boolean, optional): Defaults to `true` for top-level one-shot agents. Set to `false` to wait for the result inline. Nested agents run in the foreground. Caller-owned `working_dir` launches default to foreground and reject explicit or configured background execution.
 - `isolation` (string, optional): Set to `"worktree"` to run the agent in an isolated git worktree.
 
 ## How to use `agent` with Qwen Code
@@ -24,7 +24,7 @@ When you use the Agent tool, the subagent will:
 
 1. Receive the task prompt with full autonomy
 2. Execute the task using its available tools
-3. Return a final result message
+3. Report a completion notification by default, or return a final result message when run in the foreground
 4. Terminate (subagents are stateless and single-use)
 
 Usage:
@@ -32,6 +32,8 @@ Usage:
 ```
 agent(description="Brief task description", prompt="Detailed task instructions for the subagent", subagent_type="agent_name")
 ```
+
+Set `run_in_background=false` when the current turn must use the subagent result before continuing.
 
 ## Available Subagents
 

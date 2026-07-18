@@ -2101,6 +2101,7 @@ describe('PR 21 — auth device-flow events', () => {
         | 'in_flight'
         | 'disabled'
         | 'budget_would_exceed'
+        | 'authentication_required'
         // F2 (#4175 commit 5): pool-mode hard restart failure carried
         // alongside the soft-skip reasons. The reducer treats it like
         // any other refusal — count + remember last — without a
@@ -2109,7 +2110,13 @@ describe('PR 21 — auth device-flow events', () => {
         // counter is the operator-meaningful signal ("this many
         // restart attempts didn't take effect").
         | 'restart_failed'
-      > = ['in_flight', 'disabled', 'budget_would_exceed', 'restart_failed'];
+      > = [
+        'in_flight',
+        'disabled',
+        'budget_would_exceed',
+        'authentication_required',
+        'restart_failed',
+      ];
       let state = initial;
       for (const [i, reason] of reasons.entries()) {
         state = reduceDaemonSessionEvent(state, {
@@ -2119,7 +2126,7 @@ describe('PR 21 — auth device-flow events', () => {
           data: { serverName: 'docs', reason },
         });
       }
-      expect(state.mcpRestartRefusedCount).toBe(4);
+      expect(state.mcpRestartRefusedCount).toBe(5);
       expect(state.mcpRestartCount).toBe(0);
       expect(state.lastMcpRestartRefused?.reason).toBe('restart_failed');
       // Bogus reason literal is rejected by the parser.
@@ -3203,6 +3210,57 @@ describe('PR 21 — auth device-flow events', () => {
   });
 
   describe('session_snapshot (A5 #4511)', () => {
+    it('validates and reduces recording degradation events', () => {
+      const event = {
+        id: 44,
+        v: 1,
+        type: 'session_recording_degraded',
+        data: { sessionId: 's-1', reason: 'write_failed' },
+      } satisfies DaemonEvent;
+
+      expect(asKnownDaemonEvent(event)).toBe(event);
+      const state = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        event,
+      );
+      expect(state.sessionId).toBe('s-1');
+      expect(state.recordingDegraded).toBe(true);
+    });
+
+    it('applies recording degradation while awaiting resync', () => {
+      const state = reduceDaemonSessionEvent(
+        {
+          ...createDaemonSessionViewState(),
+          awaitingResync: true,
+        },
+        {
+          v: 1,
+          type: 'session_recording_degraded',
+          data: { sessionId: 's-1', reason: 'write_failed' },
+        },
+      );
+
+      expect(state.recordingDegraded).toBe(true);
+      expect(state.awaitingResync).toBe(true);
+    });
+
+    it('rejects malformed recording degradation events', () => {
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'session_recording_degraded',
+          data: { sessionId: '', reason: 'write_failed' },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'session_recording_degraded',
+          data: { sessionId: 's-1', reason: 'disk_full' },
+        }),
+      ).toBeUndefined();
+    });
+
     it('asKnownDaemonEvent narrows session_snapshot', () => {
       const event: DaemonEvent = {
         v: 1,
@@ -3231,6 +3289,46 @@ describe('PR 21 — auth device-flow events', () => {
       expect(state.sessionId).toBe('s-1');
       expect(state.currentModelId).toBe('qwen-turbo');
       expect(state.approvalMode).toBe('yolo');
+    });
+
+    it('uses snapshot recording state when present and preserves it for old daemons', () => {
+      const degraded = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        {
+          v: 1,
+          type: 'session_snapshot',
+          data: {
+            sessionId: 's-1',
+            currentModelId: null,
+            currentApprovalMode: null,
+            recordingDegraded: true,
+          },
+        },
+      );
+      expect(degraded.recordingDegraded).toBe(true);
+
+      const legacySnapshot = reduceDaemonSessionEvent(degraded, {
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's-1',
+          currentModelId: null,
+          currentApprovalMode: null,
+        },
+      });
+      expect(legacySnapshot.recordingDegraded).toBe(true);
+
+      const recovered = reduceDaemonSessionEvent(legacySnapshot, {
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's-1',
+          currentModelId: null,
+          currentApprovalMode: null,
+          recordingDegraded: false,
+        },
+      });
+      expect(recovered.recordingDegraded).toBe(false);
     });
 
     it('reducer does not overwrite model/mode with null snapshot values', () => {
@@ -3289,6 +3387,21 @@ describe('PR 21 — auth device-flow events', () => {
       });
       expect(state.unrecognizedKnownEventCount).toBe(1);
       expect(state.approvalMode).toBeUndefined();
+    });
+
+    it('drops session_snapshot with a non-boolean recordingDegraded', () => {
+      const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's1',
+          currentModelId: null,
+          currentApprovalMode: null,
+          recordingDegraded: 'yes' as unknown as boolean,
+        },
+      });
+      expect(state.unrecognizedKnownEventCount).toBe(1);
+      expect(state.recordingDegraded).toBe(false);
     });
   });
 });

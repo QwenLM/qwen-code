@@ -216,6 +216,12 @@ export class FeishuChannel extends ChannelBase {
       await this.connectWebhook(webhookPort, verificationToken, encryptKey);
     } else {
       // WebSocket mode (default, like DingTalk Stream)
+      const token = await this.getTenantAccessToken();
+      if (!token) {
+        throw new Error(
+          `Channel "${this.name}" failed to authenticate Feishu credentials.`,
+        );
+      }
       await this.connectWebSocket();
     }
 

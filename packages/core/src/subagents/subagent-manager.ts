@@ -122,6 +122,36 @@ export class SubagentManager {
     }
   }
 
+  private applyBuiltinSettings(config: SubagentConfig): SubagentConfig {
+    if (config.name !== 'Explore') {
+      return config;
+    }
+
+    const configuredModel =
+      this.config.getAgentsSettings().builtin?.exploreModel;
+    if (typeof configuredModel !== 'string') {
+      return config;
+    }
+
+    const exploreModel = configuredModel.trim();
+    if (!exploreModel) {
+      return config;
+    }
+
+    return { ...config, model: exploreModel };
+  }
+
+  private getBuiltinAgent(name: string): SubagentConfig | null {
+    const config = BuiltinAgentRegistry.getBuiltinAgent(name);
+    return config ? this.applyBuiltinSettings(config) : null;
+  }
+
+  private getBuiltinAgents(): SubagentConfig[] {
+    return BuiltinAgentRegistry.getBuiltinAgents().map((config) =>
+      this.applyBuiltinSettings(config),
+    );
+  }
+
   /**
    * Creates a new subagent configuration.
    *
@@ -208,7 +238,7 @@ export class SubagentManager {
     if (level) {
       // Search only the specified level
       if (level === 'builtin') {
-        return BuiltinAgentRegistry.getBuiltinAgent(name);
+        return this.getBuiltinAgent(name);
       }
 
       if (level === 'session') {
@@ -254,7 +284,7 @@ export class SubagentManager {
     }
 
     // Try built-in agents as fallback
-    return BuiltinAgentRegistry.getBuiltinAgent(name);
+    return this.getBuiltinAgent(name);
   }
 
   /**
@@ -1194,7 +1224,7 @@ export class SubagentManager {
   ): Promise<SubagentConfig[]> {
     // Handle built-in agents
     if (level === 'builtin') {
-      return BuiltinAgentRegistry.getBuiltinAgents();
+      return this.getBuiltinAgents();
     }
 
     if (level === 'extension') {

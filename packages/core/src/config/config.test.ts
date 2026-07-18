@@ -49,6 +49,7 @@ import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { GeminiClient } from '../core/client.js';
 import { ShellTool } from '../tools/shell.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
+import { getSessionProjectDir } from '../utils/sessionIdContext.js';
 import { logRipgrepFallback } from '../telemetry/loggers.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
@@ -74,6 +75,8 @@ import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { HookSystem } from '../hooks/index.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
+import type { ChatRecordingFailureEvent } from '../services/chatRecordingService.js';
+import * as jsonl from '../utils/jsonl-utils.js';
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
@@ -508,6 +511,18 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  describe('project-dir registry lifecycle', () => {
+    it('drops its session entry on shutdown — no daemon leak', async () => {
+      const sessionId = 'cfg-shutdown-test-session';
+      const config = new Config({ ...baseParams, sessionId });
+      // Registered in the constructor, resolvable while alive.
+      expect(getSessionProjectDir(sessionId)).toBeDefined();
+      await config.shutdown();
+      // In daemon mode this is what stops the map growing per session.
+      expect(getSessionProjectDir(sessionId)).toBeUndefined();
+    });
+  });
+
   describe('shell execution config', () => {
     it('allows explicitly clearing the configured pager', () => {
       const config = new Config(baseParams);
@@ -621,6 +636,69 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('getShellDefaultTimeoutMs', () => {
+    it('returns undefined when unset', () => {
+      expect(new Config(baseParams).getShellDefaultTimeoutMs()).toBeUndefined();
+    });
+
+    it('passes through positive values', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          shellDefaultTimeoutMs: 300_000,
+        }).getShellDefaultTimeoutMs(),
+      ).toBe(300_000);
+    });
+
+    it('accepts 0 (disables the timeout — unlike the vision bridge)', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          shellDefaultTimeoutMs: 0,
+        }).getShellDefaultTimeoutMs(),
+      ).toBe(0);
+    });
+
+    it('treats negative values as unset (schema validation is bypassed on load)', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          shellDefaultTimeoutMs: -5000,
+        }).getShellDefaultTimeoutMs(),
+      ).toBeUndefined();
+    });
+
+    it('rejects values AbortSignal.timeout cannot take (fractional, over 2^31-1, non-finite)', () => {
+      // A hand-edited settings.json bypasses the schema and can reach
+      // AbortSignal.timeout, which would throw RangeError or degrade to a
+      // 1ms timer on these. Coerce to undefined → built-in default.
+      for (const bad of [
+        30_000.5,
+        2_147_483_648,
+        4_294_967_296,
+        1e300,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+      ]) {
+        expect(
+          new Config({
+            ...baseParams,
+            shellDefaultTimeoutMs: bad,
+          }).getShellDefaultTimeoutMs(),
+        ).toBeUndefined();
+      }
+    });
+
+    it('accepts the maximum supported integer timeout', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          shellDefaultTimeoutMs: 2_147_483_647,
+        }).getShellDefaultTimeoutMs(),
+      ).toBe(2_147_483_647);
+    });
+  });
+
   describe('getMaxSubagentDepth', () => {
     it('defaults to 5 when unset', () => {
       expect(new Config(baseParams).getMaxSubagentDepth()).toBe(5);
@@ -728,6 +806,42 @@ describe('Server Config (config.ts)', () => {
           outputFile: '/tmp/bg-2.jsonl',
         }),
       ).toThrow('maximum concurrent background agents (1) reached');
+    });
+  });
+
+  describe('agents.maxParallelAgentsByModel', () => {
+    it('configures a per-model background task concurrency cap', () => {
+      const config = new Config({
+        ...baseParams,
+        agents: {
+          maxParallelAgentsByModel: { 'weak-model': 1 },
+        },
+      });
+      const registry = config.getBackgroundTaskRegistry();
+
+      registry.register({
+        agentId: 'bg-1',
+        description: 'one',
+        model: 'weak-model',
+        isBackgrounded: true,
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        outputFile: '/tmp/bg-1.jsonl',
+      });
+
+      expect(() =>
+        registry.register({
+          agentId: 'bg-2',
+          description: 'two',
+          model: 'weak-model',
+          isBackgrounded: true,
+          status: 'running',
+          startTime: Date.now(),
+          abortController: new AbortController(),
+          outputFile: '/tmp/bg-2.jsonl',
+        }),
+      ).toThrow('for model "weak-model" (1) reached');
     });
   });
 
@@ -939,19 +1053,24 @@ describe('Server Config (config.ts)', () => {
       );
     };
 
-    it('honors an explicit visionModel even across providers', () => {
-      const config = new Config({ ...baseParams, visionModel: 'vl-anthropic' });
+    it('keeps a bare cross-provider namesake on its exact agent route', () => {
+      const config = new Config({ ...baseParams, visionModel: 'text-primary' });
       stubProvider(config, [
         {
-          id: 'vl-anthropic',
+          id: 'text-primary',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+        },
+        {
+          id: 'text-primary',
           authType: AuthType.USE_ANTHROPIC,
-          baseUrl: 'https://api.anthropic.com',
           isVision: true,
+          capabilities: { vision: true, agent: true },
         },
       ]);
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-anthropic',
-        baseUrl: 'https://api.anthropic.com',
+        id: 'anthropic:text-primary',
+        agentCapable: true,
       });
     });
 
@@ -968,7 +1087,7 @@ describe('Server Config (config.ts)', () => {
       // 'ghost-model' isn't configured, so the explicit pin is ignored and the
       // same-provider candidate is auto-picked instead.
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
     });
@@ -984,7 +1103,7 @@ describe('Server Config (config.ts)', () => {
         },
       ]);
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
     });
@@ -1041,6 +1160,39 @@ describe('Server Config (config.ts)', () => {
       });
     });
 
+    it.each([false, true])(
+      'honors an exact visionModel route with ignored fast-only namesakes (reversed=%s)',
+      (reversed) => {
+        const baseUrl = 'https://vision.example.com/v1';
+        const routeEntries = [
+          {
+            id: 'vision-agent',
+            authType: AuthType.USE_OPENAI,
+            baseUrl,
+            isVision: true,
+            capabilities: { vision: true, agent: true },
+          },
+          {
+            id: 'vision-agent',
+            authType: AuthType.USE_OPENAI,
+            baseUrl,
+            fastOnly: true,
+          },
+        ];
+        const config = new Config({
+          ...baseParams,
+          visionModel: `openai:vision-agent\0${baseUrl}`,
+        });
+        stubProvider(config, reversed ? routeEntries.reverse() : routeEntries);
+
+        expect(config.getDefaultVisionBridgeModel()).toEqual({
+          id: 'openai:vision-agent',
+          baseUrl,
+          agentCapable: true,
+        });
+      },
+    );
+
     it('falls back to auto-select when a legacy visionModel matches multiple endpoints', () => {
       const config = new Config({
         ...baseParams,
@@ -1067,7 +1219,7 @@ describe('Server Config (config.ts)', () => {
         },
       ]);
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
     });
@@ -1086,7 +1238,7 @@ describe('Server Config (config.ts)', () => {
       ]);
       expect(() => config.getDefaultVisionBridgeModel()).not.toThrow();
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
     });
@@ -1107,7 +1259,7 @@ describe('Server Config (config.ts)', () => {
       ]);
 
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
       expect(warn).toHaveBeenCalledWith(
@@ -1137,7 +1289,7 @@ describe('Server Config (config.ts)', () => {
         },
       ]);
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
     });
@@ -1160,20 +1312,20 @@ describe('Server Config (config.ts)', () => {
       ]);
       // Pinned first.
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-anthropic',
+        id: 'anthropic:vl-anthropic',
         baseUrl: 'https://api.anthropic.com',
       });
       // Cleared with '' — JSDoc promises a fall back to auto-select.
       config.setVisionModel('');
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
       // undefined clears too.
       config.setVisionModel('vl-anthropic');
       config.setVisionModel(undefined);
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
     });
@@ -2023,6 +2175,116 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('chat recording failure listeners', () => {
+    const notify = (config: Config, event: ChatRecordingFailureEvent) => {
+      (
+        config as unknown as {
+          notifyChatRecordingFailure: (
+            failure: ChatRecordingFailureEvent,
+          ) => void;
+        }
+      ).notifyChatRecordingFailure(event);
+    };
+
+    it('notifies multiple listeners and disposes them independently', () => {
+      const config = new Config(baseParams);
+      const first = vi.fn();
+      const second = vi.fn();
+      const disposeFirst = config.onChatRecordingFailure(first);
+      config.onChatRecordingFailure(second);
+      const event = { sessionId: 's-1', error: new Error('write failed') };
+
+      notify(config, event);
+      disposeFirst();
+      notify(config, event);
+
+      expect(first).toHaveBeenCalledTimes(1);
+      expect(second).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps a subscription wired to a replacement session recorder', async () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const listener = vi.fn();
+      config.onChatRecordingFailure(listener);
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      config.startNewSession(sessionId);
+      const error = new Error('replacement write failed');
+      const writeLine = vi
+        .spyOn(jsonl, 'writeLine')
+        .mockRejectedValueOnce(error);
+
+      try {
+        const recorder = config.getChatRecordingService()!;
+        recorder.recordUserMessage([{ text: 'new session' }]);
+        await expect(recorder.flush()).rejects.toBe(error);
+
+        expect(listener).toHaveBeenCalledOnce();
+        expect(listener).toHaveBeenCalledWith({ sessionId, error });
+      } finally {
+        writeLine.mockRestore();
+      }
+    });
+
+    it('isolates synchronous throws and asynchronous listener rejections', async () => {
+      const config = new Config(baseParams);
+      const unhandled: unknown[] = [];
+      const onUnhandled = (error: unknown) => unhandled.push(error);
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        config.onChatRecordingFailure(() => {
+          throw new Error('listener threw');
+        });
+        config.onChatRecordingFailure(async () => {
+          throw new Error('listener rejected');
+        });
+
+        notify(config, {
+          sessionId: 's-1',
+          error: new Error('write failed'),
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.off('unhandledRejection', onUnhandled);
+      }
+    });
+
+    it('keeps listeners through shutdown flush and clears them afterward', async () => {
+      const config = new Config(baseParams);
+      const listener = vi.fn();
+      config.onChatRecordingFailure(listener);
+      const event = { sessionId: 's-1', error: new Error('write failed') };
+      (
+        config as unknown as {
+          initialized: boolean;
+          chatRecordingService: {
+            finalize: () => void;
+            flush: () => Promise<void>;
+          };
+        }
+      ).initialized = true;
+      (
+        config as unknown as {
+          chatRecordingService: {
+            finalize: () => void;
+            flush: () => Promise<void>;
+          };
+        }
+      ).chatRecordingService = {
+        finalize: vi.fn(),
+        flush: async () => {
+          notify(config, event);
+        },
+      };
+
+      await config.shutdown();
+      notify(config, event);
+
+      expect(listener).toHaveBeenCalledOnce();
+    });
+  });
+
   it('should expose LSP status from the configured client', () => {
     const getStatusSnapshot = vi.fn().mockReturnValue({
       enabled: true,
@@ -2394,7 +2656,7 @@ describe('Server Config (config.ts)', () => {
     });
 
     it('does not register artifact tools when artifacts are disabled', async () => {
-      const config = new Config({ ...baseParams });
+      const config = new Config({ ...baseParams, artifactEnabled: false });
       await config.initialize();
 
       const registeredNames = (
@@ -2404,10 +2666,9 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).not.toContain(ToolNames.RECORD_ARTIFACT);
     });
 
-    it('registers both artifact tools when artifacts are enabled', async () => {
+    it('registers both artifact tools by default for interactive sessions', async () => {
       const config = new Config({
         ...baseParams,
-        artifactEnabled: true,
         interactive: true,
         sdkMode: false,
       });
@@ -2420,10 +2681,9 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).toContain(ToolNames.RECORD_ARTIFACT);
     });
 
-    it('registers only record_artifact for daemon artifact metadata', async () => {
+    it('registers only record_artifact by default for daemon artifact metadata', async () => {
       const config = new Config({
         ...baseParams,
-        artifactEnabled: true,
         interactive: false,
         sdkMode: false,
       });
@@ -2458,19 +2718,30 @@ describe('Server Config (config.ts)', () => {
         }
       });
 
-      it('is disabled by default', () => {
+      it('enables metadata recording by default without publishing from daemon sessions', () => {
         const config = new Config(baseParams);
         expect(config.isArtifactEnabled()).toBe(false);
+        expect(config.isRecordArtifactEnabled()).toBe(true);
       });
 
-      it('honors settings when interactive and not in SDK mode', () => {
+      it('is enabled by default when interactive and not in SDK mode', () => {
         const config = new Config({
           ...baseParams,
-          artifactEnabled: true,
           interactive: true,
           sdkMode: false,
         });
         expect(config.isArtifactEnabled()).toBe(true);
+      });
+
+      it('honors settings that disable artifacts', () => {
+        const config = new Config({
+          ...baseParams,
+          artifactEnabled: false,
+          interactive: true,
+          sdkMode: false,
+        });
+        expect(config.isArtifactEnabled()).toBe(false);
+        expect(config.isRecordArtifactEnabled()).toBe(false);
       });
 
       it('lets QWEN_CODE_DISABLE_ARTIFACT override settings and env enablement', () => {
@@ -2512,10 +2783,9 @@ describe('Server Config (config.ts)', () => {
         expect(config.isRecordArtifactEnabled()).toBe(true);
       });
 
-      it('lets daemon sessions record metadata from settings without publishing', () => {
+      it('lets daemon sessions record metadata by default without publishing', () => {
         const config = new Config({
           ...baseParams,
-          artifactEnabled: true,
           interactive: false,
           sdkMode: false,
         });
@@ -3774,6 +4044,37 @@ describe('Server Config (config.ts)', () => {
     cwdSpy.mockRestore();
   });
 
+  it('relocateWorkingDirectory should continue after recording flush fails', async () => {
+    const config = new Config(baseParams);
+    const newDir = path.resolve('/path/to/other');
+    const finalize = vi.fn();
+    const flush = vi.fn().mockRejectedValue(new Error('recording failed'));
+    const resetStoragePaths = vi.fn();
+    (
+      config as unknown as {
+        chatRecordingService: {
+          finalize: () => void;
+          flush: () => Promise<void>;
+          resetStoragePaths: () => void;
+        };
+      }
+    ).chatRecordingService = { finalize, flush, resetStoragePaths };
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+
+    await expect(config.relocateWorkingDirectory(newDir)).resolves.toEqual({});
+
+    expect(finalize).toHaveBeenCalledOnce();
+    expect(flush).toHaveBeenCalledOnce();
+    expect(resetStoragePaths).toHaveBeenCalledOnce();
+    expect(config.getTargetDir()).toBe(newDir);
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
   it('relocateWorkingDirectory should move current session artifacts to the new workspace', async () => {
     const config = new Config(baseParams);
     const sessionId = config.getSessionId();
@@ -4082,6 +4383,28 @@ describe('Server Config (config.ts)', () => {
     expect(config.getUserMemory()).toContain('MEMORY.md is currently empty');
   });
 
+  it('refreshHierarchicalMemory should omit managed auto-memory prompt when disabled', async () => {
+    const config = new Config({
+      ...baseParams,
+      enableManagedAutoMemory: false,
+    });
+
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+      fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+    vi.mocked(readAutoMemoryIndex).mockResolvedValue(null);
+
+    await config.refreshHierarchicalMemory();
+
+    expect(config.getUserMemory()).toContain('Project rules');
+    expect(config.getUserMemory()).not.toContain('# auto memory');
+    expect(readAutoMemoryIndex).not.toHaveBeenCalled();
+  });
+
   it('refreshHierarchicalMemory should only use explicit inputs in bare mode', async () => {
     const config = new Config({
       ...baseParams,
@@ -4117,13 +4440,13 @@ describe('Server Config (config.ts)', () => {
       expect(config.isManagedMemoryAvailable()).toBe(false);
     });
 
-    it('returns true even when enableManagedAutoMemory is false', () => {
+    it('returns false when enableManagedAutoMemory is false', () => {
       const config = new Config({
         ...baseParams,
         enableManagedAutoMemory: false,
         bareMode: false,
       });
-      expect(config.isManagedMemoryAvailable()).toBe(true);
+      expect(config.isManagedMemoryAvailable()).toBe(false);
     });
   });
 
@@ -5176,6 +5499,18 @@ describe('Server Config (config.ts)', () => {
       expect(config.getMaxToolCallsPerTurn()).toBe(42);
     });
 
+    it('tracks whether maxToolCallsPerTurn was explicitly set', () => {
+      expect(
+        new Config({ ...baseParams }).isMaxToolCallsPerTurnExplicit(),
+      ).toBe(false);
+      expect(
+        new Config({
+          ...baseParams,
+          maxToolCallsPerTurn: 42,
+        }).isMaxToolCallsPerTurnExplicit(),
+      ).toBe(true);
+    });
+
     it.each([0, -1])(
       'should return infinity (cap disabled) when set to %d',
       (capValue) => {
@@ -5184,6 +5519,31 @@ describe('Server Config (config.ts)', () => {
           maxToolCallsPerTurn: capValue,
         });
         expect(config.getMaxToolCallsPerTurn()).toBe(Number.POSITIVE_INFINITY);
+      },
+    );
+
+    it.each([0.5, Number.NaN, Number.POSITIVE_INFINITY])(
+      'should reject an invalid maxToolCallsPerTurn value: %s',
+      (capValue) => {
+        expect(
+          () => new Config({ ...baseParams, maxToolCallsPerTurn: capValue }),
+        ).toThrow(/maxToolCallsPerTurn: must be an integer/);
+      },
+    );
+  });
+
+  describe('getMaxSessionTurns', () => {
+    it.each([-42, -1, 0, 42])('should accept %d', (maxSessionTurns) => {
+      const config = new Config({ ...baseParams, maxSessionTurns });
+      expect(config.getMaxSessionTurns()).toBe(maxSessionTurns);
+    });
+
+    it.each([0.5, Number.NaN, Number.POSITIVE_INFINITY])(
+      'should reject an invalid value: %s',
+      (maxSessionTurns) => {
+        expect(() => new Config({ ...baseParams, maxSessionTurns })).toThrow(
+          /maxSessionTurns: must be an integer/,
+        );
       },
     );
   });
@@ -5475,25 +5835,21 @@ describe('setApprovalMode with folder trust', () => {
       expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
     });
 
-    // Regression for #5574: the gate state records whether the model or the
-    // user entered plan mode, so exit_plan_mode can decide whether to gate.
-    it('marks the plan gate entry as user-initiated by default', () => {
+    it('increments the approval mode revision only for actual changes', () => {
       const config = new Config(baseParams);
       vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
 
+      const initialRevision = config.getApprovalModeRevision();
       config.setApprovalMode(ApprovalMode.PLAN);
-      expect(config.getPlanGateState()?.enteredByModel).toBe(false);
-    });
-
-    it('marks the plan gate entry as model-initiated when enter_plan_mode requests it', () => {
-      const config = new Config(baseParams);
-      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
-
+      expect(config.getApprovalModeRevision()).toBe(initialRevision + 1);
+      config.setApprovalMode(ApprovalMode.PLAN);
       config.setApprovalMode(ApprovalMode.PLAN, { enteredByModel: true });
-      expect(config.getPlanGateState()?.enteredByModel).toBe(true);
+      expect(config.getApprovalModeRevision()).toBe(initialRevision + 1);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      expect(config.getApprovalModeRevision()).toBe(initialRevision + 2);
     });
 
-    it('records prePlanMode=yolo and enteredByModel=false for a Shift+Tab cycle into plan mode (#5574)', () => {
+    it('records prePlanMode=yolo for a Shift+Tab cycle into plan mode', () => {
       const config = new Config(baseParams);
       vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
 
@@ -5504,10 +5860,35 @@ describe('setApprovalMode with folder trust', () => {
       config.setApprovalMode(ApprovalMode.YOLO);
       config.setApprovalMode(ApprovalMode.PLAN);
 
-      // prePlanMode is yolo purely because it precedes plan in the cycle —
-      // it does NOT mean the user wants autonomous execution.
       expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
-      expect(config.getPlanGateState()?.enteredByModel).toBe(false);
+    });
+
+    it('does not partially apply plan exit bookkeeping when transition work fails', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      config.setApprovalMode(ApprovalMode.AUTO);
+      config.setApprovalMode(ApprovalMode.PLAN);
+      const revision = config.getApprovalModeRevision();
+      (
+        config as unknown as {
+          permissionManager: {
+            stripDangerousRulesForAutoMode: () => void;
+            restoreDangerousRules: () => void;
+          };
+        }
+      ).permissionManager = {
+        stripDangerousRulesForAutoMode: () => {
+          throw new Error('strip failed');
+        },
+        restoreDangerousRules: vi.fn(),
+      };
+
+      expect(() => config.setApprovalMode(ApprovalMode.AUTO)).toThrow(
+        'strip failed',
+      );
+      expect(config.getApprovalMode()).toBe(ApprovalMode.PLAN);
+      expect(config.getPrePlanMode()).toBe(ApprovalMode.AUTO);
+      expect(config.getApprovalModeRevision()).toBe(revision);
     });
   });
 

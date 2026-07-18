@@ -890,7 +890,7 @@ export async function parseArguments(): Promise<CliArgs> {
         })
         .option('max-session-turns', {
           type: 'number',
-          description: 'Maximum number of session turns',
+          description: 'Maximum number of session turns (must be an integer)',
         })
         .option('max-wall-time', {
           type: 'string',
@@ -1610,8 +1610,13 @@ export async function loadCliConfig(
     approvalMode = ApprovalMode.YOLO;
   } else if (!bareMode && !safeMode && settings.tools?.approvalMode) {
     approvalMode = parseApprovalModeValue(settings.tools.approvalMode);
-  } else {
+  } else if (bareMode || safeMode) {
+    // Restricted modes strip permissions/allowlists and are meant to be
+    // maximally restrictive, so they keep manual approval rather than the
+    // AUTO default that normal sessions now get.
     approvalMode = ApprovalMode.DEFAULT;
+  } else {
+    approvalMode = ApprovalMode.AUTO;
   }
 
   // Force approval mode to default if the folder is not trusted.
@@ -2099,7 +2104,7 @@ export async function loadCliConfig(
     cronEnabled: settings.experimental?.cron ?? true,
     cronRecurringMaxAgeDays: settings.experimental?.cronRecurringMaxAgeDays,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
-    artifactEnabled: settings.experimental?.artifact ?? false,
+    artifactEnabled: settings.experimental?.artifact ?? true,
     artifactAutoOpen: settings.artifact?.autoOpen ?? true,
     artifactPublisher: settings.artifact?.publisher ?? 'local',
     artifactHost: settings.artifact?.host
@@ -2150,6 +2155,7 @@ export async function loadCliConfig(
     providerProtocolConfig,
     generationConfigSources: resolvedCliConfig.sources,
     generationConfig: resolvedCliConfig.generationConfig,
+    initialModelRegistryBaseUrl: resolvedCliConfig.registryBaseUrl,
     warnings: resolvedCliConfig.warnings,
     bareMode,
     safeMode,
@@ -2167,6 +2173,8 @@ export async function loadCliConfig(
     useRipgrep: settings.tools?.useRipgrep,
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     shouldUseNodePtyShell: settings.tools?.shell?.enableInteractiveShell,
+    shellDefaultTimeoutMs: settings.tools?.shell?.defaultTimeoutMs,
+    shellHeartbeatIntervalMs: settings.tools?.shell?.heartbeatIntervalMs,
     preventSystemSleep: settings.general?.preventSystemSleep ?? true,
     skipNextSpeakerCheck: settings.model?.skipNextSpeakerCheck,
     skipWorkflowUsageWarning: settings.model?.skipWorkflowUsageWarning ?? false,
@@ -2198,7 +2206,9 @@ export async function loadCliConfig(
         ? false
         : (settings.memory?.enableTeamMemorySync ?? false),
     enableAutoSkill:
-      bareMode || safeMode ? false : (settings.memory?.enableAutoSkill ?? true),
+      bareMode || safeMode
+        ? false
+        : (settings.memory?.enableAutoSkill ?? false),
     autoSkillConfirm:
       bareMode || safeMode
         ? false
@@ -2242,7 +2252,13 @@ export async function loadCliConfig(
     },
     agents: settings.agents
       ? {
+          builtin: settings.agents.builtin
+            ? {
+                exploreModel: settings.agents.builtin.exploreModel,
+              }
+            : undefined,
           maxParallelAgents: settings.agents.maxParallelAgents,
+          maxParallelAgentsByModel: settings.agents.maxParallelAgentsByModel,
           displayMode: settings.agents.displayMode,
           arena: settings.agents.arena
             ? {

@@ -27,6 +27,10 @@ import {
   QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
 } from './constants.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { getToolCallPreparations } from '../tool-call-preparation.js';
+import { InvalidStreamError } from '../invalid-stream-error.js';
+import { logProtocolTagSanitized } from '../../telemetry/loggers.js';
+import { ProtocolTagSanitizedEvent } from '../../telemetry/types.js';
 
 const debugLogger = createDebugLogger('OPENAI_PIPELINE');
 
@@ -440,6 +444,7 @@ export class ContentGenerationPipeline {
           guarded,
           context,
           request,
+          userPromptId,
         );
         async function* drainThenCleanup(): AsyncGenerator<GenerateContentResponse> {
           try {
@@ -459,16 +464,14 @@ export class ContentGenerationPipeline {
    * 1. Convert OpenAI chunks to Gemini format while preserving original chunks
    * 2. Filter empty responses
    * 3. Handle chunk merging for providers that send finishReason and usageMetadata separately
-   * 4. Collect both formats for logging
-   * 5. Handle success/error logging
+   * 4. Handle success/error logging
    */
   private async *processStreamWithLogging(
     stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
     context: RequestContext,
     request: GenerateContentParameters,
+    userPromptId: string,
   ): AsyncGenerator<GenerateContentResponse> {
-    const collectedGeminiResponses: GenerateContentResponse[] = [];
-
     // State for handling chunk merging.
     // pendingFinishResponse holds a finish chunk waiting to be merged with
     // a subsequent usage-metadata chunk before yielding.
@@ -478,6 +481,32 @@ export class ContentGenerationPipeline {
     // function-call parts from the finish chunk).
     let pendingFinishResponse: GenerateContentResponse | null = null;
     let finishYielded = false;
+    let pendingFinishProtocolTagSanitized:
+      | NonNullable<RequestContext['protocolTagSanitized']>
+      | undefined;
+    const logPendingProtocolTagSanitized = (
+      response: GenerateContentResponse,
+      sanitization:
+        | NonNullable<RequestContext['protocolTagSanitized']>
+        | undefined,
+    ) => {
+      if (!sanitization) return;
+      const event = new ProtocolTagSanitizedEvent({
+        model: context.model,
+        promptId: userPromptId,
+        responseId: response.responseId,
+        tagName: sanitization.tagName,
+        toolCallCount: sanitization.toolCallCount,
+      });
+      debugLogger.warn('Sanitized a model protocol tag', {
+        model: event.model,
+        promptId: event.prompt_id,
+        responseId: event.response_id,
+        tagName: event.tag_name,
+        toolCallCount: event.tool_call_count,
+      });
+      logProtocolTagSanitized(this.config.cliConfig, event);
+    };
 
     try {
       // Stage 2a: Convert and yield each chunk while preserving original
@@ -498,13 +527,34 @@ export class ContentGenerationPipeline {
           context,
         );
 
+        const sanitization = context.protocolTagSanitized;
+        if (sanitization) {
+          context.protocolTagSanitized = undefined;
+        }
+
         // Stage 2b: Filter empty responses to avoid downstream issues
         if (
           response.candidates?.[0]?.content?.parts?.length === 0 &&
           !response.candidates?.[0]?.finishReason &&
-          !response.usageMetadata
+          !response.usageMetadata &&
+          // Preparation-only responses must reach ACP before arguments complete.
+          getToolCallPreparations(response).length === 0
         ) {
           continue;
+        }
+
+        if (
+          pendingFinishProtocolTagSanitized &&
+          pendingFinishResponse &&
+          !response.candidates?.[0]?.finishReason &&
+          response.candidates?.some(
+            (candidate) => (candidate.content?.parts?.length ?? 0) > 0,
+          )
+        ) {
+          throw new InvalidStreamError(
+            'Model response continued after a finish reason.',
+            'PROTOCOL_TAG_LEAK',
+          );
         }
 
         // Stage 2c: Handle chunk merging for providers that send
@@ -526,13 +576,20 @@ export class ContentGenerationPipeline {
               pending.usageMetadata = response.usageMetadata;
             }
           }
-          collectedGeminiResponses.push(response);
           continue;
+        }
+
+        if (
+          !pendingFinishResponse &&
+          response.candidates?.[0]?.finishReason &&
+          sanitization
+        ) {
+          pendingFinishProtocolTagSanitized = sanitization;
         }
 
         const shouldYield = this.handleChunkMerging(
           response,
-          collectedGeminiResponses,
+          pendingFinishResponse,
           (mergedResponse) => {
             pendingFinishResponse = mergedResponse;
           },
@@ -541,26 +598,76 @@ export class ContentGenerationPipeline {
         if (shouldYield) {
           // If we have a pending finish response, yield it instead
           if (pendingFinishResponse) {
+            logPendingProtocolTagSanitized(
+              pendingFinishResponse,
+              pendingFinishProtocolTagSanitized,
+            );
             yield pendingFinishResponse;
             finishYielded = true;
             // Keep pendingFinishResponse alive so late-arriving usage
             // metadata can still be merged (see finishYielded block above).
           } else {
+            logPendingProtocolTagSanitized(response, sanitization);
             yield response;
           }
         }
       }
 
+      if (
+        context.pendingThinkingTagCandidate &&
+        !context.pendingThinkingTagCandidate.closingTagName &&
+        !/\S/.test(context.pendingThinkingTagCandidate.text)
+      ) {
+        const pendingParts = context.pendingUntrustedResponseParts;
+        context.pendingThinkingTagCandidate = undefined;
+        context.pendingUntrustedResponseParts = undefined;
+        if (pendingParts?.length) {
+          const response = new GenerateContentResponse();
+          response.candidates = [
+            {
+              content: { parts: pendingParts, role: 'model' },
+              index: 0,
+            },
+          ];
+          yield response;
+        }
+      } else if (context.pendingThinkingTagCandidate) {
+        throw new InvalidStreamError(
+          'Model response leaked thinking tags.',
+          'PROTOCOL_TAG_LEAK',
+        );
+      }
+
       // Stage 2d: If there's still a pending finish response at the end
       // (e.g. no usage chunk arrived after the finish chunk), yield it.
       if (pendingFinishResponse && !finishYielded) {
+        logPendingProtocolTagSanitized(
+          pendingFinishResponse,
+          pendingFinishProtocolTagSanitized,
+        );
         yield pendingFinishResponse;
       }
     } catch (error) {
+      if (error instanceof InvalidStreamError) {
+        throw error;
+      }
+
       // Re-throw StreamContentError directly so it can be handled by
       // the caller's retry logic (e.g., TPM throttling retry in sendMessageStream)
       if (error instanceof StreamContentError) {
         throw redactProxyError(error);
+      }
+
+      if (
+        context.pendingThinkingTagCandidate?.closingTagName &&
+        request.config?.abortSignal?.aborted !== true
+      ) {
+        context.pendingThinkingTagCandidate = undefined;
+        context.pendingUntrustedResponseParts = undefined;
+        throw new InvalidStreamError(
+          'Model response leaked thinking tags.',
+          'PROTOCOL_TAG_LEAK',
+        );
       }
 
       // Bypass handleError: it strips `code` from timeout errors, which would
@@ -587,56 +694,44 @@ export class ContentGenerationPipeline {
    * finishReason and the most up-to-date usage information from any provider pattern.
    *
    * @param response Current Gemini response
-   * @param collectedGeminiResponses Array to collect responses for logging
+   * @param pendingFinishResponse Finish response currently held for merging
    * @param setPendingFinish Callback to set pending finish response
    * @returns true if the response should be yielded, false if it should be held for merging
    */
   private handleChunkMerging(
     response: GenerateContentResponse,
-    collectedGeminiResponses: GenerateContentResponse[],
+    pendingFinishResponse: GenerateContentResponse | null,
     setPendingFinish: (response: GenerateContentResponse) => void,
   ): boolean {
     const isFinishChunk = response.candidates?.[0]?.finishReason;
 
-    // Check if we have a pending finish response from previous chunks
-    const hasPendingFinish =
-      collectedGeminiResponses.length > 0 &&
-      collectedGeminiResponses[collectedGeminiResponses.length - 1]
-        .candidates?.[0]?.finishReason;
-
     if (isFinishChunk) {
-      if (hasPendingFinish) {
+      if (pendingFinishResponse) {
         // Duplicate finish chunk (e.g. from OpenRouter providers that send two
-        // finish_reason chunks for tool calls). The streaming tool call parser
-        // was already reset after the first finish chunk, so the second one
-        // carries no functionCall parts. Merge only usageMetadata and keep the
-        // candidates (including functionCall parts) from the first finish chunk.
-        const lastResponse =
-          collectedGeminiResponses[collectedGeminiResponses.length - 1];
+        // finish_reason chunks for tool calls). The first finish response owns
+        // the candidates, including functionCall parts. Merge only usageMetadata
+        // from later finish chunks.
         if (response.usageMetadata) {
-          lastResponse.usageMetadata = response.usageMetadata;
+          pendingFinishResponse.usageMetadata = response.usageMetadata;
         }
-        setPendingFinish(lastResponse);
+        setPendingFinish(pendingFinishResponse);
       } else {
         // This is a finish reason chunk
-        collectedGeminiResponses.push(response);
         setPendingFinish(response);
       }
       return false; // Don't yield yet, wait for potential subsequent chunks to merge
-    } else if (hasPendingFinish) {
+    } else if (pendingFinishResponse) {
       // We have a pending finish chunk, merge this chunk's data into it
-      const lastResponse =
-        collectedGeminiResponses[collectedGeminiResponses.length - 1];
       const mergedResponse = new GenerateContentResponse();
 
       // Keep the finish reason from the previous chunk
-      mergedResponse.candidates = lastResponse.candidates;
+      mergedResponse.candidates = pendingFinishResponse.candidates;
 
       // Merge usage metadata if this chunk has it
       if (response.usageMetadata) {
         mergedResponse.usageMetadata = response.usageMetadata;
       } else {
-        mergedResponse.usageMetadata = lastResponse.usageMetadata;
+        mergedResponse.usageMetadata = pendingFinishResponse.usageMetadata;
       }
 
       // Copy other essential properties from the current response
@@ -645,16 +740,11 @@ export class ContentGenerationPipeline {
       mergedResponse.modelVersion = response.modelVersion;
       mergedResponse.promptFeedback = response.promptFeedback;
 
-      // Update the collected responses with the merged response
-      collectedGeminiResponses[collectedGeminiResponses.length - 1] =
-        mergedResponse;
-
       setPendingFinish(mergedResponse);
       return true; // Yield the merged response
     }
 
-    // Normal chunk - collect and yield
-    collectedGeminiResponses.push(response);
+    // Normal chunk
     return true;
   }
 
@@ -696,6 +786,20 @@ export class ContentGenerationPipeline {
           request.config.tools,
           this.contentGeneratorConfig.schemaCompliance ?? 'auto',
         );
+
+      // Map Gemini-style toolConfig.functionCallingConfig.mode to OpenAI's
+      // tool_choice so structured side queries (e.g. the AUTO-mode
+      // classifier's respond_in_schema) can force the model to emit a tool
+      // call instead of free-texting. Without this, thinking-heavy models
+      // may consume the tiny output budget on reasoning and skip the tool.
+      const fcMode = request.config?.toolConfig?.functionCallingConfig?.mode;
+      if (fcMode === 'ANY') {
+        (baseRequest as unknown as Record<string, unknown>)['tool_choice'] =
+          'required';
+      } else if (fcMode === 'NONE') {
+        (baseRequest as unknown as Record<string, unknown>)['tool_choice'] =
+          'none';
+      }
     }
 
     // Let provider enhance the request (e.g., add metadata, cache control)

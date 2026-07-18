@@ -6,6 +6,8 @@ import {
   type DaemonEvent,
   type DaemonRestoredSession,
   type DaemonSession,
+  type DaemonSessionGroup,
+  type DaemonSessionGroupCatalog,
   type DaemonSessionState,
   type DaemonSessionSummary,
   type DaemonWorkspaceExtensionsStatus,
@@ -17,6 +19,8 @@ import {
   type DaemonWorkspaceSkillsStatus,
   type DaemonWorkspaceToolsStatus,
   type DaemonWorkspaceVoiceStatus,
+  type ExtensionActiveOperations,
+  type ExtensionUpdateCheckResponse,
   type PermissionResponse,
   type PromptRequest,
 } from '@qwen-code/sdk/daemon';
@@ -40,7 +44,11 @@ export interface WebShellDaemonScenario {
   providers: DaemonWorkspaceProvidersStatus;
   skills: DaemonWorkspaceSkillsStatus;
   settings: DaemonWorkspaceSettingsStatus;
+  extensions: DaemonWorkspaceExtensionsStatus;
+  extensionOperations: ExtensionActiveOperations;
+  extensionUpdateCheck: ExtensionUpdateCheckResponse;
   sessions: DaemonSessionSummary[];
+  sessionGroups: DaemonSessionGroup[];
   events: DaemonEvent[];
   state: DaemonSessionState;
 }
@@ -59,14 +67,27 @@ export interface MockDaemonController {
 type ScenarioOverrides = Partial<
   Omit<
     WebShellDaemonScenario,
-    'capabilities' | 'providers' | 'skills' | 'settings' | 'sessions' | 'state'
+    | 'capabilities'
+    | 'providers'
+    | 'skills'
+    | 'settings'
+    | 'extensions'
+    | 'extensionOperations'
+    | 'extensionUpdateCheck'
+    | 'sessions'
+    | 'sessionGroups'
+    | 'state'
   >
 > & {
   capabilities?: Partial<DaemonCapabilities>;
   providers?: Partial<DaemonWorkspaceProvidersStatus>;
   skills?: Partial<DaemonWorkspaceSkillsStatus>;
   settings?: Partial<DaemonWorkspaceSettingsStatus>;
+  extensions?: Partial<DaemonWorkspaceExtensionsStatus>;
+  extensionOperations?: Partial<ExtensionActiveOperations>;
+  extensionUpdateCheck?: Partial<ExtensionUpdateCheckResponse>;
   sessions?: DaemonSessionSummary[];
+  sessionGroups?: DaemonSessionGroup[];
   state?: Partial<DaemonSessionState>;
 };
 
@@ -144,6 +165,7 @@ export function createWebShellDaemonScenario(
       'permission_vote',
       'session_permission_vote',
       'session_scope_override',
+      'session_source_metadata',
       'workspace_settings',
       'workspace_voice',
     ],
@@ -208,6 +230,26 @@ export function createWebShellDaemonScenario(
     ...(overrides.settings ?? {}),
   };
 
+  const extensions: DaemonWorkspaceExtensionsStatus = {
+    v: 1,
+    workspaceCwd,
+    initialized: true,
+    extensions: [],
+    errors: [],
+    ...(overrides.extensions ?? {}),
+  };
+
+  const extensionOperations: ExtensionActiveOperations = {
+    v: 1,
+    operations: [],
+    ...(overrides.extensionOperations ?? {}),
+  };
+
+  const extensionUpdateCheck: ExtensionUpdateCheckResponse = {
+    states: {},
+    ...(overrides.extensionUpdateCheck ?? {}),
+  };
+
   const sessions = overrides.sessions ?? [
     {
       sessionId,
@@ -240,7 +282,11 @@ export function createWebShellDaemonScenario(
     providers,
     skills,
     settings,
+    extensions,
+    extensionOperations,
+    extensionUpdateCheck,
     sessions,
+    sessionGroups: overrides.sessionGroups ?? [],
     events: overrides.events ?? [],
     state,
   };
@@ -285,7 +331,14 @@ export async function installMockDaemon(
       return;
     }
 
-    await handleDaemonRoute(route, method, path, scenario, body);
+    await handleDaemonRoute(
+      route,
+      method,
+      path,
+      scenario,
+      body,
+      url.searchParams,
+    );
   });
 
   return {
@@ -424,11 +477,14 @@ function isDaemonPath(path: string): boolean {
     path === '/workspace/skills' ||
     path === '/workspace/tools' ||
     path === '/workspace/extensions' ||
+    path === '/workspace/extensions/operations' ||
+    path === '/workspace/extensions/check-updates' ||
     path === '/workspace/mcp' ||
     path === '/workspace/voice' ||
     /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/resources\/?$/.test(path) ||
     /^\/workspace\/.+\/sessions\/?$/.test(path) ||
+    /^\/workspace\/.+\/session-groups\/?$/.test(path) ||
     path === '/session' ||
     /^\/permission\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/pending-prompts(?:\/[^/]+)?\/?$/.test(path) ||
@@ -452,6 +508,12 @@ function isDaemonRoute(method: string, path: string): boolean {
   if (method === 'GET' && path === '/workspace/skills') return true;
   if (method === 'GET' && path === '/workspace/tools') return true;
   if (method === 'GET' && path === '/workspace/extensions') return true;
+  if (method === 'GET' && path === '/workspace/extensions/operations') {
+    return true;
+  }
+  if (method === 'POST' && path === '/workspace/extensions/check-updates') {
+    return true;
+  }
   if (method === 'GET' && path === '/workspace/mcp') return true;
   if (method === 'GET' && path === '/workspace/voice') return true;
   if (method === 'GET' && /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path)) {
@@ -464,6 +526,9 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   }
   if (method === 'GET' && /^\/workspace\/.+\/sessions\/?$/.test(path)) {
+    return true;
+  }
+  if (method === 'GET' && /^\/workspace\/.+\/session-groups\/?$/.test(path)) {
     return true;
   }
   if (method === 'POST' && path === '/session') return true;
@@ -497,6 +562,7 @@ async function handleDaemonRoute(
   path: string,
   scenario: WebShellDaemonScenario,
   body: unknown,
+  searchParams: URLSearchParams = new URLSearchParams(),
 ): Promise<void> {
   if (method === 'GET' && path === '/health') {
     await json(route, { ok: true, healthy: true });
@@ -521,10 +587,14 @@ async function handleDaemonRoute(
   if (method === 'POST' && path === '/workspace/settings') {
     await json(route, {
       key: getRecordValue(body, 'key') ?? 'unknown',
-      scope: 'workspace',
+      scope: getRecordValue(body, 'scope') ?? 'workspace',
       value: getRecordValue(body, 'value'),
       requiresRestart: false,
     });
+    return;
+  }
+  if (method === 'DELETE' && path === '/workspace/models') {
+    await json(route, { removed: true, clearedActiveModel: false });
     return;
   }
   if (method === 'GET' && path === '/workspace/tools') {
@@ -532,7 +602,20 @@ async function handleDaemonRoute(
     return;
   }
   if (method === 'GET' && path === '/workspace/extensions') {
-    await json(route, workspaceExtensions(scenario));
+    await json(route, scenario.extensions);
+    return;
+  }
+  if (method === 'GET' && path === '/workspace/extensions/operations') {
+    // The manager polls in-flight operations on mount. Defaults to an idle
+    // (empty) list so the capture has no error banner; a scenario can seed
+    // `extensionOperations` to preview an in-progress install/update.
+    await json(route, scenario.extensionOperations);
+    return;
+  }
+  if (method === 'POST' && path === '/workspace/extensions/check-updates') {
+    // The manager kicks off an update check on mount. Defaults to "no updates
+    // available", overridable via the scenario's `extensionUpdateCheck`.
+    await json(route, scenario.extensionUpdateCheck);
     return;
   }
   if (method === 'GET' && path === '/workspace/mcp') {
@@ -557,7 +640,23 @@ async function handleDaemonRoute(
     return;
   }
   if (method === 'GET' && /^\/workspace\/.+\/sessions\/?$/.test(path)) {
-    await json(route, { sessions: scenario.sessions });
+    // Mirror production query modes: `group=pinned` is the pinned bucket;
+    // `group=all` (and missing group) returns the full active list. The UI
+    // excludes pinned rows from organized sections via `excludePinned`.
+    const group = searchParams.get('group');
+    const sessions =
+      group === 'pinned'
+        ? scenario.sessions.filter((session) => Boolean(session.isPinned))
+        : scenario.sessions;
+    await json(route, { sessions });
+    return;
+  }
+  if (method === 'GET' && /^\/workspace\/.+\/session-groups\/?$/.test(path)) {
+    const catalog: DaemonSessionGroupCatalog = {
+      groups: scenario.sessionGroups,
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    };
+    await json(route, catalog);
     return;
   }
   if (method === 'POST' && path === '/session') {
@@ -828,18 +927,6 @@ function workspaceTools(
     initialized: true,
     acpChannelLive: true,
     tools: [],
-    errors: [],
-  };
-}
-
-function workspaceExtensions(
-  scenario: WebShellDaemonScenario,
-): DaemonWorkspaceExtensionsStatus {
-  return {
-    v: 1,
-    workspaceCwd: scenario.workspaceCwd,
-    initialized: true,
-    extensions: [],
     errors: [],
   };
 }

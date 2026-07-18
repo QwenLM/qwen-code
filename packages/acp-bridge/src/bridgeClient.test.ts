@@ -57,6 +57,7 @@ import type { BridgeFileSystem } from './bridgeFileSystem.js';
 import type {
   BridgePendingInteraction,
   MidTurnQueueEntry,
+  PendingPromptEntry,
 } from './bridgeTypes.js';
 import type { ClientMcpMessageSender } from './bridgeOptions.js';
 import { CancelSentinelCollisionError } from './bridgeErrors.js';
@@ -93,6 +94,108 @@ function makeClient(fileSystem?: BridgeFileSystem): BridgeClient {
     fileSystem,
   );
 }
+
+describe('BridgeClient — recording degradation ownership', () => {
+  it('keeps session-level recording degradation prompt-neutral', async () => {
+    const sessionId = 'session-with-active-prompt';
+    const publish = vi.fn().mockReturnValue(true);
+    const entry = {
+      sessionId,
+      events: { publish },
+      recordingDegraded: false,
+      activePromptId: 'prompt-active',
+      activePromptOriginatorClientId: 'client-1',
+    };
+    const noPermissionFlow = () => {
+      throw new Error('test: permission flow should not run');
+    };
+    const client = new BridgeClient(
+      ((id: string) => (id === sessionId ? entry : undefined)) as never,
+      (() => undefined) as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+
+    await client.extNotification('qwen/notify/session/recording-degraded', {
+      v: 1,
+      sessionId,
+      reason: 'write_failed',
+    });
+
+    expect(entry.recordingDegraded).toBe(true);
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(publish.mock.calls[0][0]).toMatchObject({
+      type: 'session_recording_degraded',
+      originatorClientId: 'client-1',
+    });
+    expect(publish.mock.calls[0][0]).not.toHaveProperty('promptId');
+  });
+
+  it('drops a stale channel notification for another channel session', async () => {
+    const sessionId = 'session-owned-by-new-channel';
+    const publish = vi.fn();
+    const foreignEntry = {
+      sessionId,
+      events: { publish },
+      recordingDegraded: false,
+    };
+    const noPermissionFlow = () => {
+      throw new Error('test: permission flow should not run');
+    };
+    const client = new BridgeClient(
+      ((id: string) => (id === sessionId ? foreignEntry : undefined)) as never,
+      (() => undefined) as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => false,
+    );
+
+    await client.extNotification('qwen/notify/session/recording-degraded', {
+      v: 1,
+      sessionId,
+      reason: 'write_failed',
+    });
+
+    expect(foreignEntry.recordingDegraded).toBe(false);
+    expect(publish).not.toHaveBeenCalled();
+  });
+
+  it('keeps early recording buffers isolated between channel clients', async () => {
+    const sessionId = 'future-session-on-new-channel';
+    const noPermissionFlow = () => {
+      throw new Error('test: permission flow should not run');
+    };
+    const staleClient = new BridgeClient(
+      (() => undefined) as never,
+      (() => undefined) as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+    await staleClient.extNotification(
+      'qwen/notify/session/recording-degraded',
+      { v: 1, sessionId, reason: 'write_failed' },
+    );
+
+    const freshClient = makeClient();
+    const publish = vi.fn();
+    const freshEntry = {
+      sessionId,
+      events: { publish },
+      recordingDegraded: false,
+    };
+    freshClient.drainEarlyEvents(sessionId, freshEntry as never);
+
+    expect(freshEntry.recordingDegraded).toBe(false);
+    expect(publish).not.toHaveBeenCalled();
+  });
+});
 
 describe('BridgeClient — BridgeFileSystem injection seam (F1 step 5)', () => {
   describe('writeTextFile', () => {
@@ -471,6 +574,7 @@ describe('BridgeClient — A2UI session update publishing', () => {
     const publish = vi.fn().mockReturnValue(true);
     const fakeEntry = {
       sessionId: 'sess:a2ui',
+      activePromptId: 'prompt-a2ui',
       activePromptOriginatorClientId: 'client-1',
       events: { publish },
     };
@@ -505,6 +609,7 @@ describe('BridgeClient — A2UI session update publishing', () => {
 
     type PublishedFrame = {
       type: string;
+      promptId?: string;
       originatorClientId?: string;
       data: {
         sessionId: string;
@@ -528,6 +633,7 @@ describe('BridgeClient — A2UI session update publishing', () => {
     expect(published).toHaveLength(3);
     expect(published[0]).toMatchObject({
       type: 'session_update',
+      promptId: 'prompt-a2ui',
       originatorClientId: 'client-1',
       data: {
         sessionId: 'sess:a2ui',
@@ -548,6 +654,7 @@ describe('BridgeClient — A2UI session update publishing', () => {
     });
     expect(published[1].data.update.a2ui?.commands).toHaveLength(1);
     expect(published[2].originatorClientId).toBe('client-1');
+    expect(published[2].promptId).toBe('prompt-a2ui');
     expect(published[2].data.update.content?.[0].content.text).toBe(
       'rendered fallback',
     );
@@ -625,7 +732,13 @@ describe('BridgeClient — token usage accounting', () => {
 
   function makeClientWithTokenHook(
     sessionId: string,
-    onTokenUsage: (inputTokens: number, outputTokens: number) => void,
+    onTokenUsage: (
+      inputTokens: number,
+      outputTokens: number,
+      durationMs?: number,
+      apiErrors?: number,
+      apiRetries?: number,
+    ) => void,
   ) {
     const fakeEntry = {
       sessionId,
@@ -663,8 +776,30 @@ describe('BridgeClient — token usage accounting', () => {
     } as Parameters<BridgeClient['sessionUpdate']>[0]);
 
     expect(onTokenUsage).toHaveBeenCalledTimes(1);
-    // The sibling `_meta.durationMs` (LLM round-trip) rides through too.
-    expect(onTokenUsage).toHaveBeenCalledWith(1200, 340, 4200);
+    // The sibling `_meta.durationMs` (LLM round-trip) rides through too; a frame
+    // with no error/retry meta reports 0 for both API-health increments.
+    expect(onTokenUsage).toHaveBeenCalledWith(1200, 340, 4200, 0, 0);
+  });
+
+  it('forwards per-round model API error / retry increments from _meta', async () => {
+    const onTokenUsage = vi.fn();
+    const client = makeClientWithTokenHook('sess:apihealth', onTokenUsage);
+
+    await client.sessionUpdate({
+      sessionId: 'sess:apihealth',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          usage: { inputTokens: 10, outputTokens: 5 },
+          durationMs: 900,
+          apiErrors: 2,
+          apiRetries: 3,
+        },
+      },
+    } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    expect(onTokenUsage).toHaveBeenCalledWith(10, 5, 900, 2, 3);
   });
 
   it('does not report when the update carries no usage meta', async () => {
@@ -695,8 +830,9 @@ describe('BridgeClient — token usage accounting', () => {
       },
     } as Parameters<BridgeClient['sessionUpdate']>[0]);
 
-    // No `_meta.durationMs` on this frame → the round-trip arg is undefined.
-    expect(onTokenUsage).toHaveBeenCalledWith(0, 50, undefined);
+    // No `_meta.durationMs` on this frame → the round-trip arg is undefined,
+    // and the API-health increments default to 0.
+    expect(onTokenUsage).toHaveBeenCalledWith(0, 50, undefined, 0, 0);
   });
 
   it('does NOT count tokens for replayed history frames (no live entry yet)', async () => {
@@ -2138,12 +2274,18 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       | {
           sessionId: string;
           midTurnMessageQueue: MidTurnQueueEntry[];
+          pendingPromptList?: PendingPromptEntry[];
           events: { publish: ReturnType<typeof vi.fn> };
+          activePromptId?: string;
         }
       | undefined,
   ): BridgeClient {
+    const resolvedEntry = entry
+      ? { ...entry, pendingPromptList: entry.pendingPromptList ?? [] }
+      : undefined;
     return new BridgeClient(
-      ((sid: string) => (sid === sessionId ? entry : undefined)) as never,
+      ((sid: string) =>
+        sid === sessionId ? resolvedEntry : undefined) as never,
       thrower as never,
       { request: thrower } as never,
       0,
@@ -2155,6 +2297,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     const publish = vi.fn().mockReturnValue(true);
     const entry = {
       sessionId: 'sess:drain',
+      activePromptId: 'prompt-drain',
       midTurnMessageQueue: [{ text: 'first' }, { text: 'second' }],
       events: { publish },
     };
@@ -2164,13 +2307,17 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       sessionId: 'sess:drain',
     });
 
-    expect(result).toEqual({ messages: ['first', 'second'] });
+    expect(result).toEqual({
+      messages: ['first', 'second'],
+      hasQueuedPrompt: false,
+    });
     // Queue emptied so the same messages can't be re-injected on the next batch.
     expect(entry.midTurnMessageQueue).toEqual([]);
     // Exactly one SSE frame carrying the drained text for the browser to dedupe.
     expect(publish).toHaveBeenCalledTimes(1);
     expect(publish.mock.calls[0][0]).toMatchObject({
       type: 'mid_turn_message_injected',
+      promptId: 'prompt-drain',
       data: { sessionId: 'sess:drain', messages: ['first', 'second'] },
     });
     // Anonymous queue entries (no originator) ⇒ no `originatorClientId` on the
@@ -2185,6 +2332,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     const publish = vi.fn().mockReturnValue(true);
     const entry = {
       sessionId: 'sess:multi',
+      activePromptId: 'prompt-multi',
       midTurnMessageQueue: [
         { text: 'a', originatorClientId: 'client-1' },
         { text: 'b', originatorClientId: 'client-2' },
@@ -2198,7 +2346,10 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     const result = await client.extMethod('craft/drainMidTurnQueue', {
       sessionId: 'sess:multi',
     });
-    expect(result).toEqual({ messages: ['a', 'b', 'c'] });
+    expect(result).toEqual({
+      messages: ['a', 'b', 'c'],
+      hasQueuedPrompt: false,
+    });
     expect(entry.midTurnMessageQueue).toEqual([]);
 
     // One frame per originator: client-1 gets ['a','c'], client-2 gets ['b'].
@@ -2208,11 +2359,13 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     const c2 = frames.find((f) => f.originatorClientId === 'client-2');
     expect(c1).toMatchObject({
       type: 'mid_turn_message_injected',
+      promptId: 'prompt-multi',
       data: { sessionId: 'sess:multi', messages: ['a', 'c'] },
       originatorClientId: 'client-1',
     });
     expect(c2).toMatchObject({
       type: 'mid_turn_message_injected',
+      promptId: 'prompt-multi',
       data: { sessionId: 'sess:multi', messages: ['b'] },
       originatorClientId: 'client-2',
     });
@@ -2240,7 +2393,10 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       });
 
       // (a) the child still receives the message despite the dropped echo.
-      expect(result).toEqual({ messages: ['still-delivered'] });
+      expect(result).toEqual({
+        messages: ['still-delivered'],
+        hasQueuedPrompt: false,
+      });
       expect(entry.midTurnMessageQueue).toEqual([]);
       // (b) the dropped-echo degradation is logged.
       const logged = stderr.mock.calls.map((c) => String(c[0])).join('');
@@ -2263,7 +2419,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       sessionId: 'sess:empty',
     });
 
-    expect(result).toEqual({ messages: [] });
+    expect(result).toEqual({ messages: [], hasQueuedPrompt: false });
     expect(publish).not.toHaveBeenCalled();
   });
 
@@ -2272,7 +2428,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     const result = await client.extMethod('craft/drainMidTurnQueue', {
       sessionId: 'sess:absent',
     });
-    expect(result).toEqual({ messages: [] });
+    expect(result).toEqual({ messages: [], hasQueuedPrompt: false });
   });
 
   it('short-circuits to an empty drain when no sessionId is supplied', async () => {
@@ -2292,7 +2448,45 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       Infinity,
     );
     const result = await client.extMethod('craft/drainMidTurnQueue', {});
-    expect(result).toEqual({ messages: [] });
+    expect(result).toEqual({ messages: [], hasQueuedPrompt: false });
+  });
+
+  it('reports only complete, non-aborted queued prompts', async () => {
+    const publish = vi.fn().mockReturnValue(true);
+    const queued = {
+      promptId: 'queued',
+      queuedAt: Date.now(),
+      text: 'next',
+      state: 'queued' as const,
+      abortController: new AbortController(),
+    };
+    const running = {
+      promptId: 'running',
+      queuedAt: Date.now(),
+      text: 'current',
+      state: 'running' as const,
+      abortController: new AbortController(),
+    };
+    const entry = {
+      sessionId: 'sess:queued',
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      pendingPromptList: [running, queued],
+      events: { publish },
+    };
+    const client = makeClientWithEntry('sess:queued', entry);
+
+    await expect(
+      client.extMethod('craft/drainMidTurnQueue', {
+        sessionId: 'sess:queued',
+      }),
+    ).resolves.toEqual({ messages: [], hasQueuedPrompt: true });
+
+    queued.abortController.abort();
+    await expect(
+      client.extMethod('craft/drainMidTurnQueue', {
+        sessionId: 'sess:queued',
+      }),
+    ).resolves.toEqual({ messages: [], hasQueuedPrompt: false });
   });
 
   it('rejects an unknown ext-method with JSON-RPC methodNotFound (-32601)', async () => {

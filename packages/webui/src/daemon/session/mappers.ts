@@ -257,6 +257,17 @@ export function updateConnectionFromDaemonEvent(
   }
 
   switch (event.type) {
+    case 'git_branch_changed': {
+      const data = getRecord(event.data);
+      const workspaceCwd = getString(data, 'workspaceCwd');
+      const branch = getString(data, 'branch');
+      setConnection((current) =>
+        workspaceCwd && workspaceCwd !== current.workspaceCwd
+          ? current
+          : { ...current, gitBranch: branch },
+      );
+      break;
+    }
     case 'session_metadata_updated': {
       const data = getRecord(event.data);
       if (Object.prototype.hasOwnProperty.call(data ?? {}, 'displayName')) {

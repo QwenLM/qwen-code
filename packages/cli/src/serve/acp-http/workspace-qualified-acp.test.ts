@@ -29,7 +29,13 @@ import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
 
+const setupGithubMock = vi.hoisted(() => vi.fn());
+
 vi.mock('../../utils/stdioHelpers.js', () => ({ writeStderrLine: vi.fn() }));
+vi.mock('../../services/setup-github.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../services/setup-github.js')>()),
+  setupGithub: setupGithubMock,
+}));
 
 const PARENT_ENV: WorkspaceRuntimeEnvMetadata = {
   mode: 'parent-process',
@@ -38,7 +44,20 @@ const PARENT_ENV: WorkspaceRuntimeEnvMetadata = {
 
 function makeBridge(): HttpAcpBridge {
   return {
+    spawnOrAttach: vi.fn(async (req: { workspaceCwd: string }) => ({
+      sessionId:
+        req.workspaceCwd === '/ws-b' ? 'secondary-session' : 'primary-session',
+      workspaceCwd: req.workspaceCwd,
+      attached: false,
+      clientId:
+        req.workspaceCwd === '/ws-b' ? 'secondary-client' : 'primary-client',
+    })),
     detachClient: vi.fn(async () => {}),
+    executeShellCommand: vi.fn(async () => ({
+      exitCode: 0,
+      output: 'ok',
+      aborted: false,
+    })),
     isWorkspaceMemoryRememberAvailable: vi.fn(async () => true),
     runWorkspaceMemoryRemember: vi.fn(async () => ({
       filesTouched: [],
@@ -54,13 +73,14 @@ function makeRuntime(input: {
   primary: boolean;
   trusted: boolean;
   bridge: HttpAcpBridge;
+  env?: WorkspaceRuntimeEnvMetadata;
 }): WorkspaceRuntime {
   return {
     workspaceId: input.id,
     workspaceCwd: input.cwd,
     primary: input.primary,
     trusted: input.trusted,
-    env: PARENT_ENV,
+    env: input.env ?? PARENT_ENV,
     bridge: input.bridge,
     workspaceService: {} as unknown as DaemonWorkspaceService,
     routeFileSystemFactory: {
@@ -122,27 +142,50 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
   let checkRate: ReturnType<typeof vi.fn>;
   let primaryBridge: HttpAcpBridge;
   let secondaryBridge: HttpAcpBridge;
+  let workspaceRegistry: ReturnType<typeof createWorkspaceRegistry>;
+  let secondaryRuntime: WorkspaceRuntime;
+  let workspaceVoiceConnection: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
+    setupGithubMock.mockReset();
+    setupGithubMock.mockImplementation(async ({ cwd }: { cwd: string }) => ({
+      kind: 'github_setup',
+      workspaceCwd: cwd,
+      gitRepoRoot: cwd,
+      releaseTag: 'v1.2.3',
+      readmeUrl: 'https://example.test/readme',
+      workflows: [],
+      gitignore: { path: '.gitignore', status: 'unchanged' },
+      warnings: [],
+    }));
     primaryBridge = makeBridge();
     secondaryBridge = makeBridge();
     const untrustedBridge = makeBridge();
 
-    const registry = createWorkspaceRegistry([
+    secondaryRuntime = makeRuntime({
+      id: 'secondary-id',
+      cwd: '/ws-b',
+      primary: false,
+      trusted: true,
+      bridge: secondaryBridge,
+      env: {
+        mode: 'runtime-overlay',
+        overlayKeys: ['HTTPS_PROXY'],
+        effectiveEnv: {
+          HTTPS_PROXY: 'http://secondary-proxy.example:8080',
+        },
+      },
+    });
+    workspaceRegistry = createWorkspaceRegistry([
       makeRuntime({
         id: 'primary-id',
         cwd: '/ws',
         primary: true,
         trusted: true,
         bridge: primaryBridge,
+        env: PARENT_ENV,
       }),
-      makeRuntime({
-        id: 'secondary-id',
-        cwd: '/ws-b',
-        primary: false,
-        trusted: true,
-        bridge: secondaryBridge,
-      }),
+      secondaryRuntime,
       makeRuntime({
         id: 'untrusted-id',
         cwd: '/ws-c',
@@ -160,19 +203,32 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     });
     cdpRegistry = new CdpTunnelRegistry();
     checkRate = vi.fn().mockReturnValue(true);
+    workspaceVoiceConnection = vi.fn(
+      (runtime: WorkspaceRuntime, ws: WebSocket) => {
+        ws.send(JSON.stringify({ workspaceCwd: runtime.workspaceCwd }));
+        ws.close(1000, 'done');
+      },
+    );
 
     const app = express();
     app.use(express.json());
     handle = mountAcpHttp(app, primaryBridge, {
       boundWorkspace: '/ws',
       workspace: {} as unknown as DaemonWorkspaceService,
+      fsFactory: workspaceRegistry.primary.routeFileSystemFactory,
       enabled: true,
-      workspaceRegistry: registry,
+      daemonEnv: {
+        ...process.env,
+        HTTPS_PROXY: 'http://primary-proxy.example:8080',
+      },
+      workspaceRegistry,
       deviceFlowRegistry,
       cdpTunnelOverWs: true,
       cdpTunnelRegistry: cdpRegistry,
       checkRate,
+      sessionShellCommandEnabled: true,
       workspaceRememberLane: new WorkspaceRememberTaskLane(primaryBridge),
+      workspaceVoiceConnection,
     });
 
     await new Promise<void>((resolve) => {
@@ -251,12 +307,53 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     });
   }
 
+  async function sendWsRequests(
+    pathname: string,
+    requests: Array<Record<string, unknown>>,
+  ): Promise<Array<Record<string, unknown>>> {
+    return new Promise((resolve, reject) => {
+      const responses: Array<Record<string, unknown>> = [];
+      const ws = new WebSocket(`ws://127.0.0.1:${port}${pathname}`, {
+        handshakeTimeout: 2000,
+      });
+      ws.on('open', () => ws.send(INITIALIZE));
+      ws.on('message', (data: WebSocket.RawData) => {
+        try {
+          const message = JSON.parse(data.toString()) as Record<
+            string,
+            unknown
+          >;
+          if (message['id'] === 1) {
+            ws.send(JSON.stringify(requests[0]));
+            return;
+          }
+          const request = requests[responses.length];
+          if (message['id'] !== request?.['id']) return;
+          responses.push(message);
+          if (responses.length === requests.length) {
+            ws.close();
+            resolve(responses);
+            return;
+          }
+          ws.send(JSON.stringify(requests[responses.length]));
+        } catch (err) {
+          ws.terminate();
+          reject(err as Error);
+        }
+      });
+      ws.on('error', reject);
+    });
+  }
+
   async function initializeWs(pathname: string): Promise<{
     result?: {
       protocolVersion?: number;
       agentCapabilities?: {
         _meta?: { qwen?: { workspaceCwd?: string } };
       };
+    };
+    error?: {
+      data?: { code?: string; workspaceCwd?: string };
     };
   }> {
     return new Promise((resolve, reject) => {
@@ -286,6 +383,61 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       expect.stringContaining(
         '/workspaces/secondary-id/acp connection established',
       ),
+    );
+  });
+
+  it('uses daemon env for parent-process setup-github without leaking into overlays', async () => {
+    const secondary = await sendWsRequest('/workspaces/secondary-id/acp', {
+      jsonrpc: '2.0',
+      id: 2,
+      method: '_qwen/workspace/setup-github',
+      params: { consent: true },
+    });
+    expect(secondary['result']).toMatchObject({ workspaceCwd: '/ws-b' });
+    expect(setupGithubMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cwd: '/ws-b',
+        proxy: 'http://secondary-proxy.example:8080',
+      }),
+    );
+
+    const primary = await sendWsRequest('/acp', {
+      jsonrpc: '2.0',
+      id: 3,
+      method: '_qwen/workspace/setup-github',
+      params: { consent: true },
+    });
+    expect(primary['result']).toMatchObject({ workspaceCwd: '/ws' });
+    expect(setupGithubMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cwd: '/ws',
+        proxy: 'http://primary-proxy.example:8080',
+      }),
+    );
+  });
+
+  it('keeps empty runtime overlays isolated from daemon env', async () => {
+    workspaceRegistry.add(
+      makeRuntime({
+        id: 'empty-overlay-id',
+        cwd: '/ws-empty',
+        primary: false,
+        trusted: true,
+        bridge: makeBridge(),
+        env: { mode: 'runtime-overlay', overlayKeys: [] },
+      }),
+    );
+
+    const response = await sendWsRequest('/workspaces/empty-overlay-id/acp', {
+      jsonrpc: '2.0',
+      id: 4,
+      method: '_qwen/workspace/setup-github',
+      params: { consent: true },
+    });
+
+    expect(response['result']).toMatchObject({ workspaceCwd: '/ws-empty' });
+    expect(setupGithubMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ cwd: '/ws-empty', proxy: undefined }),
     );
   });
 
@@ -367,6 +519,43 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       },
     });
     expect(primary.status).toBe(404);
+  });
+
+  it('keeps ACP shell scoped to the workspace-qualified connection', async () => {
+    const secondary = await sendWsRequests('/workspaces/secondary-id/acp', [
+      {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'session/new',
+        params: { workspaceCwd: '/ws-b' },
+      },
+      {
+        jsonrpc: '2.0',
+        id: 3,
+        method: '_qwen/session/shell',
+        params: { sessionId: 'secondary-session', command: 'pwd' },
+      },
+    ]);
+    expect(secondary[1]?.['result']).toMatchObject({
+      exitCode: 0,
+      output: 'ok',
+    });
+    expect(secondaryBridge.executeShellCommand).toHaveBeenCalledWith(
+      'secondary-session',
+      'pwd',
+      expect.any(AbortSignal),
+      expect.objectContaining({ clientId: 'secondary-client' }),
+    );
+    expect(primaryBridge.executeShellCommand).not.toHaveBeenCalled();
+
+    const primary = await sendWsRequest('/acp', {
+      jsonrpc: '2.0',
+      id: 4,
+      method: '_qwen/session/shell',
+      params: { sessionId: 'secondary-session', command: 'pwd' },
+    });
+    expect(primary['error']).toMatchObject({ code: -32602 });
+    expect(primaryBridge.executeShellCommand).not.toHaveBeenCalled();
   });
 
   it('rejects a body workspaceCwd that differs from the selected mount', async () => {
@@ -531,6 +720,21 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
           bridge: makeBridge(),
         }),
       );
+      singleHandle.beginWorkspaceDrain('dynamic-id');
+      const drainingDynamic = await fetch(
+        `http://127.0.0.1:${singlePort}/workspaces/dynamic-id/acp`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: INITIALIZE,
+        },
+      );
+      expect(drainingDynamic.status).toBe(503);
+      await expect(drainingDynamic.json()).resolves.toMatchObject({
+        code: 'workspace_draining',
+      });
+
+      singleHandle.cancelWorkspaceDrain('dynamic-id');
       const dynamic = await fetch(
         `http://127.0.0.1:${singlePort}/workspaces/dynamic-id/acp`,
         {
@@ -564,6 +768,81 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     );
   });
 
+  it('routes workspace-qualified Voice WS by id and encoded cwd', async () => {
+    const connect = (selector: string) =>
+      new Promise<{ workspaceCwd?: string }>((resolve, reject) => {
+        const ws = new WebSocket(
+          `ws://127.0.0.1:${port}/workspaces/${selector}/voice/stream`,
+          { handshakeTimeout: 2000 },
+        );
+        ws.on('message', (data: WebSocket.RawData) => {
+          resolve(JSON.parse(data.toString()) as { workspaceCwd?: string });
+        });
+        ws.on('error', reject);
+      });
+
+    await expect(connect('secondary-id')).resolves.toEqual({
+      workspaceCwd: '/ws-b',
+    });
+    await expect(connect(encodeURIComponent('/ws-b'))).resolves.toEqual({
+      workspaceCwd: '/ws-b',
+    });
+    expect(workspaceVoiceConnection).toHaveBeenCalledTimes(2);
+    expect(workspaceVoiceConnection.mock.calls[0]?.[0]).toBe(secondaryRuntime);
+    expect(workspaceVoiceConnection.mock.calls[1]?.[0]).toBe(secondaryRuntime);
+  });
+
+  it('rejects unknown and untrusted workspace-qualified Voice WS upgrades', async () => {
+    const status = (selector: string) =>
+      new Promise<number>((resolve, reject) => {
+        const ws = new WebSocket(
+          `ws://127.0.0.1:${port}/workspaces/${selector}/voice/stream`,
+          { handshakeTimeout: 2000 },
+        );
+        ws.on('unexpected-response', (_req, response) => {
+          resolve(response.statusCode ?? 0);
+          ws.terminate();
+        });
+        ws.on('open', () => {
+          ws.close();
+          reject(new Error('rejected Voice WS upgrade should not open'));
+        });
+        ws.on('error', (err) =>
+          reject(
+            new Error(
+              `unexpected Voice WS error for ${selector}: ${err.message}`,
+            ),
+          ),
+        );
+      });
+
+    await expect(status('missing')).resolves.toBe(400);
+    await expect(status('untrusted-id')).resolves.toBe(403);
+    expect(workspaceVoiceConnection).not.toHaveBeenCalled();
+  });
+
+  it('rejects an encoded relative workspace-qualified Voice selector', async () => {
+    const relativeSelector = path.relative(process.cwd(), '/ws-b');
+    const status = await new Promise<number>((resolve, reject) => {
+      const ws = new WebSocket(
+        `ws://127.0.0.1:${port}/workspaces/${encodeURIComponent(relativeSelector)}/voice/stream`,
+        { handshakeTimeout: 2000 },
+      );
+      ws.on('unexpected-response', (_req, response) => {
+        resolve(response.statusCode ?? 0);
+        ws.terminate();
+      });
+      ws.on('open', () => {
+        ws.close();
+        reject(new Error('relative Voice WS selector should not open'));
+      });
+      ws.on('error', reject);
+    });
+
+    expect(status).toBe(400);
+    expect(workspaceVoiceConnection).not.toHaveBeenCalled();
+  });
+
   it('rejects a WS upgrade to an untrusted workspace', async () => {
     const status = await new Promise<number>((resolve, reject) => {
       const ws = new WebSocket(
@@ -578,9 +857,9 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
         ws.close();
         reject(new Error('untrusted WS upgrade should not open'));
       });
-      // Some ws versions surface a rejected upgrade as an error rather than
-      // `unexpected-response`; treat that as the expected 403.
-      ws.on('error', () => resolve(403));
+      ws.on('error', (err) =>
+        reject(new Error(`unexpected ACP WS error: ${err.message}`)),
+      );
     });
     expect(status).toBe(403);
   });
@@ -621,6 +900,102 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     } finally {
       ws.terminate();
     }
+  });
+
+  it('counts and closes an uninitialized workspace WebSocket on removal', async () => {
+    const ws = new WebSocket(
+      `ws://127.0.0.1:${port}/workspaces/secondary-id/acp`,
+      { handshakeTimeout: 2000 },
+    );
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', resolve);
+      ws.once('error', reject);
+    });
+    expect(handle!.getWorkspaceActivity('secondary-id').acpConnections).toBe(1);
+
+    const closed = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(
+        () =>
+          reject(new Error('Workspace WebSocket stayed open after removal')),
+        2000,
+      );
+      ws.once('close', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+    handle!.beginWorkspaceDrain('secondary-id');
+    handle!.commitWorkspaceRemoval('secondary-id');
+    handle!.disposeWorkspace('secondary-id');
+    await closed;
+
+    expect(handle!.getWorkspaceActivity('secondary-id').acpConnections).toBe(0);
+    await expect(initializeWs('/acp')).resolves.toMatchObject({
+      result: {
+        agentCapabilities: { _meta: { qwen: { workspaceCwd: '/ws' } } },
+      },
+    });
+  });
+
+  it('disposes only the target live WebSocket and allows a fresh mount', async () => {
+    const connect = (pathname: string) =>
+      new Promise<WebSocket>((resolve, reject) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${port}${pathname}`, {
+          handshakeTimeout: 2000,
+        });
+        ws.on('open', () => ws.send(INITIALIZE));
+        ws.on('message', (data: WebSocket.RawData) => {
+          const message = JSON.parse(data.toString()) as { id?: number };
+          if (message.id === 1) resolve(ws);
+        });
+        ws.on('error', reject);
+      });
+    const primaryWs = await connect('/acp');
+    const secondaryWs = await connect('/workspaces/secondary-id/acp');
+    const secondaryClosed = new Promise<void>((resolve) => {
+      secondaryWs.once('close', () => resolve());
+    });
+
+    expect(workspaceRegistry.beginDrain(secondaryRuntime)).toBe(true);
+    handle!.beginWorkspaceDrain('secondary-id');
+    handle!.commitWorkspaceRemoval('secondary-id');
+    handle!.disposeWorkspace('secondary-id');
+    workspaceRegistry.completeDrain(secondaryRuntime);
+    await secondaryClosed;
+
+    const primaryReply = new Promise<Record<string, unknown>>(
+      (resolve, reject) => {
+        primaryWs.once('message', (data: WebSocket.RawData) => {
+          try {
+            resolve(JSON.parse(data.toString()) as Record<string, unknown>);
+          } catch (err) {
+            reject(err as Error);
+          }
+        });
+      },
+    );
+    primaryWs.send(
+      JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'unknown/mutation' }),
+    );
+    expect(await primaryReply).toMatchObject({ id: 2 });
+    primaryWs.close();
+
+    workspaceRegistry.add(
+      makeRuntime({
+        id: 'secondary-id',
+        cwd: '/ws-b',
+        primary: false,
+        trusted: true,
+        bridge: makeBridge(),
+      }),
+    );
+    await expect(
+      initializeWs('/workspaces/secondary-id/acp'),
+    ).resolves.toMatchObject({
+      result: {
+        agentCapabilities: { _meta: { qwen: { workspaceCwd: '/ws-b' } } },
+      },
+    });
   });
 
   it('rejects an upgrade whose listener starts after disposal', async () => {
@@ -675,6 +1050,192 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
         primary: false,
       }),
     ]);
+  });
+
+  it('drains, rolls back, disposes, and recreates a secondary mount', async () => {
+    const initialized = await postInitialize('/workspaces/secondary-id/acp');
+    expect(initialized.status).toBe(200);
+    expect(handle!.getWorkspaceActivity('secondary-id')).toEqual({
+      acpConnections: 1,
+      memoryTasks: 0,
+    });
+
+    handle!.beginWorkspaceDrain('secondary-id');
+    const draining = await postInitialize('/workspaces/secondary-id/acp');
+    expect(draining.status).toBe(503);
+    expect(draining.headers.get('retry-after')).toBe('5');
+    await expect(draining.json()).resolves.toMatchObject({
+      code: 'workspace_draining',
+    });
+
+    handle!.cancelWorkspaceDrain('secondary-id');
+    expect((await postInitialize('/workspaces/secondary-id/acp')).status).toBe(
+      200,
+    );
+
+    expect(workspaceRegistry.beginDrain(secondaryRuntime)).toBe(true);
+    handle!.beginWorkspaceDrain('secondary-id');
+    const registryDraining = await postInitialize(
+      '/workspaces/secondary-id/acp',
+    );
+    expect(registryDraining.status).toBe(503);
+    await expect(registryDraining.json()).resolves.toMatchObject({
+      code: 'workspace_draining',
+    });
+    handle!.commitWorkspaceRemoval('secondary-id');
+    handle!.disposeWorkspace('secondary-id');
+    workspaceRegistry.completeDrain(secondaryRuntime);
+    expect(handle!.getWorkspaceActivity('secondary-id')).toEqual({
+      acpConnections: 0,
+      memoryTasks: 0,
+    });
+    expect(
+      handle!
+        .getSnapshot()
+        .mounts.some((mount) => mount.workspaceId === 'secondary-id'),
+    ).toBe(false);
+
+    const replacementBridge = makeBridge();
+    workspaceRegistry.add(
+      makeRuntime({
+        id: 'secondary-id',
+        cwd: '/ws-b',
+        primary: false,
+        trusted: true,
+        bridge: replacementBridge,
+      }),
+    );
+    expect((await postInitialize('/workspaces/secondary-id/acp')).status).toBe(
+      200,
+    );
+    expect(handle!.getWorkspaceActivity('secondary-id').acpConnections).toBe(1);
+  });
+
+  it('returns a structured workspace_draining error on an existing WebSocket', async () => {
+    const reply = await new Promise<Record<string, unknown>>(
+      (resolve, reject) => {
+        const ws = new WebSocket(
+          `ws://127.0.0.1:${port}/workspaces/secondary-id/acp`,
+          { handshakeTimeout: 2000 },
+        );
+        ws.on('open', () => ws.send(INITIALIZE));
+        ws.on('message', (data: WebSocket.RawData) => {
+          const message = JSON.parse(data.toString()) as Record<
+            string,
+            unknown
+          >;
+          if (message['id'] === 1) {
+            handle!.beginWorkspaceDrain('secondary-id');
+            ws.send(
+              JSON.stringify({
+                jsonrpc: '2.0',
+                id: 2,
+                method: 'unknown/mutation',
+              }),
+            );
+            return;
+          }
+          if (message['id'] === 2) {
+            ws.close();
+            resolve(message);
+          }
+        });
+        ws.on('error', reject);
+      },
+    );
+
+    expect(reply).toMatchObject({
+      error: {
+        data: {
+          code: 'workspace_draining',
+          workspaceCwd: '/ws-b',
+        },
+      },
+    });
+  });
+
+  it('rejects a new WebSocket upgrade while its workspace is draining', async () => {
+    expect(workspaceRegistry.beginDrain(secondaryRuntime)).toBe(true);
+    handle!.beginWorkspaceDrain('secondary-id');
+
+    const response = await new Promise<{
+      status: number | undefined;
+      retryAfter: string | string[] | undefined;
+    }>((resolve, reject) => {
+      const ws = new WebSocket(
+        `ws://127.0.0.1:${port}/workspaces/secondary-id/acp`,
+        { handshakeTimeout: 2000 },
+      );
+      ws.on('unexpected-response', (_req, res) => {
+        resolve({
+          status: res.statusCode,
+          retryAfter: res.headers['retry-after'],
+        });
+        ws.terminate();
+      });
+      ws.on('open', () => {
+        ws.close();
+        reject(new Error('draining workspace WS upgrade should not open'));
+      });
+      ws.on('error', reject);
+    });
+
+    expect(response).toEqual({ status: 503, retryAfter: '5' });
+  });
+
+  it('rejects unowned and spoofed correlation frames during drain', async () => {
+    const replies = await new Promise<Array<Record<string, unknown>>>(
+      (resolve, reject) => {
+        const received: Array<Record<string, unknown>> = [];
+        const ws = new WebSocket(
+          `ws://127.0.0.1:${port}/workspaces/secondary-id/acp`,
+          { handshakeTimeout: 2000 },
+        );
+        ws.on('open', () => ws.send(INITIALIZE));
+        ws.on('message', (data: WebSocket.RawData) => {
+          const message = JSON.parse(data.toString()) as Record<
+            string,
+            unknown
+          >;
+          if (message['id'] === 1) {
+            handle!.beginWorkspaceDrain('secondary-id');
+            ws.send(JSON.stringify({ jsonrpc: '2.0', id: 99, result: {} }));
+            ws.send(
+              JSON.stringify({ type: 'cdp_result', requestId: 'unknown' }),
+            );
+            ws.send(
+              JSON.stringify({
+                type: 'mcp_message',
+                id: 'unknown',
+                server: 'missing',
+                payload: {},
+              }),
+            );
+            ws.send(
+              JSON.stringify({
+                jsonrpc: '2.0',
+                id: 2,
+                method: 'unknown/mutation',
+              }),
+            );
+            return;
+          }
+          received.push(message);
+          if (message['id'] === 2) {
+            ws.close();
+            resolve(received);
+          }
+        });
+        ws.on('error', reject);
+      },
+    );
+
+    expect(replies).toHaveLength(4);
+    for (const reply of replies) {
+      expect(reply).toMatchObject({
+        error: { data: { code: 'workspace_draining' } },
+      });
+    }
   });
 
   it('rejects a raw WS upgrade whose selector is a dot-segment (%2e%2e)', async () => {

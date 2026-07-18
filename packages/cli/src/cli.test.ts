@@ -7,6 +7,7 @@
 import type { Argv } from 'yargs';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  chmodSync,
   copyFileSync,
   mkdirSync,
   mkdtempSync,
@@ -33,6 +34,8 @@ const mocks = vi.hoisted(() => ({
   main: vi.fn(),
   tryRunServeFastPath: vi.fn(),
   initStartupProfiler: vi.fn(),
+  initializeAcpStartupProfiler: vi.fn(),
+  markAcpStartup: vi.fn(),
   initCpuProfiler: vi.fn(),
   mcpHandler: vi.fn(),
   mcpBuilder: vi.fn(),
@@ -51,6 +54,11 @@ vi.mock('./serve/fast-path.js', () => ({
 
 vi.mock('./utils/startupProfiler.js', () => ({
   initStartupProfiler: mocks.initStartupProfiler,
+}));
+
+vi.mock('./utils/acp-startup-profiler.js', () => ({
+  initializeAcpStartupProfiler: mocks.initializeAcpStartupProfiler,
+  markAcpStartup: mocks.markAcpStartup,
 }));
 
 vi.mock('./utils/cpuProfiler.js', () => ({
@@ -299,6 +307,26 @@ describe('runCliEntry', () => {
     await runCliEntry([]);
 
     expect(mocks.main).toHaveBeenCalledTimes(1);
+    expect(mocks.initializeAcpStartupProfiler).not.toHaveBeenCalled();
+  });
+
+  it('profiles the Gemini module import only on the ACP path', async () => {
+    await runCliEntry(['--acp']);
+
+    expect(mocks.initializeAcpStartupProfiler).toHaveBeenCalledTimes(1);
+    expect(mocks.markAcpStartup.mock.calls).toEqual([
+      ['geminiImportStart'],
+      ['geminiImportEnd'],
+    ]);
+    expect(mocks.main).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not profile when ACP is explicitly disabled', async () => {
+    await runCliEntry(['--acp=false']);
+
+    expect(mocks.initializeAcpStartupProfiler).not.toHaveBeenCalled();
+    expect(mocks.markAcpStartup).not.toHaveBeenCalled();
+    expect(mocks.main).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -310,6 +338,7 @@ describe('bootstrap import boundaries', () => {
     expect(source).not.toContain("from '@qwen-code/qwen-code-core'");
     expect(source).not.toContain("import './gemini.js'");
     expect(source).not.toContain("import { main } from './gemini.js'");
+    expect(source).not.toContain("from './utils/acp-startup-profiler.js'");
   });
 
   it('initializes profilers during bootstrap module evaluation', () => {
@@ -343,6 +372,102 @@ describe('bootstrap import boundaries', () => {
     expect(source).toContain("first === 'mcp'");
     expect(source).toContain("hasFlag('--help', '-h')");
     expect(source).toContain("hasFlag('--version', '-v')");
+    expect(source).toContain('UPDATE_COMPLETE_EXIT_CODE = 44');
+  });
+
+  it('reloads the CLI through a stable shim after an update', () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-cli-update-'));
+    const wrongDir = mkdtempSync(path.join(tmpdir(), 'qwen-cli-wrong-'));
+    const oldDir = path.join(tempDir, 'old');
+    const newDir = path.join(tempDir, 'new');
+    const binPath = path.join(tempDir, 'qwen');
+    try {
+      mkdirSync(oldDir);
+      mkdirSync(newDir);
+      copyFileSync(
+        '../../scripts/cli-entry.js',
+        path.join(oldDir, 'entry.mjs'),
+      );
+      copyFileSync(
+        '../../scripts/cli-entry.js',
+        path.join(newDir, 'entry.mjs'),
+      );
+      writeFileSync(
+        path.join(oldDir, 'cli.js'),
+        `import { chmodSync, rmSync, writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(binPath)}, ${JSON.stringify(`#!/bin/sh\nexec "${process.execPath}" "${path.join(newDir, 'entry.mjs')}" "$@"\n`)});\nchmodSync(${JSON.stringify(binPath)}, 0o755);\nrmSync(${JSON.stringify(oldDir)}, { recursive: true, force: true });\nprocess.exit(44);\n`,
+      );
+      writeFileSync(
+        path.join(newDir, 'cli.js'),
+        "process.stdout.write(`${JSON.stringify({ args: process.argv.slice(2), skip: process.env.QWEN_CODE_SKIP_UPDATE_CHECK_ONCE, hasLauncherPid: /^\\d+$/.test(process.env.QWEN_CODE_LAUNCHER_PID ?? ''), launcherPath: process.env.QWEN_CODE_LAUNCHER_PATH })}\\n`);\n",
+      );
+      writeFileSync(
+        binPath,
+        `#!/bin/sh\nexec "${process.execPath}" "${path.join(oldDir, 'entry.mjs')}" "$@"\n`,
+      );
+      chmodSync(binPath, 0o755);
+      writeFileSync(
+        path.join(wrongDir, 'qwen'),
+        '#!/bin/sh\necho wrong-launcher\n',
+      );
+      chmodSync(path.join(wrongDir, 'qwen'), 0o755);
+
+      const output = execFileSync(binPath, ['--prompt', 'a&b'], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${wrongDir}${path.delimiter}${tempDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+        },
+      });
+
+      expect(JSON.parse(output)).toEqual({
+        args: ['--prompt', 'a&b'],
+        skip: 'true',
+        hasLauncherPid: true,
+      });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+      rmSync(wrongDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not pass the standalone launcher hint to child processes', () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-cli-launcher-env-'));
+    const entryPath = path.join(tempDir, 'entry.mjs');
+    const launcherPath = path.join(tempDir, 'qwen');
+    try {
+      copyFileSync('../../scripts/cli-entry.js', entryPath);
+      writeFileSync(
+        path.join(tempDir, 'cli.js'),
+        'process.stdout.write(JSON.stringify({ launcherPath: process.env.QWEN_CODE_LAUNCHER_PATH }));\n',
+      );
+      writeFileSync(launcherPath, '#!/bin/sh\n');
+      chmodSync(launcherPath, 0o755);
+
+      const output = execFileSync(process.execPath, [entryPath], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          QWEN_CODE_LAUNCHER_PATH: launcherPath,
+        },
+      });
+
+      expect(JSON.parse(output)).toEqual({});
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('ignores malformed relaunch args in the npm bin wrapper', () => {
+    const output = execFileSync(
+      process.execPath,
+      ['../../scripts/cli-entry.js', '--version'],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, QWEN_CODE_RELAUNCH_ARGS: 'not-json' },
+      },
+    );
+
+    expect(output.trim()).toMatch(/^\d+\.\d+\.\d+/);
   });
 
   it('prints CLI_VERSION from the npm bin wrapper version shortcut', () => {

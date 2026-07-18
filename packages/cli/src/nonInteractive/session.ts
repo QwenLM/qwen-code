@@ -43,6 +43,10 @@ import {
   finalizeStartupProfile,
   profileCheckpoint,
 } from '../utils/startupProfiler.js';
+import {
+  settleChatRecording,
+  subscribeToHeadlessChatRecordingFailures,
+} from '../utils/chat-recording-failure.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_SESSION');
 
@@ -86,6 +90,7 @@ class Session {
   private monitorNotificationsRegistered: boolean = false;
   private monitorRegistrationsRegistered: boolean = false;
   private settings: LoadedSettings;
+  private readonly unsubscribeRecordingFailure: () => void;
 
   // Single initialization promise that resolves when session is ready for user messages.
   // Created lazily once initialization actually starts.
@@ -108,6 +113,10 @@ class Session {
     this.outputAdapter = new StreamJsonOutputAdapter(
       config,
       config.getIncludePartialMessages(),
+    );
+    this.unsubscribeRecordingFailure = subscribeToHeadlessChatRecordingFailures(
+      config,
+      this.outputAdapter,
     );
 
     this.setupSignalHandlers();
@@ -628,7 +637,7 @@ class Session {
           await this.processContinueTurn();
         } catch (error) {
           debugLogger.error('[Session] Error processing continue turn:', error);
-          this.emitErrorResult(error);
+          await this.emitErrorResult(error);
         }
         continue;
       }
@@ -639,7 +648,7 @@ class Session {
           await this.processUserMessage(userMessage);
         } catch (error) {
           debugLogger.error('[Session] Error processing user message:', error);
-          this.emitErrorResult(error);
+          await this.emitErrorResult(error);
         }
         continue;
       }
@@ -661,7 +670,7 @@ class Session {
           '[Session] Error processing monitor notification batch:',
           error,
         );
-        this.emitErrorResult(error);
+        await this.emitErrorResult(error);
       }
     }
   }
@@ -701,12 +710,13 @@ class Session {
     });
   }
 
-  private emitErrorResult(
+  private async emitErrorResult(
     error: unknown,
     numTurns: number = 0,
     durationMs: number = 0,
     apiDurationMs: number = 0,
-  ): void {
+  ): Promise<void> {
+    await settleChatRecording(this.config, { finalize: false });
     const message = error instanceof Error ? error.message : String(error);
     this.outputAdapter.emitResult({
       isError: true,
@@ -777,7 +787,7 @@ class Session {
     // terminal error result so it learns the continuation was abandoned.
     if (this.pendingContinueTurn) {
       this.pendingContinueTurn = false;
-      this.emitErrorResult(
+      await this.emitErrorResult(
         new Error('Continuation abandoned: session shut down before it ran'),
       );
     }
@@ -846,6 +856,10 @@ class Session {
       process.removeListener('SIGTERM', this.shutdownHandler);
       this.shutdownHandler = null;
     }
+  }
+
+  dispose(): void {
+    this.unsubscribeRecordingFailure();
   }
 
   /**
@@ -990,5 +1004,10 @@ export async function runNonInteractiveStreamJson(
   }
 
   const manager = new Session(config, initialPrompt, settings);
-  await manager.run();
+  try {
+    await manager.run();
+  } finally {
+    await settleChatRecording(config, { finalize: true });
+    manager.dispose();
+  }
 }

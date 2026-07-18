@@ -22,12 +22,12 @@ irm https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/
 
 ```bash
 # macOS / Linux
-CUA_DRIVER_RS_VERSION=0.7.1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/install.sh)"
+CUA_DRIVER_RS_VERSION=0.7.2 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/install.sh)"
 ```
 
 ```powershell
 # Windows
-$env:CUA_DRIVER_RS_VERSION = "0.7.1"
+$env:CUA_DRIVER_RS_VERSION = "0.7.2"
 irm https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/install.ps1 | iex
 ```
 
@@ -37,7 +37,7 @@ irm https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/
 
 ```bash
 qwen-cua-driver --version
-# Expected: cua-driver 0.7.1
+# Expected: cua-driver 0.7.2
 ```
 
 ### macOS permissions
@@ -191,5 +191,5 @@ irm https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/
 ## Documentation
 
 - [Vendored patches](./.vendored-patches.md)
-- [Relative-coordinate design](./rust/docs/relative-coordinates-design.md)
+- [Relative-coordinate design](./docs/relative-coordinates-design.md)
 - [Upstream docs](https://github.com/trycua/cua/tree/main/libs/cua-driver/rust)
