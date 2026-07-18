@@ -101,6 +101,11 @@ env:
   # Upper bound on review targets emitted per scan (fan-out defense-in-depth;
   # excess is logged and deferred to the next scan).
   MAX_TARGETS_PER_SCAN: '10'
+  # Upper bound on candidates INSPECTED per scan: idle candidates consume
+  # serial API calls even when they emit nothing, and takeover widens the
+  # candidate pool. Excess candidates defer to the next scan (newest-first
+  # ordering means they rotate, not starve).
+  MAX_CANDIDATE_INSPECTIONS: '60'
   # Maintainer-facing engagement labels (applying labels requires GitHub
   # triage+, so the permission gate is GitHub's own): TAKEOVER opts a PR —
   # including a human-authored one — into the loop; SKIP opts any PR out
@@ -153,11 +158,14 @@ jobs:
       # get a run-unique group and still face the real permission gate
       # inside; the association literal mirrors TRUSTED_ASSOC and the login
       # mirrors REVIEW_BOT); pull_request label events → per-PR (GitHub only
-      # lets triage+ apply labels, so the whole event class is trusted);
+      # lets triage+ apply labels, so the whole event class is trusted —
+      # but ONLY the takeover label itself shares the group: an unrelated
+      # label changed in the same batch operation must not cancel a queued
+      # takeover route);
       # issues → per-issue; anything else (dispatch) → unique per run_id,
       # never cancelled.
       group: >-
-        ${{ github.event_name == 'schedule' && 'qwen-autofix-route-cron' || (github.event_name == 'pull_request_review' && (contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association) || github.event.review.user.login == 'qwen-code-ci-bot') && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)) || (github.event_name == 'pull_request' && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)) || (github.event_name == 'issues' && format('qwen-autofix-route-issue-{0}', github.event.issue.number)) || format('qwen-autofix-route-{0}', github.run_id) }}
+        ${{ github.event_name == 'schedule' && 'qwen-autofix-route-cron' || (github.event_name == 'pull_request_review' && (contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association) || github.event.review.user.login == 'qwen-code-ci-bot') && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)) || (github.event_name == 'pull_request' && github.event.label.name == 'autofix/takeover' && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)) || (github.event_name == 'issues' && format('qwen-autofix-route-issue-{0}', github.event.issue.number)) || format('qwen-autofix-route-{0}', github.run_id) }}
       cancel-in-progress: |-
         ${{ github.event_name != 'workflow_dispatch' }}
     permissions:
@@ -307,7 +315,13 @@ jobs:
                 else
                   sender_is_authorized=false
                   sender_permission=''
-                  if [[ "${SENDER_LOGIN}" == "${COMMENT_PR_AUTHOR}" ]]; then
+                  # Author privilege applies to IN-REPO PRs only: on a fork
+                  # PR the author is an arbitrary external account, and
+                  # accepting them here would let them drive PAT-authored
+                  # writes (even just refusal comments) onto their own PR at
+                  # will. Fork authors without write+ are dropped silently.
+                  CMD_HEAD_REPO="$(gh api "repos/${REPO}/pulls/${ISSUE_NUMBER}" --jq '.head.repo.full_name // ""' 2> /dev/null || echo '')"
+                  if [[ "${SENDER_LOGIN}" == "${COMMENT_PR_AUTHOR}" && "${CMD_HEAD_REPO}" == "${REPO}" ]]; then
                     sender_is_authorized=true
                     sender_permission='pr-author'
                   else
@@ -359,7 +373,12 @@ jobs:
                     echo "🧭 ${TAKEOVER_LABEL} applied by ${SENDER_LOGIN} on PR #${PR_NUMBER_EVENT} → review phase (takeover)"
                   fi
                 elif [[ "${EVENT_ACTION}" == 'unlabeled' ]]; then
-                  if [[ "${PR_HEAD_REPO}" != "${REPO}" ]]; then
+                  # Mirror the labeled-path guards: a fork, closed, or
+                  # non-main PR was never engaged, so a release ack would
+                  # announce a disengagement that never existed.
+                  if [[ "${PR_STATE}" != 'open' || "${PR_BASE_REF}" != 'main' ]]; then
+                    echo "🧭 takeover release ignored: PR state '${PR_STATE:-unknown}' base '${PR_BASE_REF:-unknown}' was never engaged"
+                  elif [[ "${PR_HEAD_REPO}" != "${REPO}" ]]; then
                     # Fork pull_request events carry no secrets: emitting the
                     # ack here would start takeover-ack with an empty PAT and
                     # fail its identity check — a red run for a label that
@@ -1054,7 +1073,8 @@ jobs:
           BRANCH="autofix/issue-${ISSUE}"
           git config --local --unset-all http.https://github.com/.extraheader || true
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
-          git push origin "${BRANCH}"
+          git config core.hooksPath /dev/null
+          git push --no-verify origin "${BRANCH}"
 
           PR_URL="$(gh pr create --repo "${REPO}" \
             --base main --head "${BRANCH}" \
@@ -1123,10 +1143,13 @@ jobs:
           fi
 
   # ===========================================================================
-  # TAKEOVER COMMAND — the accepted comment command's ONLY side effect: toggle
-  # TAKEOVER_LABEL. The resulting pull_request labeled/unlabeled event (fired
-  # by the PAT identity) then drives engagement/release exactly like a manual
-  # label edit — one mechanism, two entry points.
+  # TAKEOVER COMMAND — the accepted comment command's side effects are the
+  # label toggle plus its own acknowledgements: add on an unlabeled PR
+  # toggles TAKEOVER_LABEL (the resulting pull_request event drives
+  # engagement exactly like a manual label edit — one mechanism, two entry
+  # points); add on an already-managed PR posts the re-arm ack (the round
+  # window anchor); skip-labeled and fork PRs get bilingual refusals instead
+  # of a toggle.
   # ===========================================================================
   takeover-command:
     needs: 'route'
@@ -1325,7 +1348,7 @@ jobs:
               'add
                | unique_by(.number)
                | .[]
-               | select(.isCrossRepository != true)
+               | select(.isCrossRepository == false)
                | select([.labels[]?.name] | index($skip) | not)
                | .number' \
               "${WORKDIR}/bot-prs.json" "${WORKDIR}/takeover-prs.json")"
@@ -1374,7 +1397,13 @@ jobs:
           [[ "${BUSY_PRS}" != ' ' ]] && echo "🚧 address in flight/queued for PR(s):${BUSY_PRS}"
 
           TARGETS='[]'
+          INSPECTED=0
           for PR in ${CANDIDATES}; do
+            INSPECTED=$(( INSPECTED + 1 ))
+            if [[ "${INSPECTED}" -gt "${MAX_CANDIDATE_INSPECTIONS}" ]]; then
+              echo "🧮 candidate-inspection budget (${MAX_CANDIDATE_INSPECTIONS}) reached — deferring the rest to the next scan"
+              break
+            fi
             if [[ "${BUSY_PRS}" == *" ${PR} "* ]]; then
               echo "⏳ #${PR}: review-address already in flight or queued — skipping"
               continue
@@ -2120,7 +2149,12 @@ jobs:
             NEXT_ROUND="$(( ROUND + 1 ))"
             git config --local --unset-all http.https://github.com/.extraheader || true
             git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
-            git push origin "${BRANCH}"
+            # This step carries the PAT; the branch carries PR-controlled
+            # .husky hooks (hooksPath was pointed there so the AGENT's
+            # commits get checked). A pre-push hook would execute that code
+            # with the PAT in env — sever hooks entirely before pushing.
+            git config core.hooksPath /dev/null
+            git push --no-verify origin "${BRANCH}"
             {
               echo "🤖 Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS}). What changed, and what I pushed back on:"
               echo

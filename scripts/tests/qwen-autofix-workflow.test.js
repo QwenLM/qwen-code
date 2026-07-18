@@ -214,7 +214,9 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain("MAX_OPEN_AUTOFIX_PRS: '5'");
     expect(reviewScanJob).toContain('isCrossRepository');
     expect(reviewScanJob).toContain('not an open in-repo main-targeting PR');
-    expect(reviewScanJob).toContain('.isCrossRepository != true');
+    // Candidates fail CLOSED on the fork field, matching the forced path
+    // and the NOTE that documents the jq // false trap.
+    expect(reviewScanJob).toContain('select(.isCrossRepository == false)');
     // Fan-out: one scan emits EVERY eligible PR (no single-target break). The
     // address matrix's max-parallel bounds simultaneity and per-PR concurrency
     // groups prevent duplicate same-PR runs; a single-target break starved
@@ -615,8 +617,11 @@ describe('qwen-autofix workflow', () => {
     // Label events share the per-PR route group (the whole event class is
     // triage-gated), while review events need a trusted-looking payload —
     // the group is entered before any step runs.
+    // Only the takeover label itself shares the per-PR group — an
+    // unrelated label changed in the same batch must not cancel a queued
+    // takeover route.
     expect(routeJob).toContain(
-      "github.event_name == 'pull_request' && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)",
+      "github.event_name == 'pull_request' && github.event.label.name == 'autofix/takeover' && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)",
     );
     expect(routeJob).toContain(
       'contains(fromJSON(\'["OWNER", "MEMBER", "COLLABORATOR"]\'), github.event.review.author_association)',
@@ -798,6 +803,93 @@ describe('qwen-autofix workflow', () => {
     expect(cap(['autofix/takeover', 'unrelated'])).toBe('100');
     expect(cap([])).toBe('5');
     expect(cap(['unrelated'])).toBe('5');
+  });
+
+  it('behaviorally replays the takeover-command toggle across all four paths', () => {
+    // Extract the toggle VERBATIM (drift fails the test) and replay it with
+    // a PATH-stubbed gh that records writes: add+absent applies the label,
+    // add+present posts the re-arm ack (the window reset) without touching
+    // the label, remove+present removes it, remove+absent is an explicit
+    // no-op, a skip-labeled add refuses, and a fork refuses — neither posts
+    // a toggle.
+    const toggle = workflow.match(
+      /(if ! PR_INFO="\$\(gh pr view[\s\S]*?— nothing to do"\n {12}else\n {14}gh pr edit "\$\{PR\}" --repo "\$\{REPO\}" --remove-label "\$\{TAKEOVER_LABEL\}"\n[\s\S]*?\n {10}fi)/,
+    )?.[1];
+    expect(toggle).toBeTruthy();
+    const runToggle = ({ cmd, labels = [], fork = false }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-toggle-'));
+      try {
+        const prJson = JSON.stringify({
+          isCrossRepository: fork,
+          labels: labels.map((name) => ({ name })),
+        });
+        writeFileSync(
+          join(dir, 'gh'),
+          [
+            '#!/bin/bash',
+            `if [[ "$1" == "pr" && "$2" == "view" ]]; then printf '%s' '${prJson}';`,
+            `elif [[ "$1" == "pr" && "$2" == "edit" ]]; then echo "EDIT $*" >> '${join(dir, 'writes.log')}';`,
+            `elif [[ "$1" == "pr" && "$2" == "comment" ]]; then echo "COMMENT $4" >> '${join(dir, 'writes.log')}'; cat > /dev/null <<< "$6";`,
+            'fi',
+          ].join('\n'),
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        writeFileSync(join(dir, 'writes.log'), '');
+        const stdout = execFileSync(
+          'bash',
+          ['-c', `${toggle.replace(/\n {10}/g, '\n')}\nprintf 'DONE'`],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              CMD: cmd,
+              PR: '7165',
+              REPO: 'QwenLM/qwen-code',
+              TAKEOVER_LABEL: 'autofix/takeover',
+              SKIP_LABEL: 'autofix/skip',
+              TAKEOVER_COMMAND: '@qwen-code /takeover',
+              GITHUB_TOKEN: 'x',
+            },
+            encoding: 'utf8',
+          },
+        );
+        return {
+          done: stdout.endsWith('DONE'),
+          log: stdout,
+          writes: readFileSync(join(dir, 'writes.log'), 'utf8'),
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    // add + absent → label applied, no ack from this job.
+    const addAbsent = runToggle({ cmd: 'add' });
+    expect(addAbsent.writes).toContain('EDIT pr edit 7165');
+    expect(addAbsent.writes).toContain('--add-label');
+    expect(addAbsent.writes).not.toContain('COMMENT');
+    // add + present → re-arm ack, label untouched.
+    const rearm = runToggle({ cmd: 'add', labels: ['autofix/takeover'] });
+    expect(rearm.writes).toContain('COMMENT');
+    expect(rearm.writes).not.toContain('EDIT');
+    expect(rearm.log).toContain('re-armed');
+    // remove + present → label removed.
+    const removePresent = runToggle({
+      cmd: 'remove',
+      labels: ['autofix/takeover'],
+    });
+    expect(removePresent.writes).toContain('--remove-label');
+    // remove + absent → explicit no-op, no writes at all.
+    const removeAbsent = runToggle({ cmd: 'remove' });
+    expect(removeAbsent.writes.trim()).toBe('');
+    expect(removeAbsent.log).toContain('nothing to do');
+    // skip present vetoes engagement — refusal comment, never a toggle.
+    const skipBlocked = runToggle({ cmd: 'add', labels: ['autofix/skip'] });
+    expect(skipBlocked.writes).toContain('COMMENT');
+    expect(skipBlocked.writes).not.toContain('EDIT');
+    // fork PRs are refused with an explanation, never toggled.
+    const forkRefused = runToggle({ cmd: 'add', fork: true });
+    expect(forkRefused.writes).toContain('COMMENT');
+    expect(forkRefused.writes).not.toContain('EDIT');
   });
 
   it('behaviorally resets round counting at the latest takeover engage ack', () => {
@@ -1000,12 +1092,15 @@ describe('qwen-autofix workflow', () => {
       ghPermission = 'read',
       hasPr = 'url',
       state = 'open',
+      headRepo = 'QwenLM/qwen-code',
     }) => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-cmd-'));
       try {
+        // The decide branch makes two API shapes: the PR head-repo lookup
+        // (fork gate) and the collaborator-permission lookup.
         writeFileSync(
           join(dir, 'gh'),
-          `#!/bin/bash\nprintf '%s' '${ghPermission}'\n`,
+          `#!/bin/bash\nif [[ "$*" == *"/pulls/"* ]]; then printf '%s' '${headRepo}'; else printf '%s' '${ghPermission}'; fi\n`,
         );
         chmodSync(join(dir, 'gh'), 0o755);
         const out = execFileSync(
@@ -1083,6 +1178,25 @@ describe('qwen-autofix workflow', () => {
         author: 'qwen-code-dev-bot',
       }),
     ).toBe('|');
+    // Author privilege is IN-REPO only: a fork-PR author cannot summon
+    // PAT-authored writes onto their own PR (silent drop)…
+    expect(
+      runCmd({
+        body: '@qwen-code /takeover',
+        sender: 'human-a',
+        headRepo: 'human-a/qwen-code',
+      }),
+    ).toBe('|');
+    // …while a write+ maintainer still reaches the command job (which then
+    // posts the explanatory fork refusal).
+    expect(
+      runCmd({
+        body: '@qwen-code /takeover',
+        sender: 'maintainer-b',
+        ghPermission: 'write',
+        headRepo: 'human-a/qwen-code',
+      }),
+    ).toBe('add|7165');
   });
 
   it('gates real-time review triggers on bot author, trusted sender, and in-repo PR', () => {
@@ -1797,9 +1911,18 @@ describe('qwen-autofix workflow', () => {
 
   it('pushes autofix branches without rewriting remote history', () => {
     expect(workflow).not.toMatch(/\bgit push\b[^\n]*--force(?:-with-lease)?/);
-    expect(workflow).not.toMatch(/\bgit push\b[^\n]*-[^\n\s]*f/);
-    expect(publishPrStep).toContain('git push origin "${BRANCH}"');
-    expect(pushAndReportStep).toContain('git push origin "${BRANCH}"');
+    // No bare -f / +refspec force forms either. (--no-verify is NOT a force
+    // flag: it severs PR-controlled pre-push hooks from the PAT-bearing
+    // step, paired with hooksPath=/dev/null right above each push.)
+    expect(workflow).not.toMatch(/\bgit push\b[^\n]* -f\b/);
+    expect(workflow).not.toMatch(/\bgit push\b[^\n]* \+\S/);
+    expect(publishPrStep).toContain('git push --no-verify origin "${BRANCH}"');
+    expect(pushAndReportStep).toContain(
+      'git push --no-verify origin "${BRANCH}"',
+    );
+    expect(
+      workflow.split('git config core.hooksPath /dev/null').length - 1,
+    ).toBe(2);
   });
 
   it('keeps sandbox image fallback covered by a reusable script', () => {
