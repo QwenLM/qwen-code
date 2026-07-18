@@ -65,6 +65,7 @@ export const KIND_SCOPE: Record<string, RcScope> = {
   'agent.cancelled': SESSION_READ,
   'workflow.completed': SESSION_READ,
   'workflow.failed': SESSION_READ,
+  'session.rewound': SESSION_READ,
 };
 
 /**

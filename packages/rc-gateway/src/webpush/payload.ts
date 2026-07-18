@@ -111,6 +111,22 @@ export function buildPayload(
     };
   }
 
+  if (event.type === 'session_rewound') {
+    const toTurn = typeof data.toTurn === 'number' ? data.toTurn : undefined;
+    return {
+      v: 1,
+      kind: 'session.rewound',
+      sessionId: ctx.sessionId,
+      ...(ctx.sessionName ? { sessionName: ctx.sessionName } : {}),
+      summary: truncate(
+        toTurn !== undefined
+          ? `Session rewound to turn ${toTurn}`
+          : 'Session rewound',
+      ),
+      url: sessionUrl(ctx.sessionId),
+    };
+  }
+
   switch (event.type) {
     case 'permission_request': {
       const toolCall = data.toolCall as

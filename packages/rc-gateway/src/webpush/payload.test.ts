@@ -241,3 +241,19 @@ describe('agent lifecycle payloads', () => {
     }
   });
 });
+
+describe('session_rewound push payload', () => {
+  it('maps to kind session.rewound with a turn-number summary, no content', () => {
+    const payload = buildPayload(
+      { type: 'session_rewound', data: { toTurn: 3, truncatedEventId: 7 } },
+      { sessionId: 's-1', sessionName: 'My Session' },
+    );
+    expect(payload).toMatchObject({
+      kind: 'session.rewound',
+      sessionId: 's-1',
+      sessionName: 'My Session',
+    });
+    expect(payload?.summary).toContain('3');
+    expect(JSON.stringify(payload)).not.toContain('truncatedEventId');
+  });
+});

@@ -35,6 +35,12 @@ function sha256Hex(input: string | Buffer): string {
 // Existing behaviour tests (preserved - constructor signature unchanged)
 // ---------------------------------------------------------------------------
 
+describe('remote-rewind audit action', () => {
+  it('registers session_rewound in AUDIT_ACTIONS', () => {
+    expect(AUDIT_ACTIONS).toContain('session_rewound');
+  });
+});
+
 describe('AuditLog', () => {
   let dir: string;
   beforeEach(() => {
