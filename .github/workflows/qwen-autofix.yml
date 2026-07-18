@@ -77,6 +77,9 @@ env:
   # Hard cap on automated review-address rounds per PR. After this the bot stops
   # and leaves the PR for a human.
   MAX_ROUNDS: '5'
+  # Upper bound on review targets emitted per scan (fan-out defense-in-depth;
+  # excess is logged and deferred to the next scan).
+  MAX_TARGETS_PER_SCAN: '10'
   # Do not claim more issues when too many existing autofix PRs are still open.
   MAX_OPEN_AUTOFIX_PRS: '5'
 
@@ -1166,6 +1169,15 @@ jobs:
             # (which starved older PRs for hours when cron ticks were sparse).
           done
 
+          # Defense-in-depth bound on a pathological backlog: cap the targets
+          # emitted per scan so both the address matrix size and this job's
+          # runtime stay bounded. Never a silent cap — log what was deferred;
+          # the next scan picks up the remainder (their signals persist).
+          TOTAL="$(jq 'length' <<< "${TARGETS}")"
+          if [[ "${TOTAL}" -gt "${MAX_TARGETS_PER_SCAN}" ]]; then
+            echo "⚠️ ${TOTAL} eligible PRs; emitting the first ${MAX_TARGETS_PER_SCAN}, deferring the rest to the next scan"
+            TARGETS="$(jq -c --argjson n "${MAX_TARGETS_PER_SCAN}" '.[0:$n]' <<< "${TARGETS}")"
+          fi
           COUNT="$(jq 'length' <<< "${TARGETS}")"
           echo "📋 ${COUNT} PR(s) to process"
           echo "targets=${TARGETS}" >> "${GITHUB_OUTPUT}"

@@ -222,6 +222,11 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).not.toContain('break # one PR per scheduled scan');
     expect(reviewScanJob).toContain('Fan out: emit EVERY eligible PR');
     expect(workflow).toContain("max-parallel: 3");
+    // Pathological-backlog bound: targets per scan are capped, the excess is
+    // LOGGED and deferred to the next scan (never a silent cap).
+    expect(workflow).toContain("MAX_TARGETS_PER_SCAN: '10'");
+    expect(reviewScanJob).toContain('deferring the rest to the next scan');
+    expect(reviewScanJob).toContain(".[0:$n]");
     expect(reviewScanJob).toContain('statusCheckRollup');
     expect(reviewScanJob).toContain('HAS_PENDING_CHECKS');
     expect(reviewScanJob).toContain('N_FAILED_CHECKS');
