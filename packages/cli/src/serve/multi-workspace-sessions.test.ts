@@ -178,12 +178,16 @@ function makeSummary(
 async function writeStoredSession(input: {
   sessionId: string;
   cwd: string;
+  runtimeBaseDir?: string;
   timestamp: string;
   prompt: string;
   mtime: Date;
   parentSessionId?: string;
 }): Promise<void> {
-  const chatsDir = path.join(new Storage(input.cwd).getProjectDir(), 'chats');
+  const chatsDir = path.join(
+    new Storage(input.cwd, input.runtimeBaseDir).getProjectDir(),
+    'chats',
+  );
   await fsp.mkdir(chatsDir, { recursive: true });
   const filePath = path.join(chatsDir, `${input.sessionId}.jsonl`);
   const records: Array<Record<string, unknown>> = [
@@ -690,6 +694,7 @@ function makeBridge(
 function makeRuntime(input: {
   workspaceId: string;
   workspaceCwd: string;
+  runtimeBaseDir?: string;
   primary: boolean;
   trusted: boolean;
   bridge: AcpSessionBridge;
@@ -736,6 +741,8 @@ function makeHarness(opts?: {
   token?: string;
   secondaryRewindImpl?: AcpSessionBridge['rewindSession'];
   secondaryShellImpl?: AcpSessionBridge['executeShellCommand'];
+  primaryRuntimeBaseDir?: string;
+  secondaryRuntimeBaseDir?: string;
   serveOptions?: Partial<ServeOptions>;
 }) {
   const primaryBridge = makeBridge(
@@ -762,6 +769,7 @@ function makeHarness(opts?: {
     makeRuntime({
       workspaceId: 'primary-id',
       workspaceCwd: PRIMARY_CWD,
+      runtimeBaseDir: opts?.primaryRuntimeBaseDir,
       primary: true,
       trusted: opts?.primaryTrusted ?? true,
       bridge: primaryBridge,
@@ -769,6 +777,7 @@ function makeHarness(opts?: {
     makeRuntime({
       workspaceId: 'secondary-id',
       workspaceCwd: SECONDARY_CWD,
+      runtimeBaseDir: opts?.secondaryRuntimeBaseDir,
       primary: false,
       trusted: opts?.secondaryTrusted ?? true,
       bridge: secondaryBridge,
@@ -2366,6 +2375,65 @@ describe('multi-workspace session dispatch', () => {
         isArchived: true,
       });
     });
+  });
+
+  it('uses the owning runtime base for persisted session reads and maintenance', async () => {
+    const previousRuntimeBaseDir = Storage.getRuntimeBaseDir();
+    const defaultRuntimeBaseDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-default-runtime-'),
+    );
+    const secondaryRuntimeBaseDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-secondary-runtime-'),
+    );
+    const sessionId = '550e8400-e29b-41d4-a716-446655440159';
+    Storage.setRuntimeBaseDir(defaultRuntimeBaseDir);
+    try {
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        runtimeBaseDir: secondaryRuntimeBaseDir,
+        timestamp: '2026-07-08T00:20:00.000Z',
+        prompt: 'secondary custom runtime target',
+        mtime: new Date('2026-07-08T00:20:00.000Z'),
+      });
+      const { app } = makeHarness({
+        secondarySummaries: [],
+        secondaryRuntimeBaseDir,
+      });
+
+      const listed = await request(app)
+        .get('/workspaces/secondary-id/sessions')
+        .set('Host', host())
+        .expect(200);
+      expect(
+        listed.body.sessions.map(
+          (session: { sessionId: string }) => session.sessionId,
+        ),
+      ).toEqual([sessionId]);
+
+      await request(app)
+        .post('/workspaces/secondary-id/sessions/archive')
+        .set('Host', host())
+        .send({ sessionIds: [sessionId] })
+        .expect(200);
+
+      await expect(
+        new SessionService(SECONDARY_CWD, {
+          runtimeBaseDir: secondaryRuntimeBaseDir,
+        }).getSessionLocation(sessionId),
+      ).resolves.toBe('archived');
+      await expect(
+        new SessionService(SECONDARY_CWD, {
+          runtimeBaseDir: defaultRuntimeBaseDir,
+        }).getSessionLocation(sessionId),
+      ).resolves.toBeUndefined();
+    } finally {
+      Storage.setRuntimeBaseDir(previousRuntimeBaseDir);
+      await Promise.all([
+        fsp.rm(defaultRuntimeBaseDir, { recursive: true, force: true }),
+        fsp.rm(secondaryRuntimeBaseDir, { recursive: true, force: true }),
+      ]);
+    }
   });
 
   it('lists organized non-primary workspace sessions with pinned first for trusted workspaces', async () => {

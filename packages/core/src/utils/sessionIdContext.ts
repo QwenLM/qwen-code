@@ -5,13 +5,14 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { Storage } from '../config/storage.js';
 
 /**
  * Per-async-context session ID, mirroring {@link promptIdContext}.
  *
  * `QWEN_CODE_SESSION_ID` historically lived only in `process.env`, which is
  * a single process-global slot. That is fine for the interactive CLI (one
- * session per process, switched via `Config.startNewSession()`), but breaks
+ * session per process, switched via a Config session transition), but breaks
  * in daemon mode where one process hosts many concurrent sessions: only the
  * first `Config` ever claims the env slot (see `sessionEnvClaimed` in
  * config.ts), so shells spawned by every later session would read a stale
@@ -38,17 +39,50 @@ export const sessionIdContext = new AsyncLocalStorage<string>();
  * subprocesses another session's directory. Keyed on the session, it is right for
  * all of them.
  */
-const projectDirBySession = new Map<string, string>();
+const LEGACY_PROJECT_DIR_OWNER = 'legacy';
+interface SessionProjectDirRegistration {
+  projectDir: string;
+  runtimeBaseDir?: string;
+}
+
+const projectDirsBySession = new Map<
+  string,
+  Map<string, SessionProjectDirRegistration>
+>();
 
 export function registerSessionProjectDir(
   sessionId: string,
   projectDir: string,
+  ownerId = LEGACY_PROJECT_DIR_OWNER,
+  runtimeBaseDir?: string,
 ): void {
-  if (sessionId && projectDir) projectDirBySession.set(sessionId, projectDir);
+  if (!sessionId || !projectDir) return;
+  let registrations = projectDirsBySession.get(sessionId);
+  if (!registrations) {
+    registrations = new Map();
+    projectDirsBySession.set(sessionId, registrations);
+  }
+  registrations.delete(ownerId);
+  registrations.set(ownerId, {
+    projectDir,
+    ...(runtimeBaseDir !== undefined ? { runtimeBaseDir } : {}),
+  });
 }
 
 export function getSessionProjectDir(sessionId: string): string | undefined {
-  return projectDirBySession.get(sessionId);
+  const registrations = projectDirsBySession.get(sessionId);
+  if (!registrations) return undefined;
+  const ordered = [...registrations.values()];
+  const runtimeBaseDir = Storage.getRuntimeBaseDir();
+  const scoped = ordered
+    .filter((registration) => registration.runtimeBaseDir === runtimeBaseDir)
+    .at(-1);
+  if (scoped) return scoped.projectDir;
+  const legacy = ordered
+    .filter((registration) => registration.runtimeBaseDir === undefined)
+    .at(-1);
+  if (legacy) return legacy.projectDir;
+  return ordered.length === 1 ? ordered[0]?.projectDir : undefined;
 }
 
 /**
@@ -58,6 +92,16 @@ export function getSessionProjectDir(sessionId: string): string | undefined {
  * process. A session's own dispose path calls this; a single-session CLI never
  * needs to, since the process is the session.
  */
-export function unregisterSessionProjectDir(sessionId: string): void {
-  projectDirBySession.delete(sessionId);
+export function unregisterSessionProjectDir(
+  sessionId: string,
+  ownerId?: string,
+): void {
+  if (ownerId === undefined) {
+    projectDirsBySession.delete(sessionId);
+    return;
+  }
+  const registrations = projectDirsBySession.get(sessionId);
+  if (!registrations) return;
+  registrations.delete(ownerId);
+  if (registrations.size === 0) projectDirsBySession.delete(sessionId);
 }

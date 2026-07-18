@@ -675,6 +675,7 @@ export const AppContainer = (props: AppContainerProps) => {
    * parent checkout. (PR #4174 review #3259975249.)
    */
   const pendingWorktreeNoticeRef = useRef<string | null>(null);
+  const configInitializationStartedRef = useRef(false);
   const activeWorktree = useMemo(
     () =>
       worktreeSession
@@ -727,11 +728,14 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Initialize config (runs once on mount)
   useEffect(() => {
+    if (configInitializationStartedRef.current) return;
+    configInitializationStartedRef.current = true;
     (async () => {
       // Note: the program will not work if this fails so let errors be
       // handled by the global catch.
       profileCheckpoint('config_initialize_start');
       await config.initialize();
+      config.startRuntimeStatus();
       setStartupWarnings((currentWarnings) =>
         mergeStartupWarnings(currentWarnings, config.getWarnings()),
       );
@@ -3157,6 +3161,21 @@ export const AppContainer = (props: AppContainerProps) => {
         const geminiClient = needsConversation
           ? config.getGeminiClient()
           : null;
+        const conversationRecording = needsConversation
+          ? config.getChatRecordingService()
+          : undefined;
+        if (needsConversation && geminiClient) {
+          await config.assertCanStartTurn();
+          if (conversationRecording) {
+            try {
+              await conversationRecording.flush();
+            } catch {
+              throw new Error(
+                'Session recording is degraded; rewind was not applied.',
+              );
+            }
+          }
+        }
         let apiTruncateIndex = -1;
         let conversationSkippedNoClient = false;
         if (needsConversation) {
@@ -3271,13 +3290,34 @@ export const AppContainer = (props: AppContainerProps) => {
             if (isRealUserTurn(h)) targetTurnIndex++;
           }
 
-          geminiClient.truncateHistory(apiTruncateIndex);
-
           // Strip suppressOnRestore flags and filter out collapse-summary items
           // so rewound items remain visible without stale summary text
           const truncatedUi = expandCollapsedHistory(
             originalHistory.filter((h) => h.id < userItem.id),
           );
+          const survivingSnapshots = !hasRestoreFailure
+            ? config
+                .getFileHistoryService()
+                .getSnapshots()
+                .slice(0, targetTurnIndex + 1)
+            : undefined;
+
+          if (conversationRecording) {
+            conversationRecording.rewindRecording(
+              targetTurnIndex,
+              { truncatedCount: effectiveLength - truncatedUi.length },
+              survivingSnapshots,
+            );
+            try {
+              await conversationRecording.flush();
+            } catch {
+              throw conversationRecording.markIntegrityFailure(
+                'rewind_persistence',
+              );
+            }
+          }
+
+          geminiClient.truncateHistory(apiTruncateIndex);
           historyManager.loadHistory(truncatedUi);
 
           refreshStatic();
@@ -3294,17 +3334,6 @@ export const AppContainer = (props: AppContainerProps) => {
               ),
             },
             Date.now(),
-          );
-
-          config.getChatRecordingService()?.rewindRecording(
-            targetTurnIndex,
-            { truncatedCount: effectiveLength - truncatedUi.length },
-            !hasRestoreFailure
-              ? config
-                  .getFileHistoryService()
-                  .getSnapshots()
-                  .slice(0, targetTurnIndex + 1)
-              : undefined,
           );
         }
 

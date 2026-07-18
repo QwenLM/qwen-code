@@ -174,3 +174,39 @@ describe('QwenAgentManager.createNewSession', () => {
     expect(connection.newSession).toHaveBeenCalledWith('/workspace');
   });
 });
+
+describe('QwenAgentManager session mutations', () => {
+  it.each([
+    [
+      'delete',
+      (manager: QwenAgentManager) => manager.deleteSession('session-1'),
+    ],
+    [
+      'rename',
+      (manager: QwenAgentManager) =>
+        manager.renameSession('session-1', 'New title'),
+    ],
+  ])(
+    'requires a running Qwen session service to %s a session',
+    async (_operation, mutate) => {
+      const manager = new QwenAgentManager();
+      const connection = {
+        isConnected: false,
+        deleteSession: vi.fn(),
+        renameSession: vi.fn(),
+      };
+
+      (
+        manager as unknown as {
+          connection: typeof connection;
+        }
+      ).connection = connection;
+
+      await expect(mutate(manager)).rejects.toThrow(
+        'Session changes require a running Qwen session service.',
+      );
+      expect(connection.deleteSession).not.toHaveBeenCalled();
+      expect(connection.renameSession).not.toHaveBeenCalled();
+    },
+  );
+});

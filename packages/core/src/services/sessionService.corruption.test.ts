@@ -8,8 +8,7 @@
  * Integration tests for SessionService corruption-recovery paths.
  *
  * Lives in its own file (no module-level `vi.mock`) because both
- * `countSessionMessagesFromPath` and `readLastRecordUuid` walk real bytes
- * from disk via `fs.createReadStream` / `fs.readSync`, and need the real
+ * the session readers walk real bytes from disk and need the real
  * `jsonl.parseLineTolerant` to exercise the `}{`-glued recovery path
  * introduced for #3606. The unit-test file (sessionService.test.ts) mocks
  * jsonl-utils wholesale, so corruption shapes can't be exercised there.
@@ -20,8 +19,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { SessionService } from './sessionService.js';
+import { Storage } from '../config/storage.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
+import { SessionTranscriptChangedError } from './session-writer-lease.js';
 
 let tmpRoot: string;
 
@@ -115,123 +116,82 @@ describe('SessionService.countSessionMessagesFromPath (corruption recovery)', ()
   });
 });
 
-describe('SessionService.readLastRecordUuid (corruption recovery)', () => {
-  type Privates = {
-    readLastRecordUuid: (filePath: string) => string | null;
-  };
-  let svc: Privates;
+describe('SessionService.renameSession (corruption recovery)', () => {
+  const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+  const projectRoot = '/tmp/x';
 
-  beforeEach(() => {
-    svc = new SessionService('/tmp/x') as unknown as Privates;
-  });
+  async function renameWithContent(content: string): Promise<ChatRecord> {
+    const storage = new Storage(projectRoot, tmpRoot);
+    const chatsDir = path.join(storage.getProjectDir(), 'chats');
+    const transcriptPath = path.join(chatsDir, `${sessionId}.jsonl`);
+    fs.mkdirSync(chatsDir, { recursive: true });
+    fs.writeFileSync(transcriptPath, content, 'utf8');
+    const service = new SessionService(projectRoot, {
+      runtimeBaseDir: tmpRoot,
+    });
 
-  it('returns the latest record uuid from a `}{`-glued tail line', () => {
-    // Critical case: renameSession passes this uuid as the parentUuid of the
-    // synthetic title record. If the tail line is glued and we silently drop
-    // it (old behaviour), parentUuid points at an earlier record and
-    // reconstructHistory truncates the chain on resume.
+    await expect(service.renameSession(sessionId, 'recovered')).resolves.toBe(
+      true,
+    );
+    const lines = fs.readFileSync(transcriptPath, 'utf8').trim().split('\n');
+    return JSON.parse(lines.at(-1)!) as ChatRecord;
+  }
+
+  it('anchors after the latest record from a glued physical line', async () => {
     const r1 = JSON.stringify(recordFor('u1', 'user', null));
     const r2 = JSON.stringify(recordFor('u2', 'assistant', 'u1'));
-    const file = writeJsonl('glued-tail.jsonl', `${r1}${r2}\n`);
 
-    expect(svc.readLastRecordUuid(file)).toBe('u2');
+    const title = await renameWithContent(`${r1}${r2}\n`);
+
+    expect(title.parentUuid).toBe('u2');
   });
 
-  it('walks past a malformed tail line and returns the previous valid uuid', () => {
+  it('walks past a malformed tail line', async () => {
     const r1 = JSON.stringify(recordFor('u1', 'user', null));
-    const file = writeJsonl('garbage-tail.jsonl', `${r1}\nnot-json-at-all\n`);
 
-    expect(svc.readLastRecordUuid(file)).toBe('u1');
+    const title = await renameWithContent(`${r1}\nnot-json-at-all\n`);
+
+    expect(title.parentUuid).toBe('u1');
   });
 
-  it('returns null for a file with no recoverable records', () => {
-    const file = writeJsonl('no-records.jsonl', 'not-json\nstill-not-json\n');
-    expect(svc.readLastRecordUuid(file)).toBeNull();
+  it('uses the top-level uuid of a transcript larger than 64 KiB', async () => {
+    const giant = {
+      ...recordFor('real-last', 'user', null),
+      filler: 'x'.repeat(80 * 1024),
+      trojan: { uuid: 'fake-from-payload' },
+    };
+
+    const title = await renameWithContent(`${JSON.stringify(giant)}\n`);
+
+    expect(title.parentUuid).toBe('real-last');
   });
 
-  it('returns null for a missing file', () => {
-    expect(svc.readLastRecordUuid(path.join(tmpRoot, 'nope.jsonl'))).toBeNull();
-  });
-
-  it('does not extract a uuid from a payload object inside a partial-tail fragment', () => {
-    // When the last record exceeds TAIL_READ_SIZE (64 KiB), the tail buffer
-    // starts mid-record. Without the boundary guard, _recoverObjectsFromLine
-    // walks the partial fragment with depth starting at 0, finds a balanced
-    // inner `{ "uuid": "fake" }` object inside the record's payload, and
-    // surfaces "fake" as if it were the last top-level uuid. renameSession
-    // would then anchor custom_title.parentUuid at payload data and
-    // reconstructHistory would truncate the chain on resume.
-    //
-    // Filler is a long array of zeros (no quote characters) so the parser's
-    // inString state stays aligned even when entering mid-fragment, ensuring
-    // the trojan is reachable. ~80k entries → ~160 KB, comfortably above
-    // TAIL_READ_SIZE.
-    const filler = new Array(80000).fill(0).join(',');
-    const giantLine =
-      `{"uuid":"real-last","filler":[${filler}],` +
-      `"trojan":{"uuid":"fake-from-payload"}}`;
-    const file = writeJsonl('big-tail.jsonl', `${giantLine}\n`);
-
-    // We cannot recover "real-last" — it lies before the tail window. The
-    // critical assertion is the absence of the false-positive recovery: the
-    // function must not surface the payload's nested uuid.
-    expect(svc.readLastRecordUuid(file)).not.toBe('fake-from-payload');
-  });
-
-  it('returns the final complete record uuid when a giant partial precedes it in the tail', () => {
-    // Positive twin of the partial-tail test above: after a giant line
-    // whose head is past the tail window, append one normal complete
-    // record. The partial first segment must be discarded, but the
-    // complete record after the in-window `\n` must be recovered. Pins
-    // the desired behaviour — the bare-negative assertion above would
-    // still pass if the function silently skipped every line in the
-    // window and returned `null`.
-    const filler = new Array(80000).fill(0).join(',');
-    const giantLine =
-      `{"uuid":"too-early-to-see","filler":[${filler}],` +
-      `"trojan":{"uuid":"fake-from-payload"}}`;
-    const finalRecord = JSON.stringify(recordFor('actual-last', 'user', null));
-    const file = writeJsonl(
-      'big-tail-then-final.jsonl',
-      `${giantLine}\n${finalRecord}\n`,
+  it('refuses to append a title to an unmarked branch', async () => {
+    const storage = new Storage(projectRoot, tmpRoot);
+    const chatsDir = path.join(storage.getProjectDir(), 'chats');
+    const transcriptPath = path.join(chatsDir, `${sessionId}.jsonl`);
+    fs.mkdirSync(chatsDir, { recursive: true });
+    fs.writeFileSync(
+      transcriptPath,
+      [
+        recordFor('root', 'user', null),
+        recordFor('branch-a', 'assistant', 'root'),
+        recordFor('branch-b', 'assistant', 'root'),
+      ]
+        .map((record) => JSON.stringify(record))
+        .join('\n') + '\n',
+      'utf8',
     );
-
-    expect(svc.readLastRecordUuid(file)).toBe('actual-last');
-  });
-
-  it('returns the only record when the tail window starts exactly on a newline boundary', () => {
-    // Boundary case: file is `prev\n<final>\n` where `final\n` is
-    // exactly TAIL_READ_SIZE bytes, so the tail read covers `final\n`
-    // and `readStart - 1` lands on the separating `\n`. The first
-    // split segment is a complete record — not a partial fragment.
-    // An unconditional `lines.shift()` drops the only readable uuid
-    // and `renameSession` writes `custom_title.parentUuid` as `null`,
-    // truncating history on resume. The fix peeks the byte before
-    // `readStart` to distinguish boundary-aligned from mid-line reads.
-    const TAIL_READ_SIZE = 64 * 1024;
-    // Build `final` so that `final + '\n'` is exactly TAIL_READ_SIZE.
-    // `recordFor` produces a stable JSON shape; pad it via an extra
-    // `filler` field tuned so the stringified record + 1 (for the
-    // trailing newline we'll join with) hits the target length.
-    const baseFinal = recordFor('boundary-final', 'user', null);
-    const baseFinalLen = Buffer.byteLength(JSON.stringify(baseFinal), 'utf8');
-    // The added field looks like `,"filler":"x...x"` — fixed overhead
-    // (everything except the x-run) is 12 bytes: ` , " f i l l e r " : " " ` .
-    const fillerLen = TAIL_READ_SIZE - 1 - baseFinalLen - 12;
-    expect(fillerLen).toBeGreaterThan(0);
-    const finalRecord = JSON.stringify({
-      ...baseFinal,
-      filler: 'x'.repeat(fillerLen),
+    const service = new SessionService(projectRoot, {
+      runtimeBaseDir: tmpRoot,
     });
-    expect(Buffer.byteLength(finalRecord + '\n', 'utf8')).toBe(TAIL_READ_SIZE);
 
-    const prevRecord = JSON.stringify(recordFor('older', 'user', null));
-    const file = writeJsonl(
-      'tail-aligned.jsonl',
-      `${prevRecord}\n${finalRecord}\n`,
+    await expect(service.renameSession(sessionId, 'unsafe')).rejects.toThrow(
+      SessionTranscriptChangedError,
     );
-
-    expect(svc.readLastRecordUuid(file)).toBe('boundary-final');
+    expect(
+      fs.readFileSync(transcriptPath, 'utf8').trim().split('\n'),
+    ).toHaveLength(3);
   });
 });
 
@@ -279,5 +239,98 @@ describe('SessionService.reconstructHistory (history-gap detection)', () => {
     const { messages, gaps } = svc.reconstructHistory(twoIslands);
     expect(messages.map((m) => m.uuid)).toEqual(['b1', 'b2']);
     expect(gaps).toEqual([]);
+  });
+
+  it('rejects an unmarked branch instead of selecting the physical tail', () => {
+    const records = [
+      recordFor('root', 'user', null),
+      recordFor('branch-a', 'assistant', 'root'),
+      recordFor('branch-b', 'assistant', 'root'),
+    ];
+
+    expect(() => svc.reconstructHistory(records)).toThrow(
+      SessionTranscriptChangedError,
+    );
+  });
+
+  it('accepts the abandoned branch created by a rewind marker', () => {
+    const rewind: ChatRecord = {
+      ...recordFor('rewind', 'user', 'root'),
+      type: 'system',
+      subtype: 'rewind',
+      message: undefined,
+      systemPayload: { truncatedCount: 1 },
+    };
+    const records = [
+      recordFor('root', 'user', null),
+      recordFor('abandoned', 'assistant', 'root'),
+      rewind,
+      recordFor('replacement', 'user', 'rewind'),
+    ];
+
+    expect(
+      svc.reconstructHistory(records).messages.map((record) => record.uuid),
+    ).toEqual(['root', 'rewind', 'replacement']);
+  });
+
+  it('accepts repeated rewinds from the same parent', () => {
+    const rewind = (uuid: string): ChatRecord => ({
+      ...recordFor(uuid, 'user', 'root'),
+      type: 'system',
+      subtype: 'rewind',
+      message: undefined,
+      systemPayload: { truncatedCount: 1 },
+    });
+    const records = [
+      recordFor('root', 'user', null),
+      recordFor('first-abandoned', 'assistant', 'root'),
+      rewind('first-rewind'),
+      recordFor('second-abandoned', 'assistant', 'first-rewind'),
+      rewind('second-rewind'),
+      recordFor('replacement', 'user', 'second-rewind'),
+    ];
+
+    expect(
+      svc.reconstructHistory(records).messages.map((record) => record.uuid),
+    ).toEqual(['root', 'second-rewind', 'replacement']);
+  });
+
+  it('ignores sibling title anchors that never became conversation tails', () => {
+    const title = (uuid: string): ChatRecord => ({
+      ...recordFor(uuid, 'user', 'root'),
+      type: 'system',
+      subtype: 'custom_title',
+      message: undefined,
+      systemPayload: { customTitle: uuid },
+    });
+    const records = [
+      recordFor('root', 'user', null),
+      title('title-a'),
+      title('title-b'),
+    ];
+
+    expect(
+      svc.reconstructHistory(records).messages.map((record) => record.uuid),
+    ).toEqual(['root', 'title-b']);
+  });
+
+  it('rejects a divergent branch hidden behind a title anchor', () => {
+    const title: ChatRecord = {
+      ...recordFor('title', 'user', 'root'),
+      type: 'system',
+      subtype: 'custom_title',
+      message: undefined,
+      systemPayload: { customTitle: 'title' },
+    };
+    const records = [
+      recordFor('root', 'user', null),
+      recordFor('branch-a', 'assistant', 'root'),
+      title,
+      recordFor('branch-b', 'user', 'title'),
+    ];
+
+    expect(() => svc.reconstructHistory(records)).toThrow(
+      SessionTranscriptChangedError,
+    );
   });
 });

@@ -508,6 +508,39 @@ describe('UiTelemetryService', () => {
       expect(typeof modelMetrics.bySource['constructor']).toBe('object');
     });
 
+    it('preserves prototype-free source buckets across snapshot rollback', () => {
+      const event = {
+        'event.name': EVENT_API_RESPONSE,
+        model: 'glm-5',
+        duration_ms: 100,
+        input_token_count: 10,
+        output_token_count: 5,
+        total_token_count: 15,
+        cached_content_token_count: 0,
+        thoughts_token_count: 0,
+        subagent_name: 'alpha',
+      } as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
+      service.addEvent(event, 'session-a');
+      const snapshot = service.createSnapshot();
+
+      service.reset();
+      service.restoreSnapshot(snapshot);
+      service.addEvent(
+        {
+          ...(event as unknown as Record<string, unknown>),
+          subagent_name: 'constructor',
+        } as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE },
+        'session-a',
+      );
+
+      const aggregate = service.getMetrics().models['glm-5'];
+      const session = service.getMetricsForSession('session-a').models['glm-5'];
+      expect(aggregate.bySource['constructor'].api.totalRequests).toBe(1);
+      expect(session.bySource['constructor'].api.totalRequests).toBe(1);
+      expect(Object.getPrototypeOf(aggregate.bySource)).toBeNull();
+      expect(Object.getPrototypeOf(session.bySource)).toBeNull();
+    });
+
     it('attributes API errors to the subagent source bucket', () => {
       const errorEvent = {
         'event.name': EVENT_API_ERROR,

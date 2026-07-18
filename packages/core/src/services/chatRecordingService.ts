@@ -5,8 +5,6 @@
  */
 
 import { type Config } from '../config/config.js';
-import path from 'node:path';
-import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import {
   type PartListUnion,
@@ -16,7 +14,6 @@ import {
   createUserContent,
   createModelContent,
 } from '@google/genai';
-import * as jsonl from '../utils/jsonl-utils.js';
 import { getGitBranch } from '../utils/gitUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { compactToolResultDisplayForRecording } from '../utils/toolResultDisplayCompaction.js';
@@ -38,6 +35,12 @@ import type {
   SessionArtifactEventRecordPayload,
   SessionArtifactSnapshotRecordPayload,
 } from './session-artifact-persistence.js';
+import {
+  SessionTranscriptChangedError,
+  SessionWriterLostError,
+  SessionWriterUnavailableError,
+  type SessionWriterLease,
+} from './session-writer-lease.js';
 
 const debugLogger = createDebugLogger('CHAT_RECORDING');
 
@@ -258,6 +261,7 @@ export interface ChatRecord {
     | 'agent_bootstrap'
     | 'agent_launch_prompt'
     | 'file_history_snapshot'
+    | 'user_text_elements'
     | 'session_artifact_event'
     | 'session_artifact_snapshot';
   /** Working directory at time of message */
@@ -309,6 +313,7 @@ export interface ChatRecord {
     | RewindRecordPayload
     | AgentBootstrapRecordPayload
     | FileHistorySnapshotRecordPayload
+    | UserTextElementsRecordPayload
     | SessionArtifactEventRecordPayload
     | SessionArtifactSnapshotRecordPayload;
 
@@ -482,6 +487,11 @@ export interface FileHistorySnapshotRecordPayload {
   snapshots: SerializedFileHistorySnapshot[];
 }
 
+export interface UserTextElementsRecordPayload {
+  content: string;
+  textElements: unknown[];
+}
+
 export interface ChatRecordingFailureEvent {
   sessionId: string;
   error: Error;
@@ -531,13 +541,18 @@ export class ChatRecordingService {
    * record).
    */
   private turnParentUuids: Array<string | null> = [];
-  /**
-   * Cached chats-dir / conversation-file path so per-record appendRecord
-   * doesn't re-stat them on every write. The first call performs the
-   * mkdir / wx-create; subsequent calls short-circuit.
-   */
-  private chatsDirEnsured = false;
-  private cachedConversationFile: string | undefined;
+  private state:
+    | 'inactive'
+    | 'active'
+    | 'paused'
+    | 'closed'
+    | 'integrity_failed' = 'inactive';
+  private binding:
+    | {
+        readonly sessionId: string;
+        readonly lease: SessionWriterLease;
+      }
+    | undefined;
   /**
    * Serialized async write queue for appendRecord. A rejected write leaves the
    * canonical chain rejected so later queued records cannot be persisted with
@@ -547,6 +562,7 @@ export class ChatRecordingService {
   private writeChain: Promise<void> = Promise.resolve();
   /** First async JSONL write failure; permanently degrades this recorder. */
   private writeFailure: Error | undefined;
+  private integrityFailure: Error | undefined;
   /** In-memory cache of the current session's custom title (for re-append on exit) */
   private currentCustomTitle: string | undefined;
   /**
@@ -624,31 +640,6 @@ export class ChatRecordingService {
     this.config = config;
     this.lastRecordUuid =
       config.getResumedSessionData()?.lastCompletedUuid ?? null;
-
-    // On resume, load the cached custom title AND its source from the
-    // session file. Preserving the persisted source is load-bearing: the
-    // SessionPicker dim-styling depends on it, and hardcoding `'manual'`
-    // would silently downgrade auto-titled sessions every time they get
-    // resumed. Legacy records (no `titleSource` field) stay `undefined` —
-    // treated as manual for safety without rewriting the JSONL.
-    //
-    // Do not re-append during construction: loading/resuming a session is a
-    // read operation from the user's perspective, and touching the JSONL mtime
-    // would make session lists treat it as fresh activity.
-    if (config.getResumedSessionData()) {
-      try {
-        const sessionService = config.getSessionService();
-        const info = sessionService.getSessionTitleInfo(config.getSessionId());
-        this.currentCustomTitle = info.title;
-        this.currentTitleSource = info.source;
-        if (info.title) {
-          // Prime the threshold so the first real content write re-anchors.
-          this.bytesSinceTitleAnchor = TITLE_REANCHOR_BYTES;
-        }
-      } catch {
-        // Best-effort — don't block construction
-      }
-    }
   }
 
   /**
@@ -673,64 +664,56 @@ export class ChatRecordingService {
    * @returns The session ID.
    */
   private getSessionId(): string {
-    return this.config.getSessionId();
+    return this.binding?.sessionId ?? this.config.getSessionId();
   }
 
-  /**
-   * Ensures the chats directory exists, creating it if it doesn't exist.
-   * @returns The path to the chats directory.
-   * @throws Error if the directory cannot be created.
-   */
-  private ensureChatsDir(): string {
-    const projectDir = this.config.storage.getProjectDir();
-    const chatsDir = path.join(projectDir, 'chats');
-
-    if (this.chatsDirEnsured) {
-      return chatsDir;
+  activate(
+    lease: SessionWriterLease,
+    sessionData?: {
+      conversation: { messages: ChatRecord[] };
+      lastCompletedUuid: string | null;
+    },
+  ): void {
+    if (this.state !== 'inactive') {
+      throw new SessionWriterUnavailableError();
     }
-    try {
-      fs.mkdirSync(chatsDir, { recursive: true });
-      // Only cache success — keep transient mkdir failures self-healing.
-      this.chatsDirEnsured = true;
-    } catch {
-      // ignored
+    if (lease.sessionId !== this.config.getSessionId()) {
+      throw new SessionWriterUnavailableError();
     }
-    return chatsDir;
-  }
-
-  /**
-   * Ensures the conversation file exists, creating it if it doesn't exist.
-   * Uses atomic file creation to avoid race conditions. Result is cached so
-   * subsequent appendRecord calls skip the wx-create entirely.
-   * @returns The path to the conversation file.
-   * @throws Error if the file cannot be created or accessed.
-   */
-  private ensureConversationFile(): string {
-    if (this.cachedConversationFile) {
-      return this.cachedConversationFile;
-    }
-    const chatsDir = this.ensureChatsDir();
-    const sessionId = this.getSessionId();
-    const safeFilename = `${sessionId}.jsonl`;
-    const conversationFile = path.join(chatsDir, safeFilename);
-
-    try {
-      // Use 'wx' flag for exclusive creation - atomic operation that fails if
-      // the file already exists. EEXIST is the expected steady-state path on
-      // resume; we treat it as success.
-      fs.writeFileSync(conversationFile, '', { flag: 'wx', encoding: 'utf8' });
-    } catch (error) {
-      const nodeError = error as NodeJS.ErrnoException;
-      if (nodeError.code !== 'EEXIST') {
-        const message = error instanceof Error ? error.message : String(error);
-        throw new Error(
-          `Failed to create conversation file at ${conversationFile}: ${message}`,
-        );
+    this.binding = { sessionId: lease.sessionId, lease };
+    this.lastRecordUuid = sessionData?.lastCompletedUuid ?? null;
+    this.currentCustomTitle = undefined;
+    this.currentTitleSource = undefined;
+    this.currentParentSessionId = undefined;
+    this.currentSourceType = undefined;
+    this.currentSourceId = undefined;
+    if (sessionData) {
+      this.rebuildTurnBoundaries(sessionData.conversation.messages);
+      for (const record of sessionData.conversation.messages) {
+        if (record.type !== 'system') continue;
+        if (record.subtype === 'custom_title') {
+          const payload = record.systemPayload as
+            | CustomTitleRecordPayload
+            | undefined;
+          this.currentCustomTitle = payload?.customTitle;
+          this.currentTitleSource = payload?.titleSource;
+        } else if (record.subtype === 'parent_session') {
+          this.currentParentSessionId = (
+            record.systemPayload as ParentSessionRecordPayload | undefined
+          )?.parentSessionId;
+        } else if (record.subtype === 'session_source') {
+          const payload = record.systemPayload as
+            | SessionSourceRecordPayload
+            | undefined;
+          this.currentSourceType = payload?.sourceType;
+          this.currentSourceId = payload?.sourceId;
+        }
+      }
+      if (this.currentCustomTitle) {
+        this.bytesSinceTitleAnchor = TITLE_REANCHOR_BYTES;
       }
     }
-
-    this.cachedConversationFile = conversationFile;
-    return conversationFile;
+    this.state = 'active';
   }
 
   /**
@@ -759,11 +742,27 @@ export class ChatRecordingService {
     return this.cachedGitBranch.branch;
   }
 
-  private enterWriteFailure(cause: unknown, sessionId: string): Error {
+  private enterWriteFailure(
+    cause: unknown,
+    sessionId: string,
+    operation = 'append',
+  ): Error {
+    const failure = cause instanceof Error ? cause : new Error(String(cause));
+    if (
+      !this.integrityFailure &&
+      (failure instanceof SessionWriterLostError ||
+        failure instanceof SessionTranscriptChangedError ||
+        failure instanceof SessionWriterUnavailableError)
+    ) {
+      this.integrityFailure = failure;
+      this.state = 'integrity_failed';
+      debugLogger.error(
+        `Session writer failure sessionId=${sessionId} operation=${operation} errorKind=${failure.errorKind}`,
+      );
+    }
     if (!this.writeFailure) {
-      this.writeFailure =
-        cause instanceof Error ? cause : new Error(String(cause));
-      debugLogger.error('Error appending record (async):', this.writeFailure);
+      this.writeFailure = failure;
+      debugLogger.error('Chat recording failure:', this.writeFailure);
       try {
         const notification = this.onWriteFailure?.({
           sessionId,
@@ -781,16 +780,15 @@ export class ChatRecordingService {
         debugLogger.debug('Chat recording failure listener threw:', error);
       }
     }
-    return this.writeFailure;
+    return this.integrityFailure ?? this.writeFailure;
   }
 
-  private enqueueRecordWrite(
-    conversationFile: string,
-    record: ChatRecord,
-  ): Promise<void> {
+  private enqueueRecordWrite(record: ChatRecord): Promise<void> {
     const pendingWrite = this.writeChain.then(async () => {
       try {
-        await jsonl.writeLine(conversationFile, record);
+        const lease = this.binding?.lease;
+        if (!lease) throw new SessionWriterUnavailableError();
+        await lease.appendJsonLine(record);
       } catch (error) {
         throw this.enterWriteFailure(error, record.sessionId);
       }
@@ -811,19 +809,11 @@ export class ChatRecordingService {
     record: ChatRecord,
     options?: { updateActiveTail?: boolean },
   ): void {
-    if (this.writeFailure) return;
-
-    let conversationFile: string;
-    try {
-      conversationFile = this.ensureConversationFile();
-    } catch (error) {
-      debugLogger.error('Error appending record:', error);
-      throw error;
-    }
+    if (this.writeFailure || this.state !== 'active') return;
     if (options?.updateActiveTail !== false) {
       this.lastRecordUuid = record.uuid;
     }
-    this.enqueueRecordWrite(conversationFile, record);
+    this.enqueueRecordWrite(record);
     this.updateTitleAnchorTracking(record);
   }
 
@@ -832,21 +822,14 @@ export class ChatRecordingService {
     options?: { updateActiveTail?: boolean },
   ): Promise<void> {
     if (this.writeFailure) throw this.writeFailure;
+    if (this.state !== 'active') throw new SessionWriterUnavailableError();
 
     const previousLastRecordUuid = this.lastRecordUuid;
     const updateActiveTail = options?.updateActiveTail !== false;
-    let conversationFile: string;
-    try {
-      conversationFile = this.ensureConversationFile();
-    } catch (error) {
-      debugLogger.error('Error appending record:', error);
-      throw error;
-    }
-
     if (updateActiveTail) {
       this.lastRecordUuid = record.uuid;
     }
-    const pendingWrite = this.enqueueRecordWrite(conversationFile, record);
+    const pendingWrite = this.enqueueRecordWrite(record);
     // Keep anchor accounting in logical queue order, matching appendRecord.
     // Once accepted, a failed write permanently stops this recorder, so no
     // rollback of this bookkeeping is needed on rejection.
@@ -955,14 +938,130 @@ export class ChatRecordingService {
     await this.writeChain;
   }
 
-  /**
-   * Clears cached filesystem paths after Config swaps to a new working
-   * directory. The recorder keeps session state, but future appends must
-   * resolve the JSONL path through the updated Config.storage.
-   */
-  resetStoragePaths(): void {
-    this.chatsDirEnsured = false;
-    this.cachedConversationFile = undefined;
+  async assertCanStartTurn(): Promise<void> {
+    try {
+      await this.writeChain;
+    } catch {
+      if (this.integrityFailure) throw this.integrityFailure;
+      // Ordinary recording degradation keeps the existing model-call
+      // semantics, but ownership must still be fenced below.
+    }
+    if (this.integrityFailure) throw this.integrityFailure;
+    if (this.state !== 'active') throw new SessionWriterUnavailableError();
+    const lease = this.binding?.lease;
+    if (!lease) {
+      throw this.enterWriteFailure(
+        new SessionWriterUnavailableError(),
+        this.getSessionId(),
+        'turn_admission',
+      );
+    }
+    try {
+      await lease.assertOwnedAndUnchanged();
+    } catch (error) {
+      throw this.enterWriteFailure(
+        error,
+        this.getSessionId(),
+        'turn_admission',
+      );
+    }
+  }
+
+  async pause(options?: {
+    requireHealthy?: boolean;
+    allowIntegrityFailure?: boolean;
+  }): Promise<void> {
+    const wasActive = this.state === 'active';
+    if (wasActive) this.state = 'paused';
+    this.autoTitleController?.abort();
+    try {
+      await this.flush();
+    } catch (error) {
+      if (
+        (this.integrityFailure && !options?.allowIntegrityFailure) ||
+        options?.requireHealthy
+      ) {
+        if (wasActive && this.state === 'paused') this.state = 'active';
+        throw error;
+      }
+    }
+  }
+
+  resume(): void {
+    if (this.state === 'active') return;
+    if (this.state !== 'paused') throw new SessionWriterUnavailableError();
+    this.state = 'active';
+  }
+
+  async close(): Promise<void> {
+    if (this.state === 'closed') return;
+    this.autoTitleController?.abort();
+    if (this.state === 'active') this.state = 'paused';
+    let flushFailed = false;
+    let flushFailure: unknown;
+    try {
+      await this.flush();
+    } catch (error) {
+      flushFailed = true;
+      flushFailure = error;
+    }
+    try {
+      await this.binding?.lease.release();
+      this.state = 'closed';
+    } catch (error) {
+      this.state =
+        error instanceof SessionWriterLostError ? 'closed' : 'paused';
+      throw error;
+    }
+    if (flushFailed) throw flushFailure;
+  }
+
+  getOwnerId(): string | undefined {
+    return this.binding?.lease.ownerId;
+  }
+
+  isIntegrityFailed(): boolean {
+    return this.integrityFailure !== undefined;
+  }
+
+  hasWriteFailure(): boolean {
+    return this.writeFailure !== undefined;
+  }
+
+  hasWriteOwnership(): boolean {
+    return this.binding !== undefined && this.state !== 'closed';
+  }
+
+  markIntegrityFailure(operation: string): Error {
+    return this.enterWriteFailure(
+      new SessionWriterUnavailableError(),
+      this.getSessionId(),
+      operation,
+    );
+  }
+
+  async rebindTranscriptPath(transcriptPath: string): Promise<void> {
+    const lease = this.binding?.lease;
+    if (!lease || this.state !== 'paused') {
+      throw new SessionWriterUnavailableError();
+    }
+    await lease.rebindTranscriptPath(transcriptPath);
+  }
+
+  async readStableTranscriptSnapshot(): Promise<Buffer> {
+    const lease = this.binding?.lease;
+    if (!lease || this.state !== 'paused' || this.integrityFailure) {
+      throw this.integrityFailure ?? new SessionWriterUnavailableError();
+    }
+    try {
+      return await lease.readStableTranscript();
+    } catch (error) {
+      throw this.enterWriteFailure(
+        error,
+        this.getSessionId(),
+        'stable_snapshot',
+      );
+    }
   }
 
   /**
@@ -973,6 +1072,7 @@ export class ChatRecordingService {
    */
   recordUserMessage(message: PartListUnion): void {
     try {
+      if (this.writeFailure || this.state !== 'active') return;
       this.turnParentUuids.push(this.lastRecordUuid);
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
@@ -1101,6 +1201,7 @@ export class ChatRecordingService {
    * as a user-visible error or interrupt recording.
    */
   private maybeTriggerAutoTitle(): void {
+    if (this.state !== 'active') return;
     if (this.currentCustomTitle) return;
     if (this.writeFailure) return;
     if (this.pendingExplicitTitleWrites > 0) return;
@@ -1310,6 +1411,7 @@ export class ChatRecordingService {
     survivingFileHistorySnapshots?: FileHistorySnapshot[],
   ): void {
     try {
+      if (this.writeFailure || this.state !== 'active') return;
       // Re-root: point back to the record just before the target user turn.
       this.lastRecordUuid = this.turnParentUuids[targetTurnIndex] ?? null;
       // Trim future boundaries — they no longer exist in the active branch.
@@ -1632,6 +1734,7 @@ export class ChatRecordingService {
   recordAttributionSnapshot(snapshot: AttributionSnapshot): void {
     let json: string | undefined;
     try {
+      if (this.writeFailure || this.state !== 'active') return;
       this.cachedGitBranch = undefined;
       json = JSON.stringify(snapshot);
       if (json === this.lastAttributionSnapshotJson) {
@@ -1675,6 +1778,18 @@ export class ChatRecordingService {
     } catch (error) {
       debugLogger.error('Error saving file history snapshot batch:', error);
     }
+  }
+
+  async recordUserTextElements(
+    payload: UserTextElementsRecordPayload,
+  ): Promise<void> {
+    const record: ChatRecord = {
+      ...this.createBaseRecord('system'),
+      type: 'system',
+      subtype: 'user_text_elements',
+      systemPayload: payload,
+    };
+    await this.appendRecordStrict(record);
   }
 
   private appendSerializedFileHistorySnapshotBatch(

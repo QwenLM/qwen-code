@@ -7,7 +7,7 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { homedir, platform, tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { Readable, Writable } from 'node:stream';
@@ -1842,10 +1842,10 @@ export class QwenAgent extends BaseAgent {
 
       const prompt = this.buildPromptBlocks(message, attachments);
       let transcriptTextElementsPersisted = false;
-      const persistTranscriptTextElements = () => {
+      const persistTranscriptTextElements = async () => {
         if (transcriptTextElementsPersisted) return;
         transcriptTextElementsPersisted = true;
-        this.persistQwenTranscriptTextElements(
+        await this.persistQwenTranscriptTextElements(
           sessionId,
           this.resolvedCwd(),
           options?.textElements,
@@ -1863,7 +1863,7 @@ export class QwenAgent extends BaseAgent {
           const stopReason = asString(toRecord(result).stopReason);
           await this.waitForCurrentTurnUsage();
           if (this.activePromptRunId !== promptRunId) return;
-          persistTranscriptTextElements();
+          await persistTranscriptTextElements();
           this.flushThoughtText();
           this.flushAssistantText();
           this.eventQueue.enqueue({ type: 'complete' });
@@ -1872,15 +1872,15 @@ export class QwenAgent extends BaseAgent {
             `Qwen prompt complete${stopReason ? ` (${stopReason})` : ''}`,
           );
         })
-        .catch((error) => {
+        .catch(async (error) => {
           if (this.activePromptRunId !== promptRunId) return;
           if (this.abortReason) {
-            persistTranscriptTextElements();
+            await persistTranscriptTextElements();
             this.eventQueue.complete();
             return;
           }
           const message = formatQwenAcpErrorMessage(error);
-          persistTranscriptTextElements();
+          await persistTranscriptTextElements();
           this.eventQueue.enqueue({ type: 'error', message });
           this.eventQueue.enqueue({ type: 'complete' });
           this.eventQueue.complete();
@@ -3340,11 +3340,11 @@ export class QwenAgent extends BaseAgent {
     return toRecord(record.systemPayload).phase === 'invocation';
   }
 
-  private persistQwenTranscriptTextElements(
+  private async persistQwenTranscriptTextElements(
     sessionId: string,
     cwd: string,
     sourceElements?: MessageTextElement[],
-  ): void {
+  ): Promise<void> {
     const transcriptPath = getQwenTranscriptPath(sessionId, cwd);
     if (!existsSync(transcriptPath)) return;
 
@@ -3358,7 +3358,6 @@ export class QwenAgent extends BaseAgent {
       return;
     }
 
-    const hadTrailingNewline = fileContent.endsWith('\n');
     const lines = fileContent.split(/\r?\n/);
     if (lines[lines.length - 1] === '') lines.pop();
 
@@ -3386,19 +3385,19 @@ export class QwenAgent extends BaseAgent {
       const next = JSON.stringify(textElements);
       if (existing === next) return;
 
-      record.textElements = textElements;
-      lines[index] = JSON.stringify(record);
-
-      const tmpPath = `${transcriptPath}.craft-text-elements-${process.pid}-${Date.now()}.tmp`;
       try {
-        writeFileSync(
-          tmpPath,
-          lines.join('\n') + (hadTrailingNewline ? '\n' : ''),
-          'utf8',
+        await this.callAcp(
+          'ext/qwen/session/recordTextElements',
+          (connection) =>
+            connection.extMethod('qwen/session/recordTextElements', {
+              sessionId,
+              content,
+              textElements,
+            }),
+          30_000,
         );
-        renameSync(tmpPath, transcriptPath);
         this.debug(
-          `Wrote ${textElements.length} text element(s) into Qwen transcript ${transcriptPath}`,
+          `Recorded ${textElements.length} text element(s) for Qwen session ${sessionId}`,
         );
       } catch (error) {
         this.debug(
@@ -3437,11 +3436,26 @@ export class QwenAgent extends BaseAgent {
         continue;
       }
 
-      if (!this.isPatchableQwenUserRecord(record, sessionId)) continue;
-      const textElements = toQwenTranscriptTextElements(record.textElements);
+      const textElementPayload =
+        record.sessionId === sessionId &&
+        record.type === 'system' &&
+        record.subtype === 'user_text_elements'
+          ? toRecord(record.systemPayload)
+          : undefined;
+      if (
+        !textElementPayload &&
+        !this.isPatchableQwenUserRecord(record, sessionId)
+      ) {
+        continue;
+      }
+      const textElements = toQwenTranscriptTextElements(
+        textElementPayload?.textElements ?? record.textElements,
+      );
       if (!textElements) continue;
 
-      const content = this.getQwenTranscriptPatchContent(record);
+      const content = textElementPayload
+        ? asString(textElementPayload.content) || ''
+        : this.getQwenTranscriptPatchContent(record);
       if (!content) continue;
       records.push({ content, textElements });
     }

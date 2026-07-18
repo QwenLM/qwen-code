@@ -20,6 +20,11 @@ import { SessionService } from './sessionService.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
+import {
+  SessionTranscriptChangedError,
+  SessionWriterLease,
+  SessionWriterUnavailableError,
+} from './session-writer-lease.js';
 
 vi.mock('node:path');
 vi.mock('../utils/paths.js');
@@ -33,6 +38,9 @@ describe('SessionService - rename and custom title', () => {
   let statSyncSpy: MockInstance<typeof fs.statSync>;
 
   let readSyncSpy: MockInstance<typeof fs.readSync>;
+  let transcriptSnapshot: Buffer;
+  let transcriptReadError: Error | undefined;
+  let appendJsonLine: ReturnType<typeof vi.fn>;
 
   const sessionIdA = '550e8400-e29b-41d4-a716-446655440000';
   const sessionIdB = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
@@ -70,6 +78,9 @@ describe('SessionService - rename and custom title', () => {
     });
 
     sessionService = new SessionService('/test/project/root');
+    vi.spyOn(sessionService, 'getPhysicalSessionLocation').mockResolvedValue(
+      'active',
+    );
 
     readdirSyncSpy = vi.spyOn(fs, 'readdirSync').mockReturnValue([]);
     statSyncSpy = vi.spyOn(fs, 'statSync').mockImplementation(
@@ -87,6 +98,27 @@ describe('SessionService - rename and custom title', () => {
     vi.mocked(jsonl.read).mockResolvedValue([]);
     vi.mocked(jsonl.readLines).mockResolvedValue([]);
     vi.mocked(jsonl.writeLineSync).mockImplementation(() => undefined);
+    vi.mocked(jsonl.parseLineTolerant).mockImplementation((line) => {
+      try {
+        return [JSON.parse(line) as ChatRecord];
+      } catch {
+        return [];
+      }
+    });
+    transcriptSnapshot = Buffer.alloc(0);
+    transcriptReadError = undefined;
+    appendJsonLine = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(SessionWriterLease, 'acquire').mockImplementation(
+      async () =>
+        ({
+          readStableTranscript: vi.fn(async () => {
+            if (transcriptReadError) throw transcriptReadError;
+            return transcriptSnapshot;
+          }),
+          appendJsonLine,
+          release: vi.fn().mockResolvedValue(undefined),
+        }) as unknown as SessionWriterLease,
+    );
   });
 
   afterEach(() => {
@@ -95,7 +127,7 @@ describe('SessionService - rename and custom title', () => {
 
   describe('renameSession', () => {
     it('should append a custom_title record to the session file', async () => {
-      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      transcriptSnapshot = Buffer.from(`${JSON.stringify(recordA1)}\n`);
 
       const result = await sessionService.renameSession(
         sessionIdA,
@@ -103,10 +135,9 @@ describe('SessionService - rename and custom title', () => {
       );
 
       expect(result).toBe(true);
-      expect(jsonl.writeLineSync).toHaveBeenCalledOnce();
+      expect(appendJsonLine).toHaveBeenCalledOnce();
 
-      const writtenRecord = vi.mocked(jsonl.writeLineSync).mock
-        .calls[0][1] as ChatRecord;
+      const writtenRecord = appendJsonLine.mock.calls[0][0] as ChatRecord;
       expect(writtenRecord.type).toBe('system');
       expect(writtenRecord.subtype).toBe('custom_title');
       expect(writtenRecord.systemPayload).toEqual({
@@ -117,15 +148,13 @@ describe('SessionService - rename and custom title', () => {
     });
 
     it('should return false when session does not exist', async () => {
-      vi.mocked(jsonl.readLines).mockResolvedValue([]);
-
       const result = await sessionService.renameSession(
         '00000000-0000-0000-0000-000000000000',
         'test',
       );
 
       expect(result).toBe(false);
-      expect(jsonl.writeLineSync).not.toHaveBeenCalled();
+      expect(appendJsonLine).not.toHaveBeenCalled();
     });
 
     it('should return false for session from different project', async () => {
@@ -133,7 +162,9 @@ describe('SessionService - rename and custom title', () => {
         ...recordA1,
         cwd: '/different/project',
       };
-      vi.mocked(jsonl.readLines).mockResolvedValue([differentProjectRecord]);
+      transcriptSnapshot = Buffer.from(
+        `${JSON.stringify(differentProjectRecord)}\n`,
+      );
       vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
         cwd === '/test/project/root'
           ? 'test-project-hash'
@@ -146,13 +177,13 @@ describe('SessionService - rename and custom title', () => {
       );
 
       expect(result).toBe(false);
-      expect(jsonl.writeLineSync).not.toHaveBeenCalled();
+      expect(appendJsonLine).not.toHaveBeenCalled();
     });
 
     it('should handle file not found error', async () => {
       const error = new Error('ENOENT') as NodeJS.ErrnoException;
       error.code = 'ENOENT';
-      vi.mocked(jsonl.readLines).mockRejectedValue(error);
+      transcriptReadError = error;
 
       const result = await sessionService.renameSession(
         '00000000-0000-0000-0000-000000000000',
@@ -160,6 +191,35 @@ describe('SessionService - rename and custom title', () => {
       );
 
       expect(result).toBe(false);
+    });
+
+    it('sanitizes maintenance write filesystem errors', async () => {
+      transcriptSnapshot = Buffer.from(`${JSON.stringify(recordA1)}\n`);
+      appendJsonLine.mockRejectedValue(
+        Object.assign(
+          new Error("EACCES: '/private/transcripts/session.jsonl'"),
+          { code: 'EACCES' },
+        ),
+      );
+
+      const failure = await sessionService
+        .renameSession(sessionIdA, 'my-feature')
+        .catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(SessionWriterUnavailableError);
+      expect((failure as Error).message).not.toContain('/private/');
+    });
+
+    it('fails closed when active and archived copies both exist', async () => {
+      transcriptSnapshot = Buffer.from(`${JSON.stringify(recordA1)}\n`);
+      vi.mocked(sessionService.getPhysicalSessionLocation).mockResolvedValue(
+        'conflict',
+      );
+
+      await expect(
+        sessionService.renameSession(sessionIdA, 'my-feature'),
+      ).rejects.toBeInstanceOf(SessionTranscriptChangedError);
+      expect(appendJsonLine).not.toHaveBeenCalled();
     });
   });
 
@@ -392,6 +452,7 @@ describe('SessionService - rename and custom title', () => {
         hostname: 'host',
         startedAt: 1,
         qwenVersion: null,
+        active: false,
       });
       vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
         cwd === '/test/project/root'

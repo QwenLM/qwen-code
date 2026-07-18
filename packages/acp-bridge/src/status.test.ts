@@ -22,7 +22,8 @@ describe('SERVE_ERROR_KINDS', () => {
     // non-ENOENT stat failures on workspace memory discovery (see
     // #4175 PR 16). Issue #4514 T2.8 added three runtime-mutation
     // error kinds; T2.9 appended prompt_deadline_exceeded and
-    // writer_idle_timeout. Future additions append to this list.
+    // writer_idle_timeout. Session writer fencing appended its four
+    // integrity classifications. Future additions append to this list.
     expect(SERVE_ERROR_KINDS).toEqual([
       'missing_binary',
       'blocked_egress',
@@ -38,6 +39,10 @@ describe('SERVE_ERROR_KINDS', () => {
       'invalid_config',
       'prompt_deadline_exceeded',
       'writer_idle_timeout',
+      'session_writer_conflict',
+      'session_writer_lost',
+      'session_transcript_changed',
+      'session_writer_unavailable',
     ]);
   });
 
@@ -91,6 +96,14 @@ describe('MissingCliEntryError', () => {
 });
 
 describe('mapDomainErrorToErrorKind', () => {
+  it('classifies session writer errors nested in bridge RPC data', () => {
+    expect(
+      mapDomainErrorToErrorKind({
+        data: { errorKind: 'session_writer_conflict' },
+      }),
+    ).toBe('session_writer_conflict');
+  });
+
   it('classifies BridgeTimeoutError as init_timeout', () => {
     expect(mapDomainErrorToErrorKind(new BridgeTimeoutError('init', 100))).toBe(
       'init_timeout',

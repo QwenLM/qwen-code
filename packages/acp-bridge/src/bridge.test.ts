@@ -12674,7 +12674,7 @@ describe('createAcpSessionBridge', () => {
 
   describe('closeSession', () => {
     it('publishes session_closed and removes session from maps', async () => {
-      const handles: Array<{ killed: boolean }> = [];
+      const handles: ChannelHandle[] = [];
       const factory: ChannelFactory = async () => {
         const h = makeChannel();
         handles.push(h);
@@ -12694,6 +12694,10 @@ describe('createAcpSessionBridge', () => {
       await bridge.closeSession(session.sessionId);
       await drain;
 
+      expect(handles[0]?.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionClose,
+        params: { sessionId: session.sessionId },
+      });
       expect(bridge.sessionCount).toBe(0);
       const closedEvent = events.find((e) => e.type === 'session_closed');
       expect(closedEvent).toBeDefined();
@@ -12701,6 +12705,184 @@ describe('createAcpSessionBridge', () => {
         'client_close',
       );
 
+      await bridge.shutdown();
+    });
+
+    it('preserves bridge state when a normal agent close fails', async () => {
+      let failClose = true;
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionClose && failClose) {
+            failClose = false;
+            throw new Error('release failed');
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(bridge.closeSession(session.sessionId)).rejects.toThrow();
+      expect(bridge.sessionCount).toBe(1);
+
+      const reattached = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(reattached.sessionId).toBe(session.sessionId);
+      expect(handle.agent.newSessionCalls).toHaveLength(1);
+
+      await bridge.closeSession(session.sessionId);
+      expect(bridge.sessionCount).toBe(0);
+      expect(handle.agent.extMethodCalls).toEqual([
+        {
+          method: SERVE_CONTROL_EXT_METHODS.sessionClose,
+          params: { sessionId: session.sessionId },
+        },
+        {
+          method: SERVE_CONTROL_EXT_METHODS.sessionClose,
+          params: { sessionId: session.sessionId },
+        },
+      ]);
+
+      await bridge.shutdown();
+    });
+
+    it('rejects attaches while the child writer is closing', async () => {
+      const closeGate = deferred<unknown>();
+      const handle = makeChannel({
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionClose
+            ? closeGate.promise
+            : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const closing = bridge.closeSession(session.sessionId);
+      await vi.waitFor(() => {
+        expect(handle.agent.extMethodCalls).toHaveLength(1);
+      });
+      await expect(
+        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toBeInstanceOf(SessionBusyError);
+
+      closeGate.resolve({});
+      await closing;
+      expect(bridge.sessionCount).toBe(0);
+      await bridge.shutdown();
+    });
+
+    it('remains fail-closed when the child writer close times out', async () => {
+      const closeGate = deferred<unknown>();
+      const handle = makeChannel({
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionClose
+            ? closeGate.promise
+            : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        initializeTimeoutMs: 10,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.closeSession(session.sessionId),
+      ).rejects.toBeInstanceOf(BridgeTimeoutError);
+      expect(bridge.sessionCount).toBe(1);
+      await expect(
+        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toBeInstanceOf(SessionBusyError);
+      expect(() =>
+        bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'must stay blocked' }],
+        }),
+      ).toThrow(SessionBusyError);
+      await expect(
+        bridge.closeSession(session.sessionId),
+      ).rejects.toBeInstanceOf(SessionBusyError);
+
+      closeGate.resolve({});
+      await bridge.shutdown();
+    });
+
+    it('cancels an active prompt before closing the child writer and rejects new prompts', async () => {
+      let rejectPrompt: ((error: Error) => void) | undefined;
+      const closeGate = deferred<unknown>();
+      const handle = makeChannel({
+        promptImpl: () =>
+          new Promise<PromptResponse>((_resolve, reject) => {
+            rejectPrompt = reject;
+          }),
+        cancelImpl: (_params, self) => {
+          rejectPrompt?.(new Error('cancelled'));
+          expect(self.cancelCalls).toHaveLength(1);
+        },
+        extMethodImpl: (method, params, self) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          expect(self.cancelCalls).toContainEqual({
+            sessionId: params['sessionId'],
+          });
+          return closeGate.promise as Promise<Record<string, unknown>>;
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const activePrompt = bridge
+        .sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'long turn' }],
+        })
+        .catch(() => undefined);
+      await vi.waitFor(() => {
+        expect(handle.agent.promptCalls).toHaveLength(1);
+      });
+
+      const closing = bridge.closeSession(session.sessionId);
+      await vi.waitFor(() => {
+        expect(handle.agent.extMethodCalls).toHaveLength(1);
+      });
+      expect(() =>
+        bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'must not queue' }],
+        }),
+      ).toThrow(SessionBusyError);
+      expect(handle.agent.promptCalls).toHaveLength(1);
+
+      closeGate.resolve({});
+      await closing;
+      await activePrompt;
+      expect(bridge.sessionCount).toBe(0);
+      await bridge.shutdown();
+    });
+
+    it('preserves bridge state when kill cannot release the child writer', async () => {
+      let failClose = true;
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionClose && failClose) {
+            failClose = false;
+            throw new Error('release failed');
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(bridge.killSession(session.sessionId)).rejects.toThrow();
+      expect(bridge.sessionCount).toBe(1);
+
+      await expect(bridge.killSession(session.sessionId)).resolves.toBe(true);
+      expect(bridge.sessionCount).toBe(0);
       await bridge.shutdown();
     });
 

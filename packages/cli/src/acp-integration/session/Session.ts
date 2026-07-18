@@ -111,6 +111,7 @@ import {
   shouldRunAutoModeForCall,
   extractDaemonTraceContext,
   withInteractionSpan,
+  SessionWriterError,
   startToolSpan,
   endToolSpan,
   runInToolSpanContext,
@@ -1130,6 +1131,7 @@ export class Session implements SessionContext {
   // or session reload), which would otherwise execute orphaned cron prompts
   // on a session whose registries are already unregistered.
   private disposed = false;
+  private exclusiveMaintenance = false;
   private unsubscribeChatRecordingFailure?: () => void;
 
   // Modular components
@@ -1166,7 +1168,7 @@ export class Session implements SessionContext {
     private readonly settings: LoadedSettings,
   ) {
     this.sessionId = id;
-    this.runtimeBaseDir = Storage.getRuntimeBaseDir();
+    this.runtimeBaseDir = config.storage.getRuntimeBaseDir();
     const todoStopGuardEnabled =
       this.settings.merged.experimental?.todoStopGuard === true &&
       !this.config.getBareMode() &&
@@ -1493,6 +1495,19 @@ export class Session implements SessionContext {
     return this.config;
   }
 
+  async #assertCanStartTurn(): Promise<void> {
+    try {
+      await this.config.assertCanStartTurn?.();
+    } catch (error) {
+      if (error instanceof SessionWriterError) {
+        throw new RequestError(error.rpcCode, error.message, {
+          errorKind: error.errorKind,
+        });
+      }
+      throw error;
+    }
+  }
+
   isIdle(): boolean {
     return (
       !this.pendingPrompt &&
@@ -1500,8 +1515,72 @@ export class Session implements SessionContext {
       !this.cronProcessing &&
       !this.cronAbortController &&
       !this.notificationProcessing &&
-      !this.notificationAbortController
+      !this.notificationAbortController &&
+      !this.exclusiveMaintenance
     );
+  }
+
+  async withExclusiveMaintenance<T>(operation: () => Promise<T>): Promise<T> {
+    if (!this.isIdle()) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Cannot modify the session while a turn is running',
+      );
+    }
+    this.exclusiveMaintenance = true;
+    try {
+      return await operation();
+    } finally {
+      this.exclusiveMaintenance = false;
+      void this.#drainCronQueue();
+      void this.#drainNotificationQueue();
+    }
+  }
+
+  beginClose(): () => void {
+    if (this.exclusiveMaintenance) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Session maintenance is already in progress',
+      );
+    }
+    this.exclusiveMaintenance = true;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.exclusiveMaintenance = false;
+      void this.#drainCronQueue();
+      void this.#drainNotificationQueue();
+    };
+  }
+
+  async waitForActiveTurnsToSettle(): Promise<void> {
+    const pending = [
+      this.pendingPromptCompletion,
+      this.cronCompletion,
+      this.notificationCompletion,
+    ].filter((completion): completion is Promise<void> => completion !== null);
+    await Promise.allSettled(pending);
+  }
+
+  async withExclusiveTranscriptSnapshot<T>(
+    operation: (snapshot: Uint8Array) => Promise<T>,
+  ): Promise<T> {
+    return this.withExclusiveMaintenance(async () => {
+      const recorder = this.config.getChatRecordingService();
+      if (!recorder) throw new Error('Session recording is disabled');
+      let paused = false;
+      try {
+        recorder.finalize();
+        await recorder.pause({ requireHealthy: true });
+        paused = true;
+        const snapshot = await recorder.readStableTranscriptSnapshot();
+        return await operation(snapshot);
+      } finally {
+        if (paused && !recorder.isIntegrityFailed()) recorder.resume();
+      }
+    });
   }
 
   getTurnCount(): number {
@@ -1849,6 +1928,12 @@ export class Session implements SessionContext {
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
+    if (this.exclusiveMaintenance) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Session maintenance is in progress',
+      );
+    }
     const todoStopGuardPreparation =
       this.#prepareTodoStopGuardForPrompt(params);
     // Install this prompt's AbortController before awaiting the previous
@@ -1935,6 +2020,13 @@ export class Session implements SessionContext {
       void this.#drainNotificationQueue();
       this.#maybeEmitFollowupSuggestion(result);
       return result;
+    } catch (error) {
+      if (error instanceof SessionWriterError) {
+        throw new RequestError(error.rpcCode, error.message, {
+          errorKind: error.errorKind,
+        });
+      }
+      throw error;
     } finally {
       this.pendingPrompt = null;
       const shouldDrainAutomaticQueues =
@@ -2138,6 +2230,7 @@ export class Session implements SessionContext {
       this.runtimeBaseDir,
       this.config.getWorkingDir(),
       async () => {
+        await this.#assertCanStartTurn();
         // Increment turn counter for each user prompt
         this.turn += 1;
 
@@ -4122,6 +4215,7 @@ export class Session implements SessionContext {
     if (this.pendingPrompt) return;
     if (this.notificationProcessing) return;
     if (this.#nextCronQueueIndex() < 0) return;
+    if (this.exclusiveMaintenance) return;
     this.cronProcessing = true;
 
     let resolveCompletion!: () => void;
@@ -4228,6 +4322,7 @@ export class Session implements SessionContext {
           async () => {
             let turnCount = 0;
             try {
+              await this.#assertCanStartTurn();
               // A `<<loop.md>>` / `<<loop.md-dynamic>>` sentinel is expanded at
               // fire time into the loop.md task block — full on the first or a
               // changed fire, a short reminder when unchanged. Non-sentinel
@@ -4702,6 +4797,7 @@ export class Session implements SessionContext {
   async #drainNotificationQueue(): Promise<void> {
     if (this.disposed) return;
     if (this.notificationProcessing) return;
+    if (this.exclusiveMaintenance) return;
     if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {
       return;
     }
@@ -4777,6 +4873,7 @@ export class Session implements SessionContext {
         const promptId =
           this.config.getSessionId() + '########notification' + Date.now();
         try {
+          await this.#assertCanStartTurn();
           await this.#emitBackgroundNotificationDisplay(item);
 
           const notificationParts: Part[] = [{ text: item.modelText }];

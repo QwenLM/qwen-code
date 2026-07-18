@@ -13,6 +13,7 @@ import {
   ToolNames,
   persistSessionUsage,
   createDebugLogger,
+  SessionStartSource,
 } from '@qwen-code/qwen-code-core';
 import {
   hasBlockingBackgroundWork,
@@ -29,7 +30,7 @@ export const clearCommand: SlashCommand = {
     return t('Clear conversation history and free up context');
   },
   kind: CommandKind.BUILT_IN,
-  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+  supportedModes: ['interactive', 'non_interactive'] as const,
   action: async (context, _args) => {
     const { config } = context.services;
 
@@ -65,13 +66,6 @@ export const clearCommand: SlashCommand = {
           config.getDebugLogger().warn(`SessionEnd hook failed: ${err}`);
         });
 
-      // Abort old-session async work before creating the new session so
-      // cancellation notifications cannot leak across the reset boundary.
-      config.getBackgroundTaskRegistry().abortAll({ notify: false });
-      config.getMonitorRegistry().abortAll({ notify: false });
-      config.getBackgroundShellRegistry().abortAll();
-      resetBackgroundStateForSessionSwitch(config);
-
       // Persist current session's usage before resetting metrics
       const metrics = uiTelemetryService.getMetrics();
       const hasActivity = Object.values(metrics.models).some(
@@ -91,37 +85,56 @@ export const clearCommand: SlashCommand = {
         }
       }
 
-      const newSessionId = config.startNewSession();
-
-      // Reset UI telemetry metrics for the new session
-      uiTelemetryService.reset();
-
-      // Clear loaded-skills tracking so /context doesn't show stale data
+      const hadUnpersistedRecording =
+        config.getChatRecordingService?.()?.hasWriteFailure?.() ?? false;
+      const transition = await config.prepareSessionTransition(
+        undefined,
+        undefined,
+        {
+          sessionStartSource: SessionStartSource.Clear,
+          requireNew: true,
+        },
+      );
+      try {
+        await transition.commit(() => {
+          context.session.startNewSession?.(transition.sessionId);
+          context.ui.clear();
+          context.ui.setDebugMessage(
+            hadUnpersistedRecording
+              ? t(
+                  'Started a new session. Some changes in the previous session could not be saved.',
+                )
+              : t(
+                  'Starting a new session, resetting chat, and clearing terminal.',
+                ),
+          );
+        });
+      } catch (error) {
+        await transition.rollback();
+        throw error;
+      }
+      try {
+        config.getBackgroundTaskRegistry().abortAll({ notify: false });
+        config.getMonitorRegistry().abortAll({ notify: false });
+        config.getBackgroundShellRegistry().abortAll();
+        resetBackgroundStateForSessionSwitch(config);
+      } catch (error) {
+        config
+          .getDebugLogger()
+          .warn(`Failed to reset background state after /clear: ${error}`);
+      }
       const skillTool = config
         .getToolRegistry()
         ?.getAllTools()
         .find((tool) => tool.name === ToolNames.SKILL);
       if (skillTool && 'clearLoadedSkills' in skillTool) {
-        (skillTool as { clearLoadedSkills(): void }).clearLoadedSkills();
-      }
-
-      if (newSessionId && context.session.startNewSession) {
-        context.session.startNewSession(newSessionId);
-      }
-
-      // Clear UI first for immediate responsiveness
-      context.ui.clear();
-
-      const geminiClient = config.getGeminiClient();
-      if (geminiClient) {
-        context.ui.setDebugMessage(
-          t('Starting a new session, resetting chat, and clearing terminal.'),
-        );
-        // If resetChat fails, the exception will propagate and halt the command,
-        // which is the correct behavior to signal a failure to the user.
-        await geminiClient.resetChat();
-      } else {
-        context.ui.setDebugMessage(t('Starting a new session and clearing.'));
+        try {
+          (skillTool as { clearLoadedSkills(): void }).clearLoadedSkills();
+        } catch (error) {
+          config
+            .getDebugLogger()
+            .warn(`Failed to clear loaded skills after /clear: ${error}`);
+        }
       }
     } else {
       context.ui.setDebugMessage(t('Starting a new session and clearing.'));

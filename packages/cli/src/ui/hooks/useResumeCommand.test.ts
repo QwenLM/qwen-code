@@ -65,6 +65,16 @@ const resumeMocks = vi.hoisted(() => {
     getPendingLoadSession() {
       return pendingLoadSession;
     },
+    loadSession() {
+      return (
+        pendingLoadSession ??
+        Promise.resolve({
+          conversation: this.makeConversation([
+            { role: 'user', parts: [{ text: 'hello' }] },
+          ]),
+        })
+      );
+    },
     reset() {
       resolveLoadSession = undefined;
       pendingLoadSession = undefined;
@@ -93,14 +103,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   class SessionService {
     constructor(_cwd: string) {}
     async loadSession(_sessionId: string) {
-      return (
-        resumeMocks.getPendingLoadSession() ??
-        Promise.resolve({
-          conversation: resumeMocks.makeConversation([
-            { role: 'user', parts: [{ text: 'hello' }] },
-          ]),
-        })
-      );
+      return resumeMocks.loadSession();
     }
     getSessionTitle(_sessionId: string) {
       return undefined;
@@ -112,6 +115,53 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     SessionService,
   };
 });
+
+function attachSessionTransition(
+  config: import('@qwen-code/qwen-code-core').Config,
+): void {
+  const existingRecorder = config.getChatRecordingService?.();
+  Object.assign(config, {
+    getSessionService: () => ({
+      loadSession: () => resumeMocks.loadSession(),
+    }),
+    getChatRecordingService: () => ({
+      ...existingRecorder,
+      getCurrentCustomTitle: () => undefined,
+    }),
+    prepareSessionTransition: async (sessionId: string, preview: unknown) => {
+      const oldSessionId = config.getSessionId();
+      const authoritative = (await resumeMocks.loadSession()) ?? preview;
+      try {
+        config.startNewSession(sessionId, authoritative as never);
+        await config.getGeminiClient().initialize();
+      } catch (error) {
+        config.startNewSession(oldSessionId, undefined);
+        await config.getGeminiClient().initialize();
+        throw error;
+      }
+      let rolledBack = false;
+      const rollback = async () => {
+        if (rolledBack) return;
+        rolledBack = true;
+        config.startNewSession(oldSessionId, undefined);
+        await config.getGeminiClient().initialize();
+      };
+      return {
+        sessionId,
+        sessionData: authoritative,
+        rollback,
+        commit: async (uiCommit: () => void) => {
+          try {
+            uiCommit();
+          } catch (error) {
+            await rollback();
+            throw error;
+          }
+        },
+      };
+    },
+  });
+}
 
 describe('useResumeCommand', () => {
   it('should initialize with dialog closed', () => {
@@ -235,6 +285,34 @@ describe('useResumeCommand', () => {
     expect(historyManager.loadHistory).not.toHaveBeenCalled();
   });
 
+  it('handleResume closes the dialog when selecting the current session', async () => {
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
+    const config = {
+      getSessionId: () => 'session-1',
+    } as import('@qwen-code/qwen-code-core').Config;
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        settings: mockSettings,
+        historyManager,
+        startNewSession: vi.fn(),
+      }),
+    );
+
+    act(() => result.current.openResumeDialog());
+    expect(result.current.isResumeDialogOpen).toBe(true);
+
+    await act(async () => result.current.handleResume('session-1'));
+
+    expect(result.current.isResumeDialogOpen).toBe(false);
+    expect(historyManager.clearItems).not.toHaveBeenCalled();
+    expect(historyManager.loadHistory).not.toHaveBeenCalled();
+  });
+
   it('handleResume closes the dialog immediately and restores session state', async () => {
     resumeMocks.reset();
     resumeMocks.createPendingLoadSession();
@@ -284,6 +362,7 @@ describe('useResumeCommand', () => {
         error: vi.fn(),
       }),
     } as unknown as import('@qwen-code/qwen-code-core').Config;
+    attachSessionTransition(config);
 
     const { result } = renderHook(() =>
       useResumeCommand({
@@ -389,6 +468,7 @@ describe('useResumeCommand', () => {
         error: vi.fn(),
       }),
     } as unknown as import('@qwen-code/qwen-code-core').Config;
+    attachSessionTransition(config);
 
     const { result } = renderHook(() =>
       useResumeCommand({
@@ -469,6 +549,7 @@ describe('useResumeCommand', () => {
         error: vi.fn(),
       }),
     } as unknown as import('@qwen-code/qwen-code-core').Config;
+    attachSessionTransition(config);
 
     const settingsWithCollapse = {
       merged: {
@@ -569,6 +650,7 @@ describe('useResumeCommand', () => {
         error: vi.fn(),
       }),
     } as unknown as import('@qwen-code/qwen-code-core').Config;
+    attachSessionTransition(config);
 
     const { result } = renderHook(() =>
       useResumeCommand({
@@ -628,6 +710,7 @@ describe('useResumeCommand', () => {
         error: vi.fn(),
       }),
     } as unknown as import('@qwen-code/qwen-code-core').Config;
+    attachSessionTransition(config);
 
     const { result } = renderHook(() =>
       useResumeCommand({
@@ -650,6 +733,71 @@ describe('useResumeCommand', () => {
     expect(startNewSession).not.toHaveBeenCalled();
     expect(historyManager.clearItems).not.toHaveBeenCalled();
     expect(historyManager.loadHistory).not.toHaveBeenCalled();
+    expect(historyManager.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it('rechecks background work after the asynchronous session preview load', async () => {
+    resumeMocks.reset();
+    const hasRunningTasks = vi
+      .fn()
+      .mockReturnValueOnce(false)
+      .mockReturnValue(true);
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
+    const startNewSession = vi.fn();
+    const config = {
+      getSessionId: () => 'old-session-id',
+      getGeminiClient: () => ({ initialize: vi.fn() }),
+      startNewSession: vi.fn(),
+      getBackgroundTaskRegistry: () => ({
+        hasRunningTasks,
+        reset: vi.fn(),
+      }),
+      getBackgroundShellRegistry: () => ({
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getMonitorRegistry: () => ({
+        getRunning: vi.fn().mockReturnValue([]),
+        reset: vi.fn(),
+      }),
+      getWorkflowRunRegistry: () => ({
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getDebugLogger: () => ({
+        warn: vi.fn(),
+        debug: vi.fn(),
+        error: vi.fn(),
+      }),
+    } as unknown as import('@qwen-code/qwen-code-core').Config;
+    attachSessionTransition(config);
+
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        settings: mockSettings,
+        historyManager,
+        startNewSession,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.handleResume('session-2');
+    });
+
+    expect(hasRunningTasks).toHaveBeenCalledTimes(2);
+    expect(config.startNewSession).not.toHaveBeenCalled();
+    expect(startNewSession).not.toHaveBeenCalled();
     expect(historyManager.addItem).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'error',
@@ -698,6 +846,7 @@ describe('useResumeCommand', () => {
         error: vi.fn(),
       }),
     } as unknown as import('@qwen-code/qwen-code-core').Config;
+    attachSessionTransition(config);
 
     const { result } = renderHook(() =>
       useResumeCommand({
@@ -769,6 +918,7 @@ describe('useResumeCommand', () => {
         error: vi.fn(),
       }),
     } as unknown as import('@qwen-code/qwen-code-core').Config;
+    attachSessionTransition(config);
 
     const historyManager = {
       addItem: vi.fn(),

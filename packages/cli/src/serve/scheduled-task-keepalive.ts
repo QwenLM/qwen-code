@@ -36,6 +36,7 @@ import {
   getCronFilePath,
   createDebugLogger,
   SessionService,
+  Storage,
   taskHasLegacyCondition,
   type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
@@ -105,6 +106,14 @@ const KEEPALIVE_SPAWN_TIMEOUT_MS = 30_000;
  * every interval forever. */
 const MAX_REVIVE_BACKOFF_MS = 30 * 60_000;
 
+function runInRuntimeBase<T>(
+  runtimeBaseDir: string | undefined,
+  operation: () => T,
+): T {
+  if (runtimeBaseDir === undefined) return operation();
+  return Storage.runWithRuntimeBaseDir(runtimeBaseDir, undefined, operation);
+}
+
 /**
  * Bind unbound durable tasks to dedicated sessions, and rename bound
  * sessions that don't yet have the ⏰ prefix. The cron_create tool leaves
@@ -122,6 +131,7 @@ const MAX_REVIVE_BACKOFF_MS = 30 * 60_000;
 async function bindAndNameSessions(
   bridge: KeepaliveBridge,
   boundWorkspace: string,
+  runtimeBaseDir: string | undefined,
   tasks: readonly DurableCronTask[],
   renamed: Set<string>,
   spawnTimeoutMs: number,
@@ -158,15 +168,15 @@ async function bindAndNameSessions(
       // binding guard on TRUE settlement so retries are possible.
       let timedOut = false;
       rawSpawn
-        .then(({ sessionId }) => {
+        .then(async ({ sessionId }) => {
           if (timedOut) {
             log.debug(
               'keepalive: late spawn resolved, cleaning up',
               task.id,
               sessionId,
             );
-            bridge.closeSession(sessionId).catch(() => {});
-            new SessionService(boundWorkspace)
+            await bridge.closeSession(sessionId).catch(() => {});
+            await new SessionService(boundWorkspace, { runtimeBaseDir })
               .removeSession(sessionId)
               .catch(() => {});
           }
@@ -193,26 +203,28 @@ async function bindAndNameSessions(
         // naming is non-critical — the session still fires correctly
       }
       let matched = false;
-      await updateCronTasks(boundWorkspace, (list) => {
-        // Another process may have bound or disabled this task between our
-        // read and this write-lock acquisition — only attach when the task is
-        // still unbound and enabled. Otherwise return unchanged so the
-        // orphan spawn is rolled back below.
-        if (
-          !list.some(
-            (t) => t.id === task.id && !t.sessionId && t.enabled !== false,
-          )
-        ) {
-          return list;
-        }
-        const result = list.map((t) =>
-          t.id === task.id && !t.sessionId && t.enabled !== false
-            ? { ...t, sessionId }
-            : t,
-        );
-        matched = true;
-        return result;
-      });
+      await runInRuntimeBase(runtimeBaseDir, () =>
+        updateCronTasks(boundWorkspace, (list) => {
+          // Another process may have bound or disabled this task between our
+          // read and this write-lock acquisition — only attach when the task is
+          // still unbound and enabled. Otherwise return unchanged so the
+          // orphan spawn is rolled back below.
+          if (
+            !list.some(
+              (t) => t.id === task.id && !t.sessionId && t.enabled !== false,
+            )
+          ) {
+            return list;
+          }
+          const result = list.map((t) =>
+            t.id === task.id && !t.sessionId && t.enabled !== false
+              ? { ...t, sessionId }
+              : t,
+          );
+          matched = true;
+          return result;
+        }),
+      );
       if (!matched) {
         // Task was deleted between read and write — roll back the orphan.
         throw new Error(`task ${task.id} no longer on disk`);
@@ -227,7 +239,7 @@ async function bindAndNameSessions(
       log.debug('keepalive: failed to bind task', task.id, err);
       if (spawnedSessionId !== undefined) {
         await bridge.closeSession(spawnedSessionId).catch(() => {});
-        await new SessionService(boundWorkspace)
+        await new SessionService(boundWorkspace, { runtimeBaseDir })
           .removeSession(spawnedSessionId)
           .catch(() => {});
       }
@@ -257,6 +269,7 @@ export interface ScheduledTaskKeepalive {
 export interface StartScheduledTaskKeepaliveOptions {
   bridge: KeepaliveBridge;
   boundWorkspace: string;
+  runtimeBaseDir?: string;
   /** How often to heartbeat; must be comfortably under the reaper timeout. */
   intervalMs: number;
   /** Per-session revive timeout; defaults to KEEPALIVE_REVIVE_TIMEOUT_MS. */
@@ -268,7 +281,7 @@ export interface StartScheduledTaskKeepaliveOptions {
 export function startScheduledTaskKeepalive(
   opts: StartScheduledTaskKeepaliveOptions,
 ): ScheduledTaskKeepalive {
-  const { bridge, boundWorkspace, intervalMs } = opts;
+  const { bridge, boundWorkspace, intervalMs, runtimeBaseDir } = opts;
   const reviveTimeoutMs = opts.reviveTimeoutMs ?? KEEPALIVE_REVIVE_TIMEOUT_MS;
   const spawnTimeoutMs = opts.spawnTimeoutMs ?? KEEPALIVE_SPAWN_TIMEOUT_MS;
 
@@ -296,7 +309,9 @@ export function startScheduledTaskKeepalive(
   const tick = async (): Promise<void> => {
     let tasks;
     try {
-      tasks = await readCronTasks(boundWorkspace);
+      tasks = await runInRuntimeBase(runtimeBaseDir, () =>
+        readCronTasks(boundWorkspace),
+      );
     } catch (err) {
       // A read failure (missing file already maps to [], so this is a real
       // EACCES/corruption) just skips this pass; the next one retries. The
@@ -323,9 +338,9 @@ export function startScheduledTaskKeepalive(
         }
         log.debug('keepalive: recordHeartbeat failed for', sessionId, err);
         reviving.add(sessionId);
-        const metadata = await new SessionService(
-          boundWorkspace,
-        ).readCreationMetadata(sessionId);
+        const metadata = await new SessionService(boundWorkspace, {
+          runtimeBaseDir,
+        }).readCreationMetadata(sessionId);
         const load = bridge.loadSession({
           sessionId,
           workspaceCwd: boundWorkspace,
@@ -378,6 +393,7 @@ export function startScheduledTaskKeepalive(
     await bindAndNameSessions(
       bridge,
       boundWorkspace,
+      runtimeBaseDir,
       tasks,
       renamed,
       spawnTimeoutMs,
@@ -404,7 +420,9 @@ export function startScheduledTaskKeepalive(
   // dedicated session immediately, not after the next interval. Same
   // directory-watch + debounce pattern the scheduler uses.
   let bindDebounce: ReturnType<typeof setTimeout> | undefined;
-  const cronFilePath = getCronFilePath(boundWorkspace);
+  const cronFilePath = runInRuntimeBase(runtimeBaseDir, () =>
+    getCronFilePath(boundWorkspace),
+  );
   const cronDir = path.dirname(cronFilePath);
   const cronFileName = path.basename(cronFilePath);
   let fileWatcher: ReturnType<typeof fsSync.watch> | undefined;
@@ -486,6 +504,7 @@ const REHYDRATE_MAX_CONCURRENCY = 4;
 export async function rehydrateScheduledTaskSessions(deps: {
   bridge: RehydrateBridge;
   boundWorkspace: string;
+  runtimeBaseDir?: string;
   onError?: (sessionId: string, err: unknown) => void;
   loadTimeoutMs?: number;
 }): Promise<RehydrateResult> {
@@ -493,7 +512,9 @@ export async function rehydrateScheduledTaskSessions(deps: {
   const timeoutMs = deps.loadTimeoutMs ?? REHYDRATE_LOAD_TIMEOUT_MS;
   let tasks;
   try {
-    tasks = await readCronTasks(boundWorkspace);
+    tasks = await runInRuntimeBase(deps.runtimeBaseDir, () =>
+      readCronTasks(boundWorkspace),
+    );
   } catch (err) {
     log.debug('rehydrate: readCronTasks failed', err);
     return { loaded: [], failed: [] };
@@ -505,9 +526,9 @@ export async function rehydrateScheduledTaskSessions(deps: {
   const loaded: string[] = [];
   const failed: string[] = [];
   const loadOne = async (sessionId: string) => {
-    const metadata = await new SessionService(
-      boundWorkspace,
-    ).readCreationMetadata(sessionId);
+    const metadata = await new SessionService(boundWorkspace, {
+      runtimeBaseDir: deps.runtimeBaseDir,
+    }).readCreationMetadata(sessionId);
     const load = bridge.loadSession({
       sessionId,
       workspaceCwd: boundWorkspace,

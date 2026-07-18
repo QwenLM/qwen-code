@@ -434,6 +434,18 @@ describe('ToolRegistry', () => {
       expect(toolRegistry.isDeferredToolRevealed('other-hidden')).toBe(false);
     });
 
+    it('restores revealed deferred tools from a session snapshot', () => {
+      toolRegistry.revealDeferredTool('old-tool');
+      const snapshot = toolRegistry.createRevealedDeferredToolsSnapshot();
+
+      toolRegistry.clearRevealedDeferredTools();
+      toolRegistry.revealDeferredTool('new-tool');
+      toolRegistry.restoreRevealedDeferredToolsSnapshot(snapshot);
+
+      expect(toolRegistry.isDeferredToolRevealed('old-tool')).toBe(true);
+      expect(toolRegistry.isDeferredToolRevealed('new-tool')).toBe(false);
+    });
+
     it('sorts MCP declarations deterministically regardless of registration order', () => {
       const mcpCallable = {} as CallableTool;
       const registryA = new ToolRegistry(config);

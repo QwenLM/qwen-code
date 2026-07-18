@@ -6,6 +6,7 @@
 
 import {
   SessionService,
+  Storage,
   type SessionLocation,
 } from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
@@ -136,7 +137,9 @@ export async function deleteDaemonSessions(params: {
           let shouldRemove = false;
           try {
             // Intentional: batch delete bypasses per-tab ownership.
-            await bridge.closeSession(sessionId);
+            await bridge.closeSession(sessionId, undefined, {
+              requireAgentClose: true,
+            });
             shouldRemove = true;
           } catch (closeErr) {
             if (
@@ -190,15 +193,17 @@ export async function deleteDaemonSessions(params: {
   // the archive/unarchive paths) — the session is already gone, so a swallowed
   // write failure leaves the still-enabled bound task a permanent ghost the
   // keepalive retries a doomed revive on every tick.
-  await removeTasksForSessions(service.getProjectRoot(), removed).catch(
-    (err: unknown) => {
-      logSessionArchiveWarning(
-        `removeTasksForSessions failed for [${removed.join(', ')}]: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    },
-  );
+  await Storage.runWithRuntimeBaseDir(
+    service.getRuntimeBaseDir(),
+    undefined,
+    () => removeTasksForSessions(service.getProjectRoot(), removed),
+  ).catch((err: unknown) => {
+    logSessionArchiveWarning(
+      `removeTasksForSessions failed for [${removed.join(', ')}]: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  });
 
   return { removed, notFound, errors: [...closeErrors, ...removeErrors] };
 }
@@ -206,10 +211,11 @@ export async function deleteDaemonSessions(params: {
 export async function assertSessionLoadable(
   workspaceCwd: string,
   sessionId: string,
+  runtimeBaseDir?: string,
 ): Promise<SessionLocation> {
-  const location = await new SessionService(workspaceCwd).getSessionLocation(
-    sessionId,
-  );
+  const location = await new SessionService(workspaceCwd, {
+    runtimeBaseDir,
+  }).getSessionLocation(sessionId);
   if (location === 'archived') {
     throw new SessionArchivedError(sessionId);
   }
@@ -222,10 +228,11 @@ export async function assertSessionLoadable(
 export async function assertSessionArchived(
   workspaceCwd: string,
   sessionId: string,
+  runtimeBaseDir?: string,
 ): Promise<void> {
-  const location = await new SessionService(workspaceCwd).getSessionLocation(
-    sessionId,
-  );
+  const location = await new SessionService(workspaceCwd, {
+    runtimeBaseDir,
+  }).getSessionLocation(sessionId);
   if (location === 'active') {
     throw new SessionNotArchivedError(sessionId);
   }
@@ -431,15 +438,17 @@ export async function archiveDaemonSessions(params: {
   // keepalive still sees it enabled + bound and will revive the just-archived
   // session so the task keeps firing. Logging makes that broken coupling
   // diagnosable rather than silent.
-  await disableTasksForSessions(service.getProjectRoot(), archived).catch(
-    (err: unknown) => {
-      logSessionArchiveWarning(
-        `disableTasksForSessions failed for [${archived.join(', ')}]: ${
-          err instanceof Error ? err.message : String(err)
-        } — bound tasks may keep firing until reconciled`,
-      );
-    },
-  );
+  await Storage.runWithRuntimeBaseDir(
+    service.getRuntimeBaseDir(),
+    undefined,
+    () => disableTasksForSessions(service.getProjectRoot(), archived),
+  ).catch((err: unknown) => {
+    logSessionArchiveWarning(
+      `disableTasksForSessions failed for [${archived.join(', ')}]: ${
+        err instanceof Error ? err.message : String(err)
+      } — bound tasks may keep firing until reconciled`,
+    );
+  });
 
   return { archived, alreadyArchived, notFound, errors };
 }
@@ -508,7 +517,11 @@ export async function unarchiveDaemonSessions(params: {
   // swallowing, so a stranded task isn't left silent.
   const resumeSessionIds = [...new Set([...unarchived, ...alreadyActive])];
   try {
-    await enableTasksForSessions(service.getProjectRoot(), resumeSessionIds);
+    await Storage.runWithRuntimeBaseDir(
+      service.getRuntimeBaseDir(),
+      undefined,
+      () => enableTasksForSessions(service.getProjectRoot(), resumeSessionIds),
+    );
   } catch (err) {
     logSessionArchiveWarning(
       `enableTasksForSessions failed for [${resumeSessionIds.join(', ')}]: ${

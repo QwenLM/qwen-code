@@ -12,6 +12,7 @@ import {
   DEFAULT_QWEN_MODEL,
   OutputFormat,
   NativeLspService,
+  SessionWriterConflictError,
   Storage,
 } from '@qwen-code/qwen-code-core';
 import { loadCliConfig, parseArguments, type CliArgs } from './config.js';
@@ -1444,6 +1445,34 @@ describe('loadCliConfig', () => {
 
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
       `Failed to fork session ${sourceSessionId}: source session belongs to another project`,
+    );
+    expect(mockExit).toHaveBeenCalledWith(1);
+  });
+
+  it('should direct a conflicting offline fork to the owning session', async () => {
+    const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
+    mockSessionServiceInstance.loadSession.mockResolvedValue({
+      conversation: { sessionId: sourceSessionId, messages: [] },
+      uiHistory: [],
+    });
+    mockSessionServiceInstance.forkSession.mockRejectedValue(
+      new SessionWriterConflictError(),
+    );
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    await expect(
+      loadCliConfig({}, {
+        resume: sourceSessionId,
+        forkSession: true,
+      } as CliArgs),
+    ).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Open the owning Qwen session and run /branch there.',
+      ),
     );
     expect(mockExit).toHaveBeenCalledWith(1);
   });
@@ -4235,6 +4264,29 @@ describe('loadCliConfig runtimeOutputDir', () => {
 
     await loadCliConfig({}, argv);
     expect(Storage.getRuntimeBaseDir()).toBe(Storage.getGlobalQwenDir());
+  });
+
+  it('does not pollute the process default when loaded in a runtime context', async () => {
+    const argv = await parseArguments();
+    const globalRuntimeDir = path.resolve('global', 'runtime');
+    const cwd = path.resolve('workspace', 'contextual-project');
+    Storage.setRuntimeBaseDir(globalRuntimeDir);
+
+    const config = await Storage.runWithRuntimeBaseDir(
+      '.context-runtime',
+      cwd,
+      () =>
+        loadCliConfig(
+          { advanced: { runtimeOutputDir: '.context-runtime' } },
+          argv,
+          cwd,
+        ),
+    );
+
+    expect(config.storage.getRuntimeBaseDir()).toBe(
+      path.join(cwd, '.context-runtime'),
+    );
+    expect(Storage.getRuntimeBaseDir()).toBe(globalRuntimeDir);
   });
 });
 

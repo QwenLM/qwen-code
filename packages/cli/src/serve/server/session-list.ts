@@ -72,6 +72,8 @@ export interface WorkspaceSessionInfoResult {
 export interface ListWorkspaceSessionsReadOptions {
   /** Merge live bridge state into persisted summaries. */
   mergeLive?: boolean;
+  /** Runtime output base pinned by the owning workspace runtime. */
+  runtimeBaseDir?: string;
 }
 
 export class InvalidCursorError extends Error {
@@ -450,8 +452,13 @@ async function listOrganizedWorkspaceSessionsForResponse(
   readOptions: ListWorkspaceSessionsReadOptions,
 ): Promise<ListWorkspaceSessionsResult> {
   const archiveState = options.archiveState ?? 'active';
-  const sessionService = new SessionService(workspaceCwd);
-  const organizationService = createSessionOrganizationService(workspaceCwd);
+  const sessionService = new SessionService(workspaceCwd, {
+    runtimeBaseDir: readOptions.runtimeBaseDir,
+  });
+  const organizationService = createSessionOrganizationService(
+    workspaceCwd,
+    readOptions.runtimeBaseDir,
+  );
   const snapshot = await organizationService.readSnapshot();
   const knownGroupIds = new Set(snapshot.groups.map((group) => group.id));
   const group = options.group ?? 'all';
@@ -596,7 +603,9 @@ async function listWorkspaceSessionsByMetadataForResponse(
   readOptions: ListWorkspaceSessionsReadOptions,
 ): Promise<ListWorkspaceSessionsResult> {
   const archiveState = options.archiveState ?? 'active';
-  const sessionService = new SessionService(workspaceCwd);
+  const sessionService = new SessionService(workspaceCwd, {
+    runtimeBaseDir: readOptions.runtimeBaseDir,
+  });
   const bySessionId = new Map<string, BridgeSessionSummary>();
   const persisted = await listAllPersistedSummaries(
     sessionService,
@@ -736,7 +745,9 @@ export async function listWorkspaceSessionsForResponse(
   }
   const isFirstPage = numericCursor === undefined;
 
-  const sessionService = new SessionService(workspaceCwd);
+  const sessionService = new SessionService(workspaceCwd, {
+    runtimeBaseDir: readOptions.runtimeBaseDir,
+  });
   const archiveState = options?.archiveState ?? 'active';
   const persisted = await sessionService.listSessions({
     cursor: numericCursor,
@@ -841,9 +852,11 @@ export function listLiveWorkspaceSessionsForResponse(
 export async function getWorkspaceSessionInfoForResponse(
   bridge: AcpSessionBridge,
   workspaceCwd: string,
-  options: { includeLive?: boolean } = {},
+  options: { includeLive?: boolean; runtimeBaseDir?: string } = {},
 ): Promise<WorkspaceSessionInfoResult> {
-  const counts = await new SessionService(workspaceCwd).getSessionInfoCounts();
+  const counts = await new SessionService(workspaceCwd, {
+    runtimeBaseDir: options.runtimeBaseDir,
+  }).getSessionInfoCounts();
   return {
     active: counts.active,
     archived: counts.archived,

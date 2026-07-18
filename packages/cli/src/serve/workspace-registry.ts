@@ -28,6 +28,8 @@ export interface WorkspaceRuntimeEnvMetadata {
 export interface WorkspaceRuntime {
   readonly workspaceId: string;
   readonly workspaceCwd: string;
+  /** Absolute runtime output base pinned when this workspace runtime starts. */
+  readonly runtimeBaseDir?: string;
   readonly primary: boolean;
   readonly trusted: boolean;
   /** Whether this runtime may be removed without restarting the daemon. */

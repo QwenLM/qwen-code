@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   RUNTIME_STATUS_SCHEMA_VERSION,
   clearRuntimeStatus,
+  deactivateRuntimeStatus,
   readRuntimeStatus,
   writeRuntimeStatus,
 } from './runtimeStatus.js';
@@ -46,6 +47,7 @@ describe('writeRuntimeStatus', () => {
     expect(data.hostname.length).toBeGreaterThan(0);
     expect(typeof data.started_at).toBe('number');
     expect(data.qwen_version).toBe('0.15.3');
+    expect(data.active).toBe(true);
   });
 
   it('defaults pid to process.pid and qwen_version to null', async () => {
@@ -122,6 +124,7 @@ describe('readRuntimeStatus', () => {
     expect(status!.workDir).toBe('/some/where');
     expect(status!.schemaVersion).toBe(RUNTIME_STATUS_SCHEMA_VERSION);
     expect(status!.qwenVersion).toBe('0.15.3');
+    expect(status!.active).toBe(true);
   });
 
   it('returns null when the file is missing', async () => {
@@ -144,6 +147,41 @@ describe('readRuntimeStatus', () => {
         hostname: 'h',
         started_at: 0,
         qwen_version: null,
+      }),
+      'utf-8',
+    );
+    expect(await readRuntimeStatus(targetPath())).toBeNull();
+  });
+
+  it('treats legacy records without active as active', async () => {
+    await writeFile(
+      targetPath(),
+      JSON.stringify({
+        schema_version: RUNTIME_STATUS_SCHEMA_VERSION,
+        pid: 1,
+        session_id: 'legacy',
+        work_dir: '/w',
+        hostname: 'h',
+        started_at: 0,
+        qwen_version: null,
+      }),
+      'utf-8',
+    );
+    expect((await readRuntimeStatus(targetPath()))?.active).toBe(true);
+  });
+
+  it('rejects a non-boolean active marker', async () => {
+    await writeFile(
+      targetPath(),
+      JSON.stringify({
+        schema_version: RUNTIME_STATUS_SCHEMA_VERSION,
+        pid: 1,
+        session_id: 'invalid-active',
+        work_dir: '/w',
+        hostname: 'h',
+        started_at: 0,
+        qwen_version: null,
+        active: 'no',
       }),
       'utf-8',
     );
@@ -184,6 +222,48 @@ describe('readRuntimeStatus', () => {
     expect(await readRuntimeStatus(targetPath())).toBeNull();
   });
 
+  it.each([0, -1])(
+    'returns null when pid is not positive (%s)',
+    async (pid) => {
+      await writeFile(
+        targetPath(),
+        JSON.stringify({
+          schema_version: RUNTIME_STATUS_SCHEMA_VERSION,
+          pid,
+          session_id: 'abc',
+          work_dir: '/w',
+          hostname: 'h',
+          started_at: 0,
+          qwen_version: null,
+        }),
+        'utf-8',
+      );
+      expect(await readRuntimeStatus(targetPath())).toBeNull();
+    },
+  );
+
+  it.each(['session_id', 'work_dir', 'hostname', 'owner_id'])(
+    'returns null when %s is empty',
+    async (field) => {
+      await writeFile(
+        targetPath(),
+        JSON.stringify({
+          schema_version: RUNTIME_STATUS_SCHEMA_VERSION,
+          pid: 1,
+          session_id: 'abc',
+          work_dir: '/w',
+          hostname: 'h',
+          started_at: 0,
+          qwen_version: null,
+          owner_id: 'owner',
+          [field]: '',
+        }),
+        'utf-8',
+      );
+      expect(await readRuntimeStatus(targetPath())).toBeNull();
+    },
+  );
+
   it('returns null when work_dir is an array', async () => {
     await writeFile(
       targetPath(),
@@ -213,6 +293,41 @@ describe('readRuntimeStatus', () => {
   });
 });
 
+describe('deactivateRuntimeStatus', () => {
+  it('preserves the location record while marking the matching owner inactive', async () => {
+    await writeRuntimeStatus(targetPath(), {
+      sessionId: 'migrated-session',
+      workDir: '/new/workspace',
+      pid: process.pid,
+      ownerId: 'current-owner',
+    });
+
+    await deactivateRuntimeStatus(targetPath(), 'current-owner');
+
+    expect(await readRuntimeStatus(targetPath())).toMatchObject({
+      sessionId: 'migrated-session',
+      workDir: '/new/workspace',
+      ownerId: 'current-owner',
+      active: false,
+    });
+  });
+
+  it('does not deactivate a newer owner', async () => {
+    await writeRuntimeStatus(targetPath(), {
+      sessionId: 'session',
+      workDir: '/workspace',
+      ownerId: 'new-owner',
+    });
+
+    await deactivateRuntimeStatus(targetPath(), 'old-owner');
+
+    expect(await readRuntimeStatus(targetPath())).toMatchObject({
+      ownerId: 'new-owner',
+      active: true,
+    });
+  });
+});
+
 describe('clearRuntimeStatus', () => {
   it('removes an existing file', async () => {
     await writeRuntimeStatus(targetPath(), {
@@ -237,6 +352,23 @@ describe('clearRuntimeStatus', () => {
 
   it('does not throw on a non-existent directory', async () => {
     await clearRuntimeStatus(path.join(tmpDir, 'does-not-exist', 'r.json'));
+  });
+
+  it('only clears a sidecar owned by the matching writer token', async () => {
+    await writeRuntimeStatus(targetPath(), {
+      sessionId: 'abc',
+      workDir: '/w',
+      pid: 1,
+      ownerId: 'current-owner',
+    });
+
+    await clearRuntimeStatus(targetPath(), 'stale-owner');
+    expect((await readRuntimeStatus(targetPath()))?.ownerId).toBe(
+      'current-owner',
+    );
+
+    await clearRuntimeStatus(targetPath(), 'current-owner');
+    expect(await readRuntimeStatus(targetPath())).toBeNull();
   });
 });
 

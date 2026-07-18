@@ -52,18 +52,11 @@ function makeConfig(sessionId: string): Config {
   });
 }
 
-// The IIFE in startNewSession is fire-and-forget. Poll the filesystem
-// briefly instead of guessing a fixed sleep — keeps the test fast on
-// happy paths and resilient on slow CI.
-async function waitFor<T>(
-  predicate: () => Promise<T | null>,
-  timeoutMs = 1000,
-): Promise<T | null> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const value = await predicate();
-    if (value !== null) return value;
-    await new Promise((r) => setTimeout(r, 25));
+async function waitForRuntimeStatus(filePath: string) {
+  for (let attempt = 0; attempt < 40; attempt++) {
+    const status = await readRuntimeStatus(filePath);
+    if (status) return status;
+    await new Promise((resolve) => setTimeout(resolve, 25));
   }
   return null;
 }
@@ -93,13 +86,11 @@ describe('Config.startNewSession runtime.json swap', () => {
     expect(await readRuntimeStatus(bPath)).toBeNull();
   });
 
-  it('clears the old sidecar and writes a new one when this process owns it', async () => {
+  it('does not arm an ownerless legacy sidecar', async () => {
     const sessionA = 'aaaaaaaa-1111-2222-3333-aaaaaaaaaaaa';
     const sessionB = 'bbbbbbbb-1111-2222-3333-bbbbbbbbbbbb';
     const config = makeConfig(sessionA);
 
-    // Mimic what startInteractiveUI() does on launch: write the initial
-    // sidecar, then mark this Config as the owner.
     const aPath = config.storage.getRuntimeStatusPath(sessionA);
     await writeRuntimeStatus(aPath, {
       sessionId: sessionA,
@@ -111,12 +102,9 @@ describe('Config.startNewSession runtime.json swap', () => {
     config.startNewSession(sessionB);
 
     const bPath = config.storage.getRuntimeStatusPath(sessionB);
-    const after = await waitFor(() => readRuntimeStatus(bPath));
-    expect(after).not.toBeNull();
-    expect(after!.sessionId).toBe(sessionB);
-    expect(after!.pid).toBe(process.pid);
-
-    expect(await readRuntimeStatus(aPath)).toBeNull();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(await readRuntimeStatus(bPath)).toBeNull();
+    expect(await readRuntimeStatus(aPath)).not.toBeNull();
   });
 
   it('skips the swap when the session id does not change', async () => {
@@ -147,6 +135,33 @@ describe('Config.startNewSession runtime.json swap', () => {
     expect(entries.filter((e) => e.endsWith('.runtime.json'))).toEqual([
       `${sessionA}.runtime.json`,
     ]);
+  });
+
+  it('drains an initial background write before shutdown cleanup', async () => {
+    const sessionId = 'aaaaaaaa-1111-2222-3333-aaaaaaaaaaaa';
+    const config = makeConfig(sessionId);
+    const statusPath = config.storage.getRuntimeStatusPath(sessionId);
+
+    try {
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+      config.startRuntimeStatus();
+      const status = await waitForRuntimeStatus(statusPath);
+      expect(status?.ownerId).toBe(config.getSessionWriterOwnerId());
+    } finally {
+      await config.shutdown();
+    }
+
+    await expect(readRuntimeStatus(statusPath)).resolves.toMatchObject({
+      sessionId,
+      ownerId: config.getSessionWriterOwnerId(),
+      active: false,
+    });
   });
 });
 

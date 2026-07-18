@@ -140,6 +140,53 @@ function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+const SESSION_WRITER_RPC_ERRORS = {
+  session_writer_conflict: {
+    code: -32012,
+    message: 'This session is already open in another Qwen process.',
+  },
+  session_writer_lost: {
+    code: -32013,
+    message: 'Write ownership for this session was lost.',
+  },
+  session_transcript_changed: {
+    code: -32014,
+    message: 'The session transcript changed outside its active writer.',
+  },
+  session_writer_unavailable: {
+    code: -32015,
+    message: 'Session write ownership could not be verified.',
+  },
+} as const;
+
+function sessionWriterRpcError(err: unknown):
+  | {
+      code: number;
+      message: string;
+      data: { errorKind: keyof typeof SESSION_WRITER_RPC_ERRORS };
+    }
+  | undefined {
+  if (!err || typeof err !== 'object') return undefined;
+  const candidate = err as Record<string, unknown>;
+  const data = isObject(candidate['data']) ? candidate['data'] : undefined;
+  const errorKind = data?.['errorKind'] ?? candidate['errorKind'];
+  if (
+    typeof errorKind !== 'string' ||
+    !(errorKind in SESSION_WRITER_RPC_ERRORS)
+  ) {
+    return undefined;
+  }
+  const typedKind = errorKind as keyof typeof SESSION_WRITER_RPC_ERRORS;
+  const expected = SESSION_WRITER_RPC_ERRORS[typedKind];
+  const code = candidate['code'] ?? candidate['rpcCode'];
+  if (code !== expected.code) return undefined;
+  return {
+    code: expected.code,
+    message: expected.message,
+    data: { errorKind: typedKind },
+  };
+}
+
 const debugLogger = createDebugLogger('ACP_HTTP_DISPATCH');
 
 type PermissionResponse = Parameters<
@@ -449,6 +496,8 @@ function toRpcError(err: unknown): {
   message: string;
   data?: Record<string, unknown>;
 } {
+  const writerError = sessionWriterRpcError(err);
+  if (writerError) return writerError;
   if (err instanceof AcpParamError || err instanceof InvalidCursorError) {
     return { code: RPC.INVALID_PARAMS, message: err.message };
   }
@@ -675,6 +724,7 @@ export class AcpDispatcher {
     private readonly sessionShellCommandEnabled: boolean = false,
     private readonly registry?: ConnectionRegistry,
     private readonly archiveCoordinator: SessionArchiveCoordinator = new SessionArchiveCoordinator(),
+    private readonly runtimeBaseDir?: string,
   ) {
     this.agentManager = createDaemonSubagentManager(boundWorkspace);
   }
@@ -687,9 +737,9 @@ export class AcpDispatcher {
       .killSession(sessionId, { requireZeroAttaches: true })
       .then(async (killed) => {
         if (killed && removePersistedSession) {
-          await new SessionService(this.boundWorkspace).removeSession(
-            sessionId,
-          );
+          await new SessionService(this.boundWorkspace, {
+            runtimeBaseDir: this.runtimeBaseDir,
+          }).removeSession(sessionId);
         }
       })
       .catch((err) =>
@@ -1178,13 +1228,13 @@ export class AcpDispatcher {
           const restored = await this.archiveCoordinator.runSharedMany(
             [sessionId],
             async () => {
-              await assertSessionLoadable(cwd, sessionId);
+              await assertSessionLoadable(cwd, sessionId, this.runtimeBaseDir);
               // Re-seed the persisted parent lineage so a restored sub-session
               // still reports its parent over the ACP transport (parity with the
               // REST restore handler); the bridge creates the entry without it.
-              const metadata = await new SessionService(
-                cwd,
-              ).readCreationMetadata(sessionId);
+              const metadata = await new SessionService(cwd, {
+                runtimeBaseDir: this.runtimeBaseDir,
+              }).readCreationMetadata(sessionId);
               return method === 'session/load'
                 ? await this.bridge.loadSession({
                     sessionId,
@@ -1360,6 +1410,7 @@ export class AcpDispatcher {
               parentSessionId,
               ...parsedSource,
             },
+            { runtimeBaseDir: this.runtimeBaseDir },
           );
           this.replyConn(conn, id, {
             sessions: result.sessions.map((s) => ({
@@ -1401,25 +1452,20 @@ export class AcpDispatcher {
           // concurrent closes from this connection cannot both reach the bridge.
           conn.ownedSessions.delete(sessionId);
           conn.closingSessions.add(sessionId);
-          let closeStarted = false;
           const closeSession = async () => {
-            closeStarted = true;
+            await this.bridge.closeSession(
+              sessionId,
+              this.sessionCtx(conn, sessionId, loopback),
+            );
+            // The bridge has confirmed that the ACP child released its writer.
+            // Only now can the local stream, abort controller, buffered frames,
+            // and pending permissions be torn down.
             try {
-              await this.bridge.closeSession(
-                sessionId,
-                this.sessionCtx(conn, sessionId, loopback),
+              conn.closeSessionStream(sessionId);
+            } catch (teardownErr) {
+              writeStderrLine(
+                `qwen serve: /acp session/close local teardown failed (${logSafe(sessionId)}): ${logSafe(errMsg(teardownErr))}`,
               );
-            } finally {
-              // Local teardown must run even if the bridge close throws —
-              // otherwise the SSE stream, abort controller, buffered frames and
-              // pending permissions leak until idle TTL.
-              try {
-                conn.closeSessionStream(sessionId);
-              } catch (teardownErr) {
-                writeStderrLine(
-                  `qwen serve: /acp session/close local teardown failed (${logSafe(sessionId)}): ${logSafe(errMsg(teardownErr))}`,
-                );
-              }
             }
           };
           try {
@@ -1444,9 +1490,10 @@ export class AcpDispatcher {
               }
             }
           } catch (err) {
-            if (!closeStarted) {
-              conn.ownedSessions.add(sessionId);
-            }
+            // The bridge retains the live session when child close fails. Keep
+            // local ownership and the stream binding too so the client can
+            // retry instead of orphaning a still-owned writer.
+            conn.ownedSessions.add(sessionId);
             throw err;
           } finally {
             conn.closingSessions.delete(sessionId);
@@ -2062,7 +2109,9 @@ export class AcpDispatcher {
             );
           }
           await this.archiveCoordinator.runSharedMany([sessionId], async () => {
-            const sessionService = new SessionService(this.boundWorkspace);
+            const sessionService = new SessionService(this.boundWorkspace, {
+              runtimeBaseDir: this.runtimeBaseDir,
+            });
             let exists =
               await sessionService.sessionExistsInAnyState(sessionId);
             if (!exists) {
@@ -2078,6 +2127,7 @@ export class AcpDispatcher {
             }
             const organization = await createSessionOrganizationService(
               this.boundWorkspace,
+              this.runtimeBaseDir,
             ).updateSessionOrganization(sessionId, {
               ...(typeof params['isPinned'] === 'boolean'
                 ? { isPinned: params['isPinned'] }
@@ -2096,8 +2146,10 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}workspace/session_groups/list`: {
           const workspaceCwd = this.parseBoundWorkspaceParam(params);
-          const groups =
-            await createSessionOrganizationService(workspaceCwd).listGroups();
+          const groups = await createSessionOrganizationService(
+            workspaceCwd,
+            this.runtimeBaseDir,
+          ).listGroups();
           this.replyConn(conn, id, groups);
           return;
         }
@@ -2106,6 +2158,7 @@ export class AcpDispatcher {
           const workspaceCwd = this.parseBoundWorkspaceParam(params);
           const group = await createSessionOrganizationService(
             workspaceCwd,
+            this.runtimeBaseDir,
           ).createGroup({
             name: params['name'] as string,
             color: params['color'] as SessionGroupColor,
@@ -2122,6 +2175,7 @@ export class AcpDispatcher {
           }
           const group = await createSessionOrganizationService(
             workspaceCwd,
+            this.runtimeBaseDir,
           ).updateGroup(groupId, {
             ...('name' in params ? { name: params['name'] as string } : {}),
             ...('color' in params
@@ -2139,10 +2193,10 @@ export class AcpDispatcher {
           if (!groupId) {
             throw new AcpParamError('`groupId` is required');
           }
-          const deleted =
-            await createSessionOrganizationService(workspaceCwd).deleteGroup(
-              groupId,
-            );
+          const deleted = await createSessionOrganizationService(
+            workspaceCwd,
+            this.runtimeBaseDir,
+          ).deleteGroup(groupId);
           this.replyConn(conn, id, { deleted });
           return;
         }
@@ -3623,7 +3677,9 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}sessions/delete`: {
           const ids = this.parseSessionIds(params);
-          const svc = new SessionService(this.boundWorkspace);
+          const svc = new SessionService(this.boundWorkspace, {
+            runtimeBaseDir: this.runtimeBaseDir,
+          });
           const result = await deleteDaemonSessions({
             sessionIds: ids,
             service: svc,
@@ -3645,6 +3701,7 @@ export class AcpDispatcher {
           const ids = this.parseSessionIds(params);
           const svc = new SessionService(this.boundWorkspace, {
             onWarning: logSessionArchiveWarning,
+            runtimeBaseDir: this.runtimeBaseDir,
           });
           const result = await archiveDaemonSessions({
             sessionIds: ids,
@@ -3665,6 +3722,7 @@ export class AcpDispatcher {
           const ids = this.parseSessionIds(params);
           const svc = new SessionService(this.boundWorkspace, {
             onWarning: logSessionArchiveWarning,
+            runtimeBaseDir: this.runtimeBaseDir,
           });
           const result = await unarchiveDaemonSessions({
             sessionIds: ids,

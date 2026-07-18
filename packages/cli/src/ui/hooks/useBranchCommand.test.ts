@@ -6,7 +6,10 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { useBranchCommand } from './useBranchCommand.js';
+import {
+  BACKGROUND_WORK_BRANCH_BLOCKED_MESSAGE,
+  useBranchCommand,
+} from './useBranchCommand.js';
 import { restoreGoalFromHistory } from '../utils/restoreGoal.js';
 import type { LoadedSettings } from '../../config/settings.js';
 
@@ -33,6 +36,7 @@ describe('useBranchCommand', () => {
   let setSessionName: ReturnType<typeof vi.fn>;
   let remount: ReturnType<typeof vi.fn>;
   let addItem: ReturnType<typeof vi.fn>;
+  let parentSessionData: unknown;
   // Mock Config shape covers only what useBranchCommand touches.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let config: any;
@@ -85,18 +89,84 @@ describe('useBranchCommand', () => {
     setSessionName = vi.fn();
     remount = vi.fn();
     addItem = vi.fn();
+    parentSessionData = undefined;
     config = {
       getSessionId: () => '12345678-aaaa-bbbb-cccc-dddddddddddd',
       getSessionService: () => ({
         forkSession,
+        forkSessionFromSnapshot: forkSession,
         loadSession,
         removeSession,
         renameSession,
         findSessionTitlesByPrefix,
       }),
-      getChatRecordingService: () => ({ finalize, flush }),
+      getChatRecordingService: () => ({
+        finalize,
+        flush,
+        pause: flush,
+        resume: vi.fn(),
+        readStableTranscriptSnapshot: async () => {
+          parentSessionData = await loadSession(
+            '12345678-aaaa-bbbb-cccc-dddddddddddd',
+          );
+          return Buffer.from('snapshot');
+        },
+      }),
       getGeminiClient: () => ({ initialize: vi.fn() }),
+      getBackgroundTaskRegistry: () => ({
+        hasRunningTasks: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getMonitorRegistry: () => ({
+        getRunning: vi.fn().mockReturnValue([]),
+        reset: vi.fn(),
+      }),
+      getBackgroundShellRegistry: () => ({
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getWorkflowRunRegistry: () => ({
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
       startNewSession: startNewSessionConfig,
+      prepareSessionTransition: async (
+        sessionId: string,
+        sessionData: unknown,
+        options?: { sessionStartSource?: string },
+      ) => {
+        const oldSessionId = '12345678-aaaa-bbbb-cccc-dddddddddddd';
+        try {
+          startNewSessionConfig(sessionId, sessionData);
+          await config
+            .getGeminiClient()
+            .initialize(options?.sessionStartSource);
+        } catch (error) {
+          startNewSessionConfig(oldSessionId, parentSessionData);
+          await config.getGeminiClient().initialize();
+          throw error;
+        }
+        let rolledBack = false;
+        const rollback = async () => {
+          if (rolledBack) return;
+          rolledBack = true;
+          startNewSessionConfig(oldSessionId, parentSessionData);
+          await config.getGeminiClient().initialize();
+        };
+        return {
+          sessionId,
+          sessionData,
+          rollback,
+          commit: async (uiCommit: () => void) => {
+            try {
+              uiCommit();
+            } catch (error) {
+              await rollback();
+              throw error;
+            }
+          },
+        };
+      },
       getDebugLogger: () => ({ warn: vi.fn() }),
     };
   });
@@ -146,6 +216,28 @@ describe('useBranchCommand', () => {
       'load', // final load after title persistence
       'config.start',
     ]);
+  });
+
+  it('does not fork while the source session has running background work', async () => {
+    config.getBackgroundTaskRegistry = () => ({
+      hasRunningTasks: vi.fn().mockReturnValue(true),
+      reset: vi.fn(),
+    });
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('my-branch');
+    });
+
+    expect(finalize).not.toHaveBeenCalled();
+    expect(forkSession).not.toHaveBeenCalled();
+    expect(addItem).toHaveBeenCalledWith(
+      {
+        type: 'error',
+        text: BACKGROUND_WORK_BRANCH_BLOCKED_MESSAGE,
+      },
+      expect.any(Number),
+    );
   });
 
   it('starts the forked recorder from the post-title JSONL tail', async () => {
@@ -515,19 +607,13 @@ describe('useBranchCommand', () => {
     );
   });
 
-  it('still surfaces the error and leaves core on the parent when rollback re-init also throws', async () => {
-    // If the rollback initialize() itself rejects, the swap of sessionId +
-    // recorder has still happened — that is the load-bearing invariant —
-    // so we just log and surface the original failure without crashing.
+  it('surfaces a rollback failure and leaves core on the parent identity', async () => {
     const oldSessionId = '12345678-aaaa-bbbb-cccc-dddddddddddd';
     loadSession.mockResolvedValue({
       conversation: { messages: [userRecord('parent msg')] },
       filePath: '/tmp/new.jsonl',
       lastCompletedUuid: 'u2',
     });
-    const debugWarn = vi.fn();
-    config.getDebugLogger = () => ({ warn: debugWarn });
-
     const initialize = vi
       .fn()
       .mockRejectedValueOnce(new Error('init boom'))
@@ -546,14 +632,12 @@ describe('useBranchCommand', () => {
       expect.any(Object),
     );
     expect(removeSession).toHaveBeenCalledTimes(1);
-    expect(debugWarn).toHaveBeenCalledWith(
-      expect.stringContaining('Rollback after failed /branch init failed'),
-    );
-    // Original failure is what the user sees, not the rollback failure.
     expect(addItem).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'error',
-        text: expect.stringMatching(/Failed to branch conversation.*init boom/),
+        text: expect.stringMatching(
+          /Failed to branch conversation.*rollback boom/,
+        ),
       }),
       expect.any(Number),
     );

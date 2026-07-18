@@ -41,6 +41,7 @@ import {
   nextFireTime,
   nextDurableFireMs,
   SessionService,
+  Storage,
   stripTerminalControlSequences,
   MAX_JOBS,
   type DurableCronTask,
@@ -124,7 +125,20 @@ export function scheduledTaskSessionName(label: string): string {
  */
 interface ScheduledTaskTarget {
   workspaceCwd: string;
+  runtimeBaseDir?: string;
   bridge?: ScheduledTasksSessionBridge;
+}
+
+function runInTargetRuntime<T>(
+  target: ScheduledTaskTarget,
+  operation: () => T,
+): T {
+  if (target.runtimeBaseDir === undefined) return operation();
+  return Storage.runWithRuntimeBaseDir(
+    target.runtimeBaseDir,
+    undefined,
+    operation,
+  );
 }
 
 /**
@@ -148,6 +162,7 @@ interface RegisterScheduledTaskCrudRoutesDeps {
 
 interface RegisterScheduledTasksRoutesDeps {
   boundWorkspace: string;
+  runtimeBaseDir?: string;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
   /**
@@ -285,7 +300,9 @@ function registerScheduledTaskCrudRoutes(
     const target = resolveTarget(req, res);
     if (!target) return;
     try {
-      const tasks = await readCronTasks(target.workspaceCwd);
+      const tasks = await runInTargetRuntime(target, () =>
+        readCronTasks(target.workspaceCwd),
+      );
       res.status(200).json({ v: 1, tasks: tasks.map(toView) });
     } catch (err) {
       // A malformed/corrupt file throws (fix-or-delete contract) rather than
@@ -305,7 +322,7 @@ function registerScheduledTaskCrudRoutes(
   app.post(base, mutate(), async (req, res) => {
     const target = resolveTarget(req, res);
     if (!target) return;
-    const { workspaceCwd, bridge } = target;
+    const { workspaceCwd, runtimeBaseDir, bridge } = target;
     const body = safeBody(req);
 
     const cron = typeof body['cron'] === 'string' ? body['cron'].trim() : '';
@@ -398,7 +415,10 @@ function registerScheduledTaskCrudRoutes(
       // an orphan with no owning task. Best-effort — the write-lock cap check
       // below stays authoritative for the concurrent-create race.
       try {
-        if ((await readCronTasks(workspaceCwd)).length >= MAX_SCHEDULED_TASKS) {
+        if (
+          (await runInTargetRuntime(target, () => readCronTasks(workspaceCwd)))
+            .length >= MAX_SCHEDULED_TASKS
+        ) {
           res.status(409).json({
             error: `Maximum number of scheduled tasks (${MAX_SCHEDULED_TASKS}) reached`,
             code: 'max_tasks_reached',
@@ -461,7 +481,7 @@ function registerScheduledTaskCrudRoutes(
     const rollbackSession = async () => {
       if (boundSessionId !== undefined && bridge) {
         await bridge.closeSession(boundSessionId).catch(() => {});
-        await new SessionService(workspaceCwd)
+        await new SessionService(workspaceCwd, { runtimeBaseDir })
           .removeSession(boundSessionId)
           .catch(() => {});
       }
@@ -469,16 +489,18 @@ function registerScheduledTaskCrudRoutes(
 
     let overCap = false;
     try {
-      await updateCronTasks(workspaceCwd, (tasks) => {
-        // Cap check under the write lock so two concurrent creates can't both
-        // slip past a stale count. Returning the input unchanged is a no-op
-        // (no write), which the flag below turns into a 409.
-        if (tasks.length >= MAX_SCHEDULED_TASKS) {
-          overCap = true;
-          return tasks;
-        }
-        return [...tasks, task];
-      });
+      await runInTargetRuntime(target, () =>
+        updateCronTasks(workspaceCwd, (tasks) => {
+          // Cap check under the write lock so two concurrent creates can't both
+          // slip past a stale count. Returning the input unchanged is a no-op
+          // (no write), which the flag below turns into a 409.
+          if (tasks.length >= MAX_SCHEDULED_TASKS) {
+            overCap = true;
+            return tasks;
+          }
+          return [...tasks, task];
+        }),
+      );
     } catch (err) {
       await rollbackSession();
       writeStderrLine(
@@ -600,84 +622,86 @@ function registerScheduledTaskCrudRoutes(
     let blockedByArchive = false;
     let blockedLegacy = false;
     try {
-      await updateCronTasks(workspaceCwd, (tasks) => {
-        const idx = tasks.findIndex((t) => t.id === id);
-        if (idx === -1) return tasks; // not found → no write
-        found = true;
-        const current = tasks[idx]!;
-        // A legacy guarded task (isolated + precondition, both removed) can't be
-        // enabled: `toView` reports it disabled, so the only PATCH the Web Shell
-        // sends for it is the Enable toggle — which would 200 here and then read
-        // back disabled again, an Enable control that can never succeed with no
-        // error explaining why. Reject the enable with the recreate remediation
-        // instead of acknowledging an update that changes nothing runnable.
-        if (patch.enabled === true && taskHasLegacyCondition(current)) {
-          blockedLegacy = true;
-          return tasks; // no write
-        }
-        // A task disabled BY archiving its session (`disabledByArchive`) can't
-        // be re-enabled through this generic PATCH: its bound session is still
-        // archived and can't fire, so flipping `enabled: true` here would show
-        // an enabled task with a countdown that never runs. The task/session
-        // lifecycle must stay coupled — the caller has to unarchive the session
-        // (which clears the marker and reloads it). Reject and leave the file
-        // untouched.
-        if (patch.enabled === true && current.disabledByArchive === true) {
-          blockedByArchive = true;
-          return tasks; // no write
-        }
-        const next: DurableCronTask = { ...current, ...patch };
-        // `name: null/""` clears the field rather than storing an empty name,
-        // so toView reports it as unnamed and isValidTask never sees a "".
-        if (clearName) delete next.name;
-        // Re-seat the task's schedule anchor to "now" whenever an edit would
-        // otherwise let the scheduler retroactively fire an already-past slot.
-        const justReEnabled =
-          current.enabled === false && patch.enabled === true;
-        // Compare the EFFECTIVE schedule, not the raw string: a cosmetic edit
-        // (`0 9 * * *` → `00 9 * * *`, whitespace) must not re-seat the anchor
-        // and drop a legitimately-pending catch-up fire.
-        const cronChanged =
-          patch.cron !== undefined &&
-          canonicalCron(patch.cron) !== canonicalCron(current.cron);
-        const becameRecurring =
-          patch.recurring === true && current.recurring !== true;
-        const becameOneShot =
-          patch.recurring === false && current.recurring !== false;
-        // Re-seated REGARDLESS of enabled: a schedule edit made while the task
-        // is paused must not leave a stale anchor that fires retroactively when
-        // it's later re-enabled in a SEPARATE request (the re-enable patch has no
-        // schedule change of its own to trigger the re-seat). Re-seating a paused
-        // task's anchor is harmless — it doesn't fire until enabled.
-        {
-          const now = Date.now();
-          const minute = now - (now % 60_000);
-          if (
-            next.recurring &&
-            (justReEnabled || cronChanged || becameRecurring)
-          ) {
-            // A recurring task's anchor is lastFiredAt: resume from now so a
-            // re-enable / cron edit / one-shot→recurring flip doesn't retroactively
-            // fire a past slot (matters most for a bound task, whose catch-up runs
-            // on every file-watch reload).
-            next.lastFiredAt = minute;
-          } else if (
-            !next.recurring &&
-            (justReEnabled || cronChanged || becameOneShot)
-          ) {
-            // A one-shot's anchor is createdAt. Re-seat it on a schedule change
-            // (cron edit, or recurring→one-shot) OR a re-enable so the task fires
-            // at its NEXT occurrence — otherwise the scheduler reads its original
-            // long-past slot as a MISSED one-shot and fires + permanently deletes
-            // it. A one-shot disabled past its slot then re-enabled would
-            // otherwise be silently destroyed on the next reload.
-            next.createdAt = now;
-            next.lastFiredAt = minute;
+      await runInTargetRuntime(target, () =>
+        updateCronTasks(workspaceCwd, (tasks) => {
+          const idx = tasks.findIndex((t) => t.id === id);
+          if (idx === -1) return tasks; // not found → no write
+          found = true;
+          const current = tasks[idx]!;
+          // A legacy guarded task (isolated + precondition, both removed) can't be
+          // enabled: `toView` reports it disabled, so the only PATCH the Web Shell
+          // sends for it is the Enable toggle — which would 200 here and then read
+          // back disabled again, an Enable control that can never succeed with no
+          // error explaining why. Reject the enable with the recreate remediation
+          // instead of acknowledging an update that changes nothing runnable.
+          if (patch.enabled === true && taskHasLegacyCondition(current)) {
+            blockedLegacy = true;
+            return tasks; // no write
           }
-        }
-        updated = next;
-        return tasks.map((t, i) => (i === idx ? next : t));
-      });
+          // A task disabled BY archiving its session (`disabledByArchive`) can't
+          // be re-enabled through this generic PATCH: its bound session is still
+          // archived and can't fire, so flipping `enabled: true` here would show
+          // an enabled task with a countdown that never runs. The task/session
+          // lifecycle must stay coupled — the caller has to unarchive the session
+          // (which clears the marker and reloads it). Reject and leave the file
+          // untouched.
+          if (patch.enabled === true && current.disabledByArchive === true) {
+            blockedByArchive = true;
+            return tasks; // no write
+          }
+          const next: DurableCronTask = { ...current, ...patch };
+          // `name: null/""` clears the field rather than storing an empty name,
+          // so toView reports it as unnamed and isValidTask never sees a "".
+          if (clearName) delete next.name;
+          // Re-seat the task's schedule anchor to "now" whenever an edit would
+          // otherwise let the scheduler retroactively fire an already-past slot.
+          const justReEnabled =
+            current.enabled === false && patch.enabled === true;
+          // Compare the EFFECTIVE schedule, not the raw string: a cosmetic edit
+          // (`0 9 * * *` → `00 9 * * *`, whitespace) must not re-seat the anchor
+          // and drop a legitimately-pending catch-up fire.
+          const cronChanged =
+            patch.cron !== undefined &&
+            canonicalCron(patch.cron) !== canonicalCron(current.cron);
+          const becameRecurring =
+            patch.recurring === true && current.recurring !== true;
+          const becameOneShot =
+            patch.recurring === false && current.recurring !== false;
+          // Re-seated REGARDLESS of enabled: a schedule edit made while the task
+          // is paused must not leave a stale anchor that fires retroactively when
+          // it's later re-enabled in a SEPARATE request (the re-enable patch has no
+          // schedule change of its own to trigger the re-seat). Re-seating a paused
+          // task's anchor is harmless — it doesn't fire until enabled.
+          {
+            const now = Date.now();
+            const minute = now - (now % 60_000);
+            if (
+              next.recurring &&
+              (justReEnabled || cronChanged || becameRecurring)
+            ) {
+              // A recurring task's anchor is lastFiredAt: resume from now so a
+              // re-enable / cron edit / one-shot→recurring flip doesn't retroactively
+              // fire a past slot (matters most for a bound task, whose catch-up runs
+              // on every file-watch reload).
+              next.lastFiredAt = minute;
+            } else if (
+              !next.recurring &&
+              (justReEnabled || cronChanged || becameOneShot)
+            ) {
+              // A one-shot's anchor is createdAt. Re-seat it on a schedule change
+              // (cron edit, or recurring→one-shot) OR a re-enable so the task fires
+              // at its NEXT occurrence — otherwise the scheduler reads its original
+              // long-past slot as a MISSED one-shot and fires + permanently deletes
+              // it. A one-shot disabled past its slot then re-enabled would
+              // otherwise be silently destroyed on the next reload.
+              next.createdAt = now;
+              next.lastFiredAt = minute;
+            }
+          }
+          updated = next;
+          return tasks.map((t, i) => (i === idx ? next : t));
+        }),
+      );
     } catch (err) {
       writeStderrLine(
         `qwen serve: PATCH ${base}/${id} failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -749,16 +773,18 @@ function registerScheduledTaskCrudRoutes(
     let boundSessionId: string | undefined;
     let removed = false;
     try {
-      await updateCronTasks(workspaceCwd, (tasks) => {
-        const idx = tasks.findIndex((t) => t.id === id);
-        if (idx === -1) return tasks; // not found → no write
-        const match = tasks[idx]!.sessionId;
-        if (typeof match === 'string' && match.length > 0) {
-          boundSessionId = match;
-        }
-        removed = true;
-        return tasks.filter((_, i) => i !== idx);
-      });
+      await runInTargetRuntime(target, () =>
+        updateCronTasks(workspaceCwd, (tasks) => {
+          const idx = tasks.findIndex((t) => t.id === id);
+          if (idx === -1) return tasks; // not found → no write
+          const match = tasks[idx]!.sessionId;
+          if (typeof match === 'string' && match.length > 0) {
+            boundSessionId = match;
+          }
+          removed = true;
+          return tasks.filter((_, i) => i !== idx);
+        }),
+      );
     } catch (err) {
       writeStderrLine(
         `qwen serve: DELETE ${base}/${id} failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -808,49 +834,51 @@ function registerScheduledTaskCrudRoutes(
     let blockedLegacy = false;
     let updated: DurableCronTask | undefined;
     try {
-      await updateCronTasks(workspaceCwd, (tasks) => {
-        const idx = tasks.findIndex((t) => t.id === id);
-        if (idx === -1) return tasks; // not found → no write
-        found = true;
-        const current = tasks[idx]!;
-        // A legacy guarded task (isolated + precondition, both removed) must not
-        // run from ANY path. The scheduler already skips it and the list view
-        // reports it disabled; reject a direct `/run` too — its on-disk
-        // `enabled` may still be true, so the disabled check below is not enough.
-        // Executing it here would run the prompt with its safety gate ignored,
-        // which is exactly what the removal must never allow.
-        if (taskHasLegacyCondition(current)) {
-          blockedLegacy = true;
-          return tasks; // no write
-        }
-        // A disabled task must not record a manual run: it's paused (and if it
-        // was disabled by archiving its session, that session can't even fire),
-        // so stamping lastFiredAt + a 'manual' entry would write a phantom "ran"
-        // record. Mirrors the PATCH route's refusal to re-enable such tasks and
-        // the UI, where onRunPrompt already rejects before recording.
-        if (current.enabled === false) {
-          blockedDisabled = true;
-          return tasks; // no write
-        }
-        const next: DurableCronTask = {
-          ...current,
-          lastFiredAt: now,
-          runs: appendCronRun(current.runs, {
-            at: now,
-            kind: 'manual',
-            ...(current.sessionId ? { sessionId: current.sessionId } : {}),
-          }),
-        };
-        updated = next;
-        // A one-shot's manual run IS its single fire — remove it from the store
-        // so the scheduler doesn't ALSO fire it at its original scheduled time
-        // (its slot is still in the future, so stamping lastFiredAt=now wouldn't
-        // stop that fire). The response still returns the recorded run.
-        if (!current.recurring) {
-          return tasks.filter((_, i) => i !== idx);
-        }
-        return tasks.map((t, i) => (i === idx ? next : t));
-      });
+      await runInTargetRuntime(target, () =>
+        updateCronTasks(workspaceCwd, (tasks) => {
+          const idx = tasks.findIndex((t) => t.id === id);
+          if (idx === -1) return tasks; // not found → no write
+          found = true;
+          const current = tasks[idx]!;
+          // A legacy guarded task (isolated + precondition, both removed) must not
+          // run from ANY path. The scheduler already skips it and the list view
+          // reports it disabled; reject a direct `/run` too — its on-disk
+          // `enabled` may still be true, so the disabled check below is not enough.
+          // Executing it here would run the prompt with its safety gate ignored,
+          // which is exactly what the removal must never allow.
+          if (taskHasLegacyCondition(current)) {
+            blockedLegacy = true;
+            return tasks; // no write
+          }
+          // A disabled task must not record a manual run: it's paused (and if it
+          // was disabled by archiving its session, that session can't even fire),
+          // so stamping lastFiredAt + a 'manual' entry would write a phantom "ran"
+          // record. Mirrors the PATCH route's refusal to re-enable such tasks and
+          // the UI, where onRunPrompt already rejects before recording.
+          if (current.enabled === false) {
+            blockedDisabled = true;
+            return tasks; // no write
+          }
+          const next: DurableCronTask = {
+            ...current,
+            lastFiredAt: now,
+            runs: appendCronRun(current.runs, {
+              at: now,
+              kind: 'manual',
+              ...(current.sessionId ? { sessionId: current.sessionId } : {}),
+            }),
+          };
+          updated = next;
+          // A one-shot's manual run IS its single fire — remove it from the store
+          // so the scheduler doesn't ALSO fire it at its original scheduled time
+          // (its slot is still in the future, so stamping lastFiredAt=now wouldn't
+          // stop that fire). The response still returns the recorded run.
+          if (!current.recurring) {
+            return tasks.filter((_, i) => i !== idx);
+          }
+          return tasks.map((t, i) => (i === idx ? next : t));
+        }),
+      );
     } catch (err) {
       writeStderrLine(
         `qwen serve: POST ${base}/${id}/run failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -899,10 +927,14 @@ export function registerScheduledTasksRoutes(
   app: Application,
   deps: RegisterScheduledTasksRoutesDeps,
 ): void {
-  const { boundWorkspace, mutate, safeBody, bridge } = deps;
+  const { boundWorkspace, runtimeBaseDir, mutate, safeBody, bridge } = deps;
   registerScheduledTaskCrudRoutes(app, {
     prefix: '',
-    resolveTarget: () => ({ workspaceCwd: boundWorkspace, bridge }),
+    resolveTarget: () => ({
+      workspaceCwd: boundWorkspace,
+      runtimeBaseDir,
+      bridge,
+    }),
     mutate,
     safeBody,
   });
@@ -934,6 +966,7 @@ export function registerWorkspaceQualifiedScheduledTasksRoutes(
       if (!requireTrustedWorkspaceRuntime(runtime, res)) return null;
       return {
         workspaceCwd: runtime.workspaceCwd,
+        runtimeBaseDir: runtime.runtimeBaseDir,
         // Mirror the primary surface: only bind a session when management is on,
         // so a bound task always has something to keep it resident + rehydrate it.
         bridge: manageScheduledTaskSessions ? runtime.bridge : undefined,

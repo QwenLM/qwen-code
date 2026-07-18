@@ -9,7 +9,6 @@ import { randomUUID } from 'node:crypto';
 import {
   type Config,
   type ChatRecord,
-  type ResumedSessionData,
   SessionStartSource,
   computeUniqueBranchTitle,
 } from '@qwen-code/qwen-code-core';
@@ -21,6 +20,13 @@ import { restoreGoalFromHistory } from '../utils/restoreGoal.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
+import {
+  hasBlockingBackgroundWork,
+  resetBackgroundStateForSessionSwitch,
+} from '../utils/backgroundWorkUtils.js';
+
+export const BACKGROUND_WORK_BRANCH_BLOCKED_MESSAGE =
+  "Stop the current session's running background tasks before branching.";
 
 /**
  * Derives a short one-line title from the first *real* user message in the
@@ -93,14 +99,24 @@ export function useBranchCommand(
     async (name?: string) => {
       if (!config) return;
 
+      if (hasBlockingBackgroundWork(config)) {
+        historyManager.addItem(
+          {
+            type: 'error',
+            text: BACKGROUND_WORK_BRANCH_BLOCKED_MESSAGE,
+          },
+          Date.now(),
+        );
+        return;
+      }
+
       const oldSessionId = config.getSessionId();
       const newSessionId = randomUUID();
       const sessionService = config.getSessionService();
 
-      let coreSwapped = false;
       let uiSwapped = false;
       let forkCreated = false;
-      let prevSessionData: ResumedSessionData | undefined;
+      let sourcePaused = false;
 
       try {
         // 1. Flush outgoing recorder. A degraded source must not fork because
@@ -112,21 +128,18 @@ export function useBranchCommand(
         //    its parentUuid to a record that's no longer the JSONL tail.
         const outgoingRecording = config.getChatRecordingService();
         outgoingRecording?.finalize();
-        await outgoingRecording?.flush();
-
-        // 2. Snapshot the parent JSONL state for rollback. `/branch` is
-        //    guarded on `isIdleRef`, so the file isn't being mutated
-        //    concurrently between this load and the swap below.
-        try {
-          prevSessionData = await sessionService.loadSession(oldSessionId);
-        } catch {
-          // Best-effort snapshot. Falling back to undefined still rolls
-          // back sessionId + recorder, which is the load-bearing invariant;
-          // we just lose the parentUuid chain on the restored recorder.
-        }
+        await outgoingRecording?.pause({ requireHealthy: true });
+        sourcePaused = true;
+        const sourceSnapshot =
+          await outgoingRecording?.readStableTranscriptSnapshot();
+        if (!sourceSnapshot) throw new Error('Session recording is disabled');
 
         // 3. Fork the JSONL on disk.
-        await sessionService.forkSession(oldSessionId, newSessionId);
+        await sessionService.forkSessionFromSnapshot(
+          oldSessionId,
+          newSessionId,
+          sourceSnapshot,
+        );
         forkCreated = true;
 
         // 4. Load the fork to derive its title before it becomes live.
@@ -164,38 +177,65 @@ export function useBranchCommand(
         //    client init) runs while the UI is still showing the parent
         //    session, so a throw leaves the user safely on the parent
         //    instead of stranded with a cleared history and a half-live
-        //    client. `coreSwapped` gates the rollback path in the catch
-        //    block below — without it, a failure between swap and UI
-        //    update would leave core on the fork while UI still shows
-        //    the parent, silently recording user input into an orphan.
-        config.startNewSession(newSessionId, resumed);
-        coreSwapped = true;
-        await config.getGeminiClient()?.initialize?.(SessionStartSource.Branch);
-
-        // 8. Swap UI. Once this commits, rolling core back is unsafe —
-        //    it would leave UI on the branch but recorder writing into
-        //    the parent JSONL (the inverse split-brain). `uiSwapped` is
-        //    set immediately after the UI commits so any subsequent
-        //    failure (hook, remount, announce) skips the catch
-        //    block's core rollback.
-        const rawItems = buildResumedHistoryItems(resumed, config);
-        const collapseOnResume =
-          options.settings.merged.ui?.history?.collapseOnResume ?? false;
-        const collapsePreviewCount =
-          options.settings.merged.ui?.history?.collapsePreviewCount ?? 0;
-        const uiHistoryItems = applyCollapsePolicyAndSummary(
-          rawItems,
-          collapseOnResume,
-          collapsePreviewCount,
+        //    client.
+        const transition = await config.prepareSessionTransition(
+          newSessionId,
+          resumed,
+          {
+            sessionStartSource: SessionStartSource.Branch,
+            requireHealthySource: true,
+          },
         );
-        startNewSession(newSessionId);
-        historyManager.clearItems();
-        historyManager.loadHistory(uiHistoryItems);
-        uiSwapped = true;
+        let uiHistoryItems: ReturnType<typeof applyCollapsePolicyAndSummary>;
+        try {
+          const authoritativeSessionData = transition.sessionData;
+          if (!authoritativeSessionData) {
+            throw new Error('Failed to load branch under write ownership');
+          }
+          const rawItems = buildResumedHistoryItems(
+            authoritativeSessionData,
+            config,
+          );
+          const collapseOnResume =
+            options.settings.merged.ui?.history?.collapseOnResume ?? false;
+          const collapsePreviewCount =
+            options.settings.merged.ui?.history?.collapsePreviewCount ?? 0;
+          uiHistoryItems = applyCollapsePolicyAndSummary(
+            rawItems,
+            collapseOnResume,
+            collapsePreviewCount,
+          );
+        } catch (error) {
+          await transition.rollback();
+          throw error;
+        }
+        try {
+          await transition.commit(() => {
+            startNewSession(newSessionId);
+            historyManager.clearItems();
+            historyManager.loadHistory(uiHistoryItems);
+            setSessionName?.(effectiveTitle);
+            uiSwapped = true;
+          });
+        } catch (error) {
+          await transition.rollback();
+          throw error;
+        }
+        sourcePaused = false;
+
+        try {
+          resetBackgroundStateForSessionSwitch(config);
+        } catch (error) {
+          config
+            .getDebugLogger()
+            .warn(
+              `Failed to reset background state after session branch: ${error}`,
+            );
+        }
 
         // 9. Re-arm /goal under the fork's new sessionId. The branched JSONL
         // is a verbatim copy of the parent's, so an active goal sentinel
-        // carries over — but `config.startNewSession` rebuilt the hook
+        // carries over — but the Config session transition rebuilt the hook
         // system under `newSessionId`, leaving the parent's `activeGoal`
         // store entry stale and the Stop hook unregistered. Same rationale
         // as the /resume path; see [[useResumeCommand]] for details.
@@ -208,9 +248,6 @@ export function useBranchCommand(
         } catch {
           // Best-effort — branch must not fail on goal restoration.
         }
-
-        // 10. Apply the already-persisted title to the prompt bar.
-        setSessionName?.(effectiveTitle);
 
         // Refresh terminal UI.
         remount?.();
@@ -241,29 +278,13 @@ export function useBranchCommand(
           Date.now(),
         );
       } catch (err) {
-        if (coreSwapped && !uiSwapped) {
-          // Core switched to the fork but UI hasn't swapped yet — put core
-          // back on the parent, otherwise the recorder would keep writing
-          // new user messages into the orphan fork JSONL while UI still
-          // shows the parent.
-          //
-          // Skipped once `uiSwapped` is true: at that point UI is already
-          // on the branch, so reverting core would create the inverse
-          // split-brain (UI on branch, recorder on parent). Post-UI-swap
-          // failures (hook, remount, announce) are non-fatal and
-          // surfaced as an error item without unwinding the swap.
+        if (sourcePaused && config.getSessionId() === oldSessionId) {
           try {
-            config.startNewSession(oldSessionId, prevSessionData);
-            // Re-hydrate chat history against the restored session. Best-
-            // effort: if this throws too, sessionId + recorder are still
-            // back on the parent, which is the load-bearing invariant.
-            await config.getGeminiClient()?.initialize?.();
-          } catch (rollbackErr) {
+            config.getChatRecordingService()?.resume();
+          } catch (resumeError) {
             config
               .getDebugLogger()
-              .warn(
-                `Rollback after failed /branch init failed: ${rollbackErr}`,
-              );
+              .warn(`Failed to resume source recorder: ${resumeError}`);
           }
         }
         if (forkCreated && !uiSwapped) {

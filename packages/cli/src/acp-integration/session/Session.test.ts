@@ -319,6 +319,11 @@ describe('Session', () => {
     recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
     setTitleRecordedCallback: ReturnType<typeof vi.fn>;
+    finalize: ReturnType<typeof vi.fn>;
+    pause: ReturnType<typeof vi.fn>;
+    readStableTranscriptSnapshot: ReturnType<typeof vi.fn>;
+    isIntegrityFailed: ReturnType<typeof vi.fn>;
+    resume: ReturnType<typeof vi.fn>;
   };
   let mockFileHistoryService: {
     makeSnapshot: ReturnType<typeof vi.fn>;
@@ -498,6 +503,13 @@ describe('Session', () => {
       recordFileHistorySnapshot: vi.fn(),
       rewindRecording: vi.fn(),
       setTitleRecordedCallback: vi.fn(),
+      finalize: vi.fn(),
+      pause: vi.fn().mockResolvedValue(undefined),
+      readStableTranscriptSnapshot: vi
+        .fn()
+        .mockResolvedValue(Buffer.from('snapshot')),
+      isIntegrityFailed: vi.fn().mockReturnValue(false),
+      resume: vi.fn(),
     };
     mockFileHistoryService = {
       makeSnapshot: vi.fn().mockResolvedValue(undefined),
@@ -516,6 +528,9 @@ describe('Session', () => {
     };
 
     mockConfig = {
+      storage: {
+        getRuntimeBaseDir: vi.fn(() => core.Storage.getRuntimeBaseDir()),
+      },
       setApprovalMode: vi.fn(),
       // #buildInitialSystemReminders branches on ApprovalMode.PLAN on every
       // session.prompt(), so the default must be defined. Individual tests
@@ -524,6 +539,7 @@ describe('Session', () => {
       switchModel: switchModelSpy,
       getModel: vi.fn().mockImplementation(() => currentModel),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
       getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
       getProjectRoot: vi.fn().mockReturnValue('/repo'),
       // Folder trust gates the project `.qwen/loop.md`; default trusted (the
@@ -669,6 +685,146 @@ describe('Session', () => {
         titleSource: 'auto',
       },
     );
+  });
+
+  it('takes an exclusive, paused transcript snapshot for live branching', async () => {
+    const operation = vi.fn().mockResolvedValue('branched');
+
+    await expect(
+      session.withExclusiveTranscriptSnapshot(operation),
+    ).resolves.toBe('branched');
+
+    expect(mockChatRecordingService.finalize).toHaveBeenCalledOnce();
+    expect(mockChatRecordingService.pause).toHaveBeenCalledWith({
+      requireHealthy: true,
+    });
+    expect(operation).toHaveBeenCalledWith(Buffer.from('snapshot'));
+    expect(mockChatRecordingService.resume).toHaveBeenCalledOnce();
+  });
+
+  it('preserves a snapshot integrity error without resuming the recorder', async () => {
+    const error = new core.SessionTranscriptChangedError();
+    mockChatRecordingService.readStableTranscriptSnapshot.mockRejectedValueOnce(
+      error,
+    );
+    mockChatRecordingService.isIntegrityFailed.mockReturnValueOnce(true);
+
+    await expect(session.withExclusiveTranscriptSnapshot(vi.fn())).rejects.toBe(
+      error,
+    );
+    expect(mockChatRecordingService.resume).not.toHaveBeenCalled();
+  });
+
+  it('rejects prompts while exclusive session maintenance is running', async () => {
+    let finishMaintenance!: () => void;
+    const maintenance = session.withExclusiveMaintenance(
+      () =>
+        new Promise<void>((resolve) => {
+          finishMaintenance = resolve;
+        }),
+    );
+    await vi.waitFor(() => expect(session.isIdle()).toBe(false));
+
+    await expect(
+      session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      }),
+    ).rejects.toMatchObject({ code: -32602 });
+    expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+
+    finishMaintenance();
+    await maintenance;
+    expect(session.isIdle()).toBe(true);
+  });
+
+  it('holds the close gate until released and waits for active turns', async () => {
+    let resolveTurn!: () => void;
+    const turnCompletion = new Promise<void>((resolve) => {
+      resolveTurn = resolve;
+    });
+    (
+      session as unknown as {
+        pendingPromptCompletion: Promise<void> | null;
+      }
+    ).pendingPromptCompletion = turnCompletion;
+
+    const releaseClose = session.beginClose();
+    await expect(
+      session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      }),
+    ).rejects.toMatchObject({ code: -32602 });
+
+    let settled = false;
+    const waiting = session.waitForActiveTurnsToSettle().then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    resolveTurn();
+    await waiting;
+    releaseClose();
+    expect(session.isIdle()).toBe(false);
+    (
+      session as unknown as {
+        pendingPromptCompletion: Promise<void> | null;
+      }
+    ).pendingPromptCompletion = null;
+    expect(session.isIdle()).toBe(true);
+  });
+
+  it('maps writer ownership loss before an ACP user turn starts', async () => {
+    vi.mocked(mockConfig.assertCanStartTurn).mockRejectedValueOnce(
+      new core.SessionWriterLostError(),
+    );
+
+    await expect(
+      session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      }),
+    ).rejects.toMatchObject({
+      code: -32013,
+      data: { errorKind: 'session_writer_lost' },
+    });
+    expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+  });
+
+  it('does not let an ACP textual recovery command bypass writer admission', async () => {
+    vi.mocked(mockConfig.assertCanStartTurn).mockRejectedValueOnce(
+      new core.SessionWriterLostError(),
+    );
+
+    await expect(
+      session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: '/resume missing-session' }],
+      }),
+    ).rejects.toMatchObject({
+      code: -32013,
+      data: { errorKind: 'session_writer_lost' },
+    });
+    expect(nonInteractiveCliCommands.handleSlashCommand).not.toHaveBeenCalled();
+    expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+  });
+
+  it('maps writer ownership loss detected by the lower model send path', async () => {
+    vi.mocked(mockChat.sendMessageStream).mockRejectedValueOnce(
+      new core.SessionWriterLostError(),
+    );
+
+    await expect(
+      session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      }),
+    ).rejects.toMatchObject({
+      code: -32013,
+      data: { errorKind: 'session_writer_lost' },
+    });
   });
 
   describe('continueLastTurn', () => {
@@ -9956,8 +10112,11 @@ describe('Session', () => {
     });
 
     it('runs prompt inside runtime output dir context', async () => {
-      const runtimeDir = path.resolve('runtime', 'from-settings');
-      core.Storage.setRuntimeBaseDir(runtimeDir);
+      const runtimeDir = path.resolve('runtime', 'pinned-to-config');
+      core.Storage.setRuntimeBaseDir(path.resolve('runtime', 'process-global'));
+      mockConfig.storage = {
+        getRuntimeBaseDir: vi.fn().mockReturnValue(runtimeDir),
+      } as unknown as Config['storage'];
       session = new Session(
         'test-session-id',
         mockConfig,

@@ -36,6 +36,10 @@ export const SERVE_ERROR_KINDS = [
   // Prompt deadline + writer idle timeout
   'prompt_deadline_exceeded',
   'writer_idle_timeout',
+  'session_writer_conflict',
+  'session_writer_lost',
+  'session_transcript_changed',
+  'session_writer_unavailable',
 ] as const;
 
 export type ServeErrorKind = (typeof SERVE_ERROR_KINDS)[number];
@@ -1376,6 +1380,21 @@ export function mapDomainErrorToErrorKind(
   if (err instanceof BridgeTimeoutError) return 'init_timeout';
   if (err instanceof BridgeChannelClosedError) return 'protocol_error';
   if (err instanceof MissingCliEntryError) return 'missing_binary';
+  if (err && typeof err === 'object') {
+    const candidate = err as {
+      errorKind?: unknown;
+      data?: { errorKind?: unknown };
+    };
+    const errorKind = candidate.errorKind ?? candidate.data?.errorKind;
+    if (
+      errorKind === 'session_writer_conflict' ||
+      errorKind === 'session_writer_lost' ||
+      errorKind === 'session_transcript_changed' ||
+      errorKind === 'session_writer_unavailable'
+    ) {
+      return errorKind;
+    }
+  }
   // `SkillError` is defined in `@qwen-code/qwen-code-core/skills`; same
   // cross-package bundling concern as `TrustGateError` below — when this
   // function is consumed from outside the monorepo (or under a bundler

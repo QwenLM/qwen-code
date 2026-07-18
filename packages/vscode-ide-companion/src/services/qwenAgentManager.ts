@@ -727,10 +727,20 @@ export class QwenAgentManager {
    * Delete a session by ID via ACP.
    */
   async deleteSession(sessionId: string): Promise<boolean> {
+    if (!this.connection.isConnected) {
+      throw new Error(
+        'Session changes require a running Qwen session service.',
+      );
+    }
     try {
       const res = await this.connection.deleteSession(sessionId);
       return res.success;
     } catch (error) {
+      if (!this.connection.isConnected) {
+        throw new Error(
+          'Session changes require a running Qwen session service.',
+        );
+      }
       logger.error('[QwenAgentManager] Failed to delete session:', error);
       return false;
     }
@@ -740,10 +750,20 @@ export class QwenAgentManager {
    * Rename a session via ACP.
    */
   async renameSession(sessionId: string, title: string): Promise<boolean> {
+    if (!this.connection.isConnected) {
+      throw new Error(
+        'Session changes require a running Qwen session service.',
+      );
+    }
     try {
       const res = await this.connection.renameSession(sessionId, title);
       return res.success;
     } catch (error) {
+      if (!this.connection.isConnected) {
+        throw new Error(
+          'Session changes require a running Qwen session service.',
+        );
+      }
       logger.error('[QwenAgentManager] Failed to rename session:', error);
       return false;
     }

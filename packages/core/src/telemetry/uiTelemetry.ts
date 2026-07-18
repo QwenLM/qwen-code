@@ -110,6 +110,15 @@ export interface SessionMetrics {
   skills?: SkillMetrics;
 }
 
+export interface UiTelemetrySnapshot {
+  metrics: SessionMetrics;
+  sessionMetrics: Array<[string, SessionMetrics]>;
+  closedSessions: string[];
+  lastPromptTokenCount: number;
+  lastCachedContentTokenCount: number;
+  sessionStartTime: Date;
+}
+
 const createInitialModelMetricsCore = (): ModelMetricsCore => ({
   api: {
     totalRequests: 0,
@@ -164,6 +173,17 @@ const createInitialMetrics = (): SessionMetrics => ({
   skills: createInitialSkillMetrics(),
 });
 
+function cloneSessionMetrics(metrics: SessionMetrics): SessionMetrics {
+  const cloned = structuredClone(metrics);
+  for (const model of Object.values(cloned.models)) {
+    model.bySource = Object.assign(
+      Object.create(null) as Record<string, ModelMetricsCore>,
+      model.bySource,
+    );
+  }
+  return cloned;
+}
+
 export class UiTelemetryService extends EventEmitter {
   static readonly #MAX_CLOSED_SESSIONS = 1000;
   #metrics: SessionMetrics = createInitialMetrics();
@@ -191,6 +211,42 @@ export class UiTelemetryService extends EventEmitter {
 
   getMetrics(): SessionMetrics {
     return this.#metrics;
+  }
+
+  createSnapshot(): UiTelemetrySnapshot {
+    return {
+      metrics: cloneSessionMetrics(this.#metrics),
+      sessionMetrics: [...this.#sessionMetrics].map(
+        ([sessionId, metrics]): [string, SessionMetrics] => [
+          sessionId,
+          cloneSessionMetrics(metrics),
+        ],
+      ),
+      closedSessions: [...this.#closedSessions],
+      lastPromptTokenCount: this.#lastPromptTokenCount,
+      lastCachedContentTokenCount: this.#lastCachedContentTokenCount,
+      sessionStartTime: new Date(this.#sessionStartTime),
+    };
+  }
+
+  restoreSnapshot(snapshot: UiTelemetrySnapshot): void {
+    this.#metrics = cloneSessionMetrics(snapshot.metrics);
+    this.#sessionMetrics = new Map(
+      snapshot.sessionMetrics.map(
+        ([sessionId, metrics]): [string, SessionMetrics] => [
+          sessionId,
+          cloneSessionMetrics(metrics),
+        ],
+      ),
+    );
+    this.#closedSessions = new Set(snapshot.closedSessions);
+    this.#lastPromptTokenCount = snapshot.lastPromptTokenCount;
+    this.#lastCachedContentTokenCount = snapshot.lastCachedContentTokenCount;
+    this.#sessionStartTime = new Date(snapshot.sessionStartTime);
+    this.emit('update', {
+      metrics: this.#metrics,
+      lastPromptTokenCount: this.#lastPromptTokenCount,
+    });
   }
 
   getMetricsForSession(sessionId: string): SessionMetrics {

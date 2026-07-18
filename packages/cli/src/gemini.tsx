@@ -445,7 +445,7 @@ export async function main() {
     if (sandboxConfig) {
       const partialConfig = await loadCliConfig(
         settings.merged,
-        argv,
+        { ...argv, chatRecording: false },
         undefined,
         [],
         // Pass separated hooks for proper source attribution
@@ -713,9 +713,13 @@ export async function main() {
     settingsWatcher?.startWatching();
 
     markAcpStartup('configConstructionStart');
+    const bootstrapArgv =
+      argv.acp || argv.experimentalAcp
+        ? { ...argv, chatRecording: false }
+        : argv;
     const config = await loadCliConfig(
       settings.merged,
-      argv,
+      bootstrapArgv,
       process.cwd(),
       argv.extensions,
       // Pass separated hooks for proper source attribution

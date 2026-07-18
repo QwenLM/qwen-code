@@ -17,7 +17,10 @@ import {
   vi,
 } from 'vitest';
 import { getProjectHash } from '../utils/paths.js';
-import { readRuntimeStatus } from '../utils/runtimeStatus.js';
+import {
+  clearRuntimeStatus,
+  readRuntimeStatus,
+} from '../utils/runtimeStatus.js';
 import {
   SessionService,
   buildApiHistoryFromConversation,
@@ -37,6 +40,11 @@ import { SessionOrganizationService } from './session-organization-service.js';
 import { CompressionStatus } from '../core/turn.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
+import {
+  SessionTranscriptChangedError,
+  SessionWriterLease,
+  SessionWriterUnavailableError,
+} from './session-writer-lease.js';
 
 vi.mock('node:path');
 vi.mock('../utils/paths.js');
@@ -53,6 +61,7 @@ describe('SessionService', () => {
   let mkdirSyncSpy: MockInstance<typeof fs.mkdirSync>;
   let renameSyncSpy: MockInstance<typeof fs.renameSync>;
   let rmSyncSpy: MockInstance<typeof fs.rmSync>;
+  let leaseAcquireSpy: MockInstance<typeof SessionWriterLease.acquire>;
 
   beforeEach(() => {
     vi.mocked(getProjectHash).mockReturnValue('test-project-hash');
@@ -91,6 +100,29 @@ describe('SessionService', () => {
     vi.mocked(jsonl.readLines).mockResolvedValue([]);
     vi.mocked(jsonl.parseLineTolerant).mockReturnValue([]);
     vi.mocked(readRuntimeStatus).mockResolvedValue(null);
+    leaseAcquireSpy = vi
+      .spyOn(SessionWriterLease, 'acquire')
+      .mockImplementation(async (options) => {
+        const readRecords = async () => jsonl.read(options.transcriptPath);
+        return {
+          sessionId: options.sessionId,
+          ownerId: 'test-owner',
+          transcriptPath: options.transcriptPath,
+          transcriptExistedAtAcquire: false,
+          expectedByteLength: 0,
+          assertOwnedAndUnchanged: vi.fn().mockResolvedValue(undefined),
+          readStableTranscript: vi.fn(async () =>
+            Buffer.from(
+              (await readRecords())
+                .map((record) => JSON.stringify(record))
+                .join('\n') + '\n',
+            ),
+          ),
+          appendJsonLine: vi.fn().mockResolvedValue(undefined),
+          writeNewTranscript: vi.fn().mockResolvedValue(undefined),
+          release: vi.fn().mockResolvedValue(undefined),
+        } as unknown as SessionWriterLease;
+      });
   });
 
   afterEach(() => {
@@ -519,6 +551,7 @@ describe('SessionService', () => {
         hostname: 'host',
         startedAt: 1,
         qwenVersion: null,
+        active: false,
       });
       vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
         cwd === '/test/project/root'
@@ -920,18 +953,32 @@ describe('SessionService', () => {
         uuid: 'abandoned-child',
         parentUuid: 'b1',
       };
+      const rewindRecord: ChatRecord = {
+        ...recordB2,
+        uuid: 'rewind-after-abandoned-artifact',
+        parentUuid: 'b1',
+        type: 'system',
+        subtype: 'rewind',
+        message: undefined,
+        systemPayload: { truncatedCount: 1 },
+      };
+      const activeChild: ChatRecord = {
+        ...recordB2,
+        parentUuid: rewindRecord.uuid,
+      };
       vi.mocked(jsonl.read).mockResolvedValue([
         recordB1,
         artifactRecord,
         abandonedChild,
-        recordB2,
+        rewindRecord,
+        activeChild,
       ]);
 
       const loaded = await sessionService.loadSession(sessionIdB);
 
       expect(
         loaded?.conversation.messages.map((record) => record.uuid),
-      ).toEqual(['b1', 'b2']);
+      ).toEqual(['b1', rewindRecord.uuid, 'b2']);
       expect(loaded?.artifactSnapshot).toBeUndefined();
     });
 
@@ -1296,6 +1343,7 @@ describe('SessionService', () => {
         hostname: 'host',
         startedAt: 1,
         qwenVersion: null,
+        active: false,
       });
       vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
         cwd === '/test/project/root'
@@ -1510,6 +1558,7 @@ describe('SessionService', () => {
         hostname: 'host',
         startedAt: 1,
         qwenVersion: null,
+        active: false,
       });
       vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
         cwd === '/test/project/root'
@@ -1630,6 +1679,7 @@ describe('SessionService', () => {
         expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
         expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
       );
+      expect(clearRuntimeStatus).not.toHaveBeenCalled();
     });
 
     it('should archive JSONL and warn when archiving worktree sidecar fails', async () => {
@@ -1740,6 +1790,26 @@ describe('SessionService', () => {
       expect(result.errors[0]?.error.message).toMatch(/conflict/i);
       expect(renameSyncSpy).not.toHaveBeenCalled();
     });
+
+    it('rechecks the archive target after acquiring the lease', async () => {
+      mockActiveSessionOnly();
+      let targetChecks = 0;
+      existsSyncSpy.mockImplementation((filePath) => {
+        if (
+          filePath.toString().endsWith(`/chats/archive/${sessionIdA}.jsonl`)
+        ) {
+          targetChecks++;
+          return targetChecks > 1;
+        }
+        return false;
+      });
+
+      const result = await sessionService.archiveSessions([sessionIdA]);
+
+      expect(result.archived).toEqual([]);
+      expect(result.errors[0]?.error.message).toMatch(/conflict/i);
+      expect(renameSyncSpy).not.toHaveBeenCalled();
+    });
   });
 
   describe('unarchiveSessions', () => {
@@ -1787,6 +1857,7 @@ describe('SessionService', () => {
         expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
         expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
       );
+      expect(clearRuntimeStatus).not.toHaveBeenCalled();
     });
 
     it('should skip location reads when unarchiving known archived sessions', async () => {
@@ -1937,12 +2008,30 @@ describe('SessionService', () => {
       expect(result.errors[0]?.error.message).toMatch(/conflict/i);
       expect(renameSyncSpy).not.toHaveBeenCalled();
     });
+
+    it('rechecks the active target after acquiring the lease', async () => {
+      mockArchivedSessionOnly();
+      let targetChecks = 0;
+      existsSyncSpy.mockImplementation((filePath) => {
+        if (filePath.toString().endsWith(`/chats/${sessionIdA}.jsonl`)) {
+          targetChecks++;
+          return targetChecks > 1;
+        }
+        return false;
+      });
+
+      const result = await sessionService.unarchiveSessions([sessionIdA]);
+
+      expect(result.unarchived).toEqual([]);
+      expect(result.errors[0]?.error.message).toMatch(/conflict/i);
+      expect(renameSyncSpy).not.toHaveBeenCalled();
+    });
   });
 
   describe('removeSessions', () => {
     it('should remove multiple sessions and report each outcome', async () => {
-      const removeOrganizationsSpy = vi
-        .spyOn(SessionOrganizationService.prototype, 'removeSessions')
+      const removeOrganizationSpy = vi
+        .spyOn(SessionOrganizationService.prototype, 'removeSession')
         .mockResolvedValue();
       // recordA1 belongs to current project; recordB1 also; the third id
       // never has a backing record (notFound).
@@ -1969,11 +2058,9 @@ describe('SessionService', () => {
       expect(result.notFound).toEqual([sessionIdC]);
       expect(result.errors).toEqual([]);
       expect(unlinkSyncSpy).toHaveBeenCalledTimes(2);
-      expect(removeOrganizationsSpy).toHaveBeenCalledTimes(1);
-      expect(removeOrganizationsSpy).toHaveBeenCalledWith([
-        sessionIdA,
-        sessionIdB,
-      ]);
+      expect(removeOrganizationSpy).toHaveBeenCalledTimes(2);
+      expect(removeOrganizationSpy).toHaveBeenCalledWith(sessionIdA);
+      expect(removeOrganizationSpy).toHaveBeenCalledWith(sessionIdB);
     });
 
     it('should de-duplicate input ids', async () => {
@@ -2156,6 +2243,7 @@ describe('SessionService', () => {
         hostname: 'host',
         startedAt: 1,
         qwenVersion: null,
+        active: false,
       });
       vi.mocked(getProjectHash).mockImplementation((cwd) =>
         cwd === '/test/project/root' ? 'test-project-hash' : 'other-hash',
@@ -2306,6 +2394,7 @@ describe('SessionService', () => {
         hostname: 'host',
         startedAt: 1,
         qwenVersion: null,
+        active: false,
       });
       vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
         cwd === '/test/project/root'
@@ -2319,6 +2408,14 @@ describe('SessionService', () => {
     });
 
     it('should keep default existence checks active-only', async () => {
+      vi.spyOn(fs, 'lstatSync').mockImplementation((filePath) => {
+        if (filePath.toString().includes('/chats/archive/')) {
+          return {} as fs.Stats;
+        }
+        const error = new Error('ENOENT') as NodeJS.ErrnoException;
+        error.code = 'ENOENT';
+        throw error;
+      });
       vi.mocked(jsonl.readLines).mockImplementation(
         async (filePath: string) => {
           if (filePath.includes('/chats/archive/')) return [recordA1];
@@ -2337,6 +2434,14 @@ describe('SessionService', () => {
     });
 
     it('should treat unreadable active or archived files as existing for any-state checks', async () => {
+      vi.spyOn(fs, 'lstatSync').mockImplementation((filePath) => {
+        if (filePath.toString().includes('/chats/archive/')) {
+          return {} as fs.Stats;
+        }
+        const error = new Error('ENOENT') as NodeJS.ErrnoException;
+        error.code = 'ENOENT';
+        throw error;
+      });
       vi.mocked(jsonl.readLines).mockImplementation(
         async (filePath: string) => {
           if (filePath.includes('/chats/archive/')) {
@@ -2351,6 +2456,31 @@ describe('SessionService', () => {
       await expect(
         sessionService.sessionExistsInAnyState(sessionIdA),
       ).resolves.toBe(true);
+    });
+
+    it('reports a physical conflict without parsing either transcript', async () => {
+      vi.spyOn(fs, 'lstatSync').mockReturnValue({} as fs.Stats);
+
+      await expect(
+        sessionService.getPhysicalSessionLocation(sessionIdA),
+      ).resolves.toBe('conflict');
+      expect(jsonl.readLines).not.toHaveBeenCalled();
+    });
+
+    it('fails closed when physical existence cannot be verified', async () => {
+      vi.spyOn(fs, 'lstatSync').mockImplementation((filePath) => {
+        const error = new Error(
+          filePath.toString().includes('/chats/archive/') ? 'EACCES' : 'ENOENT',
+        ) as NodeJS.ErrnoException;
+        error.code = filePath.toString().includes('/chats/archive/')
+          ? 'EACCES'
+          : 'ENOENT';
+        throw error;
+      });
+
+      await expect(
+        sessionService.sessionExistsInAnyState(sessionIdA),
+      ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
     });
   });
 
@@ -2915,6 +3045,7 @@ describe('SessionService', () => {
     let originalQwenHome: string | undefined;
 
     beforeEach(async () => {
+      leaseAcquireSpy.mockRestore();
       realOs = await import('node:os');
       realPath = await vi.importActual<typeof import('node:path')>('node:path');
       const actualPaths =
@@ -2949,6 +3080,9 @@ describe('SessionService', () => {
       mockedPaths.sanitizeCwd = actualPaths.sanitizeCwd;
       vi.mocked(jsonl.read).mockImplementation(actualJsonl.read);
       vi.mocked(jsonl.readLines).mockImplementation(actualJsonl.readLines);
+      vi.mocked(jsonl.parseLineTolerant).mockImplementation(
+        actualJsonl.parseLineTolerant,
+      );
 
       // Restore any fs spies installed by the outer beforeEach.
       vi.mocked(readdirSyncSpy).mockRestore?.();
@@ -3183,9 +3317,22 @@ describe('SessionService', () => {
         uuid: 'abandoned-child',
         parentUuid: 'u1',
       };
+      const rewindRecord = {
+        ...lines[1],
+        uuid: 'rewind-after-abandoned-artifact',
+        parentUuid: 'u1',
+        type: 'system',
+        subtype: 'rewind',
+        message: undefined,
+        systemPayload: { truncatedCount: 1 },
+      };
+      const activeChild = {
+        ...lines[1],
+        parentUuid: rewindRecord.uuid,
+      };
       fs.writeFileSync(
         file,
-        [lines[0], artifactRecord, abandonedChild, lines[1]]
+        [lines[0], artifactRecord, abandonedChild, rewindRecord, activeChild]
           .map((line) => JSON.stringify(line))
           .join('\n') + '\n',
       );
@@ -3198,13 +3345,13 @@ describe('SessionService', () => {
         .split('\n')
         .map((line) => JSON.parse(line));
 
-      expect(result.copiedCount).toBe(2);
+      expect(result.copiedCount).toBe(3);
       expect(
         forkedLines.some((record) => record.uuid === 'artifact-abandoned'),
       ).toBe(false);
       expect(
         loaded?.conversation.messages.map((record) => record.uuid),
-      ).toEqual(['u1', 'u2']);
+      ).toEqual(['u1', rewindRecord.uuid, 'u2']);
       expect(loaded?.artifactSnapshot).toBeUndefined();
     });
 
@@ -3533,6 +3680,63 @@ describe('SessionService', () => {
       await expect(service.forkSession(oldId, newId)).rejects.toThrow(
         /already exists/,
       );
+      expect(
+        fs.readFileSync(realPath.join(chatsDir, `${newId}.jsonl`), 'utf8'),
+      ).toBe('x');
+    });
+
+    it('throws when the target session id already exists in the archive', async () => {
+      const oldId = '55555555-5555-5555-5555-555555555556';
+      const newId = '66666666-6666-6666-6666-666666666668';
+      seedSession(oldId);
+      const archiveDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+        'archive',
+      );
+      fs.mkdirSync(archiveDir, { recursive: true });
+      const archivedTarget = realPath.join(archiveDir, `${newId}.jsonl`);
+      fs.writeFileSync(archivedTarget, '');
+
+      await expect(service.forkSession(oldId, newId)).rejects.toThrow(
+        /already exists/,
+      );
+      expect(fs.existsSync(archivedTarget)).toBe(true);
+      expect(
+        fs.existsSync(
+          realPath.join(
+            service['storage'].getProjectDir(),
+            'chats',
+            `${newId}.jsonl`,
+          ),
+        ),
+      ).toBe(false);
+    });
+
+    it('fails closed when the source has active and archived copies', async () => {
+      const oldId = '55555555-5555-5555-5555-555555555557';
+      const newId = '66666666-6666-6666-6666-666666666669';
+      seedSession(oldId);
+      const archiveDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+        'archive',
+      );
+      fs.mkdirSync(archiveDir, { recursive: true });
+      fs.writeFileSync(realPath.join(archiveDir, `${oldId}.jsonl`), 'copy');
+
+      await expect(service.forkSession(oldId, newId)).rejects.toBeInstanceOf(
+        SessionTranscriptChangedError,
+      );
+      expect(
+        fs.existsSync(
+          realPath.join(
+            service['storage'].getProjectDir(),
+            'chats',
+            `${newId}.jsonl`,
+          ),
+        ),
+      ).toBe(false);
     });
 
     it('removes a partially written target when fork creation fails', async () => {
@@ -3544,14 +3748,10 @@ describe('SessionService', () => {
         'chats',
         `${newId}.jsonl`,
       );
-      vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(((
-        file: fs.PathOrFileDescriptor,
-      ) => {
-        if (typeof file === 'number') {
-          fs.writeSync(file, 'partial');
-        }
-        throw new Error('disk full');
-      }) as typeof fs.writeFileSync);
+      vi.spyOn(
+        SessionWriterLease.prototype,
+        'writeNewTranscript',
+      ).mockRejectedValueOnce(new Error('disk full'));
 
       await expect(service.forkSession(oldId, newId)).rejects.toThrow(
         'disk full',
@@ -3602,6 +3802,7 @@ describe('SessionService', () => {
         hostname: 'host',
         startedAt: 1,
         qwenVersion: null,
+        active: false,
       });
 
       const result = await service.forkSession(oldId, newId);

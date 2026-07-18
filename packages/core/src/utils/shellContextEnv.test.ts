@@ -16,6 +16,7 @@ import {
   registerSessionProjectDir,
   unregisterSessionProjectDir,
 } from './sessionIdContext.js';
+import { Storage } from '../config/storage.js';
 import {
   isShellTracePropagationEnabled,
   getTraceContext,
@@ -255,6 +256,76 @@ describe('getShellContextEnvVars', () => {
           'QWEN_CODE_PROJECT_DIR'
         ],
       ).toBeUndefined();
+    });
+
+    it('keeps another Config registration when one owner unregisters', () => {
+      registerSessionProjectDir('sess-shared', '/proj/live', 'live-owner');
+      registerSessionProjectDir(
+        'sess-shared',
+        '/proj/contender',
+        'contender-owner',
+      );
+
+      unregisterSessionProjectDir('sess-shared', 'contender-owner');
+
+      expect(
+        sessionIdContext.run('sess-shared', () => getShellContextEnvVars())[
+          'QWEN_CODE_PROJECT_DIR'
+        ],
+      ).toBe('/proj/live');
+      unregisterSessionProjectDir('sess-shared', 'live-owner');
+    });
+
+    it('uses the most recently refreshed owner registration', () => {
+      registerSessionProjectDir('sess-refresh', '/proj/live', 'live-owner');
+      registerSessionProjectDir(
+        'sess-refresh',
+        '/proj/preview',
+        'preview-owner',
+      );
+      registerSessionProjectDir(
+        'sess-refresh',
+        '/proj/live-moved',
+        'live-owner',
+      );
+
+      expect(
+        sessionIdContext.run('sess-refresh', () => getShellContextEnvVars())[
+          'QWEN_CODE_PROJECT_DIR'
+        ],
+      ).toBe('/proj/live-moved');
+
+      unregisterSessionProjectDir('sess-refresh');
+    });
+
+    it('isolates the same session id across runtime output directories', () => {
+      registerSessionProjectDir(
+        'sess-shared-runtime',
+        '/runtime-a/project',
+        'runtime-a-owner',
+        '/runtime-a',
+      );
+      registerSessionProjectDir(
+        'sess-shared-runtime',
+        '/runtime-b/project',
+        'runtime-b-owner',
+        '/runtime-b',
+      );
+
+      const fromA = Storage.runWithRuntimeBaseDir('/runtime-a', undefined, () =>
+        sessionIdContext.run('sess-shared-runtime', () =>
+          getShellContextEnvVars(),
+        ),
+      );
+      const fromB = Storage.runWithRuntimeBaseDir('/runtime-b', undefined, () =>
+        sessionIdContext.run('sess-shared-runtime', () =>
+          getShellContextEnvVars(),
+        ),
+      );
+
+      expect(fromA['QWEN_CODE_PROJECT_DIR']).toBe('/runtime-a/project');
+      expect(fromB['QWEN_CODE_PROJECT_DIR']).toBe('/runtime-b/project');
+      unregisterSessionProjectDir('sess-shared-runtime');
     });
 
     it('falls back to the env var for the single-session CLI', () => {

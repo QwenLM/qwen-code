@@ -1166,6 +1166,7 @@ describe('scheduledTaskSessionName', () => {
 interface QualifiedRuntime {
   workspaceId: string;
   workspaceCwd: string;
+  runtimeBaseDir: string;
   trusted: boolean;
   bridge: StubBridge;
 }
@@ -1204,10 +1205,12 @@ async function makeQualifiedHarness(): Promise<QualifiedHarness> {
     trusted: boolean,
   ): Promise<QualifiedRuntime> => {
     const workspaceCwd = path.join(scratch, name);
+    const runtimeBaseDir = path.join(scratch, 'runtimes', name);
     await fsp.mkdir(workspaceCwd, { recursive: true });
     return {
       workspaceId: `id-${name}`,
       workspaceCwd,
+      runtimeBaseDir,
       trusted,
       bridge: makeStubBridge(),
     };
@@ -1225,6 +1228,7 @@ async function makeQualifiedHarness(): Promise<QualifiedHarness> {
   // route. `bridge`-per-runtime comes from the registry.
   registerScheduledTasksRoutes(app, {
     boundWorkspace: primary.workspaceCwd,
+    runtimeBaseDir: primary.runtimeBaseDir,
     mutate: () => (_req, _res, next) => next(),
     safeBody,
     bridge: primary.bridge,
@@ -1275,12 +1279,24 @@ describe('workspace-qualified scheduled-tasks routes', () => {
       .post(qualified(h.secondary.workspaceId))
       .send({ cron: '0 9 * * *', prompt: 'p' });
     const onDisk = JSON.parse(
-      await fsp.readFile(getCronFilePath(h.secondary.workspaceCwd), 'utf-8'),
+      await fsp.readFile(
+        Storage.runWithRuntimeBaseDir(
+          h.secondary.runtimeBaseDir,
+          undefined,
+          () => getCronFilePath(h.secondary.workspaceCwd),
+        ),
+        'utf-8',
+      ),
     );
     expect(onDisk).toHaveLength(1);
     // The primary's file was never created.
     await expect(
-      fsp.readFile(getCronFilePath(h.primary.workspaceCwd), 'utf-8'),
+      fsp.readFile(
+        Storage.runWithRuntimeBaseDir(h.primary.runtimeBaseDir, undefined, () =>
+          getCronFilePath(h.primary.workspaceCwd),
+        ),
+        'utf-8',
+      ),
     ).rejects.toThrow();
   });
 

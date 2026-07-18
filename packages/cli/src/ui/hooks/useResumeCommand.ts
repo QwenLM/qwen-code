@@ -6,7 +6,6 @@
 
 import { useState, useCallback } from 'react';
 import {
-  SessionService,
   buildSessionRecoveryPlan,
   type Config,
   type SessionListItem,
@@ -91,6 +90,11 @@ export function useResumeCommand(
         return;
       }
 
+      if (sessionId === config.getSessionId?.()) {
+        closeResumeDialog();
+        return;
+      }
+
       if (hasBlockingBackgroundWork(config)) {
         const blockedMessage: HistoryItemWithoutId = {
           type: MessageType.ERROR,
@@ -104,98 +108,124 @@ export function useResumeCommand(
       // Close dialog immediately to prevent input capture during async operations.
       closeResumeDialog();
 
-      const oldSessionId = config.getSessionId();
-      let coreSwapped = false;
-      let uiSwapped = false;
-
       try {
-        const cwd = config.getTargetDir();
-        const sessionService = new SessionService(cwd);
+        const hadUnpersistedRecording =
+          config.getChatRecordingService?.()?.hasWriteFailure?.() ?? false;
+        const sessionService = config.getSessionService();
         const sessionData = await sessionService.loadSession(sessionId);
 
         if (!sessionData) {
           return;
         }
 
-        // Restore session name tag from custom title.
-        const customTitle = sessionService.getSessionTitle(sessionId);
+        if (hasBlockingBackgroundWork(config)) {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
+            },
+            Date.now(),
+          );
+          return;
+        }
 
-        // Build UI history items.
-        const recoveryPlan = buildSessionRecoveryPlan({
+        const transition = await config.prepareSessionTransition(
           sessionId,
-          conversation: sessionData.conversation,
-          historyGaps: sessionData.historyGaps,
-        });
-        const rawItems = buildResumedHistoryItems(sessionData, config);
-        const collapseOnResume =
-          settings.merged.ui?.history?.collapseOnResume ?? false;
-        const collapsePreviewCount =
-          settings.merged.ui?.history?.collapsePreviewCount ?? 0;
-
-        const uiHistoryItems = applyCollapsePolicyAndSummary(
-          rawItems,
-          collapseOnResume,
-          collapsePreviewCount,
+          sessionData,
         );
-        if (
-          recoveryPlan.kind !== 'clean' &&
-          recoveryPlan.kind !== 'degraded_history' &&
-          recoveryPlan.visibleNotice
-        ) {
-          const nextId = (uiHistoryItems.at(-1)?.id ?? 0) + 1;
-          uiHistoryItems.push({
-            id: nextId,
-            type: MessageType.INFO,
-            text: recoveryPlan.visibleNotice,
-          });
-        }
-
-        // 1. Swap core first. Matches useBranchCommand's core-before-UI
-        //    pattern: if anything fails between core swap and UI swap,
-        //    the catch block rolls core back to the old session so the
-        //    user is not stranded with a half-live client.
-        resetBackgroundStateForSessionSwitch(config);
-        config.startNewSession(sessionId, sessionData);
-        coreSwapped = true;
-
-        // Re-arm /goal: the in-memory activeGoalStore entry (if any) is stale
-        // after `config.startNewSession` rebuilds the hook system — its
-        // `setAt` was captured before /new, and its `hookId` points to a
-        // hook that no longer exists. The cold-boot path runs this same
-        // call in AppContainer; the runtime /resume path needs it too,
-        // otherwise the footer pill keeps ticking from the original setAt
-        // (visible as "几十秒" elapsed immediately after /new + /resume) and
-        // the Stop hook is silently dead until the user re-issues /goal.
         try {
-          restoreGoalFromHistory(uiHistoryItems, config, addItem);
-        } catch {
-          // Best-effort — never block resume on goal restoration.
-        }
-        // Rebuild turn boundary tracking so rewind works within resumed sessions.
-        config
-          .getChatRecordingService()
-          ?.rebuildTurnBoundaries(sessionData.conversation.messages);
-        await config.getGeminiClient()?.initialize?.();
+          const authoritativeSessionData = transition.sessionData;
+          if (!authoritativeSessionData) {
+            await transition.rollback();
+            throw new Error('Failed to load session under write ownership');
+          }
 
-        const recovered = await config.loadPausedBackgroundAgents(sessionId);
-        if (recovered.length > 0) {
-          const recoveredMessage: HistoryItemWithoutId = {
-            type: MessageType.INFO,
-            text: config
-              .getBackgroundAgentResumeService()
-              .buildRecoveredBackgroundAgentsNotice(recovered.length),
-          };
-          addItem(recoveredMessage, Date.now());
+          const customTitle = config
+            .getChatRecordingService()
+            ?.getCurrentCustomTitle();
+          const recoveryPlan = buildSessionRecoveryPlan({
+            sessionId,
+            conversation: authoritativeSessionData.conversation,
+            historyGaps: authoritativeSessionData.historyGaps,
+          });
+          const rawItems = buildResumedHistoryItems(
+            authoritativeSessionData,
+            config,
+          );
+          const collapseOnResume =
+            settings.merged.ui?.history?.collapseOnResume ?? false;
+          const collapsePreviewCount =
+            settings.merged.ui?.history?.collapsePreviewCount ?? 0;
+
+          const uiHistoryItems = applyCollapsePolicyAndSummary(
+            rawItems,
+            collapseOnResume,
+            collapsePreviewCount,
+          );
+          if (hadUnpersistedRecording) {
+            uiHistoryItems.push({
+              id: (uiHistoryItems.at(-1)?.id ?? 0) + 1,
+              type: MessageType.INFO,
+              text: 'The previous session had changes that could not be saved to its transcript.',
+            });
+          }
+          if (
+            recoveryPlan.kind !== 'clean' &&
+            recoveryPlan.kind !== 'degraded_history' &&
+            recoveryPlan.visibleNotice
+          ) {
+            const nextId = (uiHistoryItems.at(-1)?.id ?? 0) + 1;
+            uiHistoryItems.push({
+              id: nextId,
+              type: MessageType.INFO,
+              text: recoveryPlan.visibleNotice,
+            });
+          }
+
+          await transition.commit(() => {
+            startNewSession(sessionId);
+            setSessionName?.(customTitle ?? null);
+            clearItems();
+            loadHistory(uiHistoryItems);
+          });
+          try {
+            restoreGoalFromHistory(uiHistoryItems, config, addItem);
+          } catch {
+            // Best-effort — never block resume on goal restoration.
+          }
+        } catch (error) {
+          await transition.rollback();
+          throw error;
         }
 
-        // 2. Swap UI. Once this commits, rolling core back is unsafe —
-        //    it would leave UI on the resumed session but recorder writing
-        //    into the old JSONL (split-brain).
-        startNewSession(sessionId);
-        setSessionName?.(customTitle ?? null);
-        clearItems();
-        loadHistory(uiHistoryItems);
-        uiSwapped = true;
+        try {
+          resetBackgroundStateForSessionSwitch(config);
+        } catch (error) {
+          config
+            .getDebugLogger()
+            .warn(
+              `Failed to reset background state after session resume: ${error}`,
+            );
+        }
+
+        try {
+          const recovered = await config.loadPausedBackgroundAgents(sessionId);
+          if (recovered.length > 0) {
+            addItem(
+              {
+                type: MessageType.INFO,
+                text: config
+                  .getBackgroundAgentResumeService()
+                  .buildRecoveredBackgroundAgentsNotice(recovered.length),
+              },
+              Date.now(),
+            );
+          }
+        } catch (error) {
+          config
+            .getDebugLogger()
+            .warn(`Failed to restore paused background agents: ${error}`);
+        }
 
         // SessionStart hook is handled during chat initialization so its
         // additionalContext can be injected into the resumed model context.
@@ -203,21 +233,6 @@ export function useResumeCommand(
         // Refresh terminal UI.
         remount?.();
       } catch (error) {
-        if (coreSwapped && !uiSwapped) {
-          // Core switched to the resumed session but UI hasn't swapped
-          // yet — put core back on the old session, otherwise the
-          // recorder would keep writing new user messages into the
-          // orphaned session JSONL while UI still shows the old session.
-          try {
-            config.startNewSession(oldSessionId, undefined);
-          } catch (rollbackErr) {
-            config
-              .getDebugLogger()
-              .warn(
-                `Rollback after failed /resume init failed: ${rollbackErr}`,
-              );
-          }
-        }
         addItem(
           {
             type: MessageType.ERROR,

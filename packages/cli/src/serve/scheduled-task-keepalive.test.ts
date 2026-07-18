@@ -734,13 +734,20 @@ describe('scheduled-task keepalive', () => {
       task({ id: 'ok', sessionId: 'healthy-sess', prompt: 'fine' }),
     ]);
     let releaseSpawn: (() => void) | undefined;
+    let releaseClose: (() => void) | undefined;
+    const removeSpy = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
     const hungBridge = {
       ...bridge,
       spawnOrAttach: () =>
         new Promise<{ sessionId: string }>((resolve) => {
           releaseSpawn = () => resolve({ sessionId: 'late-sess' });
         }),
-      closeSession: async () => {},
+      closeSession: () =>
+        new Promise<void>((resolve) => {
+          releaseClose = resolve;
+        }),
       updateSessionMetadata: () => {},
     };
     const ka = startScheduledTaskKeepalive({
@@ -756,5 +763,10 @@ describe('scheduled-task keepalive', () => {
     ka.stop();
     // Clean up the hung spawn.
     releaseSpawn?.();
+    await vi.waitFor(() => expect(releaseClose).toBeDefined());
+    expect(removeSpy).not.toHaveBeenCalled();
+    releaseClose?.();
+    await vi.waitFor(() => expect(removeSpy).toHaveBeenCalledWith('late-sess'));
+    removeSpy.mockRestore();
   });
 });

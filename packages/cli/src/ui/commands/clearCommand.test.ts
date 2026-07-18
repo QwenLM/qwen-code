@@ -39,6 +39,7 @@ describe('clearCommand', () => {
   let mockResetBackgroundTasks: ReturnType<typeof vi.fn>;
   let mockResetMonitors: ReturnType<typeof vi.fn>;
   let mockResetBackgroundShells: ReturnType<typeof vi.fn>;
+  let mockDebugWarn: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     mockResetChat = vi.fn().mockResolvedValue(undefined);
@@ -55,6 +56,7 @@ describe('clearCommand', () => {
     mockResetBackgroundTasks = vi.fn();
     mockResetMonitors = vi.fn();
     mockResetBackgroundShells = vi.fn();
+    mockDebugWarn = vi.fn();
     vi.clearAllMocks();
 
     mockContext = createMockCommandContext({
@@ -76,9 +78,19 @@ describe('clearCommand', () => {
             abortAll: mockAbortBackgroundShells,
           }),
           startNewSession: mockStartNewSession,
+          prepareSessionTransition: vi.fn(async () => {
+            const sessionId = mockStartNewSession();
+            await mockResetChat();
+            return {
+              sessionId,
+              sessionData: undefined,
+              commit: async (uiCommit: () => void) => uiCommit(),
+              rollback: vi.fn().mockResolvedValue(undefined),
+            };
+          }),
           getHookSystem: mockGetHookSystem,
           getDebugLogger: () => ({
-            warn: vi.fn(),
+            warn: mockDebugWarn,
           }),
           getModel: () => 'test-model',
           getToolRegistry: () => undefined,
@@ -101,6 +113,13 @@ describe('clearCommand', () => {
         startNewSession: vi.fn(),
       },
     });
+  });
+
+  it('does not advertise an ACP session-id switch that the protocol cannot commit', () => {
+    expect(clearCommand.supportedModes).toEqual([
+      'interactive',
+      'non_interactive',
+    ]);
   });
 
   it('should set debug message, start a new session, reset chat, and clear UI when config is available', async () => {
@@ -144,7 +163,7 @@ describe('clearCommand', () => {
     expect(mockFireSessionStartEvent).not.toHaveBeenCalled();
   });
 
-  it('aborts old background work before starting a new session', async () => {
+  it('aborts old background work after the committed session switch', async () => {
     if (!clearCommand.action) {
       throw new Error('clearCommand must have an action.');
     }
@@ -154,11 +173,24 @@ describe('clearCommand', () => {
     expect(mockAbortBackgroundTasks).toHaveBeenCalledWith({ notify: false });
     expect(mockAbortMonitors).toHaveBeenCalledWith({ notify: false });
     expect(mockAbortBackgroundShells).toHaveBeenCalledTimes(1);
+    expect(
+      mockAbortBackgroundTasks.mock.invocationCallOrder[0],
+    ).toBeGreaterThan(
+      mockContext.session.startNewSession.mock.invocationCallOrder[0],
+    );
+    expect(mockAbortMonitors.mock.invocationCallOrder[0]).toBeGreaterThan(
+      mockContext.session.startNewSession.mock.invocationCallOrder[0],
+    );
+    expect(
+      mockAbortBackgroundShells.mock.invocationCallOrder[0],
+    ).toBeGreaterThan(
+      mockContext.session.startNewSession.mock.invocationCallOrder[0],
+    );
     expect(mockAbortBackgroundTasks.mock.invocationCallOrder[0]).toBeLessThan(
-      mockStartNewSession.mock.invocationCallOrder[0],
+      mockResetBackgroundTasks.mock.invocationCallOrder[0],
     );
     expect(mockAbortMonitors.mock.invocationCallOrder[0]).toBeLessThan(
-      mockStartNewSession.mock.invocationCallOrder[0],
+      mockResetMonitors.mock.invocationCallOrder[0],
     );
     expect(mockAbortBackgroundShells.mock.invocationCallOrder[0]).toBeLessThan(
       mockResetBackgroundShells.mock.invocationCallOrder[0],
@@ -169,14 +201,30 @@ describe('clearCommand', () => {
     expect(mockAbortMonitors.mock.invocationCallOrder[0]).toBeLessThan(
       mockResetMonitors.mock.invocationCallOrder[0],
     );
-    expect(mockResetBackgroundShells.mock.invocationCallOrder[0]).toBeLessThan(
-      mockStartNewSession.mock.invocationCallOrder[0],
-    );
-    expect(mockResetBackgroundTasks.mock.invocationCallOrder[0]).toBeLessThan(
-      mockStartNewSession.mock.invocationCallOrder[0],
-    );
-    expect(mockResetMonitors.mock.invocationCallOrder[0]).toBeLessThan(
-      mockStartNewSession.mock.invocationCallOrder[0],
+  });
+
+  it('keeps the committed session when post-commit cleanup fails', async () => {
+    if (!clearCommand.action) {
+      throw new Error('clearCommand must have an action.');
+    }
+    const rollback = vi.fn().mockResolvedValue(undefined);
+    const config = mockContext.services.config!;
+    vi.mocked(config.prepareSessionTransition).mockResolvedValueOnce({
+      sessionId: 'new-session-id',
+      sessionData: undefined,
+      commit: vi.fn(async (uiCommit: () => void) => uiCommit()),
+      rollback,
+    });
+    mockAbortBackgroundTasks.mockImplementationOnce(() => {
+      throw new Error('cleanup failed');
+    });
+
+    await clearCommand.action(mockContext, '');
+
+    expect(rollback).not.toHaveBeenCalled();
+    expect(mockContext.ui.clear).toHaveBeenCalledOnce();
+    expect(mockDebugWarn).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to reset background state after /clear'),
     );
   });
 
@@ -226,7 +274,7 @@ describe('clearCommand', () => {
     expect(mockContext.ui.clear).toHaveBeenCalledTimes(1);
   });
 
-  it('should clear UI before resetChat for immediate responsiveness', async () => {
+  it('should initialize the target core before committing the UI clear', async () => {
     if (!clearCommand.action) {
       throw new Error('clearCommand must have an action.');
     }
@@ -243,12 +291,11 @@ describe('clearCommand', () => {
 
     await clearCommand.action(mockContext, '');
 
-    // ui.clear should be called before resetChat for immediate UI feedback
     const clearIndex = callOrder.indexOf('ui.clear');
     const resetIndex = callOrder.indexOf('resetChat');
     expect(clearIndex).toBeGreaterThanOrEqual(0);
     expect(resetIndex).toBeGreaterThanOrEqual(0);
-    expect(clearIndex).toBeLessThan(resetIndex);
+    expect(resetIndex).toBeLessThan(clearIndex);
   });
 
   it('should not await hook events (fire-and-forget)', async () => {
@@ -335,6 +382,16 @@ describe('clearCommand', () => {
               abortAll: mockAbortBackgroundShells,
             }),
             startNewSession: mockStartNewSession,
+            prepareSessionTransition: vi.fn(async () => {
+              const sessionId = mockStartNewSession();
+              await mockResetChat();
+              return {
+                sessionId,
+                sessionData: undefined,
+                commit: async (uiCommit: () => void) => uiCommit(),
+                rollback: vi.fn().mockResolvedValue(undefined),
+              };
+            }),
             getGeminiClient: vi.fn().mockReturnValue({
               resetChat: mockResetChat,
             } as unknown as GeminiClient),

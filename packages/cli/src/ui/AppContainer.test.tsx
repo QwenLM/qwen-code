@@ -470,9 +470,11 @@ describe('AppContainer State Management', () => {
     };
     fileRewindError?: Error;
     noGeminiClient?: boolean;
+    recordingFlushErrorAt?: 'pre' | 'post';
   };
 
   const renderRewindHarness = (options: RewindHarnessOptions = {}) => {
+    vi.spyOn(mockConfig, 'assertCanStartTurn').mockResolvedValue(undefined);
     const history: HistoryItem[] = [
       rewindUserItem(1, 'first prompt', 'prompt-1'),
       { id: 2, type: 'gemini', text: 'first response' },
@@ -540,8 +542,22 @@ describe('AppContainer State Management', () => {
     } as unknown as ReturnType<Config['getFileHistoryService']>);
 
     const rewindRecording = vi.fn();
+    const flush = vi.fn();
+    if (options.recordingFlushErrorAt === 'pre') {
+      flush.mockRejectedValue(new Error('EIO before rewind'));
+    } else if (options.recordingFlushErrorAt === 'post') {
+      flush
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error('EIO after rewind'));
+    } else {
+      flush.mockResolvedValue(undefined);
+    }
+    const integrityFailure = new Error('Session write state is uncertain');
+    const markIntegrityFailure = vi.fn().mockReturnValue(integrityFailure);
     vi.spyOn(mockConfig, 'getChatRecordingService').mockReturnValue({
       rewindRecording,
+      flush,
+      markIntegrityFailure,
     } as unknown as NonNullable<ReturnType<Config['getChatRecordingService']>>);
 
     render(
@@ -562,6 +578,8 @@ describe('AppContainer State Management', () => {
       getHistoryShallow,
       truncateHistory,
       rewindRecording,
+      flush,
+      markIntegrityFailure,
       snapshots,
     };
   };
@@ -4200,6 +4218,32 @@ describe('AppContainer State Management', () => {
         1,
         { truncatedCount: 2 },
         harness.snapshots.slice(0, 2),
+      );
+      expect(harness.flush).toHaveBeenCalledTimes(2);
+      expect(harness.flush.mock.invocationCallOrder[1]).toBeLessThan(
+        harness.truncateHistory.mock.invocationCallOrder[0]!,
+      );
+    });
+
+    it('fails closed before changing UI when rewind persistence is ambiguous', async () => {
+      const harness = renderRewindHarness({
+        recordingFlushErrorAt: 'post',
+      });
+
+      await runRewind(harness.target, 'conversation');
+
+      expect(harness.rewindRecording).toHaveBeenCalledOnce();
+      expect(harness.markIntegrityFailure).toHaveBeenCalledWith(
+        'rewind_persistence',
+      );
+      expect(harness.truncateHistory).not.toHaveBeenCalled();
+      expect(harness.loadHistory).not.toHaveBeenCalled();
+      expect(harness.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: 'Rewind failed: Session write state is uncertain',
+        }),
+        expect.any(Number),
       );
     });
 

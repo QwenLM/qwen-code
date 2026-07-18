@@ -476,16 +476,40 @@ describe('deleteDaemonSessions', () => {
       },
     ]);
 
+    const closeSession = vi.fn().mockResolvedValue(undefined);
     const result = await deleteDaemonSessions({
       sessionIds: [sessionId],
       service: new SessionService(workspaceDir),
-      bridge: { closeSession: vi.fn().mockResolvedValue(undefined) },
+      bridge: { closeSession },
       coordinator: new SessionArchiveCoordinator(),
     });
     expect(result.removed).toEqual([sessionId]);
+    expect(closeSession).toHaveBeenCalledWith(sessionId, undefined, {
+      requireAgentClose: true,
+    });
 
     const ids = (await readCronTasks(workspaceDir)).map((t) => t.id).sort();
     expect(ids).toEqual(['other']); // bound task deleted, unbound survives
+  });
+
+  it('preserves the transcript when strict live-session close fails', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440071';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service: new SessionService(workspaceDir),
+      bridge: {
+        closeSession: vi.fn().mockRejectedValue(new Error('flush failed')),
+      },
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.removed).toEqual([]);
+    expect(result.errors).toEqual([{ sessionId, error: 'flush failed' }]);
+    expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
+      true,
+    );
   });
 });
 

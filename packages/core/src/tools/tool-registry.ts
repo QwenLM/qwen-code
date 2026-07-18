@@ -759,6 +759,14 @@ export class ToolRegistry {
     this.revealedDeferred.clear();
   }
 
+  createRevealedDeferredToolsSnapshot(): ReadonlySet<string> {
+    return new Set(this.revealedDeferred);
+  }
+
+  restoreRevealedDeferredToolsSnapshot(snapshot: ReadonlySet<string>): void {
+    this.revealedDeferred = new Set(snapshot);
+  }
+
   /**
    * Returns a lightweight summary of tools that are
    * deferred from the initial function-declaration list. Used to describe the

@@ -4,13 +4,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { SessionOrganizationService } from '@qwen-code/qwen-code-core';
+import { SessionOrganizationService, Storage } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 export function createSessionOrganizationService(
   workspaceCwd: string,
+  runtimeBaseDir?: string,
 ): SessionOrganizationService {
-  return new SessionOrganizationService(workspaceCwd, (message) => {
-    writeStderrLine(`qwen serve: session-org: ${message}`);
-  });
+  if (runtimeBaseDir === undefined) {
+    return new SessionOrganizationService(workspaceCwd, (message) => {
+      writeStderrLine(`qwen serve: session-org: ${message}`);
+    });
+  }
+  return Storage.runWithRuntimeBaseDir(
+    runtimeBaseDir,
+    undefined,
+    () =>
+      new SessionOrganizationService(workspaceCwd, (message) => {
+        writeStderrLine(`qwen serve: session-org: ${message}`);
+      }),
+  );
 }

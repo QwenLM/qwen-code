@@ -3472,6 +3472,11 @@ async function runQwenServeImpl(
       {
         workspaceId: daemonWorkspaceHash,
         workspaceCwd: boundWorkspace,
+        runtimeBaseDir: core.Storage.runWithRuntimeBaseDir(
+          runtimeBootSettings?.merged.advanced?.runtimeOutputDir,
+          boundWorkspace,
+          () => core.Storage.getRuntimeBaseDir(),
+        ),
         primary: true,
         trusted: trustedWorkspace,
         removable: false,
@@ -3766,6 +3771,11 @@ async function runQwenServeImpl(
       workspaceRuntimes.push({
         workspaceId: secondaryWorkspaceHash,
         workspaceCwd: workspaceInput.cwd,
+        runtimeBaseDir: core.Storage.runWithRuntimeBaseDir(
+          secondarySettings?.merged.advanced?.runtimeOutputDir,
+          workspaceInput.cwd,
+          () => core.Storage.getRuntimeBaseDir(),
+        ),
         primary: false,
         trusted: secondaryTrusted,
         removable: workspaceInput.removable,
@@ -4160,6 +4170,11 @@ async function runQwenServeImpl(
       return {
         workspaceId: wsHash,
         workspaceCwd: cwd,
+        runtimeBaseDir: core.Storage.runWithRuntimeBaseDir(
+          wsSettings?.merged.advanced?.runtimeOutputDir,
+          cwd,
+          () => core.Storage.getRuntimeBaseDir(),
+        ),
         primary: false,
         trusted,
         removable: true,

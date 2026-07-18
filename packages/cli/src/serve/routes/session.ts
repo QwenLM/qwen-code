@@ -18,6 +18,7 @@ import {
   SessionTranscriptCursorCodec,
   SessionTranscriptReader,
   SessionTranscriptSnapshotUnavailableError,
+  Storage,
   addDaemonRequestAttribute,
   runWithoutDebugLogSession,
   type ApprovalMode,
@@ -410,6 +411,14 @@ export function registerSessionRoutes(
     string,
     SessionTranscriptCursorCodec
   >();
+  const createRuntimeSessionService = (
+    runtime: WorkspaceRuntime,
+    options: { onWarning?: (message: string) => void } = {},
+  ) =>
+    new SessionService(runtime.workspaceCwd, {
+      ...options,
+      runtimeBaseDir: runtime.runtimeBaseDir,
+    });
 
   const getTranscriptCursorCodec = (
     runtime: WorkspaceRuntime,
@@ -574,9 +583,9 @@ export function registerSessionRoutes(
     return runtime;
   };
 
-  const hasActivePersistedSessions = async (workspaceCwd: string) => {
+  const hasActivePersistedSessions = async (runtime: WorkspaceRuntime) => {
     try {
-      const page = await new SessionService(workspaceCwd).listSessions({
+      const page = await createRuntimeSessionService(runtime).listSessions({
         archiveState: 'active',
         size: 1,
       });
@@ -626,6 +635,7 @@ export function registerSessionRoutes(
     target: {
       route: string;
       workspaceCwd: string;
+      runtimeBaseDir?: string;
       workspaceQualified?: boolean;
       archiveState?: SessionArchiveState;
     },
@@ -648,12 +658,21 @@ export function registerSessionRoutes(
         [sessionId],
         async () => {
           if (target.archiveState === 'archived') {
-            await assertSessionArchived(target.workspaceCwd, sessionId);
+            await assertSessionArchived(
+              target.workspaceCwd,
+              sessionId,
+              target.runtimeBaseDir,
+            );
           } else {
-            await assertSessionLoadable(target.workspaceCwd, sessionId);
+            await assertSessionLoadable(
+              target.workspaceCwd,
+              sessionId,
+              target.runtimeBaseDir,
+            );
           }
           return exportSessionTranscript({
             workspaceCwd: target.workspaceCwd,
+            runtimeBaseDir: target.runtimeBaseDir,
             sessionId,
             format,
             archiveState: target.archiveState,
@@ -968,6 +987,7 @@ export function registerSessionRoutes(
       const location = await assertSessionLoadable(
         runtime.workspaceCwd,
         sessionId,
+        runtime.runtimeBaseDir,
       );
       return location === 'active';
     };
@@ -1257,7 +1277,7 @@ export function registerSessionRoutes(
               requireZeroAttaches: true,
             });
             if (killed) {
-              await new SessionService(runtime.workspaceCwd).removeSession(
+              await createRuntimeSessionService(runtime).removeSession(
                 session.sessionId,
               );
             }
@@ -1337,13 +1357,18 @@ export function registerSessionRoutes(
         const session = await archiveCoordinator.runSharedMany(
           [sessionId],
           async () => {
-            await assertSessionLoadable(workspaceCwd, sessionId);
+            await assertSessionLoadable(
+              workspaceCwd,
+              sessionId,
+              runtime.runtimeBaseDir,
+            );
             // Recover the persisted parent lineage so the restored live entry
             // reports it (the bridge otherwise creates the entry without it, and
             // status calls would show a restored sub-session as top-level).
-            const metadata = await new SessionService(
-              workspaceCwd,
-            ).readCreationMetadata(sessionId);
+            const metadata =
+              await createRuntimeSessionService(runtime).readCreationMetadata(
+                sessionId,
+              );
             return action === 'load'
               ? await runtime.bridge.loadSession({
                   sessionId,
@@ -1530,6 +1555,7 @@ export function registerSessionRoutes(
     await handleSessionExport(req, res, {
       route: 'GET /session/:id/export',
       workspaceCwd: boundWorkspace,
+      runtimeBaseDir: workspaceRegistry.primary.runtimeBaseDir,
     });
   });
 
@@ -1540,6 +1566,7 @@ export function registerSessionRoutes(
     await handleSessionExport(req, res, {
       route,
       workspaceCwd: runtime.workspaceCwd,
+      runtimeBaseDir: runtime.runtimeBaseDir,
       workspaceQualified: true,
     });
   });
@@ -1553,6 +1580,7 @@ export function registerSessionRoutes(
       await handleSessionExport(req, res, {
         route,
         workspaceCwd: runtime.workspaceCwd,
+        runtimeBaseDir: runtime.runtimeBaseDir,
         workspaceQualified: true,
         archiveState: 'archived',
       });
@@ -1654,15 +1682,22 @@ export function registerSessionRoutes(
     try {
       const result = await runWithoutDebugLogSession(() =>
         archiveCoordinator.runSharedMany([sessionId], async () => {
-          const service = new SessionService(runtime.workspaceCwd);
+          const service = createRuntimeSessionService(runtime);
           if (cursor === undefined) {
-            await assertSessionLoadable(runtime.workspaceCwd, sessionId);
+            await assertSessionLoadable(
+              runtime.workspaceCwd,
+              sessionId,
+              runtime.runtimeBaseDir,
+            );
           }
           const codec = getTranscriptCursorCodec(runtime);
-          const reader = new SessionTranscriptReader(
-            runtime.workspaceCwd,
-            codec,
-          );
+          const reader = runtime.runtimeBaseDir
+            ? Storage.runWithRuntimeBaseDir(
+                runtime.runtimeBaseDir,
+                undefined,
+                () => new SessionTranscriptReader(runtime.workspaceCwd, codec),
+              )
+            : new SessionTranscriptReader(runtime.workspaceCwd, codec);
           let page;
           try {
             page = await reader.readPage(sessionId, {
@@ -2335,7 +2370,7 @@ export function registerSessionRoutes(
     const uniqueIds = parseSessionIdsBody(req, res);
     if (uniqueIds === undefined) return;
     try {
-      const service = new SessionService(boundWorkspace);
+      const service = createRuntimeSessionService(workspaceRegistry.primary);
       const result = await deleteDaemonSessions({
         sessionIds: uniqueIds,
         service,
@@ -2357,7 +2392,7 @@ export function registerSessionRoutes(
     const uniqueIds = parseSessionIdsBody(req, res);
     if (uniqueIds === undefined) return;
 
-    const service = new SessionService(boundWorkspace, {
+    const service = createRuntimeSessionService(workspaceRegistry.primary, {
       onWarning: logSessionArchiveWarning,
     });
 
@@ -2383,7 +2418,7 @@ export function registerSessionRoutes(
     const uniqueIds = parseSessionIdsBody(req, res);
     if (uniqueIds === undefined) return;
 
-    const service = new SessionService(boundWorkspace, {
+    const service = createRuntimeSessionService(workspaceRegistry.primary, {
       onWarning: logSessionArchiveWarning,
     });
 
@@ -2416,7 +2451,7 @@ export function registerSessionRoutes(
       const uniqueIds = parseSessionIdsBody(req, res);
       if (uniqueIds === undefined) return;
       try {
-        const service = new SessionService(runtime.workspaceCwd);
+        const service = createRuntimeSessionService(runtime);
         const result = await deleteDaemonSessions({
           sessionIds: uniqueIds,
           service,
@@ -2444,7 +2479,7 @@ export function registerSessionRoutes(
       if (!runtime) return;
       const uniqueIds = parseSessionIdsBody(req, res);
       if (uniqueIds === undefined) return;
-      const service = new SessionService(runtime.workspaceCwd, {
+      const service = createRuntimeSessionService(runtime, {
         onWarning: logSessionArchiveWarning,
       });
       try {
@@ -2475,7 +2510,7 @@ export function registerSessionRoutes(
       if (!runtime) return;
       const uniqueIds = parseSessionIdsBody(req, res);
       if (uniqueIds === undefined) return;
-      const service = new SessionService(runtime.workspaceCwd, {
+      const service = createRuntimeSessionService(runtime, {
         onWarning: logSessionArchiveWarning,
       });
       try {
@@ -2533,6 +2568,7 @@ export function registerSessionRoutes(
 
   type SessionOrganizationTarget = {
     workspaceCwd: string;
+    runtimeBaseDir?: string;
     bridge: AcpSessionBridge;
     route: string;
   };
@@ -2548,7 +2584,9 @@ export function registerSessionRoutes(
       await archiveCoordinator.runSharedMany([sessionId], async () => {
         // Organization is workspace-scoped sidecar state, not live-session
         // metadata. It intentionally applies to persisted and archived sessions.
-        const sessionService = new SessionService(target.workspaceCwd);
+        const sessionService = new SessionService(target.workspaceCwd, {
+          runtimeBaseDir: target.runtimeBaseDir,
+        });
         let exists = await sessionService.sessionExistsInAnyState(sessionId);
         if (!exists) {
           try {
@@ -2606,6 +2644,7 @@ export function registerSessionRoutes(
 
         const organization = await createSessionOrganizationService(
           target.workspaceCwd,
+          target.runtimeBaseDir,
         ).updateSessionOrganization(sessionId, {
           ...(rawIsPinned !== undefined ? { isPinned: rawIsPinned } : {}),
           ...(rawGroupId !== undefined
@@ -2630,6 +2669,7 @@ export function registerSessionRoutes(
   app.patch('/session/:id/organization', mutate(), async (req, res) => {
     await handleSessionOrganizationUpdate(req, res, {
       workspaceCwd: boundWorkspace,
+      runtimeBaseDir: workspaceRegistry.primary.runtimeBaseDir,
       bridge,
       route: 'PATCH /session/:id/organization',
     });
@@ -2644,6 +2684,7 @@ export function registerSessionRoutes(
       if (!runtime) return;
       await handleSessionOrganizationUpdate(req, res, {
         workspaceCwd: runtime.workspaceCwd,
+        runtimeBaseDir: runtime.runtimeBaseDir,
         bridge: runtime.bridge,
         route,
       });
@@ -2660,7 +2701,10 @@ export function registerSessionRoutes(
         .status(200)
         .json(
           await runWorkspaceInspectionWithLogPolicy(runtime, () =>
-            createSessionOrganizationService(runtime.workspaceCwd).listGroups(),
+            createSessionOrganizationService(
+              runtime.workspaceCwd,
+              runtime.runtimeBaseDir,
+            ).listGroups(),
           ),
         );
     } catch (err) {
@@ -2675,7 +2719,10 @@ export function registerSessionRoutes(
     if (key === null) return;
     const body = safeBody(req);
     try {
-      const group = await createSessionOrganizationService(key).createGroup({
+      const group = await createSessionOrganizationService(
+        key,
+        workspaceRegistry.primary.runtimeBaseDir,
+      ).createGroup({
         name: body['name'] as string,
         color: body['color'] as SessionGroupColor,
       });
@@ -2696,20 +2743,20 @@ export function registerSessionRoutes(
       if (key === null) return;
       const body = safeBody(req);
       try {
-        const group = await createSessionOrganizationService(key).updateGroup(
-          req.params['groupId'] ?? '',
-          {
-            ...(Object.prototype.hasOwnProperty.call(body, 'name')
-              ? { name: body['name'] as string }
-              : {}),
-            ...(Object.prototype.hasOwnProperty.call(body, 'color')
-              ? { color: body['color'] as SessionGroupColor }
-              : {}),
-            ...(Object.prototype.hasOwnProperty.call(body, 'order')
-              ? { order: body['order'] as number }
-              : {}),
-          },
-        );
+        const group = await createSessionOrganizationService(
+          key,
+          workspaceRegistry.primary.runtimeBaseDir,
+        ).updateGroup(req.params['groupId'] ?? '', {
+          ...(Object.prototype.hasOwnProperty.call(body, 'name')
+            ? { name: body['name'] as string }
+            : {}),
+          ...(Object.prototype.hasOwnProperty.call(body, 'color')
+            ? { color: body['color'] as SessionGroupColor }
+            : {}),
+          ...(Object.prototype.hasOwnProperty.call(body, 'order')
+            ? { order: body['order'] as number }
+            : {}),
+        });
         res.status(200).json({ group });
       } catch (err) {
         if (sendSessionOrganizationError(res, err)) return;
@@ -2727,9 +2774,10 @@ export function registerSessionRoutes(
       const key = resolveWorkspaceParam(req, res);
       if (key === null) return;
       try {
-        const deleted = await createSessionOrganizationService(key).deleteGroup(
-          req.params['groupId'] ?? '',
-        );
+        const deleted = await createSessionOrganizationService(
+          key,
+          workspaceRegistry.primary.runtimeBaseDir,
+        ).deleteGroup(req.params['groupId'] ?? '');
         res.status(200).json({ deleted });
       } catch (err) {
         if (sendSessionOrganizationError(res, err)) return;
@@ -2749,7 +2797,10 @@ export function registerSessionRoutes(
         .status(200)
         .json(
           await runWorkspaceInspectionWithLogPolicy(runtime, () =>
-            createSessionOrganizationService(runtime.workspaceCwd).listGroups(),
+            createSessionOrganizationService(
+              runtime.workspaceCwd,
+              runtime.runtimeBaseDir,
+            ).listGroups(),
           ),
         );
     } catch (err) {
@@ -2768,6 +2819,7 @@ export function registerSessionRoutes(
       try {
         const group = await createSessionOrganizationService(
           runtime.workspaceCwd,
+          runtime.runtimeBaseDir,
         ).createGroup({
           name: body['name'] as string,
           color: body['color'] as SessionGroupColor,
@@ -2791,6 +2843,7 @@ export function registerSessionRoutes(
       try {
         const group = await createSessionOrganizationService(
           runtime.workspaceCwd,
+          runtime.runtimeBaseDir,
         ).updateGroup(req.params['groupId'] ?? '', {
           ...(Object.prototype.hasOwnProperty.call(body, 'name')
             ? { name: body['name'] as string }
@@ -2820,6 +2873,7 @@ export function registerSessionRoutes(
       try {
         const deleted = await createSessionOrganizationService(
           runtime.workspaceCwd,
+          runtime.runtimeBaseDir,
         ).deleteGroup(req.params['groupId'] ?? '');
         res.status(200).json({ deleted });
       } catch (err) {
@@ -2944,7 +2998,7 @@ export function registerSessionRoutes(
           parsedSource.sourceType !== undefined ||
           (cursor !== undefined && cursor !== ''
             ? isNumericSessionCursor(cursor)
-            : await hasActivePersistedSessions(key));
+            : await hasActivePersistedSessions(runtime));
         // The live path only reads cursor/size; persisted-only options
         // (organized view or archived state) would be silently dropped there.
         // usePersisted already routes those to the persisted path — assert it so
@@ -2964,6 +3018,7 @@ export function registerSessionRoutes(
           ? await runWorkspaceInspectionWithLogPolicy(runtime, () =>
               listWorkspaceSessionsForResponse(runtime.bridge, key, options, {
                 mergeLive: !readOnlySecondary,
+                runtimeBaseDir: runtime.runtimeBaseDir,
               }),
             )
           : listLiveWorkspaceSessionsForResponse(runtime.bridge, key, options);
@@ -3025,6 +3080,7 @@ export function registerSessionRoutes(
         const info = await runWorkspaceInspectionWithLogPolicy(runtime, () =>
           getWorkspaceSessionInfoForResponse(runtime.bridge, key, {
             includeLive: !isReadOnlyWorkspaceInspection(runtime),
+            runtimeBaseDir: runtime.runtimeBaseDir,
           }),
         );
         res.status(200).json(info);

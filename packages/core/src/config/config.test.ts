@@ -49,7 +49,10 @@ import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { GeminiClient } from '../core/client.js';
 import { ShellTool } from '../tools/shell.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
-import { getSessionProjectDir } from '../utils/sessionIdContext.js';
+import {
+  getSessionProjectDir,
+  sessionIdContext,
+} from '../utils/sessionIdContext.js';
 import { logRipgrepFallback } from '../telemetry/loggers.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
@@ -77,6 +80,80 @@ import { HookSystem } from '../hooks/index.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 import type { ChatRecordingFailureEvent } from '../services/chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
+import {
+  SessionTranscriptChangedError,
+  SessionWriterConflictError,
+  SessionWriterLease,
+  SessionWriterLostError,
+  SessionWriterUnavailableError,
+} from '../services/session-writer-lease.js';
+import {
+  SessionService,
+  type ResumedSessionData,
+} from '../services/sessionService.js';
+
+function activateTestRecorder(config: Config): SessionWriterLease {
+  const sessionId = config.getSessionId();
+  const lease = {
+    sessionId,
+    ownerId: 'test-owner',
+    transcriptPath: config.getTranscriptPath(),
+    appendJsonLine: (value: unknown) =>
+      jsonl.writeLine(config.getTranscriptPath(), value),
+    assertOwnedAndUnchanged: vi.fn().mockResolvedValue(undefined),
+    rebindTranscriptPath: vi.fn().mockResolvedValue(undefined),
+    readStableTranscript: vi.fn().mockResolvedValue(Buffer.alloc(0)),
+    release: vi.fn().mockResolvedValue(undefined),
+  } as unknown as SessionWriterLease;
+  config.getChatRecordingService()?.activate(lease);
+  return lease;
+}
+
+function resumedSessionData(
+  sessionId: string,
+  text: string,
+): ResumedSessionData {
+  const message = {
+    uuid: `${sessionId}-${text}`,
+    parentUuid: null,
+    sessionId,
+    timestamp: '2026-01-01T00:00:00.000Z',
+    type: 'user' as const,
+    cwd: '/tmp',
+    version: 'test',
+    message: { role: 'user' as const, parts: [{ text }] },
+  };
+  return {
+    conversation: {
+      sessionId,
+      projectHash: 'test-project',
+      startTime: message.timestamp,
+      lastUpdated: message.timestamp,
+      messages: [message],
+    },
+    filePath: `/test/${sessionId}.jsonl`,
+    lastCompletedUuid: message.uuid,
+  };
+}
+
+function testWriterLease(sessionId: string): {
+  lease: SessionWriterLease;
+  release: ReturnType<typeof vi.fn>;
+} {
+  const release = vi.fn().mockResolvedValue(undefined);
+  return {
+    lease: {
+      sessionId,
+      ownerId: `${sessionId}-owner`,
+      expectedByteLength: 100,
+      transcriptExistedAtAcquire: true,
+      assertOwnedAndUnchanged: vi.fn().mockResolvedValue(undefined),
+      appendJsonLine: vi.fn().mockResolvedValue(undefined),
+      release,
+    } as unknown as SessionWriterLease,
+    release,
+  };
+}
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
@@ -122,6 +199,33 @@ vi.mock('../tools/tool-registry', () => {
   ToolRegistryMock.prototype.getAllToolNames = vi.fn(() => []);
   ToolRegistryMock.prototype.getTool = vi.fn();
   ToolRegistryMock.prototype.getFunctionDeclarations = vi.fn(() => []);
+  ToolRegistryMock.prototype.revealDeferredTool = function (
+    this: { revealedDeferred: Set<string> },
+    name: string,
+  ) {
+    this.revealedDeferred.add(name);
+  };
+  ToolRegistryMock.prototype.isDeferredToolRevealed = function (
+    this: { revealedDeferred: Set<string> },
+    name: string,
+  ) {
+    return this.revealedDeferred.has(name);
+  };
+  ToolRegistryMock.prototype.clearRevealedDeferredTools = function (this: {
+    revealedDeferred: Set<string>;
+  }) {
+    this.revealedDeferred.clear();
+  };
+  ToolRegistryMock.prototype.createRevealedDeferredToolsSnapshot =
+    function (this: { revealedDeferred: Set<string> }) {
+      return new Set(this.revealedDeferred);
+    };
+  ToolRegistryMock.prototype.restoreRevealedDeferredToolsSnapshot = function (
+    this: { revealedDeferred: Set<string> },
+    snapshot: ReadonlySet<string>,
+  ) {
+    this.revealedDeferred = new Set(snapshot);
+  };
   // PR 14b fix (codex round 4): per-instance manager stub so the
   // `setMcpBudgetEventCallback → createToolRegistry → manager.setOnBudgetEvent`
   // integration test can observe each instance's callback wiring.
@@ -130,11 +234,13 @@ vi.mock('../tools/tool-registry', () => {
   // `(registry as unknown as { __mcpManagerMock }).__mcpManagerMock`
   // (escape hatch — production code reads it via `getMcpClientManager`).
   ToolRegistryMock.mockImplementation(function (this: {
+    revealedDeferred: Set<string>;
     __mcpManagerMock: {
       setOnBudgetEvent: Mock;
       discoverAllMcpToolsIncremental: Mock;
     };
   }) {
+    this.revealedDeferred = new Set();
     this.__mcpManagerMock = {
       setOnBudgetEvent: vi.fn(),
       // Stubbed so `Config.startMcpDiscoveryInBackground` (kicked off
@@ -514,8 +620,19 @@ describe('Server Config (config.ts)', () => {
   describe('project-dir registry lifecycle', () => {
     it('drops its session entry on shutdown — no daemon leak', async () => {
       const sessionId = 'cfg-shutdown-test-session';
-      const config = new Config({ ...baseParams, sessionId });
-      // Registered in the constructor, resolvable while alive.
+      const config = new Config({
+        ...baseParams,
+        sessionId,
+        chatRecording: false,
+      });
+      expect(getSessionProjectDir(sessionId)).toBeUndefined();
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
       expect(getSessionProjectDir(sessionId)).toBeDefined();
       await config.shutdown();
       // In daemon mode this is what stops the map growing per session.
@@ -1945,7 +2062,7 @@ describe('Server Config (config.ts)', () => {
     });
 
     it('resets monitor cleanup state when starting a new session', async () => {
-      const config = new Config(baseParams);
+      const config = new Config({ ...baseParams, chatRecording: false });
       await config.initialize({ skipGeminiInitialization: true });
       const monitor = config.getMemoryPressureMonitor();
       expect(monitor).toBeDefined();
@@ -2208,6 +2325,7 @@ describe('Server Config (config.ts)', () => {
       config.onChatRecordingFailure(listener);
       const sessionId = '11111111-1111-1111-1111-111111111111';
       config.startNewSession(sessionId);
+      activateTestRecorder(config);
       const error = new Error('replacement write failed');
       const writeLine = vi
         .spyOn(jsonl, 'writeLine')
@@ -2261,6 +2379,7 @@ describe('Server Config (config.ts)', () => {
           chatRecordingService: {
             finalize: () => void;
             flush: () => Promise<void>;
+            close: () => Promise<void>;
           };
         }
       ).initialized = true;
@@ -2269,6 +2388,7 @@ describe('Server Config (config.ts)', () => {
           chatRecordingService: {
             finalize: () => void;
             flush: () => Promise<void>;
+            close: () => Promise<void>;
           };
         }
       ).chatRecordingService = {
@@ -2276,6 +2396,7 @@ describe('Server Config (config.ts)', () => {
         flush: async () => {
           notify(config, event);
         },
+        close: async () => {},
       };
 
       await config.shutdown();
@@ -2544,7 +2665,1028 @@ describe('Server Config (config.ts)', () => {
     expect(config.getLspStatusSnapshot().initializationError).toBeUndefined();
   });
 
+  describe('session transitions', () => {
+    it('does not let a same-id no-op bypass an in-progress transition', async () => {
+      const oldSessionId = '10101010-1010-1010-1010-101010101010';
+      const targetSessionId = '20202020-2020-2020-2020-202020202020';
+      const config = new Config({
+        ...baseParams,
+        sessionId: oldSessionId,
+        chatRecording: false,
+      });
+
+      try {
+        await config.initialize({
+          skipGeminiInitialization: true,
+          skipHooks: true,
+          skipMcpDiscovery: true,
+          skipSkillManager: true,
+          skipFileCheckpointing: true,
+        });
+        const transition = await config.prepareSessionTransition(
+          targetSessionId,
+          resumedSessionData(targetSessionId, 'target'),
+        );
+
+        await expect(
+          config.prepareSessionTransition(targetSessionId),
+        ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+
+        await transition.rollback();
+        expect(config.getSessionId()).toBe(oldSessionId);
+      } finally {
+        await config.shutdown();
+      }
+    });
+
+    it('uses the caller snapshot without acquiring a lease when recording is disabled', async () => {
+      const targetSessionId = '12121212-1212-1212-1212-121212121212';
+      const targetData = resumedSessionData(targetSessionId, 'target');
+      const acquireSpy = vi.spyOn(SessionWriterLease, 'acquire');
+      const config = new Config({
+        ...baseParams,
+        chatRecording: false,
+      });
+
+      try {
+        await config.initialize({
+          skipGeminiInitialization: true,
+          skipHooks: true,
+          skipMcpDiscovery: true,
+          skipSkillManager: true,
+          skipFileCheckpointing: true,
+        });
+        const transition = await config.prepareSessionTransition(
+          targetSessionId,
+          targetData,
+        );
+        expect(transition.sessionData).toBe(targetData);
+        await transition.commit(() => {});
+        expect(config.getResumedSessionData()).toBe(targetData);
+        expect(acquireSpy).not.toHaveBeenCalled();
+      } finally {
+        await config.shutdown();
+        acquireSpy.mockRestore();
+      }
+    });
+
+    it('initializes the target core in the target session context', async () => {
+      const oldSessionId = '13131313-1313-1313-1313-131313131313';
+      const targetSessionId = '14141414-1414-1414-1414-141414141414';
+      let initializedIn: string | undefined;
+      const config = new Config({
+        ...baseParams,
+        sessionId: oldSessionId,
+        chatRecording: false,
+      });
+
+      try {
+        await config.initialize({
+          skipGeminiInitialization: true,
+          skipHooks: true,
+          skipMcpDiscovery: true,
+          skipSkillManager: true,
+          skipFileCheckpointing: true,
+        });
+        vi.mocked(GeminiClient).mockImplementationOnce(
+          () =>
+            ({
+              initialize: vi.fn(async () => {
+                initializedIn = sessionIdContext.getStore();
+              }),
+              isInitialized: vi.fn().mockReturnValue(true),
+              setTools: vi.fn(),
+            }) as unknown as GeminiClient,
+        );
+        const transition = await sessionIdContext.run(oldSessionId, () =>
+          config.prepareSessionTransition(
+            targetSessionId,
+            resumedSessionData(targetSessionId, 'target'),
+          ),
+        );
+
+        expect(initializedIn).toBe(targetSessionId);
+        await transition.rollback();
+      } finally {
+        await config.shutdown();
+      }
+    });
+
+    it('commits the target before releasing the previous writer', async () => {
+      const oldSessionId = '11111111-1111-1111-1111-111111111111';
+      const targetSessionId = '22222222-2222-2222-2222-222222222222';
+      const oldData = resumedSessionData(oldSessionId, 'old');
+      const targetData = resumedSessionData(targetSessionId, 'target');
+      const oldWriter = testWriterLease(oldSessionId);
+      const targetWriter = testWriterLease(targetSessionId);
+      const acquireSpy = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockImplementation(async ({ sessionId }) =>
+          sessionId === oldSessionId ? oldWriter.lease : targetWriter.lease,
+        );
+      const loadSpy = vi
+        .spyOn(SessionService.prototype, 'loadSession')
+        .mockImplementation(async (sessionId) =>
+          sessionId === oldSessionId ? oldData : targetData,
+        );
+      const config = new Config({
+        ...baseParams,
+        sessionId: oldSessionId,
+        sessionData: oldData,
+        chatRecording: true,
+      });
+
+      try {
+        await config.initialize({
+          skipGeminiInitialization: true,
+          skipHooks: true,
+          skipMcpDiscovery: true,
+          skipSkillManager: true,
+          skipFileCheckpointing: true,
+        });
+        const transition = await config.prepareSessionTransition(
+          targetSessionId,
+          targetData,
+        );
+        expect(oldWriter.release).not.toHaveBeenCalled();
+        expect(getSessionProjectDir(oldSessionId)).toBeDefined();
+        expect(getSessionProjectDir(targetSessionId)).toBeDefined();
+
+        const uiCommit = vi.fn();
+        await transition.commit(uiCommit);
+
+        expect(uiCommit).toHaveBeenCalledOnce();
+        expect(config.getSessionId()).toBe(targetSessionId);
+        expect(getSessionProjectDir(oldSessionId)).toBeUndefined();
+        expect(getSessionProjectDir(targetSessionId)).toBeDefined();
+        expect(config.getResumedSessionData()).toBe(targetData);
+        expect(oldWriter.release).toHaveBeenCalledOnce();
+        await expect(config.assertCanStartTurn()).resolves.toBeUndefined();
+      } finally {
+        await config.shutdown();
+        acquireSpy.mockRestore();
+        loadSpy.mockRestore();
+      }
+      expect(targetWriter.release).toHaveBeenCalledOnce();
+    });
+
+    it('settles runtime sidecar ownership before releasing the previous writer', async () => {
+      const oldSessionId = '19191919-1919-1919-1919-191919191919';
+      const targetSessionId = '20202020-2020-2020-2020-202020202020';
+      const oldData = resumedSessionData(oldSessionId, 'old');
+      const targetData = resumedSessionData(targetSessionId, 'target');
+      const oldWriter = testWriterLease(oldSessionId);
+      const targetWriter = testWriterLease(targetSessionId);
+      const acquireSpy = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockImplementation(async ({ sessionId }) =>
+          sessionId === oldSessionId ? oldWriter.lease : targetWriter.lease,
+        );
+      const loadSpy = vi
+        .spyOn(SessionService.prototype, 'loadSession')
+        .mockImplementation(async (sessionId) =>
+          sessionId === oldSessionId ? oldData : targetData,
+        );
+      let releaseTargetStatusWrite!: () => void;
+      const targetStatusWrite = new Promise<void>((resolve) => {
+        releaseTargetStatusWrite = resolve;
+      });
+      const statusWriteSpy = vi
+        .spyOn(runtimeStatus, 'writeRuntimeStatus')
+        .mockImplementation(async (_filePath, fields) => {
+          if (fields.sessionId === targetSessionId) {
+            await targetStatusWrite;
+          }
+          return '/tmp/runtime-status.json';
+        });
+      const deactivateSpy = vi
+        .spyOn(runtimeStatus, 'deactivateRuntimeStatus')
+        .mockResolvedValue(undefined);
+      const config = new Config({
+        ...baseParams,
+        sessionId: oldSessionId,
+        sessionData: oldData,
+        chatRecording: true,
+      });
+
+      try {
+        await config.initialize({
+          skipGeminiInitialization: true,
+          skipHooks: true,
+          skipMcpDiscovery: true,
+          skipSkillManager: true,
+          skipFileCheckpointing: true,
+        });
+        config.startRuntimeStatus();
+        const transition = await config.prepareSessionTransition(
+          targetSessionId,
+          targetData,
+        );
+
+        const committing = transition.commit(() => {});
+        await vi.waitFor(() =>
+          expect(statusWriteSpy).toHaveBeenCalledWith(
+            expect.any(String),
+            expect.objectContaining({ sessionId: targetSessionId }),
+          ),
+        );
+        expect(oldWriter.release).not.toHaveBeenCalled();
+
+        releaseTargetStatusWrite();
+        await committing;
+        expect(oldWriter.release).toHaveBeenCalledOnce();
+      } finally {
+        releaseTargetStatusWrite();
+        await config.shutdown();
+        acquireSpy.mockRestore();
+        loadSpy.mockRestore();
+        statusWriteSpy.mockRestore();
+        deactivateSpy.mockRestore();
+      }
+    });
+
+    it('retains and retries a previous writer that cannot be released after commit', async () => {
+      const oldSessionId = '17171717-1717-1717-1717-171717171717';
+      const targetSessionId = '18181818-1818-1818-1818-181818181818';
+      const oldData = resumedSessionData(oldSessionId, 'old');
+      const targetData = resumedSessionData(targetSessionId, 'target');
+      const oldWriter = testWriterLease(oldSessionId);
+      const targetWriter = testWriterLease(targetSessionId);
+      oldWriter.release
+        .mockRejectedValueOnce(new SessionWriterUnavailableError())
+        .mockResolvedValue(undefined);
+      const acquireSpy = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockImplementation(async ({ sessionId }) =>
+          sessionId === oldSessionId ? oldWriter.lease : targetWriter.lease,
+        );
+      const loadSpy = vi
+        .spyOn(SessionService.prototype, 'loadSession')
+        .mockImplementation(async (sessionId) =>
+          sessionId === oldSessionId ? oldData : targetData,
+        );
+      const config = new Config({
+        ...baseParams,
+        sessionId: oldSessionId,
+        sessionData: oldData,
+        chatRecording: true,
+      });
+
+      try {
+        await config.initialize({
+          skipGeminiInitialization: true,
+          skipHooks: true,
+          skipMcpDiscovery: true,
+          skipSkillManager: true,
+          skipFileCheckpointing: true,
+        });
+        const transition = await config.prepareSessionTransition(
+          targetSessionId,
+          targetData,
+        );
+
+        await transition.commit(() => {});
+
+        expect(config.getSessionId()).toBe(targetSessionId);
+        expect(config.hasSessionWriterOwnership()).toBe(true);
+        expect(oldWriter.release).toHaveBeenCalledOnce();
+        await expect(config.assertCanStartTurn()).resolves.toBeUndefined();
+        expect(oldWriter.release).toHaveBeenCalledTimes(2);
+      } finally {
+        await config.shutdown();
+        acquireSpy.mockRestore();
+        loadSpy.mockRestore();
+      }
+      expect(targetWriter.release).toHaveBeenCalledOnce();
+    });
+
+    it('discards a previous writer after release proves ownership was lost', async () => {
+      const oldSessionId = '17171717-1717-1717-1717-171717171717';
+      const targetSessionId = '18181818-1818-1818-1818-181818181818';
+      const oldData = resumedSessionData(oldSessionId, 'old');
+      const targetData = resumedSessionData(targetSessionId, 'target');
+      const oldWriter = testWriterLease(oldSessionId);
+      const targetWriter = testWriterLease(targetSessionId);
+      oldWriter.release.mockRejectedValueOnce(new SessionWriterLostError());
+      const acquireSpy = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockImplementation(async ({ sessionId }) =>
+          sessionId === oldSessionId ? oldWriter.lease : targetWriter.lease,
+        );
+      const loadSpy = vi
+        .spyOn(SessionService.prototype, 'loadSession')
+        .mockImplementation(async (sessionId) =>
+          sessionId === oldSessionId ? oldData : targetData,
+        );
+      const config = new Config({
+        ...baseParams,
+        sessionId: oldSessionId,
+        sessionData: oldData,
+        chatRecording: true,
+      });
+
+      try {
+        await config.initialize({
+          skipGeminiInitialization: true,
+          skipHooks: true,
+          skipMcpDiscovery: true,
+          skipSkillManager: true,
+          skipFileCheckpointing: true,
+        });
+        const transition = await config.prepareSessionTransition(
+          targetSessionId,
+          targetData,
+        );
+
+        await transition.commit(() => {});
+
+        expect(config.getSessionId()).toBe(targetSessionId);
+        expect(oldWriter.release).toHaveBeenCalledOnce();
+        await expect(config.assertCanStartTurn()).resolves.toBeUndefined();
+        expect(oldWriter.release).toHaveBeenCalledOnce();
+      } finally {
+        await config.shutdown();
+        acquireSpy.mockRestore();
+        loadSpy.mockRestore();
+      }
+      expect(targetWriter.release).toHaveBeenCalledOnce();
+    });
+
+    it('rejects a fresh target that already exists in the archive', async () => {
+      const oldSessionId = '15151515-1515-1515-1515-151515151515';
+      const targetSessionId = '16161616-1616-1616-1616-161616161616';
+      const oldData = resumedSessionData(oldSessionId, 'old');
+      const oldWriter = testWriterLease(oldSessionId);
+      const targetWriter = testWriterLease(targetSessionId);
+      Object.defineProperties(targetWriter.lease, {
+        expectedByteLength: { value: 0 },
+        transcriptExistedAtAcquire: { value: false },
+      });
+      const acquireSpy = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockImplementation(async ({ sessionId }) =>
+          sessionId === oldSessionId ? oldWriter.lease : targetWriter.lease,
+        );
+      const loadSpy = vi
+        .spyOn(SessionService.prototype, 'loadSession')
+        .mockResolvedValue(oldData);
+      const config = new Config({
+        ...baseParams,
+        sessionId: oldSessionId,
+        sessionData: oldData,
+        chatRecording: true,
+      });
+
+      try {
+        await config.initialize({
+          skipGeminiInitialization: true,
+          skipHooks: true,
+          skipMcpDiscovery: true,
+          skipSkillManager: true,
+          skipFileCheckpointing: true,
+        });
+        const existsSpy = vi
+          .spyOn(SessionService.prototype, 'getPhysicalSessionLocation')
+          .mockResolvedValue('archived');
+        try {
+          await expect(
+            config.prepareSessionTransition(targetSessionId, undefined, {
+              requireNew: true,
+            }),
+          ).rejects.toBeInstanceOf(SessionTranscriptChangedError);
+        } finally {
+          existsSpy.mockRestore();
+        }
+
+        expect(config.getSessionId()).toBe(oldSessionId);
+        expect(oldWriter.release).not.toHaveBeenCalled();
+        expect(targetWriter.release).toHaveBeenCalled();
+        await expect(config.assertCanStartTurn()).resolves.toBeUndefined();
+      } finally {
+        await config.shutdown();
+        acquireSpy.mockRestore();
+        loadSpy.mockRestore();
+      }
+      expect(oldWriter.release).toHaveBeenCalledOnce();
+    });
+
+    it('rejects an archived target even when the caller provides a preview', async () => {
+      const oldSessionId = '15151515-1515-1515-1515-151515151516';
+      const targetSessionId = '16161616-1616-1616-1616-161616161617';
+      const oldData = resumedSessionData(oldSessionId, 'old');
+      const targetData = resumedSessionData(targetSessionId, 'target');
+      const oldWriter = testWriterLease(oldSessionId);
+      const targetWriter = testWriterLease(targetSessionId);
+      const acquireSpy = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockImplementation(async ({ sessionId }) =>
+          sessionId === oldSessionId ? oldWriter.lease : targetWriter.lease,
+        );
+      const loadSpy = vi
+        .spyOn(SessionService.prototype, 'loadSession')
+        .mockImplementation(async (sessionId) =>
+          sessionId === oldSessionId ? oldData : targetData,
+        );
+      const config = new Config({
+        ...baseParams,
+        sessionId: oldSessionId,
+        sessionData: oldData,
+        chatRecording: true,
+      });
+
+      try {
+        await config.initialize({
+          skipGeminiInitialization: true,
+          skipHooks: true,
+          skipMcpDiscovery: true,
+          skipSkillManager: true,
+          skipFileCheckpointing: true,
+        });
+        const locationSpy = vi
+          .spyOn(SessionService.prototype, 'getPhysicalSessionLocation')
+          .mockResolvedValue('archived');
+        try {
+          await expect(
+            config.prepareSessionTransition(targetSessionId, targetData),
+          ).rejects.toBeInstanceOf(SessionTranscriptChangedError);
+        } finally {
+          locationSpy.mockRestore();
+        }
+
+        expect(config.getSessionId()).toBe(oldSessionId);
+        expect(oldWriter.release).not.toHaveBeenCalled();
+        expect(targetWriter.release).toHaveBeenCalledTimes(2);
+        expect(loadSpy).not.toHaveBeenCalledWith(targetSessionId);
+        await expect(config.assertCanStartTurn()).resolves.toBeUndefined();
+      } finally {
+        await config.shutdown();
+        acquireSpy.mockRestore();
+        loadSpy.mockRestore();
+      }
+    });
+
+    it('rolls back a UI failure and keeps the old writer on target conflict', async () => {
+      const oldSessionId = '33333333-3333-3333-3333-333333333333';
+      const targetSessionId = '44444444-4444-4444-4444-444444444444';
+      const conflictSessionId = '55555555-5555-5555-5555-555555555555';
+      const oldData = resumedSessionData(oldSessionId, 'old');
+      const targetData = resumedSessionData(targetSessionId, 'target');
+      const oldWriter = testWriterLease(oldSessionId);
+      const targetWriter = testWriterLease(targetSessionId);
+      const acquireSpy = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockImplementation(async ({ sessionId }) => {
+          if (sessionId === oldSessionId) return oldWriter.lease;
+          if (sessionId === targetSessionId) return targetWriter.lease;
+          throw new SessionWriterConflictError();
+        });
+      const loadSpy = vi
+        .spyOn(SessionService.prototype, 'loadSession')
+        .mockImplementation(async (sessionId) =>
+          sessionId === oldSessionId ? oldData : targetData,
+        );
+      const config = new Config({
+        ...baseParams,
+        sessionId: oldSessionId,
+        sessionData: oldData,
+        chatRecording: true,
+      });
+
+      try {
+        await config.initialize({
+          skipGeminiInitialization: true,
+          skipHooks: true,
+          skipMcpDiscovery: true,
+          skipSkillManager: true,
+          skipFileCheckpointing: true,
+        });
+        config.getToolRegistry().revealDeferredTool('old-session-only-tool');
+        config.addInlineAnnouncedSkillKeys(['skill:old-session']);
+        const transition = await config.prepareSessionTransition(
+          targetSessionId,
+          targetData,
+        );
+        expect(
+          config
+            .getToolRegistry()
+            .isDeferredToolRevealed('old-session-only-tool'),
+        ).toBe(false);
+        expect(config.consumeInlineAnnouncedSkillKeys()).toEqual(new Set());
+        await expect(
+          transition.commit(() => {
+            throw new Error('UI commit failed');
+          }),
+        ).rejects.toThrow('UI commit failed');
+
+        expect(config.getSessionId()).toBe(oldSessionId);
+        expect(getSessionProjectDir(oldSessionId)).toBeDefined();
+        expect(getSessionProjectDir(targetSessionId)).toBeUndefined();
+        expect(
+          config
+            .getToolRegistry()
+            .isDeferredToolRevealed('old-session-only-tool'),
+        ).toBe(true);
+        expect(config.consumeInlineAnnouncedSkillKeys()).toEqual(
+          new Set(['skill:old-session']),
+        );
+        expect(oldWriter.release).not.toHaveBeenCalled();
+        await expect(config.assertCanStartTurn()).resolves.toBeUndefined();
+        await expect(
+          config.prepareSessionTransition(conflictSessionId, targetData),
+        ).rejects.toBeInstanceOf(SessionWriterConflictError);
+        expect(config.getSessionId()).toBe(oldSessionId);
+        await expect(config.assertCanStartTurn()).resolves.toBeUndefined();
+      } finally {
+        await config.shutdown();
+        acquireSpy.mockRestore();
+        loadSpy.mockRestore();
+      }
+      expect(targetWriter.release).toHaveBeenCalled();
+      expect(oldWriter.release).toHaveBeenCalledOnce();
+    });
+
+    it('fails closed with a sanitized error when transition rollback fails', async () => {
+      const oldSessionId = '56565656-5656-5656-5656-565656565656';
+      const targetSessionId = '57575757-5757-5757-5757-575757575757';
+      const oldData = resumedSessionData(oldSessionId, 'old');
+      const targetData = resumedSessionData(targetSessionId, 'target');
+      const oldWriter = testWriterLease(oldSessionId);
+      const targetWriter = testWriterLease(targetSessionId);
+      targetWriter.release.mockRejectedValue(
+        new Error('/private/session/lock could not be released'),
+      );
+      const acquireSpy = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockImplementation(async ({ sessionId }) =>
+          sessionId === oldSessionId ? oldWriter.lease : targetWriter.lease,
+        );
+      const loadSpy = vi
+        .spyOn(SessionService.prototype, 'loadSession')
+        .mockImplementation(async (sessionId) =>
+          sessionId === oldSessionId ? oldData : targetData,
+        );
+      const config = new Config({
+        ...baseParams,
+        sessionId: oldSessionId,
+        sessionData: oldData,
+        chatRecording: true,
+      });
+
+      try {
+        await config.initialize({
+          skipGeminiInitialization: true,
+          skipHooks: true,
+          skipMcpDiscovery: true,
+          skipSkillManager: true,
+          skipFileCheckpointing: true,
+        });
+        const transition = await config.prepareSessionTransition(
+          targetSessionId,
+          targetData,
+        );
+
+        const failure = await transition
+          .commit(() => {
+            throw new Error('UI commit failed');
+          })
+          .catch((error: unknown) => error);
+
+        expect(failure).toBeInstanceOf(SessionWriterUnavailableError);
+        expect((failure as Error).message).not.toContain('/private/');
+        await expect(config.assertCanStartTurn()).rejects.toBe(failure);
+        expect(oldWriter.release).toHaveBeenCalled();
+      } finally {
+        await config.shutdown();
+        acquireSpy.mockRestore();
+        loadSpy.mockRestore();
+      }
+    });
+  });
+
   describe('initialize', () => {
+    it('runs initialization in the config session context', async () => {
+      const sessionId = '21212121-2121-2121-2121-212121212121';
+      let initializedIn: string | undefined;
+      vi.mocked(GeminiClient).mockImplementationOnce(
+        () =>
+          ({
+            initialize: vi.fn(async () => {
+              initializedIn = sessionIdContext.getStore();
+            }),
+            isInitialized: vi.fn().mockReturnValue(true),
+            setTools: vi.fn(),
+          }) as unknown as GeminiClient,
+      );
+      const config = new Config({
+        ...baseParams,
+        sessionId,
+        chatRecording: false,
+      });
+
+      try {
+        await sessionIdContext.run('stale-bootstrap-session', () =>
+          config.initialize({
+            skipHooks: true,
+            skipMcpDiscovery: true,
+            skipSkillManager: true,
+            skipFileCheckpointing: true,
+          }),
+        );
+        expect(initializedIn).toBe(sessionId);
+      } finally {
+        await config.shutdown();
+      }
+    });
+
+    it('reloads the authoritative transcript only after acquiring the writer lease', async () => {
+      const sessionId = '22222222-2222-2222-2222-222222222222';
+      const preview = resumedSessionData(sessionId, 'preview');
+      const authoritative = resumedSessionData(sessionId, 'authoritative');
+      const release = vi.fn().mockResolvedValue(undefined);
+      const acquireSpy = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockResolvedValue({
+          sessionId,
+          ownerId: 'authoritative-owner',
+          expectedByteLength: 100,
+          transcriptExistedAtAcquire: true,
+          assertOwnedAndUnchanged: vi.fn().mockResolvedValue(undefined),
+          appendJsonLine: vi.fn().mockResolvedValue(undefined),
+          release,
+        } as unknown as SessionWriterLease);
+      const loadSpy = vi
+        .spyOn(SessionService.prototype, 'loadSession')
+        .mockResolvedValue(authoritative);
+      const config = new Config({
+        ...baseParams,
+        sessionId,
+        sessionData: preview,
+        chatRecording: true,
+      });
+
+      try {
+        await config.initialize({
+          skipGeminiInitialization: true,
+          skipHooks: true,
+          skipMcpDiscovery: true,
+          skipSkillManager: true,
+          skipFileCheckpointing: true,
+        });
+
+        expect(config.getResumedSessionData()).toBe(authoritative);
+        expect(acquireSpy.mock.invocationCallOrder[0]).toBeLessThan(
+          loadSpy.mock.invocationCallOrder[0]!,
+        );
+      } finally {
+        await config.shutdown();
+        acquireSpy.mockRestore();
+        loadSpy.mockRestore();
+      }
+      expect(release).toHaveBeenCalledOnce();
+    });
+
+    it('loads an existing transcript even when startup did not provide a preview', async () => {
+      const sessionId = '23232323-2323-2323-2323-232323232323';
+      const authoritative = resumedSessionData(sessionId, 'authoritative');
+      const writer = testWriterLease(sessionId);
+      Object.defineProperty(writer.lease, 'expectedByteLength', {
+        value: 100,
+      });
+      const acquireSpy = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockResolvedValue(writer.lease);
+      const loadSpy = vi
+        .spyOn(SessionService.prototype, 'loadSession')
+        .mockResolvedValue(authoritative);
+      const config = new Config({
+        ...baseParams,
+        sessionId,
+        chatRecording: true,
+      });
+
+      try {
+        await config.initialize({
+          skipGeminiInitialization: true,
+          skipHooks: true,
+          skipMcpDiscovery: true,
+          skipSkillManager: true,
+          skipFileCheckpointing: true,
+        });
+
+        expect(config.getResumedSessionData()).toBe(authoritative);
+        expect(loadSpy).toHaveBeenCalledWith(sessionId);
+      } finally {
+        await config.shutdown();
+        acquireSpy.mockRestore();
+        loadSpy.mockRestore();
+      }
+    });
+
+    it('rejects an active transcript that has a duplicate archived file', async () => {
+      const sessionId = '24222323-2422-2422-2422-242223232323';
+      const writer = testWriterLease(sessionId);
+      Object.defineProperties(writer.lease, {
+        expectedByteLength: { value: 100 },
+        transcriptExistedAtAcquire: { value: true },
+      });
+      const acquireSpy = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockResolvedValue(writer.lease);
+      const locationSpy = vi
+        .spyOn(SessionService.prototype, 'getPhysicalSessionLocation')
+        .mockResolvedValue('conflict');
+      const loadSpy = vi.spyOn(SessionService.prototype, 'loadSession');
+      const config = new Config({
+        ...baseParams,
+        sessionId,
+        chatRecording: true,
+      });
+
+      try {
+        await expect(
+          config.initialize({
+            skipGeminiInitialization: true,
+            skipHooks: true,
+            skipMcpDiscovery: true,
+            skipSkillManager: true,
+            skipFileCheckpointing: true,
+          }),
+        ).rejects.toBeInstanceOf(SessionTranscriptChangedError);
+        expect(loadSpy).not.toHaveBeenCalled();
+        expect(writer.release).toHaveBeenCalledOnce();
+      } finally {
+        await config.shutdown();
+        acquireSpy.mockRestore();
+        locationSpy.mockRestore();
+        loadSpy.mockRestore();
+      }
+    });
+
+    it('fails closed for an existing empty transcript that cannot be loaded', async () => {
+      const sessionId = '24232323-2423-2423-2423-242323232323';
+      const writer = testWriterLease(sessionId);
+      Object.defineProperties(writer.lease, {
+        expectedByteLength: { value: 0 },
+        transcriptExistedAtAcquire: { value: true },
+      });
+      const acquireSpy = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockResolvedValue(writer.lease);
+      const loadSpy = vi
+        .spyOn(SessionService.prototype, 'loadSession')
+        .mockResolvedValue(undefined);
+      const config = new Config({
+        ...baseParams,
+        sessionId,
+        chatRecording: true,
+      });
+
+      try {
+        await expect(
+          config.initialize({
+            skipGeminiInitialization: true,
+            skipHooks: true,
+            skipMcpDiscovery: true,
+            skipSkillManager: true,
+            skipFileCheckpointing: true,
+          }),
+        ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+        expect(loadSpy).toHaveBeenCalledWith(sessionId);
+        expect(writer.release).toHaveBeenCalledOnce();
+      } finally {
+        await config.shutdown();
+        acquireSpy.mockRestore();
+        loadSpy.mockRestore();
+      }
+    });
+
+    it('rejects a fresh session id already occupied by an archived transcript', async () => {
+      const sessionId = '25232323-2523-2523-2523-252323232323';
+      const writer = testWriterLease(sessionId);
+      Object.defineProperties(writer.lease, {
+        expectedByteLength: { value: 0 },
+        transcriptExistedAtAcquire: { value: false },
+      });
+      const acquireSpy = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockResolvedValue(writer.lease);
+      const existsSpy = vi
+        .spyOn(SessionService.prototype, 'getPhysicalSessionLocation')
+        .mockResolvedValue('archived');
+      const config = new Config({
+        ...baseParams,
+        sessionId,
+        chatRecording: true,
+      });
+
+      try {
+        await expect(
+          config.initialize({
+            skipGeminiInitialization: true,
+            skipHooks: true,
+            skipMcpDiscovery: true,
+            skipSkillManager: true,
+            skipFileCheckpointing: true,
+          }),
+        ).rejects.toBeInstanceOf(SessionTranscriptChangedError);
+        expect(existsSpy).toHaveBeenCalledWith(sessionId);
+        expect(writer.release).toHaveBeenCalledOnce();
+      } finally {
+        await config.shutdown();
+        acquireSpy.mockRestore();
+        existsSpy.mockRestore();
+      }
+    });
+
+    it('rejects an archived transcript even when startup provided a preview', async () => {
+      const sessionId = '25232323-2523-2523-2523-252323232324';
+      const preview = resumedSessionData(sessionId, 'preview');
+      const writer = testWriterLease(sessionId);
+      const acquireSpy = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockResolvedValue(writer.lease);
+      const locationSpy = vi
+        .spyOn(SessionService.prototype, 'getPhysicalSessionLocation')
+        .mockResolvedValue('archived');
+      const loadSpy = vi.spyOn(SessionService.prototype, 'loadSession');
+      const config = new Config({
+        ...baseParams,
+        sessionId,
+        sessionData: preview,
+        chatRecording: true,
+      });
+
+      try {
+        await expect(
+          config.initialize({
+            skipGeminiInitialization: true,
+            skipHooks: true,
+            skipMcpDiscovery: true,
+            skipSkillManager: true,
+            skipFileCheckpointing: true,
+          }),
+        ).rejects.toBeInstanceOf(SessionTranscriptChangedError);
+        expect(loadSpy).not.toHaveBeenCalled();
+        expect(writer.release).toHaveBeenCalledOnce();
+      } finally {
+        await config.shutdown();
+        acquireSpy.mockRestore();
+        locationSpy.mockRestore();
+        loadSpy.mockRestore();
+      }
+    });
+
+    it('sanitizes authoritative transcript filesystem failures', async () => {
+      const sessionId = '24232323-2323-2323-2323-232323232323';
+      const writer = testWriterLease(sessionId);
+      Object.defineProperty(writer.lease, 'expectedByteLength', {
+        value: 100,
+      });
+      const acquireSpy = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockResolvedValue(writer.lease);
+      const loadSpy = vi
+        .spyOn(SessionService.prototype, 'loadSession')
+        .mockRejectedValue(
+          Object.assign(
+            new Error("EACCES: '/private/transcripts/session.jsonl'"),
+            { code: 'EACCES' },
+          ),
+        );
+      const config = new Config({
+        ...baseParams,
+        sessionId,
+        chatRecording: true,
+      });
+
+      const failure = await config
+        .initialize({
+          skipGeminiInitialization: true,
+          skipHooks: true,
+          skipMcpDiscovery: true,
+          skipSkillManager: true,
+          skipFileCheckpointing: true,
+        })
+        .catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(SessionWriterUnavailableError);
+      expect((failure as Error).message).not.toContain('/private/');
+      expect(writer.release).toHaveBeenCalledOnce();
+      acquireSpy.mockRestore();
+      loadSpy.mockRestore();
+    });
+
+    it('retains and retries a lease that fails to release before recorder activation', async () => {
+      const sessionId = '24232323-2323-2323-2323-232323232324';
+      const writer = testWriterLease(sessionId);
+      writer.release
+        .mockRejectedValueOnce(new Error('temporary release failure'))
+        .mockResolvedValueOnce(undefined);
+      const acquireSpy = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockResolvedValue(writer.lease);
+      const loadSpy = vi
+        .spyOn(SessionService.prototype, 'loadSession')
+        .mockRejectedValue(new Error('load failed'));
+      const config = new Config({
+        ...baseParams,
+        sessionId,
+        chatRecording: true,
+      });
+
+      await expect(
+        config.initialize({
+          skipGeminiInitialization: true,
+          skipHooks: true,
+          skipMcpDiscovery: true,
+          skipSkillManager: true,
+          skipFileCheckpointing: true,
+        }),
+      ).rejects.toThrow('temporary release failure');
+
+      expect(writer.release).toHaveBeenCalledTimes(2);
+      expect(config.hasSessionWriterOwnership()).toBe(false);
+      await config.shutdown();
+      acquireSpy.mockRestore();
+      loadSpy.mockRestore();
+    });
+
+    it('fails closed when an unbound initialization lease cannot be released', async () => {
+      const sessionId = '24232323-2323-2323-2323-232323232325';
+      const writer = testWriterLease(sessionId);
+      writer.release.mockRejectedValue(new Error('release failure'));
+      const acquireSpy = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockResolvedValue(writer.lease);
+      const loadSpy = vi
+        .spyOn(SessionService.prototype, 'loadSession')
+        .mockRejectedValue(new Error('load failed'));
+      const config = new Config({
+        ...baseParams,
+        sessionId,
+        chatRecording: true,
+      });
+
+      await expect(
+        config.initialize({
+          skipGeminiInitialization: true,
+          skipHooks: true,
+          skipMcpDiscovery: true,
+          skipSkillManager: true,
+          skipFileCheckpointing: true,
+        }),
+      ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+      expect(config.hasSessionWriterOwnership()).toBe(true);
+
+      writer.release.mockResolvedValue(undefined);
+      await config.shutdown();
+      expect(config.hasSessionWriterOwnership()).toBe(false);
+      acquireSpy.mockRestore();
+      loadSpy.mockRestore();
+    });
+
+    it('releases the writer lease when initialization fails after activation', async () => {
+      const sessionId = '24242424-2424-2424-2424-242424242424';
+      const writer = testWriterLease(sessionId);
+      Object.defineProperties(writer.lease, {
+        expectedByteLength: { value: 0 },
+        transcriptExistedAtAcquire: { value: false },
+      });
+      const acquireSpy = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockResolvedValue(writer.lease);
+      const refreshSpy = vi
+        .spyOn(ExtensionManager.prototype, 'refreshCache')
+        .mockRejectedValueOnce(new Error('extension initialization failed'));
+      const config = new Config({
+        ...baseParams,
+        sessionId,
+        chatRecording: true,
+      });
+
+      try {
+        await expect(
+          config.initialize({
+            skipGeminiInitialization: true,
+            skipHooks: true,
+            skipMcpDiscovery: true,
+            skipSkillManager: true,
+            skipFileCheckpointing: true,
+          }),
+        ).rejects.toThrow('extension initialization failed');
+
+        expect(writer.release).toHaveBeenCalledOnce();
+        expect(getSessionProjectDir(sessionId)).toBeUndefined();
+        await expect(config.assertCanStartTurn()).rejects.toBeInstanceOf(
+          SessionWriterUnavailableError,
+        );
+      } finally {
+        await config.shutdown();
+        acquireSpy.mockRestore();
+        refreshSpy.mockRestore();
+      }
+    });
+
     it('should throw an error if initialized more than once', async () => {
       const config = new Config({
         ...baseParams,
@@ -3990,378 +5132,531 @@ describe('Server Config (config.ts)', () => {
     ).toBe(false);
   });
 
-  it('relocateWorkingDirectory should update the session working roots', async () => {
-    const config = new Config(baseParams);
-    const newDir = path.resolve('/path/to/other');
-    const workspaceContext = config.getWorkspaceContext();
-    const directoriesChanged = vi.fn();
-    workspaceContext.onDirectoriesChanged(directoriesChanged);
-    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
-      // Keep the test process in its original directory.
-    });
-    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
-
-    await config.relocateWorkingDirectory(newDir);
-
-    expect(chdirSpy).toHaveBeenCalledWith(newDir);
-    expect(config.getTargetDir()).toBe(newDir);
-    expect(config.getProjectRoot()).toBe(newDir);
-    expect(config.getCwd()).toBe(newDir);
-    expect(config.getWorkingDir()).toBe(newDir);
-    expect(config.getWorkspaceContext()).toBe(workspaceContext);
-    expect(config.getWorkspaceContext().getDirectories()[0]).toBe(newDir);
-    expect(config.storage.getProjectRoot()).toBe(newDir);
-    expect(directoriesChanged).toHaveBeenCalled();
-    expect(loadServerHierarchicalMemory).toHaveBeenCalledWith(
-      newDir,
-      expect.any(Array),
-      expect.any(Object),
-      expect.any(Array),
-      expect.any(Boolean),
-      expect.any(String),
-      expect.any(Array),
-      expect.any(Object),
-    );
-
-    chdirSpy.mockRestore();
-    cwdSpy.mockRestore();
-  });
-
-  it('relocateWorkingDirectory should recreate cwd-derived file service', async () => {
-    const config = new Config(baseParams);
-    const newDir = path.resolve('/path/to/other');
-    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
-      // Keep the test process in its original directory.
-    });
-    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
-    const fileServiceBefore = config.getFileService();
-
-    await config.relocateWorkingDirectory(newDir);
-
-    expect(config.getFileService()).not.toBe(fileServiceBefore);
-
-    chdirSpy.mockRestore();
-    cwdSpy.mockRestore();
-  });
-
-  it('relocateWorkingDirectory should continue after recording flush fails', async () => {
-    const config = new Config(baseParams);
-    const newDir = path.resolve('/path/to/other');
-    const finalize = vi.fn();
-    const flush = vi.fn().mockRejectedValue(new Error('recording failed'));
-    const resetStoragePaths = vi.fn();
-    (
-      config as unknown as {
-        chatRecordingService: {
-          finalize: () => void;
-          flush: () => Promise<void>;
-          resetStoragePaths: () => void;
-        };
-      }
-    ).chatRecordingService = { finalize, flush, resetStoragePaths };
-    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
-      // Keep the test process in its original directory.
-    });
-    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
-
-    await expect(config.relocateWorkingDirectory(newDir)).resolves.toEqual({});
-
-    expect(finalize).toHaveBeenCalledOnce();
-    expect(flush).toHaveBeenCalledOnce();
-    expect(resetStoragePaths).toHaveBeenCalledOnce();
-    expect(config.getTargetDir()).toBe(newDir);
-
-    chdirSpy.mockRestore();
-    cwdSpy.mockRestore();
-  });
-
-  it('relocateWorkingDirectory should move current session artifacts to the new workspace', async () => {
-    const config = new Config(baseParams);
-    const sessionId = config.getSessionId();
-    const newDir = path.resolve('/path/to/other');
-    const oldStorage = new Storage(config.getTargetDir());
-    const newStorage = new Storage(newDir);
-    const oldChatsDir = path.join(oldStorage.getProjectDir(), 'chats');
-    const newChatsDir = path.join(newStorage.getProjectDir(), 'chats');
-    const oldTranscriptPath = path.join(oldChatsDir, `${sessionId}.jsonl`);
-    const oldRuntimeStatusPath = path.join(
-      oldChatsDir,
-      `${sessionId}.runtime.json`,
-    );
-    const oldWorktreeSessionPath = path.join(
-      oldChatsDir,
-      `${sessionId}.worktree.json`,
-    );
-    const newTranscriptPath = path.join(newChatsDir, `${sessionId}.jsonl`);
-    const newRuntimeStatusPath = path.join(
-      newChatsDir,
-      `${sessionId}.runtime.json`,
-    );
-    const newWorktreeSessionPath = path.join(
-      newChatsDir,
-      `${sessionId}.worktree.json`,
-    );
-    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
-      // Keep the test process in its original directory.
-    });
-    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
-    const existingArtifacts = [
-      oldTranscriptPath,
-      oldRuntimeStatusPath,
-      oldWorktreeSessionPath,
-    ];
-    vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
-      const checked = pathToCheck.toString();
-      return existingArtifacts.includes(checked) || checked === newDir;
+  describe('relocateWorkingDirectory', () => {
+    beforeEach(() => {
+      vi.spyOn(runtimeStatus, 'writeRuntimeStatus').mockResolvedValue(
+        '/tmp/test-runtime-status.json',
+      );
     });
 
-    await config.relocateWorkingDirectory(newDir);
-
-    expect(fs.mkdirSync).toHaveBeenCalledWith(newChatsDir, {
-      recursive: true,
-    });
-    expect(fs.renameSync).toHaveBeenCalledWith(
-      oldTranscriptPath,
-      newTranscriptPath,
-    );
-    expect(fs.renameSync).toHaveBeenCalledWith(
-      oldRuntimeStatusPath,
-      newRuntimeStatusPath,
-    );
-    expect(fs.renameSync).toHaveBeenCalledWith(
-      oldWorktreeSessionPath,
-      newWorktreeSessionPath,
-    );
-    expect(config.getTranscriptPath()).toBe(newTranscriptPath);
-
-    chdirSpy.mockRestore();
-    cwdSpy.mockRestore();
-  });
-
-  it('relocateWorkingDirectory should refresh runtime status after moving session artifacts', async () => {
-    const config = new Config(baseParams);
-    config.markRuntimeStatusEnabled();
-    const sessionId = config.getSessionId();
-    const newDir = path.resolve('/path/to/other');
-    const oldStorage = new Storage(config.getTargetDir());
-    const newStorage = new Storage(newDir);
-    const oldRuntimeStatusPath = oldStorage.getRuntimeStatusPath(sessionId);
-    const newRuntimeStatusPath = newStorage.getRuntimeStatusPath(sessionId);
-    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
-      // Keep the test process in its original directory.
-    });
-    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
-    const writeRuntimeStatusSpy = vi
-      .spyOn(runtimeStatus, 'writeRuntimeStatus')
-      .mockResolvedValue(newRuntimeStatusPath);
-    vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
-      const checked = pathToCheck.toString();
-      return checked === oldRuntimeStatusPath || checked === newDir;
+    afterEach(() => {
+      vi.mocked(runtimeStatus.writeRuntimeStatus).mockRestore();
     });
 
-    await config.relocateWorkingDirectory(newDir);
+    it('relocateWorkingDirectory should update the session working roots', async () => {
+      const config = new Config(baseParams);
+      const newDir = path.resolve('/path/to/other');
+      const workspaceContext = config.getWorkspaceContext();
+      const directoriesChanged = vi.fn();
+      workspaceContext.onDirectoriesChanged(directoriesChanged);
+      const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+        // Keep the test process in its original directory.
+      });
+      const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
 
-    expect(fs.renameSync).toHaveBeenCalledWith(
-      oldRuntimeStatusPath,
-      newRuntimeStatusPath,
-    );
-    expect(writeRuntimeStatusSpy).toHaveBeenCalledWith(newRuntimeStatusPath, {
-      sessionId,
-      workDir: newDir,
-      qwenVersion: null,
+      await config.relocateWorkingDirectory(newDir);
+
+      expect(chdirSpy).toHaveBeenCalledWith(newDir);
+      expect(config.getTargetDir()).toBe(newDir);
+      expect(config.getProjectRoot()).toBe(newDir);
+      expect(config.getCwd()).toBe(newDir);
+      expect(config.getWorkingDir()).toBe(newDir);
+      expect(config.getWorkspaceContext()).toBe(workspaceContext);
+      expect(config.getWorkspaceContext().getDirectories()[0]).toBe(newDir);
+      expect(config.storage.getProjectRoot()).toBe(newDir);
+      expect(directoriesChanged).toHaveBeenCalled();
+      expect(loadServerHierarchicalMemory).toHaveBeenCalledWith(
+        newDir,
+        expect.any(Array),
+        expect.any(Object),
+        expect.any(Array),
+        expect.any(Boolean),
+        expect.any(String),
+        expect.any(Array),
+        expect.any(Object),
+      );
+
+      chdirSpy.mockRestore();
+      cwdSpy.mockRestore();
     });
 
-    writeRuntimeStatusSpy.mockRestore();
-    chdirSpy.mockRestore();
-    cwdSpy.mockRestore();
-  });
+    it('relocateWorkingDirectory should recreate cwd-derived file service', async () => {
+      const config = new Config(baseParams);
+      const newDir = path.resolve('/path/to/other');
+      const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+        // Keep the test process in its original directory.
+      });
+      const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+      const fileServiceBefore = config.getFileService();
 
-  it('relocateWorkingDirectory should reject and roll back when session artifact migration fails', async () => {
-    const config = new Config(baseParams);
-    const oldDir = config.getTargetDir();
-    const sessionId = config.getSessionId();
-    const newDir = path.resolve('/path/to/other');
-    const oldStorage = new Storage(oldDir);
-    const newStorage = new Storage(newDir);
-    const oldChatsDir = path.join(oldStorage.getProjectDir(), 'chats');
-    const newChatsDir = path.join(newStorage.getProjectDir(), 'chats');
-    const oldTranscriptPath = path.join(oldChatsDir, `${sessionId}.jsonl`);
-    const oldRuntimeStatusPath = path.join(
-      oldChatsDir,
-      `${sessionId}.runtime.json`,
-    );
-    const newTranscriptPath = path.join(newChatsDir, `${sessionId}.jsonl`);
-    const newRuntimeStatusPath = path.join(
-      newChatsDir,
-      `${sessionId}.runtime.json`,
-    );
-    const moveError = new Error('move failed');
-    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
-      // Keep the test process in its original directory.
-    });
-    const cwdSpy = vi
-      .spyOn(process, 'cwd')
-      .mockReturnValueOnce(oldDir)
-      .mockReturnValue(newDir);
-    const existingArtifacts = [oldTranscriptPath, oldRuntimeStatusPath];
-    vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
-      const checked = pathToCheck.toString();
-      return existingArtifacts.includes(checked) || checked === newDir;
-    });
-    vi.mocked(fs.renameSync).mockImplementation((from, to) => {
-      if (from === oldRuntimeStatusPath && to === newRuntimeStatusPath) {
-        throw moveError;
-      }
+      await config.relocateWorkingDirectory(newDir);
+
+      expect(config.getFileService()).not.toBe(fileServiceBefore);
+
+      chdirSpy.mockRestore();
+      cwdSpy.mockRestore();
     });
 
-    await expect(config.relocateWorkingDirectory(newDir)).rejects.toThrow(
-      moveError,
-    );
+    it('relocateWorkingDirectory should continue after recording flush fails', async () => {
+      const config = new Config(baseParams);
+      const newDir = path.resolve('/path/to/other');
+      activateTestRecorder(config);
+      const recorder = config.getChatRecordingService()!;
+      const finalize = vi.spyOn(recorder, 'finalize');
+      const flush = vi.spyOn(recorder, 'flush');
+      vi.spyOn(jsonl, 'writeLine').mockRejectedValueOnce(
+        new Error('recording failed'),
+      );
+      recorder.recordUserMessage([{ text: 'unpersisted' }]);
+      await expect(recorder.flush()).rejects.toThrow('recording failed');
+      vi.mocked(fs.existsSync).mockImplementation(
+        (pathToCheck) => pathToCheck.toString() === newDir,
+      );
+      const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+        // Keep the test process in its original directory.
+      });
+      const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
 
-    expect(fs.renameSync).toHaveBeenCalledWith(
-      oldTranscriptPath,
-      newTranscriptPath,
-    );
-    expect(fs.renameSync).toHaveBeenCalledWith(
-      newTranscriptPath,
-      oldTranscriptPath,
-    );
-    expect(chdirSpy).toHaveBeenCalledWith(newDir);
-    expect(chdirSpy).toHaveBeenCalledWith(oldDir);
-    expect(config.getTargetDir()).toBe(oldDir);
-    expect(config.storage.getProjectRoot()).toBe(oldDir);
-    expect(config.getTranscriptPath()).toBe(oldTranscriptPath);
+      await expect(config.relocateWorkingDirectory(newDir)).resolves.toEqual(
+        {},
+      );
 
-    chdirSpy.mockRestore();
-    cwdSpy.mockRestore();
-  });
+      expect(finalize).toHaveBeenCalledOnce();
+      expect(flush).toHaveBeenCalled();
+      expect(config.getTargetDir()).toBe(newDir);
 
-  it('relocateWorkingDirectory should remove a partial EXDEV copy when source cleanup fails', async () => {
-    const config = new Config(baseParams);
-    const oldDir = config.getTargetDir();
-    const sessionId = config.getSessionId();
-    const newDir = path.resolve('/path/to/other');
-    const oldStorage = new Storage(oldDir);
-    const newStorage = new Storage(newDir);
-    const oldRuntimeStatusPath = oldStorage.getRuntimeStatusPath(sessionId);
-    const newRuntimeStatusPath = newStorage.getRuntimeStatusPath(sessionId);
-    const cleanupError = new Error('cleanup failed');
-    const exdevError = Object.assign(new Error('cross device'), {
-      code: 'EXDEV',
-    });
-    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
-      // Keep the test process in its original directory.
-    });
-    const cwdSpy = vi
-      .spyOn(process, 'cwd')
-      .mockReturnValueOnce(oldDir)
-      .mockReturnValue(newDir);
-    vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
-      const checked = pathToCheck.toString();
-      return checked === oldRuntimeStatusPath || checked === newDir;
-    });
-    vi.mocked(fs.renameSync).mockImplementation((from, to) => {
-      if (from === oldRuntimeStatusPath && to === newRuntimeStatusPath) {
-        throw exdevError;
-      }
-    });
-    vi.mocked(fs.unlinkSync).mockImplementation((pathToUnlink) => {
-      if (pathToUnlink === oldRuntimeStatusPath) {
-        throw cleanupError;
-      }
+      chdirSpy.mockRestore();
+      cwdSpy.mockRestore();
     });
 
-    await expect(config.relocateWorkingDirectory(newDir)).rejects.toThrow(
-      cleanupError,
-    );
+    it('relocateWorkingDirectory should move current session artifacts to the new workspace', async () => {
+      const config = new Config(baseParams);
+      activateTestRecorder(config);
+      const sessionId = config.getSessionId();
+      const newDir = path.resolve('/path/to/other');
+      const oldStorage = new Storage(config.getTargetDir());
+      const newStorage = new Storage(newDir);
+      const oldChatsDir = path.join(oldStorage.getProjectDir(), 'chats');
+      const newChatsDir = path.join(newStorage.getProjectDir(), 'chats');
+      const oldTranscriptPath = path.join(oldChatsDir, `${sessionId}.jsonl`);
+      const oldRuntimeStatusPath = path.join(
+        oldChatsDir,
+        `${sessionId}.runtime.json`,
+      );
+      const oldWorktreeSessionPath = path.join(
+        oldChatsDir,
+        `${sessionId}.worktree.json`,
+      );
+      const newTranscriptPath = path.join(newChatsDir, `${sessionId}.jsonl`);
+      const newRuntimeStatusPath = path.join(
+        newChatsDir,
+        `${sessionId}.runtime.json`,
+      );
+      const newWorktreeSessionPath = path.join(
+        newChatsDir,
+        `${sessionId}.worktree.json`,
+      );
+      const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+        // Keep the test process in its original directory.
+      });
+      const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+      const existingArtifacts = [
+        oldTranscriptPath,
+        oldRuntimeStatusPath,
+        oldWorktreeSessionPath,
+      ];
+      vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
+        const checked = pathToCheck.toString();
+        return existingArtifacts.includes(checked) || checked === newDir;
+      });
 
-    expect(fs.copyFileSync).toHaveBeenCalledWith(
-      oldRuntimeStatusPath,
-      newRuntimeStatusPath,
-    );
-    expect(fs.unlinkSync).toHaveBeenCalledWith(newRuntimeStatusPath);
-    expect(chdirSpy).toHaveBeenCalledWith(oldDir);
-    expect(config.getTargetDir()).toBe(oldDir);
+      await config.relocateWorkingDirectory(newDir);
 
-    chdirSpy.mockRestore();
-    cwdSpy.mockRestore();
-  });
+      expect(fs.mkdirSync).toHaveBeenCalledWith(newChatsDir, {
+        recursive: true,
+      });
+      expect(fs.renameSync).toHaveBeenCalledWith(
+        oldTranscriptPath,
+        newTranscriptPath,
+      );
+      expect(fs.renameSync).toHaveBeenCalledWith(
+        oldRuntimeStatusPath,
+        newRuntimeStatusPath,
+      );
+      expect(fs.renameSync).toHaveBeenCalledWith(
+        oldWorktreeSessionPath,
+        newWorktreeSessionPath,
+      );
+      expect(config.getTranscriptPath()).toBe(newTranscriptPath);
 
-  it('relocateWorkingDirectory should reject and roll back when the final cwd differs from the expected path', async () => {
-    const config = new Config(baseParams);
-    const oldDir = config.getTargetDir();
-    const newDir = path.resolve('/path/to/other');
-    const expectedDir = path.resolve('/path/to/confirmed');
-    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
-      // Keep the test process in its original directory.
+      chdirSpy.mockRestore();
+      cwdSpy.mockRestore();
     });
-    const cwdSpy = vi
-      .spyOn(process, 'cwd')
-      .mockReturnValueOnce(oldDir)
-      .mockReturnValue(newDir);
 
-    await expect(
-      config.relocateWorkingDirectory(newDir, expectedDir),
-    ).rejects.toThrow(
-      `Changed directory to ${newDir}, expected ${expectedDir}.`,
-    );
+    it('relocateWorkingDirectory should refresh runtime status after moving session artifacts', async () => {
+      const config = new Config(baseParams);
+      activateTestRecorder(config);
+      config.markRuntimeStatusEnabled();
+      const sessionId = config.getSessionId();
+      const newDir = path.resolve('/path/to/other');
+      const oldStorage = new Storage(config.getTargetDir());
+      const newStorage = new Storage(newDir);
+      const oldRuntimeStatusPath = oldStorage.getRuntimeStatusPath(sessionId);
+      const newRuntimeStatusPath = newStorage.getRuntimeStatusPath(sessionId);
+      const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+        // Keep the test process in its original directory.
+      });
+      const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+      const writeRuntimeStatusSpy = vi.mocked(runtimeStatus.writeRuntimeStatus);
+      writeRuntimeStatusSpy.mockResolvedValue(newRuntimeStatusPath);
+      vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
+        const checked = pathToCheck.toString();
+        return checked === oldRuntimeStatusPath || checked === newDir;
+      });
 
-    expect(chdirSpy).toHaveBeenCalledWith(newDir);
-    expect(chdirSpy).toHaveBeenCalledWith(oldDir);
-    expect(config.getTargetDir()).toBe(oldDir);
-    expect(config.storage.getProjectRoot()).toBe(oldDir);
+      await config.relocateWorkingDirectory(newDir);
 
-    chdirSpy.mockRestore();
-    cwdSpy.mockRestore();
-  });
+      expect(fs.renameSync).toHaveBeenCalledWith(
+        oldRuntimeStatusPath,
+        newRuntimeStatusPath,
+      );
+      expect(writeRuntimeStatusSpy).toHaveBeenCalledWith(oldRuntimeStatusPath, {
+        sessionId,
+        workDir: newDir,
+        qwenVersion: null,
+        ownerId: 'test-owner',
+      });
+      expect(writeRuntimeStatusSpy).toHaveBeenCalledWith(newRuntimeStatusPath, {
+        sessionId,
+        workDir: newDir,
+        qwenVersion: null,
+        ownerId: 'test-owner',
+      });
 
-  it('relocateWorkingDirectory should reject before mutating config when include directories are stale', async () => {
-    const staleIncludeDir = path.resolve('/path/to/stale-include');
-    const config = new Config({
-      ...baseParams,
-      includeDirectories: [staleIncludeDir],
+      chdirSpy.mockRestore();
+      cwdSpy.mockRestore();
     });
-    const oldDir = config.getTargetDir();
-    const newDir = path.resolve('/path/to/other');
-    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
-      // Keep the test process in its original directory.
+
+    it('relocateWorkingDirectory should not move a pre-existing target artifact back to the source', async () => {
+      const config = new Config(baseParams);
+      activateTestRecorder(config);
+      const oldDir = config.getTargetDir();
+      const sessionId = config.getSessionId();
+      const newDir = path.resolve('/path/to/other');
+      const oldStorage = new Storage(oldDir);
+      const newStorage = new Storage(newDir);
+      const oldTranscriptPath = path.join(
+        oldStorage.getProjectDir(),
+        'chats',
+        `${sessionId}.jsonl`,
+      );
+      const newTranscriptPath = path.join(
+        newStorage.getProjectDir(),
+        'chats',
+        `${sessionId}.jsonl`,
+      );
+      const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {});
+      const cwdSpy = vi
+        .spyOn(process, 'cwd')
+        .mockReturnValueOnce(oldDir)
+        .mockReturnValue(newDir);
+      vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
+        const checked = pathToCheck.toString();
+        return checked === newTranscriptPath || checked === newDir;
+      });
+
+      await expect(config.relocateWorkingDirectory(newDir)).rejects.toThrow(
+        `Session artifact target already exists: ${newTranscriptPath}`,
+      );
+
+      expect(fs.renameSync).not.toHaveBeenCalledWith(
+        newTranscriptPath,
+        oldTranscriptPath,
+      );
+      expect(config.getTargetDir()).toBe(oldDir);
+
+      chdirSpy.mockRestore();
+      cwdSpy.mockRestore();
     });
-    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(oldDir);
-    vi.mocked(fs.existsSync).mockImplementation(
-      (pathToCheck) => pathToCheck !== staleIncludeDir,
-    );
 
-    await expect(config.relocateWorkingDirectory(newDir)).rejects.toThrow(
-      `Directory does not exist: ${staleIncludeDir}`,
-    );
+    it('relocateWorkingDirectory should reject and roll back when session artifact migration fails', async () => {
+      const config = new Config(baseParams);
+      activateTestRecorder(config);
+      const oldDir = config.getTargetDir();
+      const sessionId = config.getSessionId();
+      const newDir = path.resolve('/path/to/other');
+      const oldStorage = new Storage(oldDir);
+      const newStorage = new Storage(newDir);
+      const oldChatsDir = path.join(oldStorage.getProjectDir(), 'chats');
+      const newChatsDir = path.join(newStorage.getProjectDir(), 'chats');
+      const oldTranscriptPath = path.join(oldChatsDir, `${sessionId}.jsonl`);
+      const oldRuntimeStatusPath = path.join(
+        oldChatsDir,
+        `${sessionId}.runtime.json`,
+      );
+      const newTranscriptPath = path.join(newChatsDir, `${sessionId}.jsonl`);
+      const newRuntimeStatusPath = path.join(
+        newChatsDir,
+        `${sessionId}.runtime.json`,
+      );
+      const moveError = new Error('move failed');
+      const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+        // Keep the test process in its original directory.
+      });
+      const cwdSpy = vi
+        .spyOn(process, 'cwd')
+        .mockReturnValueOnce(oldDir)
+        .mockReturnValue(newDir);
+      const existingArtifacts = [oldTranscriptPath, oldRuntimeStatusPath];
+      vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
+        const checked = pathToCheck.toString();
+        return existingArtifacts.includes(checked) || checked === newDir;
+      });
+      vi.mocked(fs.renameSync).mockImplementation((from, to) => {
+        if (from === oldRuntimeStatusPath && to === newRuntimeStatusPath) {
+          throw moveError;
+        }
+      });
 
-    expect(chdirSpy).not.toHaveBeenCalled();
-    expect(config.getTargetDir()).toBe(oldDir);
-    expect(config.storage.getProjectRoot()).toBe(oldDir);
-    expect(config.getWorkspaceContext().getDirectories()[0]).toBe(oldDir);
+      await expect(config.relocateWorkingDirectory(newDir)).rejects.toThrow(
+        moveError,
+      );
 
-    chdirSpy.mockRestore();
-    cwdSpy.mockRestore();
-  });
+      expect(fs.renameSync).toHaveBeenCalledWith(
+        oldTranscriptPath,
+        newTranscriptPath,
+      );
+      expect(fs.renameSync).toHaveBeenCalledWith(
+        newTranscriptPath,
+        oldTranscriptPath,
+      );
+      expect(chdirSpy).toHaveBeenCalledWith(newDir);
+      expect(chdirSpy).toHaveBeenCalledWith(oldDir);
+      expect(config.getTargetDir()).toBe(oldDir);
+      expect(config.storage.getProjectRoot()).toBe(oldDir);
+      expect(config.getTranscriptPath()).toBe(oldTranscriptPath);
 
-  it('relocateWorkingDirectory should return memory refresh failures after moving', async () => {
-    const config = new Config(baseParams);
-    const newDir = path.resolve('/path/to/other');
-    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
-      // Keep the test process in its original directory.
+      chdirSpy.mockRestore();
+      cwdSpy.mockRestore();
     });
-    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
-    vi.mocked(loadServerHierarchicalMemory).mockRejectedValueOnce(
-      new Error('memory failed'),
-    );
 
-    const result = await config.relocateWorkingDirectory(newDir);
+    it('relocateWorkingDirectory should reject EXDEV without copying', async () => {
+      const config = new Config(baseParams);
+      activateTestRecorder(config);
+      const oldDir = config.getTargetDir();
+      const sessionId = config.getSessionId();
+      const newDir = path.resolve('/path/to/other');
+      const oldStorage = new Storage(oldDir);
+      const newStorage = new Storage(newDir);
+      const oldRuntimeStatusPath = oldStorage.getRuntimeStatusPath(sessionId);
+      const newRuntimeStatusPath = newStorage.getRuntimeStatusPath(sessionId);
+      const exdevError = Object.assign(new Error('cross device'), {
+        code: 'EXDEV',
+      });
+      const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+        // Keep the test process in its original directory.
+      });
+      const cwdSpy = vi
+        .spyOn(process, 'cwd')
+        .mockReturnValueOnce(oldDir)
+        .mockReturnValue(newDir);
+      vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
+        const checked = pathToCheck.toString();
+        return checked === oldRuntimeStatusPath || checked === newDir;
+      });
+      vi.mocked(fs.renameSync).mockImplementation((from, to) => {
+        if (from === oldRuntimeStatusPath && to === newRuntimeStatusPath) {
+          throw exdevError;
+        }
+      });
+      await expect(config.relocateWorkingDirectory(newDir)).rejects.toThrow(
+        exdevError,
+      );
 
-    expect(config.getTargetDir()).toBe(newDir);
-    expect(result.memoryRefreshError).toEqual(new Error('memory failed'));
+      expect(fs.copyFileSync).not.toHaveBeenCalled();
+      expect(chdirSpy).toHaveBeenCalledWith(oldDir);
+      expect(config.getTargetDir()).toBe(oldDir);
 
-    chdirSpy.mockRestore();
-    cwdSpy.mockRestore();
+      chdirSpy.mockRestore();
+      cwdSpy.mockRestore();
+    });
+
+    it('relocateWorkingDirectory should restore cwd when recorder pause fails', async () => {
+      const config = new Config(baseParams);
+      activateTestRecorder(config);
+      const recorder = config.getChatRecordingService()!;
+      const oldDir = config.getTargetDir();
+      const newDir = path.resolve('/path/to/other');
+      const pauseFailure = new SessionWriterUnavailableError();
+      vi.spyOn(recorder, 'pause').mockRejectedValueOnce(pauseFailure);
+      const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {});
+      const cwdSpy = vi
+        .spyOn(process, 'cwd')
+        .mockReturnValueOnce(oldDir)
+        .mockReturnValue(newDir);
+
+      await expect(config.relocateWorkingDirectory(newDir)).rejects.toBe(
+        pauseFailure,
+      );
+
+      expect(chdirSpy).toHaveBeenCalledWith(newDir);
+      expect(chdirSpy).toHaveBeenCalledWith(oldDir);
+      expect(config.getTargetDir()).toBe(oldDir);
+
+      chdirSpy.mockRestore();
+      cwdSpy.mockRestore();
+    });
+
+    it('relocateWorkingDirectory should fail closed when cwd rollback fails', async () => {
+      const config = new Config(baseParams);
+      const lease = activateTestRecorder(config);
+      const oldDir = config.getTargetDir();
+      const newDir = path.resolve('/path/to/other');
+      const oldRuntimeStatusPath = new Storage(oldDir).getRuntimeStatusPath(
+        config.getSessionId(),
+      );
+      const newRuntimeStatusPath = new Storage(newDir).getRuntimeStatusPath(
+        config.getSessionId(),
+      );
+      const moveError = new Error('move failed');
+      const rollbackError = new Error('cwd rollback failed');
+      const chdirSpy = vi
+        .spyOn(process, 'chdir')
+        .mockImplementationOnce(() => {})
+        .mockImplementationOnce(() => {
+          throw rollbackError;
+        });
+      const cwdSpy = vi
+        .spyOn(process, 'cwd')
+        .mockReturnValueOnce(oldDir)
+        .mockReturnValue(newDir);
+      vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
+        const checked = pathToCheck.toString();
+        return checked === oldRuntimeStatusPath || checked === newDir;
+      });
+      vi.mocked(fs.renameSync).mockImplementation((from, to) => {
+        if (from === oldRuntimeStatusPath && to === newRuntimeStatusPath) {
+          throw moveError;
+        }
+      });
+
+      await expect(
+        config.relocateWorkingDirectory(newDir),
+      ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+      await expect(config.assertCanStartTurn()).rejects.toBeInstanceOf(
+        SessionWriterUnavailableError,
+      );
+      expect(lease.release).toHaveBeenCalledOnce();
+
+      chdirSpy.mockRestore();
+      cwdSpy.mockRestore();
+    });
+
+    it('relocateWorkingDirectory should fail closed when recorder rebind rollback fails', async () => {
+      const config = new Config(baseParams);
+      const lease = activateTestRecorder(config);
+      const oldDir = config.getTargetDir();
+      const newDir = path.resolve('/path/to/other');
+      const rebindError = new Error('/private/transcript/path was unavailable');
+      vi.mocked(lease.rebindTranscriptPath).mockRejectedValue(rebindError);
+      const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {});
+      const cwdSpy = vi
+        .spyOn(process, 'cwd')
+        .mockReturnValueOnce(oldDir)
+        .mockReturnValue(newDir);
+      vi.mocked(fs.existsSync).mockImplementation(
+        (pathToCheck) => pathToCheck.toString() === newDir,
+      );
+
+      await expect(
+        config.relocateWorkingDirectory(newDir),
+      ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+      await expect(config.assertCanStartTurn()).rejects.toBeInstanceOf(
+        SessionWriterUnavailableError,
+      );
+      expect(lease.rebindTranscriptPath).toHaveBeenCalledTimes(2);
+      expect(lease.release).toHaveBeenCalledOnce();
+
+      chdirSpy.mockRestore();
+      cwdSpy.mockRestore();
+    });
+
+    it('relocateWorkingDirectory should reject and roll back when the final cwd differs from the expected path', async () => {
+      const config = new Config(baseParams);
+      const oldDir = config.getTargetDir();
+      const newDir = path.resolve('/path/to/other');
+      const expectedDir = path.resolve('/path/to/confirmed');
+      const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+        // Keep the test process in its original directory.
+      });
+      const cwdSpy = vi
+        .spyOn(process, 'cwd')
+        .mockReturnValueOnce(oldDir)
+        .mockReturnValue(newDir);
+
+      await expect(
+        config.relocateWorkingDirectory(newDir, expectedDir),
+      ).rejects.toThrow(
+        `Changed directory to ${newDir}, expected ${expectedDir}.`,
+      );
+
+      expect(chdirSpy).toHaveBeenCalledWith(newDir);
+      expect(chdirSpy).toHaveBeenCalledWith(oldDir);
+      expect(config.getTargetDir()).toBe(oldDir);
+      expect(config.storage.getProjectRoot()).toBe(oldDir);
+
+      chdirSpy.mockRestore();
+      cwdSpy.mockRestore();
+    });
+
+    it('relocateWorkingDirectory should reject before mutating config when include directories are stale', async () => {
+      const staleIncludeDir = path.resolve('/path/to/stale-include');
+      const config = new Config({
+        ...baseParams,
+        includeDirectories: [staleIncludeDir],
+      });
+      const oldDir = config.getTargetDir();
+      const newDir = path.resolve('/path/to/other');
+      const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+        // Keep the test process in its original directory.
+      });
+      const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(oldDir);
+      vi.mocked(fs.existsSync).mockImplementation(
+        (pathToCheck) => pathToCheck !== staleIncludeDir,
+      );
+
+      await expect(config.relocateWorkingDirectory(newDir)).rejects.toThrow(
+        `Directory does not exist: ${staleIncludeDir}`,
+      );
+
+      expect(chdirSpy).not.toHaveBeenCalled();
+      expect(config.getTargetDir()).toBe(oldDir);
+      expect(config.storage.getProjectRoot()).toBe(oldDir);
+      expect(config.getWorkspaceContext().getDirectories()[0]).toBe(oldDir);
+
+      chdirSpy.mockRestore();
+      cwdSpy.mockRestore();
+    });
+
+    it('relocateWorkingDirectory should return memory refresh failures after moving', async () => {
+      const config = new Config(baseParams);
+      const newDir = path.resolve('/path/to/other');
+      const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+        // Keep the test process in its original directory.
+      });
+      const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+      vi.mocked(loadServerHierarchicalMemory).mockRejectedValueOnce(
+        new Error('memory failed'),
+      );
+
+      const result = await config.relocateWorkingDirectory(newDir);
+
+      expect(config.getTargetDir()).toBe(newDir);
+      expect(result.memoryRefreshError).toEqual(new Error('memory failed'));
+
+      chdirSpy.mockRestore();
+      cwdSpy.mockRestore();
+    });
   });
 
   it('refreshHierarchicalMemory should include empty memory prompt when no managed auto-memory index exists', async () => {
@@ -4621,6 +5916,15 @@ describe('Server Config (config.ts)', () => {
     const config = new Config(paramsWithTelemetry);
 
     await config.shutdown();
+
+    expect(shutdownTelemetry).not.toHaveBeenCalled();
+  });
+
+  it('Config shutdown should preserve process telemetry for daemon session cleanup', async () => {
+    vi.mocked(isTelemetrySdkInitialized).mockReturnValue(true);
+    const config = new Config(baseParams);
+
+    await config.shutdown({ shutdownTelemetry: false });
 
     expect(shutdownTelemetry).not.toHaveBeenCalled();
   });

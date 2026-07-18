@@ -15,6 +15,24 @@ import {
   type ChatRecord,
 } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
+import type { SessionWriterLease } from './session-writer-lease.js';
+
+function createRecordingService(config: Config): ChatRecordingService {
+  const service = new ChatRecordingService(config);
+  const sessionId = config.getSessionId();
+  const transcriptPath = `/test/${sessionId}.jsonl`;
+  service.activate(
+    {
+      sessionId,
+      ownerId: 'test-owner',
+      appendJsonLine: (value: unknown) =>
+        jsonl.writeLine(transcriptPath, value),
+      release: vi.fn().mockResolvedValue(undefined),
+    } as unknown as SessionWriterLease,
+    config.getResumedSessionData(),
+  );
+  return service;
+}
 
 vi.mock('node:path');
 vi.mock('node:child_process');
@@ -78,7 +96,7 @@ describe('ChatRecordingService - recordParentSession', () => {
     vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
     vi.spyOn(fs, 'existsSync').mockReturnValue(false);
 
-    chatRecordingService = new ChatRecordingService(mockConfig);
+    chatRecordingService = createRecordingService(mockConfig);
 
     // writeLine is async; mockResolvedValue lets the writeChain settle on flush.
     vi.mocked(jsonl.writeLine).mockResolvedValue(undefined);

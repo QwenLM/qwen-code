@@ -558,6 +558,8 @@ interface SessionEntry {
    *  an originator clientId is known. Used by the session reaper to avoid
    *  killing sessions mid-prompt. */
   promptActive: boolean;
+  /** True while the ACP child is releasing this session's writer. */
+  closing?: boolean;
   /** Terminal error from the prior turn, cleared when the next turn starts. */
   turnError?: {
     message: string;
@@ -2881,6 +2883,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     entry: SessionEntry,
   ): void => {
     const info = channelInfoForEntry(entry);
+    if (entry.closing) {
+      throw new SessionBusyError(sessionId, `Session ${sessionId} is closing`);
+    }
     if (byId.get(sessionId) !== entry || !info || info.isDying) {
       throw new SessionNotFoundError(sessionId);
     }
@@ -3807,6 +3812,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
     const existing = byId.get(req.sessionId);
     if (existing) {
+      if (existing.closing) {
+        throw new SessionBusyError(
+          req.sessionId,
+          `Session ${req.sessionId} is closing`,
+        );
+      }
       existing.attachCount++;
       const clientId = registerClient(existing, req.clientId);
       if (req.approvalMode) {
@@ -3871,6 +3882,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         throw new SessionNotFoundError(
           restored.sessionId,
           'the agent child likely crashed during session restore — retry to restore the session',
+        );
+      }
+      if (entry.closing) {
+        entry.attachCount = Math.max(0, entry.attachCount - 1);
+        throw new SessionBusyError(
+          entry.sessionId,
+          `Session ${entry.sessionId} is closing`,
         );
       }
       // NOTE: do NOT bump entry.attachCount here — `createSessionEntry`
@@ -4037,6 +4055,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const racedEntry = byId.get(req.sessionId);
       if (racedEntry) {
         restoreEvents.close();
+        if (racedEntry.closing) {
+          throw new SessionBusyError(
+            req.sessionId,
+            `Session ${req.sessionId} is closing`,
+          );
+        }
         // Self + any coalescers we accumulated while the restore was
         // in flight. Coalescers must not bump attachCount themselves
         // (they read it off the registered entry on the next tick).
@@ -4230,6 +4254,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   ): Promise<void> {
     const entry = byId.get(sessionId);
     if (!entry) throw new SessionNotFoundError(sessionId);
+    if (entry.closing) {
+      throw new SessionBusyError(sessionId, `Session ${sessionId} is closing`);
+    }
     let originatorClientId: string | undefined;
     if (context?.clientId !== undefined) {
       originatorClientId = resolveTrustedClientId(entry, context.clientId);
@@ -4242,12 +4269,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ? ` by client ${JSON.stringify(originatorClientId)}`
           : ''),
     );
-    telemetry.event('session.close', {
-      'qwen-code.daemon.bridge.operation': 'session.close',
-      'session.id': sessionId,
-      'session.close.reason': reason,
-    });
-    if (defaultEntry === entry) defaultEntry = undefined;
+    entry.closing = true;
     // HAZARD: Resolve the channel via `channelInfoForEntry(entry)` (search
     // `aliveChannels` for the entry's actual channel) instead of the
     // module-scoped `channelInfo` (the CURRENT attach target). The two
@@ -4267,19 +4289,40 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
     }
     const requireAgentClose = closeOpts?.requireAgentClose === true;
-    if (requireAgentClose) {
+    try {
+      try {
+        await entry.connection.cancel({ sessionId });
+      } catch {
+        // No active prompt, or it already settled. The child close below is
+        // still authoritative for draining and releasing the recorder.
+      }
       await notifyAgentSessionClose(entry, ci, 'closeSession', {
         throwOnFailure: true,
-        requireFlush: true,
+        requireFlush: requireAgentClose,
       });
+    } catch (error) {
+      // `withTimeout` does not cancel the in-flight close RPC. A timeout
+      // therefore leaves ownership uncertain: the child may still release its
+      // writer after this call rejects. Keep the bridge entry fail-closed so a
+      // new prompt or attach cannot overlap that late completion. A definite
+      // child rejection proves the writer was retained and remains retryable.
+      if (!(error instanceof BridgeTimeoutError)) {
+        entry.closing = false;
+      }
+      throw error;
     }
+    telemetry.event('session.close', {
+      'qwen-code.daemon.bridge.operation': 'session.close',
+      'session.id': sessionId,
+      'session.close.reason': reason,
+    });
+    if (defaultEntry === entry) defaultEntry = undefined;
     if (ci && ci.channel === entry.channel) {
       ci.sessionIds.delete(sessionId);
     }
-    // For normal close, tombstone + event publish + bus close run before the
-    // best-effort agent notification. Strict archive close is different: the
-    // agent flush must succeed before bridge state is removed, so a failed
-    // archive close can be retried against the same live session.
+    // The agent must release its recorder before bridge state is removed so a
+    // failed close can be retried against the same live session. Archive/delete
+    // additionally require a healthy flush before the release above.
     permissionMediator.forgetSession(sessionId);
     entry.pendingPermissionIds.clear();
     entry.pendingInteractions.clear();
@@ -4320,22 +4363,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // `session_closed` is terminal. Close the bus before ACP cancel so any
     // late cancellation frames from the agent are intentionally dropped.
     entry.events.close();
-    if (!requireAgentClose) {
-      await notifyAgentSessionClose(entry, ci, 'closeSession');
-    }
-    try {
-      await telemetry.withSpan(
-        'session.close.cancel_active_prompt',
-        {
-          'qwen-code.daemon.bridge.operation':
-            'session.close.cancel_active_prompt',
-          'session.id': sessionId,
-        },
-        async () => await entry.connection.cancel({ sessionId }),
-      );
-    } catch {
-      /* no active prompt or session already torn down */
-    }
     if (ci && hasNoChannelWork(ci)) {
       await reapPendingEmptyChannel(ci);
       if (!ci.isDying) {
@@ -4497,6 +4524,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (effectiveScope === 'single') {
         const existing = defaultEntry;
         if (existing) {
+          if (existing.closing) {
+            throw new SessionBusyError(
+              existing.sessionId,
+              `Session ${existing.sessionId} is closing`,
+            );
+          }
           // BRSCi: bump attach counter BEFORE any await so the
           // spawn-owner's disconnect reaper (server.ts:
           // `requireZeroAttaches: true`) sees this attach even when
@@ -4591,6 +4624,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             throw new SessionNotFoundError(
               session.sessionId,
               'the agent child likely crashed during initialization — retry to spawn a new session',
+            );
+          }
+          if (attachedEntry.closing) {
+            throw new SessionBusyError(
+              attachedEntry.sessionId,
+              `Session ${attachedEntry.sessionId} is closing`,
             );
           }
           const clientId = registerClient(attachedEntry, req.clientId);
@@ -4692,6 +4731,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const queuedAt = Date.now();
       const entry = byId.get(sessionId);
       if (!entry) return Promise.reject(new SessionNotFoundError(sessionId));
+      if (entry.closing) {
+        throw new SessionBusyError(
+          sessionId,
+          `Session ${sessionId} is closing`,
+        );
+      }
       const originatorClientId = resolveTrustedClientId(
         entry,
         context?.clientId,
@@ -7468,6 +7513,36 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry.spawnOwnerWantedKill = true;
         return false;
       }
+      if (entry.closing) {
+        throw new SessionBusyError(
+          sessionId,
+          `Session ${sessionId} is closing`,
+        );
+      }
+      entry.closing = true;
+      const ci = channelInfoForEntry(entry);
+      if (!ci) {
+        writeStderrLine(
+          `qwen serve: killSession channelInfoForEntry returned undefined ` +
+            `for session ${JSON.stringify(sessionId)} — channel cleanup skipped (entry's channel already torn down)`,
+        );
+      }
+      try {
+        try {
+          await entry.connection.cancel({ sessionId });
+        } catch {
+          // No active prompt, or it already settled. The child close below is
+          // still authoritative for draining and releasing the recorder.
+        }
+        await notifyAgentSessionClose(entry, ci, 'killSession', {
+          throwOnFailure: true,
+        });
+      } catch (error) {
+        if (!(error instanceof BridgeTimeoutError)) {
+          entry.closing = false;
+        }
+        throw error;
+      }
       // Mediator-driven cancel cascade. Must run BEFORE byId.delete so
       // the mediator's emit callback can still reach entry.events via
       // byId.get(sessionId) (same order as closeSession).
@@ -7494,28 +7569,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // session leaves — other sessions on the same channel keep
       // running.
       //
-      // HAZARD: Same channel-overlap fix as in `closeSession` above.
-      // `channelInfoForEntry(entry)` returns the entry's actual
-      // channel rather than the module-scoped `channelInfo` (current
-      // attach target), preventing the "kill operates on the freshly-
-      // spawned channel B instead of the dying channel A" cascade
-      // during the overlap window. The regression test is single-channel
-      // smoke only and WILL NOT fail if this reverts to module-scoped
-      // channelInfo. Keep `channelInfoForEntry(entry)` until a
-      // deterministic overlap test lands.
-      const ci = channelInfoForEntry(entry);
-      if (!ci) {
-        // Same diagnostic as `closeSession` — when the entry's channel
-        // is already gone, the cleanup below short-circuits silently.
-        writeStderrLine(
-          `qwen serve: killSession channelInfoForEntry returned undefined ` +
-            `for session ${JSON.stringify(sessionId)} — channel cleanup skipped (entry's channel already torn down)`,
-        );
-      }
       if (ci && ci.channel === entry.channel) {
         ci.sessionIds.delete(sessionId);
       }
-      await notifyAgentSessionClose(entry, ci, 'killSession');
       // Tombstone the killed sessionId so any in-flight
       // `extNotification` from the (about-to-be-killed) child can't
       // seed the early-event buffer for a subsequent load/resume of

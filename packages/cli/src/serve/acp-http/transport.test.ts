@@ -192,6 +192,7 @@ class FakeBridge {
   }
 
   loadShouldThrow = false;
+  loadError: unknown;
 
   async loadSession(req: {
     sessionId: string;
@@ -199,6 +200,7 @@ class FakeBridge {
     clientId?: string;
   }) {
     this.loadRequests.push(req);
+    if (this.loadError) throw this.loadError;
     if (this.loadShouldThrow) throw new Error('load failed');
     if (this.gate) await this.gate;
     return {
@@ -4155,6 +4157,45 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(frame.error.code).toBe(-32603);
   });
 
+  it.each([
+    ['session_writer_conflict', -32012],
+    ['session_writer_lost', -32013],
+    ['session_transcript_changed', -32014],
+    ['session_writer_unavailable', -32015],
+  ] as const)(
+    'session/load preserves %s as a safe structured error',
+    async (errorKind, code) => {
+      bridge.loadError = Object.assign(new Error('/private/path leaked'), {
+        code,
+        data: { errorKind, details: 'pid=123 host=secret' },
+      });
+      const connId = await initialize();
+      const connStream = await openStream(connId);
+      const got = takeFrames(connStream, 1);
+      await new Promise((r) => setTimeout(r, 50));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 31,
+        method: 'session/load',
+        params: { sessionId: 'x' },
+      });
+      const [frame] = (await got) as Array<{
+        id: number;
+        error: {
+          code: number;
+          message: string;
+          data: Record<string, unknown>;
+        };
+      }>;
+      expect(frame).toMatchObject({
+        id: 31,
+        error: { code, data: { errorKind } },
+      });
+      expect(frame.error.message).not.toContain('/private/path');
+      expect(frame.error.data).not.toHaveProperty('details');
+    },
+  );
+
   it('connection teardown detaches the session client from the bridge', async () => {
     const connId = await initialize();
     await newSession(connId);
@@ -4542,7 +4583,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
-  it('session/close runs local cleanup even if the bridge close throws', async () => {
+  it('session/close keeps local ownership when the bridge close throws', async () => {
     bridge.closeShouldThrow = true;
     const connId = await initialize();
     await newSession(connId); // creates + owns sess-1
@@ -4555,9 +4596,20 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
     await new Promise((r) => setTimeout(r, 50));
     expect(bridge.closedSessions).toContain('sess-1'); // bridge was called (then threw)
-    // Local teardown ran in `finally` despite the throw → session unowned now.
+    // The bridge still owns the child writer, so the connection must retain
+    // ownership and its binding to make a close retry possible.
     const after = await openStream(connId, 'sess-1');
-    expect(after.status).toBe(403);
+    expect(after.status).toBe(200);
+
+    bridge.closeShouldThrow = false;
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 47,
+      method: 'session/close',
+      params: { sessionId: 'sess-1' },
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(bridge.closedSessions).toEqual(['sess-1', 'sess-1']);
   });
 
   it('connection cap → 503 on initialize', async () => {

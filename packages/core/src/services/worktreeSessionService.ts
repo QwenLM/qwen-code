@@ -321,6 +321,7 @@ async function getRuntimeStatusPathState(
   if (!status || status.sessionId !== sessionId) {
     return 'missing';
   }
+  if (!status.active) return 'dead';
 
   if (status.hostname !== os.hostname()) {
     return 'active';

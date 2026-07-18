@@ -774,6 +774,7 @@ export function mountAcpHttp(
     opts.sessionShellCommandEnabled === true,
     registry,
     opts.archiveCoordinator ?? new SessionArchiveCoordinator(),
+    opts.workspaceRegistry?.primary.runtimeBaseDir,
   );
   dispatcherRef.current = dispatcher;
 
@@ -1234,6 +1235,7 @@ export function mountAcpHttp(
       opts.sessionShellCommandEnabled === true,
       secondaryRegistry,
       opts.archiveCoordinator ?? new SessionArchiveCoordinator(),
+      rt.runtimeBaseDir,
     );
     secondaryDispatcherRef.current = secondaryDispatcher;
     return {

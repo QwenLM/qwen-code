@@ -25,6 +25,7 @@ const CONTENT_RETRY_FAILURE_COUNT = `${SERVICE_NAME}.chat.content_retry_failure.
 // call sites. Tagged by `model` so operators can graph per-model retry rate.
 const API_RETRY_COUNT = `${SERVICE_NAME}.api.retry.count`;
 const MODEL_SLASH_COMMAND_CALL_COUNT = `${SERVICE_NAME}.slash_command.model.call_count`;
+const SESSION_WRITER_EVENT_COUNT = `${SERVICE_NAME}.session.writer.event.count`;
 export const SUBAGENT_EXECUTION_COUNT = `${SERVICE_NAME}.subagent.execution.count`;
 
 // Arena Metrics
@@ -372,6 +373,7 @@ let contentRetryFailureCounter: Counter | undefined;
 let apiRetryCounter: Counter | undefined;
 let subagentExecutionCounter: Counter | undefined;
 let modelSlashCommandCallCounter: Counter | undefined;
+let sessionWriterEventCounter: Counter | undefined;
 
 // Performance Monitoring Metrics
 let startupTimeHistogram: Histogram | undefined;
@@ -409,6 +411,21 @@ export function getMeter(): Meter | undefined {
     cliMeter = metrics.getMeter(SERVICE_NAME);
   }
   return cliMeter;
+}
+
+export function recordSessionWriterEvent(
+  event: 'conflict' | 'stale_reclaim' | 'writer_lost' | 'transcript_changed',
+): void {
+  const meter = getMeter();
+  if (!meter) return;
+  sessionWriterEventCounter ??= meter.createCounter(
+    SESSION_WRITER_EVENT_COUNT,
+    {
+      description: 'Counts session writer lease and fencing outcomes.',
+      valueType: ValueType.INT,
+    },
+  );
+  sessionWriterEventCounter.add(1, { event });
 }
 
 export function initializeMetrics(config: TelemetryRuntimeConfig): void {

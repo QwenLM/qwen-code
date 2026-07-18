@@ -178,4 +178,18 @@ describe('Config sessionEnvClaimed guard', () => {
     expect(process.env['QWEN_CODE_SESSION_ID']).toBe('new-session-uuid-123');
     expect(process.env['QWEN_CODE_SESSION_ID']).not.toBe(originalSessionId);
   });
+
+  it('a later Config cannot update the process env during a session switch', async () => {
+    const { Config } = await import('./config.js');
+    const firstConfig = new Config({ ...baseParams });
+    const firstSessionId = firstConfig.getSessionId();
+    const secondConfig = new Config({
+      ...baseParams,
+      sessionId: 'secondary-session-id',
+    });
+
+    secondConfig.startNewSession('secondary-next-session-id');
+
+    expect(process.env['QWEN_CODE_SESSION_ID']).toBe(firstSessionId);
+  });
 });

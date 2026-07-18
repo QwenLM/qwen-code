@@ -7,7 +7,7 @@
 import express from 'express';
 import type { Application } from 'express';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
-import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core';
+import { hashDaemonWorkspace, Storage } from '@qwen-code/qwen-code-core';
 import type { DaemonLogger } from './daemon-logger.js';
 import type {
   DaemonMetricsBucket,
@@ -882,6 +882,7 @@ export function createServeApp(
       {
         workspaceId: hashDaemonWorkspace(boundWorkspace),
         workspaceCwd: boundWorkspace,
+        runtimeBaseDir: Storage.getRuntimeBaseDir(),
         primary: true,
         trusted: deps.primaryWorkspaceTrusted ?? false,
         env: primaryRuntimeEnvMetadata ?? {
@@ -1551,6 +1552,7 @@ export function createServeApp(
   // get UNBOUND tasks (shared-owner firing) instead.
   registerScheduledTasksRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
+    runtimeBaseDir: primaryRuntime.runtimeBaseDir,
     mutate,
     safeBody,
     bridge: deps.manageScheduledTaskSessions ? bridge : undefined,
@@ -1597,13 +1599,11 @@ export function createServeApp(
     // restart (a bound task fires only in its own session, which nothing else
     // reloads). Fire-and-forget so it never delays the server coming up; a
     // no-op when there are no bound tasks. Deliberately not awaited.
-    const rehydrateWorkspace = (
-      taskBridge: AcpSessionBridge,
-      workspaceCwd: string,
-    ) => {
+    const rehydrateWorkspace = (runtime: WorkspaceRuntime) => {
       void rehydrateScheduledTaskSessions({
-        bridge: taskBridge,
-        boundWorkspace: workspaceCwd,
+        bridge: runtime.bridge,
+        boundWorkspace: runtime.workspaceCwd,
+        runtimeBaseDir: runtime.runtimeBaseDir,
         onError: (sessionId, err) => {
           process.stderr.write(
             `qwen serve: failed to rehydrate scheduled-task session ${sessionId}: ${
@@ -1636,9 +1636,10 @@ export function createServeApp(
       const keepalive = startScheduledTaskKeepalive({
         bridge: runtime.bridge,
         boundWorkspace: runtime.workspaceCwd,
+        runtimeBaseDir: runtime.runtimeBaseDir,
         intervalMs: keepaliveIntervalMs,
       });
-      rehydrateWorkspace(runtime.bridge, runtime.workspaceCwd);
+      rehydrateWorkspace(runtime);
       keepaliveStops.set(runtime.workspaceCwd, keepalive.stop);
     };
     for (const runtime of workspaceRegistry.list()) {

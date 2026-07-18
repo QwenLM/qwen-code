@@ -31,4 +31,40 @@ describe('runWithAcpRuntimeOutputDir', () => {
 
     expect(Storage.getRuntimeBaseDir()).toBe(Storage.getGlobalQwenDir());
   });
+
+  it('isolates concurrent workspace runtime directories across awaits', async () => {
+    const cwdA = path.resolve('workspace', 'project-a');
+    const cwdB = path.resolve('workspace', 'project-b');
+    const settingsA = {
+      merged: { advanced: { runtimeOutputDir: '.runtime-a' } },
+    } as LoadedSettings;
+    const settingsB = {
+      merged: { advanced: { runtimeOutputDir: '.runtime-b' } },
+    } as LoadedSettings;
+    let arrivals = 0;
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const waitForBoth = async () => {
+      arrivals++;
+      if (arrivals === 2) release();
+      await barrier;
+    };
+
+    await Promise.all([
+      runWithAcpRuntimeOutputDir(settingsA, cwdA, async () => {
+        const storage = new Storage(cwdA);
+        await waitForBoth();
+        expect(Storage.getRuntimeBaseDir()).toBe(path.join(cwdA, '.runtime-a'));
+        expect(storage.getRuntimeBaseDir()).toBe(path.join(cwdA, '.runtime-a'));
+      }),
+      runWithAcpRuntimeOutputDir(settingsB, cwdB, async () => {
+        const storage = new Storage(cwdB);
+        await waitForBoth();
+        expect(Storage.getRuntimeBaseDir()).toBe(path.join(cwdB, '.runtime-b'));
+        expect(storage.getRuntimeBaseDir()).toBe(path.join(cwdB, '.runtime-b'));
+      }),
+    ]);
+  });
 });
