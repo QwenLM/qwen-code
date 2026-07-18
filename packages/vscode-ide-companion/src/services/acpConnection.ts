@@ -526,10 +526,7 @@ export class AcpConnection {
         cwd,
         mcpServers: [],
       });
-      logger.log(
-        '[ACP] Session load succeeded. Response:',
-        JSON.stringify(response),
-      );
+      logger.log('[ACP] Session load succeeded. Response:', response);
       this.sessionId = sessionId;
       return response;
     } catch (error) {

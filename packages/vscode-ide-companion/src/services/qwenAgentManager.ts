@@ -1088,7 +1088,7 @@ export class QwenAgentManager {
       );
       logger.log(
         '[QwenAgentManager] Session load succeeded. Response:',
-        JSON.stringify(response).substring(0, 200),
+        response,
       );
       this.applySessionStateFromResult(response);
       this.restoreBaselineSessionStateAfterLoad(response);
@@ -1271,7 +1271,7 @@ export class QwenAgentManager {
           newSessionResult = await this.connection.newSession(workingDir);
           logger.log(
             '[QwenAgentManager] newSession returned:',
-            JSON.stringify(newSessionResult, null, 2),
+            newSessionResult,
           );
         } catch (err) {
           const requiresAuth = isAuthenticationRequiredError(err);
