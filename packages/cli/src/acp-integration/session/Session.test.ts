@@ -3636,27 +3636,29 @@ describe('Session', () => {
       }
     });
 
-    it('ignores unsafe ACP text @ paths before reading files', async () => {
+    it('ignores non-image and relative ACP text @ paths', async () => {
       const tempDir = await fs.mkdtemp(
         path.join(os.tmpdir(), 'qwen-acp-paths-'),
       );
       const outsideDir = await fs.mkdtemp(
         path.join(os.tmpdir(), 'qwen-acp-outside-'),
       );
-      const outsidePath = path.join(outsideDir, 'secret.txt');
-      await fs.writeFile(path.join(tempDir, 'allowed.txt'), 'ok');
+      const textPath = path.join(tempDir, 'notes.txt');
+      const relativeImagePath = 'relative.png';
+      const outsidePath = path.join(outsideDir, 'outside.png');
+      const ignoredPath = path.join(tempDir, 'ignored.png');
+      await fs.writeFile(textPath, 'notes');
+      await fs.writeFile(path.join(tempDir, relativeImagePath), 'image');
       await fs.mkdir(path.join(tempDir, 'dir'));
-      await fs.writeFile(path.join(tempDir, 'ignored.txt'), 'ignored');
-      await fs.writeFile(outsidePath, 'secret');
+      await fs.writeFile(ignoredPath, 'ignored');
+      await fs.writeFile(outsidePath, 'outside');
       mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
       mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
         isPathWithinWorkspace: (pathSpec: string) =>
           path.resolve(tempDir, pathSpec).startsWith(`${tempDir}${path.sep}`),
       });
       const fileService = {
-        shouldIgnoreFile: vi.fn(
-          (pathSpec: string) => pathSpec === 'ignored.txt',
-        ),
+        shouldIgnoreFile: vi.fn((pathSpec: string) => pathSpec === ignoredPath),
       };
       mockConfig.getFileService = vi.fn().mockReturnValue(fileService);
       mockConfig.getFileFilteringOptions = vi.fn().mockReturnValue({
@@ -3679,15 +3681,12 @@ describe('Session', () => {
           prompt: [
             {
               type: 'text',
-              text: `read @allowed.txt @dir @${outsidePath} @ignored.txt`,
+              text: `read @${textPath} @${relativeImagePath} @${path.join(tempDir, 'dir')} @${outsidePath} @${ignoredPath}`,
             },
           ],
         });
 
-        expect(readManyFilesSpy).toHaveBeenCalledWith(mockConfig, {
-          paths: ['allowed.txt'],
-          signal: expect.any(AbortSignal),
-        });
+        expect(readManyFilesSpy).not.toHaveBeenCalled();
       } finally {
         readManyFilesSpy.mockRestore();
         await fs.rm(tempDir, { recursive: true, force: true });

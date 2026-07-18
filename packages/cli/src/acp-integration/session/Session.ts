@@ -64,6 +64,7 @@ import {
   getErrorStatus,
   UserPromptEvent,
   readManyFiles,
+  getSpecificMimeType,
   clampInlineMediaPart,
   Storage,
   ToolNames,
@@ -5968,6 +5969,8 @@ export class Session implements SessionContext {
             );
             const filteringOptions = this.config.getFileFilteringOptions();
             if (
+              path.isAbsolute(pathSpec) &&
+              getSpecificMimeType(resolved)?.startsWith('image/') &&
               existsSync(resolved) &&
               statSync(resolved).isFile() &&
               this.config
