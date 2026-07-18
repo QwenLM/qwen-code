@@ -158,6 +158,95 @@ describe('classifyCi — a skipped check is not a passing check', () => {
   });
 });
 
+// A name's runs supersede each other: the routing workflows re-dispatch a name
+// several times per commit and cancel the displaced runs, and a flaky job
+// re-run to green leaves its failed attempt behind. Failure used to be judged
+// per RUN, so any one leftover pushed its name into `failedCheckNames` — two
+// real reviews were downgraded from Approve over exactly that (`route` at
+// #7150; route, review-pr, review-config and four more at #7171), each on a
+// commit whose every live check was green on the PR page.
+describe('classifyCi — a superseded run does not outvote the latest verdict', () => {
+  const at = (
+    name: string,
+    conclusion: string | null,
+    completed_at: string | null,
+    status = 'completed',
+  ) => ({ name, status, conclusion, completed_at });
+
+  it('a cancelled run displaced by a later success is not a failure — the #7150/#7171 false alarm', () => {
+    const got = classifyCi(
+      [
+        at('route', 'success', '2026-07-18T15:30:00Z'),
+        at('route', 'cancelled', '2026-07-18T15:10:00Z'),
+        at('route', 'success', '2026-07-18T15:20:00Z'),
+      ],
+      [],
+    );
+    expect(got.failedCheckNames).toEqual([]);
+    expect(got.class).toBe('all_pass');
+  });
+
+  it('a flaky job re-run to green is green — the failed attempt is history', () => {
+    const got = classifyCi(
+      [
+        at(
+          'Test (ubuntu-latest, Node 22.x)',
+          'failure',
+          '2026-07-18T10:00:00Z',
+        ),
+        at(
+          'Test (ubuntu-latest, Node 22.x)',
+          'success',
+          '2026-07-18T11:00:00Z',
+        ),
+      ],
+      [],
+    );
+    expect(got.class).toBe('all_pass');
+  });
+
+  it('a re-run that FAILS after a success is a failure — latest wins both ways', () => {
+    const got = classifyCi(
+      [
+        at('Test', 'success', '2026-07-18T10:00:00Z'),
+        at('Test', 'failure', '2026-07-18T11:00:00Z'),
+      ],
+      [],
+    );
+    expect(got.class).toBe('any_failure');
+    expect(got.failedCheckNames).toEqual(['Test']);
+  });
+
+  it('a name whose ONLY run was cancelled still fails — nothing superseded it', () => {
+    const got = classifyCi(
+      [at('E2E', 'cancelled', '2026-07-18T10:00:00Z')],
+      [],
+    );
+    expect(got.class).toBe('any_failure');
+    expect(got.failedCheckNames).toEqual(['E2E']);
+  });
+
+  it('a later skipped re-dispatch does not erase a real failure — skips are not verdicts', () => {
+    const got = classifyCi(
+      [
+        at('Test', 'failure', '2026-07-18T10:00:00Z'),
+        at('Test', 'skipped', '2026-07-18T11:00:00Z'),
+      ],
+      [],
+    );
+    expect(got.class).toBe('any_failure');
+    expect(got.failedCheckNames).toEqual(['Test']);
+  });
+
+  it('with no timestamps at all, the first-listed run keeps the name — the API lists newest first', () => {
+    const got = classifyCi(
+      [at('route', 'success', null), at('route', 'cancelled', null)],
+      [],
+    );
+    expect(got.class).toBe('all_pass');
+  });
+});
+
 const {
   ghMock,
   ghApiMock,
