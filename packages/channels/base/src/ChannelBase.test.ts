@@ -8631,7 +8631,8 @@ describe('ChannelBase', () => {
       const log = String(writeSpy.mock.calls[0]?.[0]);
       expect(log).toContain('channel memory read failed');
       expect(log).toContain('chat=chat1');
-      expect(log).toContain('EIO\\n');
+      expect(log).toContain('entry listing failed');
+      expect(log).not.toContain('EIO');
       expect(log).not.toContain('ship it');
       expect(log.length).toBeLessThan(350);
       writeSpy.mockRestore();
@@ -8873,7 +8874,7 @@ describe('ChannelBase', () => {
       expect(promptMock.mock.calls[1]![1]).toBe('[User 1] second');
     });
 
-    it('recomputes recall from the latest entry snapshot on every normal turn', async () => {
+    it('recomputes recall on every normal turn without a revision callback', async () => {
       const first = { id: 'm-a31f0d82c7e4', text: 'Use staging.' };
       const second = { id: 'm-b82c4e190a6f', text: 'Use production.' };
       const channelMemory = createChannelMemory();
@@ -8895,6 +8896,208 @@ describe('ChannelBase', () => {
       expect(channelMemory.readChannelMemory).not.toHaveBeenCalled();
     });
 
+    it('reuses a prepared recall index while the memory revision is unchanged', async () => {
+      const relevant = { id: 'm-a31f0d82c7e4', text: 'Use staging.' };
+      const channelMemory = {
+        ...createChannelMemory([relevant]),
+        getChannelMemoryRevision: vi.fn().mockResolvedValue('revision-1'),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(envelope({ text: 'deploy', senderId: 'alice' }));
+      await ch.handleInbound(envelope({ text: 'deploy', senderId: 'alice' }));
+
+      expect(channelMemory.listChannelMemoryEntries).toHaveBeenCalledTimes(1);
+      expect(channelMemory.getChannelMemoryRevision).toHaveBeenCalledTimes(3);
+      const promptMock = bridge.prompt as ReturnType<typeof vi.fn>;
+      expect(promptMock.mock.calls[0]![1]).toContain(
+        relevantChannelMemoryPrompt([relevant]),
+      );
+      expect(promptMock.mock.calls[1]![1]).toContain(
+        relevantChannelMemoryPrompt([relevant]),
+      );
+    });
+
+    it('rebuilds the recall index when the memory revision changes', async () => {
+      const first = { id: 'm-a31f0d82c7e4', text: 'Use staging.' };
+      const second = { id: 'm-b82c4e190a6f', text: 'Use production.' };
+      const channelMemory = {
+        ...createChannelMemory(),
+        getChannelMemoryRevision: vi
+          .fn()
+          .mockResolvedValueOnce('revision-1')
+          .mockResolvedValueOnce('revision-1')
+          .mockResolvedValueOnce('revision-2')
+          .mockResolvedValueOnce('revision-2'),
+      };
+      channelMemory.listChannelMemoryEntries
+        .mockResolvedValueOnce([first])
+        .mockResolvedValueOnce([second]);
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(envelope({ text: 'deploy', senderId: 'alice' }));
+      await ch.handleInbound(envelope({ text: 'deploy', senderId: 'alice' }));
+
+      expect(channelMemory.listChannelMemoryEntries).toHaveBeenCalledTimes(2);
+      const promptMock = bridge.prompt as ReturnType<typeof vi.fn>;
+      expect(promptMock.mock.calls[0]![1]).toContain(
+        relevantChannelMemoryPrompt([first]),
+      );
+      expect(promptMock.mock.calls[1]![1]).toContain(
+        relevantChannelMemoryPrompt([second]),
+      );
+    });
+
+    it('keeps cached recall indexes isolated by exact chat and thread target', async () => {
+      const channelMemory = {
+        ...createChannelMemory(),
+        getChannelMemoryRevision: vi.fn().mockResolvedValue('shared-revision'),
+      };
+      channelMemory.listChannelMemoryEntries.mockImplementation(
+        async (target: { chatId: string; threadId?: string }) => [
+          {
+            id: `m-${target.threadId ?? target.chatId}`,
+            text: `${target.chatId}:${target.threadId ?? 'root'} deployment`,
+          },
+        ],
+      );
+      const ch = createChannel(
+        { senderPolicy: 'open', sessionScope: 'thread' },
+        { channelMemory },
+      );
+
+      await ch.handleInbound(
+        envelope({ text: 'deployment', chatId: 'chat-a' }),
+      );
+      await ch.handleInbound(
+        envelope({ text: 'deployment', chatId: 'chat-a', threadId: 'topic-a' }),
+      );
+
+      expect(channelMemory.listChannelMemoryEntries).toHaveBeenCalledTimes(2);
+      const promptMock = bridge.prompt as ReturnType<typeof vi.fn>;
+      expect(promptMock.mock.calls[0]![1]).toContain('chat-a:root deployment');
+      expect(promptMock.mock.calls[0]![1]).not.toContain('topic-a');
+      expect(promptMock.mock.calls[1]![1]).toContain(
+        'chat-a:topic-a deployment',
+      );
+      expect(promptMock.mock.calls[1]![1]).not.toContain(
+        'chat-a:root deployment',
+      );
+    });
+
+    it('bounds prepared recall indexes across many memory targets', async () => {
+      const channelMemory = {
+        ...createChannelMemory(),
+        getChannelMemoryRevision: vi.fn().mockResolvedValue('revision-1'),
+      };
+      const ch = createChannel({ senderPolicy: 'open' }, { channelMemory });
+
+      for (let index = 0; index < 129; index += 1) {
+        await ch.handleInbound(
+          envelope({ text: 'deployment', chatId: `chat-${index}` }),
+        );
+      }
+
+      const cache = (
+        ch as unknown as {
+          channelMemoryRecallCache: Map<string, unknown>;
+        }
+      ).channelMemoryRecallCache;
+      expect(cache.size).toBe(128);
+      expect(cache.has(JSON.stringify(['test-chan', 'chat-0', null]))).toBe(
+        false,
+      );
+      expect(cache.has(JSON.stringify(['test-chan', 'chat-128', null]))).toBe(
+        true,
+      );
+    });
+
+    it('falls back to uncached recall when revision lookup fails', async () => {
+      const relevant = { id: 'm-a31f0d82c7e4', text: 'Use staging.' };
+      const channelMemory = {
+        ...createChannelMemory([relevant]),
+        getChannelMemoryRevision: vi
+          .fn()
+          .mockRejectedValue(new Error('revision unavailable')),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(envelope({ text: 'deploy', senderId: 'alice' }));
+      await ch.handleInbound(envelope({ text: 'deploy', senderId: 'alice' }));
+
+      expect(channelMemory.listChannelMemoryEntries).toHaveBeenCalledTimes(2);
+      expect(bridge.prompt).toHaveBeenCalledTimes(2);
+      const promptMock = bridge.prompt as ReturnType<typeof vi.fn>;
+      expect(promptMock.mock.calls[0]![1]).toContain(
+        relevantChannelMemoryPrompt([relevant]),
+      );
+      expect(promptMock.mock.calls[1]![1]).toContain(
+        relevantChannelMemoryPrompt([relevant]),
+      );
+    });
+
+    it('reloads a snapshot whose revision changes while it is read', async () => {
+      const stale = { id: 'm-a31f0d82c7e4', text: 'Use staging.' };
+      const fresh = { id: 'm-b82c4e190a6f', text: 'Use production.' };
+      const channelMemory = {
+        ...createChannelMemory(),
+        getChannelMemoryRevision: vi
+          .fn()
+          .mockResolvedValueOnce('revision-1')
+          .mockResolvedValueOnce('revision-2')
+          .mockResolvedValue('revision-2'),
+      };
+      channelMemory.listChannelMemoryEntries
+        .mockResolvedValueOnce([stale])
+        .mockResolvedValueOnce([fresh]);
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(envelope({ text: 'deploy', senderId: 'alice' }));
+      await ch.handleInbound(envelope({ text: 'deploy', senderId: 'alice' }));
+
+      const promptMock = bridge.prompt as ReturnType<typeof vi.fn>;
+      expect(promptMock.mock.calls[0]![1]).toContain(
+        relevantChannelMemoryPrompt([fresh]),
+      );
+      expect(promptMock.mock.calls[0]![1]).not.toContain('Use staging.');
+      expect(promptMock.mock.calls[1]![1]).toContain(
+        relevantChannelMemoryPrompt([fresh]),
+      );
+      expect(channelMemory.listChannelMemoryEntries).toHaveBeenCalledTimes(2);
+    });
+
+    it('invalidates a cached index after a successful local mutation', async () => {
+      let entries: ChannelMemoryEntry[] = [
+        { id: 'm-old000000001', text: 'old memory' },
+      ];
+      const channelMemory = {
+        ...createChannelMemory(),
+        getChannelMemoryRevision: vi.fn().mockResolvedValue('revision-1'),
+      };
+      channelMemory.listChannelMemoryEntries.mockImplementation(
+        async () => entries,
+      );
+      channelMemory.addChannelMemoryEntries.mockImplementation(
+        async (_target: unknown, texts: readonly string[]) => {
+          entries = [{ id: 'm-a31f0d82c7e4', text: texts[0]! }];
+          return { changed: true, added: entries, duplicateIds: [] };
+        },
+      );
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(envelope({ text: 'old', senderId: 'alice' }));
+      await ch.handleInbound(
+        envelope({ text: '记住：new memory', senderId: 'alice' }),
+      );
+      await ch.handleInbound(envelope({ text: 'new', senderId: 'alice' }));
+
+      expect(channelMemory.listChannelMemoryEntries).toHaveBeenCalledTimes(2);
+      const latestPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1]![1] as string;
+      expect(latestPrompt).toContain(relevantChannelMemoryPrompt(entries));
+      expect(latestPrompt).not.toContain('old memory');
+    });
+
     it('rejects a pending normal recall snapshot invalidated by a same-target mutation', async () => {
       let resolveFirstRead: (value: ChannelMemoryEntry[]) => void = () => {};
       const firstRead = new Promise<ChannelMemoryEntry[]>((resolve) => {
@@ -8903,7 +9106,10 @@ describe('ChannelBase', () => {
       let entries: ChannelMemoryEntry[] = [
         { id: 'm-a31f0d82c7e4', text: 'Use staging.' },
       ];
-      const channelMemory = createChannelMemory();
+      const channelMemory = {
+        ...createChannelMemory(),
+        getChannelMemoryRevision: vi.fn().mockResolvedValue('revision-1'),
+      };
       channelMemory.listChannelMemoryEntries
         .mockReturnValueOnce(firstRead)
         .mockImplementation(async () => entries);
@@ -9127,6 +9333,9 @@ describe('ChannelBase', () => {
 
       await ch.handleInbound(envelope({ text: 'first', senderId: 'alice' }));
       expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('entry listing failed'),
+      );
+      expect(stderrSpy).not.toHaveBeenCalledWith(
         expect.stringContaining('memory boom'),
       );
       stderrSpy.mockRestore();

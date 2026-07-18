@@ -3,6 +3,7 @@ import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import {
   addChannelMemoryEntries,
   clearChannelMemory,
+  getChannelMemoryRevision,
   listChannelMemoryEntries,
   readChannelMemory,
   removeChannelMemoryEntries,
@@ -493,6 +494,7 @@ export async function runChannelDaemonWorker(
             router: createdRouter,
             channelMemory: {
               readChannelMemory,
+              getChannelMemoryRevision,
               listChannelMemoryEntries,
               addChannelMemoryEntries,
               updateChannelMemoryEntry,

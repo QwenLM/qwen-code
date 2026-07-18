@@ -3,7 +3,9 @@ import {
   CHANNEL_MEMORY_RECALL_FALLBACK_CODE_POINTS,
   CHANNEL_MEMORY_RECALL_MAX_CODE_POINTS,
   CHANNEL_MEMORY_RECALL_MAX_ENTRIES,
+  createChannelMemoryRecallIndex,
   selectRelevantChannelMemory,
+  selectRelevantChannelMemoryFromIndex,
 } from './channel-memory-recall.js';
 import type { ChannelMemoryEntry } from './types.js';
 
@@ -18,6 +20,27 @@ function longFact(text: string): string {
 }
 
 describe('selectRelevantChannelMemory', () => {
+  it('reuses an immutable prepared index with equivalent selection', () => {
+    const entries = [
+      entry('fallback', 'short preference'),
+      entry('relevant', longFact('deploy staging')),
+    ];
+    const index = createChannelMemoryRecallIndex(entries);
+
+    expect(
+      selectRelevantChannelMemoryFromIndex('deploy staging', index),
+    ).toEqual(selectRelevantChannelMemory('deploy staging', entries));
+
+    entries[0]!.text = 'changed after indexing';
+    entries[1]!.text = 'production only';
+    expect(
+      selectRelevantChannelMemoryFromIndex('deploy staging', index),
+    ).toEqual([
+      entry('relevant', longFact('deploy staging')),
+      entry('fallback', 'short preference'),
+    ]);
+  });
+
   it('matches NFKC-normalized, lowercased Latin terms', () => {
     const matching = entry('matching', longFact('deploy staging'));
 
