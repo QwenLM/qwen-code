@@ -4,6 +4,7 @@ import { act, createRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import type { WebShellApi } from './App';
+import { loadSplitSessions, saveSplitSessions } from './utils/splitUrl';
 
 type StreamingState = 'idle' | 'responding';
 
@@ -836,6 +837,9 @@ function makePendingPermissionBlock(
 }
 
 beforeEach(() => {
+  // Split persistence uses sessionStorage; clear it so one test's split doesn't
+  // auto-restore into the next test's App mount.
+  sessionStorage.clear();
   Object.defineProperty(window, 'matchMedia', {
     configurable: true,
     // Query-aware: report a large screen (min-width matches) so the Session
@@ -2756,6 +2760,45 @@ describe('App session callbacks', () => {
     const messages = container.querySelector('[data-testid="messages"]');
     expect(messages).not.toBeNull();
     expect(messages?.closest('[aria-hidden="true"]')).not.toBeNull();
+  });
+
+  it('restores a persisted split on load (survives a refresh)', async () => {
+    // Simulate the storage left behind by a split that was open before a refresh.
+    saveSplitSessions(['s1', 's2']);
+    const { container } = renderApp();
+    await flush();
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="split-initial"]')?.textContent,
+    ).toBe('s1,s2');
+  });
+
+  it('does not open the split when nothing was persisted', async () => {
+    const { container } = renderApp();
+    await flush();
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+  });
+
+  it('clears the persisted split when the user leaves the split view', async () => {
+    saveSplitSessions(['s1', 's2']);
+    const { container } = renderApp();
+    await flush();
+    // Restored into the split; leaving via its back button must clear storage
+    // so a later refresh doesn't bring the split back uninvited.
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-back"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(loadSplitSessions()).toEqual([]);
   });
 
   it('syncs the split view from external session ids without the sidebar', async () => {

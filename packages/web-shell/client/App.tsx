@@ -94,7 +94,13 @@ import {
   getScheduledTasksByTurn,
 } from './components/artifacts/turnOutputSelectors';
 import { useIsLargeScreen } from './hooks/useIsLargeScreen';
-import { MAX_SPLIT_PANES, parseSplitSessionIds } from './utils/splitUrl';
+import {
+  clearSplitSessions,
+  loadSplitSessions,
+  MAX_SPLIT_PANES,
+  parseSplitSessionIds,
+  saveSplitSessions,
+} from './utils/splitUrl';
 import { ScheduledTasksDialog } from './components/dialogs/ScheduledTasksDialog';
 import { ExtensionsManagerPage } from './components/extensions/ExtensionsManagerPage';
 import { PluginManagerPage } from './components/plugins/PluginManagerPage';
@@ -2320,6 +2326,9 @@ export function App({
   // to the Session Overview — the hub the split is launched from.
   const handleSplitExit = useCallback(() => {
     notifyControlledSplitClose();
+    // The user left the split of their own accord, so a refresh must not bring
+    // it back. (A shrink-fold is transient and deliberately doesn't clear it.)
+    clearSplitSessions();
     openPanel('sessions');
   }, [notifyControlledSplitClose, openPanel]);
   // A `?split=a,b` URL (opened in a new tab from the overview) enters the split
@@ -2327,14 +2336,33 @@ export function App({
   // or exit doesn't force the split back on.
   useEffect(() => {
     const ids = parseSplitSessionIds(window.location.search);
-    if (ids.length === 0) return;
-    const url = new URL(window.location.href);
-    url.searchParams.delete('split');
-    window.history.replaceState(null, '', url);
-    if (!externalSplitControlled) {
-      openSplitView(ids);
+    if (ids.length > 0) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('split');
+      window.history.replaceState(null, '', url);
+      if (!externalSplitControlled) {
+        openSplitView(ids);
+      }
+      return;
     }
+    // No `?split=` deep link: restore the in-window split the user had before a
+    // refresh, when one was persisted for this tab. sessionStorage is per-tab,
+    // so a fresh tab (or a controlled host, which owns its own lifecycle)
+    // restores nothing.
+    if (externalSplitControlled) return;
+    const saved = loadSplitSessions();
+    if (saved.length > 0) openSplitView(saved);
   }, [externalSplitControlled, openSplitView]);
+  // Mirror the live split session set to per-tab storage while the split is the
+  // active view, so a refresh restores exactly these panes. Not written when the
+  // split is merely folded by a shrink (mainView flips to 'chat' transiently) —
+  // the saved set is kept so growing back, or refreshing mid-fold, still restores.
+  useEffect(() => {
+    if (externalSplitControlled) return;
+    if (mainView === 'split' && splitSessionIds.length > 0) {
+      saveSplitSessions(splitSessionIds);
+    }
+  }, [mainView, splitSessionIds, externalSplitControlled]);
   // If the viewport shrinks below the large-screen breakpoint, fold away the
   // Session Overview panel and the split view — both are large-screen-only
   // surfaces whose entry points are hidden on small screens. The split is only
