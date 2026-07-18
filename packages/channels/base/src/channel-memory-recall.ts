@@ -5,6 +5,8 @@ export const CHANNEL_MEMORY_RECALL_MAX_ENTRIES = 3;
 export const CHANNEL_MEMORY_RECALL_MAX_CODE_POINTS = 1_200;
 export const CHANNEL_MEMORY_RECALL_FALLBACK_CODE_POINTS = 120;
 
+const CHANNEL_MEMORY_RECALL_TRUNCATION_SUFFIX = ' [truncated]';
+
 const TERM_RUN_PATTERN =
   /\p{Script=Latin}+|\p{Decimal_Number}+|\p{Script_Extensions=Han}+|\p{Script_Extensions=Hiragana}+|\p{Script_Extensions=Katakana}+|\p{Script_Extensions=Hangul}+/gu;
 
@@ -63,6 +65,17 @@ function overlapSize(left: Set<string>, right: Set<string>): number {
   return score;
 }
 
+function truncateEntryToRecallBudget(
+  entry: ChannelMemoryEntry,
+): ChannelMemoryEntry {
+  const suffix = Array.from(CHANNEL_MEMORY_RECALL_TRUNCATION_SUFFIX);
+  const text = Array.from(entry.text)
+    .slice(0, CHANNEL_MEMORY_RECALL_MAX_CODE_POINTS - suffix.length)
+    .concat(suffix)
+    .join('');
+  return { ...entry, text };
+}
+
 export function selectRelevantChannelMemory(
   message: string,
   entries: readonly ChannelMemoryEntry[],
@@ -90,13 +103,21 @@ export function selectRelevantChannelMemory(
   const selected: ChannelMemoryEntry[] = [];
   let usedCodePoints = 0;
 
-  for (const { entry } of [...positive, ...fallback]) {
+  for (const { entry, score } of [...positive, ...fallback]) {
     if (selected.length >= CHANNEL_MEMORY_RECALL_MAX_ENTRIES) break;
     const entryCodePoints = Array.from(entry.text).length;
     if (
       usedCodePoints + entryCodePoints >
       CHANNEL_MEMORY_RECALL_MAX_CODE_POINTS
     ) {
+      if (
+        score > 0 &&
+        selected.length === 0 &&
+        entryCodePoints > CHANNEL_MEMORY_RECALL_MAX_CODE_POINTS
+      ) {
+        selected.push(truncateEntryToRecallBudget(entry));
+        break;
+      }
       continue;
     }
     selected.push(entry);

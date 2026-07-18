@@ -161,7 +161,25 @@ describe('selectRelevantChannelMemory', () => {
     ).toBe(CHANNEL_MEMORY_RECALL_MAX_CODE_POINTS);
   });
 
-  it('does not truncate entries or mutate the input array', () => {
+  it('truncates a relevant entry that alone exceeds the fact-text budget', () => {
+    const relevant = entry(
+      'relevant',
+      `deploy runbook ${'x'.repeat(CHANNEL_MEMORY_RECALL_MAX_CODE_POINTS)}`,
+    );
+
+    const selected = selectRelevantChannelMemory('deploy', [relevant]);
+
+    expect(selected).toHaveLength(1);
+    expect(selected[0]?.id).toBe(relevant.id);
+    expect(selected[0]?.text).toMatch(/^deploy runbook/u);
+    expect(selected[0]?.text).toMatch(/ \[truncated\]$/u);
+    expect(Array.from(selected[0]?.text ?? '')).toHaveLength(
+      CHANNEL_MEMORY_RECALL_MAX_CODE_POINTS,
+    );
+    expect(relevant.text).not.toMatch(/\[truncated\]$/u);
+  });
+
+  it('does not truncate fitting entries or mutate the input array', () => {
     const fallback = Object.freeze(entry('fallback', 'short preference'));
     const relevant = Object.freeze(entry('relevant', longFact('deploy')));
     const entries = Object.freeze([fallback, relevant]);
