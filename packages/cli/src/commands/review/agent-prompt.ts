@@ -1248,6 +1248,17 @@ function runAllChunks(
   const chunks = (report.chunks as DiffChunk[]).filter((c) =>
     Number.isSafeInteger(c?.id),
   );
+  // The single-chunk path throws on a chunk it cannot use; the batch may not
+  // instead print "0 auditors required" with a valid end marker and exit clean
+  // — that is a zero-coverage round wearing a receipt. Same corruption, same
+  // refusal.
+  if (chunks.length === 0) {
+    throw new Error(
+      'agent-prompt: the plan has chunks but none with a usable integer `id` ' +
+        '— a round built from it would launch no auditors while looking ' +
+        'complete. Re-run the Step 1 capture; do not hand-edit the plan.',
+    );
+  }
   const digest = findingsDigest(findingsContent);
   const blocks = chunks.map((c, i) => {
     const key = `${role}--chunk-${c.id}--${digest}`;

@@ -492,6 +492,37 @@ describe('--all-chunks — every auditor of a Step 5 round, in one call', () => 
     }
   });
 
+  it('refuses a plan whose every chunk id is unusable — zero auditors is not a clean round', () => {
+    // The filter used to swallow this: all-non-integer ids passed the has-chunks
+    // guard, the filter emptied the list, and the command printed "0 auditors
+    // required this round" with a valid end marker and recorded nothing — a
+    // zero-coverage round wearing a receipt. The single-chunk path throws on
+    // the same corruption; so does the batch now.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-allchunks-0-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(
+        plan,
+        JSON.stringify({
+          ...PLAN,
+          chunks: PLAN.chunks.map((c) => ({ ...c, id: 'x' })),
+        }),
+      );
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '- x');
+      expect(() =>
+        (agentPromptCommand.handler as (a: unknown) => void)({
+          plan,
+          role: 'reverse-audit',
+          'all-chunks': true,
+          findings,
+        }),
+      ).toThrow(/none with a usable integer/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('refuses --all-chunks for a role that is not per-chunk-findings, and with --chunk', () => {
     const dir = mkdtempSync(join(tmpdir(), 'ap-allchunks-x-'));
     try {
