@@ -202,6 +202,12 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   }),
   useStreamingState: () => testState.streamingState,
   useTranscriptBlocks: () => testState.blocks,
+  useTranscriptHistory: () => ({
+    hasMore: false,
+    loading: false,
+    capacityReached: false,
+    loadMore: vi.fn(),
+  }),
   useTranscriptStore: () => mockStore,
   useWorkspace: () => mockWorkspace,
   useWorkspaceActions: () => mockWorkspaceActions,

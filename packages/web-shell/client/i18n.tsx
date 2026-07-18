@@ -677,6 +677,9 @@ const EN: Messages = {
   'editor.hintSearch': 'search',
   'editor.noHistory': 'No matching history',
   'editor.placeholder': 'Type a message or @ file path',
+  'history.loadingEarlier': 'Loading earlier messages…',
+  'history.capacityReached':
+    'History display limit reached. Earlier messages remain saved.',
   'editor.shellPlaceholder': 'Enter terminal command',
   'editor.send': 'Send message',
   'editor.connectionDisconnected':
@@ -856,6 +859,7 @@ const EN: Messages = {
     'The daemon did not confirm persistent workspace registration',
   'sidebar.addWorkspaceAbsError': 'Path must be absolute',
   'sidebar.addWorkspaceHint': 'Enter the absolute path to a project directory.',
+  'sidebar.addWorkspaceSuggestions': 'Directory suggestions',
   'sidebar.addWorkspacePersist': 'Keep after daemon restart',
   'sidebar.addWorkspacePersistHint':
     'Persist this workspace registration in the daemon configuration.',
@@ -2762,6 +2766,8 @@ const ZH: Messages = {
   'editor.hintSearch': '搜索',
   'editor.noHistory': '没有匹配的历史记录',
   'editor.placeholder': '输入消息或 @ 文件路径',
+  'history.loadingEarlier': '正在加载更早消息…',
+  'history.capacityReached': '已达到历史显示上限，更早消息仍保存在会话中。',
   'editor.shellPlaceholder': '请输入终端命令',
   'editor.send': '发送消息',
   'editor.connectionDisconnected': '连接已中断，请在恢复后重试。',
@@ -2932,6 +2938,7 @@ const ZH: Messages = {
   'sidebar.addWorkspacePersistenceError': '守护进程未确认工作区已持久化注册',
   'sidebar.addWorkspaceAbsError': '路径必须是绝对路径',
   'sidebar.addWorkspaceHint': '请输入项目目录的绝对路径。',
+  'sidebar.addWorkspaceSuggestions': '目录建议',
   'sidebar.addWorkspacePersist': '服务重启后保留',
   'sidebar.addWorkspacePersistHint': '将此工作区注册持久化到守护进程配置中。',
   'sidebar.addWorkspaceAdding': '添加中…',

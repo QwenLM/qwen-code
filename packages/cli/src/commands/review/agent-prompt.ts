@@ -38,6 +38,7 @@
 // remember.
 
 import type { CommandModule } from 'yargs';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
@@ -45,7 +46,12 @@ import { READ_FILE_CHAR_CAP, type DiffChunk } from './lib/diff-plan.js';
 import { recordPrompt, writeBrief } from './lib/prompt-record.js';
 import { BRIEFS, type RoleId } from './lib/agent-briefs.js';
 import { pathRulesFor } from './lib/path-rules.js';
-import { reviewMode, type RosterPlan } from './lib/roster.js';
+import {
+  requiredAgents,
+  reviewMode,
+  type RequiredAgent,
+  type RosterPlan,
+} from './lib/roster.js';
 
 interface AgentPromptArgs {
   plan: string;
@@ -57,10 +63,14 @@ interface AgentPromptArgs {
   file?: string;
   /** Build only the diff-reading block (Agent 8, whose brief lives nowhere else). */
   wholeDiff?: boolean;
+  /** Build every prompt the plan's roster requires, in one call. */
+  roster?: boolean;
   rules?: string;
   /**
    * A file of findings to fold into a verify/reverse-audit prompt, so the caller
-   * pastes one block instead of hand-prepending the list. Printed, not recorded.
+   * pastes one block instead of hand-prepending the list. Folded into BOTH the
+   * printed prompt and the record (keyed per findings digest) — a launch that
+   * drops the list matches no record.
    */
   findings?: string;
 }
@@ -217,7 +227,10 @@ export function buildChunkAgentPrompt(
       (f): f is DiffChunk['files'][number] =>
         !!f && typeof f.path === 'string' && f.path.length > 0,
     )
-    .map((f) => `- ${f.path} (new-side lines ${f.newStart}-${f.newEnd})`)
+    .map(
+      (f) =>
+        `- ${inertPath(f.path)} (new-side lines ${f.newStart}-${f.newEnd})`,
+    )
     .join('\n');
 
   // The uncoverable case: a single line longer than one read returns. Paging
@@ -564,6 +577,23 @@ function tail(
  * increment is exactly the class of defect this checklist hunts, and it is
  * invisible in the file's text. The `-` lines are the only evidence it existed.
  */
+/**
+ * A PR-controlled path, flattened for display inside a brief or prompt. The
+ * brief is the file the agent is told is the whole of its instructions — a git
+ * path can legally contain newlines, and a newline inside an interpolated path
+ * would let PR content open its own Markdown line there. Functional arguments
+ * (the `read_file` path) are JSON-quoted instead, which both survives the
+ * newline and remains the parseable single-line form the transcripts checks read.
+ */
+function inertPath(p: string): string {
+  // \p{Cc} covers every control character (newlines, tabs, ESC — a terminal
+  // control sequence in a filename must not reach a terminal either); U+2500 is
+  // the roster separator glyph; the backtick would close the Markdown code span
+  // these paths are rendered inside, letting the tail of a filename run as
+  // markup in the file the agent treats as authoritative.
+  return p.replace(/[\p{Cc}\u2500`]+/gu, ' ');
+}
+
 function invariantFileBlock(
   report: PlanReport,
   diffPath: string,
@@ -596,14 +626,14 @@ function invariantFileBlock(
     .map((r) => `${r.start}-${r.end}`)
     .join(', ');
   const parts = [
-    `## The file: \`${file}\``,
+    `## The file: \`${inertPath(file)}\``,
     '',
     '**Read the whole post-change file**, from the worktree, paging with `offset` until ' +
       '`isTruncated` is false. A 2 500-line file needs several reads. You read it whole ' +
       'because an invariant has two ends and they can sit two thousand lines apart.',
     '',
     '```',
-    `read_file(file_path="${file}")`,
+    `read_file(file_path=${JSON.stringify(file)})`,
     '```',
     '',
     added
@@ -788,7 +818,14 @@ export function buildRoleBrief(
           'command exists to prevent, one level up). Invoke it with `timeout: 600000`:',
         '',
         '```bash',
-        `qwen review build-test \\`,
+        // Prefixed like every other executable review command: this block is run
+        // by a SUBAGENT — the one call site neither the SKILL.md sweep nor the
+        // stderr hints could reach — and its shell gets QWEN_CODE_CLI exactly as
+        // the orchestrator's does. A bare `qwen` here re-creates the PATH skew on
+        // the machines this exists for, and worse: `build-test` is recent enough
+        // that an old global lacks it entirely, wedging Agent 7 between its
+        // mandate (no hand-run `npm run build`) and a command that does not exist.
+        `"\${QWEN_CODE_CLI:-qwen}" review build-test \\`,
         `  --plan ${resolve(opts.planPath)} \\`,
         `  --worktree ${resolve(buildTree)} \\`,
         `  --out ${resolve(dirname(opts.planPath), outName)}`,
@@ -810,7 +847,7 @@ export function buildRoleBrief(
           'different claims:',
         '',
         '```bash',
-        `qwen review test-efficacy ${resolve(opts.planPath)} \\`,
+        `"\${QWEN_CODE_CLI:-qwen}" review test-efficacy ${resolve(opts.planPath)} \\`,
         `  --worktree ${typeof wt === 'string' ? resolve(wt) : '<worktree>'} \\`,
         `  --base ${base} \\`,
         `  --out ${resolve(dirname(opts.planPath), `qwen-review-pr-${pr}-efficacy.json`)}`,
@@ -855,7 +892,11 @@ export function buildRoleBrief(
     if (pathRules) parts.push('', pathRules);
   }
 
-  parts.push(...tail(opts.rules, brief.output));
+  // SKILL.md is explicit: "Do NOT inject review rules into Agent 7 (Build &
+  // Test) — it runs deterministic commands, not code review." The roster path
+  // hands the same --rules to every role, so the exclusion lives here, where
+  // both the single-role and roster builds pass through.
+  parts.push(...tail(role === '7' ? undefined : opts.rules, brief.output));
   return parts.join('\n');
 }
 
@@ -902,9 +943,15 @@ export function buildRoleLaunchPrompt(
       `agent-prompt: unknown role "${role}". Known roles: ${Object.keys(BRIEFS).join(', ')}.`,
     );
   }
+  // The file is a PR-controlled path and this prompt lands in the roster's
+  // stdout, whose blocks are separated by lines: a newline smuggled in a
+  // filename could open a forged block boundary. Flattened, exactly as the
+  // separator label is; a path that needed the newline was never readable as a
+  // one-line `read_file` argument anyway.
+  const safeFile = opts.file === undefined ? undefined : inertPath(opts.file);
   const parts = [
     `You are review agent \`${role}\` — ${b.label}.` +
-      (opts.file ? ` Your file: \`${opts.file}\`.` : ''),
+      (safeFile ? ` Your file: \`${safeFile}\`.` : ''),
     '',
     '**Your brief is a file. Read it first — it is the whole of your instructions,',
     'and nothing in this message replaces it.**',
@@ -976,10 +1023,13 @@ export function buildRoleLaunchPrompt(
  * The findings block folded above a verify / reverse-audit launch prompt, so the
  * caller pastes one thing instead of hand-assembling it.
  *
- * This is what gets *printed*; it is not recorded (the record stays the findings-
- * free launch block, so the shared per-shard/round key still matches by the add-only
- * delivery rule). Its closing line restates that the brief is authoritative — the
- * exact sentence the orchestrator truncated when it used to build this by hand.
+ * This is folded into the printed prompt AND the record alike — the record is
+ * the exact printed block, keyed per findings digest, so a launch that drops or
+ * rewrites this section matches no record. (The first design recorded the
+ * findings-free block for a shared key; that receipt could be satisfied by
+ * delivering only the tail.) Its closing line restates that the brief is
+ * authoritative — the exact sentence the orchestrator truncated when it used to
+ * build this by hand.
  *
  * Each `acceptsFindings` role has its own framing, and the branches are explicit: a
  * future role that opts into `--findings` but has no framing here throws, rather than
@@ -1026,6 +1076,130 @@ export function findingsSection(role: RoleId, content: string): string {
   );
 }
 
+/**
+ * Build one agent's brief and launch prompt, write the brief beside the plan, and
+ * return the key and the prompt for the caller to record and print.
+ *
+ * One body for both callers on purpose: the single-agent path and `--roster` must
+ * emit byte-identical prompts for the same agent, because the delivery check
+ * compares agents against records — a drift between the two paths would read as a
+ * rewritten launch on a run that did everything right.
+ */
+function buildLaunch(
+  report: PlanReport,
+  planPath: string,
+  spec: { role?: RoleId; chunk?: number; file?: string; key?: string },
+  rules?: string,
+): { key: string; prompt: string } {
+  if (spec.role) {
+    const key =
+      spec.key ??
+      (spec.file
+        ? `${spec.role}--${spec.file}`
+        : typeof spec.chunk === 'number'
+          ? `${spec.role}--chunk-${spec.chunk}`
+          : spec.role);
+    const briefFile = writeBrief(
+      planPath,
+      key,
+      buildRoleBrief(report, spec.role, {
+        rules,
+        file: spec.file,
+        planPath,
+        chunk: spec.chunk,
+      }),
+    );
+    return {
+      key,
+      prompt: buildRoleLaunchPrompt(report, spec.role, briefFile, {
+        file: spec.file,
+        chunk: spec.chunk,
+      }),
+    };
+  }
+  const id = spec.chunk as number;
+  const key = `chunk-${id}`;
+  const briefFile = writeBrief(
+    planPath,
+    key,
+    buildChunkAgentPrompt(report, id, rules),
+  );
+  return { key, prompt: buildChunkLaunchPrompt(report, id, briefFile) };
+}
+
+/**
+ * The line above each roster block: who this launch is, in the reader's terms.
+ *
+ * The file part is PR-controlled (it is a path from the diff), and the separator
+ * is a line: a filename carrying a newline could end the label early and make
+ * its tail read as a forged block boundary — content an orchestrator would then
+ * paste to an agent as if the CLI wrote it. Control characters are flattened to
+ * spaces, and the separator glyph is stripped so a name cannot imitate one.
+ */
+function rosterLabel(req: RequiredAgent): string {
+  if (req.role === 'chunk') return `chunk ${req.chunk}`;
+  // The brief's label already reads `Agent 1a: Line-by-line correctness`; the
+  // rebuild hint downstream names roles, so keep the id visible when the label
+  // does not carry it.
+  const label = BRIEFS[req.role]?.label ?? `role ${req.role}`;
+  const file = req.file === undefined ? undefined : inertPath(req.file);
+  return file ? `${label} — ${file}` : label;
+}
+
+/**
+ * Every prompt the plan requires, in one call.
+ *
+ * The per-agent form asks the orchestrator for ~30 build-then-launch round trips
+ * on a large review, and compliance decays with repetition: dogfooded on one PR,
+ * the same environment went from a clean run to "no prompt was built for any of
+ * twelve roles" over three reviews in a day — the builder simply stopped being
+ * called. One call per review is a compliance cost that does not accumulate, and
+ * the list it builds is the same one `check-coverage` will hold the run to,
+ * because both come from `requiredAgents(plan)`.
+ */
+function runRoster(report: PlanReport, planPath: string, rules?: string): void {
+  const roster = requiredAgents(report as RosterPlan);
+  const blocks = roster.map((req, i) => {
+    const { key, prompt } = buildLaunch(
+      report,
+      planPath,
+      req.role === 'chunk'
+        ? { chunk: req.chunk }
+        : { role: req.role, file: req.file },
+      rules,
+    );
+    // The roster is what coverage checks; the key is what this command records
+    // under. They are derived in two files, and if they ever disagree, every
+    // delivery check downstream reads "brief never reached an agent" on a run
+    // that did everything right. Refuse to hand out prompts that cannot match.
+    if (key !== req.key) {
+      throw new Error(
+        `agent-prompt: --roster built "${key}" where the roster requires ` +
+          `"${req.key}" — the record could never be matched to the requirement. ` +
+          'This is a bug in the CLI, not in the call.',
+      );
+    }
+    recordPrompt(planPath, key, prompt);
+    return `───── agent ${i + 1} of ${roster.length} — ${rosterLabel(req)} ─────\n\n${prompt}`;
+  });
+  writeStdoutLine(
+    [
+      `${roster.length} agents required. Launch one agent per block below, ` +
+        `passing its block VERBATIM — copy, do not retype. The ───── lines are ` +
+        `separators, not part of any prompt. This is the same roster ` +
+        `\`check-coverage\` reads out of the plan: a block you skip or reword is ` +
+        `a dimension nobody reviewed. Blocks are numbered \`agent k of ` +
+        `${roster.length}\` and the output ends with an end-of-roster line — if ` +
+        `either is missing, this output was truncated in transit: every prompt ` +
+        `is also recorded on disk, so rebuild just the missing blocks with ` +
+        `--chunk <id>, or --role <r> (--file <path> for an invariant agent), ` +
+        `plus the same --rules this call was given.`,
+      ...blocks,
+      `───── end of roster — ${roster.length} agents ─────`,
+    ].join('\n\n'),
+  );
+}
+
 function runAgentPrompt(args: AgentPromptArgs): void {
   // Exactly one primary mode: a territory chunk, a named role, or the bare
   // whole-diff block. A call that named none used to fall through to the chunk
@@ -1040,7 +1214,18 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   const bad = (msg: string): never => {
     throw new Error(`agent-prompt: ${msg}`);
   };
-  if (hasWhole) {
+  if (args.roster) {
+    // The roster IS the selection — the plan decides who runs, which is the point.
+    // A --roster call that also names one agent is asking for two contradictory
+    // scopes, and honouring either would silently drop the other.
+    if (hasChunk || hasRole || hasFile || hasFindings || hasWhole) {
+      bad(
+        '--roster builds every prompt the plan requires; it takes no --chunk, ' +
+          '--role, --file, --findings or --whole-diff. (Step 4/5 verify and ' +
+          'reverse-audit prompts are built per round, with --role and --findings.)',
+      );
+    }
+  } else if (hasWhole) {
     if (hasChunk || hasRole || hasFile || hasFindings) {
       bad(
         '--whole-diff builds the diff-reading block alone; it takes no --chunk, --role, --file or --findings.',
@@ -1076,6 +1261,22 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     // `--findings` folds a findings list into the printed prompt, for the two roles
     // that take one: the verifier rules on findings, the reverse auditor avoids
     // re-reporting them. Declared on the brief (`acceptsFindings`), like `acceptsChunk`.
+    // A role that TAKES findings must be GIVEN them. Without this the command still
+    // printed a bare launch block, and the caller was left to prepend the list by
+    // hand — the one assembly step left in the skill, and measurably where the
+    // prompt got rewritten: dogfooded on a real 3A review, the orchestrator skipped
+    // `--findings`, hand-wrote the auditor's launch, and the delivery check capped
+    // the verdict (which it then talked its way past). There is no bare-block path
+    // to hand-assemble any more. An early reverse-audit round with nothing confirmed
+    // yet passes an empty file — the command says so in the prompt.
+    if (!hasFindings && BRIEFS[role]?.acceptsFindings) {
+      bad(
+        `--role ${role} needs --findings <file>: it is launched with a findings ` +
+          `list folded in, and this command builds that block so there is nothing ` +
+          `for you to assemble. Write the list to a file and pass it — an early ` +
+          `reverse-audit round with nothing confirmed yet passes an empty file.`,
+      );
+    }
     if (hasFindings && !BRIEFS[role]?.acceptsFindings) {
       const findingRoles = (Object.keys(BRIEFS) as RoleId[]).filter(
         (r) => BRIEFS[r].acceptsFindings,
@@ -1100,8 +1301,9 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     );
   } else if (!hasChunk) {
     bad(
-      'pass exactly one of --chunk <id> (a Step 3B territory agent), --role ' +
-        '<role> (a named agent), or --whole-diff (the diff-reading block on its own).',
+      'pass exactly one of --roster (every prompt the plan requires, in one ' +
+        'call), --chunk <id> (a Step 3B territory agent), --role <role> (a named ' +
+        'agent), or --whole-diff (the diff-reading block on its own).',
     );
   }
 
@@ -1141,73 +1343,98 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   // reciting a stock sentence, and replacing the project's review rules with a
   // summary of its own — and every check downstream passed, because a paraphrase
   // keeps the diff path.
+  if (args.roster) {
+    runRoster(report, args.plan, rules);
+    return;
+  }
+
+  // Findings are read BEFORE the build: they are part of what gets recorded.
+  // The first design recorded the findings-free launch block so one key could
+  // serve every shard — and that receipt could be satisfied by delivering ONLY
+  // the recorded tail: build with a real findings file, launch the agent with
+  // the block alone, let it open the brief, and the delivery check matched while
+  // no verifier ever saw a finding. The record is now the exact printed prompt,
+  // keyed per findings-content digest, so a launch that dropped the findings
+  // matches nothing.
+  let findingsContent: string | undefined;
+  if (hasFindings && args.role) {
+    const role = args.role as RoleId;
+    try {
+      findingsContent = readFileSync(args.findings as string, 'utf8');
+    } catch (err) {
+      throw new Error(
+        `agent-prompt: cannot read the findings ${args.findings}: ` +
+          `${(err as Error).message}. Pass a path that resolves — --findings is ` +
+          `required for this role, so omitting it only fails one guard earlier. ` +
+          `An early reverse-audit round with nothing confirmed passes an empty ` +
+          `file (create it first).`,
+      );
+    }
+    // An empty list is a legitimate early reverse-audit round. For the verifier
+    // it is a vacuous pass: the agent opens its brief, clears the delivery
+    // floor, and the review posts findings certified by a verifier that saw
+    // none. Refuse it here, where the content is first known.
+    if (role === 'verify' && findingsContent.trim() === '') {
+      throw new Error(
+        'agent-prompt: --findings for --role verify is empty. A verifier that ' +
+          'sees no findings verifies nothing, and the review would post ' +
+          "findings on the strength of that nothing. Pass the shard's " +
+          'findings; only an early reverse-audit round passes an empty file.',
+      );
+    }
+  }
+
   let prompt: string;
   let key: string;
   if (args.wholeDiff) {
     prompt = buildWholeDiffBlock(report, rules);
     key = 'whole-diff';
-  } else if (args.role) {
-    const role = args.role as RoleId;
+  } else {
     // The record key must be unique per launch. An invariant agent is keyed by its
     // file; a Step 3B reverse-audit agent by its chunk (its brief is identical
     // across chunks, but its launch prompt reads a different range, and the delivery
     // check compares launch prompts). Everything else is one per review.
-    key = args.file
-      ? `${role}--${args.file}`
-      : typeof args.chunk === 'number'
-        ? `${role}--chunk-${args.chunk}`
-        : role;
-    // Two artifacts, both written here. The brief is what the agent reads; the
-    // launch prompt is the short thing the orchestrator carries, and the only thing
-    // it has to get right.
-    const briefFile = writeBrief(
+    // Two artifacts, both written in `buildLaunch`. The brief is what the agent
+    // reads; the launch prompt is the short thing the orchestrator carries, and the
+    // only thing it has to get right.
+    // A findings-taking role is keyed per findings digest: each shard/round is
+    // its own record, its own brief, its own receipt. The delivery side collects
+    // the whole family (`verify`, `verify--*`; `reverse-audit`, `reverse-audit--*`)
+    // and keeps the documented floor of one.
+    let keyOverride: string | undefined;
+    if (findingsContent !== undefined && args.role) {
+      const digest = createHash('sha256')
+        .update(findingsContent)
+        .digest('hex')
+        .slice(0, 12);
+      const base =
+        typeof args.chunk === 'number'
+          ? `${args.role}--chunk-${args.chunk}`
+          : args.role;
+      keyOverride = `${base}--${digest}`;
+    }
+    ({ key, prompt } = buildLaunch(
+      report,
       args.plan,
-      key,
-      buildRoleBrief(report, role, {
-        rules,
-        file: args.file,
-        planPath: args.plan,
-        chunk: args.chunk,
-      }),
-    );
-    prompt = buildRoleLaunchPrompt(report, role, briefFile, {
-      file: args.file,
-      chunk: args.chunk,
-    });
-  } else {
-    const id = args.chunk as number;
-    key = `chunk-${id}`;
-    const briefFile = writeBrief(
-      args.plan,
-      key,
-      buildChunkAgentPrompt(report, id, rules),
-    );
-    prompt = buildChunkLaunchPrompt(report, id, briefFile);
+      args.role
+        ? {
+            role: args.role as RoleId,
+            chunk: args.chunk,
+            file: args.file,
+            key: keyOverride,
+          }
+        : { chunk: args.chunk },
+      rules,
+    ));
   }
 
-  // Record the findings-FREE launch prompt, and print the one the caller pastes.
-  // For a verifier / reverse auditor given `--findings`, those differ: the printed
-  // prompt folds the findings in so there is no hand-assembly step to drift, but the
-  // record stays the launch block alone. The delivery check is add-only — the built
-  // block must appear in order in what the agent got — so a printed prompt that is
-  // `<findings>\n\n<block>` still matches the recorded `<block>`, and the per-shard
-  // (verify) / per-round (reverse-audit) key keeps working without baking a
-  // different findings list into each one's record.
-  let printed = prompt;
-  if (hasFindings && args.role) {
-    const role = args.role as RoleId;
-    let content: string;
-    try {
-      content = readFileSync(args.findings as string, 'utf8');
-    } catch (err) {
-      throw new Error(
-        `agent-prompt: cannot read the findings ${args.findings}: ` +
-          `${(err as Error).message}. Omit --findings, or pass a path that resolves.`,
-      );
-    }
-    printed = `${findingsSection(role, content)}\n\n${prompt}`;
-  }
-  recordPrompt(args.plan, key, prompt);
+  // The record IS the printed prompt. Anything less is a receipt a partial
+  // delivery can satisfy — the findings-free record was exactly that.
+  const printed =
+    findingsContent !== undefined && args.role
+      ? `${findingsSection(args.role as RoleId, findingsContent)}\n\n${prompt}`
+      : prompt;
+  recordPrompt(args.plan, key, printed);
   writeStdoutLine(printed);
 }
 
@@ -1243,6 +1470,13 @@ export const agentPromptCommand: CommandModule = {
           'The heavily-rewritten file an invariant agent owns (--role ' +
           'invariant-a|invariant-b|invariant-c)',
       })
+      .option('roster', {
+        type: 'boolean',
+        describe:
+          'Build EVERY prompt the plan requires — chunk, dimension and ' +
+          'invariant agents alike — in one call, each labelled and separated. ' +
+          'The list is the same one check-coverage reads out of the plan.',
+      })
       .option('whole-diff', {
         type: 'boolean',
         describe:
@@ -1261,8 +1495,10 @@ export const agentPromptCommand: CommandModule = {
         describe:
           'Path to a file of findings to fold into a --role verify (the shard it ' +
           'rules on) / --role reverse-audit (the cumulative confirmed list) prompt, ' +
-          'so you paste ONE block. The findings are printed, not recorded — paste ' +
-          'the whole output verbatim, do not add a round number or reword it.',
+          'so you paste ONE block. The findings are part of the recorded prompt ' +
+          '(keyed per findings digest), so a launch that drops them matches no ' +
+          'record — paste the whole output verbatim, do not add a round number ' +
+          'or reword it.',
       }),
   handler: (argv) => {
     runAgentPrompt({
@@ -1271,6 +1507,7 @@ export const agentPromptCommand: CommandModule = {
       chunk: argv['chunk'] as number | undefined,
       file: argv['file'] as string | undefined,
       wholeDiff: argv['whole-diff'] === true,
+      roster: argv['roster'] === true,
       rules: argv['rules'] as string | undefined,
       findings: argv['findings'] as string | undefined,
     });

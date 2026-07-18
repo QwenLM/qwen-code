@@ -38,14 +38,16 @@ Your goal here is to understand the scope of changes so you can dispatch agents 
 
 If the args file is genuinely absent (an older CLI, or a write that failed), fall back to `write_file`-ing the raw argument string **verbatim and unmodified** — copying **the user's argument**, not an example from these instructions — and say in your output that you did, so a wrong target is at least attributable. For a no-argument `/review`, no file is written and none is needed; run the parser with an empty stdin.
 
+**Every command below is written `"${QWEN_CODE_CLI:-qwen}" review …`, and that is not decoration — copy it as written.** `QWEN_CODE_CLI` is the entry of the CLI **running this skill**, exported to your shell for you; a bare `qwen` is whatever the machine's `PATH` happens to resolve to, which is a different program the moment a global install is older than the build you are in. Measured: a `npm run dev:daemon` session issued `qwen review agent-prompt --role 0`, `PATH` found a v0.19.10 whose `agent-prompt` predates `--role` entirely, and the review died on `Missing required argument: chunk` — the skill and the CLI it was talking to were different versions. The `:-qwen` fallback keeps older hosts that do not export it working. It is POSIX parameter expansion, which makes the POSIX-shell requirement this skill already had (Step 0 pipes through `tee`) total: on Windows, run the review from git-bash — cmd.exe passes `${…:-…}` through literally and PowerShell errors on it.
+
 Then run:
 
 ```bash
 # The CLI wrote this file; you did not, and must not.
-qwen review parse-args --stdin < <the path in the <skill-args-file> note> \
+"${QWEN_CODE_CLI:-qwen}" review parse-args --stdin < <the path in the <skill-args-file> note> \
   | tee .qwen/tmp/qwen-review-parse-args.json
 # No arguments at all (`/review` bare) — no args file exists:
-#   : | qwen review parse-args --stdin | tee .qwen/tmp/qwen-review-parse-args.json
+#   : | "${QWEN_CODE_CLI:-qwen}" review parse-args --stdin | tee .qwen/tmp/qwen-review-parse-args.json
 ```
 
 (Step 9 removes these files with the other temp files.)
@@ -75,7 +77,7 @@ The parser already classified the target, so there is nothing to disambiguate by
 
 For a `pr-url` whose `host` is not `github.com` (GitHub Enterprise), **pass `--host <host>` to every review subcommand that talks to GitHub — `fetch-pr`, `pr-context`, and `presubmit`** — which routes all of their `gh` calls via GH_HOST in code; a forgotten host cannot silently retarget them at github.com. The `gh` commands you run directly are still yours to route: prefix Agent 0's `gh pr view`/`gh issue view`, Step 6's residual body fetch, and the Step 7 submission with `GH_HOST=<host> ` (e.g. `GH_HOST=github.example.com gh api ...`). `gh` defaults to `github.com`, so a dropped host makes a call read from and post to the wrong site's `owner/repo`.
 
-3. If **no remote matches**, use **lightweight mode**: run `gh pr diff <url>` to get the diff directly. Skip Step 2 (no local rules) and Step 8 (no local reports or cache). In Step 9, skip worktree removal (none was created) but still clean up temp files (`.qwen/tmp/qwen-review-{target}-*`). Also run `qwen review pr-context <number> <owner>/<repo> --out .qwen/tmp/qwen-review-pr-<number>-context.md` — it is pure GitHub API and works cross-repo. Agent 0 and Step 6's open-Critical re-check depend on it: a `Refs #123`-style target issue is only discoverable from the PR body, and open Critical threads only from the context file, so skipping it lets a wrong-root fix sail through blocker-free. If `pr-context` fails here (auth, network), warn and continue with the diff alone — but skip Agent 0 (it has nothing to work from) and treat every open-Critical re-check verdict as "cannot tell", which forbids an Approve. Carry this forward as the **context-unavailable** state: Step 7's invariant caps **every** `C=0` outcome of such a run at `COMMENT` with a diff-only body (both the would-be APPROVE and the Suggestion-only "no blockers" sentence), so a run that could not see the PR's existing discussion can post findings but never certify the absence of blockers. In Step 7, use the owner/repo from the URL. Inform the user: "Cross-repo review: running in lightweight mode (no build/test)."
+3. If **no remote matches**, use **lightweight mode**: run `gh pr diff <url>` to get the diff directly. Skip Step 2 (no local rules) and Step 8 (no local reports or cache). In Step 9, skip worktree removal (none was created) but still clean up temp files (`.qwen/tmp/qwen-review-{target}-*`). Also run `"${QWEN_CODE_CLI:-qwen}" review pr-context <number> <owner>/<repo> --out .qwen/tmp/qwen-review-pr-<number>-context.md` — it is pure GitHub API and works cross-repo. Agent 0 and Step 6's open-Critical re-check depend on it: a `Refs #123`-style target issue is only discoverable from the PR body, and open Critical threads only from the context file, so skipping it lets a wrong-root fix sail through blocker-free. If `pr-context` fails here (auth, network), warn and continue with the diff alone — but skip Agent 0 (it has nothing to work from) and treat every open-Critical re-check verdict as "cannot tell", which forbids an Approve. Carry this forward as the **context-unavailable** state: Step 7's invariant caps **every** `C=0` outcome of such a run at `COMMENT` with a diff-only body (both the would-be APPROVE and the Suggestion-only "no blockers" sentence), so a run that could not see the PR's existing discussion can post findings but never certify the absence of blockers. In Step 7, use the owner/repo from the URL. Inform the user: "Cross-repo review: running in lightweight mode (no build/test)."
 
 Based on the parsed `target.type`:
 
@@ -88,7 +90,7 @@ Based on the parsed `target.type`:
   - **Run `qwen review fetch-pr`** to set up the working state in one pass — it cleans any stale worktree, fetches the PR HEAD into `qwen-review/pr-<n>`, queries `gh pr view` for metadata, and creates an ephemeral worktree at `.qwen/tmp/review-pr-<n>`:
 
     ```bash
-    qwen review fetch-pr <pr_number> <owner>/<repo> \
+    "${QWEN_CODE_CLI:-qwen}" review fetch-pr <pr_number> <owner>/<repo> \
       --remote <remote> \
       --out .qwen/tmp/qwen-review-pr-<pr_number>-fetch.json
     ```
@@ -109,14 +111,14 @@ Based on the parsed `target.type`:
 
   - **Incremental review check** (high effort only — a low/medium quick pass neither consults nor updates the cache): if `.qwen/review-cache/pr-<n>.json` exists, read `lastCommitSha` and `lastModelId`. Compare to `fetchedSha` from the fetch report and the current model ID (`{{model}}`):
     - If SHAs differ → continue with the worktree just created. Compute the incremental diff (`git diff <lastCommitSha>..HEAD` inside the worktree) and use as the review scope; if the cached commit was rebased away, fall back to the full diff and log a warning.
-    - If SHAs match **and** model matches **and** `--comment` was NOT specified → inform the user "No new changes since last review", run `qwen review cleanup pr-<n>` to remove the worktree just created, and stop.
+    - If SHAs match **and** model matches **and** `--comment` was NOT specified → inform the user "No new changes since last review", run `"${QWEN_CODE_CLI:-qwen}" review cleanup pr-<n>` to remove the worktree just created, and stop.
     - If SHAs match **and** model matches **but** `--comment` WAS specified → run the full review anyway. Inform the user: "No new code changes. Running review to post inline comments."
     - If SHAs match **but** model differs → continue. Inform: "Previous review used {cached_model}. Running full review with {{model}} for a second opinion."
 
   - **Fetch PR context** (metadata + already-discussed issues) in one pass:
 
     ```bash
-    qwen review pr-context <pr_number> <owner>/<repo> \
+    "${QWEN_CODE_CLI:-qwen}" review pr-context <pr_number> <owner>/<repo> \
       --out .qwen/tmp/qwen-review-pr-<pr_number>-context.md
     ```
 
@@ -140,7 +142,7 @@ Based on the parsed `target.type`:
   - **Do not install dependencies here.** The install belongs to Agent 7, and `qwen review build-test` runs it — nothing before Agent 7 needs `node_modules`: the diff-reading agents read the diff and grep the worktree's _sources_. Run from here it is a **blocking prefix** to the whole fan-out — measured at ~161 seconds on a cold worktree of this repo, because `npm ci` triggers this project's `prepare` hook, which builds and bundles every workspace; run from inside `build-test` (which sets `QWEN_SKIP_PREPARE=1`) the install skips that wasted full build and overlaps the other agents, still reading. At low/medium effort nothing builds or tests at all, so there is no install on any path.
 
 - **`file`** (e.g., `src/foo.ts`):
-  - Run `qwen review capture-local --file <file> --target <filename> --out .qwen/tmp/qwen-review-<filename>-plan.json` to get its changes (`--out` is required — see the capture block below for the full form). An **untracked** target file is captured whole (every line reads as added), which is the right frame for a file that does not exist upstream yet. The path is taken relative to **your** working directory and must be inside the repo.
+  - Run `"${QWEN_CODE_CLI:-qwen}" review capture-local --file <file> --target <filename> --out .qwen/tmp/qwen-review-<filename>-plan.json` to get its changes (`--out` is required — see the capture block below for the full form). An **untracked** target file is captured whole (every line reads as added), which is the right frame for a file that does not exist upstream yet. The path is taken relative to **your** working directory and must be inside the repo.
   - If the plan is empty (the file is tracked and unmodified), read the file and review its current state — see the no-diff branch below
 
 ### Diff capture and the review topology
@@ -167,9 +169,9 @@ A chunk is read with `read_file(file_path=diffPathAbsolute, offset=startLine - 1
 For **local-diff and file-path reviews**, capture and plan in one command:
 
 ```bash
-qwen review capture-local --out .qwen/tmp/qwen-review-local-plan.json
+"${QWEN_CODE_CLI:-qwen}" review capture-local --out .qwen/tmp/qwen-review-local-plan.json
 # for a file-path review:
-qwen review capture-local --file <file> --target <filename> \
+"${QWEN_CODE_CLI:-qwen}" review capture-local --file <file> --target <filename> \
   --out .qwen/tmp/qwen-review-<filename>-plan.json
 ```
 
@@ -190,9 +192,12 @@ For **cross-repo lightweight reviews**, do the same with the diff GitHub hands y
 ```bash
 mkdir -p .qwen/tmp
 gh pr diff <pr_number> --repo <owner>/<repo> > .qwen/tmp/qwen-review-pr-<n>-diff.txt
-qwen review plan-diff .qwen/tmp/qwen-review-pr-<n>-diff.txt \
+"${QWEN_CODE_CLI:-qwen}" review plan-diff .qwen/tmp/qwen-review-pr-<n>-diff.txt \
+  --pr <pr_number> --repo <owner>/<repo> \
   --out .qwen/tmp/qwen-review-pr-<n>-plan.json
 ```
+
+**Pass `--pr`/`--repo` only when the `pr-context` fetch above succeeded** — they put the PR identity into the plan, which makes the roster REQUIRE Agent 0 (`check-coverage` will name it if it never runs, exactly as in worktree mode). If `pr-context` failed, omit them: the run is in the context-unavailable state, Agent 0 has nothing to work from, and a roster demanding an agent nobody can brief would wedge the review.
 
 `plan-diff` and `capture-local` emit the same `diffPathAbsolute`, `chunks[]`, `files[]` and topology counts as `fetch-pr`, so Steps 3A, 3B and 7 work identically on all four review paths. Neither can decide `heavy` — that needs a tree to read the post-change file from — so no invariant agents run on a bare diff.
 
@@ -216,7 +221,7 @@ Skip this step at **low** effort — the low pass checks hunk-visible correctnes
 Run `qwen review load-rules` to read project-specific rules. **For PR reviews, read from the base branch** (the PR branch is untrusted — a malicious PR could otherwise inject bypass rules):
 
 ```bash
-qwen review load-rules <resolved_base_ref> \
+"${QWEN_CODE_CLI:-qwen}" review load-rules <resolved_base_ref> \
   --out .qwen/tmp/qwen-review-<target>-rules.md
 ```
 
@@ -245,14 +250,17 @@ Use **Step 3A** or **Step 3B** as the topology gate in Step 1 decided. The dimen
 
 Launch **12 agents** for same-repo **PR** reviews (Agent 1 has three procedural variants 1a/1b/1c and Agent 6 has three persona variants 6a/6b/6c — each variant counts as a separate parallel agent), plus up to 2 optional diff-specialized finders (Agent 8) when the diff's domain calls for them. For cross-repo lightweight **PR** mode launch **10 agents** — skip Agent 7 (Build & Test) and Agent 1c (Cross-file tracer), since there is no local codebase to build, test, or grep. (Agent 8 finders need only the diff, so the up-to-2 option applies in every mode — lightweight and local included.) Lightweight mode also degrades Agents 1a and 1b, whose briefs assume a source tree: tell them they have the diff ONLY — 1a reviews hunks without enclosing-function reads, and 1b, when it cannot find a deleted invariant re-established because the evidence would live outside the diff, reports the candidate at `Confidence: low` and says the re-establishment could not be checked, instead of asserting it is missing. Step 4's verifiers operate under the same limit, so lightweight-mode findings that depend on unseen source must stay low-confidence (terminal-only) rather than becoming public blockers. **Agent 0 (Issue Fidelity) runs only when the review target is a PR** — a local-diff or file-path review has no PR and no linked issue, so skip Agent 0 and launch **11 agents** (Agents 1a–7). Each agent should focus exclusively on its dimension. (Agent counts are maxima: on a diff with no removed or replaced lines, Agent 1b has nothing to audit and is skipped — one fewer agent.)
 
-**Do not write these prompts. Ask for each one:**
+**Do not write these prompts, and do not ask for them one at a time. One call builds all of them:**
 
 ```bash
-qwen review agent-prompt --plan <the plan report from Step 1> --role <role> \
-  [--rules <the rules file from Step 2, if the project has any>]
+"${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan <the plan report from Step 1> --roster \
+  [--rules <the rules file from Step 2, if the project has any>] \
+  > .qwen/tmp/qwen-review-{target}-roster.txt
 ```
 
-One call per agent, and **pass what it prints to that agent verbatim.** The roles are `0`, `1a`, `1b`, `1c`, `2`, `3`, `4`, `5`, `6a`, `6b`, `6c`, `7`.
+**Redirected to a file, then `read_file` it, paging until `isTruncated` is false** — the same rule as every other large output in this skill: shell output truncates at 30 000 characters, and a large plan's roster exceeds that, which would silently swallow the middle blocks. The output is self-checking: blocks are numbered `agent k of N` and the file ends with an `end of roster` line — if any `k` is missing or the end line is absent, rebuild just those blocks with `--chunk <id>` / `--role <r>` (every prompt is also recorded on disk regardless).
+
+It prints one labelled block per required agent — which roles this review owes is read out of the plan, so the paragraph above is the _why_ and the roster is the _list_ — and **each block goes to its agent verbatim**, all launched in one response. To rebuild a single agent's prompt (a relaunch after Step 3D): `--role <role>` in place of `--roster`; the roles are `0`, `1a`, `1b`, `1c`, `2`, `3`, `4`, `5`, `6a`, `6b`, `6c`, `7`.
 
 **What it prints is short — a few hundred characters — and it is short on purpose.** It names the agent's role, points at the **brief file** the command just wrote, and lists the `read_file` calls for the diff. The brief itself — the dimension, the finding format, the severity definitions, the project rules — is on disk, and the agent reads it, exactly as it reads the diff. That is not an optimisation. Asked to paste a 4 652-character prompt to each of twelve agents, a real run delivered **2 893** characters of one: it kept the head, added a preamble of its own, and cut nineteen hundred characters out of the middle. Then it read the coverage check's refusal, concluded that "the agents clearly did their job", skipped `compose-review`, and filed an **Approve it had written itself**. What you are asked to carry is now small enough that you will carry it. Copy it; do not retype it. (Agent 8, when you launch one, is the exception — its brief is the one you write, so give it `--whole-diff` and append your domain brief.)
 
@@ -264,16 +272,15 @@ Why: **the roles this command does not build are the roles that go missing.** Me
 
 Eleven agents all reading the same diff (every 3A agent except Build & Test walks the whole chunk plan) multiplies redundant reading of the early hunks; it does not add coverage. Once there is enough production code to divide, fan out along **territory** as well: one agent per chunk, with the review dimensions folded into that agent's brief, plus a small set of whole-diff agents for the concerns that only exist at diff scale.
 
-**Chunk agents — one per entry in `chunks[]`.** Each is a `general-purpose` subagent. **Do not write its prompt. Ask for it:**
+**Chunk agents — one per entry in `chunks[]`.** Each is a `general-purpose` subagent. **Do not write their prompts, and do not ask for them one at a time — one call builds the whole 3B fan-out, chunk agents, whole-diff agents and invariant agents alike:**
 
 ```bash
-qwen review agent-prompt \
-  --plan <the plan report from Step 1> \
-  --chunk <id> \
-  [--rules <the rules file from Step 2, if the project has any>]
+"${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan <the plan report from Step 1> --roster \
+  [--rules <the rules file from Step 2, if the project has any>] \
+  > .qwen/tmp/qwen-review-{target}-roster.txt
 ```
 
-Pass what it prints to the agent **verbatim**. **Pass `--rules` whenever Step 2 found any** — this command builds the whole prompt, so there is no later step in which you would staple them on, and a review that silently enforces no project rule is one of the things this skill exists to prevent.
+Redirect and `read_file` it paged, exactly as in Step 3A — a 3B roster is the large case, and shell output truncates at 30 000 characters. Check every `agent k of N` block is present (the file ends with an `end of roster` line); rebuild any missing one with `--chunk <id>` / `--role <r>`. One labelled block per agent; each goes to its agent **verbatim**. (To rebuild a single chunk agent's prompt for a relaunch: `--chunk <id>` in place of `--roster`.) **Pass `--rules` whenever Step 2 found any** — this command builds the whole prompt, so there is no later step in which you would staple them on, and a review that silently enforces no project rule is one of the things this skill exists to prevent.
 
 **What it prints is short — a few hundred characters.** It names the chunk, points at the **brief file** the command just wrote, and gives the one `read_file` that defines the territory. The brief — the territory's files, the paging rule, the uncoverable rule, what to review, the finding format, the severity definitions, the project rules and the receipt — is on disk, and the agent reads it, exactly as it reads the diff. A chunk agent's brief runs to about five kilobytes with the project rules in it, and a Step 3B review of a real pull request has **seventeen** of them: eighty-seven kilobytes, in one response, pasted without an edit. That is not a thing that happens. At a twelfth of that load, a real run cut nineteen hundred characters out of a single prompt and then talked its way past the check that caught it.
 
@@ -295,14 +302,7 @@ Everything below still governs what the agent is asked to do; the command builds
 
 **Whole-diff agents — launched alongside the chunk agents, in the same response.**
 
-**Their prompts are built in code too. Ask for each one:**
-
-```bash
-qwen review agent-prompt --plan <the plan report from Step 1> --role <role> \
-  [--rules <the rules file from Step 2, if the project has any>]
-```
-
-Roles here: `0` (PR reviews), `1b` (when the diff removes anything), `1c`, `test-matrix`, `7` (same-repo). For a **heavy** file, three more, one per checklist slice: `--role invariant-a|invariant-b|invariant-c --file <path>`. Pass each **verbatim**. `check-coverage` derives the same list from the plan and will name any role that did not run.
+**Their blocks are already in the `--roster` output above — you have them.** Roles there: `0` (PR reviews), `1b` (when the diff removes anything), `1c`, `test-matrix`, `7` (same-repo), and for a **heavy** file three more, one per checklist slice (their blocks are labelled `Invariant agent A|B|C: … — <path>`). Pass each **verbatim**. To rebuild one for a relaunch: `--role <role>` (an invariant agent adds `--file <path>`). `check-coverage` derives the same list from the plan and will name any role that did not run.
 
 Why: **the chunk agents got the diff and these did not.** Measured against the harness's record of one real 3B run, all three whole-diff agents — cross-file tracer, test-coverage matrix, build & test — were launched with a prompt that named **no diff file at all**. The test-coverage matrix was told, in prose, to "Read the diff chunks and the test files", and given no path to read them from. It went and read the post-change source instead, and on a diff with deletions that shows an agent precisely nothing: the removed line is not in that file, and nothing marks where it was. These are the agents that own the classes a chunk agent is structurally blind to — the cross-file trace, the cross-chunk removed-behaviour pairing, the test matrix. The review's only coverage of all three was done by agents that never opened the diff, and the coverage check could not see it, because it only ever asked that question of agents whose prompt said `chunk N of M`.
 
@@ -320,10 +320,10 @@ The sections below say what each agent is _for_. They are no longer what it is _
 
 When a file is largely rewritten, reviewing it as a diff is the wrong frame. The bugs are not inside any one hunk; they are **between** the new lines, which can sit two thousand lines apart — a timer armed near the top of the file and a teardown path near the bottom. No chunk agent, and no reader of a diff with three lines of context, can see that pair.
 
-Three agents per `heavy` file, one checklist slice each:
+Three agents per `heavy` file, one checklist slice each — their blocks are in the `--roster` output; to rebuild one for a relaunch:
 
 ```bash
-qwen review agent-prompt --plan <the plan report from Step 1> \
+"${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan <the plan report from Step 1> \
   --role invariant-a --file <path> [--rules <the rules file from Step 2>]
 # ...and --role invariant-b, --role invariant-c, for the same file
 ```
@@ -339,7 +339,7 @@ Three ranges exist in the report and they are not interchangeable, which is why 
 **Do not check the coverage. It is checked for you, from what the agents actually did.** You do not copy their returns anywhere — the harness already recorded them, along with every tool call each agent made and the prompt each was launched with. Run:
 
 ```bash
-qwen review check-coverage \
+"${QWEN_CODE_CLI:-qwen}" review check-coverage \
   --plan <the plan report from Step 1> \
   --out .qwen/tmp/qwen-review-{target}-coverage.json
 ```
@@ -384,7 +384,7 @@ A check you perform silently is a check you skip, and this one has been skipped:
 
 **For same-repo PR reviews (worktree mode), every `agent` call MUST also set `working_dir: "<worktreePath>"`** — the `worktreePath` from the Step 1 fetch report (a repo-relative path like `.qwen/tmp/review-pr-<n>`; pass it through as-is). This sets each agent's working directory to the PR worktree, so its `git diff`, `grep_search`, file reads, and Agent 7's build/test **resolve against the PR's code, not the user's main checkout**. It is a deterministic, harness-level cwd pin — it does NOT depend on the agent remembering to `cd`, and it is what makes reviewing multiple PRs concurrently safe. (It pins the working directory; it is not a hard filesystem sandbox — an absolute path could still reach elsewhere — but normal review operations stay inside the worktree.) This rule applies to **every** agent the review workflow launches — not just the Step 3 dimension agents, but also the Step 4 verification agent and the Step 5 reverse-audit agents (both restated below). Do NOT set `working_dir` for **local-diff, file-path, or cross-repo lightweight** reviews — those have no worktree, so the agents run in the main project directory.
 
-**You no longer compose these prompts. `qwen review agent-prompt` does** — one call per agent, and what it prints goes to that agent unedited. It already contains everything the list below used to ask you to remember: `diffPathAbsolute` and the exact `read_file` ranges for that role (its own `offset`/`limit` for a chunk agent; every chunk for a whole-diff or 3A agent; the post-change file plus `addedRanges[]` and its own `diffRange` for an invariant agent), the agent's focus areas, the severity definitions verbatim, the finding format, and the project rules. **Never give an agent a `git diff` command** — see "Diff capture and the review topology" in Step 1 for why. In worktree-mode PR reviews the agent's `working_dir` is the PR worktree, so `grep_search` and source-file reads resolve against the PR's code automatically — the agent must NOT `cd` into the worktree or prefix absolute paths for those.
+**You no longer compose these prompts. `qwen review agent-prompt` does** — one `--roster` call builds every one of them, and each block it prints goes to its agent unedited. It already contains everything the list below used to ask you to remember: `diffPathAbsolute` and the exact `read_file` ranges for that role (its own `offset`/`limit` for a chunk agent; every chunk for a whole-diff or 3A agent; the post-change file plus `addedRanges[]` and its own `diffRange` for an invariant agent), the agent's focus areas, the severity definitions verbatim, the finding format, and the project rules. **Never give an agent a `git diff` command** — see "Diff capture and the review topology" in Step 1 for why. In worktree-mode PR reviews the agent's `working_dir` is the PR worktree, so `grep_search` and source-file reads resolve against the PR's code automatically — the agent must NOT `cd` into the worktree or prefix absolute paths for those.
 
 The one thing you still add per agent is **a one-sentence summary of what the change is about**, ahead of the block. Add it before, never inside: the delivered prompt must _contain_ what the command printed, and Step 3D checks that it does.
 
@@ -426,7 +426,7 @@ Two things the command's briefs carry that no orchestrator should be relaying by
 
 The fixed dimensions are domain-blind. When a diff concentrates in a domain with a recognizable failure grammar — a reconnect/backoff state machine, a module loader, a cron scheduler, a wire-protocol codec, a cache layer, a data migration — write 1–2 additional finder briefs specialized to that domain and launch them alongside the standard set, labeled `Agent 8a/8b: <domain> angle`.
 
-**This is the one brief you write**, so it is the one place `--role` does not help: build the diff-reading block with `qwen review agent-prompt --plan <plan> --whole-diff` and append your domain brief to it. A specialized brief names the domain's specific invariants to walk, the way the invariant checklist does for a rewritten file. Examples: for a module loader — resolution order, ESM/CJS interop, circular-import timing, cache invalidation; for reconnect logic — state flags reset on every exit path, backoff growth and cap, timer cancellation on teardown, buffered-data loss when a retry is abandoned.
+**This is the one brief you write**, so it is the one place `--role` does not help: build the diff-reading block with `"${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan <plan> --whole-diff` and append your domain brief to it. A specialized brief names the domain's specific invariants to walk, the way the invariant checklist does for a rewritten file. Examples: for a module loader — resolution order, ESM/CJS interop, circular-import timing, cache invalidation; for reconnect logic — state flags reset on every exit path, backoff growth and cap, timer cancellation on teardown, buffered-data loss when a retry is abandoned.
 
 Rules: at most 2; launch none when no domain stands out (the common case — most diffs get zero). They are not in the roster, so nothing will ask for them. Their findings are `Source: [review]`, use the standard finding format including the failure scenario, and go through Step 4 verification like any other finding.
 
@@ -445,7 +445,7 @@ At low and medium effort there are no subagents: you are the finder, in this con
 **Medium — the finder angles run in sequence, by you.** Do NOT spawn subagents — inline sequencing is what makes this level cheap. The angles, in order: Agent 1a (line-by-line, with the language-pitfall and wrapper-routing checks — in lightweight mode, diff-only: there is no tree for enclosing-function reads), Agent 1b (removed behavior — in lightweight mode it degrades exactly as in Step 3A: with no tree to grep, a missing re-establishment is a candidate at `Confidence: low`, not an assertion), Agent 1c (cross-file trace — same-repo only, skip in lightweight mode), Agent 3 (code quality including altitude), Agent 4 (performance), and a conventions pass over the Step 2 rules (quote the exact rule and the exact line, or report nothing). **Get the dimension briefs; do not work from the table.** The table in the agent-dimensions section says what each angle is _for_; the brief says how to walk it — the language-pitfall checklist, the producer-direction grep, the altitude test, the Exclusion Criteria. Build the ones you need and read them:
 
 ```bash
-qwen review agent-prompt --plan <the plan report from Step 1> --role 1a \
+"${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan <the plan report from Step 1> --role 1a \
   [--rules <the rules file from Step 2, if the project has any>]
 # ...same for 1b, 1c, 3, 4. Each writes its brief to disk and prints where.
 ```
@@ -479,12 +479,12 @@ A single verifier for every finding was cheaper, but on a large review it become
 Write this shard's findings to a file — each with its file, line, issue and failure scenario (the scenario is the claim under test); for any **Agent 0 (Issue Fidelity)** finding, include the **issue evidence it quoted** (issue body + comments), because a root-cause claim rests on linked-issue evidence the codebase does not contain and the verifier must check against it. Then:
 
 ```bash
-qwen review agent-prompt --plan <the plan report from Step 1> --role verify \
+"${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan <the plan report from Step 1> --role verify \
   --findings <the file of this shard's findings> \
   [--rules <the rules file from Step 2, if the project has any>]
 ```
 
-**Paste what it prints verbatim — the whole block, findings and all. Do not prepend, append, reword, or add a shard number.** `--findings` folds the list in for you precisely so there is no hand-assembly step left to drift: dogfooded, the step that used to have you prepend the list by hand is where the prompt got paraphrased — a summary inserted, the "nothing replaces the brief" line truncated — and Step 6's check caught it and capped the verdict. The command records the findings-free launch block, so every shard's record still matches (the findings are an add-only prefix). In worktree mode the verifier's `working_dir` is the PR worktree (same rule as Step 3), so its reads and re-checks resolve against the PR's code.
+**`--findings` is required for this role — the command refuses without it**, because a bare block is a block you would assemble by hand, and hand-assembly is the one step this skill measured drifting. **Paste what it prints verbatim — the whole block, findings and all. Do not prepend, append, reword, or add a shard number.** Dogfooded twice: the step that used to have you prepend the list by hand is where the prompt got paraphrased — a summary inserted, the "nothing replaces the brief" line truncated — and Step 6's check caught it and capped the verdict. The command records the exact block it prints — findings included, keyed per findings digest — so a launch that drops or rewrites the findings matches no record. In worktree mode the verifier's `working_dir` is the PR worktree (same rule as Step 3), so its reads and re-checks resolve against the PR's code.
 
 The brief holds the method the orchestrator used to spell out here and that a paraphrase kept dropping: trace the failure scenario through the real code rather than voting on the finding's prose; engage the diff's own documented intent before calling a documented change a regression (the rule a run skipped when it auto-posted a false "leaks tokens" Critical); and the one-way, quote-the-contradiction bar on **rejecting a Critical**. Read the brief to know what a verdict means; do not re-derive it here.
 
@@ -528,17 +528,17 @@ Write **the cumulative list of every confirmed finding so far** (Steps 3-4 plus 
 
 ```bash
 # Step 3A (small diff): one auditor per round, the whole diff.
-qwen review agent-prompt --plan <the plan report from Step 1> --role reverse-audit \
+"${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan <the plan report from Step 1> --role reverse-audit \
   --findings <the cumulative findings file> \
   [--rules <the rules file from Step 2>]
 
 # Step 3B (large diff): one auditor PER CHUNK per round, launched together.
-qwen review agent-prompt --plan <the plan report from Step 1> --role reverse-audit --chunk <id> \
+"${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan <the plan report from Step 1> --role reverse-audit --chunk <id> \
   --findings <the cumulative findings file> \
   [--rules <the rules file from Step 2>]
 ```
 
-**Paste what it prints verbatim — the whole block. Do not prepend, append, reword, or add a round number** (track the round in your own notes, not in the prompt). `--findings` folds the cumulative list in so there is no hand-assembly step to drift — the same paraphrase Step 6's check caught and capped a real run on, even though the auditor had opened its brief. The command records the findings-free launch block, so every round's record still matches. It also gives each auditor its diff reads — the whole plan in 3A, one chunk's range in 3B (a Step 3B auditor handed the whole 5 800-line diff is the most context-starved agent in the pipeline, on exactly the PRs where the reverse audit matters most). In worktree mode its `working_dir` is the PR worktree.
+**`--findings` is required for this role — the command refuses without it** (an early round with nothing confirmed yet passes an empty file; the command tells the auditor so). **Paste what it prints verbatim — the whole block. Do not prepend, append, reword, or add a round number** (track the round in your own notes, not in the prompt). A real run skipped `--findings`, hand-wrote the auditor's launch keeping only the brief pointer, and Step 6's check capped the verdict — the auditors had run and read their brief, but not one of them got the prompt the CLI built. The command records the exact block it prints — findings included, keyed per round's findings digest — so a launch that drops the confirmed list matches no record. It also gives each auditor its diff reads — the whole plan in 3A, one chunk's range in 3B (a Step 3B auditor handed the whole 5 800-line diff is the most context-starved agent in the pipeline, on exactly the PRs where the reverse audit matters most). In worktree mode its `working_dir` is the PR worktree.
 
 The brief holds what the auditor is for: hunt only the **gaps** no prior agent caught, report only Critical or Suggestion, apply the Exclusion Criteria, and end with a substantive receipt (`No issues found — <what it re-examined>`) — a bare "No issues found." fails the substantive-return check below and triggers the one relaunch.
 
@@ -623,7 +623,7 @@ Two failure modes this closes, both observed in this repo's own dogfood: reporti
 **You do not decide the verdict, and you do not write it. Ask for it:**
 
 ```bash
-qwen review compose-review --input .qwen/tmp/qwen-review-{target}-compose.json \
+"${QWEN_CODE_CLI:-qwen}" review compose-review --input .qwen/tmp/qwen-review-{target}-compose.json \
   --out .qwen/tmp/qwen-review-{target}-composed.json
 ```
 
@@ -639,6 +639,10 @@ The rules it applies — so you can read the line it gives you, not so you can a
 - **Comment** — suggestions but no blockers, **or** an Approve that a cap took away: an uncoverable chunk, a chunk nobody read, a dimension nobody reviewed, a **reverse audit that never ran** (or a **verifier** that never ran on a review with findings), an existing blocker you could not rule on, a PR whose discussion you could not read. A review that did not read part of the diff — or never looked for what it missed — cannot certify it.
 
 **Why this is a command and not a paragraph.** It was a paragraph, and the paragraph was skipped. Dogfooded, a run read the coverage check's refusal, concluded that "the agents clearly did their job", never called `compose-review` at all, and printed **`Review complete — Approve`** — a verdict it had composed itself, from prose, on a review whose gate had just refused. There is now one place a verdict exists. Skipping the command does not get you a different one; it gets you none.
+
+**And you may not overrule the line it gives you.** The failure came back in a subtler shape, on a later dogfood: the run _did_ call `compose-review`, _did_ read `Verdict: Comment — an Approve was NOT available: a dimension nobody reviewed`, and then wrote — in its next thought — _"the compose-review flagged reverse audit as unreviewed (transcript visibility issue — the reverse audit did run substantively)"_, and reported **Approve** to the user and into the saved report. It was wrong: the auditors had run, but the orchestrator had hand-written their launch prompts, so they never got the prompt the CLI built — which is precisely what the gap said, and precisely the run's own doing. **A cap you can explain is still a cap.** If you believe a gap is wrong, the answer is to make the step verifiable — relaunch it with the prompt `agent-prompt` printed, verbatim — and run `compose-review` again. It is never to keep the verdict you preferred and narrate the gap away. The verdict you print, and the verdict in the report you save, are the one this command computed; when they differ from it, the review is lying to the person who trusted it.
+
+**The `FIX:` lines on stderr are that repair, spelled out.** For every repairable gap it capped on, `compose-review` prints one `FIX:` line naming the command — with this run's plan path already substituted. The parts that vary per agent stay as selectors: take `<id>`, `<r>` and `<path>` from the labels in the same report (never paste a literal `<...>` into a shell — it parses as a redirection), and add the `--rules` file whenever Step 2 loaded one. Execute them — **one repair round, then `compose-review` again**. If the same gap survives the round, stop: the cap stands, post with it, and disclose the gap. Do not loop repairs hoping for a different verdict, and do not skip the round and post a capped verdict the FIX lines could have lifted — both are the same failure, choosing the verdict over the evidence, in opposite directions.
 
 Append a follow-up tip after the verdict (high effort only — a quick pass emits no verdict and uses Step 3C's tip instead; its "post comments" follow-up is declined per Step 3C). Choose based on remaining state:
 
@@ -656,7 +660,7 @@ If the user responds with "post comments" (or similar intent like "yes post them
 **You do not post. `qwen review submit` posts, and it refuses when the run is not authorised.** Do NOT call `gh api repos/.../pulls/<n>/reviews` yourself — not to submit the review, not to "test" an anchor, not at all. That command is the one write in this skill, and it now lives behind a check:
 
 ```bash
-qwen review submit \
+"${QWEN_CODE_CLI:-qwen}" review submit \
   --pr <pr_number> --repo <owner>/<repo> \
   --review .qwen/tmp/qwen-review-{target}-review.json \
   [--user-authorized] [--host <host>]
@@ -687,7 +691,7 @@ Also skip this step (independently of the gate above) if the review target is no
 #   "anchor": "  if (amt < 0) return;\n  charge(amt);", "line": 42}]
 # `line` is OPTIONAL — omit it when the finder gave no number; it only breaks ties.
 
-qwen review resolve-anchors \
+"${QWEN_CODE_CLI:-qwen}" review resolve-anchors \
   --diff <diffPathAbsolute> \
   --input .qwen/tmp/qwen-review-{target}-anchors.json \
   --out .qwen/tmp/qwen-review-{target}-anchors-resolved.json
@@ -719,7 +723,7 @@ echo '[{"path":"src/foo.ts","line":42}, ...]' > .qwen/tmp/qwen-review-{target}-f
 Then run:
 
 ```bash
-qwen review presubmit \
+"${QWEN_CODE_CLI:-qwen}" review presubmit \
   {pr_number} {commit_sha} {owner}/{repo} \
   .qwen/tmp/qwen-review-{target}-presubmit.json \
   [--new-findings .qwen/tmp/qwen-review-{target}-findings.json]
@@ -838,7 +842,7 @@ The verdict is a computed fact and this is the second place it must not be re-de
 Then submit it — through `submit`, which checks the authorisation and the payload before anything reaches GitHub:
 
 ```bash
-qwen review submit \
+"${QWEN_CODE_CLI:-qwen}" review submit \
   --pr {pr_number} --repo {owner}/{repo} \
   --review .qwen/tmp/qwen-review-{target}-review.json \
   [--host <host>]     # required for GitHub Enterprise; omit on github.com
@@ -875,6 +879,10 @@ Report content should include:
 - All findings with verification status
 - Verdict (high effort only — a quick pass claims none)
 
+**The report's verdict is not yours to type.** `compose-review` printed the exact `Verdict:` line in Step 6 and persisted the same line as `verdictLine` inside `.qwen/tmp/qwen-review-{target}-composed.json` — copy either, verbatim. Do not reconstruct it from `event` + `cappedBy`: a presubmit downgrade also depends on fields that pair does not carry, and a rebuilt line can differ from the computed one. (And not `$(jq …)`: a `jq` binary is not guaranteed on the host, and a substitution that fails leaves the archived verdict blank or literal — worse than absent, because it looks written.)
+
+A run that had read `Verdict: Comment — an Approve was NOT available` wrote `**Verdict:** Approve` into its saved report minutes later. The terminal is prose and the archive is forever; this line is the one place the archive can be made to tell the truth for free. If the composed event is not the one you expected, fix the run — not the report.
+
 ### Incremental review cache
 
 If reviewing a PR **at high effort**, update the review cache for incremental review support. Low/medium quick passes must NOT write it — a cache hit would make a later high-effort review of the same SHA report "No new changes since last review", silently converting a quick pass into a full-review verdict.
@@ -901,7 +909,7 @@ If reviewing a PR **at high effort**, update the review cache for incremental re
 Run the bundled cleanup subcommand:
 
 ```bash
-qwen review cleanup <target>
+"${QWEN_CODE_CLI:-qwen}" review cleanup <target>
 ```
 
 `<target>` is the same suffix used throughout (`pr-<n>`, `local`, or filename). The command removes the worktree at `.qwen/tmp/review-pr-<n>` (PR targets only), deletes the local branch ref `qwen-review/pr-<n>`, and clears any `.qwen/tmp/qwen-review-<target>-*` side files (review JSON, PR context, presubmit / findings reports). It is idempotent — missing files are silent OK. Also remove `.qwen/tmp/qwen-review-parse-args.json` and the session args directory `.qwen/tmp/s-<session>/` (the path from the `<skill-args>` note) — both are written before the target suffix is known, so the pattern above misses them. (Leave the args file in place if you had to fall back to writing it yourself and the run failed: it is the only record of what the review was actually asked to do.)

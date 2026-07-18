@@ -1315,8 +1315,14 @@ describe('LoggingContentGenerator', () => {
         { functionCall: { id: 'call-1', name: 'tool', args: '{"x":1}' } },
         { functionResponse: { name: 'tool', response: { output: 'ok' } } },
       ],
-      usage2,
+      undefined,
       'STOP',
+    );
+    const usageResponse = createResponse(
+      'resp-usage',
+      'model-stream',
+      [],
+      usage2,
     );
 
     const wrapped = createWrappedGenerator(
@@ -1324,6 +1330,7 @@ describe('LoggingContentGenerator', () => {
       vi.fn().mockResolvedValue(
         (async function* () {
           yield response1;
+          yield usageResponse;
           yield response2;
         })(),
       ),
@@ -1349,7 +1356,7 @@ describe('LoggingContentGenerator', () => {
     for await (const item of stream) {
       seen.push(item);
     }
-    expect(seen).toHaveLength(2);
+    expect(seen).toHaveLength(3);
 
     expect(logApiResponse).toHaveBeenCalledTimes(1);
     const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];

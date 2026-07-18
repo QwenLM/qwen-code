@@ -281,6 +281,12 @@ const serveEnv = {
   QWEN_SERVER_TOKEN: token,
   QWEN_CODE_NO_RELAUNCH: 'true',
   NODE_OPTIONS: nodeOptions,
+  // QWEN_CODE_CLI — the entry a `qwen …` subprocess should call to reach this
+  // build — is NOT set here: `scripts/dev.js`, which the daemon below is launched
+  // through, stamps it unconditionally. Setting it here too gave it two writers,
+  // and this one deferred to an inherited value (`??`) — so a daemon started from
+  // inside another qwen session's shell pointed every subprocess at the OUTER
+  // session's CLI: the exact skew the variable exists to prevent, one level up.
 };
 
 const webEnv = {

@@ -23,6 +23,7 @@ import type {
   EditorType,
   GeminiClient,
   AnyToolInvocation,
+  SteerInput,
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
@@ -295,6 +296,7 @@ describe('useGeminiStream', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllEnvs();
   });
 
   const mockLoadedSettings: LoadedSettings = {
@@ -495,6 +497,192 @@ describe('useGeminiStream', () => {
       expect(String(visionNotice?.[0]?.text)).not.toContain(
         '[transcribed image]',
       );
+    });
+
+    it('keeps an agent-capable image route through tools and retry, then clears it', async () => {
+      enableBridge();
+      mockHandleSlashCommand.mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'describe' }, imagePart],
+      });
+      mockConfig.getDefaultVisionBridgeModel = vi.fn(() => ({
+        id: 'vision-agent',
+        baseUrl: 'https://vision.example.com/v1',
+        agentCapable: true,
+      }));
+      const selector = 'vision-agent\0https://vision.example.com/v1\0';
+      const { result, mockSendMessageStream } = renderTestHook();
+      const toolRequest = {
+        callId: 'full-turn-tool',
+        name: 'read_file',
+        args: { file_path: 'image.png' },
+      };
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: toolRequest,
+          };
+        })(),
+      );
+
+      await act(async () => {
+        await result.current.submitQuery('/inspect-image');
+      });
+      expect(mockRunVisionBridge).not.toHaveBeenCalled();
+      expect(mockSendMessageStream.mock.calls[0]?.[0]).toEqual([
+        { text: 'describe' },
+        imagePart,
+      ]);
+      expect(mockSendMessageStream.mock.calls[0]?.[3]).toMatchObject({
+        modelOverride: selector,
+      });
+      expect(mockScheduleToolCalls).toHaveBeenCalledWith(
+        [toolRequest],
+        expect.any(AbortSignal),
+        selector,
+      );
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.VISION_NOTICE,
+          text: expect.stringContaining('Routing this image turn'),
+        }),
+        expect.any(Number),
+      );
+
+      await act(async () => {
+        await result.current.submitQuery(
+          [
+            {
+              functionResponse: {
+                id: 'tool-call',
+                name: 'read_file',
+                response: { output: 'tool result' },
+              },
+            },
+          ],
+          SendMessageType.ToolResult,
+        );
+      });
+      expect(mockSendMessageStream.mock.calls[1]?.[3]).toMatchObject({
+        modelOverride: selector,
+      });
+
+      await act(async () => {
+        await result.current.submitQuery(
+          [{ text: 'retry' }, imagePart],
+          SendMessageType.Retry,
+        );
+      });
+      expect(mockSendMessageStream.mock.calls[2]?.[3]).toMatchObject({
+        modelOverride: selector,
+      });
+
+      handleAtCommandSpy.mockResolvedValue({
+        processedQuery: [{ text: 'next text turn' }],
+        shouldProceed: true,
+      } as unknown as Awaited<
+        ReturnType<typeof atCommandProcessor.handleAtCommand>
+      >);
+      await act(async () => {
+        await result.current.submitQuery('next text turn');
+      });
+      expect(
+        mockSendMessageStream.mock.calls[3]?.[3].modelOverride,
+      ).toBeUndefined();
+    });
+
+    it('clamps oversized agent-capable image routes before applying a full-turn override', async () => {
+      vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
+      enableBridge();
+      mockConfig.getDefaultVisionBridgeModel = vi.fn(() => ({
+        id: 'vision-agent',
+        agentCapable: true,
+      }));
+      mockHandleSlashCommand.mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'describe' }, imagePart],
+      });
+      const { result, mockSendMessageStream } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('/inspect-image');
+      });
+
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+      expect(
+        JSON.stringify(mockSendMessageStream.mock.calls[0]?.[0]),
+      ).toContain('Media omitted:');
+      expect(
+        mockSendMessageStream.mock.calls[0]?.[3].modelOverride,
+      ).toBeUndefined();
+      expect(mockRunVisionBridge).not.toHaveBeenCalled();
+    });
+
+    it('does not let a skill tool override clobber an active full-turn route', async () => {
+      enableBridge();
+      mockConfig.getDefaultVisionBridgeModel = vi.fn(() => ({
+        id: 'vision-agent',
+        baseUrl: 'https://vision.example.com/v1',
+        agentCapable: true,
+      }));
+      mockHandleSlashCommand.mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'describe' }, imagePart],
+      });
+      const selector = 'vision-agent\0https://vision.example.com/v1\0';
+      const { result, mockSendMessageStream } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('/inspect-image');
+      });
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+      expect(mockSendMessageStream.mock.calls[0]?.[3]).toMatchObject({
+        modelOverride: selector,
+      });
+
+      mockSendMessageStream.mockClear();
+      const onComplete = mockUseReactToolScheduler.mock.calls.at(-1)?.[0] as
+        | ((completedTools: TrackedToolCall[]) => Promise<void>)
+        | undefined;
+      await act(async () => {
+        await onComplete?.([
+          {
+            request: {
+              callId: 'skill-call',
+              name: 'pdf-skill',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-id-skill',
+            },
+            status: 'success',
+            responseSubmittedToGemini: false,
+            response: {
+              callId: 'skill-call',
+              responseParts: [{ text: 'skill loaded' }],
+              errorType: undefined,
+              modelOverride: 'other-model',
+            },
+            tool: {
+              name: 'pdf-skill',
+              displayName: 'pdf-skill',
+              description: 'd',
+              build: vi.fn(),
+            } as never,
+            invocation: {
+              getDescription: () => 'desc',
+            } as unknown as AnyToolInvocation,
+            startTime: Date.now(),
+            endTime: Date.now(),
+          } as TrackedCompletedToolCall,
+        ]);
+      });
+
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+      expect(mockSendMessageStream.mock.calls[0]?.[3]).toMatchObject({
+        type: SendMessageType.ToolResult,
+        modelOverride: selector,
+      });
     });
 
     it('does not query bridge config for text-only messages', async () => {
@@ -1078,7 +1266,7 @@ describe('useGeminiStream', () => {
     );
   });
 
-  it('records mid-turn queued user messages before submitting tool results', async () => {
+  it('records mid-turn queued user messages after tool results accept them', async () => {
     const queuedPrompt = 'save the logs locally first';
     const recordMidTurnUserMessage = vi.fn();
     mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
@@ -1118,7 +1306,10 @@ describe('useGeminiStream', () => {
       } as TrackedCompletedToolCall,
     ];
     const midTurnDrainRef = {
-      current: vi.fn().mockReturnValue([queuedPrompt]),
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
     };
 
     let capturedOnComplete:
@@ -1165,9 +1356,7 @@ describe('useGeminiStream', () => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
     });
 
-    const expectedMidTurnMessage = {
-      text: `\n[User message received during tool execution]: ${queuedPrompt}`,
-    };
+    const expectedMidTurnMessage = { text: queuedPrompt };
     expect(recordMidTurnUserMessage).toHaveBeenCalledWith(
       [expectedMidTurnMessage],
       queuedPrompt,
@@ -1180,8 +1369,8 @@ describe('useGeminiStream', () => {
     expect(recordMidTurnUserMessage.mock.invocationCallOrder[0]).toBeLessThan(
       mockAddItem.mock.invocationCallOrder[queuedPromptAddItemIndex],
     );
-    expect(recordMidTurnUserMessage.mock.invocationCallOrder[0]).toBeLessThan(
-      mockSendMessageStream.mock.invocationCallOrder[0],
+    expect(mockSendMessageStream.mock.invocationCallOrder[0]).toBeLessThan(
+      recordMidTurnUserMessage.mock.invocationCallOrder[0],
     );
     expect(mockAddItem).toHaveBeenCalledWith(
       { type: MessageType.NOTIFICATION, text: queuedPrompt },
@@ -1191,7 +1380,149 @@ describe('useGeminiStream', () => {
       [...toolCallResponseParts, expectedMidTurnMessage],
       expect.any(AbortSignal),
       'prompt-id-midturn',
-      { type: SendMessageType.ToolResult },
+      expect.objectContaining({
+        type: SendMessageType.ToolResult,
+        steerInput: expect.objectContaining({
+          parts: [expectedMidTurnMessage],
+          accept: expect.any(Function),
+          restore: expect.any(Function),
+        }),
+      }),
+    );
+  });
+
+  it('provides queued steer input to core at the next sampling boundary', async () => {
+    const steeredPrompt = 'focus on the error handling';
+    const recordMidTurnUserMessage = vi.fn();
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordMidTurnUserMessage,
+    });
+    mockSendMessageStream.mockImplementation(() => (async function* () {})());
+    const drainSteer = vi
+      .fn<() => string[]>()
+      .mockReturnValueOnce([steeredPrompt])
+      .mockReturnValue([]);
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        { current: drainSteer },
+      ),
+    );
+
+    await act(async () => {
+      await result.current.submitQuery(
+        'start the analysis',
+        SendMessageType.UserQuery,
+        'prompt-id-steer',
+      );
+    });
+
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    const sendOptions = mockSendMessageStream.mock.calls[0][3] as {
+      getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
+    };
+    expect(sendOptions.getSteerInput).toEqual(expect.any(Function));
+    let steerInput: SteerInput | undefined;
+    await act(async () => {
+      steerInput = await sendOptions.getSteerInput!(
+        new AbortController().signal,
+      );
+    });
+    expect(steerInput?.parts).toEqual([{ text: steeredPrompt }]);
+    expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
+    expect(mockAddItem).not.toHaveBeenCalledWith(
+      { type: MessageType.NOTIFICATION, text: steeredPrompt },
+      expect.any(Number),
+    );
+    steerInput?.accept();
+    expect(recordMidTurnUserMessage).toHaveBeenCalledWith(
+      [{ text: steeredPrompt }],
+      steeredPrompt,
+    );
+    expect(mockAddItem).toHaveBeenCalledWith(
+      { type: MessageType.NOTIFICATION, text: steeredPrompt },
+      expect.any(Number),
+    );
+  });
+
+  it('restores drained steer input when attachment resolution is cancelled', async () => {
+    const steeredPrompt = 'inspect @/tmp/slow.png';
+    const restoreSteer = vi.fn();
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockImplementation(
+      () => new Promise(() => {}),
+    );
+    const drainSteer = vi
+      .fn<() => string[]>()
+      .mockReturnValueOnce([steeredPrompt])
+      .mockReturnValue([]);
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        { current: drainSteer },
+        undefined,
+        undefined,
+        undefined,
+        { current: restoreSteer },
+      ),
+    );
+
+    await act(async () => {
+      await result.current.submitQuery('start the analysis');
+    });
+    const sendOptions = mockSendMessageStream.mock.calls[0][3] as {
+      getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
+    };
+    const abort = new AbortController();
+    let steerInput: SteerInput | undefined;
+    await act(async () => {
+      const pending = sendOptions.getSteerInput!(abort.signal);
+      abort.abort();
+      steerInput = await pending;
+    });
+
+    expect(steerInput).toBeUndefined();
+    expect(restoreSteer).toHaveBeenCalledWith([steeredPrompt]);
+    expect(mockAddItem).not.toHaveBeenCalledWith(
+      { type: MessageType.NOTIFICATION, text: steeredPrompt },
+      expect.any(Number),
     );
   });
 
@@ -1271,7 +1602,10 @@ describe('useGeminiStream', () => {
       } as TrackedCompletedToolCall,
     ];
     const midTurnDrainRef = {
-      current: vi.fn().mockReturnValue([queuedPrompt]),
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
     };
 
     let capturedOnComplete:
@@ -1318,11 +1652,7 @@ describe('useGeminiStream', () => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
     });
 
-    const expectedMidTurnParts: Part[] = [
-      {
-        text: `\n[User message received during tool execution]: ${transcriptPart.text}`,
-      },
-    ];
+    const expectedMidTurnParts: Part[] = [transcriptPart];
     expect(mockRunVisionBridge).toHaveBeenCalledWith({
       config: mockConfig,
       parts: [resolvedTextPart, resolvedImagePart],
@@ -1369,7 +1699,7 @@ describe('useGeminiStream', () => {
       [...toolCallResponseParts, ...expectedMidTurnParts],
       expect.any(AbortSignal),
       'prompt-id-midturn-image',
-      { type: SendMessageType.ToolResult },
+      expect.objectContaining({ type: SendMessageType.ToolResult }),
     );
   });
 
@@ -1444,7 +1774,10 @@ describe('useGeminiStream', () => {
       } as TrackedCompletedToolCall,
     ];
     const midTurnDrainRef = {
-      current: vi.fn().mockReturnValue([queuedPrompt]),
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
     };
 
     let capturedOnComplete:
@@ -1492,11 +1825,7 @@ describe('useGeminiStream', () => {
     expect(sent).toContain('inspect @/tmp/screenshot.png and summarize');
     expect(sent).not.toContain('inlineData');
     expect(recordMidTurnUserMessage).toHaveBeenCalledWith(
-      [
-        {
-          text: `\n[User message received during tool execution]: ${resolvedTextPart.text}`,
-        },
-      ],
+      [resolvedTextPart],
       queuedPrompt,
     );
   });
@@ -1565,7 +1894,10 @@ describe('useGeminiStream', () => {
       } as TrackedCompletedToolCall,
     ];
     const midTurnDrainRef = {
-      current: vi.fn().mockReturnValue([queuedPrompt]),
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
     };
 
     let capturedOnComplete:
@@ -1638,7 +1970,7 @@ describe('useGeminiStream', () => {
       toolCallResponseParts,
       expect.any(AbortSignal),
       'prompt-id-midturn-at-error',
-      { type: SendMessageType.ToolResult },
+      expect.objectContaining({ type: SendMessageType.ToolResult }),
     );
   });
 
@@ -1685,7 +2017,10 @@ describe('useGeminiStream', () => {
       } as TrackedCompletedToolCall,
     ];
     const midTurnDrainRef = {
-      current: vi.fn().mockReturnValue([queuedPrompt]),
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
     };
 
     let capturedOnComplete:
@@ -1744,7 +2079,7 @@ describe('useGeminiStream', () => {
       toolCallResponseParts,
       expect.any(AbortSignal),
       'prompt-id-midturn-at-throw',
-      { type: SendMessageType.ToolResult },
+      expect.objectContaining({ type: SendMessageType.ToolResult }),
     );
   });
 
@@ -1810,7 +2145,10 @@ describe('useGeminiStream', () => {
       } as TrackedCompletedToolCall,
     ];
     const midTurnDrainRef = {
-      current: vi.fn().mockReturnValue([queuedPrompt]),
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
     };
 
     let capturedOnComplete:
@@ -1920,7 +2258,10 @@ describe('useGeminiStream', () => {
       } as TrackedCompletedToolCall,
     ];
     const midTurnDrainRef = {
-      current: vi.fn().mockReturnValue([queuedPrompt]),
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
     };
 
     let capturedOnComplete:
@@ -2027,7 +2368,10 @@ describe('useGeminiStream', () => {
       } as TrackedCompletedToolCall,
     ];
     const midTurnDrainRef = {
-      current: vi.fn().mockReturnValue([queuedPrompt]),
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
     };
 
     let capturedOnComplete:
@@ -2131,7 +2475,10 @@ describe('useGeminiStream', () => {
       } as TrackedCompletedToolCall,
     ];
     const midTurnDrainRef = {
-      current: vi.fn().mockReturnValue([queuedPrompt]),
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
     };
 
     let capturedOnComplete:
@@ -2183,15 +2530,10 @@ describe('useGeminiStream', () => {
       expect.any(Number),
     );
     expect(mockSendMessageStream).toHaveBeenCalledWith(
-      [
-        ...toolCallResponseParts,
-        {
-          text: `\n[User message received during tool execution]: ${queuedPrompt}`,
-        },
-      ],
+      [...toolCallResponseParts, { text: queuedPrompt }],
       expect.any(AbortSignal),
       'prompt-id-midturn',
-      { type: SendMessageType.ToolResult },
+      expect.objectContaining({ type: SendMessageType.ToolResult }),
     );
   });
 
@@ -5884,9 +6226,17 @@ describe('useGeminiStream', () => {
 
       it('does not let a skill tool with modelOverride: undefined clobber an active inline override', async () => {
         allowInlineModel();
+        mockConfig.getEffectiveInputModalities = vi.fn(() => ({}));
+        mockConfig.getDefaultVisionBridgeModel = vi.fn(() => ({
+          id: 'vision-agent',
+          agentCapable: true,
+        }));
         mockHandleSlashCommand.mockResolvedValue({
           type: 'submit_prompt',
-          content: 'do the thing',
+          content: [
+            { text: 'do the thing' },
+            { inlineData: { mimeType: 'image/png', data: 'abc123' } },
+          ],
           modelOverride: 'inline-model',
         });
 
@@ -5935,6 +6285,7 @@ describe('useGeminiStream', () => {
         expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
           modelOverride: 'inline-model',
         });
+        expect(mockRunVisionBridge).not.toHaveBeenCalled();
 
         mockSendMessageStream.mockClear();
 
@@ -6026,6 +6377,63 @@ describe('useGeminiStream', () => {
           }),
           expect.any(Number),
         );
+      });
+
+      // Regression for #7114: a background task completion drains as a
+      // SendMessageType.Notification submission. Notifications are system
+      // events, not new user turns — they must not clear the active model
+      // override, or the notification turn (and everything after it) falls
+      // back to the default model, whose smaller context window can 400 on a
+      // long history.
+      it('does not clear an active model override when a background notification drains', async () => {
+        allowInlineModel();
+        mockHandleSlashCommand.mockResolvedValue({
+          type: 'submit_prompt',
+          content: 'do the thing',
+          modelOverride: 'inline-model',
+        });
+
+        const { result } = renderTestHook();
+
+        // Turn 1: the override is set and used.
+        await act(async () => {
+          await result.current.submitQuery('/model inline-model do the thing');
+        });
+        await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+        expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
+          modelOverride: 'inline-model',
+        });
+
+        mockSendMessageStream.mockClear();
+
+        // A background shell completes while the session sits on the override.
+        const callback = mockBackgroundShellRegistry.setNotificationCallback
+          .mock.calls[0][0] as (displayText: string, modelText: string) => void;
+        act(() => {
+          callback(
+            'Background shell "npm test" completed.',
+            '<task-notification>completed</task-notification>',
+          );
+        });
+
+        // The notification turn itself still runs on the overridden model.
+        await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+        expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
+          type: SendMessageType.Notification,
+          modelOverride: 'inline-model',
+        });
+
+        mockSendMessageStream.mockClear();
+        mockHandleSlashCommand.mockResolvedValue(false);
+
+        // A real user turn still clears the one-shot inline override.
+        await act(async () => {
+          await result.current.submitQuery('plain follow-up prompt');
+        });
+        await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+        expect(
+          mockSendMessageStream.mock.calls[0][3].modelOverride,
+        ).toBeUndefined();
       });
     });
   });
