@@ -836,6 +836,43 @@ describe('--round — the CLI bakes the round into the identity line and the key
     }
   });
 
+  it('carries the round through a single-chunk rebuild — the repair path after a gap', () => {
+    // The batch and the single path build their keys at two separate
+    // concatenation sites; the batch test cannot see the single one drifting
+    // (a swapped segment order, `--round-1--chunk-14--`, would still pass it).
+    // This is also the exact call the FIX line prescribes to rebuild one
+    // auditor of a round, so its key must land in the same family the batch
+    // wrote — or the repair round can never match the requirement it repairs.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-round-single-chunk-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN));
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '- x');
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'reverse-audit',
+        chunk: 14,
+        findings,
+        round: 1,
+      });
+      const recorded = readRecordedPrompts(plan);
+      const keys = [...recorded.keys()];
+      expect(keys).toHaveLength(1);
+      expect(keys[0]).toMatch(
+        /^reverse-audit--chunk-14--round-1--[0-9a-f]{12}$/,
+      );
+      const rec = recorded.get(keys[0])!;
+      expect(rec.split('\n')[0]).toContain('(round 1).');
+      // Its OWN chunk's range — a rebuild that read another chunk's lines
+      // would repair nothing.
+      expect(rec).toContain('offset=4024');
+      expect(rec).not.toContain('offset=3807');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('verify takes --round too — a re-verification round is its own receipt', () => {
     const dir = mkdtempSync(join(tmpdir(), 'ap-round-verify-'));
     try {

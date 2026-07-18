@@ -694,8 +694,12 @@ const rebuildFix = (role: 'verify' | 'reverse-audit', noun: string): string =>
       `no findings verifies nothing; `) +
   `pass --rules whenever the review loaded any, or the rebuilt brief silently ` +
   `drops the project rules) and launch an agent with EXACTLY what it prints — ` +
-  `no hand-added ${noun} number (--round bakes it in), no summary of your ` +
-  `own, no rewording`;
+  `no hand-added ${noun} number` +
+  // --round bakes in a ROUND number. Verify's noun is "shard", and a
+  // parenthetical claiming --round bakes it in would send the reader to the
+  // wrong flag — shards are already told apart by their findings digest.
+  (role === 'reverse-audit' ? ` (--round bakes it in)` : ``) +
+  `, no summary of your own, no rewording`;
 
 const REVERSE_AUDIT_GAP: GapText = {
   // Not "no auditor ran": a run that skipped the builder and hand-wrote the

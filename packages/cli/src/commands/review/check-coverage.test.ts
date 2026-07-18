@@ -1482,7 +1482,13 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     expect(gap).toMatch(/no agent was launched with the prompt the CLI built/);
     expect(gap).not.toMatch(/no verifier ran/);
     expect(gap).not.toMatch(/agent-prompt|--findings|--role/);
-    expect(r.remediation.join(' ')).toContain('--role verify');
+    const fix = r.remediation.join(' ');
+    expect(fix).toContain('--role verify');
+    // The verify fix bans a hand-added SHARD number, and must not claim
+    // --round bakes one in — --round bakes in a round number, and shards are
+    // told apart by their findings digest, not by that flag.
+    expect(fix).toMatch(/no hand-added shard number,/);
+    expect(fix).not.toContain('shard number (--round bakes it in)');
   });
 
   it('flags a reverse audit built but whose agent never opened its brief', () => {
