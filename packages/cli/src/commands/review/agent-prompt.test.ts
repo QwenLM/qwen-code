@@ -425,6 +425,103 @@ describe('agent-prompt (command boundary)', () => {
 // was built for any of twelve roles" in a day — the builder simply stopped being
 // called. The roster call and check-coverage read the same list out of the same
 // plan, so what gets built is exactly what gets checked.
+describe('--all-chunks — every auditor of a Step 5 round, in one call', () => {
+  beforeEach(() => {
+    (writeStdoutLine as unknown as Mock).mockClear();
+  });
+
+  it('builds one labelled block per chunk, each recorded as its exact printed prompt', () => {
+    // The per-chunk form asked for one build-and-capture round trip per chunk;
+    // a real run answered with `for i in …; do agent-prompt … | head -5; done`
+    // — it sampled each build, never possessed the texts, hand-reconstructed
+    // all ten launches, and every one was flagged rewritten. One call, blocks
+    // to copy, nothing to reconstruct.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-allchunks-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN)); // chunks 13, 14, 15
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '- **[Critical]** x.ts:1 — y');
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'reverse-audit',
+        'all-chunks': true,
+        findings,
+      });
+
+      const printed = (writeStdoutLine as unknown as Mock).mock
+        .calls[0][0] as string;
+      // Numbered blocks + end marker: the same truncation self-check as the
+      // roster, and an explicit ban on sampling the output.
+      expect(printed).toContain('3 auditors required this round');
+      expect(printed).toContain('NEVER sample this output');
+      expect(printed).toMatch(/───── auditor 1 of 3 — chunk 13 ─────/);
+      expect(printed).toMatch(/───── end of round — 3 auditors ─────/);
+
+      const recorded = readRecordedPrompts(plan);
+      const keys = [...recorded.keys()].sort();
+      expect(keys).toHaveLength(3);
+      for (const c of [13, 14, 15]) {
+        const key = keys.find((k) =>
+          k.startsWith(`reverse-audit--chunk-${c}--`),
+        )!;
+        expect(key).toMatch(/--[0-9a-f]{12}$/);
+        const rec = recorded.get(key)!;
+        // The record IS the printed block, identity line first, findings in.
+        expect(printed).toContain(rec);
+        expect(rec.startsWith('You are review agent `reverse-audit`')).toBe(
+          true,
+        );
+        expect(rec).toContain('- **[Critical]** x.ts:1 — y');
+      }
+      // Each block reads its OWN chunk's range — asserted on two different
+      // chunks, because checking only the first cannot see a batch that built
+      // every block from the same chunk.
+      const rec13 = recorded.get(
+        keys.find((k) => k.includes('--chunk-13--'))!,
+      )!;
+      const rec14 = recorded.get(
+        keys.find((k) => k.includes('--chunk-14--'))!,
+      )!;
+      expect(rec13).toContain('offset=3807');
+      expect(rec13).not.toContain('offset=4024');
+      expect(rec14).toContain('offset=4024');
+      expect(rec14).not.toContain('offset=3807');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses --all-chunks for a role that is not per-chunk-findings, and with --chunk', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ap-allchunks-x-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN));
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '- x');
+      expect(() =>
+        (agentPromptCommand.handler as (a: unknown) => void)({
+          plan,
+          role: 'verify',
+          'all-chunks': true,
+          findings,
+        }),
+      ).toThrow(/does not take it/);
+      expect(() =>
+        (agentPromptCommand.handler as (a: unknown) => void)({
+          plan,
+          role: 'reverse-audit',
+          'all-chunks': true,
+          chunk: 13,
+          findings,
+        }),
+      ).toThrow(/contradict/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('--roster — every prompt the plan requires, in one call', () => {
   beforeEach(() => {
     (writeStdoutLine as unknown as Mock).mockClear();
@@ -786,7 +883,7 @@ describe('--findings — fold the list in, print one block, record EXACTLY that 
     return { printed, plan };
   }
 
-  it('a verifier gets the findings folded above, and the record IS the printed prompt', () => {
+  it('a verifier gets the findings folded beneath its identity line, and the record IS the printed prompt', () => {
     const { printed, plan } = run({ role: 'verify' });
     // Printed: the findings section AND the findings themselves — and NOT the
     // reverse auditor's framing (a branch swap in findingsSection would pass both
@@ -802,10 +899,19 @@ describe('--findings — fold the list in, print one block, record EXACTLY that 
     // the delivery check passed while no verifier ever saw a finding.
     const recorded = recordByPrefix(plan, 'verify--');
     expect(recorded).toBe(printed);
-    // The attack shape from the review: delivering the tail alone (the old
-    // findings-free block) no longer matches the record.
-    const tail = printed.slice(printed.indexOf('You are review agent'));
-    expect(wasDeliveredVerbatim(tail, recorded)).toBe(false);
+    // The identity line leads the output — the one spot a real run edited on a
+    // fully possessed prompt was the head, where it swapped the role line for
+    // its own context sentence; with identity first, a context wrap lands
+    // above it instead of replacing it.
+    expect(printed.startsWith('You are review agent `verify`')).toBe(true);
+    // The attack shape from the review: a launch that carries the block but
+    // DROPS the findings section still matches no record.
+    const identity = printed.split('\n')[0];
+    const afterFindings = printed.slice(
+      printed.indexOf('**Your brief is a file'),
+    );
+    const findingsFree = `${identity}\n\n${afterFindings}`;
+    expect(wasDeliveredVerbatim(findingsFree, recorded)).toBe(false);
     // The compliant launch (possibly wrapped) still does.
     expect(wasDeliveredVerbatim(`Context.\n${printed}\nGo.`, recorded)).toBe(
       true,
