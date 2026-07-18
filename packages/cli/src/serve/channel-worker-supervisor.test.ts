@@ -8,6 +8,10 @@ import {
 } from './channel-worker-supervisor.js';
 import { CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS } from './channel-worker-env.js';
 import { MAX_CHANNEL_STARTUP_FAILURES } from './channel-worker-startup-ipc.js';
+import {
+  CHANNEL_DELIVERY_IPC_TIMEOUT_MS,
+  type ChannelDeliveryRequest,
+} from './channel-delivery-ipc.js';
 
 const TEST_HEARTBEAT_TIMEOUT_MS = CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS + 5;
 
@@ -39,6 +43,17 @@ const webhookTask: ChannelWebhookTask = {
   targetRef: 'default',
   title: 'CI failed',
   payload: { runId: 123 },
+};
+
+const deliveryRequest: ChannelDeliveryRequest = {
+  deliveryId: 'delivery-1',
+  channelName: 'telegram',
+  target: {
+    channelName: 'telegram',
+    chatId: 'group-1',
+    isGroup: true,
+  },
+  text: 'inspection result',
 };
 
 describe('createChannelWorkerSupervisor', () => {
@@ -2400,6 +2415,159 @@ describe('createChannelWorkerSupervisor', () => {
       pid: 22222,
       channels: ['telegram'],
       requestedChannels: ['telegram'],
+    });
+  });
+
+  it('delivers a channel message through a running worker', async () => {
+    const child = new FakeChild(false);
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+
+    const delivered = supervisor.deliverChannelMessage!(deliveryRequest);
+    const sent = child.send.mock.calls[0]![0] as { id: string };
+    expect(sent).toMatchObject({
+      type: 'channel_delivery',
+      id: expect.any(String),
+      expiresAt: expect.any(Number),
+      request: deliveryRequest,
+    });
+
+    let settled = false;
+    void delivered.finally(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    child.emit('message', {
+      type: 'channel_delivery_result',
+      id: sent.id,
+      ok: true,
+    });
+
+    await expect(delivered).resolves.toEqual({ delivered: true });
+  });
+
+  it('rejects channel delivery when the worker is not running', async () => {
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => new FakeChild()),
+    });
+
+    await expect(
+      supervisor.deliverChannelMessage!(deliveryRequest),
+    ).rejects.toMatchObject({
+      code: 'channel_worker_unavailable',
+      message: 'Channel worker is not running.',
+    });
+  });
+
+  it('rejects channel delivery errors reported by the worker', async () => {
+    const child = new FakeChild(false);
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+    });
+    await started;
+
+    const delivered = supervisor.deliverChannelMessage!(deliveryRequest);
+    const sent = child.send.mock.calls[0]![0] as { id: string };
+    child.emit('message', {
+      type: 'channel_delivery_result',
+      id: sent.id,
+      ok: false,
+      code: 'channel_delivery_failed',
+      error: 'Platform send failed.',
+    });
+
+    await expect(delivered).rejects.toMatchObject({
+      code: 'channel_delivery_failed',
+      message: 'Platform send failed.',
+    });
+  });
+
+  it('times out a channel delivery without a worker result', async () => {
+    vi.useFakeTimers();
+    const child = new FakeChild(false);
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+    });
+    await started;
+
+    const delivered = supervisor.deliverChannelMessage!(deliveryRequest).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await vi.advanceTimersByTimeAsync(CHANNEL_DELIVERY_IPC_TIMEOUT_MS);
+
+    await expect(delivered).resolves.toMatchObject({
+      code: 'channel_delivery_timeout',
+      message: 'Channel delivery IPC timed out.',
+    });
+  });
+
+  it('rejects pending channel delivery when the worker exits', async () => {
+    const child = new FakeChild(false);
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+    });
+    await started;
+
+    const delivered = supervisor.deliverChannelMessage!(deliveryRequest);
+    child.emit('exit', 1, null);
+
+    await expect(delivered).rejects.toMatchObject({
+      code: 'channel_worker_unavailable',
+      message: 'Channel worker exited.',
     });
   });
 

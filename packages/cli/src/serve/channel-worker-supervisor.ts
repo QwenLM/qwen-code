@@ -28,6 +28,16 @@ import {
   type ChannelWebhookEnqueueErrorCode,
 } from './channel-webhook-ipc.js';
 import {
+  CHANNEL_DELIVERY_IPC_TIMEOUT_MS,
+  ChannelDeliveryError,
+  createChannelDeliveryMessage,
+  isChannelDeliveryErrorCode,
+  isChannelDeliveryResultMessage,
+  type ChannelDeliveryAccepted,
+  type ChannelDeliveryErrorCode,
+  type ChannelDeliveryRequest,
+} from './channel-delivery-ipc.js';
+import {
   createWorkerDiagnosticRedactor,
   normalizeWorkerDiagnostic,
   sanitizeWorkerDiagnostic,
@@ -132,6 +142,9 @@ export interface ChannelWorkerSupervisor {
   restart(): Promise<ChannelWorkerSnapshot>;
   killAllSync(): void;
   snapshot(): ChannelWorkerSnapshot;
+  deliverChannelMessage?(
+    request: ChannelDeliveryRequest,
+  ): Promise<ChannelDeliveryAccepted>;
   enqueueWebhookTask(task: ChannelWebhookTask): Promise<ChannelWebhookAccepted>;
 }
 
@@ -471,6 +484,14 @@ export function createChannelWorkerSupervisor(
       timer: NodeJS.Timeout;
     }
   >();
+  const pendingChannelDeliveries = new Map<
+    string,
+    {
+      resolve: (accepted: ChannelDeliveryAccepted) => void;
+      reject: (err: Error) => void;
+      timer: NodeJS.Timeout;
+    }
+  >();
   let restarting: Promise<ChannelWorkerSnapshot> | undefined;
   let disposed = false;
 
@@ -543,6 +564,48 @@ export function createChannelWorkerSupervisor(
         new ChannelWebhookEnqueueError(
           code,
           message.error || 'Channel webhook task failed.',
+        ),
+      );
+    }
+    return true;
+  };
+
+  const rejectPendingChannelDeliveries = (
+    code: ChannelDeliveryErrorCode,
+    message: string,
+  ) => {
+    for (const pending of pendingChannelDeliveries.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new ChannelDeliveryError(code, message));
+    }
+    pendingChannelDeliveries.clear();
+  };
+
+  const rejectPendingChannelDelivery = (id: string, err: Error) => {
+    const pending = pendingChannelDeliveries.get(id);
+    if (!pending) return;
+    pendingChannelDeliveries.delete(id);
+    clearTimeout(pending.timer);
+    pending.reject(err);
+  };
+
+  const settleChannelDelivery = (message: unknown): boolean => {
+    if (!isChannelDeliveryResultMessage(message)) return false;
+    const pending = pendingChannelDeliveries.get(message.id);
+    if (!pending) return true;
+    if (message.ok) {
+      pendingChannelDeliveries.delete(message.id);
+      clearTimeout(pending.timer);
+      pending.resolve({ delivered: true });
+    } else {
+      const code = isChannelDeliveryErrorCode(message.code)
+        ? message.code
+        : 'channel_delivery_failed';
+      rejectPendingChannelDelivery(
+        message.id,
+        new ChannelDeliveryError(
+          code,
+          message.error || 'Channel delivery failed.',
         ),
       );
     }
@@ -930,6 +993,9 @@ export function createChannelWorkerSupervisor(
       };
       function handleMessage(message: unknown) {
         if (child !== startedChild) return;
+        if (settleChannelDelivery(message)) {
+          return;
+        }
         if (settleWebhookTask(message)) {
           return;
         }
@@ -955,6 +1021,10 @@ export function createChannelWorkerSupervisor(
             (ready ? undefined : sanitizeWorkerError(message, redaction)),
         );
         rejectPendingWebhookTasks(
+          'channel_worker_unavailable',
+          'Channel worker exited.',
+        );
+        rejectPendingChannelDeliveries(
           'channel_worker_unavailable',
           'Channel worker exited.',
         );
@@ -1036,6 +1106,10 @@ export function createChannelWorkerSupervisor(
         'channel_worker_unavailable',
         'Channel worker stopped.',
       );
+      rejectPendingChannelDeliveries(
+        'channel_worker_unavailable',
+        'Channel worker stopped.',
+      );
       if (
         !child ||
         snapshot.state === 'exited' ||
@@ -1093,6 +1167,10 @@ export function createChannelWorkerSupervisor(
         'channel_worker_unavailable',
         'Channel worker stopped.',
       );
+      rejectPendingChannelDeliveries(
+        'channel_worker_unavailable',
+        'Channel worker stopped.',
+      );
       if (
         !child ||
         snapshot.state === 'exited' ||
@@ -1120,6 +1198,59 @@ export function createChannelWorkerSupervisor(
     },
     snapshot() {
       return snapshotCopy();
+    },
+    async deliverChannelMessage(request) {
+      const startedChild = child;
+      if (!startedChild || snapshot.state !== 'running') {
+        throw new ChannelDeliveryError(
+          'channel_worker_unavailable',
+          'Channel worker is not running.',
+        );
+      }
+      const send = startedChild.send;
+      if (!send) {
+        throw new ChannelDeliveryError(
+          'channel_worker_unavailable',
+          'Channel worker IPC send failed.',
+        );
+      }
+      const message = createChannelDeliveryMessage(request);
+      return await new Promise<ChannelDeliveryAccepted>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pendingChannelDeliveries.delete(message.id);
+          reject(
+            new ChannelDeliveryError(
+              'channel_delivery_timeout',
+              'Channel delivery IPC timed out.',
+            ),
+          );
+        }, CHANNEL_DELIVERY_IPC_TIMEOUT_MS);
+        timer.unref();
+        pendingChannelDeliveries.set(message.id, { resolve, reject, timer });
+        try {
+          send.call(startedChild, message, (err) => {
+            if (err) {
+              rejectPendingChannelDelivery(
+                message.id,
+                new ChannelDeliveryError(
+                  'channel_worker_unavailable',
+                  `Channel worker IPC send failed: ${err.message}`,
+                ),
+              );
+            }
+          });
+        } catch (err) {
+          rejectPendingChannelDelivery(
+            message.id,
+            new ChannelDeliveryError(
+              'channel_worker_unavailable',
+              `Channel worker IPC send failed: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            ),
+          );
+        }
+      });
     },
     async enqueueWebhookTask(task) {
       const startedChild = child;

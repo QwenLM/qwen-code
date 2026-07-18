@@ -60,6 +60,7 @@ function fakeGroup(
     workspaceActivity: vi.fn(() => 0),
     removeWorkspace: vi.fn(async () => {}),
     restoreWorkspace: vi.fn(async () => {}),
+    deliverChannelMessage: vi.fn(async () => ({ delivered: true as const })),
     enqueueWebhookTask: vi.fn(async () => ({ accepted: true as const })),
     ...overrides,
   };
