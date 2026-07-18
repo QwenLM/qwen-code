@@ -9066,6 +9066,37 @@ describe('ChannelBase', () => {
       expect(channelMemory.listChannelMemoryEntries).toHaveBeenCalledTimes(2);
     });
 
+    it('logs a stable diagnostic when the recall revision stays unstable', async () => {
+      const channelMemory = {
+        ...createChannelMemory([
+          { id: 'm-a31f0d82c7e4', text: 'Use staging.' },
+        ]),
+        getChannelMemoryRevision: vi
+          .fn()
+          .mockResolvedValueOnce('revision-1')
+          .mockResolvedValueOnce('revision-2')
+          .mockResolvedValueOnce('revision-3'),
+      };
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(
+        envelope({ text: 'deploy secret-project', senderId: 'alice' }),
+      );
+
+      expect(channelMemory.listChannelMemoryEntries).toHaveBeenCalledTimes(2);
+      const log = String(stderrSpy.mock.calls[0]?.[0]);
+      expect(log).toContain('recall revision unstable after retry');
+      expect(log).not.toContain('deploy secret-project');
+      expect(log).not.toContain('revision-');
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[0]![1],
+      ).toBe('deploy secret-project');
+      stderrSpy.mockRestore();
+    });
+
     it('invalidates a cached index after a successful local mutation', async () => {
       let entries: ChannelMemoryEntry[] = [
         { id: 'm-old000000001', text: 'old memory' },

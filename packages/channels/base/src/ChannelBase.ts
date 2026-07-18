@@ -822,10 +822,11 @@ export abstract class ChannelBase {
   }
 
   private async selectRelevantChannelMemory(
-    message: string,
+    envelope: Envelope,
     target: ChannelMemoryTarget,
     read: ChannelMemoryReadToken,
   ): Promise<ChannelMemoryEntry[]> {
+    const message = envelope.text;
     const channelMemory = this.channelMemory;
     if (!channelMemory) return [];
     if (!channelMemory.getChannelMemoryRevision) {
@@ -866,6 +867,11 @@ export abstract class ChannelBase {
       }
       return selectRelevantChannelMemoryFromIndex(message, index);
     }
+    this.logChannelMemoryError(
+      'read',
+      envelope,
+      'recall revision unstable after retry',
+    );
     return [];
   }
 
@@ -4521,7 +4527,7 @@ export abstract class ChannelBase {
         recallRead = this.beginChannelMemoryRead(memoryTarget);
         try {
           const relevantEntries = await this.selectRelevantChannelMemory(
-            envelope.text,
+            envelope,
             memoryTarget,
             recallRead,
           );
