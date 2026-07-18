@@ -215,6 +215,39 @@ export interface DaemonScheduledTaskDelivery {
   target: DaemonScheduledTaskChannelTarget;
 }
 
+export interface DaemonObservedChannelRelatedUser {
+  id: string;
+  label: string;
+  lastObservedAt: string;
+}
+
+export interface DaemonObservedChannelUser
+  extends DaemonObservedChannelRelatedUser {
+  channelName: string;
+  chatId?: string;
+}
+
+export interface DaemonObservedChannelTopic {
+  id: string;
+  label: string;
+  lastObservedAt: string;
+  users: DaemonObservedChannelRelatedUser[];
+}
+
+export interface DaemonObservedChannelGroup {
+  channelName: string;
+  id: string;
+  label: string;
+  lastObservedAt: string;
+  users: DaemonObservedChannelRelatedUser[];
+  topics: DaemonObservedChannelTopic[];
+}
+
+export interface DaemonObservedChannelContacts {
+  users: DaemonObservedChannelUser[];
+  groups: DaemonObservedChannelGroup[];
+}
+
 export interface DaemonScheduledTask {
   id: string;
   name: string | null;
@@ -473,6 +506,9 @@ export interface DaemonWorkspaceActions {
   // every trusted workspace and threads each task's `workspaceId` back into the
   // mutations.
   listScheduledTasks(workspaceId?: string): Promise<DaemonScheduledTask[]>;
+  listObservedChannelContacts(
+    workspaceId?: string,
+  ): Promise<DaemonObservedChannelContacts>;
   createScheduledTask(
     req: DaemonCreateScheduledTaskRequest,
     workspaceId?: string,

@@ -63,6 +63,31 @@ describe('scheduled-tasks workspace actions', () => {
     expect(await makeActions().listScheduledTasks()).toEqual([]);
   });
 
+  it('lists primary observed Channel contacts', async () => {
+    const contacts = { users: [], groups: [] };
+    fetchMock.mockResolvedValue(ok(contacts));
+
+    await expect(
+      makeActions('tok').listObservedChannelContacts(),
+    ).resolves.toEqual(contacts);
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      '/workspace/channel/observed-contacts',
+    );
+    expect(headersOf(initOf(fetchMock.mock.calls[0]))['Authorization']).toBe(
+      'Bearer tok',
+    );
+  });
+
+  it('lists observed contacts for only the selected workspace', async () => {
+    fetchMock.mockResolvedValue(ok({ users: [], groups: [] }));
+
+    await makeActions('tok').listObservedChannelContacts('ws/2');
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      '/workspaces/ws%2F2/channel/observed-contacts',
+    );
+  });
+
   it('creates a task with a POST + JSON body', async () => {
     fetchMock.mockResolvedValue(ok({ id: 'x' }));
     const res = await makeActions().createScheduledTask({
