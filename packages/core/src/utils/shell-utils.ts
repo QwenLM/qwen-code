@@ -325,6 +325,52 @@ export function splitCommands(command: string): string[] {
 }
 
 /**
+ * A parameter expansion standing in command position — `$VAR`, `"$VAR"`,
+ * `${VAR}`, `"${VAR:-default}"`, `${VAR-default}` — resolved the way the shell
+ * will resolve it at execution time.
+ *
+ * Without this, such a command had NO identifiable root: the tokenizer turns
+ * the expansion into a non-string (or empty) token, `getCommandRoot` returns
+ * undefined, and the shell tool hard-refuses the command before any approval
+ * mode is consulted — including YOLO. Dogfooded live: the bundled /review
+ * skill invokes every command as `"${QWEN_CODE_CLI:-qwen}" review …`, and each
+ * run opened with "Could not identify command root to obtain permission from
+ * user" until the model hand-resolved the variable itself.
+ *
+ * Resolution mirrors POSIX: `:-` substitutes the default when the variable is
+ * unset OR empty; `-` only when unset; a bare `$VAR` that resolves to nothing
+ * yields no root, and the command stays refusable — there is nothing to name.
+ * The environment consulted is this process's own, which is what the spawned
+ * shell inherits.
+ */
+const PARAMETER_EXPANSION_COMMAND =
+  /^"?\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?-)([^}]*))?\}|([A-Za-z_][A-Za-z0-9_]*))"?$/;
+
+function resolveLeadingParameterExpansion(command: string): string | undefined {
+  let rest = command;
+  // Leading env assignments come first (`FOO=1 "${BAR:-baz}" …`), exactly as
+  // the plain-token path below skips them.
+  while (true) {
+    const t = takeLeadingToken(rest);
+    if (!t || !isEnvAssignmentToken(t.token)) break;
+    rest = t.rest;
+  }
+  const head = takeLeadingToken(rest);
+  if (!head) return undefined;
+  const m = PARAMETER_EXPANSION_COMMAND.exec(head.token);
+  if (!m) return undefined;
+  const name = (m[1] ?? m[4]) as string;
+  const op = m[2];
+  const value = process.env[name];
+  const useDefault =
+    op === undefined ? false : op === ':-' ? !value : value === undefined;
+  const resolved = useDefault
+    ? stripSymmetricQuotes(m[3] ?? '').value
+    : (value ?? '');
+  return resolved || undefined;
+}
+
+/**
  * Extracts the root command from a given shell command string.
  * Skips leading env var assignments (VAR=value) so that
  * `PYTHONPATH=/tmp python3 -c "..."` returns `python3`.
@@ -333,6 +379,11 @@ export function getCommandRoot(command: string): string | undefined {
   const trimmedCommand = command.trim();
   if (!trimmedCommand) {
     return undefined;
+  }
+
+  const expanded = resolveLeadingParameterExpansion(trimmedCommand);
+  if (expanded !== undefined) {
+    return expanded.split(/[\\/]/).pop();
   }
 
   try {
