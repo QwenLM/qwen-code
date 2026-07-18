@@ -14,6 +14,12 @@ const workflow = readFileSync(
 );
 
 describe('fleet shepherd workflow', () => {
+  it('runs checkout-free — every read goes through the API', () => {
+    // The run step reads no repo files (the flake registry is gone with the
+    // rerun lever), so a checkout would be pure per-tick waste.
+    expect(workflow).not.toContain('actions/checkout');
+  });
+
   it('ticks on a schedule with a manual dry-run escape hatch', () => {
     expect(workflow).toContain("cron: '*/15 * * * *'");
     expect(workflow).toContain('workflow_dispatch');
@@ -140,12 +146,23 @@ describe('fleet shepherd workflow', () => {
 
   it('maintains one dashboard issue edited in place', () => {
     expect(workflow).toContain("DASHBOARD_TITLE: 'Fleet Shepherd Dashboard'");
-    // gh --jq takes a single expression (no --arg support).
+    // Exact-title equality via real jq --arg (in:title search is substring
+    // based — a bystander issue containing the title must never be hijacked);
+    // gh's own --jq has no --arg, so the JSON is piped to standalone jq.
     expect(workflow).not.toContain('--jq --arg');
-    expect(workflow).toContain('--jq \'.[0].number // ""\'');
+    expect(workflow).toContain("map(select(.title == $t)) | .[0].number");
+    // A FAILED lookup is not "not found" — never create-on-failure.
+    expect(workflow).toContain(
+      'dashboard lookup failed; dashboard update skipped this tick',
+    );
     expect(workflow).toContain('gh issue edit');
     expect(workflow).toContain('gh issue create');
     expect(workflow).toContain('do not edit by hand');
+    // act() propagates exit codes, so EVERY call site must be if-wrapped or a
+    // failure aborts the tick under set -e — including the dashboard writes.
+    expect(workflow).toMatch(/if ! act "create dashboard issue"/);
+    expect(workflow).toMatch(/if ! act "update dashboard issue/);
+    expect(workflow).not.toMatch(/^\s+act "/m);
   });
 
   it('behaviorally proves act() gates follow-up markers on success', () => {

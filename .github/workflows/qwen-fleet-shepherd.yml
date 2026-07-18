@@ -62,11 +62,6 @@ jobs:
     runs-on: 'ubuntu-latest'
     timeout-minutes: 15
     steps:
-      - name: 'Checkout (flake registry)'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
-        with:
-          persist-credentials: false
-
       - name: 'Shepherd the fleet'
         env:
           REPO: '${{ github.repository }}'
@@ -108,11 +103,24 @@ jobs:
           fi
 
           # ---- dashboard lookup (also carries the liveness watermark) -----
-          # gh's --jq accepts a single expression only (no --arg), so match the
-          # exact title in the expression after an in:title search.
-          DASH_NUM="$(gh issue list --repo "${REPO}" --state open \
+          # Exact-title equality (an in:title search is substring-based, and a
+          # bystander issue merely CONTAINING the title must never be
+          # hijacked-and-overwritten), interpolated into the jq expression
+          # because gh's --jq accepts a single expression only (no --arg).
+          # A FAILED lookup is not "not found": creating on failure would mint
+          # a duplicate dashboard per transient error, so the dashboard is
+          # simply skipped for the tick (same fail-closed rule as the fleet
+          # and marker reads).
+          DASH_LOOKUP_OK=true
+          DASH_NUM=''
+          if DASH_LIST="$(gh issue list --repo "${REPO}" --state open \
             --search "in:title \"${DASHBOARD_TITLE}\"" \
-            --json number,title --jq '.[0].number // ""' 2> /dev/null || echo '')"
+            --json number,title 2> /dev/null)"; then
+            DASH_NUM="$(jq -r --arg t "${DASHBOARD_TITLE}" 'map(select(.title == $t)) | .[0].number // ""' <<< "${DASH_LIST}")"
+          else
+            DASH_LOOKUP_OK=false
+            echo "::warning::dashboard lookup failed; dashboard update skipped this tick"
+          fi
           PREV_DASH=''
           if [[ -n "${DASH_NUM}" ]]; then
             PREV_DASH="$(gh issue view "${DASH_NUM}" --repo "${REPO}" --json body --jq '.body // ""' 2> /dev/null || echo '')"
@@ -269,11 +277,20 @@ jobs:
               echo "<!-- fleet-shepherd liveness-dispatched: ${LIVENESS_OUT} -->"
             fi
           } > /tmp/dashboard.md
-          if [[ -z "${DASH_NUM}" ]]; then
-            act "create dashboard issue" \
-              gh issue create --repo "${REPO}" --title "${DASHBOARD_TITLE}" --body-file /tmp/dashboard.md
+          # Every act() call is if-wrapped: act propagates the real exit code
+          # (so markers stay conditional), and under set -e a BARE failing call
+          # would abort the whole tick.
+          if [[ "${DASH_LOOKUP_OK}" != "true" ]]; then
+            : # lookup failed — keep the previous dashboard untouched
+          elif [[ -z "${DASH_NUM}" ]]; then
+            if ! act "create dashboard issue" \
+              gh issue create --repo "${REPO}" --title "${DASHBOARD_TITLE}" --body-file /tmp/dashboard.md; then
+              echo "::warning::dashboard create failed; will retry next tick"
+            fi
           else
-            act "update dashboard issue #${DASH_NUM}" \
-              gh issue edit "${DASH_NUM}" --repo "${REPO}" --body-file /tmp/dashboard.md
+            if ! act "update dashboard issue #${DASH_NUM}" \
+              gh issue edit "${DASH_NUM}" --repo "${REPO}" --body-file /tmp/dashboard.md; then
+              echo "::warning::dashboard update failed; will retry next tick"
+            fi
           fi
           echo "✅ tick complete (syncs=${SYNCS} dispatches=${DISPATCHES})"
