@@ -462,6 +462,100 @@ describe('qwen-autofix workflow', () => {
     expect(sentinel.wm).toBe(W);
   });
 
+  it('behaviorally replays the eligibility recheck across lifecycle and label states', () => {
+    // Extract the recheck VERBATIM (drift fails the test) and run it with a
+    // PATH-stubbed gh: the discard path must actually WRITE stale=true (and
+    // the outputs later gates read) — string pins alone would stay green if
+    // a future edit dropped the echo, leaving STALE empty and letting a
+    // late always() failure post a spurious handoff for a discarded job.
+    const recheck = prepareBranchAndFeedbackStep.match(
+      /(PR_LIVE="\$\(gh pr view[\s\S]*?exit 0\n {10}fi)/,
+    )?.[1];
+    expect(recheck).toBeTruthy();
+    const runRecheck = (prJson) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-elig-'));
+      try {
+        const gh = join(dir, 'gh');
+        writeFileSync(
+          gh,
+          prJson === null
+            ? '#!/bin/bash\nexit 1\n'
+            : `#!/bin/bash\nprintf '%s' '${JSON.stringify(prJson)}'\n`,
+        );
+        chmodSync(gh, 0o755);
+        const out = join(dir, 'out.txt');
+        writeFileSync(out, '');
+        const stdout = execFileSync(
+          'bash',
+          ['-c', `${recheck.replace(/\n {10}/g, '\n')}\nprintf 'PASSED'`],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              PR: '7163',
+              REPO: 'QwenLM/qwen-code',
+              BRANCH: 'ci/some-branch',
+              WATERMARK: '2026-07-18T08:00:00Z',
+              ROUND: '2',
+              AUTOFIX_BOT: 'qwen-code-dev-bot',
+              TAKEOVER_LABEL: 'autofix/takeover',
+              SKIP_LABEL: 'autofix/skip',
+              GITHUB_OUTPUT: out,
+              GITHUB_TOKEN: 'x',
+            },
+            encoding: 'utf8',
+          },
+        );
+        return {
+          passed: stdout.endsWith('PASSED'),
+          out: readFileSync(out, 'utf8'),
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const pr = (over = {}) => ({
+      state: 'OPEN',
+      author: { login: 'qwen-code-dev-bot' },
+      isCrossRepository: false,
+      baseRefName: 'main',
+      headRefName: 'ci/some-branch',
+      labels: [],
+      ...over,
+    });
+    // Healthy bot PR → proceeds, nothing written.
+    const ok = runRecheck(pr());
+    expect(ok.passed).toBe(true);
+    expect(ok.out).not.toContain('stale=true');
+    // Closed while queued → discards AND writes every output later gates
+    // read (this is the assertion string pins cannot make).
+    const closed = runRecheck(pr({ state: 'CLOSED' }));
+    expect(closed.passed).toBe(false);
+    expect(closed.out).toContain('stale=true');
+    expect(closed.out).toContain('conflict=false');
+    expect(closed.out).toContain('newest=2026-07-18T08:00:00Z');
+    expect(closed.out).toContain('effective_round=2');
+    // Live engagement labels: takeover exempts a human author, skip
+    // withdraws consent even for the bot's own PR.
+    expect(
+      runRecheck(
+        pr({
+          author: { login: 'human' },
+          labels: [{ name: 'autofix/takeover' }],
+        }),
+      ).passed,
+    ).toBe(true);
+    expect(runRecheck(pr({ author: { login: 'human' } })).passed).toBe(false);
+    expect(
+      runRecheck(pr({ labels: [{ name: 'autofix/skip' }] })).out,
+    ).toContain('stale=true');
+    // Fork head, renamed branch, and a FAILED fetch (unknown ≠ eligible)
+    // all discard.
+    expect(runRecheck(pr({ isCrossRepository: true })).passed).toBe(false);
+    expect(runRecheck(pr({ headRefName: 'renamed' })).passed).toBe(false);
+    expect(runRecheck(null).passed).toBe(false);
+  });
+
   it('rechecks target eligibility at address time and discards inactive targets', () => {
     // A queued matrix job can start hours after its scan: a PR closed or
     // merged meanwhile must not get a secret-bearing agent run, branch push,
