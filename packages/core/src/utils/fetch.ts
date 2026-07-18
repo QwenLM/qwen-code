@@ -330,7 +330,14 @@ async function fetchPolicyAttempt(
       if (!location) {
         throw new FetchError('Redirect response missing Location header');
       }
-      const redirectUrl = new URL(location, currentUrl).toString();
+      let redirectUrl: string;
+      try {
+        redirectUrl = new URL(location, currentUrl).toString();
+      } catch {
+        throw new FetchError(
+          `Redirect response has a malformed Location header: ${location}`,
+        );
+      }
       if (!isPermittedRedirect(currentUrl, redirectUrl)) {
         return {
           kind: 'cross-host-redirect',

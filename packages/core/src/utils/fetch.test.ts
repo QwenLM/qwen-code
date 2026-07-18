@@ -160,6 +160,19 @@ describe('fetchWithPolicy', () => {
     }
   });
 
+  it('wraps a malformed Location header in a FetchError', async () => {
+    stubFetch(
+      () =>
+        new Response(null, {
+          status: 301,
+          headers: { location: 'http://[invalid' },
+        }),
+    );
+    await expect(
+      fetchWithPolicy('https://example.com/bad-redirect', opts),
+    ).rejects.toThrow(/malformed Location header/);
+  });
+
   it('surfaces cross-host redirects without following them', async () => {
     stubFetch(
       () =>

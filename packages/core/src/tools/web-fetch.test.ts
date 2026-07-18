@@ -406,6 +406,7 @@ describe('WebFetchTool', () => {
       expect(receivedContent).toContain(
         '[Content truncated: showing first 100,000 of',
       );
+      expect(receivedContent).not.toContain('NEEDLE-AT-END');
     });
 
     it('should keep content past 100k of raw HTML when the text itself fits', async () => {
@@ -763,9 +764,11 @@ describe('WebFetchTool', () => {
     });
 
     it('should persist PDFs, extract their text, and summarize it', async () => {
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
-        okResponse({ contentType: 'application/pdf', body: pdfBytes }),
-      );
+      const fetchSpy = vi
+        .spyOn(fetchUtils, 'fetchWithPolicy')
+        .mockResolvedValue(
+          okResponse({ contentType: 'application/pdf', body: pdfBytes }),
+        );
       mockExtractPDFText.mockResolvedValue({
         success: true,
         text: 'CY 2025 tribal FQHC PPS rate: $718.00',
@@ -796,6 +799,19 @@ describe('WebFetchTool', () => {
       expect(savedPath).toBeDefined();
       expect(fs.readFileSync(savedPath!)).toEqual(pdfBytes);
       expect(result.resultFilePaths).toEqual([savedPath]);
+
+      // A same-session repeat is a cache hit: no second fetch, extraction,
+      // or budget charge — and the persisted-file wiring survives the hit.
+      const repeat = await tool
+        .build({ url: 'https://example.com/doc.pdf', prompt: 'again?' })
+        .execute(new AbortController().signal);
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(mockExtractPDFText).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(mockConfig.trackToolResultBytes).mock.calls).toEqual([
+        [pdfBytes.length],
+      ]);
+      expect(repeat.resultFilePaths).toEqual([savedPath]);
+      expect(repeat.llmContent).toContain(`saved to ${savedPath}`);
     });
 
     it('should skip the side-query when PDF extraction fails, with no mojibake', async () => {
@@ -884,6 +900,27 @@ describe('WebFetchTool', () => {
       expect(result.error?.type).toBe(ToolErrorType.WEB_FETCH_FALLBACK_FAILED);
       expect(result.llmContent).toContain('failed to save');
       expect(mockGenerateContent).not.toHaveBeenCalled();
+      // Reserve, then roll back: the disk budget must net to zero on failure.
+      expect(vi.mocked(brokenConfig.trackToolResultBytes).mock.calls).toEqual([
+        [pdfBytes.length],
+        [-pdfBytes.length],
+      ]);
+    });
+
+    it('should wire Content-Disposition through to the persisted extension', async () => {
+      // Unit-covered in binary-content.test.ts; this locks the wiring from
+      // the response header to sniffFileKind.
+      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
+        okResponse({
+          contentType: 'application/octet-stream',
+          contentDisposition: 'attachment; filename="report.xlsx"',
+          body: Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0x00, 0x00, 0x00]),
+        }),
+      );
+      const result = await new WebFetchTool(mockConfig)
+        .build({ url: 'https://example.com/download', prompt: 'what is it?' })
+        .execute(new AbortController().signal);
+      expect(result.resultFilePaths?.[0]).toMatch(/\.xlsx$/);
     });
 
     it('should not persist textual content', async () => {
@@ -999,28 +1036,40 @@ describe('WebFetchTool', () => {
   });
 
   describe('cache', () => {
-    it('should serve a repeat fetch of the same URL from cache', async () => {
-      const fetchSpy = vi
-        .spyOn(fetchUtils, 'fetchWithPolicy')
-        .mockResolvedValue(okResponse());
-      mockGenerateContent.mockResolvedValue({ text: 'Summary' });
+    it('should serve a repeat fetch from cache until the TTL expires', async () => {
+      vi.useFakeTimers();
+      try {
+        const fetchSpy = vi
+          .spyOn(fetchUtils, 'fetchWithPolicy')
+          .mockResolvedValue(okResponse());
+        mockGenerateContent.mockResolvedValue({ text: 'Summary' });
 
-      const tool = new WebFetchTool(mockConfig);
-      const first = tool.build({
-        url: 'https://example.com',
-        prompt: 'summarize',
-      });
-      await first.execute(new AbortController().signal);
-      const second = tool.build({
-        url: 'https://example.com',
-        prompt: 'a different prompt',
-      });
-      const result = await second.execute(new AbortController().signal);
+        const tool = new WebFetchTool(mockConfig);
+        const first = tool.build({
+          url: 'https://example.com',
+          prompt: 'summarize',
+        });
+        await first.execute(new AbortController().signal);
+        const second = tool.build({
+          url: 'https://example.com',
+          prompt: 'a different prompt',
+        });
+        const result = await second.execute(new AbortController().signal);
 
-      expect(fetchSpy).toHaveBeenCalledTimes(1);
-      expect(result.error).toBeUndefined();
-      // The side query still runs per-prompt; only the fetch is cached.
-      expect(mockGenerateContent).toHaveBeenCalledTimes(2);
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        expect(result.error).toBeUndefined();
+        // The side query still runs per-prompt; only the fetch is cached.
+        expect(mockGenerateContent).toHaveBeenCalledTimes(2);
+
+        // Past the 15-minute TTL the entry is stale and must be refetched.
+        vi.advanceTimersByTime(15 * 60 * 1000 + 1);
+        await tool
+          .build({ url: 'https://example.com', prompt: 'summarize' })
+          .execute(new AbortController().signal);
+        expect(fetchSpy).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('should key the cache on format as well as URL', async () => {

@@ -61,6 +61,7 @@ describe('extensionForMimeType', () => {
     ],
     ['image/jpeg', 'jpg'],
     ['application/vnd.ms-powerpoint', 'ppt'],
+    ['application/x-gzip', 'gz'],
     ['application/x-tar', 'tar'],
     ['application/x-7z-compressed', '7z'],
     ['application/vnd.rar', 'rar'],
@@ -279,6 +280,11 @@ describe('sniffFileKind', () => {
     );
     expect(kind.extension).toBe('pdf');
     expect(kind.magicMatched).toBe(false);
+    // RFC 5987 allows a non-empty language tag between the quotes.
+    expect(
+      sniffFileKind(TEXT, '', "attachment; filename*=UTF-8'en'report.xlsx", URL)
+        .extension,
+    ).toBe('xlsx');
   });
 
   it('recognizes archive extensions from headerless URLs', () => {

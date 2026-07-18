@@ -66,6 +66,7 @@ const MIME_EXTENSIONS: ReadonlyMap<string, string> = new Map([
   ['application/vnd.ms-excel', 'xls'],
   ['application/vnd.ms-powerpoint', 'ppt'],
   ['application/gzip', 'gz'],
+  ['application/x-gzip', 'gz'],
   ['application/x-tar', 'tar'],
   ['application/x-7z-compressed', '7z'],
   ['application/x-rar-compressed', 'rar'],
@@ -121,8 +122,9 @@ function extensionFromFilename(name: string | undefined): string | undefined {
 function filenameFromContentDisposition(
   contentDisposition: string,
 ): string | undefined {
-  // filename*=UTF-8''name.pdf takes precedence over filename="name.pdf"
-  const star = /filename\*\s*=\s*[^']*''([^;]+)/i.exec(contentDisposition);
+  // filename*=UTF-8'lang'name.pdf (the language tag is usually empty, but
+  // RFC 5987 allows one) takes precedence over filename="name.pdf"
+  const star = /filename\*\s*=\s*[^']*'[^']*'([^;]+)/i.exec(contentDisposition);
   if (star?.[1]) {
     try {
       return decodeURIComponent(star[1].trim());
