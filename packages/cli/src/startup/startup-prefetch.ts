@@ -171,9 +171,6 @@ export function startPostRenderPrefetches(
         import('../utils/updateEventEmitter.js'),
         import('../i18n/index.js'),
       ]);
-      const updateFailedMessage = t(
-        'Failed to check for updates. Please check your network or registry configuration.',
-      );
       try {
         const result = await checkForUpdatesDetailed();
         if (result.status === 'update') {
@@ -217,15 +214,10 @@ export function startPostRenderPrefetches(
             void handleAutoUpdate(result.info, settings, projectRoot);
           }
         } else if (result.status === 'error') {
-          updateEventEmitter.emit('update-failed', {
-            message: updateFailedMessage,
-          });
+          debugLogger.warn('Startup update check failed:', result.error);
         }
       } catch (error) {
-        updateEventEmitter.emit('update-failed', {
-          message: updateFailedMessage,
-        });
-        throw error;
+        debugLogger.warn('Startup update check failed:', error);
       }
     });
   }

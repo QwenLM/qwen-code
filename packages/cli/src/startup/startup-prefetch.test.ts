@@ -382,21 +382,26 @@ describe('startupPrefetch', () => {
     expect(mockConnectIdeForStartup).toHaveBeenCalledWith(config);
   });
 
-  it('surfaces update check errors through the update event emitter', async () => {
+  it('logs update check errors without surfacing them to the user', async () => {
     const config = makeConfig();
+    const error = new Error('registry unavailable');
     mockCheckForUpdatesDetailed.mockResolvedValue({
       status: 'error',
-      error: new Error('registry unavailable'),
+      error,
     });
 
     startPostRenderPrefetches(config, makeSettings());
 
     await vi.dynamicImportSettled();
 
-    expect(mockUpdateEventEmit).toHaveBeenCalledWith('update-failed', {
-      message:
-        'Failed to check for updates. Please check your network or registry configuration.',
-    });
+    expect(mockWarn).toHaveBeenCalledWith(
+      'Startup update check failed:',
+      error,
+    );
+    expect(mockUpdateEventEmit).not.toHaveBeenCalledWith(
+      'update-failed',
+      expect.anything(),
+    );
     expect(mockRequestUpdateOnExit).not.toHaveBeenCalled();
   });
 
@@ -622,11 +627,14 @@ describe('startupPrefetch', () => {
 
     await vi.dynamicImportSettled();
 
-    expect(mockWarn).toHaveBeenCalledWith('update_check failed:', error);
-    expect(mockUpdateEventEmit).toHaveBeenCalledWith('update-failed', {
-      message:
-        'Failed to check for updates. Please check your network or registry configuration.',
-    });
+    expect(mockWarn).toHaveBeenCalledWith(
+      'Startup update check failed:',
+      error,
+    );
+    expect(mockUpdateEventEmit).not.toHaveBeenCalledWith(
+      'update-failed',
+      expect.anything(),
+    );
   });
 
   it('does not start housekeeping for non-interactive configs', async () => {
