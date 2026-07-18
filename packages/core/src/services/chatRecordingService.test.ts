@@ -1283,6 +1283,26 @@ describe('ChatRecordingService', () => {
       expect(binding.binding.lease.release).toHaveBeenCalledOnce();
       expect(chatRecordingService.hasWriteOwnership()).toBe(false);
     });
+
+    it('keeps a release failure primary and preserves the flush failure as its cause', async () => {
+      const binding = chatRecordingService as unknown as {
+        binding: {
+          lease: {
+            release: ReturnType<typeof vi.fn>;
+          };
+        };
+      };
+      const flushError = new Error('disk unavailable');
+      const releaseError = new SessionWriterUnavailableError();
+      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(flushError);
+      binding.binding.lease.release.mockRejectedValueOnce(releaseError);
+      chatRecordingService.recordUserMessage([{ text: 'not persisted' }]);
+
+      await expect(chatRecordingService.close()).rejects.toBe(releaseError);
+      expect(releaseError.cause).toBe(flushError);
+      expect(Object.keys(releaseError)).not.toContain('cause');
+      expect(chatRecordingService.hasWriteOwnership()).toBe(true);
+    });
   });
 
   describe('lease binding', () => {

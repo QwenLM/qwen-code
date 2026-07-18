@@ -4247,6 +4247,28 @@ describe('AppContainer State Management', () => {
       );
     });
 
+    it('does not start rewind when the pre-flight recording flush fails', async () => {
+      const harness = renderRewindHarness({
+        recordingFlushErrorAt: 'pre',
+      });
+
+      await runRewind(harness.target, 'both');
+
+      expect(harness.flush).toHaveBeenCalledOnce();
+      expect(harness.rewindRecording).not.toHaveBeenCalled();
+      expect(harness.rewind).not.toHaveBeenCalled();
+      expect(harness.truncateHistory).not.toHaveBeenCalled();
+      expect(harness.loadHistory).not.toHaveBeenCalled();
+      expect(harness.setText).not.toHaveBeenCalled();
+      expect(harness.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: 'Rewind failed: Session recording is degraded; rewind was not applied.',
+        }),
+        expect.any(Number),
+      );
+    });
+
     it('shows an error and returns for conversation-only rewind with no client', async () => {
       const harness = renderRewindHarness({ noGeminiClient: true });
 

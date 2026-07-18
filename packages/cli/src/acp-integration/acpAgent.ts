@@ -506,6 +506,24 @@ async function shutdownConfig(config: Config): Promise<void> {
   if (shutdownError !== undefined) throw shutdownError;
 }
 
+async function shutdownConfigAfterFailure(
+  config: Config,
+  failure: unknown,
+): Promise<unknown> {
+  try {
+    await shutdownConfig(config);
+  } catch (shutdownError) {
+    if (shutdownError instanceof Error && shutdownError.cause === undefined) {
+      Reflect.defineProperty(shutdownError, 'cause', {
+        value: failure,
+        configurable: true,
+      });
+    }
+    return shutdownError;
+  }
+  return failure;
+}
+
 const logWorkspaceMemoryExtractionError =
   createWorkspaceMemoryExtractionErrorLogger(debugLogger);
 
@@ -3178,8 +3196,7 @@ class QwenAgent implements Agent {
           }
           return config;
         } catch (error) {
-          await shutdownConfig(config);
-          throw error;
+          throw await shutdownConfigAfterFailure(config, error);
         }
       },
     );
@@ -3660,8 +3677,7 @@ class QwenAgent implements Agent {
             this.createAndStoreSession(config, settings),
           );
         } catch (error) {
-          await shutdownConfig(config);
-          throw error;
+          throw await shutdownConfigAfterFailure(config, error);
         }
         profiler.setSessionId(session.getId());
         return profiler.timeSync('response_build', () => ({
@@ -3740,8 +3756,7 @@ class QwenAgent implements Agent {
           : {},
       );
     } catch (error) {
-      await shutdownConfig(config);
-      throw error;
+      throw await shutdownConfigAfterFailure(config, error);
     }
     let replayEnvelope: BridgeLoadReplayEnvelope | undefined;
     if (bulkReplay) {
@@ -3871,8 +3886,7 @@ class QwenAgent implements Agent {
         { replayHistory: false },
       );
     } catch (error) {
-      await shutdownConfig(config);
-      throw error;
+      throw await shutdownConfigAfterFailure(config, error);
     }
 
     await this.#restoreWorktreeOnResume(config, session);
@@ -9913,8 +9927,7 @@ class QwenAgent implements Agent {
         sendSdkMcpMessage: this.buildClientMcpSender(wiredSessionId),
       });
     } catch (error) {
-      await shutdownConfig(config);
-      throw error;
+      throw await shutdownConfigAfterFailure(config, error);
     }
     if (config.getSessionWriterOwnerId?.()) {
       config.startRuntimeStatus?.();

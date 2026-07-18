@@ -1011,6 +1011,12 @@ export class ChatRecordingService {
     } catch (error) {
       this.state =
         error instanceof SessionWriterLostError ? 'closed' : 'paused';
+      if (flushFailed && error instanceof Error && error.cause === undefined) {
+        Reflect.defineProperty(error, 'cause', {
+          value: flushFailure,
+          configurable: true,
+        });
+      }
       throw error;
     }
     if (flushFailed) throw flushFailure;

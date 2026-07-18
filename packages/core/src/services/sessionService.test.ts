@@ -3739,10 +3739,10 @@ describe('SessionService', () => {
       ).toBe(false);
     });
 
-    it('removes a partially written target when fork creation fails', async () => {
+    it('releases the target lease when snapshot fork creation fails', async () => {
       const oldId = '55555555-5555-5555-5555-555555555556';
       const newId = '66666666-6666-6666-6666-666666666667';
-      seedSession(oldId);
+      const { file } = seedSession(oldId);
       const targetPath = realPath.join(
         service['storage'].getProjectDir(),
         'chats',
@@ -3753,10 +3753,18 @@ describe('SessionService', () => {
         'writeNewTranscript',
       ).mockRejectedValueOnce(new Error('disk full'));
 
-      await expect(service.forkSession(oldId, newId)).rejects.toThrow(
-        'disk full',
-      );
+      await expect(
+        service.forkSessionFromSnapshot(oldId, newId, fs.readFileSync(file)),
+      ).rejects.toThrow('disk full');
       expect(fs.existsSync(targetPath)).toBe(false);
+
+      const reacquired = await SessionWriterLease.acquire({
+        runtimeBaseDir: service['storage'].getRuntimeBaseDir(),
+        sessionId: newId,
+        transcriptPath: targetPath,
+        processKind: 'maintenance',
+      });
+      await reacquired.release();
     });
 
     it('throws when the source session belongs to a different project', async () => {

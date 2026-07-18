@@ -1884,6 +1884,53 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
+  it('keeps cleanup failure primary and preserves the newSession failure as its cause', async () => {
+    const fileSystemError = new Error('file system setup failed');
+    const cleanupError = new Error('cleanup failed');
+    vi.mocked(AcpFileSystemService).mockImplementationOnce(() => {
+      throw fileSystemError;
+    });
+    const innerConfig = {
+      ...makeInnerConfig(),
+      shutdown: vi.fn().mockRejectedValue(cleanupError),
+      storage: {
+        getProjectTempDir: vi.fn().mockReturnValue('/tmp/project'),
+        getProjectDir: vi.fn().mockReturnValue('/tmp'),
+        getUserSkillsDirs: vi.fn().mockReturnValue([]),
+      },
+    };
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfig as unknown as Config,
+    );
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.initialize({
+      clientCapabilities: {
+        fs: { readTextFile: true, writeTextFile: true },
+      },
+    });
+
+    try {
+      await expect(
+        agent.newSession({ cwd: '/tmp', mcpServers: [] }),
+      ).rejects.toBe(cleanupError);
+      expect(cleanupError.cause).toBe(fileSystemError);
+      expect(Object.keys(cleanupError)).not.toContain('cause');
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('does not return discontinued qwen-oauth as the only ACP auth option', async () => {
     vi.mocked(buildAuthMethods).mockReturnValue([
       {
