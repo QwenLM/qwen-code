@@ -75,6 +75,7 @@ export const pairingApproveCommand: CommandModule<
         `No pending request found for code "${argv.code.toUpperCase()}" in this workspace. It may have expired, or the channel may run in a different workspace (pass --cwd <dir>).`,
       );
       process.exit(1);
+      return; // process.exit is mocked in tests; never fall through
     }
 
     writeStdoutLine(

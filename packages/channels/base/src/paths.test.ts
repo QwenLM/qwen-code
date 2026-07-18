@@ -92,7 +92,7 @@ describe('canonicalizeWorkspacePath', () => {
         getWorkspaceScopeDirName(real),
       );
     } finally {
-      fs.rmSync(link);
+      fs.unlinkSync(link);
       fs.rmSync(real, { recursive: true, force: true });
     }
   });

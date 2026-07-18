@@ -295,6 +295,56 @@ describe('PairingStore workspace scoping (#7017)', () => {
       expect(store.isApproved('legacy-sender')).toBe(true);
     });
 
+    it('migrates legacy files written under a raw channel name that encodes differently', () => {
+      // Pre-scoping code wrote legacy files under the RAW name; the encoded
+      // name is only for scoped destinations. A name with a space must still
+      // find its legacy state.
+      fs.mkdirSync(channelsRoot(), { recursive: true });
+      fs.writeFileSync(
+        path.join(channelsRoot(), 'my channel-allowlist.json'),
+        JSON.stringify(['spaced-sender']),
+      );
+      const store = new PairingStore('my channel', workspaceA);
+      expect(store.isApproved('spaced-sender')).toBe(true);
+    });
+
+    it('retries a partially failed migration instead of locking in incomplete state', () => {
+      // First run: pairing file copies, allowlist copy fails (directory
+      // masquerading as the file). The sentinel must NOT be written, so a
+      // later construction — after the operator fixes the file — completes
+      // the migration instead of silently dropping approved senders.
+      fs.mkdirSync(channelsRoot(), { recursive: true });
+      fs.writeFileSync(
+        path.join(channelsRoot(), 'support-bot-pairing.json'),
+        JSON.stringify([
+          {
+            senderId: 'pending-sender',
+            senderName: 'Pending',
+            code: 'ABCDEFGH',
+            createdAt: Date.now(),
+          },
+        ]),
+      );
+      const badAllowlist = path.join(
+        channelsRoot(),
+        'support-bot-allowlist.json',
+      );
+      fs.mkdirSync(badAllowlist, { recursive: true });
+
+      const first = new PairingStore('support-bot', workspaceA);
+      expect(first.listPending().map((r) => r.senderId)).toEqual([
+        'pending-sender',
+      ]);
+      expect(first.isApproved('legacy-sender')).toBe(false);
+
+      // Operator repairs the legacy allowlist; the next construction picks
+      // it up because the gate never closed.
+      fs.rmdirSync(badAllowlist);
+      fs.writeFileSync(badAllowlist, JSON.stringify(['legacy-sender']));
+      const second = new PairingStore('support-bot', workspaceA);
+      expect(second.isApproved('legacy-sender')).toBe(true);
+    });
+
     it('never overwrites existing scoped state with legacy content', () => {
       const store = new PairingStore('support-bot', workspaceA);
       const code = store.createRequest('scoped-sender', 'Scoped')!;

@@ -55,7 +55,7 @@ export class PairingStore {
       `${safeChannelName}.migrated`,
     );
     if (workspaceCwd) {
-      this.migrateLegacyState(channelsRoot, safeChannelName);
+      this.migrateLegacyState(channelsRoot, channelName);
     }
   }
 
@@ -84,29 +84,29 @@ export class PairingStore {
    * Revocation therefore means REMOVING ENTRIES from the scoped allowlist
    * (and from the legacy global file, while it exists) — not deleting files.
    */
-  private migrateLegacyState(
-    channelsRoot: string,
-    safeChannelName: string,
-  ): void {
+  private migrateLegacyState(channelsRoot: string, channelName: string): void {
     try {
       if (fs.existsSync(this.migratedSentinelPath)) {
         return;
       }
+      // Legacy files were written by pre-scoping code under the RAW channel
+      // name; the encoded name is only used for the scoped destinations. The
+      // containment check keeps a traversal-style raw name (e.g. `../x`)
+      // from reading files outside the channels root.
       const legacyPairs: Array<[string, string]> = [
         [
-          path.join(channelsRoot, `${safeChannelName}-pairing.json`),
+          path.join(channelsRoot, `${channelName}-pairing.json`),
           this.pendingPath,
         ],
         [
-          path.join(channelsRoot, `${safeChannelName}-allowlist.json`),
+          path.join(channelsRoot, `${channelName}-allowlist.json`),
           this.allowlistPath,
         ],
       ];
       this.ensureDir();
+      let allSucceeded = true;
       for (const [legacyPath, scopedPath] of legacyPairs) {
         try {
-          // Defense in depth: the encoded name cannot contain separators,
-          // but never read a legacy source from outside the channels root.
           if (path.dirname(path.resolve(legacyPath)) !== channelsRoot) {
             continue;
           }
@@ -116,15 +116,33 @@ export class PairingStore {
           const tmpPath = `${scopedPath}.${process.pid}.migrating`;
           fs.copyFileSync(legacyPath, tmpPath);
           fs.renameSync(tmpPath, scopedPath);
-        } catch {
+        } catch (err) {
           // Best-effort per file: an unreadable legacy file must not block
-          // the other file or prevent the channel from starting.
+          // the other file or prevent the channel from starting. Leave the
+          // sentinel unwritten so the next construction retries this file.
+          allSucceeded = false;
+          process.stderr.write(
+            `[PairingStore] legacy migration of ${path.basename(legacyPath)} ` +
+              `failed for channel "${channelName}": ` +
+              `${(err as Error)?.message}; will retry on next start\n`,
+          );
         }
       }
-      fs.writeFileSync(this.migratedSentinelPath, '');
-    } catch {
-      // Best-effort: if even the sentinel cannot be written, the next
-      // construction simply retries the migration.
+      // The sentinel closes the gate permanently, so it is only written once
+      // every present legacy file has been copied (or was already there): a
+      // partial failure (ENOSPC, transient I/O) must not lock in incomplete
+      // state and silently drop previously-approved senders.
+      if (allSucceeded) {
+        fs.writeFileSync(this.migratedSentinelPath, '');
+      }
+    } catch (err) {
+      // Best-effort: migration problems must not prevent the channel from
+      // starting; the scoped store just starts empty and the migration is
+      // retried on the next construction.
+      process.stderr.write(
+        `[PairingStore] legacy migration failed for channel ` +
+          `"${channelName}": ${(err as Error)?.message}; scoped store starts empty\n`,
+      );
     }
   }
 
