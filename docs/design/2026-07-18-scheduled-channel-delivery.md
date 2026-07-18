@@ -1,6 +1,6 @@
 # Scheduled Channel Delivery for Durable Tasks
 
-Status: Draft
+Status: Approved direction; implementation staged on `main`
 
 Related: [#7152](https://github.com/QwenLM/qwen-code/issues/7152), [#7109](https://github.com/QwenLM/qwen-code/pull/7109), [#7103](https://github.com/QwenLM/qwen-code/issues/7103)
 
@@ -8,9 +8,11 @@ Related: [#7152](https://github.com/QwenLM/qwen-code/issues/7152), [#7109](https
 
 Daemon-managed durable scheduled tasks can run unattended and retain their own
 session history, but they cannot deliver a completed run to a selected IM
-conversation. Channel loops can already deliver to the chat where the loop was
-created, but that path has its own scheduler and store and cannot target a chat
-selected by an authenticated daemon client.
+conversation. Standalone Channel loops can already deliver to the chat where
+the loop was created, but that path has its own scheduler and store. A
+daemon-managed Channel currently receives neither that loop controller nor an
+equivalent daemon-backed controller, so `/loop` and selected-chat delivery do
+not yet share a working daemon path.
 
 #7109 adds a workspace-scoped API for recently observed users, groups, and
 topics. It intentionally stops at discovery. A client can present a destination
@@ -28,6 +30,10 @@ selected identifier into reliable proactive delivery.
 - Reuse existing Channel adapters and their proactive formatting and transport.
 - Keep credentials, webhook URLs, and secrets out of scheduled-task storage.
 - Preserve workspace ownership and daemon authentication boundaries.
+- Give Web Shell, daemon-aware CLI clients, IM `/loop`, and externally hosted
+  clients one workspace-qualified task contract.
+- Keep the daemon deployment boundary as the owner of schedule state,
+  execution state, and delivery state; clients only create and manage tasks.
 
 ## Non-goals
 
@@ -39,6 +45,9 @@ selected identifier into reliable proactive delivery.
 - Changing existing Channel webhook contracts.
 - Migrating standalone `qwen channel start` loops in the first version.
 - Exactly-once delivery across platform APIs that do not support idempotency.
+- Making an externally hosted browser or BFF the schedule owner.
+- Guaranteeing an exact fire time while the daemon runtime is stopped. An
+  external wake-up service is a separate deployment concern.
 
 ## Existing boundaries
 
@@ -63,6 +72,33 @@ and is therefore the wrong contract for delivering an already-produced result.
 #7109 exposes complete `channelName`, user ID, group ID, and topic ID values for
 recent accepted inbound conversations. The registry is bounded and freshness
 filtered. It is a discovery source, not a permanent routing database.
+
+## Deployment and client model
+
+The daemon deployment boundary is the control plane. The durable scheduler may
+run inside a bound Agent session rather than the HTTP process itself, but the
+daemon runtime still owns the workspace task file, session lifecycle, run
+state, and delivery outbox. No remote client owns a second clock or task store.
+
+Clients use the same contract in different ways:
+
+| Client                      | Task API                        | Delivery target          | Session binding        |
+| --------------------------- | ------------------------------- | ------------------------ | ---------------------- |
+| Web Shell                   | daemon REST                     | observed-contact picker  | owned task session     |
+| Hosted client/BFF           | workspace-qualified daemon REST | observed-contact picker  | owned task session     |
+| Daemon Channel `/loop`      | internal daemon controller      | accepted current chat    | shared Channel session |
+| Daemon-aware management CLI | daemon REST/SDK                 | observed target argument | owned task session     |
+| Standalone CLI/Channel      | existing local cron/loop path   | current behavior         | unchanged              |
+
+An externally hosted browser must not hold a daemon token or Channel
+credential. Its authenticated BFF maps the user-selected tenant/workspace to
+an exact trusted daemon workspace, forwards the workspace-qualified request,
+and returns daemon status without maintaining schedule or delivery state.
+
+All hosted and multi-workspace clients use
+`/workspaces/:workspace/scheduled-tasks`. The unqualified route remains a
+single-primary-workspace convenience and is not a fallback when a qualified
+workspace is unknown, untrusted, draining, or unavailable.
 
 ## Considered approaches
 
@@ -108,6 +144,10 @@ interface ScheduledChannelDeliveryTarget {
 
 interface DurableCronTask {
   // Existing fields omitted.
+  sessionBinding?: {
+    sessionId: string;
+    ownership: 'owned' | 'shared';
+  };
   delivery?: {
     type: 'channel';
     target: ScheduledChannelDeliveryTarget;
@@ -115,6 +155,13 @@ interface DurableCronTask {
   };
 }
 ```
+
+The existing `sessionId` field remains the persisted compatibility form. The
+API exposes its lifecycle meaning explicitly: a Web Shell or hosted-client
+task has an `owned` session that may be created and closed with the task; an IM
+`/loop` task uses the already accepted Channel session as `shared`, so deleting
+the task must not close the conversation session. Old records with only
+`sessionId` are treated as `owned`.
 
 `channelName`, `kind`, `chatId`, and optional `threadId` are the routing
 snapshot. `label` is an optional sanitized display snapshot and never
@@ -278,6 +325,26 @@ Run history returns delivery status, attempt count, timestamps, and a sanitized
 error code/message. It does not return platform credentials or raw upstream
 response bodies.
 
+Capability negotiation, rather than daemon version checks, controls client
+behavior:
+
+- `scheduled_task_channel_delivery` gates the `delivery` field and delivery
+  status;
+- `workspace_channel_observed_contacts` gates the selected-target picker;
+- `workspace_qualified_rest_core` gates multi-workspace management.
+
+A new client talking to an older daemon hides the destination UI and omits the
+field. An older client can ignore additive response fields. If a stale client
+sends `delivery` to a daemon that cannot validate it, the daemon returns a
+typed error and never silently drops the target.
+
+The implementation remains based on `main` and does not import or copy #7109.
+Scheduled-task routes consume a narrow target-admission dependency. Until an
+observed-contacts provider is available, authenticated selected-target
+creation is unavailable; the trusted current-IM-chat path can still be
+admitted by the daemon Channel controller. After #7109 lands, wiring its
+provider into that dependency is a small integration change.
+
 ## IM-originated task creation and compatibility
 
 The user-facing `channel_loop_create` tool remains the way a Channel user asks
@@ -287,6 +354,12 @@ For daemon-managed Channels, its handler forwards creation to the parent daemon
 and persists a durable task with the accepted current-chat target. This makes
 the task visible through the daemon scheduled-task API and uses the same run
 and delivery state machine as a client-created task.
+
+`channel_loop_create` remains model-visible because it expresses the user's
+request to create or manage a schedule in the current conversation. The
+actual `channel_delivery` operation is different: it is daemon-to-worker
+control IPC, never a model tool, so a delivery retry cannot start another
+Agent turn or choose a different recipient.
 
 Standalone `qwen channel start` keeps the existing `ChannelLoopStore` and
 `ChannelLoopScheduler`. A daemon worker that advertises
@@ -357,6 +430,22 @@ accepted IM Envelope                 authenticated daemon client
   delivery. No message payload or observed membership list is copied into the
   task.
 
+## Daemon availability boundary
+
+The durable task file survives restart, but an inactive daemon runtime has no
+process available to fire its CronScheduler. The first version therefore
+assumes the daemon is resident or can be woken before the task deadline.
+
+If a hosting platform must stop the daemon between runs while still promising
+deadline execution, it may add an external wake-up alarm. That alarm only
+starts the daemon; after startup, the daemon calculates due/catch-up tasks,
+runs the Agent session, and delivers through the Channel worker. It is not an
+IM delivery webhook and does not carry a target credential or completed
+message.
+
+Moving the actual clock and retry state into the hosting platform would create
+a second scheduler and is outside this design.
+
 ## Test strategy
 
 ### Task contract and routes
@@ -396,14 +485,19 @@ accepted IM Envelope                 authenticated daemon client
 
 ## Rollout
 
-1. Land #7109 and gate the picker on its capability.
-2. Add the durable task field, admission validation, run correlation, and
-   delivery state view behind `scheduled_task_channel_delivery`.
-3. Add parent-to-worker delivery IPC and adapter coverage.
-4. Enable selected-target delivery for authenticated daemon clients.
-5. Forward daemon-managed `channel_loop_create` to the unified durable path.
-6. Keep standalone loop behavior unchanged and remove daemon compatibility
-   code only after migrated tasks are accounted for.
+1. On `main`, add the Channel-level proactive delivery boundary and dedicated
+   parent-to-worker `channel_delivery` IPC.
+2. Add the durable task field, admission dependency, session ownership, run
+   correlation, and delivery state behind
+   `scheduled_task_channel_delivery`.
+3. Forward daemon-managed `channel_loop_create` to the unified durable path,
+   admitting the accepted current-chat target without a second loop store.
+4. When #7109 lands, connect its provider to target admission and enable the
+   selected-target picker for authenticated daemon clients.
+5. Add Web Shell and daemon-aware CLI presentation while keeping standalone
+   local cron/loop behavior unchanged.
+6. Add an optional hosting wake-up integration only for deployments that stop
+   daemons between deadlines.
 
 ## Required implementation boundaries
 
@@ -417,3 +511,9 @@ accepted IM Envelope                 authenticated daemon client
 - Target admission happens when a target is created or replaced.
 - A terminal session turn, not prompt enqueue, creates delivery work.
 - Retry invokes only adapter-owned proactive transport and never Agent work.
+- Hosted clients never own schedule state and never call a Channel worker
+  directly.
+- Daemon-managed `/loop` and REST-created tasks use the same task file; no
+  request is dual-written to the standalone Channel loop store.
+- The code and PR remain based on `main`; #7109 is integrated through a narrow
+  admission provider after it lands.
