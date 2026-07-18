@@ -133,6 +133,20 @@ describe('SessionWriterLease', () => {
     await lease.release();
   });
 
+  it('reclaims a live PID whose process start identity changed', async () => {
+    await writeLock(
+      lockRecord({
+        pid: process.pid,
+        process_start_time_ms: 1,
+      }),
+    );
+
+    const lease = await acquire();
+
+    expect(lease.ownerId).toBeTruthy();
+    await lease.release();
+  });
+
   it('never reclaims a foreign-host owner', async () => {
     await writeLock(
       lockRecord({ hostname: 'another-host.invalid', pid: 2_147_483_647 }),
@@ -172,6 +186,37 @@ describe('SessionWriterLease', () => {
       { sessionId, workDir: '/workspace', pid: process.pid },
     );
     await expect(acquire()).rejects.toBeInstanceOf(SessionWriterConflictError);
+  });
+
+  it('reclaims an old malformed lock whose runtime PID was reused', async () => {
+    const lockPath = await writeLock('not a lock');
+    const old = new Date(Date.now() - 10_000);
+    await fs.utimes(lockPath, old, old);
+    const statusPath = path.join(
+      runtimeBaseDir,
+      'projects',
+      'project',
+      'chats',
+      `${sessionId}.runtime.json`,
+    );
+    await fs.mkdir(path.dirname(statusPath), { recursive: true });
+    await fs.writeFile(
+      statusPath,
+      JSON.stringify({
+        schema_version: 1,
+        pid: process.pid,
+        session_id: sessionId,
+        work_dir: '/workspace',
+        hostname: os.hostname(),
+        started_at: 1,
+        qwen_version: null,
+        active: true,
+      }),
+    );
+
+    const lease = await acquire();
+
+    await lease.release();
   });
 
   it('does not reclaim an old malformed lock with a foreign runtime sidecar', async () => {

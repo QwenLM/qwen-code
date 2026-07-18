@@ -28,10 +28,12 @@ The lock lives at
 project directory and archive state. It is created atomically with `wx` and
 mode `0600`. Its random `owner_id` is the fencing token.
 
-A live local PID and every foreign-host owner cause a conflict. A dead local
-owner is moved aside atomically, re-read, and reclaimed only after the moved
-record is proved stale. A malformed record is retried to tolerate an
-in-progress write; young or otherwise unverifiable records fail closed.
+A live local PID with the same process start time and every foreign-host owner
+cause a conflict. A dead or reused local PID is moved aside atomically, re-read,
+and reclaimed only after the moved record is proved stale. A malformed record
+is retried to tolerate an in-progress write; young or otherwise unverifiable
+records fail closed. Runtime sidecars apply the same start-time check before a
+reused PID can keep a malformed lock alive.
 Release removes the lock only when its on-disk `owner_id` still matches.
 
 Each lease tracks the transcript's expected UTF-8 byte length. Appends validate

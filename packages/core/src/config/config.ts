@@ -2334,7 +2334,7 @@ export class Config {
         await this.chatRecordingService.close().catch(() => {});
       }
       if (this.hasSessionWriterOwnership()) {
-        throw new SessionWriterUnavailableError();
+        throw new SessionWriterUnavailableError({ cause: error });
       }
       throw error;
     }

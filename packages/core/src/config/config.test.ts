@@ -3615,28 +3615,31 @@ describe('Server Config (config.ts)', () => {
     it('fails closed when an unbound initialization lease cannot be released', async () => {
       const sessionId = '24232323-2323-2323-2323-232323232325';
       const writer = testWriterLease(sessionId);
+      const loadFailure = new Error('load failed');
       writer.release.mockRejectedValue(new Error('release failure'));
       const acquireSpy = vi
         .spyOn(SessionWriterLease, 'acquire')
         .mockResolvedValue(writer.lease);
       const loadSpy = vi
         .spyOn(SessionService.prototype, 'loadSession')
-        .mockRejectedValue(new Error('load failed'));
+        .mockRejectedValue(loadFailure);
       const config = new Config({
         ...baseParams,
         sessionId,
         chatRecording: true,
       });
 
-      await expect(
-        config.initialize({
+      const failure = await config
+        .initialize({
           skipGeminiInitialization: true,
           skipHooks: true,
           skipMcpDiscovery: true,
           skipSkillManager: true,
           skipFileCheckpointing: true,
-        }),
-      ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+        })
+        .catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(SessionWriterUnavailableError);
+      expect((failure as Error).cause).toBe(loadFailure);
       expect(config.hasSessionWriterOwnership()).toBe(true);
 
       writer.release.mockResolvedValue(undefined);

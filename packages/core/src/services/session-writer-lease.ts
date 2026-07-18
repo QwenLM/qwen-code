@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import type { Dirent } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -79,8 +80,8 @@ export class SessionWriterUnavailableError extends SessionWriterError {
   readonly errorKind = 'session_writer_unavailable';
   readonly httpStatus = 503;
 
-  constructor() {
-    super('Session write ownership could not be verified.');
+  constructor(options?: ErrorOptions) {
+    super('Session write ownership could not be verified.', options);
   }
 }
 
@@ -89,6 +90,7 @@ interface SessionWriterLockRecord {
   session_id: string;
   owner_id: string;
   pid: number;
+  process_start_time_ms?: number;
   hostname: string;
   process_kind: SessionWriterProcessKind;
   acquired_at: string;
@@ -118,6 +120,75 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+async function execFileText(
+  file: string,
+  args: readonly string[],
+): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile(
+      file,
+      args,
+      { encoding: 'utf8', timeout: 1_000, windowsHide: true },
+      (error, stdout) => {
+        const value = stdout.trim();
+        resolve(error || value.length === 0 ? null : value);
+      },
+    );
+  });
+}
+
+async function readProcessStartTimeMs(pid: number): Promise<number | null> {
+  if (process.platform === 'linux') {
+    try {
+      const [stat, systemStat, clockTicksText] = await Promise.all([
+        fs.readFile(`/proc/${pid}/stat`, 'utf8'),
+        fs.readFile('/proc/stat', 'utf8'),
+        execFileText('getconf', ['CLK_TCK']),
+      ]);
+      const fields = stat
+        .slice(stat.lastIndexOf(')') + 1)
+        .trim()
+        .split(/\s+/);
+      const startTicks = fields[19];
+      const bootTime = /^btime\s+(\d+)$/m.exec(systemStat)?.[1];
+      const clockTicks = Number(clockTicksText);
+      if (
+        !startTicks ||
+        !/^\d+$/.test(startTicks) ||
+        !bootTime ||
+        !Number.isFinite(clockTicks) ||
+        clockTicks <= 0
+      ) {
+        return null;
+      }
+      return (Number(bootTime) + Number(startTicks) / clockTicks) * 1_000;
+    } catch {
+      return null;
+    }
+  }
+  if (process.platform === 'darwin') {
+    const startedAt = await execFileText('/bin/ps', [
+      '-o',
+      'lstart=',
+      '-p',
+      String(pid),
+    ]);
+    const parsed = startedAt ? Date.parse(startedAt) : Number.NaN;
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  if (process.platform === 'win32') {
+    const startedAt = await execFileText('powershell.exe', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      `$targetProcess = Get-Process -Id ${pid} -ErrorAction Stop; ([DateTimeOffset]$targetProcess.StartTime).ToUnixTimeMilliseconds()`,
+    ]);
+    const parsed = Number(startedAt);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }
+  return null;
+}
+
 function isLockRecord(value: unknown): value is SessionWriterLockRecord {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
@@ -130,6 +201,10 @@ function isLockRecord(value: unknown): value is SessionWriterLockRecord {
     record['owner_id'].length > 0 &&
     Number.isInteger(record['pid']) &&
     (record['pid'] as number) > 0 &&
+    (record['process_start_time_ms'] === undefined ||
+      (typeof record['process_start_time_ms'] === 'number' &&
+        Number.isFinite(record['process_start_time_ms']) &&
+        record['process_start_time_ms'] > 0)) &&
     typeof record['hostname'] === 'string' &&
     record['hostname'].length > 0 &&
     typeof processKind === 'string' &&
@@ -152,11 +227,17 @@ function parseLockRecord(raw: string): SessionWriterLockRecord | null {
   }
 }
 
-function lockStateForRecord(
+async function lockStateForRecord(
   record: SessionWriterLockRecord,
-): ExistingLockState {
+): Promise<ExistingLockState> {
   if (record.hostname !== os.hostname()) return { kind: 'live' };
-  return isProcessAlive(record.pid) ? { kind: 'live' } : { kind: 'stale' };
+  if (!isProcessAlive(record.pid)) return { kind: 'stale' };
+  if (!record.process_start_time_ms) return { kind: 'live' };
+  const currentStartTimeMs = await readProcessStartTimeMs(record.pid);
+  return currentStartTimeMs !== null &&
+    currentStartTimeMs !== record.process_start_time_ms
+    ? { kind: 'stale' }
+    : { kind: 'live' };
 }
 
 async function delay(ms: number): Promise<void> {
@@ -245,10 +326,13 @@ async function hasMatchingLiveRuntime(
       throw new SessionWriterUnavailableError();
     }
     const status = await readRuntimeStatus(statusPath);
+    if (status?.sessionId !== sessionId || !status.active) continue;
+    if (status.hostname !== os.hostname()) return true;
+    if (!isProcessAlive(status.pid)) continue;
+    const currentStartTimeMs = await readProcessStartTimeMs(status.pid);
     if (
-      status?.sessionId === sessionId &&
-      status.active &&
-      (status.hostname !== os.hostname() || isProcessAlive(status.pid))
+      currentStartTimeMs === null ||
+      currentStartTimeMs <= status.startedAt * 1_000
     ) {
       return true;
     }
@@ -332,11 +416,15 @@ export class SessionWriterLease {
       throw new SessionWriterUnavailableError();
     }
 
+    const processStartTimeMs = await readProcessStartTimeMs(process.pid);
     const lockRecord: SessionWriterLockRecord = {
       schema_version: LOCK_SCHEMA_VERSION,
       session_id: options.sessionId,
       owner_id: randomUUID(),
       pid: process.pid,
+      ...(processStartTimeMs
+        ? { process_start_time_ms: processStartTimeMs }
+        : {}),
       hostname: os.hostname(),
       process_kind: options.processKind ?? 'unknown',
       acquired_at: new Date().toISOString(),
@@ -463,7 +551,7 @@ export class SessionWriterLease {
         if (record.session_id !== expectedSessionId) {
           throw new SessionWriterUnavailableError();
         }
-        return lockStateForRecord(record);
+        return await lockStateForRecord(record);
       }
       if (attempt + 1 < MALFORMED_RETRY_COUNT) {
         await delay(MALFORMED_RETRY_DELAY_MS);
