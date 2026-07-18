@@ -26,7 +26,7 @@ import {
 import {
   OUTPUT_LANGUAGE_AUTO,
   isAutoLanguage,
-  resolveOutputLanguage,
+  resolveOutputLanguageOrPreserveAuto,
   writeOutputLanguageAndRegisterPath,
 } from '../../utils/languageUtils.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
@@ -34,8 +34,8 @@ import { createDebugLogger } from '@qwen-code/qwen-code-core';
 const debugLogger = createDebugLogger('LANGUAGE_COMMAND');
 
 /**
- * Gets the current LLM output language setting and its resolved value.
- * Returns an object with both the raw setting and the resolved language.
+ * Gets the current LLM output language setting and its display value.
+ * Returns an object with both the raw setting and the display language.
  */
 function getCurrentOutputLanguage(context?: CommandContext): {
   setting: string;
@@ -44,7 +44,7 @@ function getCurrentOutputLanguage(context?: CommandContext): {
   const settingValue =
     context?.services?.settings?.merged?.general?.outputLanguage ||
     OUTPUT_LANGUAGE_AUTO;
-  const resolved = resolveOutputLanguage(settingValue);
+  const resolved = resolveOutputLanguageOrPreserveAuto(settingValue);
   return { setting: settingValue, resolved };
 }
 
@@ -138,7 +138,7 @@ async function setUiLanguage(
 
 /**
  * Handles the /language output command, updating both the setting and the rule file.
- * 'auto' is preserved in settings but resolved to the detected language for the rule file.
+ * 'auto' is preserved in settings and written as a dynamic same-language rule.
  *
  * After persisting the change, hierarchical memory is reloaded so `output-language.md`
  * flows back into `userMemory`, and the live chat's system instruction is rebuilt
@@ -151,7 +151,7 @@ async function setOutputLanguage(
 ): Promise<MessageActionReturn> {
   try {
     const isAuto = isAutoLanguage(language);
-    const resolved = resolveOutputLanguage(language);
+    const resolved = resolveOutputLanguageOrPreserveAuto(language);
     // Save 'auto' as-is to settings, or normalize other values
     const settingValue = isAuto ? OUTPUT_LANGUAGE_AUTO : resolved;
 
@@ -185,9 +185,7 @@ async function setOutputLanguage(
       }
     }
 
-    const displayLang = isAuto
-      ? `${t('Auto (detect from system)')} → ${resolved}`
-      : resolved;
+    const displayLang = isAuto ? t('Auto (follow user input)') : resolved;
 
     return {
       type: 'message',
@@ -272,9 +270,9 @@ export const languageCommand: SlashCommand = {
     const { setting: outputSetting, resolved: outputResolved } =
       getCurrentOutputLanguage(context);
 
-    // Format output language display: show "Auto → English" or just "English"
+    // Format output language display: show auto mode or the fixed language.
     const outputLangDisplay = isAutoLanguage(outputSetting)
-      ? `${t('Auto (detect from system)')} → ${outputResolved}`
+      ? t('Auto (follow user input)')
       : outputResolved;
 
     return {
