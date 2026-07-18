@@ -48,10 +48,13 @@ const MCP_RESTART_REFUSED_REASONS = new Set<string>([
   'in_flight',
   'disabled',
   'budget_would_exceed',
+  'authentication_required',
 ]);
 
 const MALFORMED_MEMORY_CHANGED = 'malformed memory_changed payload';
 const MAX_DETAILS_LENGTH = 4096;
+const SESSION_RECORDING_DEGRADED_MESSAGE =
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording.';
 
 export function normalizeDaemonEvent(
   event: DaemonEvent,
@@ -125,6 +128,45 @@ export function normalizeDaemonEvent(
           text: `Session closed: ${getString(event.data, 'reason') ?? 'closed'}`,
         },
       ];
+    case 'session_recording_degraded': {
+      const sessionId = getString(event.data, 'sessionId');
+      if (!sessionId || getString(event.data, 'reason') !== 'write_failed') {
+        return fallbackDebug(event, base, 'malformed recording state');
+      }
+      return [
+        {
+          ...base,
+          type: 'error',
+          recoverable: true,
+          code: 'session_recording_degraded',
+          text: SESSION_RECORDING_DEGRADED_MESSAGE,
+        },
+      ];
+    }
+    case 'session_snapshot': {
+      if (!isRecord(event.data) || !getString(event.data, 'sessionId')) {
+        return fallbackDebug(event, base, 'malformed recording snapshot');
+      }
+      const recordingDegraded = event.data['recordingDegraded'];
+      if (
+        recordingDegraded !== undefined &&
+        typeof recordingDegraded !== 'boolean'
+      ) {
+        return fallbackDebug(event, base, 'malformed recording snapshot');
+      }
+      if (recordingDegraded === true) {
+        return [
+          {
+            ...base,
+            type: 'error',
+            recoverable: true,
+            code: 'session_recording_degraded',
+            text: SESSION_RECORDING_DEGRADED_MESSAGE,
+          },
+        ];
+      }
+      return [];
+    }
     case 'client_evicted':
       return [
         {
@@ -300,6 +342,15 @@ export function normalizeDaemonEvent(
     case 'mcp_server_restart_refused':
       return normalizeMcpServerRestartRefused(event, base);
 
+    case 'mcp_server_added':
+      return normalizeMcpServerChanged(event, base, 'added');
+
+    case 'mcp_server_removed':
+      return normalizeMcpServerChanged(event, base, 'removed');
+
+    case 'mcp_server_changed':
+      return normalizeMcpServerChanged(event, base);
+
     case 'extensions_changed':
       return normalizeExtensionsChanged(event, base);
 
@@ -331,14 +382,21 @@ export function normalizeDaemonEvent(
       // status block was redundant. Adapters that want a user-visible
       // banner can pattern-match on `event.type === 'debug'` and the
       // text prefix.
-      return [
-        {
-          ...base,
-          type: 'debug',
-          text: `${event.type} (unrecognized daemon event): ${stringifyRedactedJson(event.data)}`,
-        },
-      ];
+      return normalizeUnrecognizedEvent(event, base);
   }
+}
+
+function normalizeUnrecognizedEvent(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  return [
+    {
+      ...base,
+      type: 'debug',
+      text: `${event.type} (unrecognized daemon event): ${stringifyRedactedJson(event.data)}`,
+    },
+  ];
 }
 
 function normalizeStateResyncRequired(
@@ -665,8 +723,21 @@ function normalizeSessionUpdate(
       ];
     }
     case 'tool_call':
-    case 'tool_call_update':
+    case 'tool_call_update': {
+      // Silent-shell liveness heartbeat: a meta-only in_progress frame with
+      // no kind/title/content. Normalizing it would overwrite the tool
+      // block's human-readable title with the bare tool name from _meta;
+      // the web UI has its own activity indicator, so drop the frame.
+      const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+      if (
+        getString(update, 'status') === 'in_progress' &&
+        getString(update, 'kind') === undefined &&
+        meta?.['shellProgress'] !== undefined
+      ) {
+        return [];
+      }
       return [normalizeToolUpdate(update, base)];
+    }
     case 'shell_output':
     case 'tool_output': {
       const text = getOutputText(update);
@@ -1533,7 +1604,50 @@ function normalizeMcpServerRestartRefused(
       ...base,
       type: 'workspace.mcp.server_restart_refused',
       serverName,
-      reason: reason as 'in_flight' | 'disabled' | 'budget_would_exceed',
+      reason: reason as
+        | 'in_flight'
+        | 'disabled'
+        | 'budget_would_exceed'
+        | 'authentication_required',
+    },
+  ];
+}
+
+function normalizeMcpServerChanged(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+  fixedAction?: 'added' | 'removed',
+): DaemonUiEvent[] {
+  const serverName = getString(event.data, fixedAction ? 'name' : 'serverName');
+  const action = fixedAction ?? getString(event.data, 'action');
+  if (
+    !serverName ||
+    !action ||
+    ![
+      'added',
+      'removed',
+      'approve',
+      'enable',
+      'disable',
+      'authenticate',
+      'clear-auth',
+    ].includes(action)
+  ) {
+    return fallbackDebug(event, base, `malformed ${event.type} payload`);
+  }
+  return [
+    {
+      ...base,
+      type: 'workspace.mcp.server_changed',
+      serverName,
+      action: action as
+        | 'added'
+        | 'removed'
+        | 'approve'
+        | 'enable'
+        | 'disable'
+        | 'authenticate'
+        | 'clear-auth',
     },
   ];
 }

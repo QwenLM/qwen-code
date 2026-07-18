@@ -11,6 +11,7 @@ import type {
   DaemonFileStat,
   DaemonScheduledTask,
   DaemonWorkspaceActions,
+  DaemonWorkspacePathSuggestions,
 } from './types.js';
 
 const AGENT_GENERATE_TIMEOUT_MS = 330_000;
@@ -159,6 +160,22 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async initializeMcp() {
+      const client = requireClient(getClient, 'Initialize MCP failed');
+      return withActionTimeout(
+        client.initializeWorkspaceMcp(),
+        'Initialize MCP timed out',
+      );
+    },
+
+    async reloadMcp() {
+      const client = requireClient(getClient, 'Reload MCP failed');
+      return withActionTimeout(
+        client.reloadWorkspaceMcp(),
+        'Reload MCP timed out',
+      );
+    },
+
     async loadMcpTools(serverName) {
       const client = requireClient(getClient, 'Load MCP tools failed');
       try {
@@ -234,6 +251,24 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async addRuntimeMcpServer(request) {
+      const client = requireClient(getClient, 'Add MCP server failed');
+      return withActionTimeout(
+        client.addRuntimeMcpServer(request),
+        'Add MCP server timed out',
+        5 * 60_000,
+      );
+    },
+
+    async removeRuntimeMcpServer(name) {
+      const client = requireClient(getClient, 'Remove MCP server failed');
+      return withActionTimeout(
+        client.removeRuntimeMcpServer(name),
+        'Remove MCP server timed out',
+        5 * 60_000,
+      );
+    },
+
     async loadDaemonStatus(detail) {
       const client = requireClient(getClient, 'Load daemon status failed');
       return withActionTimeout(
@@ -255,6 +290,30 @@ export function createDaemonWorkspaceActions({
       return withActionTimeout(
         client.workspaceSkills(),
         'Load skills timed out',
+      );
+    },
+
+    async setWorkspaceSkillEnabled(skillName, enabled) {
+      const client = requireClient(getClient, 'Set skill enabled failed');
+      return withActionTimeout(
+        client.setWorkspaceSkillEnabled(skillName, enabled),
+        'Set skill enabled timed out',
+      );
+    },
+
+    async installWorkspaceSkill(request) {
+      const client = requireClient(getClient, 'Install skill failed');
+      return withActionTimeout(
+        client.installWorkspaceSkill(request),
+        'Install skill timed out',
+      );
+    },
+
+    async deleteWorkspaceSkill(skillName, scope) {
+      const client = requireClient(getClient, 'Delete skill failed');
+      return withActionTimeout(
+        client.deleteWorkspaceSkill(skillName, scope),
+        'Delete skill timed out',
       );
     },
 
@@ -287,10 +346,17 @@ export function createDaemonWorkspaceActions({
       );
     },
 
-    async setWorkspaceSetting(scope: 'workspace', key: string, value: unknown) {
+    async setWorkspaceSetting(
+      scope: 'workspace' | 'user',
+      key: string,
+      value: unknown,
+      options?: {
+        mcpServerMutation?: { operation: 'set' | 'remove'; name: string };
+      },
+    ) {
       const client = requireClient(getClient, 'Set setting failed');
       return withActionTimeout(
-        client.setWorkspaceSetting(scope, key, value),
+        client.setWorkspaceSetting(scope, key, value, options),
         'Set setting timed out',
       );
     },
@@ -466,10 +532,13 @@ export function createDaemonWorkspaceActions({
     // Scheduled tasks (durable cron). Raw fetch like glob/stat/list — the
     // /scheduled-tasks routes are REST-only and not yet on the DaemonClient
     // transport, so this path only reaches the daemon over plain HTTP (the
-    // web-shell's own origin), which is exactly where the page runs.
-    async listScheduledTasks() {
+    // web-shell's own origin), which is exactly where the page runs. A
+    // `workspaceId` selects a non-primary workspace's own cron file via the
+    // workspace-qualified route; omitting it hits the primary surface.
+    async listScheduledTasks(workspaceId) {
       requireClient(getClient, 'List scheduled tasks failed');
-      const url = createDaemonRequestUrl(baseUrl, '/scheduled-tasks');
+      const path = scheduledTasksPath(workspaceId);
+      const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
         fetch(serializeDaemonRequestUrl(url, baseUrl), {
           headers: createDaemonHeaders(token),
@@ -477,15 +546,16 @@ export function createDaemonWorkspaceActions({
         'List scheduled tasks timed out',
       );
       if (!res.ok) {
-        throw new Error(await readDaemonError(res, 'GET /scheduled-tasks'));
+        throw new Error(await readDaemonError(res, `GET ${path}`));
       }
       const data = (await res.json()) as { tasks?: DaemonScheduledTask[] };
       return Array.isArray(data.tasks) ? data.tasks : [];
     },
 
-    async createScheduledTask(req) {
+    async createScheduledTask(req, workspaceId) {
       requireClient(getClient, 'Create scheduled task failed');
-      const url = createDaemonRequestUrl(baseUrl, '/scheduled-tasks');
+      const path = scheduledTasksPath(workspaceId);
+      const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
         fetch(serializeDaemonRequestUrl(url, baseUrl), {
           method: 'POST',
@@ -495,17 +565,18 @@ export function createDaemonWorkspaceActions({
         'Create scheduled task timed out',
       );
       if (!res.ok) {
-        throw new Error(await readDaemonError(res, 'POST /scheduled-tasks'));
+        throw new Error(await readDaemonError(res, `POST ${path}`));
       }
       return (await res.json()) as DaemonScheduledTask;
     },
 
-    async updateScheduledTask(id, patch) {
+    async updateScheduledTask(id, patch, workspaceId) {
       requireClient(getClient, 'Update scheduled task failed');
-      const url = createDaemonRequestUrl(
-        baseUrl,
-        `/scheduled-tasks/${encodeURIComponent(id)}`,
+      const path = scheduledTasksPath(
+        workspaceId,
+        `/${encodeURIComponent(id)}`,
       );
+      const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
         fetch(serializeDaemonRequestUrl(url, baseUrl), {
           method: 'PATCH',
@@ -515,19 +586,18 @@ export function createDaemonWorkspaceActions({
         'Update scheduled task timed out',
       );
       if (!res.ok) {
-        throw new Error(
-          await readDaemonError(res, `PATCH /scheduled-tasks/${id}`),
-        );
+        throw new Error(await readDaemonError(res, `PATCH ${path}`));
       }
       return (await res.json()) as DaemonScheduledTask;
     },
 
-    async runScheduledTask(id) {
+    async runScheduledTask(id, workspaceId) {
       requireClient(getClient, 'Run scheduled task failed');
-      const url = createDaemonRequestUrl(
-        baseUrl,
-        `/scheduled-tasks/${encodeURIComponent(id)}/run`,
+      const path = scheduledTasksPath(
+        workspaceId,
+        `/${encodeURIComponent(id)}/run`,
       );
+      const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
         fetch(serializeDaemonRequestUrl(url, baseUrl), {
           method: 'POST',
@@ -536,19 +606,18 @@ export function createDaemonWorkspaceActions({
         'Run scheduled task timed out',
       );
       if (!res.ok) {
-        throw new Error(
-          await readDaemonError(res, `POST /scheduled-tasks/${id}/run`),
-        );
+        throw new Error(await readDaemonError(res, `POST ${path}`));
       }
       return (await res.json()) as DaemonScheduledTask;
     },
 
-    async deleteScheduledTask(id) {
+    async deleteScheduledTask(id, workspaceId) {
       requireClient(getClient, 'Delete scheduled task failed');
-      const url = createDaemonRequestUrl(
-        baseUrl,
-        `/scheduled-tasks/${encodeURIComponent(id)}`,
+      const path = scheduledTasksPath(
+        workspaceId,
+        `/${encodeURIComponent(id)}`,
       );
+      const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
         fetch(serializeDaemonRequestUrl(url, baseUrl), {
           method: 'DELETE',
@@ -557,9 +626,7 @@ export function createDaemonWorkspaceActions({
         'Delete scheduled task timed out',
       );
       if (!res.ok) {
-        throw new Error(
-          await readDaemonError(res, `DELETE /scheduled-tasks/${id}`),
-        );
+        throw new Error(await readDaemonError(res, `DELETE ${path}`));
       }
     },
 
@@ -608,6 +675,38 @@ export function createDaemonWorkspaceActions({
       return withActionTimeout(
         client.extensionOperationStatus(operationId),
         'Load extension operation timed out',
+      );
+    },
+
+    async activeExtensionOperations() {
+      const client = requireClient(
+        getClient,
+        'Load active extension operations failed',
+      );
+      return withActionTimeout(
+        client.activeExtensionOperations(),
+        'Load active extension operations timed out',
+      );
+    },
+
+    async respondToExtensionInteraction(
+      operationId,
+      interactionId,
+      response,
+      clientId,
+    ) {
+      const client = requireClient(
+        getClient,
+        'Respond to extension interaction failed',
+      );
+      return withActionTimeout(
+        client.respondToExtensionInteraction(
+          operationId,
+          interactionId,
+          response,
+          clientId,
+        ),
+        'Respond to extension interaction timed out',
       );
     },
 
@@ -707,11 +806,39 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async deleteModel(target) {
+      const client = requireClient(getClient, 'Delete model failed');
+      return withActionTimeout(
+        client.deleteModel(target),
+        'Delete model timed out',
+      );
+    },
+
     async addWorkspace(cwd, options) {
       const client = requireClient(getClient, 'Add workspace failed');
       return withActionTimeout(
         client.addWorkspace(cwd, options),
         'Add workspace timed out',
+      );
+    },
+
+    async suggestWorkspacePaths(prefix) {
+      const client = requireClient(getClient, 'Suggest workspace paths failed');
+      const result = await withActionTimeout(
+        client.workspacePathSuggestions(prefix),
+        'Suggest workspace paths timed out',
+      );
+      return result as DaemonWorkspacePathSuggestions;
+    },
+
+    async removeWorkspace(workspaceId, options) {
+      const client = requireClient(getClient, 'Remove workspace failed');
+      const removal = client.workspaceById(workspaceId).remove(options);
+      if (options?.timeoutMs === 0) return removal;
+      return withActionTimeout(
+        removal,
+        'Remove workspace timed out',
+        options?.timeoutMs,
       );
     },
   };
@@ -738,6 +865,18 @@ function requireWorkspaceCwd(
     throw new Error('Daemon workspace is not connected');
   }
   return cwd;
+}
+
+// Builds a scheduled-tasks REST path. With a `workspaceId` it targets that
+// workspace's own cron file via the qualified route; without one it hits the
+// primary surface. `suffix` appends the task id (and `/run`) for item routes.
+// The aggregated view passes the primary workspace as `undefined`, so the
+// primary keeps its trust-free unqualified surface while secondaries use the
+// (trust-checked) qualified one.
+function scheduledTasksPath(workspaceId?: string, suffix = ''): string {
+  return workspaceId
+    ? `/workspaces/${encodeURIComponent(workspaceId)}/scheduled-tasks${suffix}`
+    : `/scheduled-tasks${suffix}`;
 }
 
 function createDaemonHeaders(token: string | undefined): HeadersInit {

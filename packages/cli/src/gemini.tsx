@@ -78,6 +78,12 @@ import { initializeWarningHandler } from './utils/warningHandler.js';
 import { writeStderrLine } from './utils/stdioHelpers.js';
 import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js';
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
+import {
+  CUSTOM_SANDBOX_IMAGE_ENV_VAR,
+  HOST_UPDATE_RELAUNCH_ENV_VAR,
+  UPDATE_COMPLETE_EXIT_CODE,
+} from './utils/processUtils.js';
+import { getInstallationInfo } from './utils/installationInfo.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
@@ -181,10 +187,31 @@ function getSignalExitCode(signal: NodeJS.Signals): number {
   return signal === 'SIGINT' ? 130 : 143;
 }
 
+// A real SIGINT only reaches the process-level handler while raw mode is
+// off (in raw mode Ctrl+C arrives as input and goes through the UI's
+// double-press guard). Terminals that toggle raw mode around subprocesses
+// (e.g. the PyCharm terminal) deliver real SIGINTs, so mirror the UI's
+// press-twice-to-exit window here instead of exiting on the first signal.
+const SIGINT_EXIT_CONFIRM_WINDOW_MS = 1000;
+
+// `when-exit` (pulled in via `atomically`) re-raises the signal from its own
+// once-handler after running its callbacks, so one physical Ctrl+C surfaces
+// as two SIGINT events microseconds apart. Repeats inside this gap are the
+// same press, not a confirmation; a human double-press is far slower.
+const SIGINT_RERAISE_IGNORE_MS = 50;
+
 function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
   let cleanupStarted = false;
+  let lastSigintAt = 0;
 
-  const handleSignal = (signal: NodeJS.Signals) => {
+  // The exit cleanup chain removes the named handlers below. Without a
+  // stand-in listener, a stray Ctrl+C during cleanup would fall back to
+  // Node's default SIGINT handling and kill the process before the
+  // terminal is restored (see #6776). Registered when cleanup begins;
+  // the process exits at the end of cleanup regardless.
+  const swallowSignalDuringCleanup = () => {};
+
+  const beginExit = (signal: NodeJS.Signals) => {
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(wasRaw);
     }
@@ -193,6 +220,7 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
       return;
     }
     cleanupStarted = true;
+    process.on('SIGINT', swallowSignalDuringCleanup);
 
     void runExitCleanup()
       .catch((error) => {
@@ -204,14 +232,27 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
   };
 
   const handleSigterm = () => {
-    handleSignal('SIGTERM');
+    beginExit('SIGTERM');
   };
   const handleSigint = () => {
-    handleSignal('SIGINT');
+    if (cleanupStarted) {
+      return;
+    }
+    const now = Date.now();
+    const sincePrevious = now - lastSigintAt;
+    if (sincePrevious <= SIGINT_RERAISE_IGNORE_MS) {
+      return;
+    }
+    if (sincePrevious <= SIGINT_EXIT_CONFIRM_WINDOW_MS) {
+      beginExit('SIGINT');
+      return;
+    }
+    lastSigintAt = now;
+    writeStderrLine('Press Ctrl+C again to exit.');
   };
 
-  process.once('SIGTERM', handleSigterm);
-  process.once('SIGINT', handleSigint);
+  process.on('SIGTERM', handleSigterm);
+  process.on('SIGINT', handleSigint);
 
   return () => {
     process.removeListener('SIGTERM', handleSigterm);
@@ -244,6 +285,16 @@ export async function main() {
 
   let argv = await parseArguments();
   profileCheckpoint('after_parse_arguments');
+
+  if (
+    (argv.acp || argv.experimentalAcp) &&
+    process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'] === '1'
+  ) {
+    delete process.env['ELECTRON_RUN_AS_NODE'];
+    if (process.env['QWEN_CODE_NO_RELAUNCH'] || process.env['SANDBOX']) {
+      delete process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'];
+    }
+  }
 
   if (isBareMode(argv.bare)) {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
@@ -334,8 +385,44 @@ export async function main() {
     const memoryArgs = settings.merged.advanced?.autoConfigureMemory
       ? getNodeMemoryArgs(isDebugMode)
       : [];
+    const updateProjectRoot = process.cwd();
+    const onUpdateRelaunch = async () => {
+      await initializeI18n(
+        resolveLanguageSetting(settings.merged.general?.language as string),
+      );
+      const { updateBeforeRelaunch } = await import(
+        './utils/update-relaunch.js'
+      );
+      const shouldRelaunch = await updateBeforeRelaunch(
+        settings,
+        updateProjectRoot,
+      );
+      return shouldRelaunch ? UPDATE_COMPLETE_EXIT_CODE : 0;
+    };
     const sandboxConfig = await loadSandboxConfig(settings.merged, argv);
-    // We intentially omit the list of extensions here because extensions
+    const customSandboxImage =
+      argv.sandboxImage ??
+      process.env['QWEN_SANDBOX_IMAGE'] ??
+      settings.merged.tools?.sandboxImage;
+    if (
+      sandboxConfig &&
+      sandboxConfig.command !== 'sandbox-exec' &&
+      customSandboxImage
+    ) {
+      // Images built before this handoff protocol must be rebuilt; they cannot
+      // be made to skip their in-process updater from the host.
+      process.env[CUSTOM_SANDBOX_IMAGE_ENV_VAR] = sandboxConfig.image;
+    } else if (sandboxConfig && sandboxConfig.command !== 'sandbox-exec') {
+      const hostInstallationInfo = getInstallationInfo(updateProjectRoot, true);
+      process.env[HOST_UPDATE_RELAUNCH_ENV_VAR] = String(
+        Boolean(
+          hostInstallationInfo.updateCommand ||
+            (hostInstallationInfo.isStandalone &&
+              hostInstallationInfo.standaloneDir),
+        ),
+      );
+    }
+    // We intentionally omit the list of extensions here because extensions
     // should not impact auth or setting up the sandbox.
     // TODO(jacobr): refactor loadCliConfig so there is a minimal version
     // that only initializes enough config to enable refreshAuth or find
@@ -442,8 +529,12 @@ export async function main() {
           )
         : injectStdinIntoArgs(process.argv, stdinData);
 
-      await relaunchOnExitCode(() =>
-        start_sandbox(sandboxConfig, memoryArgs, partialConfig, sandboxArgs),
+      await relaunchOnExitCode(
+        () =>
+          start_sandbox(sandboxConfig, memoryArgs, partialConfig, sandboxArgs),
+        {
+          onUpdateRelaunch,
+        },
       );
       process.exit(0);
     } else {
@@ -451,6 +542,7 @@ export async function main() {
       // restarted if needed.
       await relaunchAppInChildProcess(memoryArgs, [], {
         afterSpawn: clearCorruptionEnvVars,
+        onUpdateRelaunch,
       });
     }
   }

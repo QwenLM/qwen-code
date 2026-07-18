@@ -39,6 +39,8 @@ export function registerCapabilitiesRoutes(
   app.get('/capabilities', (_req, res) => {
     const runtimes = deps.workspaceRegistry.list();
     const multiWorkspace = runtimes.length > 1;
+    const features = deps.currentServeFeatures();
+    const runtimeRemoval = features.includes('workspace_runtime_removal');
     const envelope: CapabilitiesEnvelope = {
       v: CAPABILITIES_SCHEMA_VERSION,
       protocolVersions: getServeProtocolVersions(),
@@ -46,7 +48,7 @@ export function registerCapabilitiesRoutes(
         ? { qwenCodeVersion: deps.qwenCodeVersion }
         : {}),
       mode: deps.mode,
-      features: deps.currentServeFeatures(),
+      features,
       modelServices: [],
       // Surface the primary workspace so clients can omit `cwd` on
       // `POST /session`; multi-workspace clients use `workspaces[]`.
@@ -74,16 +76,13 @@ export function registerCapabilitiesRoutes(
             }
           : {}),
       },
-      ...(multiWorkspace
-        ? {
-            workspaces: runtimes.map((runtime) => ({
-              id: runtime.workspaceId,
-              cwd: runtime.workspaceCwd,
-              primary: runtime.primary,
-              trusted: runtime.trusted,
-            })),
-          }
-        : {}),
+      workspaces: runtimes.map((runtime) => ({
+        id: runtime.workspaceId,
+        cwd: runtime.workspaceCwd,
+        primary: runtime.primary,
+        trusted: runtime.trusted,
+        ...(runtimeRemoval ? { removable: runtime.removable === true } : {}),
+      })),
       supportedLanguages: deps.languageCodes,
     };
     res.status(200).json(envelope);

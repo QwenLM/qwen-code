@@ -2,6 +2,7 @@ import { basename, join } from 'node:path';
 import type {
   ChannelConfig,
   ChannelMemoryCallbacks,
+  ChannelMemoryEntry,
   ChannelMemoryIntentClassifier,
   ChannelMemoryTarget,
   ChannelRuntimeIdentity,
@@ -73,9 +74,11 @@ const GROUP_HISTORY_ENTRY_TEXT_LIMIT = 1000;
 const GROUP_HISTORY_ENTRY_METADATA_LIMIT = 256;
 const LOOP_CANCEL_GRACE_MS = 5000;
 const CHANNEL_MEMORY_PROMPT_CODE_POINT_LIMIT = 12_000;
+const CHANNEL_MEMORY_PAGE_SIZE = 20;
+const CHANNEL_MEMORY_PREVIEW_CODE_POINT_LIMIT = 160;
 const CHANNEL_MEMORY_CLASSIFIER_MIN_CONFIDENCE = 0.7;
 const CHANNEL_MEMORY_CLASSIFIER_TRIGGER_RE =
-  /(记住|记得|记一下|记忆|忘掉|忘记|清空|清除|删除|保存|remember|memory|forget)/iu;
+  /(?:记住|记得|记一下|记忆|忘掉|忘记|清空|清除|删除|删掉|改成|更新|刚才那条|保存|(?:只|仅)(?:看|列出)[\p{Script=Han}\s]{0,12}(?:偏好|习惯)|\b(?:remember|memory|forget|delete|remove|update|change)\b)/iu;
 /** Sentinel message for the loop-prompt timeout rejection; matched by identity below. */
 const LOOP_TIMED_OUT_MESSAGE = 'loop timed out';
 const DEBUG_PAYLOAD_ENV = 'QWEN_CHANNEL_DEBUG_PAYLOAD';
@@ -106,6 +109,34 @@ const SENSITIVE_PAYLOAD_KEY_PATTERN = new RegExp(
   ].join('|'),
   'i',
 );
+
+type ResolvedChannelMemoryIntent =
+  | ChannelMemoryIntent
+  | { kind: 'list_matches'; ids: string[] }
+  | { kind: 'no_match' }
+  | { kind: 'ambiguous'; ids: string[] }
+  | { kind: 'natural_update'; id: string; text: string; expectedText: string }
+  | { kind: 'natural_remove'; id: string; expectedText: string };
+
+type PendingChannelMemoryMutationInput =
+  | { kind: 'clear' }
+  | {
+      kind: 'update';
+      id: string;
+      expectedText: string;
+      proposedText: string;
+    }
+  | {
+      kind: 'remove';
+      id: string;
+      expectedText: string;
+    };
+
+type PendingChannelMemoryMutation = PendingChannelMemoryMutationInput & {
+  expiresAt: number;
+};
+
+type PendingChannelMemoryMutationKind = PendingChannelMemoryMutation['kind'];
 
 export interface ChannelBaseOptions {
   router?: SessionRouter;
@@ -259,7 +290,14 @@ export abstract class ChannelBase {
    * so a cleared session can't be resurrected by an already-queued prompt.
    */
   private sessionGenerations: Map<string, number> = new Map();
-  private pendingClears: Map<string, number> = new Map();
+  private pendingChannelMemoryMutations = new Map<
+    string,
+    PendingChannelMemoryMutation
+  >();
+  private pendingChannelMemoryMutationDeliveries = new Map<
+    string,
+    PendingChannelMemoryMutationInput
+  >();
 
   /** Per-session active prompt tracking for dispatch modes. */
   private activePrompts: Map<string, ActivePrompt> = new Map();
@@ -603,6 +641,10 @@ export abstract class ChannelBase {
 
   protected supportsProactiveTarget(target: SessionTarget): boolean {
     return target.threadId === undefined;
+  }
+
+  protected supportsProactiveWebhookTarget(target: SessionTarget): boolean {
+    return this.supportsProactiveTarget(target);
   }
 
   protected async pushProactive(
@@ -1017,7 +1059,7 @@ export abstract class ChannelBase {
       task.source,
       task.targetRef,
     );
-    if (!this.supportsProactiveTarget(target)) {
+    if (!this.supportsProactiveWebhookTarget(target)) {
       throw new Error(
         'Channel does not support proactive webhook messages for this chat target.',
       );
@@ -2036,43 +2078,6 @@ export abstract class ChannelBase {
       this.handlePermissionResponseCommand(envelope, args, 'deny'),
     );
 
-    this.registerCommand('remember-channel', async (envelope, args) => {
-      const text = args.trim();
-      if (text === '') {
-        await this.sendMessage(
-          envelope.chatId,
-          'Usage: /remember-channel <text>',
-        );
-        return true;
-      }
-      await this.handleChannelMemoryIntent(envelope, {
-        kind: 'remember',
-        text,
-      });
-      return true;
-    });
-
-    this.registerCommand('channel-memory', async (envelope) => {
-      await this.handleChannelMemoryIntent(envelope, { kind: 'list' });
-      return true;
-    });
-
-    this.registerCommand('forget-channel', async (envelope, args) => {
-      if (args.toLowerCase() !== 'confirm') {
-        await this.sendMessage(
-          envelope.chatId,
-          'This clears channel memory for this chat. Re-send with "confirm" (e.g. /forget-channel confirm) to proceed.',
-        );
-        return true;
-      }
-      await this.handleChannelMemoryIntent(
-        envelope,
-        { kind: 'clear_confirm' },
-        { skipPendingClear: true },
-      );
-      return true;
-    });
-
     // Read-only: report the current (possibly group-shared) session and workspace.
     // For a shared session, gate it to authorized senders like /clear — /who
     // leaks the workspace basename, so non-members shouldn't see it either.
@@ -2748,16 +2753,213 @@ export abstract class ChannelBase {
     return this.channelMemory;
   }
 
+  private entriesForChannelMemoryIds(
+    entries: readonly ChannelMemoryEntry[],
+    ids: readonly string[],
+  ): ChannelMemoryEntry[] {
+    const selected = new Set(ids);
+    return entries.filter((entry) => selected.has(entry.id));
+  }
+
+  private renderChannelMemoryCandidate(entry: ChannelMemoryEntry): string {
+    const preview = truncateCodePoints(
+      sanitizePromptText(entry.text)
+        .replace(/[\r\n]+/gu, ' ')
+        .trim(),
+      CHANNEL_MEMORY_PREVIEW_CODE_POINT_LIMIT,
+    );
+    return `${entry.id}  ${preview}`;
+  }
+
+  private renderChannelMemoryCandidates(
+    entries: readonly ChannelMemoryEntry[],
+  ): string[] {
+    return entries.map((entry) => this.renderChannelMemoryCandidate(entry));
+  }
+
   private async handleChannelMemoryIntent(
     envelope: Envelope,
-    intent: ChannelMemoryIntent,
-    options: { skipPendingClear?: boolean } = {},
+    intent: ResolvedChannelMemoryIntent,
   ): Promise<void> {
-    if (intent.kind === 'clear_request') {
-      this.setPendingClear(this.clearPendingKey(envelope));
+    if (intent.kind === 'no_match') {
       await this.sendMessage(
         envelope.chatId,
+        'No matching channel memory entry.',
+      );
+      return;
+    }
+
+    if (intent.kind === 'ambiguous') {
+      const channelMemory = await this.getChannelMemory(envelope);
+      if (!channelMemory) return;
+      let entries: ChannelMemoryEntry[];
+      try {
+        entries = await channelMemory.listChannelMemoryEntries(
+          this.channelMemoryTarget(envelope),
+        );
+      } catch (error) {
+        this.logChannelMemoryError(
+          'read',
+          envelope,
+          this.channelMemoryErrorMessage(error),
+        );
+        await this.sendMessage(
+          envelope.chatId,
+          `Failed to read channel memory: ${this.channelMemoryUserErrorMessage()}`,
+        );
+        return;
+      }
+      const selected = this.entriesForChannelMemoryIds(entries, intent.ids);
+      await this.sendMessage(
+        envelope.chatId,
+        [
+          'Multiple channel memory entries match:',
+          ...this.renderChannelMemoryCandidates(selected),
+        ].join('\n'),
+      );
+      return;
+    }
+
+    if (intent.kind === 'list_matches') {
+      const channelMemory = await this.getChannelMemory(envelope);
+      if (!channelMemory) return;
+      let entries: ChannelMemoryEntry[];
+      try {
+        entries = await channelMemory.listChannelMemoryEntries(
+          this.channelMemoryTarget(envelope),
+        );
+      } catch (error) {
+        this.logChannelMemoryError(
+          'read',
+          envelope,
+          this.channelMemoryErrorMessage(error),
+        );
+        await this.sendMessage(
+          envelope.chatId,
+          `Failed to read channel memory: ${this.channelMemoryUserErrorMessage()}`,
+        );
+        return;
+      }
+      const selected = this.entriesForChannelMemoryIds(entries, intent.ids);
+      await this.sendMessage(
+        envelope.chatId,
+        [
+          'Channel memory (page 1/1):',
+          ...this.renderChannelMemoryCandidates(selected),
+        ].join('\n'),
+      );
+      return;
+    }
+
+    if (intent.kind === 'clear_request') {
+      await this.deliverPendingChannelMemoryMutation(
+        envelope,
+        { kind: 'clear' },
         'This clears channel memory for this chat. Say "确认清空记忆" or "confirm clear memory" to proceed.',
+      );
+      return;
+    }
+
+    if (intent.kind === 'update_confirm' || intent.kind === 'remove_confirm') {
+      const pending =
+        intent.kind === 'update_confirm'
+          ? this.takePendingChannelMemoryMutation(envelope, 'update')
+          : this.takePendingChannelMemoryMutation(envelope, 'remove');
+      if (!pending) {
+        await this.sendMessage(
+          envelope.chatId,
+          intent.kind === 'update_confirm'
+            ? 'No pending channel memory update. Start a new update request first.'
+            : 'No pending channel memory removal. Start a new removal request first.',
+        );
+        return;
+      }
+
+      const channelMemory = await this.getChannelMemory(envelope);
+      if (!channelMemory) return;
+      const isUpdate = pending.kind === 'update';
+      let changed: boolean;
+      try {
+        if (isUpdate) {
+          ({ changed } = await channelMemory.updateChannelMemoryEntry(
+            this.channelMemoryTarget(envelope),
+            {
+              id: pending.id,
+              text: pending.proposedText,
+              expectedText: pending.expectedText,
+            },
+          ));
+        } else {
+          ({ changed } = await channelMemory.removeChannelMemoryEntries(
+            this.channelMemoryTarget(envelope),
+            {
+              ids: [pending.id],
+              expectedTextById: { [pending.id]: pending.expectedText },
+            },
+          ));
+        }
+      } catch (error) {
+        const message = this.channelMemoryErrorMessage(error);
+        this.logChannelMemoryError(
+          isUpdate ? 'update' : 'remove',
+          envelope,
+          message,
+        );
+        await this.sendMessage(
+          envelope.chatId,
+          message === 'Channel memory entry changed'
+            ? 'That channel memory entry changed since it was selected. View channel memory and start the operation again.'
+            : `Failed to ${isUpdate ? 'update' : 'remove'} channel memory: ${this.channelMemoryUserErrorMessage()}`,
+        );
+        return;
+      }
+      if (!changed) {
+        await this.sendMessage(
+          envelope.chatId,
+          `No channel memory entry ${pending.id}.`,
+        );
+        return;
+      }
+      this.invalidateSessionContext(envelope);
+      await this.sendMessage(
+        envelope.chatId,
+        `Channel memory ${pending.id} ${isUpdate ? 'updated' : 'removed'}.`,
+      );
+      return;
+    }
+
+    if (intent.kind === 'natural_update') {
+      await this.deliverPendingChannelMemoryMutation(
+        envelope,
+        {
+          kind: 'update',
+          id: intent.id,
+          expectedText: intent.expectedText,
+          proposedText: intent.text,
+        },
+        [
+          `Update channel memory ${intent.id}?`,
+          `Before: ${sanitizePromptText(intent.expectedText).trim()}`,
+          `After: ${sanitizePromptText(intent.text).trim()}`,
+          'Say "确认更新记忆" or "confirm memory update" within 60 seconds.',
+        ].join('\n'),
+      );
+      return;
+    }
+
+    if (intent.kind === 'natural_remove') {
+      await this.deliverPendingChannelMemoryMutation(
+        envelope,
+        {
+          kind: 'remove',
+          id: intent.id,
+          expectedText: intent.expectedText,
+        },
+        [
+          `Remove channel memory ${intent.id}?`,
+          sanitizePromptText(intent.expectedText).trim(),
+          'Say "确认删除记忆" or "confirm memory removal" within 60 seconds.',
+        ].join('\n'),
       );
       return;
     }
@@ -2768,10 +2970,16 @@ export abstract class ChannelBase {
     }
 
     if (intent.kind === 'remember') {
+      let result: {
+        changed: boolean;
+        added: Array<{ id: string }>;
+        duplicateIds: string[];
+      };
       try {
-        await channelMemory.appendChannelMemory(
+        result = await channelMemory.addChannelMemoryEntries(
           this.channelMemoryTarget(envelope),
-          intent.text,
+          intent.texts,
+          envelope.senderId,
         );
       } catch (error) {
         const message = this.channelMemoryErrorMessage(error);
@@ -2782,19 +2990,36 @@ export abstract class ChannelBase {
         );
         return;
       }
-      this.invalidateSessionContext(envelope);
-      await this.sendMessage(envelope.chatId, 'Channel memory updated.');
+      if (result.changed) {
+        this.invalidateSessionContext(envelope);
+      }
+      if (result.added.length > 0) {
+        const ids = result.added.map((entry) => entry.id);
+        await this.sendMessage(
+          envelope.chatId,
+          result.duplicateIds.length > 0
+            ? `Channel memory saved: ${ids.join(', ')}. Skipped duplicates: ${result.duplicateIds.join(', ')}.`
+            : ids.length === 1
+              ? `Channel memory ${ids[0]} saved.`
+              : `Channel memory saved: ${ids.join(', ')}.`,
+        );
+      } else if (result.duplicateIds.length > 0) {
+        await this.sendMessage(
+          envelope.chatId,
+          `Channel memory already contains ${result.duplicateIds.join(', ')}.`,
+        );
+      } else {
+        await this.sendMessage(envelope.chatId, 'Channel memory updated.');
+      }
       return;
     }
 
-    if (intent.kind === 'list') {
-      let text: string;
+    if (intent.kind === 'list' || intent.kind === 'inspect') {
+      let entries;
       try {
-        text = (
-          await channelMemory.readChannelMemory(
-            this.channelMemoryTarget(envelope),
-          )
-        ).trim();
+        entries = await channelMemory.listChannelMemoryEntries(
+          this.channelMemoryTarget(envelope),
+        );
       } catch (error) {
         const message = this.channelMemoryErrorMessage(error);
         this.logChannelMemoryError('read', envelope, message);
@@ -2804,25 +3029,96 @@ export abstract class ChannelBase {
         );
         return;
       }
+      if (intent.kind === 'inspect') {
+        const entry = entries.find((candidate) => candidate.id === intent.id);
+        await this.sendMessage(
+          envelope.chatId,
+          entry
+            ? `Channel memory ${entry.id}:\n${sanitizePromptText(entry.text).trim()}`
+            : `No channel memory entry ${intent.id}.`,
+        );
+        return;
+      }
+      const totalPages = Math.max(
+        1,
+        Math.ceil(entries.length / CHANNEL_MEMORY_PAGE_SIZE),
+      );
+      if (intent.page > totalPages) {
+        await this.sendMessage(
+          envelope.chatId,
+          `Channel memory page ${intent.page} does not exist.`,
+        );
+        return;
+      }
+      if (entries.length === 0) {
+        await this.sendMessage(envelope.chatId, 'No channel memory saved.');
+        return;
+      }
+      const pageStart = (intent.page - 1) * CHANNEL_MEMORY_PAGE_SIZE;
+      const lines = entries
+        .slice(pageStart, pageStart + CHANNEL_MEMORY_PAGE_SIZE)
+        .map((entry) => this.renderChannelMemoryCandidate(entry));
       await this.sendMessage(
         envelope.chatId,
-        text === '' ? 'No channel memory saved.' : sanitizePromptText(text),
+        [`Channel memory (page ${intent.page}/${totalPages}):`, ...lines].join(
+          '\n',
+        ),
+      );
+      return;
+    }
+
+    if (intent.kind === 'update' || intent.kind === 'remove') {
+      let changed: boolean;
+      const isUpdate = intent.kind === 'update';
+      const id = intent.id;
+      try {
+        if (isUpdate) {
+          ({ changed } = await channelMemory.updateChannelMemoryEntry(
+            this.channelMemoryTarget(envelope),
+            { id: intent.id, text: intent.text },
+          ));
+        } else {
+          ({ changed } = await channelMemory.removeChannelMemoryEntries(
+            this.channelMemoryTarget(envelope),
+            { ids: [intent.id] },
+          ));
+        }
+      } catch (error) {
+        const message = this.channelMemoryErrorMessage(error);
+        this.logChannelMemoryError(
+          isUpdate ? 'update' : 'remove',
+          envelope,
+          message,
+        );
+        await this.sendMessage(
+          envelope.chatId,
+          `Failed to ${isUpdate ? 'update' : 'remove'} channel memory: ${this.channelMemoryUserErrorMessage()}`,
+        );
+        return;
+      }
+      if (!changed) {
+        await this.sendMessage(
+          envelope.chatId,
+          `No channel memory entry ${id}.`,
+        );
+        return;
+      }
+      this.invalidateSessionContext(envelope);
+      await this.sendMessage(
+        envelope.chatId,
+        `Channel memory ${id} ${isUpdate ? 'updated' : 'removed'}.`,
       );
       return;
     }
 
     if (intent.kind === 'clear_confirm') {
-      if (!options.skipPendingClear) {
-        const pendingKey = this.clearPendingKey(envelope);
-        const expiresAt = this.pendingClears.get(pendingKey);
-        this.pendingClears.delete(pendingKey);
-        if (expiresAt === undefined || expiresAt < Date.now()) {
-          await this.sendMessage(
-            envelope.chatId,
-            'No pending clear request. Say "清空记忆" first.',
-          );
-          return;
-        }
+      const pending = this.takePendingChannelMemoryMutation(envelope, 'clear');
+      if (!pending) {
+        await this.sendMessage(
+          envelope.chatId,
+          'No pending clear request. Say "清空记忆" first.',
+        );
+        return;
       }
 
       let result: { changed: boolean };
@@ -2839,7 +3135,9 @@ export abstract class ChannelBase {
         );
         return;
       }
-      this.invalidateSessionContext(envelope);
+      if (result.changed) {
+        this.invalidateSessionContext(envelope);
+      }
       await this.sendMessage(
         envelope.chatId,
         result.changed ? 'Channel memory cleared.' : 'No channel memory saved.',
@@ -2863,33 +3161,103 @@ export abstract class ChannelBase {
     );
   }
 
-  private clearPendingKey(envelope: Envelope): string {
-    return `${this.name}:${envelope.chatId}:${envelope.threadId ?? ''}:${
-      envelope.senderId ?? ''
-    }`;
+  private channelMemoryPendingKey(envelope: Envelope): string {
+    return JSON.stringify([
+      this.name,
+      envelope.chatId,
+      envelope.threadId ?? null,
+      envelope.senderId ?? null,
+    ]);
   }
 
-  private setPendingClear(key: string): void {
+  private async deliverPendingChannelMemoryMutation(
+    envelope: Envelope,
+    mutation: PendingChannelMemoryMutationInput,
+    message: string,
+  ): Promise<void> {
     const now = Date.now();
-    for (const [pendingKey, expiresAt] of this.pendingClears) {
-      if (expiresAt < now) {
-        this.pendingClears.delete(pendingKey);
+    for (const [pendingKey, pending] of this.pendingChannelMemoryMutations) {
+      if (pending.expiresAt < now) {
+        this.pendingChannelMemoryMutations.delete(pendingKey);
       }
     }
-    this.pendingClears.set(key, now + 60_000);
+    this.deletePendingChannelMemoryMutation(envelope);
+    const key = this.channelMemoryPendingKey(envelope);
+    this.pendingChannelMemoryMutationDeliveries.set(key, mutation);
+    try {
+      await this.sendMessage(envelope.chatId, message);
+    } catch (error) {
+      if (this.pendingChannelMemoryMutationDeliveries.get(key) === mutation) {
+        this.pendingChannelMemoryMutationDeliveries.delete(key);
+      }
+      throw error;
+    }
+    if (this.pendingChannelMemoryMutationDeliveries.get(key) !== mutation) {
+      return;
+    }
+    this.pendingChannelMemoryMutationDeliveries.delete(key);
+    this.pendingChannelMemoryMutations.set(key, {
+      ...mutation,
+      expiresAt: Date.now() + 60_000,
+    });
+  }
+
+  private takePendingChannelMemoryMutation<
+    K extends PendingChannelMemoryMutationKind,
+  >(
+    envelope: Envelope,
+    kind: K,
+  ): Extract<PendingChannelMemoryMutation, { kind: K }> | undefined {
+    const key = this.channelMemoryPendingKey(envelope);
+    const pending = this.pendingChannelMemoryMutations.get(key);
+    if (!pending) {
+      return undefined;
+    }
+    if (pending.expiresAt < Date.now()) {
+      this.pendingChannelMemoryMutations.delete(key);
+      return undefined;
+    }
+    if (pending.kind !== kind) {
+      return undefined;
+    }
+    this.pendingChannelMemoryMutations.delete(key);
+    return pending as Extract<PendingChannelMemoryMutation, { kind: K }>;
+  }
+
+  private deletePendingChannelMemoryMutation(envelope: Envelope): void {
+    const key = this.channelMemoryPendingKey(envelope);
+    this.pendingChannelMemoryMutations.delete(key);
+    this.pendingChannelMemoryMutationDeliveries.delete(key);
   }
 
   private async classifyChannelMemoryIntent(
-    text: string,
-  ): Promise<ChannelMemoryIntent | null> {
-    if (!this.memoryIntentClassifier) {
+    envelope: Envelope,
+  ): Promise<ResolvedChannelMemoryIntent | null> {
+    if (!this.memoryIntentClassifier || !this.channelMemory) {
       return null;
     }
 
-    let classified;
+    let entries: ChannelMemoryEntry[];
+    try {
+      entries = await this.channelMemory.listChannelMemoryEntries(
+        this.channelMemoryTarget(envelope),
+      );
+    } catch (error) {
+      this.logChannelMemoryError(
+        'read',
+        envelope,
+        this.channelMemoryErrorMessage(error),
+      );
+      return null;
+    }
+
+    let classified: unknown;
     try {
       classified =
-        await this.memoryIntentClassifier.classifyChannelMemoryIntent(text);
+        await this.memoryIntentClassifier.classifyChannelMemoryIntent(
+          envelope.text,
+          entries,
+        );
     } catch (error) {
       process.stderr.write(
         `[${this.name}] channel memory intent classifier failed: ${sanitizeLogText(
@@ -2900,21 +3268,134 @@ export abstract class ChannelBase {
       return null;
     }
 
-    if (classified.confidence < CHANNEL_MEMORY_CLASSIFIER_MIN_CONFIDENCE) {
+    try {
+      if (typeof classified !== 'object' || classified === null) return null;
+      const result = classified as {
+        intent?: unknown;
+        memory?: unknown;
+        memories?: unknown;
+        targetIds?: unknown;
+        confidence?: unknown;
+      };
+      const confidence = result.confidence;
+      if (
+        typeof confidence !== 'number' ||
+        !Number.isFinite(confidence) ||
+        confidence < 0 ||
+        confidence > 1 ||
+        confidence < CHANNEL_MEMORY_CLASSIFIER_MIN_CONFIDENCE
+      ) {
+        return null;
+      }
+
+      const intent = result.intent;
+      if (intent === 'remember') {
+        const hasMemory = Object.prototype.hasOwnProperty.call(
+          result,
+          'memory',
+        );
+        const hasMemories = Object.prototype.hasOwnProperty.call(
+          result,
+          'memories',
+        );
+        if (hasMemory === hasMemories) return null;
+
+        let texts: string[] = [];
+        if (hasMemory) {
+          const memory = result.memory;
+          texts = typeof memory === 'string' ? [memory.trim()] : [];
+        } else {
+          const memories = result.memories;
+          if (Array.isArray(memories)) {
+            const snapshot = Array.from(memories);
+            if (
+              snapshot.every(
+                (memory): memory is string => typeof memory === 'string',
+              )
+            ) {
+              texts = snapshot.map((memory) => memory.trim());
+            }
+          }
+        }
+        return texts.length >= 1 &&
+          texts.length <= 10 &&
+          texts.every((text) => text.length > 0)
+          ? { kind: 'remember', texts }
+          : null;
+      }
+      if (intent === 'clear_all') return { kind: 'clear_request' };
+      if (
+        intent !== 'list' &&
+        intent !== 'inspect' &&
+        intent !== 'update' &&
+        intent !== 'remove'
+      ) {
+        return null;
+      }
+
+      const targetIds = result.targetIds;
+      if (intent === 'list' && targetIds === undefined) {
+        return { kind: 'list', page: 1 };
+      }
+      if (!Array.isArray(targetIds)) return null;
+      const targetIdSnapshot = Array.from(targetIds);
+      const entryById = new Map(entries.map((entry) => [entry.id, entry]));
+      if (
+        !targetIdSnapshot.every(
+          (id): id is string => typeof id === 'string' && entryById.has(id),
+        ) ||
+        new Set(targetIdSnapshot).size !== targetIdSnapshot.length
+      ) {
+        return null;
+      }
+      const resolvedEntries = this.entriesForChannelMemoryIds(
+        entries,
+        targetIdSnapshot,
+      );
+      if (intent === 'list') {
+        return resolvedEntries.length === 0
+          ? { kind: 'no_match' }
+          : {
+              kind: 'list_matches',
+              ids: resolvedEntries.map((entry) => entry.id),
+            };
+      }
+      if (resolvedEntries.length === 0) return { kind: 'no_match' };
+      if (resolvedEntries.length > 1) {
+        return {
+          kind: 'ambiguous',
+          ids: resolvedEntries.map((entry) => entry.id),
+        };
+      }
+
+      const entry = resolvedEntries[0]!;
+      if (intent === 'inspect') return { kind: 'inspect', id: entry.id };
+      if (intent === 'remove') {
+        return {
+          kind: 'natural_remove',
+          id: entry.id,
+          expectedText: entry.text,
+        };
+      }
+      const memory = result.memory;
+      const text = typeof memory === 'string' ? memory.trim() : '';
+      return text
+        ? {
+            kind: 'natural_update',
+            id: entry.id,
+            text,
+            expectedText: entry.text,
+          }
+        : null;
+    } catch (error) {
+      process.stderr.write(
+        `[${this.name}] channel memory intent validation failed: ${sanitizeLogText(
+          this.channelMemoryErrorMessage(error),
+          200,
+        )}\n`,
+      );
       return null;
     }
-
-    if (classified.intent === 'remember') {
-      const memory = classified.memory?.trim();
-      return memory ? { kind: 'remember', text: memory } : null;
-    }
-    if (classified.intent === 'list') {
-      return { kind: 'list' };
-    }
-    if (classified.intent === 'clear_all') {
-      return { kind: 'clear_request' };
-    }
-    return null;
   }
 
   private channelMemoryErrorMessage(error: unknown): string {
@@ -2926,7 +3407,7 @@ export abstract class ChannelBase {
   }
 
   private logChannelMemoryError(
-    action: 'save' | 'read' | 'clear',
+    action: 'save' | 'read' | 'update' | 'remove' | 'clear',
     envelope: Envelope,
     message: string,
   ): void {
@@ -3377,12 +3858,16 @@ export abstract class ChannelBase {
       );
     }
 
-    let memoryIntent = parseChannelMemoryIntent(envelope.text);
+    let memoryIntent: ResolvedChannelMemoryIntent | null =
+      parseChannelMemoryIntent(envelope.text);
+    if (memoryIntent?.kind === 'update' || memoryIntent?.kind === 'remove') {
+      this.deletePendingChannelMemoryMutation(envelope);
+    }
     if (
       !memoryIntent &&
       this.shouldClassifyChannelMemoryIntent(envelope.text)
     ) {
-      memoryIntent = await this.classifyChannelMemoryIntent(envelope.text);
+      memoryIntent = await this.classifyChannelMemoryIntent(envelope);
     }
     if (memoryIntent) {
       await this.handleChannelMemoryIntent(envelope, memoryIntent);
@@ -3825,8 +4310,10 @@ export abstract class ChannelBase {
       // to any visible sink could send output the cancel can't recall. On a
       // failed cancel they're replayed; on success, discarded.
       const heldChunks: string[] = [];
+      let hasStreamedText = false;
       const releaseHeldChunks = () => {
         for (const held of heldChunks.splice(0)) {
+          hasStreamedText = true;
           this.emitTaskLifecycle({
             ...this.lifecycleBase(
               envelope.chatId,
@@ -3858,6 +4345,7 @@ export abstract class ChannelBase {
           return;
         }
         heldChunks.length = 0;
+        hasStreamedText = false;
         this.onResponseBoundary(envelope.chatId, sessionId);
         streamer?.stop();
       };
@@ -3880,6 +4368,9 @@ export abstract class ChannelBase {
         if (!promptState.cancelled && response) {
           promptState.deliveryStarted = true;
           if (streamer) {
+            if (!hasStreamedText) {
+              streamer.push(response);
+            }
             await streamer.flush();
           } else {
             await this.onResponseComplete(envelope.chatId, response, sessionId);

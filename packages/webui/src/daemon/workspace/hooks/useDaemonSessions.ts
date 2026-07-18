@@ -21,11 +21,19 @@ export interface DaemonSessionsOptions extends DaemonResourceOptions {
   archiveState?: DaemonSessionArchiveState;
   view?: 'organized';
   group?: string;
+  sourceType?: string;
 }
 
 export function useDaemonSessions(options: DaemonSessionsOptions = {}) {
-  const { pageSize, cursor, archiveState, view, group, ...resourceOptions } =
-    options;
+  const {
+    pageSize,
+    cursor,
+    archiveState,
+    view,
+    group,
+    sourceType,
+    ...resourceOptions
+  } = options;
   const workspace = useDaemonWorkspace();
   const sessionActions = useOptionalDaemonActions();
   const load = useCallback(() => {
@@ -35,9 +43,18 @@ export function useDaemonSessions(options: DaemonSessionsOptions = {}) {
       ...(archiveState !== undefined ? { archiveState } : {}),
       ...(view !== undefined ? { view } : {}),
       ...(group !== undefined ? { group } : {}),
+      ...(sourceType !== undefined ? { sourceType } : {}),
     };
     return workspace.actions.listSessionsPage(listOptions);
-  }, [archiveState, cursor, group, pageSize, view, workspace.actions]);
+  }, [
+    archiveState,
+    cursor,
+    group,
+    pageSize,
+    sourceType,
+    view,
+    workspace.actions,
+  ]);
   const workspaceReady = !!workspace.workspaceCwd;
   const result = useDaemonResource(load, {
     ...resourceOptions,

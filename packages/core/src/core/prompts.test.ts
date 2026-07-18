@@ -67,6 +67,25 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).toContain('stop and ask the user for explicit approval');
   });
 
+  it('instructs the model to preserve unrelated existing work', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    vi.mocked(isGitRepository).mockReturnValue(true);
+    const prompt = getCoreSystemPrompt();
+
+    expect(prompt).toContain(
+      'Treat existing or unexpected changes as user-owned',
+    );
+    expect(prompt).toContain(
+      'Do not modify, stage, commit, or revert unrelated changes',
+    );
+    expect(prompt).toContain(
+      'Stage only paths that belong to the requested change',
+    );
+    expect(prompt).toContain(
+      'Do not use broad staging commands such as `git add -A` when unrelated changes are present',
+    );
+  });
+
   it('does not tell the model to enter plan mode without user opt-in', () => {
     vi.stubEnv('SANDBOX', undefined);
     const prompt = getCoreSystemPrompt();
@@ -80,6 +99,40 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).not.toContain(
       'When the work requires a shared plan before execution, enter plan mode',
     );
+  });
+
+  it('uses todos selectively and keeps plans outcome-oriented', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt();
+
+    expect(prompt).toContain('complex, ambiguous, or multi-phase tasks');
+    expect(prompt).toContain('Do not use it for simple or single-step queries');
+    expect(prompt).toContain('unless the user explicitly asks for a plan');
+    expect(prompt).toContain('Keep it short and outcome-oriented');
+    expect(prompt).toContain(
+      'rather than one item per error, file, command, or minor edit',
+    );
+    expect(prompt).not.toContain('VERY frequently');
+    expect(prompt).not.toContain('EXTREMELY helpful');
+    expect(prompt).not.toContain('write 10 items to the todo list');
+  });
+
+  it('adapts final response detail to the request', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt();
+
+    expect(prompt).toContain(
+      'Final responses should be concise by default, but their shape and depth must match the request',
+    );
+    expect(prompt).toContain(
+      'For code reviews, explanations, investigations, or substantial changes',
+    );
+    expect(prompt).toContain(
+      'complex findings may require several paragraphs or sections',
+    );
+    expect(prompt).not.toContain('End-of-turn summary: one or two sentences');
+    expect(prompt).not.toContain('Nothing else.');
+    expect(prompt).not.toContain('fewer than 3 lines');
   });
 
   it('should return the base prompt when userMemory is empty string', () => {
@@ -496,6 +549,14 @@ describe('getPlanModeSystemReminder', () => {
     expect(result).toContain('Iterative Planning Workflow');
     expect(result).toContain('### The Loop');
     expect(result).toContain('exit_plan_mode tool');
+  });
+
+  it('should include guidance when a tool is blocked by plan mode', () => {
+    const result = getPlanModeSystemReminder();
+
+    expect(result).toContain('When a Tool is Blocked by Plan Mode');
+    expect(result).toContain('Do NOT retry');
+    expect(result).toContain('Pivot to read-only');
   });
 
   it('should be deterministic', () => {

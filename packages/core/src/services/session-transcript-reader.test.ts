@@ -30,6 +30,8 @@ import {
   SESSION_TRANSCRIPT_MAX_LIMIT,
   resetSessionTranscriptIndexCacheForTest,
   setSessionTranscriptIndexCacheMaxBytesForTest,
+  SessionTranscriptCursorCodec,
+  SessionTranscriptPageTooLargeError,
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptReader,
 } from './session-transcript-reader.js';
@@ -155,6 +157,67 @@ describe('SessionTranscriptReader', () => {
     },
   );
 
+  it.each([0, -1, 1.5])(
+    'rejects invalid page byte limit %s',
+    async (maxBytes) => {
+      await expect(
+        new SessionTranscriptReader(workspaceDir).readPage(sessionId, {
+          maxBytes,
+        }),
+      ).rejects.toBeInstanceOf(RangeError);
+    },
+  );
+
+  it('stops at a record boundary when the page byte budget is reached', async () => {
+    const records = [
+      record('u1', null, 'first'),
+      record('a1', 'u1', 'second'),
+      record('u2', 'a1', 'third'),
+    ];
+    await writeRecords(records);
+    const firstTwoBytes =
+      Buffer.byteLength(JSON.stringify(records[0])) +
+      Buffer.byteLength(JSON.stringify(records[1]));
+    const reader = new SessionTranscriptReader(workspaceDir);
+
+    const first = await reader.readPage(sessionId, {
+      limit: 3,
+      maxBytes: firstTwoBytes,
+    });
+    const second = await reader.readPage(sessionId, {
+      cursor: encodeCursor(first.nextCursorState!),
+      limit: 3,
+      maxBytes: firstTwoBytes,
+    });
+
+    expect(first.records.map((item) => item.uuid)).toEqual(['u1', 'a1']);
+    expect(first.hasMore).toBe(true);
+    expect(first.nextCursorState?.position).toBe(2);
+    expect(second.records.map((item) => item.uuid)).toEqual(['u2']);
+    expect(second.hasMore).toBe(false);
+  });
+
+  it('rejects a single aggregate record over the page byte budget', async () => {
+    const first = record('u1', null, 'first');
+    const second = record('u1', null, 'second fragment');
+    await writeRecords([first, second, record('a1', 'u1', 'reply')]);
+    const aggregateBytes =
+      Buffer.byteLength(JSON.stringify(first)) +
+      Buffer.byteLength(JSON.stringify(second));
+
+    await expect(
+      new SessionTranscriptReader(workspaceDir).readPage(sessionId, {
+        limit: 1,
+        maxBytes: aggregateBytes - 1,
+      }),
+    ).rejects.toMatchObject({
+      name: 'SessionTranscriptPageTooLargeError',
+      sessionId,
+      pageBytes: aggregateBytes,
+      maxBytes: aggregateBytes - 1,
+    } satisfies Partial<SessionTranscriptPageTooLargeError>);
+  });
+
   it('pages only the active parentUuid chain and skips abandoned branches', async () => {
     await writeRecords([
       record('u1', null, 'root'),
@@ -178,6 +241,130 @@ describe('SessionTranscriptReader', () => {
     expect(second.records.map((r) => r.uuid)).toEqual(['u2-new', 'a2-new']);
     expect(second.hasMore).toBe(false);
     expect(second.nextCursorState).toBeUndefined();
+  });
+
+  it('pages backward before an exclusive active record boundary', async () => {
+    await writeRecords([
+      record('u1', null, 'first prompt'),
+      record('a1', 'u1', 'first answer'),
+      record('u2', 'a1', 'second prompt'),
+      record('a2', 'u2', 'second answer'),
+      record('u3', 'a2', 'third prompt'),
+      record('a3', 'u3', 'third answer'),
+    ]);
+
+    const reader = new SessionTranscriptReader(workspaceDir);
+    const first = await reader.readPage(sessionId, {
+      beforeRecordId: 'u3',
+      limit: 2,
+    });
+    const second = await reader.readPage(sessionId, {
+      cursor: encodeCursor(first.nextCursorState!),
+      limit: 2,
+    });
+
+    expect(first.records.map((item) => item.uuid)).toEqual(['u2', 'a2']);
+    expect(first.direction).toBe('backward');
+    expect(first.hasMore).toBe(true);
+    expect(first.nextCursorState).toMatchObject({
+      position: 2,
+      direction: 'backward',
+    });
+    expect(second.records.map((item) => item.uuid)).toEqual(['u1', 'a1']);
+    expect(second.hasMore).toBe(false);
+  });
+
+  it('keeps backward pages within a normal user turn boundary', async () => {
+    const toolCall = record('a-tool', 'u1', 'call tool');
+    const toolResult = {
+      ...record('t1', 'a-tool', 'tool result'),
+      type: 'tool_result' as const,
+    };
+    await writeRecords([
+      record('u1', null, 'first prompt'),
+      toolCall,
+      toolResult,
+      record('a1', 't1', 'first answer'),
+      record('u2', 'a1', 'second prompt'),
+      record('a2', 'u2', 'second answer'),
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      { beforeRecordId: 'u2', limit: 4 },
+    );
+
+    expect(page.records.map((item) => item.uuid)).toEqual([
+      'u1',
+      'a-tool',
+      't1',
+      'a1',
+    ]);
+  });
+
+  it('keeps a long user turn complete when it exceeds the record limit', async () => {
+    const toolCall = record('a-tool', 'u1', 'call tool');
+    const toolResult = {
+      ...record('t1', 'a-tool', 'tool result'),
+      type: 'tool_result' as const,
+    };
+    await writeRecords([
+      record('u1', null, 'prompt'),
+      toolCall,
+      toolResult,
+      record('a-final', 't1', 'final answer'),
+      record('u2', 'a-final', 'next prompt'),
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      { beforeRecordId: 'u2', limit: 2 },
+    );
+
+    expect(page.records.map((item) => item.uuid)).toEqual([
+      'u1',
+      'a-tool',
+      't1',
+      'a-final',
+    ]);
+    expect(page.hasMore).toBe(false);
+  });
+
+  it('rejects a backward turn that exceeds maxBytes after alignment', async () => {
+    const toolCall = record('a-tool', 'u1', 'call tool');
+    const toolResult = {
+      ...record('t1', 'a-tool', 'tool result'),
+      type: 'tool_result' as const,
+    };
+    const finalAnswer = record('a-final', 't1', 'final answer');
+    await writeRecords([
+      record('u1', null, 'prompt'),
+      toolCall,
+      toolResult,
+      finalAnswer,
+      record('u2', 'a-final', 'next prompt'),
+    ]);
+
+    await expect(
+      new SessionTranscriptReader(workspaceDir).readPage(sessionId, {
+        beforeRecordId: 'u2',
+        limit: 2,
+        maxBytes: Buffer.byteLength(JSON.stringify(finalAnswer)),
+      }),
+    ).rejects.toBeInstanceOf(SessionTranscriptPageTooLargeError);
+  });
+
+  it('rejects a backward boundary outside the active chain', async () => {
+    await writeRecords([
+      record('u1', null, 'root'),
+      record('a1', 'u1', 'answer'),
+    ]);
+
+    await expect(
+      new SessionTranscriptReader(workspaceDir).readPage(sessionId, {
+        beforeRecordId: 'missing',
+      }),
+    ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
   });
 
   it('continues a frozen snapshot after new records are appended', async () => {
@@ -381,6 +568,62 @@ describe('SessionTranscriptReader', () => {
     expect(second.hasMore).toBe(true);
   });
 
+  it('uses an injected in-memory codec without creating a cursor key file', async () => {
+    await writeRecords([
+      record('u1', null, 'hello'),
+      record('a1', 'u1', 'reply'),
+    ]);
+    const key = Buffer.alloc(32, 7);
+    const codec = new SessionTranscriptCursorCodec(key);
+    key.fill(9);
+    const sameOriginalKey = new SessionTranscriptCursorCodec(
+      Buffer.alloc(32, 7),
+    );
+    const reader = new SessionTranscriptReader(workspaceDir, codec);
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    const cursor = codec.encode(first.nextCursorState!);
+    expect(sameOriginalKey.decode(cursor).sessionId).toBe(sessionId);
+    const second = await reader.readPage(sessionId, { cursor, limit: 1 });
+
+    expect(second.records.map((item) => item.uuid)).toEqual(['a1']);
+    await expect(
+      fs.stat(
+        path.join(
+          new Storage(workspaceDir).getProjectDir(),
+          'session-transcript-cursor-key',
+        ),
+      ),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('rejects in-memory cursors signed with another key or tampered', () => {
+    const first = new SessionTranscriptCursorCodec(Buffer.alloc(32, 1));
+    const second = new SessionTranscriptCursorCodec(Buffer.alloc(32, 2));
+    const cursor = first.encode({
+      v: 1,
+      sessionId,
+      fileIdentity: { dev: 1, ino: 2 },
+      snapshotSize: 3,
+      position: 1,
+      leafUuid: 'leaf',
+      startTime: 'start',
+      lastUpdated: 'end',
+    });
+
+    expect(() => second.decode(cursor)).toThrow(
+      InvalidSessionTranscriptCursorError,
+    );
+    expect(() => first.decode(`${cursor.slice(0, -1)}A`)).toThrow(
+      InvalidSessionTranscriptCursorError,
+    );
+  });
+
+  it('rejects an invalid in-memory cursor key length', () => {
+    expect(() => new SessionTranscriptCursorCodec(Buffer.alloc(31))).toThrow(
+      /must be 32 bytes/,
+    );
+  });
+
   it('warns and replaces a corrupt persisted cursor signing key', async () => {
     const projectDir = new Storage(workspaceDir).getProjectDir();
     const keyPath = path.join(projectDir, 'session-transcript-cursor-key');
@@ -443,6 +686,22 @@ describe('SessionTranscriptReader', () => {
       { text: 'hello' },
       { text: ' world' },
     ]);
+  });
+
+  it('counts glued-line fragments conservatively against the byte budget', async () => {
+    const first = record('u1', null, 'hello');
+    const second = record('u1', null, ' world');
+    const gluedLine = `${JSON.stringify(first)}${JSON.stringify(second)}`;
+    await writeRawTranscript(
+      `${gluedLine}\n${JSON.stringify(record('a1', 'u1', 'reply'))}\n`,
+    );
+
+    await expect(
+      new SessionTranscriptReader(workspaceDir).readPage(sessionId, {
+        limit: 1,
+        maxBytes: Buffer.byteLength(gluedLine) * 2 - 1,
+      }),
+    ).rejects.toBeInstanceOf(SessionTranscriptPageTooLargeError);
   });
 
   it('skips non-ChatRecord JSON lines while indexing', async () => {

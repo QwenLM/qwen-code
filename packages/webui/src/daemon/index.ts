@@ -16,6 +16,7 @@ export {
   useDaemonStreamingState,
   useDaemonSession,
   useDaemonTranscriptBlocks,
+  useDaemonTranscriptHistory,
   useDaemonTranscriptState,
   useDaemonTranscriptStore,
   useDaemonWorkspaceEventSignals,
@@ -47,6 +48,7 @@ export type {
   DaemonSessionContextValue,
   DaemonSessionNotice,
   DaemonSessionProviderProps,
+  DaemonTranscriptHistory,
   DaemonTokenUsage,
   DaemonTodoItem,
   DaemonTodoList,
@@ -80,6 +82,7 @@ export {
   useDaemonUsageDashboard,
   useDaemonTools,
   useDaemonSettings,
+  useDaemonProviders,
 } from './workspace/index.js';
 export type {
   DaemonDirectoryEntry,
@@ -167,4 +170,10 @@ export type {
   DaemonSettingDescriptor,
   DaemonWorkspaceSettingsStatus,
   DaemonSettingUpdateResult,
+  DaemonWorkspaceProvidersStatus,
+  DaemonWorkspaceProviderStatus,
+  DaemonWorkspaceProviderModel,
+  DaemonWorkspaceProviderCurrent,
+  DaemonModelDeleteRequest,
+  DaemonModelDeleteResult,
 } from '@qwen-code/sdk/daemon';

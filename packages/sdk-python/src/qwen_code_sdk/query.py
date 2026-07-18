@@ -65,7 +65,9 @@ class Query:
         self._prompt = prompt
         self._single_turn = isinstance(prompt, str)
         self._session_id = session_id
-        self._session_id_locked = bool(options.resume or options.session_id)
+        self._session_id_locked = bool(
+            (options.resume or options.session_id) and not options.fork_session
+        )
 
         self._message_queue: asyncio.Queue[SDKMessage | Exception | object] = (
             asyncio.Queue()
@@ -111,6 +113,10 @@ class Query:
     async def _initialize(self) -> None:
         try:
             payload: dict[str, Any] = {"hooks": None}
+            if self._options.mcp_servers:
+                payload["mcpServers"] = self._options.mcp_servers
+            if self._options.agents:
+                payload["agents"] = self._options.agents
             if self._options.effort:
                 payload["effort"] = self._options.effort
             await self._send_control_request("initialize", payload)
@@ -629,11 +635,15 @@ def query(
 
     validate_query_options(parsed_options)
 
-    session_id = parsed_options.resume or parsed_options.session_id
-    if session_id is None and not parsed_options.continue_session:
-        session_id = str(uuid4())
-    if parsed_options.resume is None and not parsed_options.continue_session:
-        parsed_options = replace(parsed_options, session_id=session_id)
+    session_id: str | None
+    if parsed_options.fork_session:
+        session_id = parsed_options.session_id or str(uuid4())
+    else:
+        session_id = parsed_options.resume or parsed_options.session_id
+        if session_id is None and not parsed_options.continue_session:
+            session_id = str(uuid4())
+        if parsed_options.resume is None and not parsed_options.continue_session:
+            parsed_options = replace(parsed_options, session_id=session_id)
 
     transport = ProcessTransport(parsed_options)
     return Query(transport, parsed_options, prompt, session_id or "")

@@ -68,11 +68,18 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   },
   useStreamingState: () => streamingStateValue,
   useTranscriptBlocks: () => [],
+  useTranscriptHistory: () => ({
+    hasMore: false,
+    loading: false,
+    capacityReached: false,
+    loadMore: vi.fn(),
+  }),
   useTranscriptStore: () => ({
     dispatch: transcriptDispatch,
   }),
   usePromptStatus: () => 'idle',
   useWorkspaceActions: () => ({}),
+  useWorkspace: () => ({ capabilities: connectionState.capabilities }),
   useWorkspaceEventSignals: () => ({ artifactsVersion: 0 }),
 }));
 
@@ -282,6 +289,59 @@ describe('ChatPane', () => {
     expect(container!.textContent).toContain('Refactor core');
   });
 
+  it('adds no workspace toolbar chip on a single-workspace daemon', () => {
+    render({ title: 'Refactor core', workspaceCwd: '/w' });
+    expect(latestChatEditorProps.visibleToolbarActions).not.toContain(
+      'workspace',
+    );
+    expect(latestChatEditorProps.workspaceName).toBeUndefined();
+  });
+
+  it('shows the pane workspace as a toolbar chip on a multi-workspace daemon', () => {
+    connectionState.capabilities = {
+      features: [],
+      workspaceCwd: '/work/web-shell',
+      workspaces: [
+        { id: 'w0', cwd: '/work/web-shell', primary: true, trusted: true },
+        { id: 'w1', cwd: '/work/api', primary: false, trusted: true },
+      ],
+    };
+    // The split view hands each pane its own workspace explicitly.
+    render({ title: 'Add pagination', workspaceCwd: '/work/api' });
+    expect(latestChatEditorProps.visibleToolbarActions).toContain('workspace');
+    expect(latestChatEditorProps.workspaceName).toBe('api');
+    expect(latestChatEditorProps.workspaceTitle).toBe('/work/api');
+    // The chip carries the pane's stable accent color (api is the 2nd workspace
+    // → the 2nd palette color) so it stays distinct when it collapses to an icon.
+    expect(latestChatEditorProps.workspaceColor).toBe('green');
+  });
+
+  it('surfaces the workspace in the pane header on a multi-workspace daemon', () => {
+    connectionState.capabilities = {
+      features: [],
+      workspaceCwd: '/work/web-shell',
+      workspaces: [
+        { id: 'w0', cwd: '/work/web-shell', primary: true, trusted: true },
+        { id: 'w1', cwd: '/work/api', primary: false, trusted: true },
+      ],
+    };
+    render({ title: 'Add pagination', workspaceCwd: '/work/api' });
+    // The header tag (always visible at the top, unlike the composer chip that
+    // collapses on a narrow split) names the workspace and carries its full cwd
+    // in a hover tooltip.
+    const tag = container!.querySelector('[data-web-shell-pane-workspace]');
+    expect(tag).not.toBeNull();
+    expect(tag!.textContent).toContain('api');
+    expect(tag!.getAttribute('title')).toBe('/work/api');
+  });
+
+  it('omits the header workspace tag on a single-workspace daemon', () => {
+    render({ title: 'Refactor core', workspaceCwd: '/w' });
+    expect(
+      container!.querySelector('[data-web-shell-pane-workspace]'),
+    ).toBeNull();
+  });
+
   it('reports loaded pane artifacts to the outer panel owner', async () => {
     const onPaneArtifactsChange = vi.fn();
     connectionState.capabilities = { features: ['session_artifacts'] };
@@ -439,6 +499,32 @@ describe('ChatPane', () => {
     expect(enqueuePrompt).not.toHaveBeenCalled();
   });
 
+  it('submits while disconnected when prompt SSE restart is enabled', () => {
+    connectionState.status = 'disconnected';
+    render({ restartSseOnPrompt: true });
+
+    act(() => {
+      latestOnSubmit!('hi');
+    });
+
+    expect(sendPrompt).toHaveBeenCalledWith(
+      'hi',
+      expect.objectContaining({ onAdmitted: expect.any(Function) }),
+    );
+  });
+
+  it('does not submit without a recoverable disconnected session', () => {
+    connectionState.status = 'disconnected';
+    connectionState.sessionId = undefined;
+    render({ restartSseOnPrompt: true });
+
+    act(() => {
+      latestOnSubmit!('hi');
+    });
+
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
   it('reports an idle prompt failure to the pane error handler', async () => {
     const onError = vi.fn();
     sendPrompt.mockRejectedValueOnce(new Error('disconnected'));
@@ -507,6 +593,36 @@ describe('ChatPane', () => {
       closeBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true })),
     );
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders no maximize toggle without onToggleMaximize', () => {
+    render({ onClose: () => {} });
+    expect(container!.querySelector('[aria-label="Maximize pane"]')).toBeNull();
+    expect(container!.querySelector('[aria-label="Restore pane"]')).toBeNull();
+  });
+
+  it('invokes onToggleMaximize from the header maximize button', () => {
+    const onToggleMaximize = vi.fn();
+    render({ onToggleMaximize });
+    const maximizeBtn = container!.querySelector(
+      '[aria-label="Maximize pane"]',
+    );
+    expect(maximizeBtn).not.toBeNull();
+    // A toggle button always exposes its pressed state; not maximized here.
+    expect(maximizeBtn!.getAttribute('aria-pressed')).toBe('false');
+    act(() =>
+      maximizeBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    expect(onToggleMaximize).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the restore affordance while maximized', () => {
+    render({ onToggleMaximize: () => {}, isMaximized: true });
+    const restoreBtn = container!.querySelector('[aria-label="Restore pane"]');
+    expect(restoreBtn).not.toBeNull();
+    expect(restoreBtn!.getAttribute('aria-pressed')).toBe('true');
+    // The label flips to "restore" — no stale "maximize" affordance remains.
+    expect(container!.querySelector('[aria-label="Maximize pane"]')).toBeNull();
   });
 
   it('cancels the active turn via the composer cancel action', () => {

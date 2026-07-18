@@ -168,6 +168,14 @@
           "type": "boolean",
           "default": true
         },
+        "notificationMode": {
+          "description": "Which unfocused-terminal events fire a bell/OS notification. \"all\" fires on every tool approval prompt AND on task completion (current behavior). \"task-complete\" suppresses the per-approval notification and only fires when a long task returns to idle. Requires `terminalBell` to be enabled; otherwise no notifications fire regardless of mode. Options: all, task-complete",
+          "enum": [
+            "all",
+            "task-complete"
+          ],
+          "default": "all"
+        },
         "preventSystemSleep": {
           "description": "Prevent the system from sleeping while Qwen Code is streaming a model response or executing tools. Idle prompt time and permission prompts do not inhibit sleep.",
           "type": "boolean",
@@ -367,7 +375,7 @@
           "default": false
         },
         "useTerminalBuffer": {
-          "description": "Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled; for native text selection, hold Shift (or Option on macOS) while dragging.",
+          "description": "Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled. Drag to select text in the viewport (double/triple click selects a word/line), copied on release. To use the terminal’s own selection instead, hold Shift (or Option on macOS) while dragging.",
           "type": "boolean",
           "default": false
         },
@@ -589,8 +597,8 @@
           ]
         },
         "maxSessionTurns": {
-          "description": "Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.",
-          "type": "number",
+          "description": "Maximum number of user/model/tool turns to keep in a session. Must be an integer; -1 means unlimited.",
+          "type": "integer",
           "default": -1
         },
         "maxWallTimeSeconds": {
@@ -633,8 +641,8 @@
           "default": true
         },
         "maxToolCallsPerTurn": {
-          "description": "Hard cap on tool calls within a single turn (one model turn plus its tool-result continuations; blocking Stop-hook continuations such as /goal iterations start a fresh budget). An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.",
-          "type": "number",
+          "description": "Per-turn tool-call cap (one model turn plus its tool-result continuations; blocking Stop-hook continuations such as /goal iterations start a fresh budget). When set explicitly, this value is a hard cap: the turn halts on the next tool call after it is reached (the released behavior). When left unset (default 100), the cap is adaptive: once the turn exceeds 100 it halts only when the model keeps repeating the same call (a stuck loop); a productive turn (diverse calls) continues up to a hard backstop of 1000, which always halts. The adaptive default applies to both the interactive TUI and non-interactive (-p / JSON / stream-JSON) core-client runs; the daemon/ACP path always treats the value as a hard cap. An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.",
+          "type": "integer",
           "default": 100
         },
         "skipStartupContext": {
@@ -827,7 +835,7 @@
         "enableAutoSkill": {
           "description": "Enable background review for reusable project skills after tool-heavy sessions.",
           "type": "boolean",
-          "default": true
+          "default": false
         },
         "autoSkillConfirm": {
           "description": "Ask for confirmation before auto-generated skills are added to the skill library. When off, auto-skills are saved immediately.",
@@ -1034,6 +1042,18 @@
               "description": "Show color in shell output.",
               "type": "boolean",
               "default": false
+            },
+            "defaultTimeoutMs": {
+              "description": "Default timeout, in milliseconds, for foreground shell commands started by the agent. A per-call timeout on the shell tool overrides this. When unset, foreground commands time out after 120000 ms (2 minutes). Set to 0 to disable the timeout.",
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 600000
+            },
+            "heartbeatIntervalMs": {
+              "description": "Interval, in milliseconds, between liveness heartbeats emitted while a foreground shell command produces no output. Heartbeats are forwarded to ACP clients and stream-json consumers so they can tell a silent command from a dead session. When unset, heartbeats fire every 10000 ms (10 seconds). Set to 0 to disable heartbeats.",
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 600000
             }
           }
         },
@@ -1081,7 +1101,7 @@
             "auto",
             "yolo"
           ],
-          "default": "default"
+          "default": "auto"
         },
         "autoAccept": {
           "description": "Automatically accept and execute tool calls that are considered safe (e.g., read-only operations) without explicit user confirmation.",
@@ -1288,13 +1308,32 @@
       }
     },
     "agents": {
-      "description": "Settings for multi-agent collaboration features (Arena, Team, Swarm).",
+      "description": "Settings for built-in agents and multi-agent collaboration features (Arena, Team, Swarm).",
       "type": "object",
       "properties": {
+        "builtin": {
+          "description": "Settings for built-in subagents.",
+          "type": "object",
+          "properties": {
+            "exploreModel": {
+              "description": "Model selector for the built-in Explore subagent. Use \"inherit\" for the main session model, \"fast\" for fastModel, a model ID, or an authType:model-id selector. Custom same-name agents are unaffected.",
+              "type": "string",
+              "default": "inherit"
+            }
+          }
+        },
         "maxParallelAgents": {
           "type": "integer",
           "minimum": 1,
-          "description": "Global maximum number of background sub-agents that can run concurrently. Additional background agents wait in a queue until a slot is available. Per-model limits are not supported yet."
+          "description": "Global maximum number of background sub-agents that can run concurrently. Additional background agents wait in a queue until a slot is available. Use maxParallelAgentsByModel to cap a specific model below this global limit."
+        },
+        "maxParallelAgentsByModel": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "description": "Per-model maximum number of background sub-agents that can run concurrently, keyed by model ID (e.g. { \"qwen3-max\": 2 }). Useful when a model has a lower concurrency capacity. Takes precedence over the global maxParallelAgents for the matched model; models not listed here fall back to the global limit."
         },
         "displayMode": {
           "description": "Display mode for multi-agent sessions. Currently only \"in-process\" is supported. Options: in-process",
@@ -2920,9 +2959,9 @@
           "default": false
         },
         "artifact": {
-          "description": "Enable the Artifact tool (experimental). When enabled, the model can publish a self-contained HTML page as an interactive Artifact and open it in the browser. Interactive, non-SDK sessions only. QWEN_CODE_ENABLE_ARTIFACT=1 enables the metadata-only record_artifact tool for non-SDK daemon sessions, and also enables the Artifact tool in interactive sessions. QWEN_CODE_DISABLE_ARTIFACT=1 hard-disables both.",
+          "description": "Enable artifact tools. Enabled by default. In interactive, non-SDK sessions, the model can publish a self-contained HTML page as an interactive Artifact and open it in the browser. Non-SDK daemon sessions can use the metadata-only record_artifact tool. Set this to false or use QWEN_CODE_DISABLE_ARTIFACT=1 to disable both.",
           "type": "boolean",
-          "default": false
+          "default": true
         },
         "emitToolUseSummaries": {
           "description": "Generate a short LLM-based label after each tool batch completes. For a completed tool group the label replaces the generic `Tool × N` header; when the group is force-expanded it appears as a dim `● <label>` line below the tool group. Requires a fast model to be configured; runs in parallel with the next API call so latency is hidden. Currently affects interactive CLI rendering only — SDK / non-interactive emission of the `tool_use_summary` message is not yet wired (the message factory is exported for a follow-up PR). Can be overridden with QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=0 or =1.",
@@ -2932,7 +2971,7 @@
       }
     },
     "artifact": {
-      "description": "Configuration for the experimental Artifact tool (enable it via experimental.artifact). Selects the publish backend and, for the host backend, the upload command and shareable URL template.",
+      "description": "Configuration for artifact publishing. Selects the publish backend and, for the host backend, the upload command and shareable URL template.",
       "type": "object",
       "properties": {
         "autoOpen": {

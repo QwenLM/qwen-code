@@ -8,13 +8,14 @@ import type { CommandModule } from 'yargs';
 
 import {
   ExtensionManager,
+  isExtensionCommittedWithWarningsError,
   parseInstallSource,
   type ExtensionScope,
 } from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../utils/errors.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
-import { loadSettings, SettingScope } from '../../config/settings.js';
+import { loadSettings } from '../../config/settings.js';
 import {
   requestConsentOrFail,
   requestConsentNonInteractive,
@@ -38,6 +39,8 @@ function normalizeScope(scope: string | undefined): ExtensionScope {
 }
 
 export async function handleInstall(args: InstallArgs) {
+  const scope = normalizeScope(args.scope);
+  let extensionManager: ExtensionManager | undefined;
   try {
     const installMetadata = await parseInstallSource(args.source);
 
@@ -82,7 +85,7 @@ export async function handleInstall(args: InstallArgs) {
       ? () => Promise.resolve()
       : requestConsentOrFail.bind(null, requestConsentNonInteractive);
     const workspaceDir = process.cwd();
-    const extensionManager = new ExtensionManager({
+    extensionManager = new ExtensionManager({
       workspaceDir,
       locale: getCurrentLanguage(),
       isWorkspaceTrusted:
@@ -100,46 +103,21 @@ export async function handleInstall(args: InstallArgs) {
         allowPreRelease: args.allowPreRelease,
       },
       requestConsent,
+      undefined,
+      workspaceDir,
+      undefined,
+      scope === 'project'
+        ? { scope: 'workspace', workspacePath: workspaceDir }
+        : { scope: 'user' },
     );
-    const scope = normalizeScope(args.scope);
     if (args.scope) {
-      // installExtension auto-enables at the user (global) scope. For a
-      // project-scoped install, re-scope enablement to this workspace only —
-      // BEFORE recording the scope preference, so a failed Workspace enable
-      // (which rolls back to User) can't leave the prefs claiming "project".
-      if (scope === 'project') {
-        await extensionManager.disableExtension(
-          extension.name,
-          SettingScope.User,
+      try {
+        extensionManager.setExtensionScope(extension.name, scope);
+      } catch (scopeError) {
+        writeStderrLine(
+          `Warning: Extension installed, but failed to save scope preference: ${getErrorMessage(scopeError)}`,
         );
-        try {
-          await extensionManager.enableExtension(
-            extension.name,
-            SettingScope.Workspace,
-          );
-        } catch (enableError) {
-          // The User-scope disable already landed. If the Workspace enable
-          // fails, the extension would be left disabled everywhere — roll the
-          // User enable back so it isn't silently dead, then surface the error.
-          try {
-            await extensionManager.enableExtension(
-              extension.name,
-              SettingScope.User,
-            );
-          } catch (rollbackError) {
-            // Rollback failed too: the extension is now disabled at every
-            // scope. Surface this so the user knows recovery also failed,
-            // before the original error is reported below.
-            writeStderrLine(
-              `Warning: failed to roll back the scope change for "${extension.name}"; it may be disabled at all scopes: ${getErrorMessage(rollbackError)}`,
-            );
-          }
-          throw enableError;
-        }
       }
-      // Enablement succeeded (or scope is user/local with no enablement change):
-      // now it's safe to persist the scope preference.
-      extensionManager.setExtensionScope(extension.name, scope);
     }
     writeStdoutLine(
       scope === 'project'
@@ -152,6 +130,19 @@ export async function handleInstall(args: InstallArgs) {
           }),
     );
   } catch (error) {
+    if (isExtensionCommittedWithWarningsError(error)) {
+      if (args.scope && extensionManager) {
+        try {
+          extensionManager.setExtensionScope(error.identity.name, scope);
+        } catch (scopeError) {
+          writeStderrLine(
+            `Warning: Extension installed, but failed to save scope preference: ${getErrorMessage(scopeError)}`,
+          );
+        }
+      }
+      writeStderrLine(`Warning: ${getErrorMessage(error)}`);
+      return;
+    }
     writeStderrLine(getErrorMessage(error));
     process.exit(1);
   }

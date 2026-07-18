@@ -105,13 +105,25 @@
   word-break: break-word;
 }
 
+.thinkingHeader {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.thinkingHeader:hover {
+  color: var(--primary);
+}
+
 .thinkingSummary {
-  width: 100%;
+  flex: 0 1 auto;
   margin: 0;
   border: none;
   border-radius: 0;
   background: transparent;
-  color: var(--muted-foreground);
+  color: inherit;
   display: flex;
   align-items: center;
   gap: 7px;
@@ -121,14 +133,84 @@
   font: inherit;
 }
 
-.thinkingSummary:hover,
+.translateButton {
+  flex-shrink: 0;
+  margin-left: 7px;
+  color: var(--foreground);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.thinkingHeader:hover .translateButton,
+.thinkingHeaderExpanded .translateButton,
+.translateButton:focus-visible,
+.translateButton[data-state='open'] {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.translationPopover {
+  width: min(480px, calc(100vw - 32px));
+  max-height: min(520px, calc(100vh - 48px));
+}
+
+.translationTitle {
+  color: var(--foreground);
+  font-weight: 500;
+}
+
+.translationContent {
+  overflow-y: auto;
+  color: var(--foreground);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.translationPending {
+  color: var(--muted-foreground);
+}
+
+.translationError {
+  color: var(--destructive);
+}
+
+.translationFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.translationUsage {
+  display: flex;
+  gap: 12px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.translationActions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.translationActions button {
+  cursor: pointer;
+}
+
 .thinkingSummary:focus-visible {
   color: var(--primary);
   outline: none;
 }
 
-.thinkingSummary:hover .thinkingSummaryTextActive,
+.thinkingHeader:hover .thinkingSummaryTextActive,
 .thinkingSummary:focus-visible .thinkingSummaryTextActive {
+  color: inherit;
   background-image: none;
   -webkit-text-fill-color: currentColor;
 }
@@ -192,6 +274,7 @@
 
 .thinkingChevronRight,
 .thinkingChevronDown {
+  margin-left: 7px;
   width: 14px;
   height: 14px;
   position: relative;
@@ -212,10 +295,11 @@
   border-radius: 1px;
 }
 
-.thinkingSummary:hover .thinkingChevronRight,
-.thinkingSummary:hover .thinkingChevronDown,
-.thinkingSummary:focus-visible .thinkingChevronRight,
-.thinkingSummary:focus-visible .thinkingChevronDown {
+.thinkingHeader:hover .thinkingChevronRight,
+.thinkingHeader:hover .thinkingChevronDown,
+.thinkingSummary:focus-visible ~ .thinkingChevronRight,
+.thinkingSummary:focus-visible ~ .thinkingChevronDown {
+  color: var(--primary);
   opacity: 1;
 }
 

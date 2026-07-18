@@ -10,6 +10,7 @@ import type {
   DaemonSessionContextStatus,
   DaemonSessionClient,
   DaemonSessionBtwResult,
+  DaemonSessionGenerationEvent,
   CreateSessionRequest,
   DaemonForkSessionResult,
   DaemonMidTurnMessageResult,
@@ -60,15 +61,17 @@ export interface CreateDaemonSessionActionsArgs {
   getCreateSessionRequest: () => CreateSessionRequest;
   createDetachedSession: (
     workspaceCwd?: string,
-    overrides?: Pick<CreateSessionRequest, 'approvalMode'>,
+    overrides?: Pick<CreateSessionRequest, 'approvalMode' | 'sourceType'>,
   ) => Promise<DaemonSessionClient>;
   getConnection: () => DaemonConnectionState;
   hasSessionActivePrompt: () => boolean;
   resetCurrentSessionActivePrompt: () => void;
+  restartEventStream: (sessionId: string) => void;
   addNotice: AddDaemonSessionNotice;
   setConnection: Dispatch<SetStateAction<DaemonConnectionState>>;
   setPromptStatus: Dispatch<SetStateAction<DaemonPromptStatus>>;
   setRestoreSessionId: Dispatch<SetStateAction<string | undefined>>;
+  setRestoreWorkspaceCwd: Dispatch<SetStateAction<string | undefined>>;
   setRestoreMode: Dispatch<SetStateAction<'load' | 'resume'>>;
   setRestoreSessionNonce: Dispatch<SetStateAction<number>>;
   setAttachSessionNonce: Dispatch<SetStateAction<number>>;
@@ -127,10 +130,12 @@ export function createDaemonSessionActions({
   getConnection,
   hasSessionActivePrompt,
   resetCurrentSessionActivePrompt,
+  restartEventStream,
   addNotice,
   setConnection,
   setPromptStatus,
   setRestoreSessionId,
+  setRestoreWorkspaceCwd,
   setRestoreMode,
   setRestoreSessionNonce,
   setAttachSessionNonce,
@@ -159,6 +164,7 @@ export function createDaemonSessionActions({
     }
     store.reset();
     setRestoreSessionId(undefined);
+    setRestoreWorkspaceCwd(undefined);
   }
 
   function startPendingSessionLoad(
@@ -205,6 +211,7 @@ export function createDaemonSessionActions({
   function startSessionSwitch(
     sessionId: string,
     mode: 'load' | 'resume',
+    workspaceCwd?: string,
   ): Promise<void> {
     manualSessionClearRef.current = false;
     const loadPromise = startPendingSessionLoad(sessionId, mode);
@@ -247,6 +254,7 @@ export function createDaemonSessionActions({
     store.reset();
     setRestoreMode(mode);
     setRestoreSessionId(sessionId);
+    setRestoreWorkspaceCwd(workspaceCwd ?? getConnection().workspaceCwd);
     setRestoreSessionNonce((nonce) => nonce + 1);
     return loadPromise.catch((error: unknown) => {
       if (!isAbortError(error)) {
@@ -314,6 +322,9 @@ export function createDaemonSessionActions({
           promptRequest as Parameters<typeof session.submitPrompt>[0],
           ctrl.signal,
         );
+        if (activePromptsRef.current.get(sessionId)?.controller === ctrl) {
+          restartEventStream(sessionId);
+        }
         // The prompt is admitted to the session here — signal it before we wait
         // out the (possibly long) turn, so an admission-only caller can proceed.
         options?.onAdmitted?.();
@@ -596,17 +607,18 @@ export function createDaemonSessionActions({
       }
     },
 
-    async loadSession(sessionId) {
-      return startSessionSwitch(sessionId, 'load');
+    async loadSession(sessionId, options) {
+      return startSessionSwitch(sessionId, 'load', options?.workspaceCwd);
     },
 
-    async resumeSession(sessionId) {
-      return startSessionSwitch(sessionId, 'resume');
+    async resumeSession(sessionId, options) {
+      return startSessionSwitch(sessionId, 'resume', options?.workspaceCwd);
     },
 
     async createSession(options?: {
       workspaceCwd?: string;
       approvalMode?: DaemonApprovalMode;
+      sourceType?: string;
     }) {
       try {
         manualSessionClearRef.current = false;
@@ -616,10 +628,14 @@ export function createDaemonSessionActions({
         // `setApprovalMode` round-trip. Approval mode is fail-closed at spawn:
         // an application failure aborts creation (this call rejects) rather than
         // leaving the session in a different mode than the caller requested.
-        const approvalOverride =
-          options?.approvalMode !== undefined
+        const requestOverrides = {
+          ...(options?.approvalMode !== undefined
             ? { approvalMode: options.approvalMode }
-            : {};
+            : {}),
+          ...(options?.sourceType !== undefined
+            ? { sourceType: options.sourceType }
+            : {}),
+        };
         const session = sessionRef.current;
         const activeSession =
           session && getConnection().sessionId === session.sessionId
@@ -632,7 +648,7 @@ export function createDaemonSessionActions({
               ...(options?.workspaceCwd !== undefined
                 ? { workspaceCwd: options.workspaceCwd }
                 : {}),
-              ...approvalOverride,
+              ...requestOverrides,
             }),
             'Create session timed out',
           );
@@ -641,7 +657,7 @@ export function createDaemonSessionActions({
         }
 
         const nextSession = await withActionTimeout(
-          createDetachedSession(options?.workspaceCwd, approvalOverride),
+          createDetachedSession(options?.workspaceCwd, requestOverrides),
           'Create session timed out',
         );
         if (manualSessionClearRef.current) {
@@ -890,6 +906,19 @@ export function createDaemonSessionActions({
           'recap_session',
         );
       }
+    },
+
+    async *generateSessionContent(
+      prompt: string,
+      opts?: { signal?: AbortSignal },
+    ): AsyncGenerator<DaemonSessionGenerationEvent> {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Generate content failed',
+        'generate_session_content',
+      );
+      yield* session.generateContent(prompt, opts);
     },
 
     async getRewindSnapshots(): Promise<{

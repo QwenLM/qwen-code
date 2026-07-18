@@ -23,9 +23,12 @@ import type {
 import {
   CoreToolScheduler,
   compactToolResultDisplayForHistory,
+  convertToFunctionErrorResponse,
   createDebugLogger,
   getToolResponseDisplayText,
   isAnyAutoMemPath,
+  isShellProgressData,
+  ToolErrorType,
 } from '@qwen-code/qwen-code-core';
 import * as path from 'node:path';
 import { useCallback, useState, useMemo } from 'react';
@@ -41,6 +44,7 @@ const debugLogger = createDebugLogger('REACT_TOOL_SCHEDULER');
 export type ScheduleFn = (
   request: ToolCallRequestInfo | ToolCallRequestInfo[],
   signal: AbortSignal,
+  modelOverride?: string,
 ) => void;
 export type MarkToolsAsSubmittedFn = (callIds: string[]) => void;
 
@@ -114,6 +118,12 @@ export function useReactToolScheduler(
 
   const outputUpdateHandler: OutputUpdateHandler = useCallback(
     (toolCallId, outputChunk) => {
+      // Shell liveness heartbeats are for headless consumers; the TUI
+      // already shows a spinner and must not replace accumulated live
+      // output with a stats object.
+      if (isShellProgressData(outputChunk)) {
+        return;
+      }
       const compactOutput = compactToolResultDisplayForHistory(outputChunk);
       setToolCallsForDisplay((prevCalls) =>
         prevCalls.map((tc) => {
@@ -210,10 +220,68 @@ export function useReactToolScheduler(
     (
       request: ToolCallRequestInfo | ToolCallRequestInfo[],
       signal: AbortSignal,
+      modelOverride?: string,
     ) => {
-      void scheduler.schedule(request, signal);
+      if (!modelOverride?.endsWith('\0')) {
+        void scheduler.schedule(request, signal);
+        return;
+      }
+      void (async () => {
+        try {
+          const runtimeView = await config
+            .getBaseLlmClient()
+            .resolveForModel(modelOverride.slice(0, -1), {
+              failClosed: true,
+            });
+          await scheduler.schedule(request, signal, runtimeView);
+        } catch (error) {
+          debugLogger.error(
+            `Full-turn tool scheduling failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          const message =
+            'Full-turn tool scheduling failed. The tool was not executed.';
+          const requests = Array.isArray(request) ? request : [request];
+          const completedCalls: CompletedToolCall[] = requests.map(
+            (toolRequest) => {
+              const toolError = new Error(message);
+              const responseParts = convertToFunctionErrorResponse(
+                toolRequest.name,
+                toolRequest.callId,
+                message,
+                message,
+              );
+              config
+                .getChatRecordingService()
+                ?.recordToolResult(responseParts, {
+                  callId: toolRequest.callId,
+                  status: 'error',
+                  resultDisplay: message,
+                  error: toolError,
+                  errorType: ToolErrorType.UNHANDLED_EXCEPTION,
+                });
+              return {
+                status: 'error',
+                request: toolRequest,
+                response: {
+                  callId: toolRequest.callId,
+                  responseParts,
+                  resultDisplay: message,
+                  error: toolError,
+                  errorType: ToolErrorType.UNHANDLED_EXCEPTION,
+                  contentLength: message.length,
+                },
+              };
+            },
+          );
+          setToolCallsForDisplay((prev) => [...prev, ...completedCalls]);
+          await allToolCallsCompleteHandler(completedCalls);
+          return;
+        }
+      })();
     },
-    [scheduler],
+    [allToolCallsCompleteHandler, config, scheduler],
   );
 
   const markToolsAsSubmitted: MarkToolsAsSubmittedFn = useCallback(

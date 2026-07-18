@@ -18,13 +18,18 @@ const CHANNEL_APPROVAL_MODES = new Set([
 
 export { findCliEntryPath } from './cli-entry-path.js';
 
-export function resolveEnvVars(value: string): string {
+type WebhookEnvironment = Readonly<Record<string, string | undefined>>;
+
+export function resolveEnvVars(
+  value: string,
+  env: WebhookEnvironment = process.env,
+): string {
   if (value.startsWith('$$')) {
     return value.substring(1);
   }
   if (value.startsWith('$')) {
     const envName = value.substring(1);
-    const envValue = process.env[envName];
+    const envValue = env[envName];
     if (envValue === undefined) {
       throw new Error(
         `Environment variable ${envName} is not set (referenced as ${value})`,
@@ -221,6 +226,7 @@ function parseWebhookSource(
   channelName: string,
   path: string,
   raw: unknown,
+  env: WebhookEnvironment,
 ): ChannelWebhookSourceConfig {
   const record = requireObjectField(channelName, path, raw);
   const rawTargets = requireObjectField(
@@ -249,6 +255,7 @@ function parseWebhookSource(
   const secret = hasSecret
     ? resolveEnvVars(
         requireStringField(channelName, `${path}.secret`, record['secret']),
+        env,
       )
     : resolveWebhookSecretEnv(
         channelName,
@@ -258,6 +265,7 @@ function parseWebhookSource(
           `${path}.secretEnv`,
           record['secretEnv'],
         ),
+        env,
       );
   if (secret.length === 0) {
     throw new Error(
@@ -272,6 +280,7 @@ function resolveWebhookSecretEnv(
   channelName: string,
   path: string,
   secretEnv: string,
+  env: WebhookEnvironment,
 ): string {
   const envName = secretEnv.startsWith('$')
     ? secretEnv.substring(1)
@@ -281,7 +290,7 @@ function resolveWebhookSecretEnv(
       `Channel "${channelName}" field "${path}.secretEnv" must be an environment variable name or $-prefixed reference.`,
     );
   }
-  const envValue = process.env[envName];
+  const envValue = env[envName];
   if (envValue === undefined) {
     throw new Error(
       `Channel "${channelName}" field "${path}.secretEnv" references an unset environment variable.`,
@@ -298,6 +307,7 @@ function resolveWebhookSecretEnv(
 function parseWebhookConfig(
   channelName: string,
   rawConfig: Record<string, unknown>,
+  env: WebhookEnvironment = process.env,
 ): ChannelWebhookConfig | undefined {
   const raw = rawConfig['webhooks'];
   if (raw === undefined || raw === null) {
@@ -315,6 +325,7 @@ function parseWebhookConfig(
       channelName,
       `webhooks.sources.${source}`,
       sourceConfig,
+      env,
     );
   }
   return { sources };
@@ -344,14 +355,16 @@ function parseApprovalModeConfig(
 export function parseChannelWebhookConfig(
   channelName: string,
   rawConfig: Record<string, unknown>,
+  env: WebhookEnvironment = process.env,
 ): ChannelWebhookConfig | undefined {
-  return parseWebhookConfig(channelName, rawConfig);
+  return parseWebhookConfig(channelName, rawConfig, env);
 }
 
 export function parseChannelWebhookConfigLenient(
   channelName: string,
   rawConfig: Record<string, unknown>,
   onSourceError?: (source: string, error: unknown) => void,
+  env: WebhookEnvironment = process.env,
 ): ChannelWebhookConfig | undefined {
   const raw = rawConfig['webhooks'];
   if (raw === undefined || raw === null) {
@@ -370,6 +383,7 @@ export function parseChannelWebhookConfigLenient(
         channelName,
         `webhooks.sources.${source}`,
         sourceConfig,
+        env,
       );
     } catch (error) {
       onSourceError?.(source, error);

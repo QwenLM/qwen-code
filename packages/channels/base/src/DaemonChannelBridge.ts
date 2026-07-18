@@ -7,6 +7,7 @@ import type {
   AvailableCommand,
   BridgeSessionInfo,
   ChannelAgentBridge,
+  ChannelAgentBridgeSessionOptions,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
 import { readAvailableCommandAltNames } from './AcpBridge.js';
@@ -56,6 +57,8 @@ export interface DaemonChannelSessionFactoryRequest {
   sessionId?: string;
   sessionScope?: SessionScope;
   approvalMode?: string;
+  /** Channel instance name stamped as daemon `sourceId` (new sessions only). */
+  sourceId?: string;
 }
 
 export type DaemonChannelSessionFactory = (
@@ -253,7 +256,7 @@ export class DaemonChannelBridge
 
   async newSession(
     cwd: string,
-    options?: { approvalMode?: string },
+    options?: ChannelAgentBridgeSessionOptions,
     bindingToken?: object,
   ): Promise<string> {
     const lifecycleGeneration = this.lifecycleGeneration;
@@ -262,6 +265,7 @@ export class DaemonChannelBridge
       modelServiceId: this.options.modelServiceId,
       sessionScope: this.options.sessionScope ?? 'thread',
       ...(options?.approvalMode ? { approvalMode: options.approvalMode } : {}),
+      ...(options?.sourceId ? { sourceId: options.sourceId } : {}),
     });
     if (lifecycleGeneration !== this.lifecycleGeneration) {
       await this.rejectStaleSession(session);
@@ -273,7 +277,7 @@ export class DaemonChannelBridge
   async loadSession(
     sessionId: string,
     cwd: string,
-    options?: { approvalMode?: string },
+    options?: ChannelAgentBridgeSessionOptions,
     bindingToken?: object,
   ): Promise<string> {
     const lifecycleGeneration = this.lifecycleGeneration;
@@ -321,14 +325,21 @@ export class DaemonChannelBridge
     controllers.add(controller);
 
     const chunks: string[] = [];
+    let slashCommandOutput = '';
     const onChunk = (sid: string, chunk: string) => {
       if (sid === sessionId) {
         chunks.push(chunk);
       }
     };
+    const onSlashCommandOutput = (sid: string, chunk: string) => {
+      if (sid === sessionId) {
+        slashCommandOutput = chunk;
+      }
+    };
     const clearChunks = (sid: string) => {
       if (sid === sessionId) {
         chunks.length = 0;
+        slashCommandOutput = '';
       }
     };
     const onSessionDied = (info: { sessionId: string }) => {
@@ -337,6 +348,7 @@ export class DaemonChannelBridge
       }
     };
     this.on('textChunk', onChunk);
+    this.on('slashCommandOutput', onSlashCommandOutput);
     this.on('responseBoundary', clearChunks);
     this.on('sessionDied', onSessionDied);
     const turnBarrier = this.createTurnBarrier(sessionId);
@@ -360,7 +372,7 @@ export class DaemonChannelBridge
         turnBarrier,
         new Promise<void>((resolve) => setTimeout(resolve, 0)),
       ]);
-      const textResult = chunks.join('');
+      const textResult = chunks.join('') || slashCommandOutput;
       this.emit('promptComplete', {
         sessionId,
         text: textResult,
@@ -370,6 +382,7 @@ export class DaemonChannelBridge
     } finally {
       this.clearTurnBarrier(sessionId);
       this.off('textChunk', onChunk);
+      this.off('slashCommandOutput', onSlashCommandOutput);
       this.off('responseBoundary', clearChunks);
       this.off('sessionDied', onSessionDied);
       this.activePrompts.delete(sessionId);
@@ -574,6 +587,13 @@ export class DaemonChannelBridge
   ): void {
     switch (event.type) {
       case 'session_update':
+        if (
+          isRecord(event.data) &&
+          typeof event.data['sessionId'] === 'string' &&
+          event.data['sessionId'] !== session.sessionId
+        ) {
+          break;
+        }
         this.handleSessionUpdate(session.sessionId, event.data);
         break;
       case 'permission_request':
@@ -634,7 +654,13 @@ export class DaemonChannelBridge
         }
         const text = getTextContent(update['content']);
         if (text) {
-          this.emit('textChunk', sessionId, text);
+          this.emit(
+            meta?.['source'] === 'slash_command'
+              ? 'slashCommandOutput'
+              : 'textChunk',
+            sessionId,
+            text,
+          );
         }
         break;
       }
@@ -649,6 +675,22 @@ export class DaemonChannelBridge
       case 'tool_call_update': {
         const toolCallId = getString(update['toolCallId']);
         const kind = getString(update['kind']);
+        const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+        if (
+          !kind &&
+          toolCallId &&
+          getString(update['status']) === 'in_progress' &&
+          meta?.['shellProgress'] !== undefined
+        ) {
+          // Silent-shell liveness heartbeat: a kind-less in_progress frame
+          // carrying only the id, status, and _meta.shellProgress stats.
+          // Channels have no use for it — drop it without flagging the
+          // session as malformed. Gate on shellProgress (matching the
+          // qwen-agent and web-shell normalizer guards) so a genuinely
+          // malformed kind-less tool_call still reaches emitProtocolError
+          // below instead of being silently swallowed.
+          break;
+        }
         if (!toolCallId || !kind) {
           this.emitProtocolError(`Malformed daemon ${type} event`, update);
           break;

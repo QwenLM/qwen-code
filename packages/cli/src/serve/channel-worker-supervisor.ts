@@ -13,7 +13,11 @@ import {
 } from './channel-worker-env.js';
 import { sanitizeLogText } from '@qwen-code/channel-base';
 import type { ChannelWebhookTask } from '@qwen-code/channel-base';
-import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
+import {
+  CHANNEL_WORKER_KILL_GRACE_MS,
+  CHANNEL_WORKER_STARTUP_TIMEOUT_MS,
+  CHANNEL_WORKER_STOP_GRACE_MS,
+} from '@qwen-code/acp-bridge/channelControlTimeouts';
 import {
   CHANNEL_WEBHOOK_TASK_IPC_TIMEOUT_MS,
   ChannelWebhookEnqueueError,
@@ -23,25 +27,64 @@ import {
   type ChannelWebhookAccepted,
   type ChannelWebhookEnqueueErrorCode,
 } from './channel-webhook-ipc.js';
+import {
+  createWorkerDiagnosticRedactor,
+  normalizeWorkerDiagnostic,
+  sanitizeWorkerDiagnostic,
+  type WorkerDiagnosticRedactionOptions,
+} from './channel-worker-diagnostics.js';
+import {
+  isChannelStartupReportMessage,
+  isChannelStartupReportType,
+  MAX_CHANNEL_STARTUP_FAILURES,
+  MAX_CHANNEL_STARTUP_FAILURE_CHANNEL_LENGTH,
+  MAX_CHANNEL_STARTUP_FAILURE_CODE_LENGTH,
+  MAX_CHANNEL_STARTUP_FAILURE_MESSAGE_LENGTH,
+  type ChannelStartupFailure,
+} from './channel-worker-startup-ipc.js';
 
-const DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS = 30_000;
 const DEFAULT_CHANNEL_WORKER_HEARTBEAT_TIMEOUT_MS = 45_000;
-const CHANNEL_WORKER_STOP_GRACE_MS = 10_000;
 const MAX_WORKER_LOG_LINE_LENGTH = 4096;
 const MAX_WORKER_LOG_BUFFER_LENGTH = 64 * 1024;
 const MAX_WORKER_LOG_DISCARDED_REMAINDER_LENGTH = MAX_WORKER_LOG_BUFFER_LENGTH;
-const ANSI_CSI_SEQUENCE_RE = new RegExp(
-  `${String.fromCharCode(0x1b)}\\[[0-?]*[ -/]*[@-~]`,
-  'g',
-);
-const WORKER_LOG_INVISIBLE_RE = /[\p{Cf}\u2028\u2029]|\p{Variation_Selector}/gu;
-// eslint-disable-next-line no-control-regex
-const WORKER_LOG_CONTROL_RE = /[\x00-\x08\x0a-\x1f\x7f]/g;
 
 export interface ChannelWorkerRestartPolicy {
   maxRestarts: number;
   windowMs: number;
   delaysMs: number[];
+}
+
+export class ChannelWorkerStopError extends Error {
+  constructor(message = 'Channel worker did not exit after SIGKILL.') {
+    super(message);
+    this.name = 'ChannelWorkerStopError';
+  }
+}
+
+export interface ChannelStartupAttemptFailure extends ChannelStartupFailure {
+  workspaceCwd: string;
+}
+
+export class ChannelWorkerStartupError extends Error {
+  readonly startupFailures: ChannelStartupAttemptFailure[];
+  readonly startupFailuresTruncated: boolean;
+
+  constructor(
+    message: string,
+    details: {
+      workspaceCwd: string;
+      startupFailures: readonly ChannelStartupFailure[];
+      startupFailuresTruncated?: boolean;
+    },
+  ) {
+    super(message);
+    this.name = 'ChannelWorkerStartupError';
+    this.startupFailures = details.startupFailures.map((failure) => ({
+      ...failure,
+      workspaceCwd: details.workspaceCwd,
+    }));
+    this.startupFailuresTruncated = details.startupFailuresTruncated === true;
+  }
 }
 
 const DEFAULT_RESTART_POLICY: ChannelWorkerRestartPolicy = {
@@ -74,6 +117,8 @@ export interface ChannelWorkerSnapshot {
   nextRestartAt?: string;
   lastHeartbeatAt?: string;
   staleHeartbeatAt?: string;
+  startupFailures?: ChannelStartupFailure[];
+  startupFailuresTruncated?: boolean;
 }
 
 export interface ChannelWorkerSupervisor {
@@ -99,6 +144,10 @@ export interface ChannelWorkerChild {
   kill(signal?: NodeJS.Signals | number): boolean;
   on(event: 'message', listener: (message: unknown) => void): this;
   removeListener(event: 'message', listener: (message: unknown) => void): this;
+  removeListener(
+    event: 'exit',
+    listener: (code: number | null, signal: NodeJS.Signals | null) => void,
+  ): this;
   once(event: 'message', listener: (message: unknown) => void): this;
   once(
     event: 'exit',
@@ -129,11 +178,6 @@ export interface WorkerLogStream {
   ): unknown;
   on(event: 'end' | 'close', listener: () => void): unknown;
   on(event: 'error', listener: (err: Error) => void): unknown;
-}
-
-interface WorkerLogRedactionOptions {
-  daemonToken?: string;
-  workerEnv: NodeJS.ProcessEnv;
 }
 
 export interface CreateChannelWorkerSupervisorOptions {
@@ -217,7 +261,7 @@ function requestedChannelNames(
 function workerLogRedactionOptions(
   daemonToken: string | undefined,
   workerEnv: NodeJS.ProcessEnv,
-): WorkerLogRedactionOptions {
+): WorkerDiagnosticRedactionOptions {
   return {
     ...(daemonToken ? { daemonToken } : {}),
     workerEnv,
@@ -226,13 +270,11 @@ function workerLogRedactionOptions(
 
 function sanitizeWorkerError(
   error: string,
-  redaction?: WorkerLogRedactionOptions,
+  redaction?: WorkerDiagnosticRedactionOptions,
 ): string {
-  const normalized = normalizeWorkerLogLineForRedaction(error);
-  const redacted = redaction
-    ? redactWorkerLogLine(normalized, redaction)
-    : normalized;
-  return Array.from(sanitizeLogText(redacted, 512)).slice(0, 512).join('');
+  return redaction
+    ? sanitizeWorkerDiagnostic(error, 512, redaction)
+    : sanitizeLogText(normalizeWorkerDiagnostic(error), 512);
 }
 
 function notifyExit(
@@ -274,15 +316,17 @@ function waitForExit(
 ): Promise<boolean> {
   return new Promise((resolve) => {
     let settled = false;
+    const onExit = () => done(true);
     const done = (exited: boolean) => {
       if (settled) return;
       settled = true;
-      if (timer) clearTimeout(timer);
+      clearTimeout(timer);
+      child.removeListener('exit', onExit);
       resolve(exited);
     };
     const timer = setTimeout(() => done(false), timeoutMs);
     timer.unref();
-    child.once('exit', () => done(true));
+    child.once('exit', onExit);
   });
 }
 
@@ -309,63 +353,6 @@ function createWorkerEnv(opts: {
   return env;
 }
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function sensitiveEnvValues(env: NodeJS.ProcessEnv): string[] {
-  const sensitiveKey =
-    /(^|_)(TOKEN|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL|PASSWORD|PASSWD|PASSPHRASE|BASIC_AUTH|AUTH_TOKEN|AUTHORIZATION|SESSION_SECRET|SESSION_TOKEN|SESSION_KEY|SESSION_COOKIE|DSN|CONNECTION_STRING)($|_)/i;
-  return Object.entries(env)
-    .filter(([key, value]) => sensitiveKey.test(key) && value !== undefined)
-    .flatMap(([, value]) => {
-      const lines = value!.split('\n').filter((l) => l.length >= 4);
-      return lines.length > 0 ? [value!, ...lines] : [value!];
-    })
-    .filter((value) => value.length >= 4);
-}
-
-function redactWorkerLogLine(
-  line: string,
-  opts: { daemonToken?: string; workerEnv: NodeJS.ProcessEnv },
-): string {
-  return createWorkerLogRedactor(opts)(line);
-}
-
-function createWorkerLogRedactor(opts: WorkerLogRedactionOptions) {
-  const secretPatterns = [
-    ...new Set([
-      ...(opts.daemonToken && opts.daemonToken.length >= 4
-        ? [opts.daemonToken]
-        : []),
-      ...sensitiveEnvValues(opts.workerEnv),
-    ]),
-  ]
-    .sort((a, b) => b.length - a.length)
-    .map((secret) => new RegExp(escapeRegExp(secret), 'g'));
-
-  return (line: string): string => {
-    let redacted = line.replace(
-      /\b([a-z][a-z0-9+.-]{0,31}:\/\/)([^\s/]*@)([^\s/]+)([^\s]*)/gi,
-      '$1<redacted>@$3$4',
-    );
-    for (const secretPattern of secretPatterns) {
-      redacted = redacted.replace(secretPattern, '<redacted>');
-    }
-    // Pattern-based redaction for runtime-acquired credentials (Bearer
-    // tokens, Authorization headers, API key prefixes, etc.) that are
-    // not in the worker's process.env.
-    return redactLogCredentials(redacted);
-  };
-}
-
-function normalizeWorkerLogLineForRedaction(line: string): string {
-  return line
-    .replace(ANSI_CSI_SEQUENCE_RE, '')
-    .replace(WORKER_LOG_INVISIBLE_RE, '')
-    .replace(WORKER_LOG_CONTROL_RE, '');
-}
-
 function attachWorkerLogStream(
   stream: WorkerLogStream | undefined,
   streamName: ChannelWorkerLogEntry['stream'],
@@ -379,13 +366,14 @@ function attachWorkerLogStream(
   let buffer = '';
   let discardingOversizedLineRemainder = false;
   let discardedOversizedLineRemainderLength = 0;
-  const redactWorkerLogLineForStream = createWorkerLogRedactor({
+  const redactWorkerLogLineForStream = createWorkerDiagnosticRedactor({
     ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
     workerEnv: opts.workerEnv,
   });
   const flushLine = (line: string) => {
+    const displayLine = line.replace(/\t/gu, ' ');
     const redacted = redactWorkerLogLineForStream(
-      normalizeWorkerLogLineForRedaction(line),
+      normalizeWorkerDiagnostic(displayLine),
     );
     notifyLog(opts.onLog, {
       stream: streamName,
@@ -491,6 +479,13 @@ export function createChannelWorkerSupervisor(
     channels: [...snapshot.channels],
     ...(snapshot.requestedChannels
       ? { requestedChannels: [...snapshot.requestedChannels] }
+      : {}),
+    ...(snapshot.startupFailures
+      ? {
+          startupFailures: snapshot.startupFailures.map((failure) => ({
+            ...failure,
+          })),
+        }
       : {}),
   });
 
@@ -630,7 +625,7 @@ export function createChannelWorkerSupervisor(
 
   const handleRestartFailure = (
     error: string,
-    redaction?: WorkerLogRedactionOptions,
+    redaction?: WorkerDiagnosticRedactionOptions,
   ) => {
     snapshot = {
       ...snapshot,
@@ -754,18 +749,29 @@ export function createChannelWorkerSupervisor(
         cleanupLaunch();
         if (terminatingBeforeReady) return;
         terminatingBeforeReady = true;
-        const exited = waitForExit(startedChild, 2_000);
+        const exited = waitForExit(startedChild, CHANNEL_WORKER_KILL_GRACE_MS);
         startedChild.kill('SIGTERM');
         void exited.then(async (didExit) => {
           if (!didExit && child === startedChild && !exitObserved) {
-            const killed = waitForExit(startedChild, 2_000);
+            const killed = waitForExit(
+              startedChild,
+              CHANNEL_WORKER_KILL_GRACE_MS,
+            );
             startedChild.kill('SIGKILL');
             if (!(await killed) && child === startedChild && !exitObserved) {
-              child = undefined;
-              if (kind === 'restart' && !stopping) {
-                scheduleRestart();
-                notifyExit(opts.onExit, snapshotCopy());
-              }
+              stopping = true;
+              notifyLog(opts.onLog, {
+                stream: 'stderr',
+                line: 'Channel worker did not exit after SIGKILL; automatic restart is disabled.',
+              });
+              snapshot = {
+                ...snapshot,
+                state: 'failed',
+                error:
+                  snapshot.error ??
+                  'Channel worker did not exit after SIGKILL.',
+              };
+              notifyExit(opts.onExit, snapshotCopy());
             }
           }
         });
@@ -779,6 +785,104 @@ export function createChannelWorkerSupervisor(
         } else {
           resolve();
         }
+      };
+      const startupError = (message: string): Error => {
+        const failures = snapshot.startupFailures;
+        return failures && failures.length > 0
+          ? new ChannelWorkerStartupError(message, {
+              workspaceCwd: opts.workspace,
+              startupFailures: failures,
+              ...(snapshot.startupFailuresTruncated
+                ? { startupFailuresTruncated: true }
+                : {}),
+            })
+          : new Error(message);
+      };
+      const failStartupProtocol = (detail: string) => {
+        if (settled || ready || child !== startedChild) return;
+        const error = sanitizeWorkerError(
+          `Channel worker startup IPC protocol error: ${detail}`,
+          redaction,
+        );
+        snapshot = { ...snapshot, state: 'failed', error };
+        failBeforeReady(startupError(error));
+        terminateBeforeReady();
+      };
+      const acknowledgeStartupReport = () => {
+        const send = startedChild.send;
+        if (!send) {
+          failStartupProtocol('acknowledgement is unavailable.');
+          return;
+        }
+        try {
+          send.call(
+            startedChild,
+            { type: 'channel_startup_report_ack' },
+            (err) => {
+              if (err) {
+                failStartupProtocol('acknowledgement failed.');
+              }
+            },
+          );
+        } catch {
+          failStartupProtocol('acknowledgement failed.');
+        }
+      };
+      const handleStartupReport = (message: unknown) => {
+        if (!isChannelStartupReportMessage(message)) {
+          failStartupProtocol('invalid startup report.');
+          return;
+        }
+        if (message.type === 'channel_startup_failures_truncated') {
+          if (
+            snapshot.startupFailuresTruncated ||
+            snapshot.startupFailures?.length !== MAX_CHANNEL_STARTUP_FAILURES
+          ) {
+            failStartupProtocol('invalid truncation marker.');
+            return;
+          }
+          snapshot = { ...snapshot, startupFailuresTruncated: true };
+          acknowledgeStartupReport();
+          return;
+        }
+        if (
+          snapshot.startupFailuresTruncated ||
+          (snapshot.startupFailures?.length ?? 0) >=
+            MAX_CHANNEL_STARTUP_FAILURES
+        ) {
+          failStartupProtocol('too many startup failures.');
+          return;
+        }
+        const safeChannel =
+          sanitizeWorkerDiagnostic(
+            message.failure.channel,
+            MAX_CHANNEL_STARTUP_FAILURE_CHANNEL_LENGTH,
+            redaction,
+          ) || '<unnamed>';
+        const safeMessage =
+          sanitizeWorkerDiagnostic(
+            message.failure.message,
+            MAX_CHANNEL_STARTUP_FAILURE_MESSAGE_LENGTH,
+            redaction,
+          ) || 'Channel connection failed.';
+        const safeCode = message.failure.code
+          ? sanitizeWorkerDiagnostic(
+              message.failure.code,
+              MAX_CHANNEL_STARTUP_FAILURE_CODE_LENGTH,
+              redaction,
+            )
+          : undefined;
+        const failure: ChannelStartupFailure = {
+          channel: safeChannel,
+          phase: 'connect',
+          ...(safeCode ? { code: safeCode } : {}),
+          message: safeMessage,
+        };
+        snapshot = {
+          ...snapshot,
+          startupFailures: [...(snapshot.startupFailures ?? []), failure],
+        };
+        acknowledgeStartupReport();
       };
       const completeReady = (message: {
         pid?: number;
@@ -829,7 +933,9 @@ export function createChannelWorkerSupervisor(
         if (settleWebhookTask(message)) {
           return;
         }
-        if (!ready && isReadyMessage(message)) {
+        if (!ready && isChannelStartupReportType(message)) {
+          handleStartupReport(message);
+        } else if (!ready && isReadyMessage(message)) {
           completeReady(message);
         } else if (isHeartbeatMessage(message)) {
           handleHeartbeat(message);
@@ -858,7 +964,7 @@ export function createChannelWorkerSupervisor(
           notifyExit(opts.onExit, snapshotCopy());
         }
         if (!settled) {
-          failBeforeReady(new Error(snapshot.error ?? message));
+          failBeforeReady(startupError(snapshot.error ?? message));
         }
       }
       function settleError(err: Error) {
@@ -878,23 +984,25 @@ export function createChannelWorkerSupervisor(
         };
         terminateBeforeReady();
         if (!settled) {
-          failBeforeReady(new Error(snapshot.error));
+          failBeforeReady(
+            startupError(snapshot.error ?? 'Channel worker failed to start.'),
+          );
         }
       }
       startupTimer = setTimeout(() => {
         const timeoutMs =
-          opts.startupTimeoutMs ?? DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS;
+          opts.startupTimeoutMs ?? CHANNEL_WORKER_STARTUP_TIMEOUT_MS;
         const error = `Channel worker did not become ready within ${timeoutMs}ms.`;
         snapshot = {
           ...snapshot,
           state: 'failed',
           error: sanitizeWorkerError(error, redaction),
         };
-        failBeforeReady(new Error(error));
+        failBeforeReady(startupError(error));
         if (child === startedChild) {
           terminateBeforeReady();
         }
-      }, opts.startupTimeoutMs ?? DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS);
+      }, opts.startupTimeoutMs ?? CHANNEL_WORKER_STARTUP_TIMEOUT_MS);
       startupTimer.unref();
       startedChild.on('message', handleMessage);
       startedChild.once('exit', settleExit);
@@ -907,7 +1015,15 @@ export function createChannelWorkerSupervisor(
       // `disposed` is latched only by killAllSync() (hard shutdown), so the
       // supported stop()/start() reuse lifecycle is preserved; this guard just
       // prevents a relaunch into a daemon that is being force-torn-down.
-      if (disposed || child) return;
+      if (disposed) return;
+      if (child) {
+        if (stopping) {
+          throw new ChannelWorkerStopError(
+            'Channel worker stop is not yet confirmed.',
+          );
+        }
+        return;
+      }
       stopping = false;
       clearRestartTimer();
       restartAttemptTimes = [];
@@ -930,22 +1046,20 @@ export function createChannelWorkerSupervisor(
         snapshot = { ...snapshot, state: 'stopped' };
         return;
       }
-      const exited = waitForExit(child, CHANNEL_WORKER_STOP_GRACE_MS);
+      const stoppingChild = child;
+      const exited = waitForExit(stoppingChild, CHANNEL_WORKER_STOP_GRACE_MS);
       stopping = true;
-      child.kill('SIGTERM');
-      if (!(await exited)) {
-        const killed = waitForExit(child, 2_000);
-        child.kill('SIGKILL');
+      stoppingChild.kill('SIGTERM');
+      if (!(await exited) && child === stoppingChild) {
+        const killed = waitForExit(stoppingChild, CHANNEL_WORKER_KILL_GRACE_MS);
+        stoppingChild.kill('SIGKILL');
         if (!(await killed)) {
-          child = undefined;
-          stopping = false;
           snapshot = {
             ...snapshot,
             state: 'failed',
-            signal: 'SIGKILL',
             error: 'Channel worker did not exit after SIGKILL.',
           };
-          return;
+          throw new ChannelWorkerStopError();
         }
       }
       child = undefined;

@@ -37,7 +37,7 @@ import {
   isFallbackEligible,
 } from '../utils/retryErrorClassification.js';
 import type { Config } from '../config/config.js';
-import type { ContentGenerator } from './contentGenerator.js';
+import type { ContentGenerator, InputModalities } from './contentGenerator.js';
 import {
   clampOutputTokensToWindow,
   defaultOutputCeiling,
@@ -69,6 +69,7 @@ import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
 import {
   resolveCompactionTuning,
   resolveSlimmingConfig,
+  slimCompactionInput,
 } from '../services/compactionInputSlimming.js';
 import {
   InMemoryImagePayloadStore,
@@ -101,9 +102,31 @@ import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
 import {
   collectToolCallIdsFromHistory,
   normalizeModelToolCallIds,
+  reserveModelToolCallId,
 } from './toolCallIdUtils.js';
+import {
+  getToolCallPreparations,
+  setToolCallPreparations,
+} from './tool-call-preparation.js';
+import { InvalidStreamError } from './invalid-stream-error.js';
+
+export { InvalidStreamError };
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
+// Gemini can emit this filler after tool results; filtering and validation
+// must stay in sync.
+const GEMINI_EMPTY_CONTENT_PLACEHOLDER = '(empty content)';
+
+function isToolCallPreparationOnly(response: GenerateContentResponse): boolean {
+  if (getToolCallPreparations(response).length === 0) return false;
+
+  const hasCandidateOutput = response.candidates?.some(
+    (candidate) =>
+      Boolean(candidate.finishReason) ||
+      (candidate.content?.parts?.length ?? 0) > 0,
+  );
+  return !hasCandidateOutput && !response.usageMetadata;
+}
 
 function syncFunctionCallsField(
   response: GenerateContentResponse,
@@ -292,16 +315,6 @@ export type StreamEvent =
   | { type: StreamEventType.COMPRESSED; info: ChatCompressionInfo }
   | { type: StreamEventType.MODEL_FALLBACK; info: ModelFallbackInfo };
 
-/**
- * Options for retrying due to invalid content from the model.
- */
-interface ContentRetryOptions {
-  /** Total number of attempts to make (1 initial + N retries). */
-  maxAttempts: number;
-  /** The base delay in milliseconds for linear backoff. */
-  initialDelayMs: number;
-}
-
 interface TryCompressOptions {
   originalTokenCountOverride?: number;
   trigger?: CompactTrigger;
@@ -332,20 +345,12 @@ interface TryCompressOptions {
   customInstructions?: string;
 }
 
-const INVALID_CONTENT_RETRY_OPTIONS: ContentRetryOptions = {
-  maxAttempts: 2, // 1 initial call + 1 retry
-  initialDelayMs: 500,
-};
-
-// Some providers occasionally return transient stream anomalies: either an
-// empty stream (usage metadata only, no candidates), a stream that finishes
-// normally but contains no usable text, or a stream cut off without a finish
-// reason. All are retried with an independent budget (similar to rate-limit
-// retries) so they do not consume each other's retry budgets.
+// Model-output validation errors (protocol tag leaks, malformed tool calls)
+// and transient stream anomalies (empty streams, no usable text, missing
+// finish reason) use an independent retry budget so they do not consume each
+// other's or HTTP retries' budgets.
 const INVALID_STREAM_RETRY_CONFIG = {
   transientMaxRetries: 4,
-  // Protocol-tag leaks are model-output validation failures, not the
-  // provider-side empty/truncated streams covered by issue #6670.
   protocolTagLeakMaxRetries: 2,
   initialDelayMs: 2000,
 };
@@ -1041,23 +1046,6 @@ function stripThoughtPartsFromContent(content: Content): Content | null {
   };
 }
 
-/**
- * Custom error to signal that a stream completed with invalid content,
- * which should trigger a retry.
- */
-export class InvalidStreamError extends Error {
-  readonly type: 'NO_FINISH_REASON' | 'NO_RESPONSE_TEXT' | 'PROTOCOL_TAG_LEAK';
-
-  constructor(
-    message: string,
-    type: 'NO_FINISH_REASON' | 'NO_RESPONSE_TEXT' | 'PROTOCOL_TAG_LEAK',
-  ) {
-    super(message);
-    this.name = 'InvalidStreamError';
-    this.type = type;
-  }
-}
-
 const PROTOCOL_TAG_PREFIXES = [
   '<analysis',
   '</analysis',
@@ -1656,6 +1644,16 @@ export class GeminiChat {
     return curatedHistory.map(copyContentContainer);
   }
 
+  private getRequestHistoryForRoute(
+    currentUserContent: Content | undefined,
+    supportedModalities: InputModalities,
+  ): Content[] {
+    return slimCompactionInput(
+      this.getRequestHistory(currentUserContent),
+      supportedModalities,
+    ).slimmedHistory;
+  }
+
   /**
    * Seed the last-prompt-token-count for chats created with inherited
    * history (forks, subagents, speculation). Without this, the auto-compress
@@ -1899,6 +1897,19 @@ export class GeminiChat {
     params: SendMessageParameters,
     prompt_id: string,
   ): Promise<AsyncGenerator<StreamEvent>> {
+    const fullTurnRoute = model.endsWith('\0');
+    const exactRoute = fullTurnRoute
+      ? await this.config
+          .getBaseLlmClient()
+          .resolveForModel(model.slice(0, -1), { failClosed: true })
+      : undefined;
+    if (exactRoute) {
+      model = exactRoute.model;
+    }
+    const requestModalities =
+      exactRoute?.contentGeneratorConfig.modalities ??
+      this.config.getEffectiveInputModalities();
+
     await this.sendPromise;
 
     let streamDoneResolver: () => void;
@@ -1933,7 +1944,9 @@ export class GeminiChat {
     // or QWEN_CODE_MAX_OUTPUT_TOKENS from user config), else
     // defaultOutputCeiling(model) (the model's output limit clipped to
     // OUTPUT_TOKEN_CEILING).
-    const cgConfigForThresholds = this.config.getContentGeneratorConfig();
+    const cgConfigForThresholds =
+      exactRoute?.contentGeneratorConfig ??
+      this.config.getContentGeneratorConfig();
     const parsedEnvMaxTokensForClamp = parsePositiveIntegerEnvValue(
       process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
     );
@@ -2009,7 +2022,9 @@ export class GeminiChat {
       );
       const isHardTier = effectiveTokens >= hard;
       const shouldForceFromHard =
-        isHardTier && this.hardRescueFailureCount < MAX_CONSECUTIVE_FAILURES;
+        !exactRoute &&
+        isHardTier &&
+        this.hardRescueFailureCount < MAX_CONSECUTIVE_FAILURES;
       const historyBeforeHardRescue = shouldForceFromHard
         ? this.getHistoryShallow()
         : undefined;
@@ -2020,13 +2035,13 @@ export class GeminiChat {
         debugLogger.warn(
           `[compaction] hard-tier rescue triggered: prompt_id=${prompt_id}, effectiveTokens=${effectiveTokens}, hard=${hard}, hardRescueAttempt=${this.hardRescueFailureCount + 1}, consecutiveFailures=${this.consecutiveFailures}.`,
         );
-      } else if (isHardTier) {
+      } else if (isHardTier && !exactRoute) {
         debugLogger.warn(
           `[compaction] hard-tier rescue skipped after ${this.hardRescueFailureCount} failed attempts; relying on reactive overflow recovery. prompt_id=${prompt_id}, effectiveTokens=${effectiveTokens}, hard=${hard}.`,
         );
       }
 
-      if (isHardTier && !shouldForceFromHard) {
+      if (exactRoute || (isHardTier && !shouldForceFromHard)) {
         compressionInfo = {
           originalTokenCount: effectiveTokens,
           newTokenCount: effectiveTokens,
@@ -2151,7 +2166,10 @@ export class GeminiChat {
               .join(', '),
         );
       }
-      requestContents = this.getRequestHistory(currentUserContent);
+      requestContents = this.getRequestHistoryForRoute(
+        currentUserContent,
+        requestModalities,
+      );
 
       // Window-clamp the output request AFTER compression has settled the
       // history: max_tokens = min(ceiling, window − prompt − margin), floored
@@ -2240,7 +2258,16 @@ export class GeminiChat {
         let streamYieldedAnyChunk = false;
 
         // Read per-config overrides; fall back to built-in defaults.
-        const cgConfig = self.config.getContentGeneratorConfig();
+        const cgConfig =
+          exactRoute?.contentGeneratorConfig ??
+          self.config.getContentGeneratorConfig();
+        const requestOverrides = exactRoute
+          ? {
+              contentGenerator: exactRoute.contentGenerator,
+              retryAuthType: exactRoute.retryAuthType,
+              retryErrorCodes: exactRoute.retryErrorCodes,
+            }
+          : undefined;
         const maxRateLimitRetries =
           cgConfig?.maxRetries ?? RATE_LIMIT_RETRY_OPTIONS.maxRetries;
         const extraRetryErrorCodes = cgConfig?.retryErrorCodes;
@@ -2255,20 +2282,26 @@ export class GeminiChat {
           (cgConfig?.samplingParams?.max_tokens !== undefined &&
             cgConfig?.samplingParams?.max_tokens !== null) ||
           parsedEnvMaxTokens !== undefined;
+        // params.config.maxOutputTokens is set by the first-send clamp; the
+        // outputCeiling fallback is defensive and should not fire in practice.
+        const effectiveInitialMaxOutputTokens =
+          params.config?.maxOutputTokens ?? outputCeiling;
+        const escalatedLimit = clampOutputTokensToWindow(
+          OUTPUT_TOKEN_CEILING,
+          contextWindowForClamp,
+          promptTokensForClamp,
+        );
+        const shouldEscalateMaxOutputTokens =
+          effectiveInitialMaxOutputTokens < escalatedLimit;
 
         let lastFinishReason: string | undefined;
 
-        for (
-          let attempt = 0;
-          attempt < INVALID_CONTENT_RETRY_OPTIONS.maxAttempts;
-          attempt++
-        ) {
+        for (;;) {
           let streamYieldedChunk = false;
           try {
             if (suppressNextRetryEvent) {
               suppressNextRetryEvent = false;
             } else if (
-              attempt > 0 ||
               rateLimitRetryCount > 0 ||
               totalInvalidStreamRetryCount() > 0 ||
               transportStreamRetryCount > 0
@@ -2281,12 +2314,15 @@ export class GeminiChat {
               requestContents,
               params,
               prompt_id,
+              requestOverrides,
             );
 
             lastFinishReason = undefined;
             for await (const chunk of stream) {
-              streamYieldedChunk = true;
-              streamYieldedAnyChunk = true;
+              if (!isToolCallPreparationOnly(chunk)) {
+                streamYieldedChunk = true;
+                streamYieldedAnyChunk = true;
+              }
               const fr = chunk.candidates?.[0]?.finishReason;
               if (fr) lastFinishReason = fr;
               yield { type: StreamEventType.CHUNK, value: chunk };
@@ -2355,8 +2391,6 @@ export class GeminiChat {
                     skipDelay: skip,
                   },
                 };
-                // Don't count rate-limit retries against the content retry limit
-                attempt--;
                 await delayPromise;
                 continue;
               }
@@ -2400,8 +2434,6 @@ export class GeminiChat {
               });
               yield { type: StreamEventType.RETRY };
               suppressNextRetryEvent = true;
-              // Don't count transport retries against the content retry limit.
-              attempt--;
               await delay(delayMs, params.config?.abortSignal).promise;
               continue;
             }
@@ -2423,12 +2455,12 @@ export class GeminiChat {
 
             const contextOverflow = getContextLengthExceededInfo(error);
             if (contextOverflow.isExceeded) {
-              if (!reactiveCompressionAttempted) {
+              if (!exactRoute && !reactiveCompressionAttempted) {
                 reactiveCompressionAttempted = true;
                 const reactiveOriginalTokenCount =
                   contextOverflow.actualTokens ??
                   contextOverflow.limitTokens ??
-                  self.config.getContentGeneratorConfig()?.contextWindowSize ??
+                  cgConfig?.contextWindowSize ??
                   DEFAULT_TOKEN_LIMIT;
                 debugLogger.warn(
                   'Context length exceeded; attempting reactive compression.',
@@ -2455,8 +2487,10 @@ export class GeminiChat {
                     // tryCompress stops resetting it.
                     self.popPendingPartialAssistantTurn();
 
-                    requestContents =
-                      self.getRequestHistory(currentUserContent);
+                    requestContents = self.getRequestHistoryForRoute(
+                      currentUserContent,
+                      requestModalities,
+                    );
                     debugLogger.info(
                       `Reactive compression succeeded: ` +
                         `${reactiveInfo.originalTokenCount} -> ` +
@@ -2468,9 +2502,6 @@ export class GeminiChat {
                     };
                     yield { type: StreamEventType.RETRY };
                     suppressNextRetryEvent = true;
-                    // Do not count reactive compression against the content
-                    // validation retry budget.
-                    attempt--;
                     continue;
                   }
 
@@ -2518,8 +2549,20 @@ export class GeminiChat {
               break;
             }
 
-            // Invalid stream responses use an independent retry budget and do
-            // not consume the content retry budget.
+            if (
+              error instanceof InvalidStreamError &&
+              error.type === 'NO_TOOL_RESULT_PROGRESS_MAX_TOKENS' &&
+              !maxTokensEscalated &&
+              !hasUserMaxTokensOverride &&
+              shouldEscalateMaxOutputTokens
+            ) {
+              lastError = null;
+              lastFinishReason = FinishReason.MAX_TOKENS;
+              break;
+            }
+
+            // Invalid stream responses use INVALID_STREAM_RETRY_CONFIG, which
+            // is independent from HTTP retries handled by retryWithBackoff.
             const isInvalidStreamError = error instanceof InvalidStreamError;
             const maxInvalidStreamRetries =
               isInvalidStreamError && error.type === 'PROTOCOL_TAG_LEAK'
@@ -2558,45 +2601,8 @@ export class GeminiChat {
                 ),
               );
               yield { type: StreamEventType.RETRY };
-              // Don't count transient retries against content retry limit.
-              attempt--;
               await delay(delayMs, params.config?.abortSignal).promise;
               continue;
-            }
-            // Invalid-stream budget exhausted — stop immediately.
-            if (isInvalidStreamError) {
-              break;
-            }
-
-            // Currently unreachable for `InvalidStreamError`. The
-            // `isContentError` predicate is identical to
-            // `isInvalidStreamError` (`error instanceof InvalidStreamError`),
-            // and the transient branch above already either continued or
-            // broke for that class. The branch is preserved as
-            // defense-in-depth: a future error class that should consume
-            // its own content-retry budget but NOT the transient one
-            // could be threaded through here without re-deriving the
-            // popPartialIfPushed sequence. No reachable test path until
-            // the predicates diverge.
-            const isContentError = error instanceof InvalidStreamError;
-            if (isContentError) {
-              if (attempt < INVALID_CONTENT_RETRY_OPTIONS.maxAttempts - 1) {
-                self.popPendingPartialAssistantTurn();
-                logContentRetry(
-                  self.config,
-                  new ContentRetryEvent(
-                    attempt,
-                    (error as InvalidStreamError).type,
-                    INVALID_CONTENT_RETRY_OPTIONS.initialDelayMs,
-                    model,
-                  ),
-                );
-                await delay(
-                  INVALID_CONTENT_RETRY_OPTIONS.initialDelayMs * (attempt + 1),
-                  params.config?.abortSignal,
-                ).promise;
-                continue;
-              }
             }
             break;
           }
@@ -2671,15 +2677,16 @@ export class GeminiChat {
                 attemptState.requestContents,
                 attemptState.params,
                 prompt_id,
+                requestOverrides,
               );
               for await (const chunk of stream) {
                 yield { type: StreamEventType.CHUNK, value: chunk };
               }
               return;
             } catch (error) {
+              attemptState.rollback();
               if (!(error instanceof InvalidStreamError)) throw error;
 
-              attemptState.rollback();
               const maxContinuationRetries =
                 error.type === 'PROTOCOL_TAG_LEAK'
                   ? INVALID_STREAM_RETRY_CONFIG.protocolTagLeakMaxRetries
@@ -2721,19 +2728,6 @@ export class GeminiChat {
             }
           }
         };
-        // params.config.maxOutputTokens is always set by the first-send clamp
-        // above; the `?? outputCeiling` is a defensive fallback that never
-        // fires in practice.
-        const effectiveInitialMaxOutputTokens =
-          params.config?.maxOutputTokens ?? outputCeiling;
-        const escalatedLimit = clampOutputTokensToWindow(
-          OUTPUT_TOKEN_CEILING,
-          contextWindowForClamp,
-          promptTokensForClamp,
-        );
-        const shouldEscalateMaxOutputTokens =
-          effectiveInitialMaxOutputTokens < escalatedLimit;
-
         if (
           lastError === null &&
           lastFinishReason === FinishReason.MAX_TOKENS &&
@@ -2868,7 +2862,10 @@ export class GeminiChat {
                   )
                 : 0;
             self.history.push(recoveryUserContent);
-            const recoveryContents = self.getRequestHistory(currentUserContent);
+            const recoveryContents = self.getRequestHistoryForRoute(
+              currentUserContent,
+              requestModalities,
+            );
             self.history.pop();
             const walkRecoveryEstimate =
               estimateContentTokens(
@@ -2901,7 +2898,10 @@ export class GeminiChat {
                 () => {
                   self.history.push(recoveryUserContent);
                   return {
-                    requestContents: self.getRequestHistory(currentUserContent),
+                    requestContents: self.getRequestHistoryForRoute(
+                      currentUserContent,
+                      requestModalities,
+                    ),
                     params: iterationParams,
                     rollback: rollbackRecoveryAttempt,
                   };
@@ -2980,7 +2980,9 @@ export class GeminiChat {
           // - Maximum 3 fallback transitions (capped by config normalization).
           // - Fallback is only for capacity/availability errors (429/503/529),
           //   not for auth/billing/client errors.
-          const fallbackModels = self.config.getModelFallbacks();
+          const fallbackModels = exactRoute
+            ? []
+            : self.config.getModelFallbacks();
 
           if (
             fallbackModels.length > 0 &&
@@ -3017,6 +3019,7 @@ export class GeminiChat {
                 let fallbackRetryAuthType: string | undefined;
                 let fallbackRetryErrorCodes: readonly number[] | undefined;
                 let resolvedFallbackModel: string;
+                let fallbackModalities: InputModalities | undefined;
                 try {
                   const resolved = await self.config
                     .getBaseLlmClient()
@@ -3025,6 +3028,8 @@ export class GeminiChat {
                   fallbackRetryAuthType = resolved.retryAuthType;
                   fallbackRetryErrorCodes = resolved.retryErrorCodes;
                   resolvedFallbackModel = resolved.model;
+                  fallbackModalities =
+                    resolved.contentGeneratorConfig?.modalities;
                 } catch (resolveError) {
                   if (isAbortError(resolveError)) throw resolveError;
                   const resolveErrorMessage =
@@ -3076,17 +3081,27 @@ export class GeminiChat {
                 // Run the fallback model through the existing API-call wiring.
                 let currentFallbackYieldedAnyChunk = false;
                 try {
+                  const fallbackRequestContents =
+                    self.getRequestHistoryForRoute(
+                      currentUserContent,
+                      fallbackModalities ?? {},
+                    );
                   for await (const event of self.makeFallbackStream(
                     resolvedFallbackModel,
-                    requestContents,
+                    fallbackRequestContents,
                     params,
                     prompt_id,
                     fallbackGenerator,
                     fallbackRetryAuthType,
                     fallbackRetryErrorCodes,
                   )) {
-                    currentFallbackYieldedAnyChunk = true;
-                    fallbackStreamYieldedAnyChunk = true;
+                    const emittedUserVisibleOutput =
+                      event.type !== StreamEventType.CHUNK ||
+                      !isToolCallPreparationOnly(event.value);
+                    if (emittedUserVisibleOutput) {
+                      currentFallbackYieldedAnyChunk = true;
+                      fallbackStreamYieldedAnyChunk = true;
+                    }
                     yield event;
                   }
 
@@ -3643,6 +3658,7 @@ export class GeminiChat {
     const allModelParts: Part[] = [];
     const usedToolCallIds = collectToolCallIdsFromHistory(this.history);
     const rawToolCallIdsInCurrentTurn = new Set<string>();
+    const reservedToolCallIds = new Map<string, string>();
     let usageMetadata: GenerateContentResponseUsageMetadata | undefined;
     let coercedUsage:
       | {
@@ -3658,6 +3674,11 @@ export class GeminiChat {
     let hasFinishReason = false;
     const protocolTagDetector = new LeadingProtocolTagLeakDetector();
     let protocolTextWasSuppressed = false;
+    const currentUserTurn = this.history[this.history.length - 1];
+    const isToolResultContinuation =
+      currentUserTurn?.role === 'user' &&
+      currentUserTurn.parts?.some((part) => part.functionResponse) === true;
+    let deferredFinishReason: FinishReason | undefined;
     // Captured if the upstream stream throws mid-iteration (typical on weak
     // networks: SSE drops between `content_block_stop` of a tool_use and the
     // terminal `message_stop`). We still build / record / push a partial
@@ -3668,6 +3689,21 @@ export class GeminiChat {
 
     try {
       for await (const chunk of streamResponse) {
+        const preparations = getToolCallPreparations(chunk);
+        if (preparations.length > 0) {
+          setToolCallPreparations(
+            chunk,
+            preparations.map((preparation) => ({
+              ...preparation,
+              callId: reserveModelToolCallId(
+                preparation.callId,
+                usedToolCallIds,
+                reservedToolCallIds,
+              ),
+            })),
+          );
+        }
+
         // Use ||= to avoid later usage-only chunks (no candidates) overwriting
         // a finishReason that was already seen in an earlier chunk.
         hasFinishReason ||=
@@ -3679,6 +3715,13 @@ export class GeminiChat {
           const content = candidate?.content;
           if (content?.parts) {
             content.parts = content.parts.flatMap((part) => {
+              if (
+                isToolResultContinuation &&
+                !part.thought &&
+                part.text?.trim() === GEMINI_EMPTY_CONTENT_PLACEHOLDER
+              ) {
+                return [];
+              }
               if (typeof part.text !== 'string' || part.thought) return [part];
               const text = protocolTagDetector.accept(part.text);
               if (text) return [{ ...part, text }];
@@ -3696,6 +3739,7 @@ export class GeminiChat {
               content.parts,
               usedToolCallIds,
               rawToolCallIdsInCurrentTurn,
+              reservedToolCallIds,
             );
             syncFunctionCallsField(chunk, content.parts);
 
@@ -3781,6 +3825,17 @@ export class GeminiChat {
           }
         }
 
+        if (isToolResultContinuation) {
+          // Do not let consumers commit Finished before post-stream validation
+          // can reject a semantically empty continuation.
+          for (const candidate of chunk.candidates ?? []) {
+            if (candidate.finishReason) {
+              deferredFinishReason ??= candidate.finishReason;
+              delete candidate.finishReason;
+            }
+          }
+        }
+
         if (!protocolTextWasSuppressed || !protocolTagDetector.blockingOutput) {
           yield chunk;
         }
@@ -3843,17 +3898,29 @@ export class GeminiChat {
     // 1. There's a tool call (tool calls can end without explicit finish reasons), OR
     // 2. There's a finish reason AND we have non-empty response text or thought text
     //
-    // Note: Thoughts-only responses are valid for models that use thinking modes.
+    // Thought-only responses remain valid for ordinary user turns. After a tool
+    // result, they do not advance the agent without text or another tool call.
     const hasAnyContent = contentText || thoughtText;
+    const lacksVisibleToolResultProgress =
+      isToolResultContinuation &&
+      (!contentText || contentText === GEMINI_EMPTY_CONTENT_PLACEHOLDER);
     if (
       streamError === null &&
       !hasToolCall &&
-      (!hasFinishReason || !hasAnyContent)
+      (!hasFinishReason || !hasAnyContent || lacksVisibleToolResultProgress)
     ) {
       if (!hasFinishReason) {
         throw new InvalidStreamError(
           'Model stream ended without a finish reason.',
           'NO_FINISH_REASON',
+        );
+      }
+      if (lacksVisibleToolResultProgress) {
+        throw new InvalidStreamError(
+          'Model stream ended after a tool result without visible progress.',
+          deferredFinishReason === FinishReason.MAX_TOKENS
+            ? 'NO_TOOL_RESULT_PROGRESS_MAX_TOKENS'
+            : 'NO_TOOL_RESULT_PROGRESS',
         );
       }
       throw new InvalidStreamError(
@@ -3987,6 +4054,12 @@ export class GeminiChat {
         ...consolidatedHistoryParts,
       ],
     });
+    if (deferredFinishReason) {
+      yield {
+        candidates: [{ finishReason: deferredFinishReason }],
+        usageMetadata,
+      } as GenerateContentResponse;
+    }
   }
 
   /**

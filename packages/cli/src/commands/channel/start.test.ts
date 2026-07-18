@@ -14,7 +14,10 @@ const mockStorageGetGlobalQwenDir = vi.hoisted(() =>
   vi.fn(() => '/tmp/qwen-home'),
 );
 const mockReadChannelMemory = vi.hoisted(() => vi.fn());
-const mockAppendChannelMemory = vi.hoisted(() => vi.fn());
+const mockListChannelMemoryEntries = vi.hoisted(() => vi.fn());
+const mockAddChannelMemoryEntries = vi.hoisted(() => vi.fn());
+const mockUpdateChannelMemoryEntry = vi.hoisted(() => vi.fn());
+const mockRemoveChannelMemoryEntries = vi.hoisted(() => vi.fn());
 const mockClearChannelMemory = vi.hoisted(() => vi.fn());
 const mockParseCron = vi.hoisted(() => vi.fn());
 const mockNextFireTime = vi.hoisted(() =>
@@ -101,12 +104,15 @@ vi.mock('undici', () => ({
 }));
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
-  appendChannelMemory: mockAppendChannelMemory,
+  addChannelMemoryEntries: mockAddChannelMemoryEntries,
   clearChannelMemory: mockClearChannelMemory,
+  listChannelMemoryEntries: mockListChannelMemoryEntries,
   nextFireTime: mockNextFireTime,
   normalizeProxyUrl: mockNormalizeProxyUrl,
   parseCron: mockParseCron,
   readChannelMemory: mockReadChannelMemory,
+  removeChannelMemoryEntries: mockRemoveChannelMemoryEntries,
+  updateChannelMemoryEntry: mockUpdateChannelMemoryEntry,
   Storage: {
     getGlobalQwenDir: mockStorageGetGlobalQwenDir,
   },
@@ -865,9 +871,12 @@ describe('startCommand.handler', () => {
       expect.any(Object),
       expect.objectContaining({
         channelMemory: {
-          appendChannelMemory: mockAppendChannelMemory,
-          clearChannelMemory: mockClearChannelMemory,
           readChannelMemory: mockReadChannelMemory,
+          listChannelMemoryEntries: mockListChannelMemoryEntries,
+          addChannelMemoryEntries: mockAddChannelMemoryEntries,
+          updateChannelMemoryEntry: mockUpdateChannelMemoryEntry,
+          removeChannelMemoryEntries: mockRemoveChannelMemoryEntries,
+          clearChannelMemory: mockClearChannelMemory,
         },
         memoryIntentClassifier: expect.objectContaining({
           classifyChannelMemoryIntent: expect.any(Function),
@@ -903,9 +912,12 @@ describe('startCommand.handler', () => {
       expect.any(Object),
       expect.objectContaining({
         channelMemory: {
-          appendChannelMemory: mockAppendChannelMemory,
-          clearChannelMemory: mockClearChannelMemory,
           readChannelMemory: mockReadChannelMemory,
+          listChannelMemoryEntries: mockListChannelMemoryEntries,
+          addChannelMemoryEntries: mockAddChannelMemoryEntries,
+          updateChannelMemoryEntry: mockUpdateChannelMemoryEntry,
+          removeChannelMemoryEntries: mockRemoveChannelMemoryEntries,
+          clearChannelMemory: mockClearChannelMemory,
         },
         memoryIntentClassifier: expect.objectContaining({
           classifyChannelMemoryIntent: expect.any(Function),
@@ -919,9 +931,12 @@ describe('startCommand.handler', () => {
       expect.any(Object),
       expect.objectContaining({
         channelMemory: {
-          appendChannelMemory: mockAppendChannelMemory,
-          clearChannelMemory: mockClearChannelMemory,
           readChannelMemory: mockReadChannelMemory,
+          listChannelMemoryEntries: mockListChannelMemoryEntries,
+          addChannelMemoryEntries: mockAddChannelMemoryEntries,
+          updateChannelMemoryEntry: mockUpdateChannelMemoryEntry,
+          removeChannelMemoryEntries: mockRemoveChannelMemoryEntries,
+          clearChannelMemory: mockClearChannelMemory,
         },
       }),
     );
