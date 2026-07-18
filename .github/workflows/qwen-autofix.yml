@@ -114,8 +114,9 @@ env:
   # need dozens of feedback rounds — that is the point of takeover — so the
   # unattended cap (MAX_ROUNDS) would strangle it. The circuit breaker stays
   # (a bot↔review-bot ping-pong is still bounded), it is just sized for
-  # explicitly delegated work; removing the label restores the strict cap.
-  TAKEOVER_MAX_ROUNDS: '50'
+  # explicitly delegated work; removing the label restores the strict cap,
+  # and re-engaging opens a fresh counting window (see REARM_TS below).
+  TAKEOVER_MAX_ROUNDS: '100'
   # Do not claim more issues when too many existing autofix PRs are still open.
   MAX_OPEN_AUTOFIX_PRS: '5'
 
@@ -1154,7 +1155,16 @@ jobs:
           fi
           if [[ "${CMD}" == 'add' ]]; then
             if [[ "${HAS}" == 'true' ]]; then
-              echo "ℹ️ #${PR} already carries ${TAKEOVER_LABEL} — nothing to do"
+              # Already managed: repeating the command is the ROUND-COUNTER
+              # RESET. A fresh engage ack starts a new counting window (only
+              # markers newer than the latest ack count toward the cap), so
+              # a PR that exhausted its rounds continues under management —
+              # no label churn needed. The watermark is untouched: feedback
+              # already addressed is never replayed.
+              gh pr comment "${PR}" --repo "${REPO}" --body "🔄 Takeover re-armed: the round counter starts a fresh window (previous rounds no longer count toward the cap); management continues. / 已重新武装：轮次计数开启新窗口（此前轮次不再计入上限），托管继续。
+
+          <!-- takeover-ack engaged -->"
+              echo "🔄 re-armed ${TAKEOVER_LABEL} window on #${PR}"
             else
               gh pr edit "${PR}" --repo "${REPO}" --add-label "${TAKEOVER_LABEL}"
               echo "🏷️ applied ${TAKEOVER_LABEL} to #${PR}"
@@ -1384,14 +1394,27 @@ jobs:
             # Inserting or reordering a field here or at any write site silently
             # corrupts round tracking; keep the `ts= acted= round=` order in lockstep.
             MARKERS="$(jq -c --arg ab "${AUTOFIX_BOT}" '
-              [ .[] | select((.user.login // "") == $ab) | (.body // "")
+              [ .[] | select((.user.login // "") == $ab)
+                | .created_at as $at | (.body // "")
                 | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+) -->") ] | .[]
-                | {ts: .[0], round: (.[2] | tonumber)} ]' "${WORKDIR}/ic.json")"
+                | {ts: .[0], round: (.[2] | tonumber), at: $at} ]' "${WORKDIR}/ic.json")"
+            # The watermark is GLOBAL across all markers — feedback already
+            # evaluated stays evaluated, no matter how counting windows move.
             EVAL_WM="$(jq -r 'map(.ts) | max // ""' <<< "${MARKERS}")"
-            # Highest round across markers, not last-by-ts: a terminal handoff
-            # marker (round = MAX_ROUNDS) must make the scan skip regardless of its
-            # timestamp, and normal rounds increase monotonically anyway.
-            ROUND="$(jq -r 'map(.round) | max // 0' <<< "${MARKERS}")"
+            # ROUND counting is windowed by the latest takeover engage ack:
+            # re-engaging (label off→on, or the command on an already-managed
+            # PR) posts a fresh '<!-- takeover-ack engaged -->' comment, and
+            # only eval markers NEWER than it count toward the cap — that ack
+            # IS the round-counter reset, human-visible and auditable. A PR
+            # never taken over has no ack, so every marker counts (strict
+            # lifetime cap, unchanged behavior). Within a window the highest
+            # round wins, not last-by-ts: a terminal handoff marker must make
+            # the scan skip regardless of its timestamp.
+            REARM_TS="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+              [ .[] | select((.user.login // "") == $ab)
+                | select((.body // "") | contains("<!-- takeover-ack engaged -->"))
+                | .created_at ] | max // ""' "${WORKDIR}/ic.json")"
+            ROUND="$(jq -r --arg rt "${REARM_TS}" 'map(select((.at // "") > $rt)) | map(.round) | max // 0' <<< "${MARKERS}")"
 
             # Effective watermark = what the agent has actually evaluated (its last
             # eval marker's newest-feedback timestamp), NOT the last push. A bot
@@ -1408,6 +1431,24 @@ jobs:
 
             if [[ "${ROUND}" -ge "${EFF_MAX_ROUNDS}" ]]; then
               echo "🚧 #${PR}: hit the round cap (${ROUND}/${EFF_MAX_ROUNDS}) — leaving for a human"
+              # A MANAGED PR pausing at its cap deserves a visible reminder —
+              # maintainers otherwise learn about it only from workflow logs.
+              # Once per counting window: re-arming opens a fresh window and,
+              # if the cap is hit again, a fresh reminder. A failed post
+              # retries naturally on the next scan (marker still absent).
+              if [[ "${HAS_TAKEOVER}" == "true" ]]; then
+                CAP_NOTICED="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg rt "${REARM_TS}" '
+                  [ .[] | select((.user.login // "") == $ab)
+                    | select((.body // "") | contains("<!-- takeover-cap-reached -->"))
+                    | select((.created_at // "") > $rt) ] | length' "${WORKDIR}/ic.json")"
+                if [[ "${CAP_NOTICED}" == "0" ]]; then
+                  if ! gh pr comment "${PR}" --repo "${REPO}" --body "⏸️ Takeover paused: this PR reached its round cap (${ROUND}/${EFF_MAX_ROUNDS}). Comment \\`${TAKEOVER_COMMAND}\\` to re-arm a fresh window and continue management, or \\`${TAKEOVER_COMMAND} stop\\` to release. / 托管已暂停：本 PR 达到轮次上限（${ROUND}/${EFF_MAX_ROUNDS}）。评论 \\`${TAKEOVER_COMMAND}\\` 可重新武装、开启新窗口继续托管；或评论 \\`${TAKEOVER_COMMAND} stop\\` 释放。
+
+            <!-- takeover-cap-reached -->"; then
+                    echo "::warning::cap-paused notice failed for #${PR}; will retry next scan"
+                  fi
+                fi
+              fi
               continue
             fi
             N_FAILED_CHECKS="$(jq --arg wm "${EFF_WM}" '
@@ -1700,10 +1741,20 @@ jobs:
           # is a stale duplicate and discards itself.
           STALE='false'
           LIVE_MARKS="$(jq -r --arg ab "${AUTOFIX_BOT}" '
-            [ .[] | select((.user.login // "") == $ab) | (.body // "")
-              | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+) -->") ] | .[] ]' "${WORKDIR}/ic.json")"
-          LIVE_EVAL_WM="$(jq -r 'map(.[0]) | max // ""' <<< "${LIVE_MARKS}")"
-          LIVE_MAX_ROUND="$(jq -r 'map(.[2] | tonumber) | max // 0' <<< "${LIVE_MARKS}")"
+            [ .[] | select((.user.login // "") == $ab)
+              | .created_at as $at | (.body // "")
+              | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+) -->") ] | .[]
+              | {ts: .[0], round: (.[2] | tonumber), at: $at} ]' "${WORKDIR}/ic.json")"
+          LIVE_EVAL_WM="$(jq -r 'map(.ts) | max // ""' <<< "${LIVE_MARKS}")"
+          # Round counting mirrors the scan: windowed by the latest takeover
+          # engage ack (the round-counter reset), so a re-engaged PR's stale
+          # pre-reset markers can neither trip the cap nor inflate the live
+          # round here.
+          LIVE_REARM_TS="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+            [ .[] | select((.user.login // "") == $ab)
+              | select((.body // "") | contains("<!-- takeover-ack engaged -->"))
+              | .created_at ] | max // ""' "${WORKDIR}/ic.json")"
+          LIVE_MAX_ROUND="$(jq -r --arg rt "${LIVE_REARM_TS}" 'map(select((.at // "") > $rt)) | map(.round) | max // 0' <<< "${LIVE_MARKS}")"
           if [[ -n "${LIVE_EVAL_WM}" && "${CONFLICT}" != "true" ]] \
             && { [[ "${LIVE_EVAL_WM}" > "${WATERMARK}" ]] || [[ "${LIVE_MAX_ROUND}" -gt "${ROUND}" ]]; }; then
             LIVE_NEW="$(jq -rs \
