@@ -45,7 +45,7 @@ interface ObservedChannelContactObservation {
 - A threaded group message also records the topic from `threadId` and the observed user inside that topic.
 - A user seen only in groups does not appear in top-level `users`. If the same user also sends a direct message, it appears both at the top level and under the relevant groups.
 - `groups[].users` and `groups[].topics[].users` mean users observed in those conversations. They are not authoritative platform membership lists.
-- Sender labels use the sanitized inbound display name, falling back to the complete user ID. The current common envelope has no portable group/topic display name, so those labels fall back to their complete IDs.
+- Sender labels use the sanitized inbound display name, falling back to the complete user ID. Group labels use a sanitized name when the accepted inbound envelope supplies one; DingTalk maps `conversationTitle` and Telegram maps `chat.title`. Feishu and WeCom group labels, and all topic labels, fall back to their complete IDs.
 
 Feishu maps `root_id` to `threadId`; Telegram maps `message_thread_id` to `threadId`. Current DingTalk and WeCom envelopes do not expose a stable topic identifier, so their observations stop at the group level.
 
