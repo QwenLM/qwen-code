@@ -658,6 +658,20 @@ interface CronQueueItem {
 
 const MAX_NOTIFICATION_QUEUE = 20;
 
+export function isExistingFile(
+  resolved: string,
+  fileExists: (path: string) => boolean = existsSync,
+  statFile: (
+    path: string,
+  ) => Pick<ReturnType<typeof statSync>, 'isFile'> = statSync,
+): boolean {
+  try {
+    return fileExists(resolved) && statFile(resolved).isFile();
+  } catch {
+    return false;
+  }
+}
+
 export function resolveHomeLoopResolverRoots({
   homeQwenDir = Storage.getGlobalQwenDir(),
   homeDir = os.homedir(),
@@ -5971,8 +5985,7 @@ export class Session implements SessionContext {
             if (
               path.isAbsolute(pathSpec) &&
               getSpecificMimeType(resolved)?.startsWith('image/') &&
-              existsSync(resolved) &&
-              statSync(resolved).isFile() &&
+              isExistingFile(resolved) &&
               this.config
                 .getWorkspaceContext()
                 .isPathWithinWorkspace(pathSpec) &&

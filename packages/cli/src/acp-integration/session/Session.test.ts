@@ -12,6 +12,7 @@ import * as path from 'node:path';
 import {
   computeInitialTurnFromHistory,
   fireSessionPermissionDeniedForAutoMode,
+  isExistingFile,
   resolveHomeLoopResolverRoots,
   Session,
 } from './Session.js';
@@ -192,6 +193,20 @@ describe('computeInitialTurnFromHistory', () => {
         'test-session-id',
       ),
     ).toBe(2);
+  });
+});
+
+describe('isExistingFile', () => {
+  it('returns false when stat fails after exists succeeds', () => {
+    expect(
+      isExistingFile(
+        '/tmp/image.png',
+        () => true,
+        () => {
+          throw new Error('EACCES');
+        },
+      ),
+    ).toBe(false);
   });
 });
 
