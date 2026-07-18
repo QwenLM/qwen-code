@@ -67,6 +67,9 @@ let cachedWlPasteImageTypes: string[] | null = null;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let clipboardModulePromise: Promise<any | null> | null = null;
 
+// Cache for powershell.exe availability on WSL2
+let powershellAvailable: boolean | undefined;
+
 /**
  * Get and cache the @teddyzhu/clipboard module.
  * Only used on macOS/Windows as fallback for Linux platform-native tools.
@@ -92,6 +95,7 @@ export function resetLinuxClipboardTool(): void {
   linuxClipboardTool = undefined;
   cachedWlPasteImageTypes = null;
   linuxTextReadCmd = undefined;
+  powershellAvailable = undefined;
 }
 
 /**
@@ -321,10 +325,6 @@ export async function clipboardHasImage(
   cachedWlPasteImageTypes = null; // Fresh check each time
   if (process.platform === 'linux') {
     try {
-      // WSL2 first: check Windows clipboard via powershell.exe.
-      // This does not consume the clipboard content, unlike wl-paste.
-      if (clipboardHasImageViaPowershell()) return true;
-
       const tool = getLinuxClipboardTool();
       if (tool === 'wl-paste') {
         return checkClipboardForImage('wl-paste', ['--list-types']);
@@ -410,34 +410,37 @@ async function getWlPasteImageTypes(): Promise<string[]> {
 }
 
 /**
- * Check if the Windows clipboard (via powershell.exe) contains an image.
- * Used as a WSL2 fallback when wl-paste/xclip are unavailable or fail.
+ * Check if powershell.exe is available (WSL2 interop).
+ * Result is cached to avoid repeated ENOENT spawns on non-WSL2 Linux.
  */
-function clipboardHasImageViaPowershell(): boolean {
+function isPowershellAvailable(): boolean {
+  if (powershellAvailable !== undefined) return powershellAvailable;
   try {
-    const result = execFileSync(
+    execFileSync(
       'powershell.exe',
-      [
-        '-NoProfile',
-        '-NonInteractive',
-        '-c',
-        'Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Clipboard]::ContainsImage()',
-      ],
-      { encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'ignore'] },
-    ).trim();
-    return result === 'True';
-  } catch (e) {
-    debugLogger.debug('PowerShell clipboard image check failed:', e);
-    return false;
+      ['-NoProfile', '-NonInteractive', '-c', 'echo 1'],
+      {
+        encoding: 'utf-8',
+        timeout: 500,
+        stdio: ['pipe', 'pipe', 'ignore'],
+      },
+    );
+    powershellAvailable = true;
+  } catch {
+    powershellAvailable = false;
   }
+  return powershellAvailable;
 }
 
 /**
  * Save the Windows clipboard image to a PNG file via powershell.exe.
- * Used as a WSL2 fallback when wl-paste/xclip are unavailable or fail.
+ * Checks ContainsImage() first to avoid creating empty files when no image
+ * is present. Used as a WSL2 fallback when wl-paste/xclip are unavailable.
  */
 async function saveImageWithPowershell(targetPath: string): Promise<boolean> {
+  if (!isPowershellAvailable()) return false;
   const absPath = path.resolve(targetPath);
+  const escapedPath = absPath.replace(/'/g, "''");
   try {
     execFileSync(
       'powershell.exe',
@@ -445,7 +448,7 @@ async function saveImageWithPowershell(targetPath: string): Promise<boolean> {
         '-NoProfile',
         '-NonInteractive',
         '-c',
-        `Add-Type -AssemblyName System.Windows.Forms; $img = [System.Windows.Forms.Clipboard]::GetImage(); if ($img) { $img.Save('${absPath}') }`,
+        `Add-Type -AssemblyName System.Windows.Forms; if ([System.Windows.Forms.Clipboard]::ContainsImage()) { [System.Windows.Forms.Clipboard]::GetImage().Save('${escapedPath}') }`,
       ],
       { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] },
     );
@@ -624,7 +627,7 @@ export async function saveClipboardImage(
             /* ignore */
           }
         }
-        // Fall through to xclip fallback
+        // wl-paste failed; fall through to cleanup
       }
       if (tool === 'xclip') {
         if (await saveFileWithXclip(pngPath)) return pngPath;
@@ -748,46 +751,23 @@ export function readTextFromClipboard(): string {
         },
       ).toString();
     }
-    // Linux/WSL2: probe once, then use cached tool
+    // Linux/WSL2: reuse getLinuxClipboardTool() for consistent tool priority
+    // with image paste, then fall back to powershell.exe on WSL2.
     if (linuxTextReadCmd === undefined) {
-      const candidates: Array<[string, string[]]> = [
-        ['xclip', ['-selection', 'clipboard', '-o']],
-        ['xsel', ['--clipboard', '--output']],
-        ['wl-paste', ['--no-newline']],
-      ];
       linuxTextReadCmd = null;
-      for (const [bin, args] of candidates) {
-        try {
-          execSync('command -v ' + bin, { stdio: 'ignore' });
-          linuxTextReadCmd = [bin, ...args];
-          break;
-        } catch {
-          /* try next */
-        }
-      }
-      // WSL2 fallback: read Windows clipboard via powershell interop.
-      // Works even when no Linux clipboard tools are installed.
-      if (!linuxTextReadCmd) {
-        try {
-          execFileSync(
-            'powershell.exe',
-            ['-NoProfile', '-NonInteractive', '-c', 'echo 1'],
-            {
-              encoding: 'utf-8',
-              timeout: 500,
-              stdio: ['pipe', 'pipe', 'ignore'],
-            },
-          );
-          linuxTextReadCmd = [
-            'powershell.exe',
-            '-NoProfile',
-            '-NonInteractive',
-            '-c',
-            'Get-Clipboard',
-          ];
-        } catch {
-          /* not WSL2 or powershell unavailable */
-        }
+      const tool = getLinuxClipboardTool();
+      if (tool === 'wl-paste') {
+        linuxTextReadCmd = ['wl-paste', '--no-newline'];
+      } else if (tool === 'xclip') {
+        linuxTextReadCmd = ['xclip', '-selection', 'clipboard', '-o'];
+      } else if (isPowershellAvailable()) {
+        linuxTextReadCmd = [
+          'powershell.exe',
+          '-NoProfile',
+          '-NonInteractive',
+          '-c',
+          'Get-Clipboard',
+        ];
       }
     }
     if (linuxTextReadCmd) {
@@ -796,7 +776,9 @@ export function readTextFromClipboard(): string {
         encoding: 'utf-8',
         timeout: 2000,
         stdio: ['pipe', 'pipe', 'ignore'],
-      }).toString();
+      })
+        .toString()
+        .replace(/\r?\n$/, '');
     }
     return '';
   } catch (e) {
