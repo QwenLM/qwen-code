@@ -70,6 +70,7 @@ import {
   type RosterPlan,
 } from './roster.js';
 import { BRIEFS } from './agent-briefs.js';
+import { chunkIdsProblem } from './diff-plan.js';
 import { shellQuotePath } from './shell-quote.js';
 
 export interface CoverageFromTranscripts {
@@ -158,14 +159,9 @@ function readPlan(path: string): { plan: Plan; mtimeMs: number } {
   // Chunk ids are matched against what the launch prompts say and rendered into
   // the review body. A non-integer or duplicate id would silently never match,
   // and the chunk it stands for would be reported as unreviewed forever.
-  const ids = plan.chunks.map((c) => c?.id);
-  if (ids.some((id) => !Number.isSafeInteger(id) || (id as number) < 1)) {
-    throw new Error(
-      `coverage: ${path} has a chunk with no positive integer id`,
-    );
-  }
-  if (new Set(ids).size !== ids.length) {
-    throw new Error(`coverage: ${path} has duplicate chunk ids`);
+  const problem = chunkIdsProblem(plan.chunks.map((c) => c?.id));
+  if (problem) {
+    throw new Error(`coverage: ${path} has ${problem}`);
   }
   return { plan, mtimeMs: statSync(path).mtimeMs };
 }

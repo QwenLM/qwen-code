@@ -417,6 +417,44 @@ describe('agent-prompt (command boundary)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('a rules change changes the key — a corrected-rules rebuild cannot inherit the old brief', () => {
+    // The digest keyed findings alone. A round launched without the project
+    // rules and rebuilt with them kept its key, so the corrected brief landed
+    // at the SAME path the first round's agent had already opened — and the
+    // delivery check credited that old transcript with reading rules it never
+    // saw. The key is the identity of the launch material; rules are launch
+    // material.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-ruleskey-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN));
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '- **[Critical]** x.ts:1 — y');
+      const rulesFile = join(dir, 'rules.md');
+      writeFileSync(rulesFile, 'Never merge without a changeset entry.');
+      const handler = agentPromptCommand.handler as (a: unknown) => void;
+      handler({ plan, role: 'verify', findings });
+      handler({ plan, role: 'verify', findings, rules: rulesFile });
+
+      const recorded = readRecordedPrompts(plan);
+      const keys = [...recorded.keys()];
+      // Two records, not one overwritten: same findings, different rules,
+      // different identity.
+      expect(keys).toHaveLength(2);
+      // Each launch reads its OWN brief: the rules-less brief stayed intact
+      // where its transcript can honestly match it, and the corrected round
+      // has a fresh path no old transcript has ever opened.
+      const briefs = keys.map((k) => readFileSync(briefPath(plan, k), 'utf8'));
+      const ruled = briefs.filter((b) => b.includes('## Project rules'));
+      const bare = briefs.filter((b) => !b.includes('## Project rules'));
+      expect(ruled).toHaveLength(1);
+      expect(bare).toHaveLength(1);
+      expect(ruled[0]).toContain('Never merge without a changeset entry.');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 // One call per review, not one per agent. The per-agent form asks for ~30
@@ -517,7 +555,49 @@ describe('--all-chunks — every auditor of a Step 5 round, in one call', () => 
           'all-chunks': true,
           findings,
         }),
-      ).toThrow(/none with a usable integer/);
+      ).toThrow(/no positive integer id/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a plan with ONE unusable or duplicated chunk id — no shrunken round, nothing written', () => {
+    // Filtering handled only the all-bad case: `[13, "x", 15]` still printed a
+    // valid-looking TWO-auditor round with one territory silently gone, and
+    // `[13, 13, 15]` resolved both id-13 blocks to the same chunk and the same
+    // record key — the second territory never audited, under an end marker
+    // that says the round is whole. Same corruption coverage's readPlan
+    // refuses; the batch must refuse it before writing anything.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-allchunks-part-'));
+    try {
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '- x');
+      const cases: Array<[unknown[], RegExp]> = [
+        [
+          [PLAN.chunks[0], { ...PLAN.chunks[1], id: 'x' }, PLAN.chunks[2]],
+          /no positive integer id/,
+        ],
+        [
+          [PLAN.chunks[0], { ...PLAN.chunks[1], id: 13 }, PLAN.chunks[2]],
+          /duplicate chunk ids/,
+        ],
+      ];
+      for (const [chunks, pattern] of cases) {
+        const plan = join(dir, 'plan.json');
+        writeFileSync(plan, JSON.stringify({ ...PLAN, chunks }));
+        expect(() =>
+          (agentPromptCommand.handler as (a: unknown) => void)({
+            plan,
+            role: 'reverse-audit',
+            'all-chunks': true,
+            findings,
+          }),
+        ).toThrow(pattern);
+        // Refused BEFORE any brief, record or stdout block — a partial round
+        // on disk would be indistinguishable from a delivered one.
+        expect(readRecordedPrompts(plan).size).toBe(0);
+        expect(writeStdoutLine as unknown as Mock).not.toHaveBeenCalled();
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -547,6 +627,101 @@ describe('--all-chunks — every auditor of a Step 5 round, in one call', () => 
           findings,
         }),
       ).toThrow(/contradict/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ['--roster', { roster: true }, /--roster builds every prompt/],
+    [
+      '--whole-diff',
+      { 'whole-diff': true },
+      /--whole-diff builds the diff-reading block alone/,
+    ],
+    ['a bare --chunk', { chunk: 13 }, /contradict/],
+    ['nothing else', {}, /needs --role <role> and --findings <file>/],
+  ])(
+    'refuses --all-chunks combined with %s — never silently dropped',
+    (_, extra, pattern) => {
+      // The batch gate reads `allChunks && role && findings`, so every one of
+      // these used to pass the guards, run the OTHER mode, and exit 0 with the
+      // batch silently discarded — an orchestrator that asked for a round
+      // walked away believing it was built. Ruled on at the primary-mode
+      // boundary, before any mode can quietly win.
+      expect(() =>
+        (agentPromptCommand.handler as (a: unknown) => void)({
+          plan: '/nonexistent/plan.json',
+          'all-chunks': true,
+          ...extra,
+        }),
+      ).toThrow(pattern as RegExp);
+      expect(writeStdoutLine as unknown as Mock).not.toHaveBeenCalled();
+    },
+  );
+
+  it('an empty findings file still builds one auditor per chunk, each with the early-round framing', () => {
+    // Step 5's first round on a clean review passes an empty file — the batch
+    // gate reads `findingsContent !== undefined` for exactly that reason. A
+    // truthiness regression turns '' falsy, falls through to the single-role
+    // path, and prints ONE 3A-style prompt where the round needs one auditor
+    // per chunk — with every other batch test green, because they all pass
+    // non-empty content.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-allchunks-empty-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN));
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '');
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'reverse-audit',
+        'all-chunks': true,
+        findings,
+      });
+      const printed = (writeStdoutLine as unknown as Mock).mock
+        .calls[0][0] as string;
+      expect(printed).toContain('3 auditors required this round');
+      expect(printed).toMatch(/───── end of round — 3 auditors ─────/);
+      // EVERY block carries the empty-list framing, not just the first — a
+      // batch that fell through would carry it zero times or once.
+      expect(printed.split('Nothing is confirmed yet')).toHaveLength(4);
+      const keys = [...readRecordedPrompts(plan).keys()];
+      expect(
+        keys.filter((k) => k.startsWith('reverse-audit--chunk-')),
+      ).toHaveLength(3);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('--rules lands in every brief of the batch', () => {
+    // The batch plumbs `rules` through buildLaunch per chunk. Dropping that
+    // argument would leave labels, keys, records and ranges — everything the
+    // other tests pin — exactly as they are, while every auditor of every
+    // round silently runs without the project's review rules.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-allchunks-rules-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN));
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '- **[Critical]** x.ts:1 — y');
+      const rulesFile = join(dir, 'rules.md');
+      writeFileSync(rulesFile, 'Never merge without a changeset entry.');
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'reverse-audit',
+        'all-chunks': true,
+        findings,
+        rules: rulesFile,
+      });
+      const keys = [...readRecordedPrompts(plan).keys()];
+      expect(keys).toHaveLength(3);
+      for (const key of keys) {
+        const brief = readFileSync(briefPath(plan, key), 'utf8');
+        expect(brief).toContain('## Project rules');
+        expect(brief).toContain('Never merge without a changeset entry.');
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
