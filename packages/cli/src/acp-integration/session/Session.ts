@@ -661,9 +661,7 @@ const MAX_NOTIFICATION_QUEUE = 20;
 export function isExistingFile(
   resolved: string,
   fileExists: (path: string) => boolean = existsSync,
-  statFile: (
-    path: string,
-  ) => Pick<ReturnType<typeof statSync>, 'isFile'> = statSync,
+  statFile: (path: string) => { isFile(): boolean } = statSync,
 ): boolean {
   try {
     return fileExists(resolved) && statFile(resolved).isFile();
