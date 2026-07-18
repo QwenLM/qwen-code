@@ -1163,6 +1163,18 @@ function findingsDigest(content: string, rules: string | undefined): string {
 function foldFindings(role: RoleId, content: string, prompt: string): string {
   const nl = prompt.indexOf('\n');
   const identity = nl === -1 ? prompt : prompt.slice(0, nl);
+  // The split is anchored on line one BEING the identity line —
+  // `buildRoleLaunchPrompt` writes it first. If a future prompt shape moves
+  // it, refuse here rather than fold the findings under whatever line came
+  // first: that would silently rebuild the buried-identity layout this
+  // function exists to prevent.
+  if (!identity.startsWith('You are review agent `')) {
+    throw new Error(
+      'agent-prompt: foldFindings expected the launch prompt to open with ' +
+        `its identity line, got: "${identity.slice(0, 60)}". Keep the ` +
+        'identity line first in buildRoleLaunchPrompt, or update the fold.',
+    );
+  }
   const rest = nl === -1 ? '' : prompt.slice(nl + 1);
   return `${identity}\n\n${findingsSection(role, content)}\n${rest}`;
 }
