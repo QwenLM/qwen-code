@@ -5,7 +5,15 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync(
@@ -102,13 +110,20 @@ describe('fleet shepherd workflow', () => {
       'capture("^review-address \\\\((?<pr>[0-9]+),") | .pr',
     );
     expect(workflow).toMatch(
-      /if \[\[ "\$\{SCAN_RUNS_OK\}" != "true" \]\]; then[\s\S]{0,300}elif \[\[ "\$\{SHEP_BUSY\}" == \*" \$\{PR\} "\* \]\]; then/,
+      /if \[\[ "\$\{BUSY_OK\}" != "true" \]\]; then[\s\S]{0,300}elif \[\[ "\$\{SHEP_BUSY\}" == \*" \$\{PR\} "\* \]\]; then/,
     );
     expect(workflow).toContain(
       'review-address already in flight — deferring dispatch',
     );
     expect(workflow).toContain(
-      'run snapshot unavailable — busy-state unknown, deferring dispatch',
+      'busy-state unknown (runs or jobs read failed) — deferring dispatch',
+    );
+    // EVERY jobs read is tracked — a partial enumeration is unknown
+    // busy-state, not a smaller busy-set; and BUSY_OK inherits SCAN_RUNS_OK
+    // so a failed run-list read defers conflict dispatches the same way.
+    expect(workflow).toContain('BUSY_OK="${SCAN_RUNS_OK}"');
+    expect(workflow).toContain(
+      'jobs read failed for run ${LIVE_RUN}; busy-state unknown',
     );
     // Stale-base sync: threshold-gated, self-limiting (behind_by resets),
     // never while checks are in flight, and a compare-and-swap on the head.
@@ -173,8 +188,73 @@ describe('fleet shepherd workflow', () => {
       'run-list read failed; liveness lever and conflict dispatches skipped',
     );
     expect(workflow).toContain(
-      '"${SCAN_RUNS_OK}" == "true" && "${SCAN_AGE_MIN}" -ge "${SCAN_LIVENESS_MINUTES}"',
+      '"${DASH_LOOKUP_OK}" == "true" && "${SCAN_RUNS_OK}" == "true" && "${SCAN_AGE_MIN}" -ge "${SCAN_LIVENESS_MINUTES}"',
     );
+    // The watermark LIVES in the dashboard body: an unreadable body is
+    // unknown watermark state, so the lever is skipped AND the body is not
+    // overwritten (which would destroy the stored watermark).
+    expect(workflow).toContain(
+      'dashboard body read failed; dashboard write and liveness lever skipped this tick',
+    );
+  });
+
+  it('behaviorally proves a failed jobs read yields unknown busy-state, not an empty busy-set', () => {
+    // Extract the busy-set walk VERBATIM (drift fails the test) and replay it
+    // with a PATH-stubbed gh: one live run whose jobs read fails must flip
+    // BUSY_OK to false (deferring every conflict dispatch), a successful read
+    // must collect the PR into the busy-set, and no live runs at all must
+    // leave BUSY_OK true with an empty set.
+    const busyWalk = workflow.match(
+      /(SHEP_BUSY=' '\n[\s\S]*?done < <\(jq -r '\.\[\] \| select\(\.status != "completed"\) \| \.databaseId' \/tmp\/scan-runs\.json 2> \/dev\/null\))/,
+    )?.[1];
+    expect(busyWalk).toBeTruthy();
+    const runBusyWalk = ({ runs, ghScript }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'shepherd-busy-'));
+      try {
+        const gh = join(dir, 'gh');
+        writeFileSync(gh, `#!/bin/bash\n${ghScript}\n`);
+        chmodSync(gh, 0o755);
+        writeFileSync('/tmp/scan-runs.json', JSON.stringify(runs));
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `${busyWalk.replace(/\n {10}/g, '\n')}\nprintf '%s|%s' "$BUSY_OK" "$SHEP_BUSY"`,
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              SCAN_RUNS_OK: 'true',
+              ACTIONS_TOKEN: 'x',
+              REPO: 'QwenLM/qwen-code',
+            },
+            encoding: 'utf8',
+          },
+        );
+        return out.split('\n').at(-1);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+        rmSync('/tmp/scan-runs.json', { force: true });
+      }
+    };
+    const live = [{ databaseId: 101, status: 'in_progress' }];
+    // Jobs read fails → busy-state UNKNOWN, never "nothing is busy".
+    expect(runBusyWalk({ runs: live, ghScript: 'exit 1' })).toBe('false| ');
+    // Jobs read succeeds → the queued/running review-address PR is busy.
+    expect(
+      runBusyWalk({
+        runs: live,
+        ghScript: `printf '%s' '{"jobs":[{"status":"queued","name":"review-address (7127, ci/autofix-concurrent-fanout)"},{"status":"completed","name":"review-address (7000, x)"}]}'`,
+      }),
+    ).toBe('true| 7127 ');
+    // No live runs → known-empty busy-set, dispatches stay enabled.
+    expect(
+      runBusyWalk({
+        runs: [{ databaseId: 100, status: 'completed' }],
+        ghScript: 'exit 1',
+      }),
+    ).toBe('true| ');
   });
 
   it('behaviorally proves in-flight counting ignores foreign dispatches', () => {

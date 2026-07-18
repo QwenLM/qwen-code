@@ -129,9 +129,20 @@ jobs:
             DASH_LOOKUP_OK=false
             echo "::warning::dashboard lookup failed; dashboard update skipped this tick"
           fi
+          # The liveness watermark LIVES in the dashboard body, so watermark
+          # state is known only when the lookup succeeded AND (no dashboard
+          # exists yet — a legitimate first tick — or the body was read). A
+          # failed body read flips DASH_LOOKUP_OK too: writing would replace
+          # the body that holds the watermark, and dispatching on an unknown
+          # watermark would launch a duplicate full scan every tick for the
+          # duration of a PAT outage once cron is stale.
           PREV_DASH=''
           if [[ -n "${DASH_NUM}" ]]; then
-            PREV_DASH="$(gh issue view "${DASH_NUM}" --repo "${REPO}" --json body --jq '.body // ""' 2> /dev/null || echo '')"
+            if ! PREV_DASH="$(gh issue view "${DASH_NUM}" --repo "${REPO}" --json body --jq '.body // ""' 2> /dev/null)"; then
+              PREV_DASH=''
+              DASH_LOOKUP_OK=false
+              echo "::warning::dashboard body read failed; dashboard write and liveness lever skipped this tick"
+            fi
           fi
           PREV_LIVENESS="$(grep -oE '<!-- fleet-shepherd liveness-dispatched: [^ ]+ -->' <<< "${PREV_DASH}" | grep -oE '[0-9T:Z-]{20}' | head -1 || true)"
 
@@ -180,8 +191,8 @@ jobs:
             SCAN_AGE_MIN=$(( (NOW_EPOCH - $(date -u -d "${LAST_SIGNAL}" +%s)) / 60 ))
           fi
           LIVENESS_OUT="${PREV_LIVENESS}"
-          echo "🫀 last scan signal: ${LAST_SIGNAL:-never} (${SCAN_AGE_MIN}m ago), liveness-relevant in-flight: ${SCAN_INFLIGHT}, snapshot ok: ${SCAN_RUNS_OK}"
-          if [[ "${SCAN_RUNS_OK}" == "true" && "${SCAN_AGE_MIN}" -ge "${SCAN_LIVENESS_MINUTES}" && "${SCAN_INFLIGHT}" == "0" ]]; then
+          echo "🫀 last scan signal: ${LAST_SIGNAL:-never} (${SCAN_AGE_MIN}m ago), liveness-relevant in-flight: ${SCAN_INFLIGHT}, snapshot ok: ${SCAN_RUNS_OK}, watermark state known: ${DASH_LOOKUP_OK}"
+          if [[ "${DASH_LOOKUP_OK}" == "true" && "${SCAN_RUNS_OK}" == "true" && "${SCAN_AGE_MIN}" -ge "${SCAN_LIVENESS_MINUTES}" && "${SCAN_INFLIGHT}" == "0" ]]; then
             if act "scan liveness: dispatch unforced review scan" \
               env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh workflow run qwen-autofix.yml --repo "${REPO}" -f phase=review; then
               LIVENESS_OUT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -194,15 +205,23 @@ jobs:
           # not be dispatched again (also what makes the dispatch-succeeded /
           # marker-failed retry idempotent on current main). Schedule/dispatch
           # matrix jobs never appear in the PR's check rollup, so this is the
-          # only way to see them. On a failed snapshot the set stays empty and
-          # SCAN_RUNS_OK already defers every conflict dispatch below.
+          # only way to see them. EVERY jobs read is tracked: a partial
+          # enumeration is not a busy-set, it is unknown busy-state, and
+          # BUSY_OK=false defers every conflict dispatch below (it inherits
+          # SCAN_RUNS_OK so a failed run-list read defers the same way).
           SHEP_BUSY=' '
+          BUSY_OK="${SCAN_RUNS_OK}"
           while IFS= read -r LIVE_RUN; do
             [[ -z "${LIVE_RUN}" ]] && continue
+            if ! RUN_JOBS="$(env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run view "${LIVE_RUN}" --repo "${REPO}" --json jobs 2> /dev/null)" \
+              || ! MATCHED="$(jq -r '.jobs[] | select(.status != "completed") | .name | capture("^review-address \\((?<pr>[0-9]+),") | .pr' <<< "${RUN_JOBS}" 2> /dev/null)"; then
+              BUSY_OK=false
+              echo "::warning::jobs read failed for run ${LIVE_RUN}; busy-state unknown — conflict dispatches deferred this tick"
+              break
+            fi
             while IFS= read -r BUSY; do
               [[ -n "${BUSY}" ]] && SHEP_BUSY="${SHEP_BUSY}${BUSY} "
-            done < <(env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run view "${LIVE_RUN}" --repo "${REPO}" --json jobs \
-              --jq '.jobs[] | select(.status != "completed") | .name | capture("^review-address \\((?<pr>[0-9]+),") | .pr' 2> /dev/null)
+            done <<< "${MATCHED}"
           done < <(jq -r '.[] | select(.status != "completed") | .databaseId' /tmp/scan-runs.json 2> /dev/null)
           [[ "${SHEP_BUSY}" != ' ' ]] && echo "🚧 review-address in flight/queued for PR(s):${SHEP_BUSY}"
 
@@ -253,10 +272,10 @@ jobs:
             # marker for a failed dispatch would freeze the PR at this head.
             if [[ "${MERGEABLE}" == "CONFLICTING" ]]; then
               STATUS_NOTE='conflicting'
-              if [[ "${SCAN_RUNS_OK}" != "true" ]]; then
-                # Without the run snapshot the busy-state is UNKNOWN — a blind
-                # dispatch could stack onto a live address run, so defer.
-                ACTION_NOTE='run snapshot unavailable — busy-state unknown, deferring dispatch'
+              if [[ "${BUSY_OK}" != "true" ]]; then
+                # Runs or jobs read failed — busy-state is UNKNOWN, and a
+                # blind dispatch could stack onto a live address run.
+                ACTION_NOTE='busy-state unknown (runs or jobs read failed) — deferring dispatch'
               elif [[ "${SHEP_BUSY}" == *" ${PR} "* ]]; then
                 # An address run for this PR is already live or queued — a
                 # second dispatch would only stack a duplicate behind it.
