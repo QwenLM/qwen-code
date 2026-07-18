@@ -43,6 +43,12 @@ async function getDependencyLicense(depName, depVersion, resolvedKey) {
     repositoryUrl = depPackageJson.repository?.url || repositoryUrl;
 
     const packageDir = path.dirname(depPackageJsonPath);
+    // Resolve the license file case-insensitively. The default macOS
+    // filesystem is case-insensitive while Linux (CI) is case-sensitive, so a
+    // fixed-case candidate list finds a `License` file on macOS but misses it
+    // on Linux, making the generated notices platform-dependent. Scan the
+    // directory and compare lowercased names so the result is identical on
+    // both.
     const licenseFileCandidates = [
       depPackageJson.licenseFile,
       'LICENSE',
@@ -51,13 +57,23 @@ async function getDependencyLicense(depName, depVersion, resolvedKey) {
       'LICENSE-MIT.txt',
       'license.md',
       'license',
-    ].filter(Boolean);
+    ]
+      .filter(Boolean)
+      .map((candidate) => candidate.toLowerCase());
 
     let licenseFile;
+    const dirEntries = await fs.readdir(packageDir).catch(() => []);
+    const entriesByLowerName = new Map();
+    for (const entry of dirEntries) {
+      const lower = entry.toLowerCase();
+      if (!entriesByLowerName.has(lower)) {
+        entriesByLowerName.set(lower, entry);
+      }
+    }
     for (const candidate of licenseFileCandidates) {
-      const potentialFile = path.join(packageDir, candidate);
-      if (await fs.stat(potentialFile).catch(() => false)) {
-        licenseFile = potentialFile;
+      const match = entriesByLowerName.get(candidate);
+      if (match) {
+        licenseFile = path.join(packageDir, match);
         break;
       }
     }
