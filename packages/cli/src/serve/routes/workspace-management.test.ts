@@ -224,6 +224,25 @@ describe('POST /workspaces', () => {
     expect(res.body).not.toHaveProperty('persisted');
   });
 
+  it('sets a display name on a process-local registration', async () => {
+    const runtime = makeRuntime(REAL_DIR);
+    const registry = createMockRegistry([makeRuntime('/some-other-dir')]);
+    const { app } = createApp({
+      workspaceRegistry: registry,
+      createWorkspaceRuntime: vi.fn().mockResolvedValue(runtime),
+    });
+
+    const res = await request(app).post('/workspaces').send({
+      cwd: REAL_DIR,
+      displayName: 'Qwen SDK',
+    });
+
+    expect(res.status).toBe(201);
+    expect(res.body.displayName).toBe('Qwen SDK');
+    expect(runtime.displayName).toBe('Qwen SDK');
+    expect(registry.getByWorkspaceCwd(REAL_DIR)).toBe(runtime);
+  });
+
   it('registers and persists an optional display name', async () => {
     const add = vi.fn().mockResolvedValue(true);
     const registry = createMockRegistry([makeRuntime('/some-other-dir')]);
@@ -349,6 +368,59 @@ describe('POST /workspaces', () => {
       'Promoted name',
     );
     expect(runtime.displayName).toBe('Promoted name');
+  });
+
+  it('does not repeat the display-name write after adding a registration', async () => {
+    const runtime = makeRuntime(REAL_DIR, { displayName: 'Old name' });
+    const setDisplayNameByIds = vi
+      .fn()
+      .mockRejectedValue(new Error('disk full'));
+    const add = vi.fn().mockResolvedValue(true);
+    const { app } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      workspaceRegistrationStore: {
+        add,
+        read: vi.fn().mockResolvedValue({ workspaces: [] }),
+        setDisplayNameByIds,
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app).post('/workspaces').send({
+      cwd: REAL_DIR,
+      persist: true,
+      displayName: 'Promoted name',
+    });
+
+    expect(res.status).toBe(200);
+    expect(add).toHaveBeenCalledWith(REAL_DIR, 'Promoted name');
+    expect(setDisplayNameByIds).not.toHaveBeenCalled();
+    expect(runtime.registrationIds).toEqual([
+      workspaceRegistrationId(REAL_DIR),
+    ]);
+    expect(runtime.displayName).toBe('Promoted name');
+  });
+
+  it('does not change runtime metadata when promotion persistence fails', async () => {
+    const runtime = makeRuntime(REAL_DIR, { displayName: 'Old name' });
+    const { app } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      workspaceRegistrationStore: {
+        add: vi.fn(),
+        read: vi.fn().mockResolvedValue({ workspaces: [REAL_DIR] }),
+        setDisplayNameByIds: vi.fn().mockRejectedValue(new Error('disk full')),
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app).post('/workspaces').send({
+      cwd: REAL_DIR,
+      persist: true,
+      displayName: 'Promoted name',
+    });
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('workspace_registration_store_error');
+    expect(runtime.registrationIds).toBeUndefined();
+    expect(runtime.displayName).toBe('Old name');
   });
 
   it('clears a concurrently persisted name while promoting', async () => {
@@ -757,6 +829,35 @@ describe('PATCH /workspaces/:workspace', () => {
       [workspaceRegistrationId(REAL_DIR)],
       undefined,
     );
+  });
+
+  it('gates removable on runtime removal support', async () => {
+    const unsupportedRuntime = makeRuntime(REAL_DIR);
+    const unsupported = createApp({
+      workspaceRegistry: createMockRegistry([unsupportedRuntime]),
+    }).app;
+
+    const unsupportedResult = await request(unsupported)
+      .patch(
+        `/workspaces/${encodeURIComponent(unsupportedRuntime.workspaceId)}`,
+      )
+      .send({ displayName: 'Process only' });
+
+    expect(unsupportedResult.status).toBe(200);
+    expect(unsupportedResult.body).not.toHaveProperty('removable');
+
+    const supportedRuntime = makeRuntime(REAL_DIR);
+    const supported = createApp({
+      workspaceRegistry: createMockRegistry([supportedRuntime]),
+      runtimeRemoval: createRemovalController(),
+    }).app;
+
+    const supportedResult = await request(supported)
+      .patch(`/workspaces/${encodeURIComponent(supportedRuntime.workspaceId)}`)
+      .send({ displayName: 'Process only' });
+
+    expect(supportedResult.status).toBe(200);
+    expect(supportedResult.body.removable).toBe(true);
   });
 
   it('allows duplicate display names and clears with an empty string', async () => {

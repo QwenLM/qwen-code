@@ -412,6 +412,7 @@ export function registerWorkspaceManagementRoutes(
             },
           );
           const alreadyPersisted = persistedRegistrationIds.length > 0;
+          let displayNamePersistedByAdd = false;
           if (
             !alreadyPersisted &&
             snapshot.workspaces.length >= MAX_REGISTERED_WORKSPACES - 1
@@ -427,18 +428,20 @@ export function registerWorkspaceManagementRoutes(
               const persistedDisplayName = hasDisplayName
                 ? displayName
                 : existingRuntime.displayName;
-              if (persistedDisplayName === undefined) {
-                await workspaceRegistrationStore!.add(canonical);
-              } else {
-                await workspaceRegistrationStore!.add(
-                  canonical,
-                  persistedDisplayName,
-                );
-              }
+              const added =
+                persistedDisplayName === undefined
+                  ? await workspaceRegistrationStore!.add(canonical)
+                  : await workspaceRegistrationStore!.add(
+                      canonical,
+                      persistedDisplayName,
+                    );
+              displayNamePersistedByAdd =
+                hasDisplayName && (displayName !== undefined || added);
             } catch (err) {
               if (!(err instanceof WorkspaceRegistrationStoreCommittedError)) {
                 throw err;
               }
+              displayNamePersistedByAdd = hasDisplayName;
               try {
                 writeStderrLine(`qwen serve: ${err.message}`);
               } catch {
@@ -447,18 +450,18 @@ export function registerWorkspaceManagementRoutes(
             }
             persistedRegistrationIds.push(workspaceRegistrationId(canonical));
           }
+          if (hasDisplayName && !displayNamePersistedByAdd) {
+            await persistDisplayName(
+              workspaceRegistrationStore!,
+              persistedRegistrationIds,
+              displayName,
+            );
+          }
           existingRuntime.registrationIds ??= [];
           for (const registrationId of persistedRegistrationIds) {
             if (!existingRuntime.registrationIds.includes(registrationId)) {
               existingRuntime.registrationIds.push(registrationId);
             }
-          }
-          if (hasDisplayName) {
-            await persistDisplayName(
-              workspaceRegistrationStore!,
-              existingRuntime.registrationIds,
-              displayName,
-            );
           }
           if (hasDisplayName) {
             if (displayName === undefined) {
@@ -840,7 +843,7 @@ export function registerWorkspaceManagementRoutes(
             : {}),
           primary: runtime.primary,
           trusted: runtime.trusted,
-          removable: runtime.removable === true,
+          ...(runtimeRemoval ? { removable: runtime.removable === true } : {}),
         });
       } catch (err) {
         writeStderrLine(
