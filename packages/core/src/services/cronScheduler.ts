@@ -821,6 +821,20 @@ export class CronScheduler {
         const nextFire = computeNextFireMs(t.cron, anchor, jitter);
         if (nextFire === null || nextFire >= now) continue;
         if (!t.recurring) {
+          // A watcher reload can race another bound session removing its own
+          // one-shot from the shared file during this task's due minute. If
+          // this session already loaded the task, leave it live for the normal
+          // tick path so the raw prompt fires; it was not missed while Qwen was
+          // offline. Once the scheduled minute has elapsed, the ordinary
+          // confirm-first missed behavior still applies.
+          const existing = this.jobs.get(t.id);
+          if (
+            existing?.durable &&
+            existing.boundSessionId === this.sessionId &&
+            now - nextFire < 60_000
+          ) {
+            continue;
+          }
           // Missed one-shots are delivered as one batched confirm-first
           // notification: the task file is project-controlled, and
           // executing a prompt read from it would bypass the approval

@@ -1372,6 +1372,66 @@ describe('CronScheduler', () => {
       await settle(schedB);
     });
 
+    it('keeps a loaded bound one-shot raw when another session reloads the shared file during its due minute', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(2025, 0, 15, 10, 14, 0));
+      const createdAt = Date.now();
+      await writeCronTasks(tmpDir, [
+        {
+          ...diskTask('taskA'),
+          cron: '15 * * * *',
+          recurring: false,
+          createdAt,
+          sessionId: 'sess-A',
+        },
+        {
+          ...diskTask('taskB'),
+          cron: '15 * * * *',
+          recurring: false,
+          createdAt,
+          sessionId: 'sess-B',
+        },
+      ]);
+      const firedA: CronJob[] = [];
+      await scheduler.enableDurable('sess-A');
+      scheduler.start((job) => firedA.push(job));
+      const schedB = new CronScheduler(tmpDir);
+      const firedB: CronJob[] = [];
+      await schedB.enableDurable('sess-B');
+      schedB.start((job) => firedB.push(job));
+
+      try {
+        const due = new Date(2025, 0, 15, 10, 15, 5);
+        vi.setSystemTime(due);
+        scheduler.tick(due);
+        expect(firedA.map((job) => job.id)).toEqual(['taskA']);
+        await vi.waitFor(async () => {
+          expect((await readCronTasks(tmpDir)).map((task) => task.id)).toEqual([
+            'taskB',
+          ]);
+        });
+
+        await (
+          schedB as unknown as {
+            loadFileTasks(handleMissed: boolean): Promise<void>;
+          }
+        ).loadFileTasks(false);
+        expect(firedB).toHaveLength(0);
+
+        schedB.tick(due);
+        expect(firedB).toHaveLength(1);
+        expect(firedB[0]).toMatchObject({
+          id: 'taskB',
+          prompt: 'task taskB',
+          recurring: false,
+        });
+        expect(firedB[0]!.missed).toBeUndefined();
+      } finally {
+        await settle(schedB);
+        vi.useRealTimers();
+      }
+    });
+
     it('a non-owner session catches up its own overdue bound task', async () => {
       const createdAt = Date.now() - 3 * 60 * 60_000; // 3h overdue
       await writeCronTasks(tmpDir, [
