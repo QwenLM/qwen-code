@@ -84,6 +84,7 @@ export interface ChannelWorkerGroup {
     request: Parameters<
       NonNullable<ChannelWorkerSupervisor['deliverChannelMessage']>
     >[0],
+    workspaceCwd?: string,
   ): ReturnType<NonNullable<ChannelWorkerSupervisor['deliverChannelMessage']>>;
   enqueueWebhookTask: ChannelWorkerSupervisor['enqueueWebhookTask'];
 }
@@ -383,7 +384,19 @@ export function createChannelWorkerGroup(
 
   const routeEntry = (
     channelName: string,
+    workspaceCwd?: string,
   ): ChannelWorkerGroupEntry | undefined => {
+    if (workspaceCwd !== undefined) {
+      const entry = entries.get(workspaceCwd);
+      if (
+        entry &&
+        (entry.selection.mode === 'all' ||
+          entry.selection.names.includes(channelName))
+      ) {
+        return entry;
+      }
+      return undefined;
+    }
     for (const entry of entries.values()) {
       if (
         entry.selection.mode === 'all' ||
@@ -703,8 +716,8 @@ export function createChannelWorkerGroup(
         throw err;
       }
     },
-    async deliverChannelMessage(request) {
-      const entry = routeEntry(request.channelName);
+    async deliverChannelMessage(request, workspaceCwd) {
+      const entry = routeEntry(request.channelName, workspaceCwd);
       const deliver = entry?.supervisor.deliverChannelMessage;
       if (
         !entry ||

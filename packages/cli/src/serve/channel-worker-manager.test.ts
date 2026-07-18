@@ -746,6 +746,26 @@ describe('createChannelWorkerManager', () => {
     expect(group.enqueueWebhookTask).not.toHaveBeenCalled();
   });
 
+  it('routes scheduled delivery through the committed group and exact workspace', async () => {
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({
+      mode: 'names',
+      names: ['telegram'],
+    });
+    const delivery = {
+      deliveryId: 'task-1:1000',
+      channelName: 'telegram',
+      target: { channelName: 'telegram', chatId: 'group-42' },
+      text: 'daily result',
+    };
+
+    await expect(
+      test.manager.deliverChannelMessage(PRIMARY, delivery),
+    ).resolves.toEqual({ delivered: true });
+    expect(group.deliverChannelMessage).toHaveBeenCalledWith(delivery, PRIMARY);
+  });
+
   it('serializes mutations and rejects queued work once shutdown latches', async () => {
     let releaseStart!: () => void;
     const group = fakeGroup({

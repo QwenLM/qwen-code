@@ -117,6 +117,11 @@ import type {
 } from './channel-worker-supervisor.js';
 import { QWEN_SERVER_TOKEN_ENV } from './channel-worker-env.js';
 import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
+import { ChannelDeliveryError } from './channel-delivery-ipc.js';
+import {
+  createScheduledDeliveryDispatcher,
+  type ScheduledDeliveryDispatcher,
+} from './scheduled-delivery-dispatcher.js';
 import { channelSelectionNames } from './channel-selection.js';
 import {
   resolveChannelWorkspaceGroups,
@@ -2537,6 +2542,7 @@ async function runQwenServeImpl(
   };
   let channelWorkerManager: ChannelWorkerManager | undefined;
   let channelWorkerManagerStarting: Promise<ChannelWorkerManager> | undefined;
+  let scheduledDeliveryDispatcher: ScheduledDeliveryDispatcher | undefined;
   let channelControlDraining = false;
   let channelWorkspaceGroups: readonly ChannelWorkspaceGroup[] | undefined;
   const channelWebhookEnvByWorkspace = new Map<
@@ -4328,6 +4334,7 @@ async function runQwenServeImpl(
       // (keepalive) and reloads them on boot (rehydration). Off by default so
       // direct createServeApp embeds/tests don't spawn sessions.
       manageScheduledTaskSessions: true,
+      scheduledTaskChannelDeliveryAvailable: true,
       fsFactory: routeFsFactory,
       primaryWorkspaceTrusted: trustedWorkspace,
       primaryRuntimeEnv,
@@ -5059,6 +5066,32 @@ async function runQwenServeImpl(
           await manager.startInitial(opts.channelSelection);
           if (runtimeStartupSettled) return;
         }
+        const registry = candidateApp.locals?.['workspaceRegistry'] as
+          | WorkspaceRegistry
+          | undefined;
+        scheduledDeliveryDispatcher ??= createScheduledDeliveryDispatcher({
+          listWorkspaces: () =>
+            registry?.list().map((runtime) => runtime.workspaceCwd) ?? [
+              boundWorkspace,
+            ],
+          deliver: async (workspaceCwd, request) => {
+            const manager =
+              channelWorkerManager ?? (await ensureChannelWorkerManager?.());
+            if (!manager) {
+              throw new ChannelDeliveryError(
+                'channel_worker_unavailable',
+                'Channel worker manager is unavailable.',
+              );
+            }
+            return manager.deliverChannelMessage(workspaceCwd, request);
+          },
+          onError: (error) => {
+            daemonLog.warn('scheduled Channel delivery dispatcher error', {
+              error: error instanceof Error ? error.message : String(error),
+            });
+          },
+        });
+        scheduledDeliveryDispatcher.start();
         if (runtimeStartupSettled) return;
         runtimeStartupSettled = true;
         clearRuntimeStartupTimer();
@@ -5372,6 +5405,9 @@ async function runQwenServeImpl(
                 }
                 disposeRuntimeAppResources(appForCleanup);
                 disposeDaemonEventLoopMonitor();
+                // Stop claiming new outbox work and let the current delivery
+                // settle before its Channel worker is torn down.
+                await scheduledDeliveryDispatcher?.stop();
                 // The worker owns daemon-backed sessions; disconnect it before
                 // tearing down the ACP bridge it is attached to.
                 if (channelWorkerManager) {

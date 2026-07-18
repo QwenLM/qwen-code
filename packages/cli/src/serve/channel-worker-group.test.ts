@@ -169,6 +169,43 @@ describe('createChannelWorkerGroup', () => {
     );
   });
 
+  it('uses the explicit workspace when multiple workers own the same channel', async () => {
+    const registry = fakeRegistry([
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false),
+    ]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [
+        {
+          workspaceCwd: PRIMARY,
+          selection: { mode: 'names', names: ['b'] },
+        },
+        {
+          workspaceCwd: SECONDARY,
+          selection: { mode: 'names', names: ['b'] },
+        },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+    recorded[1]!.supervisor.deliverChannelMessage.mockResolvedValueOnce({
+      delivered: true,
+    });
+
+    await group.deliverChannelMessage(deliveryRequest, SECONDARY);
+
+    expect(
+      recorded[0]!.supervisor.deliverChannelMessage,
+    ).not.toHaveBeenCalled();
+    expect(recorded[1]!.supervisor.deliverChannelMessage).toHaveBeenCalledWith(
+      deliveryRequest,
+    );
+  });
+
   it('rejects channel delivery while the owning workspace is draining', async () => {
     const registry = fakeRegistry([
       fakeRuntime(PRIMARY, true),
