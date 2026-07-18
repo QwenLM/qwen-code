@@ -73,6 +73,9 @@ import type {
   DaemonSessionUpdateData,
   DaemonSessionUpdateEvent,
   DaemonSessionViewState,
+  DaemonLogHealth,
+  DaemonLogIssue,
+  DaemonLogMode,
   DaemonStatusReport,
   DaemonStatusReportDetail,
   DaemonStatusReportIssue,
@@ -268,8 +271,19 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     // `GET /daemon/status` report surface (PR 5174 client coverage): the
     // envelope plus the sub-shapes UI dashboards need to type against.
     expectTypeOf<DaemonStatusReport>().not.toBeNever();
+    expectTypeOf<DaemonLogMode>().not.toBeNever();
+    expectTypeOf<DaemonLogHealth>().not.toBeNever();
+    expectTypeOf<DaemonLogIssue>().not.toBeNever();
     expectTypeOf<DaemonStatusReport['limits']>().toMatchTypeOf<{
       compactedReplayMaxBytes: number;
+    }>();
+    expectTypeOf<DaemonStatusReport['daemon']>().toMatchTypeOf<{
+      runId?: string;
+      logMode?: DaemonLogMode;
+      logHealth?: DaemonLogHealth;
+      logIssues?: readonly DaemonLogIssue[];
+      logDroppedRecords?: number;
+      logDroppedBytes?: number;
     }>();
     expectTypeOf<DaemonStatusReportDetail>().not.toBeNever();
     expectTypeOf<DaemonStatusReportIssue>().not.toBeNever();

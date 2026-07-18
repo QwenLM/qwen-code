@@ -487,14 +487,6 @@ export class PermissionManager {
   private async resolveDefaultPermission(
     command: string,
   ): Promise<'allow' | 'ask'> {
-    // AST-based read-only detection. Commands containing command
-    // substitution are never read-only — `evaluateStatementReadOnly`
-    // (shellAstParser.ts) guards on `containsCommandSubstitutionAST` at
-    // the top so every node type inherits the check, including
-    // `variable_assignment` (`FOO=$(curl ...)`) and `redirected_statement`
-    // (`cat < $(curl ...)`) where earlier versions had blind spots. See
-    // PR #4386 round 4. So substitution-bearing commands fall through
-    // to 'ask' on the line below.
     try {
       const isReadOnly = await isShellCommandReadOnlyAST(command);
       if (isReadOnly) {

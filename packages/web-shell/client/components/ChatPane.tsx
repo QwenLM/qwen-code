@@ -556,9 +556,10 @@ export function ChatPane({
               request={pendingToolApproval}
               onConfirm={handleConfirm}
               variant="floating"
-              // Several panes can show approvals at once; global Enter/Escape
-              // shortcuts aren't focus-scoped, so keep pane approvals
-              // click-only to avoid confirming the wrong session's request.
+              // Several panes can show approvals at once; don't auto-focus one
+              // pane's approval (it would steal focus from the pane the user is
+              // in). Keyboard handling is focus-scoped, so each pane's approval
+              // is still fully keyboard-operable once clicked/tabbed into.
               keyboardActive={false}
             />
           </div>
@@ -569,6 +570,7 @@ export function ChatPane({
               request={pendingAskUserApproval}
               onConfirm={handleConfirm}
               variant="floating"
+              keyboardActive={false}
             />
           </div>
         )}
