@@ -134,6 +134,14 @@ describe('WebShellWithProviders top-level boundary', () => {
     expect(sessionProviderProps[0]).toHaveProperty('sessionId', undefined);
   });
 
+  it('enables prompt SSE restarts only when explicitly requested', () => {
+    render(<WebShellWithProviders restartSseOnPrompt />);
+    expect(sessionProviderProps[0]).toMatchObject({
+      restartEventStreamOnPrompt: true,
+    });
+    expect(appProps[0]).toMatchObject({ restartSseOnPrompt: true });
+  });
+
   it('selects a registered workspace by path without locking the UI', () => {
     workspaceCapabilities = {
       workspaces: [

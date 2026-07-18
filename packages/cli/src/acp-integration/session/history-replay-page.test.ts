@@ -145,6 +145,39 @@ describe('history replay page', () => {
     );
   });
 
+  it('replays backward pages without forward replay state', async () => {
+    const replayPage = vi
+      .spyOn(HistoryReplayer.prototype, 'replayPage')
+      .mockResolvedValueOnce({ pendingToolCalls: [] });
+    const encodeCursor = vi.fn(() => 'next-cursor');
+
+    await replayTranscriptRecordPage({
+      sessionId: SESSION_ID,
+      page: recordPage({
+        direction: 'backward',
+        hasMore: true,
+        nextCursorState: cursorState(),
+        replay: {
+          pendingToolCalls: [
+            {
+              callId: 'stale-call',
+              toolName: 'Read',
+              recordId: 'stale-record',
+            },
+          ],
+        },
+      }),
+      encodeCursor,
+    });
+
+    expect(replayPage).toHaveBeenCalledWith([], {
+      pendingToolCalls: [],
+      finalizeDangling: true,
+      gaps: [],
+    });
+    expect(encodeCursor).toHaveBeenCalledWith(cursorState());
+  });
+
   it('terminates pagination when replay conversion fails', async () => {
     vi.spyOn(HistoryReplayer.prototype, 'replayPage').mockRejectedValueOnce(
       new Error('replay failed'),

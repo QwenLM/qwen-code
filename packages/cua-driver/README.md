@@ -191,5 +191,5 @@ irm https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/
 ## Documentation
 
 - [Vendored patches](./.vendored-patches.md)
-- [Relative-coordinate design](./rust/docs/relative-coordinates-design.md)
+- [Relative-coordinate design](./docs/relative-coordinates-design.md)
 - [Upstream docs](https://github.com/trycua/cua/tree/main/libs/cua-driver/rust)

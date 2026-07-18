@@ -179,10 +179,7 @@ export class HistoryReplayer {
   }
 
   private setActiveRecordId(recordId: string | null, timestamp?: string): void {
-    const context = this.ctx as unknown as {
-      setActiveRecordId?: (id: string | null, timestamp?: string) => void;
-    };
-    context.setActiveRecordId?.(recordId, timestamp);
+    this.ctx.setActiveRecordId?.(recordId, timestamp);
   }
 }
 

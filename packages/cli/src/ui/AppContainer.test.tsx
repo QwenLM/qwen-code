@@ -576,9 +576,11 @@ describe('AppContainer State Management', () => {
   };
 
   describe('Basic Rendering', () => {
-    it('cancels an active request before quitting', () => {
+    it('continues quitting when cancelling the active request fails', () => {
       vi.useFakeTimers();
-      const cancelOngoingRequest = vi.fn();
+      const cancelOngoingRequest = vi.fn(() => {
+        throw new Error('cancel failed');
+      });
       const requestShutdown = vi.fn();
       mockedUseGeminiStream.mockReturnValue({
         streamingState: StreamingState.Responding,
@@ -610,10 +612,12 @@ describe('AppContainer State Management', () => {
       const slashCommandActions = mockedUseSlashCommandProcessor.mock.calls.at(
         -1,
       )?.[12] as { quit: (messages: HistoryItem[]) => void };
-      slashCommandActions.quit([]);
+      const timerCount = vi.getTimerCount();
+      expect(() => slashCommandActions.quit([])).not.toThrow();
 
       expect(cancelOngoingRequest).toHaveBeenCalledOnce();
       expect(requestShutdown).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(timerCount + 1);
     });
 
     it('shows recording failures as warnings and unsubscribes on unmount', async () => {
@@ -974,6 +978,48 @@ describe('AppContainer State Management', () => {
           messageQueueLength: 1,
         }),
       ).toBe(true);
+    });
+
+    it('marks Ctrl+Q submissions to wait for the idle boundary', () => {
+      const mockQueueMessage = vi.fn();
+      const mockSubmitQuery = vi.fn();
+
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'responding',
+        submitQuery: mockSubmitQuery,
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      capturedUIActions.handleFinalSubmit('/btw next turn', {
+        deferUntilIdle: true,
+      });
+
+      expect(mockQueueMessage).toHaveBeenCalledWith('/btw next turn', true);
+      expect(mockSubmitQuery).not.toHaveBeenCalled();
     });
 
     it('submits /btw immediately instead of queueing while responding', () => {

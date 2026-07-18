@@ -26,6 +26,8 @@ export interface WebShellWithProvidersProps extends WebShellProps {
   lockWorkspaceCwd?: string;
   /** Client identity to reuse when attaching to an externally created session. */
   clientId?: string;
+  /** Restart the SSE event stream after each accepted prompt. Disabled by default. */
+  restartSseOnPrompt?: boolean;
 }
 
 function resolveBaseUrl(baseUrl: string | undefined): string {
@@ -89,6 +91,7 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
     workspaceCwd,
     lockWorkspaceCwd,
     clientId,
+    restartSseOnPrompt,
     ...webShellProps
   } = props;
   const resolvedBaseUrl = resolveBaseUrl(baseUrl);
@@ -108,6 +111,7 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
           workspaceCwd={workspaceCwd}
           lockWorkspaceCwd={lockWorkspaceCwd}
           clientId={clientId}
+          restartSseOnPrompt={restartSseOnPrompt}
           webShellProps={webShellProps}
         />
       </DaemonWorkspaceProvider>

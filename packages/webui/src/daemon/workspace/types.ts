@@ -258,6 +258,21 @@ export interface DaemonAddWorkspaceResult {
   persisted?: boolean;
 }
 
+export interface DaemonWorkspacePathSuggestion {
+  name: string;
+  path: string;
+}
+
+export interface DaemonWorkspacePathSuggestions {
+  kind: 'workspace-path-suggestions';
+  /** Directory the suggestions were listed from. */
+  dir: string;
+  /** Path separator of the daemon host, for appending on accept. */
+  sep: string;
+  suggestions: DaemonWorkspacePathSuggestion[];
+  truncated: boolean;
+}
+
 export interface DaemonWorkspaceActions {
   // Sessions
   listSessions(
@@ -491,6 +506,9 @@ export interface DaemonWorkspaceActions {
     cwd: string,
     options?: { persist?: boolean },
   ): Promise<DaemonAddWorkspaceResult>;
+  suggestWorkspacePaths(
+    prefix: string,
+  ): Promise<DaemonWorkspacePathSuggestions>;
   removeWorkspace(
     workspaceId: string,
     options?: { force?: boolean; timeoutMs?: number },

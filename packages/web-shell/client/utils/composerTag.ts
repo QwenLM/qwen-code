@@ -29,6 +29,7 @@ const builtinTagIconUrls: Record<WebShellBuiltinComposerTagKind, string> = {
   mcp: mcpIconUrl,
   skill: skillIconUrl,
 };
+const builtinTagIconUrlSet = new Set(Object.values(builtinTagIconUrls));
 
 function getOwnIconUrl(
   iconUrls: WebShellComposerTagIconMap | undefined,
@@ -56,6 +57,12 @@ export function getComposerTagIconUrl(
     getOwnIconUrl(customIconUrls, kind) ??
     getOwnIconUrl(builtinTagIconUrls, kind)
   );
+}
+
+export function isBuiltinComposerTagIconUrl(
+  iconUrl: string | undefined,
+): boolean {
+  return iconUrl !== undefined && builtinTagIconUrlSet.has(iconUrl);
 }
 
 export function createInputAnnotationsFromComposerTags(

@@ -389,6 +389,15 @@ export class ExtensionFileWatcher {
 
   private markStoreGenerationChanged(generation: number, force = false): void {
     const previous = this.observedStoreGeneration;
+    // First observed generation — establish baseline without firing a change
+    // notification. On a fresh install, state.json doesn't exist yet so the
+    // baseline is undefined; the store then writes generation:0 and the next
+    // poll sees undefined→0. That transition is baseline establishment, not
+    // a real extension change (see #7029).
+    if (previous === undefined) {
+      this.observedStoreGeneration = generation;
+      return;
+    }
     if (!force && previous === generation) return;
     if (this.refreshState.isSuppressed()) return;
     const marked = this.refreshState.markExtensionsChanged(

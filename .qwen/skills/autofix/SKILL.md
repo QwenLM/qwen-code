@@ -50,6 +50,24 @@ owns the model-driven decisions, code changes, and pre-commit verification.
   infra failure IS worth reporting: quote the exact command and its real output
   in `<workdir>/failure.md` rather than skipping the check or guessing at the
   cause (e.g. do not claim "node_modules is incomplete" unless you saw it fail).
+- Bilingual PR-comment outputs: any file the workflow posts VERBATIM as a PR
+  comment — `address-summary.md`, `no-action.md`, and `e2e-report.md` — must be
+  written in English and END with a complete collapsed Chinese translation of
+  its content, mirroring the repository's PR-body convention:
+
+  ```markdown
+  <details>
+  <summary>中文说明</summary>
+
+  …完整逐段翻译…
+
+  </details>
+  ```
+
+  Translate the whole body, section by section; do not summarize or omit.
+  Keep `failure.md` and `handoff.md` English-only WITHOUT a details block:
+  handoff comments embed a byte-truncated excerpt of them, and a severed
+  `<details>` tag would swallow the rest of the comment when rendered.
 - Never ask the user a question in this headless workflow. If blocked, write
   `<workdir>/failure.md` with what you learned and stop.
 
@@ -108,7 +126,8 @@ Implement the selected issue in the checked-out repository:
 8. Ensure `git status --short` shows only intended files, then create one
    Conventional Commit, e.g. `fix(core): summary (#<issue>)`.
 9. Write all required outputs:
-   - `<workdir>/e2e-report.md`
+   - `<workdir>/e2e-report.md` (bilingual per Shared Rules — it is posted
+     verbatim as a PR comment)
    - `<workdir>/pr-title.txt`
    - `<workdir>/pr-body.md` using `.qwen/skills/prepare-pr/SKILL.md`
 
@@ -127,9 +146,13 @@ Classify every feedback point:
 
 - Required: correctness bug, broken build/test, security issue, or a
   `CHANGES_REQUESTED` item naming a real defect. Verify it, then fix minimally.
-- Optional: suggestion, nit, or hardening. Prefer NOT to deviate from this PR's
-  original direction and scope. Implement only if valuable,
-  codebase-consistent, and in scope; otherwise explain why no action is needed.
+- Optional: suggestion, nit, or hardening — including `**[Suggestion]**`
+  findings from the automated reviewer. Per AGENTS.md's review policy these ARE
+  addressed during a PR's early review rounds: implement each one that is
+  valuable, codebase-consistent, and in scope. Decline only with a recorded
+  reason per finding (out of scope, conflicts with the PR's direction, or not
+  worth the diff growth) so the deferral is visible in the PR thread — never
+  drop one silently.
 
 If `--conflict true`, merge `origin/<base>` and resolve conflicts by
 understanding both sides, never blindly taking one side. If false, do not merge
@@ -142,6 +165,7 @@ Finish with exactly one outcome:
   tests for touched packages (plus `npm run generate:settings-schema`, staging
   the regenerated schema, if a settings source changed), commit once only after
   they pass, then write `<workdir>/address-summary.md` with each feedback point,
-  decision, changes, conflict notes, and verification results.
-- No change: write `<workdir>/no-action.md`.
+  decision, changes, conflict notes, and verification results (bilingual per
+  Shared Rules).
+- No change: write `<workdir>/no-action.md` (bilingual per Shared Rules).
 - Cannot confidently proceed: write `<workdir>/failure.md` and do not commit.

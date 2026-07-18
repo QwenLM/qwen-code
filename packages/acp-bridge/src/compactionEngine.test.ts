@@ -1013,6 +1013,39 @@ describe('EventBus + CompactionEngine integration', () => {
     ).toBeUndefined();
   });
 
+  it('seedReplayEvents evicts whole persisted records', () => {
+    const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 512 });
+    const bus = new EventBus(100, undefined, engine);
+    const update = (recordId: string, text: string) => ({
+      type: 'session_update' as const,
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `${text}-${'x'.repeat(600)}` },
+          _meta: { 'qwen.session.recordId': recordId },
+        },
+      },
+    });
+
+    bus.seedReplayEvents([
+      update('old-record', 'old-1'),
+      update('old-record', 'old-2'),
+      update('new-record', 'new-1'),
+      update('new-record', 'new-2'),
+    ]);
+
+    const snapshot = bus.snapshotReplay()!;
+    expect(snapshot.compactedTurns[0]?.type).toBe('history_truncated');
+    expect(extractTexts(snapshot.compactedTurns)).toEqual([
+      `new-1-${'x'.repeat(600)}`,
+      `new-2-${'x'.repeat(600)}`,
+    ]);
+    expect(snapshot.compactedTurns[0]?.data).toMatchObject({
+      truncatedEvents: 2,
+      retainedEvents: 2,
+    });
+  });
+
   it('seedReplayEvents replaces prior replay and truncation state', () => {
     const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 512 });
     const bus = new EventBus(100, undefined, engine);

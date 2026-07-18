@@ -141,10 +141,23 @@ function replayContext(
   cumulativeUsage: CumulativeUsage,
   config?: Config,
 ): SessionEmitterContext {
+  let activeRecordId: string | null = null;
   return {
     sessionId,
     sendUpdate: async (update) => {
-      updates.push(update);
+      if (activeRecordId === null) {
+        updates.push(update);
+        return;
+      }
+      const record = update as unknown as Record<string, unknown>;
+      const meta = isObjectRecord(record['_meta']) ? record['_meta'] : {};
+      updates.push({
+        ...record,
+        _meta: { ...meta, 'qwen.session.recordId': activeRecordId },
+      } as unknown as SessionUpdate);
+    },
+    setActiveRecordId: (recordId: string | null) => {
+      activeRecordId = recordId;
     },
     cumulativeUsage,
     ...(config ? { config } : {}),
@@ -229,8 +242,9 @@ export async function replayTranscriptRecordPage({
   let replayError: string | undefined;
   try {
     const replayPageState = await replayer.replayPage(page.records, {
-      pendingToolCalls: state.pendingToolCalls,
-      finalizeDangling: !page.hasMore,
+      pendingToolCalls:
+        page.direction === 'backward' ? [] : state.pendingToolCalls,
+      finalizeDangling: page.direction === 'backward' || !page.hasMore,
       gaps: page.gaps,
     });
     replayState = replayPageState.replay;
@@ -249,7 +263,9 @@ export async function replayTranscriptRecordPage({
     page.nextCursorState && replayError === undefined
       ? encodeCursor({
           ...page.nextCursorState,
-          replay: replayState,
+          ...(page.direction === 'backward'
+            ? {}
+            : { replay: replayState }),
         })
       : undefined;
 
