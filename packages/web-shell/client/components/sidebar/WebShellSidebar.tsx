@@ -658,6 +658,9 @@ export function WebShellSidebar({
   const workspaceRemovalEnabled = Boolean(
     connection.capabilities?.features?.includes('workspace_runtime_removal'),
   );
+  const workspaceDisplayNameEnabled = Boolean(
+    connection.capabilities?.features?.includes('workspace_display_name'),
+  );
   const canExportSessions =
     connection.capabilities?.features?.includes('session_export') ?? false;
   const canExportArchivedSessions =
@@ -1183,8 +1186,11 @@ export function WebShellSidebar({
   }, [currentSessionIdentity, getIdentityForSession, sessions]);
 
   const handleAddWorkspace = useCallback(
-    async (cwd: string, persist: boolean) => {
-      const result = await workspaceActions.addWorkspace(cwd, { persist });
+    async (cwd: string, persist: boolean, displayName?: string) => {
+      const result = await workspaceActions.addWorkspace(cwd, {
+        persist,
+        ...(displayName ? { displayName } : {}),
+      });
       if (persist && result.persisted !== true) {
         throw new Error(t('sidebar.addWorkspacePersistenceError'));
       }
@@ -3799,6 +3805,7 @@ export function WebShellSidebar({
         <AddWorkspaceDialog
           onClose={() => setShowAddWorkspaceDialog(false)}
           onAdd={handleAddWorkspace}
+          displayNameEnabled={workspaceDisplayNameEnabled}
           onSuggest={handleSuggestWorkspacePaths}
         />
       )}

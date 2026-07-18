@@ -30,21 +30,31 @@ afterEach(() => {
 // The dialog is portaled to document.body, so query the document, not container.
 const input = () =>
   document.querySelector<HTMLInputElement>('#add-workspace-path')!;
+const displayNameInput = () =>
+  document.querySelector<HTMLInputElement>('#add-workspace-display-name')!;
 const alert = () => document.querySelector('[role="alert"]');
 const submitButton = () =>
   Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find(
     (b) => b.getAttribute('type') === 'submit',
   )!;
 
-function type(value: string) {
+function typeInto(target: HTMLInputElement, value: string) {
   act(() => {
     const setter = Object.getOwnPropertyDescriptor(
       HTMLInputElement.prototype,
       'value',
     )!.set!;
-    setter.call(input(), value);
-    input().dispatchEvent(new Event('input', { bubbles: true }));
+    setter.call(target, value);
+    target.dispatchEvent(new Event('input', { bubbles: true }));
   });
+}
+
+function type(value: string) {
+  typeInto(input(), value);
+}
+
+function typeDisplayName(value: string) {
+  typeInto(displayNameInput(), value);
 }
 
 function submit() {
@@ -58,6 +68,12 @@ describe('AddWorkspaceDialog', () => {
     mount(<AddWorkspaceDialog onClose={vi.fn()} onAdd={vi.fn()} />);
 
     expect(document.activeElement).toBe(input());
+  });
+
+  it('hides the display name field unless the daemon supports it', () => {
+    mount(<AddWorkspaceDialog onClose={vi.fn()} onAdd={vi.fn()} />);
+
+    expect(document.querySelector('#add-workspace-display-name')).toBeNull();
   });
 
   it('describes the input with the hint and no error initially', () => {
@@ -103,6 +119,28 @@ describe('AddWorkspaceDialog', () => {
     });
 
     expect(onAdd).toHaveBeenCalledWith('/abs/project', true);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('submits an optional trimmed display name', async () => {
+    const onAdd = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+    mount(
+      <AddWorkspaceDialog onClose={onClose} onAdd={onAdd} displayNameEnabled />,
+    );
+
+    expect(displayNameInput().maxLength).toBe(256);
+    expect(displayNameInput().getAttribute('aria-describedby')).toBe(
+      'add-workspace-display-name-hint',
+    );
+    type('/abs/project');
+    typeDisplayName('  Payments API  ');
+    submit();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(onAdd).toHaveBeenCalledWith('/abs/project', true, 'Payments API');
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 

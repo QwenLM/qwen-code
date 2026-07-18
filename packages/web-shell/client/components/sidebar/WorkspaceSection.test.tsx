@@ -120,6 +120,20 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe('WorkspaceSection label', () => {
+  it('prefers the workspace display name over the cwd basename', () => {
+    renderSection({
+      workspace: {
+        ...trustedWorkspace,
+        displayName: 'Payments API',
+      },
+    });
+
+    expect(container.textContent).toContain('Payments API');
+    expect(container.textContent).not.toContain('project');
+  });
+});
+
 describe('WorkspaceSection git chip', () => {
   it('renders a clickable git chip for a trusted repo and opens its diff', async () => {
     const status: DaemonWorkspaceGitStatus = {

@@ -4,6 +4,8 @@
 
 Let daemon and TypeScript SDK clients attach an optional human-readable display
 name to a registered workspace without changing workspace identity or routing.
+Let Web Shell users set that name while adding a workspace and see it in the
+workspace list.
 
 ## Contract
 
@@ -16,6 +18,8 @@ name to a registered workspace without changing workspace identity or routing.
   effective display name when one exists.
 - `workspace_display_name` advertises the contract. The TypeScript SDK exposes
   the registration option and a workspace-bound setter.
+- When the capability is advertised, the Web Shell add-workspace dialog accepts
+  an optional display name and uses it for workspace labels.
 
 `id` and `cwd` remain the only workspace selectors. A display name is never
 used for lookup and does not need to be unique.
@@ -49,6 +53,7 @@ unchanged. Process-local workspaces do not gain a persistence dependency.
 Every wire change is additive to protocol v1. Older SDKs ignore
 `displayName`; newer SDKs type it as optional and continue to work with older
 daemons that omit both the field and capability tag.
+Web Shell hides the display-name input when the capability tag is absent.
 
 ## Verification
 
@@ -58,10 +63,18 @@ daemons that omit both the field and capability tag.
   and routing by id/cwd rather than display name.
 - Capability/status and SDK tests cover the additive field, request shapes,
   and `workspace_display_name` advertisement.
-- A browser screenshot verifies that the PR branch serves the real Web Shell.
+- Web Shell tests cover the optional input, SDK option forwarding, and label
+  fallback. Browser screenshots verify the real add-workspace form and its
+  resulting sidebar label.
 - An end-to-end daemon recording demonstrates register, read, update, clear,
   and restart persistence for the PR.
 
-![Workspace display-name Web Shell](../assets/workspace-display-name-web-shell.jpg)
+Filled add-workspace form:
+
+![Workspace display-name form](../assets/workspace-display-name-web-shell.jpg)
+
+Created workspace shown by display name:
+
+![Workspace display-name result](../assets/workspace-display-name-web-shell-result.jpg)
 
 ![Workspace display-name daemon E2E](../assets/workspace-display-name-e2e.gif)

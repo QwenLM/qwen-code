@@ -30,7 +30,7 @@ import { useScopedSessions } from '../hooks/useScopedSessions';
 import {
   hasMultipleWorkspaces,
   mergeSessionsById,
-  workspaceBasename,
+  workspaceLabelForCwd,
 } from '../utils/workspace';
 import { isEditableTarget } from '../utils/dom';
 import styles from './SplitView.module.css';
@@ -397,7 +397,10 @@ export function SplitView({
                         className={styles.pickerItemWorkspace}
                         title={session.workspaceCwd}
                       >
-                        {workspaceBasename(session.workspaceCwd)}
+                        {workspaceLabelForCwd(
+                          session.workspaceCwd,
+                          connection.capabilities?.workspaces,
+                        )}
                       </span>
                     )}
                   </button>

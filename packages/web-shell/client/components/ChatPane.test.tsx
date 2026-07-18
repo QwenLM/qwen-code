@@ -304,13 +304,19 @@ describe('ChatPane', () => {
       workspaceCwd: '/work/web-shell',
       workspaces: [
         { id: 'w0', cwd: '/work/web-shell', primary: true, trusted: true },
-        { id: 'w1', cwd: '/work/api', primary: false, trusted: true },
+        {
+          id: 'w1',
+          cwd: '/work/api',
+          displayName: 'Payments API',
+          primary: false,
+          trusted: true,
+        },
       ],
     };
     // The split view hands each pane its own workspace explicitly.
     render({ title: 'Add pagination', workspaceCwd: '/work/api' });
     expect(latestChatEditorProps.visibleToolbarActions).toContain('workspace');
-    expect(latestChatEditorProps.workspaceName).toBe('api');
+    expect(latestChatEditorProps.workspaceName).toBe('Payments API');
     expect(latestChatEditorProps.workspaceTitle).toBe('/work/api');
     // The chip carries the pane's stable accent color (api is the 2nd workspace
     // → the 2nd palette color) so it stays distinct when it collapses to an icon.
@@ -323,7 +329,13 @@ describe('ChatPane', () => {
       workspaceCwd: '/work/web-shell',
       workspaces: [
         { id: 'w0', cwd: '/work/web-shell', primary: true, trusted: true },
-        { id: 'w1', cwd: '/work/api', primary: false, trusted: true },
+        {
+          id: 'w1',
+          cwd: '/work/api',
+          displayName: 'Payments API',
+          primary: false,
+          trusted: true,
+        },
       ],
     };
     render({ title: 'Add pagination', workspaceCwd: '/work/api' });
@@ -332,7 +344,7 @@ describe('ChatPane', () => {
     // in a hover tooltip.
     const tag = container!.querySelector('[data-web-shell-pane-workspace]');
     expect(tag).not.toBeNull();
-    expect(tag!.textContent).toContain('api');
+    expect(tag!.textContent).toContain('Payments API');
     expect(tag!.getAttribute('title')).toBe('/work/api');
   });
 
