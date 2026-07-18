@@ -916,6 +916,7 @@ async function loadServeRuntimeModules() {
     workspaceSkillsStatusModule,
     totalSessionAdmissionModule,
     workspaceRegistryModule,
+    scheduledTaskChannelAdmissionModule,
   ] = await Promise.all([
     import('./server.js'),
     import('@qwen-code/acp-bridge/bridge'),
@@ -927,6 +928,7 @@ async function loadServeRuntimeModules() {
     import('./workspace-skills-status.js'),
     import('./total-session-admission.js'),
     import('./workspace-registry.js'),
+    import('./scheduled-task-channel-admission.js'),
   ]);
   return {
     createServeApp: serverModule.createServeApp,
@@ -952,6 +954,8 @@ async function loadServeRuntimeModules() {
     createWorkspaceRegistry: workspaceRegistryModule.createWorkspaceRegistry,
     createWorkspaceSessionOwnerIndex:
       workspaceRegistryModule.createWorkspaceSessionOwnerIndex,
+    createObservedContactScheduledTaskAdmission:
+      scheduledTaskChannelAdmissionModule.createObservedContactScheduledTaskAdmission,
   };
 }
 
@@ -4334,6 +4338,8 @@ async function runQwenServeImpl(
       // (keepalive) and reloads them on boot (rehydration). Off by default so
       // direct createServeApp embeds/tests don't spawn sessions.
       manageScheduledTaskSessions: true,
+      admitScheduledTaskChannelTarget:
+        runtime.createObservedContactScheduledTaskAdmission(),
       scheduledTaskChannelDeliveryAvailable: true,
       fsFactory: routeFsFactory,
       primaryWorkspaceTrusted: trustedWorkspace,

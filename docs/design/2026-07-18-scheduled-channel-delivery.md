@@ -317,12 +317,12 @@ field. An older client can ignore additive response fields. If a stale client
 sends `delivery` to a daemon that cannot validate it, the daemon returns a
 typed error and never silently drops the target.
 
-The implementation remains based on `main` and does not import or copy #7109.
-Scheduled-task routes consume a narrow target-admission dependency. Until an
-observed-contacts provider is available, authenticated selected-target
-creation is unavailable; the trusted current-IM-chat path can still be
-admitted by the daemon Channel controller. After #7109 lands, wiring its
-provider into that dependency is a small integration change.
+The implementation is based on `main`, including the merged #7109 observed
+contact registry. The production daemon wires that registry through a narrow
+target-admission dependency and accepts only an exact workspace-scoped match
+observed within the last seven days. Minimal embedders that do not install the
+provider continue to fail closed. The trusted current-IM-chat path is admitted
+directly by the daemon Channel controller after the normal inbound gates.
 
 ## IM-originated task creation and compatibility
 
@@ -465,8 +465,8 @@ a second scheduler and is outside this design.
    `scheduled_task_channel_delivery`.
 3. Back daemon-managed `/loop` creation with the unified durable path, admitting
    the accepted current-chat target without a second loop store.
-4. When #7109 lands, connect its provider to target admission and enable the
-   selected-target picker for authenticated daemon clients.
+4. Connect #7109's merged observed-contact provider to target admission and
+   expose the capability to authenticated daemon clients.
 5. Add Web Shell and daemon-aware CLI presentation while keeping standalone
    local cron/loop behavior unchanged.
 6. Add an optional hosting wake-up integration only for deployments that stop
@@ -488,5 +488,5 @@ a second scheduler and is outside this design.
   directly.
 - Daemon-managed `/loop` and REST-created tasks use the same task file; no
   request is dual-written to the standalone Channel loop store.
-- The code and PR remain based on `main`; #7109 is integrated through a narrow
-  admission provider after it lands.
+- The code and PR remain based on `main`; merged #7109 is integrated through a
+  narrow, freshness-bounded admission provider.

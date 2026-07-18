@@ -344,8 +344,9 @@ export interface ServeAppDeps {
   manageScheduledTaskSessions?: boolean;
   /**
    * Resolves externally requested Channel targets against an observed and
-   * authorized mapping. Omitted on main until an embedding supplies that
-   * registry; delivery-bearing schedule writes then fail closed.
+   * authorized mapping. The production daemon wires the workspace-scoped
+   * observed-contact registry; minimal embedders may omit it, in which case
+   * delivery-bearing schedule writes fail closed.
    */
   admitScheduledTaskChannelTarget?: AdmitScheduledTaskChannelTarget;
   /**
