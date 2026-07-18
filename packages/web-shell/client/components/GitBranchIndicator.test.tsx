@@ -185,6 +185,20 @@ describe('GitBranchIndicator', () => {
     expect(chip().querySelector('[data-tone]')).toBeNull();
   });
 
+  it('labels a known-clean working tree in the accessible label', () => {
+    // The clean aria-label branch fires only when a real status snapshot exists
+    // (computedAt defined) and every change counter is zero — distinguishing
+    // "known clean" from "no status yet" (which omits the clean phrase).
+    render({
+      branch: 'main',
+      status: { v: 2, workspaceCwd: '/repo', branch: 'main', computedAt: 1 },
+    });
+
+    const label = chip().getAttribute('aria-label') ?? '';
+    expect(label).toContain('Current Git branch: main');
+    expect(label).toContain('Working tree clean');
+  });
+
   it('localizes the accessible branch label', () => {
     expect(getTranslator('en')('git.currentBranch', { branch: 'main' })).toBe(
       'Current Git branch: main',

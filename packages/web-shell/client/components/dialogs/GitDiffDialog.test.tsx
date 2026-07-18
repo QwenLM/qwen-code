@@ -374,6 +374,7 @@ describe('GitDiffDialog', () => {
     const header = document.body.querySelector(
       'button[aria-expanded="false"]',
     ) as HTMLButtonElement;
+    expect(header).not.toBeNull();
     await act(async () => {
       header.click();
     });
@@ -404,6 +405,7 @@ describe('GitDiffDialog', () => {
     const header = document.body.querySelector(
       'button[aria-expanded="false"]',
     ) as HTMLButtonElement;
+    expect(header).not.toBeNull();
     await act(async () => {
       header.click();
     });
@@ -446,6 +448,7 @@ describe('GitDiffDialog', () => {
     const header = document.body.querySelector(
       'button[aria-expanded="false"]',
     ) as HTMLButtonElement;
+    expect(header).not.toBeNull();
     await act(async () => {
       header.click();
     });

@@ -68,6 +68,8 @@ function renderSection(
   overrides: Partial<{
     workspace: DaemonWorkspaceCapability;
     onOpenGitDiff: (cwd: string) => void;
+    client: DaemonClient;
+    reloadToken: number;
   }> = {},
 ): void {
   act(() => {
@@ -75,8 +77,8 @@ function renderSection(
       <I18nProvider language="en">
         <WorkspaceSection
           workspace={overrides.workspace ?? trustedWorkspace}
-          client={makeClient()}
-          reloadToken={0}
+          client={overrides.client ?? makeClient()}
+          reloadToken={overrides.reloadToken ?? 0}
           untrustedLabel="Untrusted"
           readOnlyLabel="Read-only"
           trustToOpenLabel="Trust to open"
@@ -182,6 +184,27 @@ describe('WorkspaceSection git chip', () => {
 
     expect(workspaceGit).not.toHaveBeenCalled();
     expect(gitChip()).toBeNull();
+  });
+
+  it('re-fetches git status when reloadToken changes', async () => {
+    // reloadToken is in the polling effect's dependency array so agent activity
+    // (which bumps it) refreshes the chip immediately instead of waiting for the
+    // next 60s tick. A stable client isolates the re-fetch to the token change.
+    workspaceGit.mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/tmp/project',
+      branch: 'main',
+    });
+    const client = makeClient();
+    const onOpenGitDiff = vi.fn();
+
+    renderSection({ client, reloadToken: 0, onOpenGitDiff });
+    await flush();
+    expect(workspaceGit).toHaveBeenCalledTimes(1);
+
+    renderSection({ client, reloadToken: 1, onOpenGitDiff });
+    await flush();
+    expect(workspaceGit).toHaveBeenCalledTimes(2);
   });
 
   it('hides the chip when the workspace is not a git repo (null branch)', async () => {

@@ -229,6 +229,31 @@ describe('workspace Git diff routes', () => {
     );
   });
 
+  it('surfaces a traversal oldPath as unavailable via core normalization', async () => {
+    // The route forwards oldPath verbatim; fetchGitDiffHunksForFile rejects `..`
+    // traversal (returns null) and the route surfaces that as available:false
+    // rather than erroring or escaping the workspace.
+    fetchGitDiffHunksForFileMock.mockResolvedValue(null);
+    const app = express();
+    registerWorkspaceGitDiffRoutes(app, {
+      boundWorkspace: '/work/main',
+      sendBridgeError,
+    });
+
+    const response = await request(app).get(
+      '/workspace/git/diff/file?path=ok.ts&oldPath=../../etc/passwd',
+    );
+
+    expect(response.status).toBe(200);
+    expect(fetchGitDiffHunksForFileMock).toHaveBeenCalledWith(
+      '/work/main',
+      'ok.ts',
+      '../../etc/passwd',
+    );
+    expect(response.body.available).toBe(false);
+    expect(response.body.hunks).toEqual([]);
+  });
+
   it('surfaces the truncated flag when the diff was capped', async () => {
     fetchGitDiffHunksForFileMock.mockResolvedValue({
       hunks: [
