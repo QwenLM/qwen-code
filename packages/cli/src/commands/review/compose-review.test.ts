@@ -761,17 +761,24 @@ describe('composeReview — presubmit permission gates certification even when n
 });
 
 describe('composeReviewCommand handler (the CLI glue)', () => {
-  it('reads --input and writes the result JSON to --out', () => {
+  it('reads --input, counts the drafted comments, and writes the result JSON to --out', () => {
     const dir = mkdtempSync(join(tmpdir(), 'compose-review-test-'));
     const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
     const outPath = join(dir, 'nested', 'composed.json');
+    writeFileSync(inputPath, JSON.stringify({ modelId: MODEL }), 'utf8');
+    // The count comes from the drafted comments, not from a number in the
+    // state JSON — one Suggestion drafted, one Suggestion composed.
     writeFileSync(
-      inputPath,
-      JSON.stringify({ suggestionsInline: 1, modelId: MODEL }),
+      commentsPath,
+      JSON.stringify([
+        { path: 'a.ts', line: 3, body: '**[Suggestion]** prefer x over y' },
+      ]),
       'utf8',
     );
     (composeReviewCommand.handler as (argv: unknown) => void)({
       input: inputPath,
+      comments: commentsPath,
       out: outPath,
     });
     const written = JSON.parse(
@@ -780,6 +787,171 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     expect(written.event).toBe('COMMENT');
     expect(written.body).toContain('Suggestions are inline.');
     expect(written.body.endsWith(FOOTER)).toBe(true);
+  });
+
+  it('a drafted inline Critical reaches the verdict line — the report-only hole', () => {
+    // The dogfooded failure this boundary exists for: a report-only run (no
+    // submit, so nothing downstream recounts) moved its one Critical from
+    // `bodyCriticals` to an inline comment, dropped the count on the way, and
+    // the verdict line read Approve over a blocker the same report listed.
+    // With the counts derived from the drafted comments, that finding cannot
+    // fall out of the computation.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-inline-crit-'));
+    try {
+      const inputPath = join(dir, 'compose.json');
+      const commentsPath = join(dir, 'comments.json');
+      const outPath = join(dir, 'composed.json');
+      writeFileSync(inputPath, JSON.stringify({ modelId: MODEL }), 'utf8');
+      writeFileSync(
+        commentsPath,
+        JSON.stringify([
+          {
+            path: 'shellAstParser.ts',
+            line: 141,
+            body: '**[Critical]** the AST path omits %G[?GKFPST]',
+          },
+        ]),
+        'utf8',
+      );
+      (composeReviewCommand.handler as (argv: unknown) => void)({
+        input: inputPath,
+        comments: commentsPath,
+        out: outPath,
+      });
+      const written = JSON.parse(readFileSync(outPath, 'utf8')) as {
+        event: string;
+        verdictLine: string;
+      };
+      expect(written.event).toBe('REQUEST_CHANGES');
+      expect(written.verdictLine).toContain('Request changes');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts the review-payload shape too — the same file submit takes', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'compose-payload-shape-'));
+    try {
+      const inputPath = join(dir, 'compose.json');
+      const commentsPath = join(dir, 'review.json');
+      const outPath = join(dir, 'composed.json');
+      writeFileSync(inputPath, JSON.stringify({ modelId: MODEL }), 'utf8');
+      writeFileSync(
+        commentsPath,
+        JSON.stringify({
+          commit_id: 'abc',
+          comments: [{ path: 'a.ts', line: 1, body: '**[Critical]** boom' }],
+        }),
+        'utf8',
+      );
+      (composeReviewCommand.handler as (argv: unknown) => void)({
+        input: inputPath,
+        comments: commentsPath,
+        out: outPath,
+      });
+      expect(
+        (JSON.parse(readFileSync(outPath, 'utf8')) as { event: string }).event,
+      ).toBe('REQUEST_CHANGES');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ['criticalsInline', { criticalsInline: 1 }],
+    ['suggestionsInline', { suggestionsInline: 2 }],
+  ])(
+    'refuses a state JSON carrying %s — counts are counted, not typed',
+    (_, extra) => {
+      const dir = mkdtempSync(join(tmpdir(), 'compose-typed-count-'));
+      try {
+        const inputPath = join(dir, 'compose.json');
+        const commentsPath = join(dir, 'comments.json');
+        writeFileSync(
+          inputPath,
+          JSON.stringify({ modelId: MODEL, ...extra }),
+          'utf8',
+        );
+        writeFileSync(commentsPath, '[]', 'utf8');
+        expect(() =>
+          (composeReviewCommand.handler as (argv: unknown) => void)({
+            input: inputPath,
+            comments: commentsPath,
+          }),
+        ).toThrow(/counted from the --comments file/);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('refuses a drafted comment with no severity marker — it would weigh nothing', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'compose-unmarked-'));
+    try {
+      const inputPath = join(dir, 'compose.json');
+      const commentsPath = join(dir, 'comments.json');
+      writeFileSync(inputPath, JSON.stringify({ modelId: MODEL }), 'utf8');
+      writeFileSync(
+        commentsPath,
+        JSON.stringify([
+          { path: 'a.ts', line: 1, body: '**[Critical]** real one' },
+          { path: 'b.ts', line: 2, body: 'this blocker forgot its marker' },
+        ]),
+        'utf8',
+      );
+      expect(() =>
+        (composeReviewCommand.handler as (argv: unknown) => void)({
+          input: inputPath,
+          comments: commentsPath,
+        }),
+      ).toThrow(/comments\[1\].*neither/s);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ['missing --comments', undefined, /--comments is required/],
+    [
+      'a comments path that does not resolve',
+      '/nonexistent/c.json',
+      /cannot read the comments file/,
+    ],
+  ])(
+    'refuses %s — omission is the failure mode, not a default',
+    (_, commentsPath, pattern) => {
+      const dir = mkdtempSync(join(tmpdir(), 'compose-no-comments-'));
+      try {
+        const inputPath = join(dir, 'compose.json');
+        writeFileSync(inputPath, JSON.stringify({ modelId: MODEL }), 'utf8');
+        expect(() =>
+          (composeReviewCommand.handler as (argv: unknown) => void)({
+            input: inputPath,
+            comments: commentsPath,
+          }),
+        ).toThrow(pattern as RegExp);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('refuses a comments file that is not an array (nor a payload with one)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'compose-bad-comments-'));
+    try {
+      const inputPath = join(dir, 'compose.json');
+      const commentsPath = join(dir, 'comments.json');
+      writeFileSync(inputPath, JSON.stringify({ modelId: MODEL }), 'utf8');
+      writeFileSync(commentsPath, JSON.stringify({ criticals: 3 }), 'utf8');
+      expect(() =>
+        (composeReviewCommand.handler as (argv: unknown) => void)({
+          input: inputPath,
+          comments: commentsPath,
+        }),
+      ).toThrow(/must be a JSON array of comment objects/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('strips a model-supplied `env` — it cannot redirect the transcript lookup', () => {
@@ -865,19 +1037,20 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
       writeFileSync(
         inputPath,
         JSON.stringify({
-          criticalsInline: 0,
-          suggestionsInline: 0,
           planPath,
           env: { QWEN_CODE_PROJECT_DIR: forged, QWEN_CODE_SESSION_ID: 'S1' },
           modelId: MODEL,
         }),
       );
+      const commentsPath = join(dir, 'comments.json');
+      writeFileSync(commentsPath, '[]', 'utf8');
       const outPath = join(dir, 'out.json');
       const prevProj = process.env['QWEN_CODE_PROJECT_DIR'];
       delete process.env['QWEN_CODE_PROJECT_DIR']; // real env cannot find transcripts
       try {
         (composeReviewCommand.handler as (argv: unknown) => void)({
           input: inputPath,
+          comments: commentsPath,
           out: outPath,
         });
       } finally {
@@ -1046,12 +1219,12 @@ describe('coverage is recomputed, never accepted', () => {
     writeFileSync(
       input,
       JSON.stringify({
-        criticalsInline: 0,
-        suggestionsInline: 0,
         planPath: p,
         modelId: MODEL,
       }),
     );
+    const commentsPath = join(dir, 'comments.json');
+    writeFileSync(commentsPath, '[]', 'utf8');
 
     const prevDir = process.env['QWEN_CODE_PROJECT_DIR'];
     const prevSession = process.env['QWEN_CODE_SESSION_ID'];
@@ -1062,6 +1235,7 @@ describe('coverage is recomputed, never accepted', () => {
       vi.mocked(writeStdoutLine).mockClear();
       (composeReviewCommand.handler as (a: Record<string, unknown>) => void)({
         input,
+        comments: commentsPath,
       });
 
       const stderr = vi
