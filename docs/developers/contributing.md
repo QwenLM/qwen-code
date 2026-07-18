@@ -41,7 +41,7 @@ If you'd like to get early feedback on your work, please use GitHub's **Draft Pu
 
 #### 4. Ensure All Checks Pass
 
-Before submitting your PR, run `npm run verify:pr` from a clean Node 22 checkout. This is the final local PR gate; `npm run preflight` remains useful during development but is not equivalent to CI.
+Before submitting your PR, ensure that all automated checks are passing by running `npm run preflight`. This command runs all tests, linting, and other style checks.
 
 #### 5. Update Documentation
 
@@ -126,7 +126,7 @@ To execute the unit test suite for the project:
 npm run test
 ```
 
-This will run tests located in the `packages/core` and `packages/cli` directories. Ensure focused tests pass while developing, then run `npm run verify:pr` before submitting the PR.
+This will run tests located in the `packages/core` and `packages/cli` directories. Ensure tests pass before submitting any changes. For a more comprehensive check, it is recommended to run `npm run preflight`.
 
 #### Integration Tests
 
@@ -140,21 +140,15 @@ npm run test:e2e
 
 For more detailed information on the integration testing framework, please see the [Integration Tests documentation](./development/integration-tests.md).
 
-### Linting and PR Verification
+### Linting and Preflight Checks
 
-During development, the legacy preflight command provides a broad check and may rewrite formatting:
+To ensure code quality and formatting consistency, run the preflight check:
 
 ```bash
 npm run preflight
 ```
 
-Before pushing a PR, run the read-only final local gate from a clean worktree:
-
-```bash
-npm run verify:pr
-```
-
-The final gate covers the deterministic PR CI checks that `preflight` omits. See [`local-pr-verification.md`](../design/local-pr-verification.md) for profiles, supported hosts, and remote-only boundaries.
+This command will run ESLint, Prettier, all tests, and other checks as defined in the project's `package.json`.
 
 _ProTip_
 

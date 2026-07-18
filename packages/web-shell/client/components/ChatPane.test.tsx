@@ -68,6 +68,12 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   },
   useStreamingState: () => streamingStateValue,
   useTranscriptBlocks: () => [],
+  useTranscriptHistory: () => ({
+    hasMore: false,
+    loading: false,
+    capacityReached: false,
+    loadMore: vi.fn(),
+  }),
   useTranscriptStore: () => ({
     dispatch: transcriptDispatch,
   }),
@@ -305,6 +311,35 @@ describe('ChatPane', () => {
     expect(latestChatEditorProps.visibleToolbarActions).toContain('workspace');
     expect(latestChatEditorProps.workspaceName).toBe('api');
     expect(latestChatEditorProps.workspaceTitle).toBe('/work/api');
+    // The chip carries the pane's stable accent color (api is the 2nd workspace
+    // → the 2nd palette color) so it stays distinct when it collapses to an icon.
+    expect(latestChatEditorProps.workspaceColor).toBe('green');
+  });
+
+  it('surfaces the workspace in the pane header on a multi-workspace daemon', () => {
+    connectionState.capabilities = {
+      features: [],
+      workspaceCwd: '/work/web-shell',
+      workspaces: [
+        { id: 'w0', cwd: '/work/web-shell', primary: true, trusted: true },
+        { id: 'w1', cwd: '/work/api', primary: false, trusted: true },
+      ],
+    };
+    render({ title: 'Add pagination', workspaceCwd: '/work/api' });
+    // The header tag (always visible at the top, unlike the composer chip that
+    // collapses on a narrow split) names the workspace and carries its full cwd
+    // in a hover tooltip.
+    const tag = container!.querySelector('[data-web-shell-pane-workspace]');
+    expect(tag).not.toBeNull();
+    expect(tag!.textContent).toContain('api');
+    expect(tag!.getAttribute('title')).toBe('/work/api');
+  });
+
+  it('omits the header workspace tag on a single-workspace daemon', () => {
+    render({ title: 'Refactor core', workspaceCwd: '/w' });
+    expect(
+      container!.querySelector('[data-web-shell-pane-workspace]'),
+    ).toBeNull();
   });
 
   it('reports loaded pane artifacts to the outer panel owner', async () => {
@@ -462,6 +497,32 @@ describe('ChatPane', () => {
     expect(returned).toBe(false);
     expect(sendPrompt).not.toHaveBeenCalled();
     expect(enqueuePrompt).not.toHaveBeenCalled();
+  });
+
+  it('submits while disconnected when prompt SSE restart is enabled', () => {
+    connectionState.status = 'disconnected';
+    render({ restartSseOnPrompt: true });
+
+    act(() => {
+      latestOnSubmit!('hi');
+    });
+
+    expect(sendPrompt).toHaveBeenCalledWith(
+      'hi',
+      expect.objectContaining({ onAdmitted: expect.any(Function) }),
+    );
+  });
+
+  it('does not submit without a recoverable disconnected session', () => {
+    connectionState.status = 'disconnected';
+    connectionState.sessionId = undefined;
+    render({ restartSseOnPrompt: true });
+
+    act(() => {
+      latestOnSubmit!('hi');
+    });
+
+    expect(sendPrompt).not.toHaveBeenCalled();
   });
 
   it('reports an idle prompt failure to the pane error handler', async () => {

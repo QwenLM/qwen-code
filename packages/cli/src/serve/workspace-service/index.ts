@@ -58,6 +58,11 @@ import {
   type WorkspaceVoiceSettingsWrite,
 } from '../../services/voice-service.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  deleteWorkspaceSkill,
+  installWorkspaceSkill,
+  WorkspaceSkillManagementError,
+} from '../workspace-skill-management.js';
 
 import {
   WorkspacePermissionRulesSessionRequiredError,
@@ -76,6 +81,9 @@ import type {
   WorkspaceAcpPreheatResult,
   WorkspaceAcpStatusResult,
   WorkspaceSkillToggleResult,
+  WorkspaceSkillInstallRequest,
+  WorkspaceSkillMutationResult,
+  WorkspaceSkillScope,
 } from './types.js';
 
 // Re-export types for consumers.
@@ -208,6 +216,7 @@ export function createDaemonWorkspaceService(
     persistDisabledSkills,
     persistSetting,
     persistSettings,
+    skillInstallEnv,
     voiceEnv,
     voiceSettingsScope,
     preheatAcpChild: preheatAcpChildOnBridge,
@@ -266,6 +275,27 @@ export function createDaemonWorkspaceService(
       }
       return status;
     };
+
+  const refreshWorkspaceSkillsAfterMutation = async (): Promise<void> => {
+    lastWorkspaceSkillsStatus = undefined;
+    workspaceSkillsStatusProvider?.invalidate?.(boundWorkspace);
+    if (!(isChannelLive?.() ?? false)) return;
+    try {
+      await invokeWorkspaceCommand<ServeWorkspaceSkillsRefreshResult>(
+        SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+        { cwd: boundWorkspace },
+      );
+    } catch (err) {
+      if (
+        !(err instanceof SessionNotFoundError) &&
+        !(err instanceof BridgeChannelClosedError)
+      ) {
+        writeStderrLine(
+          `qwen serve: workspace skill refresh after mutation failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+  };
 
   // -- Facade --
   return {
@@ -703,6 +733,7 @@ export function createDaemonWorkspaceService(
 
       if (persisted.changed) {
         lastWorkspaceSkillsStatus = undefined;
+        workspaceSkillsStatusProvider?.invalidate?.(boundWorkspace);
         if (channelLive) {
           try {
             const refreshed =
@@ -749,6 +780,48 @@ export function createDaemonWorkspaceService(
         sessionsRefreshed,
         sessionsFailed,
       };
+    },
+
+    async installWorkspaceSkill(
+      _ctx: WorkspaceRequestContext,
+      request: WorkspaceSkillInstallRequest,
+    ): Promise<WorkspaceSkillMutationResult> {
+      const result = await installWorkspaceSkill(
+        boundWorkspace,
+        request,
+        skillInstallEnv?.['GH_TOKEN'] ?? skillInstallEnv?.['GITHUB_TOKEN'],
+      );
+      await refreshWorkspaceSkillsAfterMutation();
+      return result;
+    },
+
+    async deleteWorkspaceSkill(
+      _ctx: WorkspaceRequestContext,
+      requestedSkillName: string,
+      scope: WorkspaceSkillScope,
+    ): Promise<WorkspaceSkillMutationResult> {
+      const normalizedName = requestedSkillName.trim().toLowerCase();
+      const status = await getWorkspaceSkillsStatus();
+      const skill = status.skills.find(
+        (candidate) => candidate.name.trim().toLowerCase() === normalizedName,
+      );
+      if (!skill) throw new WorkspaceSkillNotFoundError(requestedSkillName);
+      const expectedLevel = scope === 'workspace' ? 'project' : 'user';
+      if (skill.level !== expectedLevel || !skill.installedPath) {
+        throw new WorkspaceSkillManagementError(
+          'skill_not_managed',
+          'Skill is not managed in the requested scope',
+          409,
+        );
+      }
+      const result = await deleteWorkspaceSkill(
+        boundWorkspace,
+        scope,
+        skill.name,
+        skill.installedPath,
+      );
+      await refreshWorkspaceSkillsAfterMutation();
+      return result;
     },
 
     async initWorkspace(

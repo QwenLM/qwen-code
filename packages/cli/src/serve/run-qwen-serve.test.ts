@@ -55,6 +55,7 @@ import {
   workspaceRegistrationId,
   type WorkspaceRegistrationStore,
 } from './workspace-registration-store.js';
+import { getDeferredRuntimeRequestTiming } from './server/request-helpers.js';
 
 const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
   limits: {
@@ -84,7 +85,9 @@ function makeRuntimeBridge(): HttpAcpBridge {
     resume: vi.fn(),
     preheat: vi.fn().mockResolvedValue(undefined),
     sessionCount: 0,
+    pendingPermissionCount: 0,
     activePromptCount: 0,
+    lastActivityAt: null,
     getDaemonStatusSnapshot: vi.fn().mockReturnValue(BASE_BRIDGE_SNAPSHOT),
     isChannelLive: vi.fn().mockReturnValue(true),
   } as unknown as HttpAcpBridge;
@@ -3205,6 +3208,64 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it('returns retryable bootstrap deep health while starting deferred runtime', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-deep-first-')),
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      expect(createBridge).not.toHaveBeenCalled();
+      const bootstrapRes = await fetch(`${handle.url}/health?deep=1`);
+      expect(bootstrapRes.status).toBe(503);
+      expect(bootstrapRes.headers.get('retry-after')).toBe('1');
+      expect(await bootstrapRes.json()).toEqual({
+        status: 'degraded',
+        reason: 'bootstrap',
+      });
+
+      await vi.waitFor(() => expect(createBridge).toHaveBeenCalledTimes(1), {
+        timeout: 500,
+      });
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+
+      const runtimeRes = await fetch(`${handle.url}/health?deep=1`);
+      expect(runtimeRes.status).toBe(200);
+      expect(await runtimeRes.json()).toMatchObject({
+        status: 'ok',
+        workspaceCount: 1,
+        sessions: 0,
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('starts deferred runtime once for duplicate health probes', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-dedupe-')),
@@ -3262,10 +3323,17 @@ describe('runQwenServe runtime startup failures', () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-route-start-')),
     );
-    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
-      enabled: false,
-      sensitiveSpanAttributeMaxLength: 1024 * 1024,
-    });
+    let resolveTelemetry:
+      | ((settings: qwenCore.ResolvedTelemetrySettings) => void)
+      | undefined;
+    const telemetryPromise = new Promise<qwenCore.ResolvedTelemetrySettings>(
+      (resolve) => {
+        resolveTelemetry = resolve;
+      },
+    );
+    const resolveTelemetrySettings = vi
+      .spyOn(qwenCore, 'resolveTelemetrySettings')
+      .mockReturnValue(telemetryPromise);
     const bridge = makeRuntimeBridge();
     const createBridge = vi
       .spyOn(acpBridge, 'createAcpSessionBridge')
@@ -3274,8 +3342,13 @@ describe('runQwenServe runtime startup failures', () => {
       );
     vi.spyOn(serverModule, 'createServeApp').mockImplementation(() => {
       const app = express();
-      app.post('/session', (_req, res) => {
-        res.status(201).json({ sessionId: 'session-1' });
+      app.post('/session', (req, res) => {
+        const timing = getDeferredRuntimeRequestTiming(req);
+        res.status(201).json({
+          sessionId: 'session-1',
+          runtimePath: timing?.path,
+          runtimeWaitMs: timing?.waitMs,
+        });
       });
       return app;
     });
@@ -3296,14 +3369,57 @@ describe('runQwenServe runtime startup failures', () => {
       },
     );
 
+    let sessionRequestCount = 0;
+    let resolveSecondSessionRequest: (() => void) | undefined;
+    const secondSessionRequest = new Promise<void>((resolve) => {
+      resolveSecondSessionRequest = resolve;
+    });
+    const observeSessionRequest = (req: { method?: string; url?: string }) => {
+      if (req.method !== 'POST' || req.url !== '/session') return;
+      sessionRequestCount += 1;
+      if (sessionRequestCount === 2) resolveSecondSessionRequest?.();
+    };
+    handle.server.on('request', observeSessionRequest);
+
     try {
       expect(createBridge).not.toHaveBeenCalled();
-      const res = await fetch(`${handle.url}/session`, { method: 'POST' });
-      expect(res.status).toBe(201);
-      expect(await res.json()).toEqual({ sessionId: 'session-1' });
+      const firstResponse = fetch(`${handle.url}/session`, { method: 'POST' });
+      await vi.waitFor(() =>
+        expect(resolveTelemetrySettings).toHaveBeenCalledOnce(),
+      );
+      const joinedResponse = fetch(`${handle.url}/session`, {
+        method: 'POST',
+      });
+      await secondSessionRequest;
+      resolveTelemetry?.({
+        enabled: false,
+        sensitiveSpanAttributeMaxLength: 1024 * 1024,
+      });
+
+      const [first, joined] = await Promise.all([
+        firstResponse,
+        joinedResponse,
+      ]);
+      expect(first.status).toBe(201);
+      expect(await first.json()).toEqual({
+        sessionId: 'session-1',
+        runtimePath: 'started_on_request',
+        runtimeWaitMs: expect.any(Number),
+      });
+      expect(joined.status).toBe(201);
+      expect(await joined.json()).toEqual({
+        sessionId: 'session-1',
+        runtimePath: 'joined',
+        runtimeWaitMs: expect.any(Number),
+      });
       expect(createBridge).toHaveBeenCalledTimes(1);
       await expect(handle.runtimeReady).resolves.toBeUndefined();
     } finally {
+      resolveTelemetry?.({
+        enabled: false,
+        sensitiveSpanAttributeMaxLength: 1024 * 1024,
+      });
+      handle.server.off('request', observeSessionRequest);
       await handle.close();
     }
   });

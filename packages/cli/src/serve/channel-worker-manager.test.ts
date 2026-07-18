@@ -14,6 +14,7 @@ import {
   ChannelWorkerControlError,
   createChannelWorkerManager,
 } from './channel-worker-manager.js';
+import { ChannelWorkerStartupError } from './channel-worker-supervisor.js';
 import type { ChannelWorkspaceGroup } from './channel-workspace-grouping.js';
 import type { ServeChannelSelection } from './types.js';
 
@@ -397,6 +398,48 @@ describe('createChannelWorkerManager', () => {
     );
   });
 
+  it('preserves workspace-attributed startup failures from reload', async () => {
+    const test = setup();
+    const selection: ServeChannelSelection = {
+      mode: 'names',
+      names: ['telegram'],
+    };
+    await test.manager.setSelection(selection);
+    vi.mocked(test.group.reconcile).mockRejectedValueOnce(
+      new ChannelWorkerReconcileError('reload failed', {
+        rolledBack: true,
+        startupFailures: [
+          {
+            workspaceCwd: '/ws/secondary',
+            channel: 'telegram',
+            phase: 'connect',
+            code: 'ECONNREFUSED',
+            message: 'connection refused',
+          },
+        ],
+      }),
+    );
+
+    await expect(test.manager.reload()).rejects.toMatchObject({
+      code: 'channel_worker_start_failed',
+      rolledBack: true,
+      startupFailures: [
+        {
+          workspaceCwd: '/ws/secondary',
+          channel: 'telegram',
+          phase: 'connect',
+          code: 'ECONNREFUSED',
+          message: 'connection refused',
+        },
+      ],
+    });
+    expect(test.manager.state()).toMatchObject({
+      enabled: true,
+      selection,
+      transition: 'idle',
+    });
+  });
+
   it('does not reconcile after forced shutdown interrupts reload resolution', async () => {
     const test = setup();
     const selection: ServeChannelSelection = {
@@ -485,7 +528,18 @@ describe('createChannelWorkerManager', () => {
 
   it('retains a failed first-start group and lease until DELETE confirms stop', async () => {
     const group = fakeGroup();
-    vi.mocked(group.start).mockRejectedValueOnce(new Error('spawn failed'));
+    vi.mocked(group.start).mockRejectedValueOnce(
+      new ChannelWorkerStartupError('spawn failed', {
+        workspaceCwd: PRIMARY,
+        startupFailures: [
+          {
+            channel: 'telegram',
+            phase: 'connect',
+            message: 'provider failed',
+          },
+        ],
+      }),
+    );
     vi.mocked(group.stop)
       .mockRejectedValueOnce(new Error('exit not observed'))
       .mockResolvedValueOnce(undefined);
@@ -496,6 +550,13 @@ describe('createChannelWorkerManager', () => {
     ).rejects.toMatchObject({
       code: 'channel_worker_start_failed',
       rolledBack: false,
+      rollbackError: 'exit not observed',
+      startupFailures: [
+        expect.objectContaining({
+          workspaceCwd: PRIMARY,
+          message: 'provider failed',
+        }),
+      ],
     });
     expect(test.manager.state()).toMatchObject({
       enabled: true,
@@ -509,6 +570,89 @@ describe('createChannelWorkerManager', () => {
     });
     expect(group.stop).toHaveBeenCalledTimes(2);
     expect(test.releaseLease).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns attempted startup failures while current state reflects successful rollback', async () => {
+    const group = fakeGroup();
+    const startupError = new ChannelWorkerStartupError('worker failed', {
+      workspaceCwd: PRIMARY,
+      startupFailures: [
+        {
+          channel: 'telegram',
+          phase: 'connect',
+          code: 'ECONNREFUSED',
+          message: 'connection refused',
+        },
+      ],
+      startupFailuresTruncated: true,
+    });
+    vi.mocked(group.start).mockRejectedValueOnce(startupError);
+    const test = setup(group);
+
+    const error = await test.manager
+      .setSelection({ mode: 'names', names: ['telegram'] })
+      .catch((value: unknown) => value);
+
+    expect(error).toMatchObject({
+      code: 'channel_worker_start_failed',
+      rolledBack: true,
+      startupFailuresTruncated: true,
+      startupFailures: [
+        {
+          workspaceCwd: PRIMARY,
+          channel: 'telegram',
+          phase: 'connect',
+          code: 'ECONNREFUSED',
+          message: 'connection refused',
+        },
+      ],
+    });
+    expect(test.manager.state()).toEqual({
+      enabled: false,
+      selection: null,
+      transition: 'idle',
+      workers: [],
+    });
+    (error as ChannelWorkerControlError).startupFailures![0]!.message =
+      'mutated';
+    expect(startupError.startupFailures![0]!.message).toBe(
+      'connection refused',
+    );
+  });
+
+  it('does not replace attempted failures with a reconcile rollback error', async () => {
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({ mode: 'names', names: ['telegram'] });
+    vi.mocked(group.reconcile).mockRejectedValueOnce(
+      new ChannelWorkerReconcileError('replacement failed', {
+        rolledBack: false,
+        rollbackError: 'restore failed',
+        startupFailures: [
+          {
+            workspaceCwd: PRIMARY,
+            channel: 'discord',
+            phase: 'connect',
+            message: 'invalid token',
+          },
+        ],
+      }),
+    );
+
+    await expect(
+      test.manager.setSelection({ mode: 'names', names: ['discord'] }),
+    ).rejects.toMatchObject({
+      code: 'channel_worker_start_failed',
+      rolledBack: false,
+      rollbackError: 'restore failed',
+      startupFailures: [
+        expect.objectContaining({
+          workspaceCwd: PRIMARY,
+          channel: 'discord',
+          message: 'invalid token',
+        }),
+      ],
+    });
   });
 
   it('keeps a lease-only failure enabled so DELETE can retry its release', async () => {

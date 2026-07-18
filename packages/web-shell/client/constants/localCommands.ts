@@ -89,6 +89,7 @@ export function getLocalCommands(t: Translate): CommandInfo[] {
       description: t('local.branch'),
       argumentHint: '[<name>]',
     },
+    { name: 'diff', description: t('local.diff') },
     {
       name: 'fork',
       description: t('local.fork'),

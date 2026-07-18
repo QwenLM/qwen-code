@@ -49,8 +49,9 @@ function createMockChild(overrides?: Record<string, unknown>) {
 }
 
 describe('AcpConnection process spawning', () => {
-  it('runs the bundled CLI with Electron in Node mode', async () => {
-    spawnMock.mockReset();
+  it('runs the managed ACP child in Electron Node mode', async () => {
+    vi.stubEnv('ELECTRON_RUN_AS_NODE', '');
+    vi.stubEnv('QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE', '');
     spawnMock.mockReturnValue(createMockChild());
     const conn = new AcpConnection() as unknown as {
       connect: (cliEntryPath: string) => Promise<void>;
@@ -58,14 +59,17 @@ describe('AcpConnection process spawning', () => {
     };
     conn.setupChildProcessHandlers = vi.fn().mockResolvedValue(undefined);
 
-    await conn.connect(process.execPath);
+    try {
+      await conn.connect(process.execPath);
+      const options = spawnMock.mock.calls[0]?.[2] as {
+        env?: NodeJS.ProcessEnv;
+      };
 
-    expect(spawnMock).toHaveBeenCalledOnce();
-    const options = spawnMock.mock.calls[0]?.[2] as {
-      env?: NodeJS.ProcessEnv;
-    };
-    expect(options.env?.ELECTRON_RUN_AS_NODE).toBe('1');
-    expect(options.env?.QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE).toBe('1');
+      expect(options.env?.['ELECTRON_RUN_AS_NODE']).toBe('1');
+      expect(options.env?.['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE']).toBe('1');
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 

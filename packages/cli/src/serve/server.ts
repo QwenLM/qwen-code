@@ -102,6 +102,7 @@ import {
   registerScheduledTasksRoutes,
   registerWorkspaceQualifiedScheduledTasksRoutes,
 } from './routes/scheduled-tasks.js';
+import { registerGoalsRoutes } from './routes/goals.js';
 import { registerUsageStatsRoutes } from './routes/usage-stats.js';
 import {
   startScheduledTaskKeepalive,
@@ -193,12 +194,17 @@ import {
   registerWorkspaceGitRoutes,
   registerWorkspaceQualifiedGitRoutes,
 } from './routes/workspace-git.js';
+import {
+  registerWorkspaceGitDiffRoutes,
+  registerWorkspaceQualifiedGitDiffRoutes,
+} from './routes/workspace-git-diff.js';
 import { WorkspaceGitState } from './workspace-git-state.js';
 import {
   registerWorkspaceMcpControlRoutes,
   registerWorkspaceQualifiedMcpControlRoutes,
 } from './routes/workspace-mcp-control.js';
 import { registerWorkspaceChannelControlRoutes } from './routes/workspace-channel-control.js';
+import { registerWorkspaceChannelObservedContactRoutes } from './routes/workspace-channel-observed-contacts.js';
 import {
   registerWorkspaceQualifiedToolsRoutes,
   registerWorkspaceToolsRoutes,
@@ -227,12 +233,14 @@ export {
 export { detectFromLoopback } from './server/request-helpers.js';
 export {
   InvalidCursorError,
+  getWorkspaceSessionInfoForResponse,
   listWorkspaceSessionsForResponse,
 } from './server/session-list.js';
 export type {
   ListWorkspaceSessionsOptions,
   ListWorkspaceSessionsReadOptions,
   ListWorkspaceSessionsResult,
+  WorkspaceSessionInfoResult,
 } from './server/session-list.js';
 export { getActiveSseCount } from './routes/sse-events.js';
 
@@ -487,6 +495,7 @@ export interface ServeAppDeps {
   workspaceRuntimeRemoval?: WorkspaceRuntimeRemovalController;
   primaryWorkspaceTrusted?: boolean;
   primaryRuntimeEnv?: WorkspaceRuntimeEnvMetadata;
+  daemonEnv?: Readonly<NodeJS.ProcessEnv>;
   voiceTranscriber?: WorkspaceVoiceRouteDeps['transcribe'];
   /**
    * Daemon-private credential store. Used to inject QWEN_CUSTOM_API_KEY_*
@@ -701,6 +710,15 @@ export function createServeApp(
       persistSettingAvailable: deps.persistSetting !== undefined,
       sessionArtifactsPersistenceAvailable:
         deps.sessionArtifactsPersistenceAvailable !== false,
+      sessionGenerationAvailable: () => {
+        const runtimes = workspaceRegistry.list();
+        return (
+          runtimes.length > 0 &&
+          runtimes.every(
+            (runtime) => runtime.bridge.generateSessionContent !== undefined,
+          )
+        );
+      },
       // Registry injection supplies the primary workspace service through the
       // runtime, so it has the same reload surface as legacy deps.workspace.
       reloadAvailable:
@@ -845,6 +863,7 @@ export function createServeApp(
         primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {},
       ),
       workspaceSkillsStatusProvider: createWorkspaceSkillsStatusProvider(),
+      ...(primaryEffectiveEnv ? { skillInstallEnv: primaryEffectiveEnv } : {}),
       ...(primaryEffectiveEnv ? { voiceEnv: primaryEffectiveEnv } : {}),
       isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools:
@@ -906,6 +925,9 @@ export function createServeApp(
   (app.locals as { workspaceRegistry?: WorkspaceRegistry }).workspaceRegistry =
     workspaceRegistry;
   const primaryRuntime = workspaceRegistry.primary;
+  const daemonEnv = deps.daemonEnv ?? process.env;
+  const primaryRuntimeEffectiveEnv =
+    getRuntimeEffectiveEnv(primaryRuntime.env) ?? daemonEnv;
   const voiceCoordinator =
     deps.voiceCoordinator ?? new WorkspaceVoiceCoordinator();
   const primaryBoundWorkspace = primaryRuntime.workspaceCwd;
@@ -959,7 +981,7 @@ export function createServeApp(
   const healthDemoRoutes = createHealthDemoRoutes({
     opts,
     getPort,
-    bridge: primaryBridge,
+    workspaceRegistry,
     getActiveSseCount,
     getRateLimiter: () => rateLimiter,
   });
@@ -1070,40 +1092,27 @@ export function createServeApp(
   });
 
   app.use(
-    daemonTelemetryMiddleware(
-      (req) => {
-        const match = req.path.match(/^\/workspaces\/([^/]+)/);
-        const rawSelector = match?.[1];
-        if (rawSelector) {
-          try {
-            const selector = decodeURIComponent(rawSelector);
-            const byId = workspaceRegistry.getByWorkspaceId(selector);
-            if (byId) return byId.workspaceCwd;
-            if (isPortableAbsolutePath(selector)) {
-              const runtime = resolveRegisteredWorkspaceRuntimeByPathSelector(
-                workspaceRegistry,
-                selector,
-              );
-              if (runtime) return runtime.workspaceCwd;
-            }
-          } catch {
-            return primaryBoundWorkspace;
-          }
-        }
-        return primaryBoundWorkspace;
-      },
-      deps.recordDaemonRequest,
-      (sessionId) => {
+    daemonTelemetryMiddleware((req) => {
+      const match = req.path.match(/^\/workspaces\/([^/]+)/);
+      const rawSelector = match?.[1];
+      if (rawSelector) {
         try {
-          const owner = workspaceRegistry.resolveLiveSessionOwner(sessionId);
-          return owner.kind === 'found'
-            ? owner.runtime.workspaceCwd
-            : undefined;
+          const selector = decodeURIComponent(rawSelector);
+          const byId = workspaceRegistry.getByWorkspaceId(selector);
+          if (byId) return byId.workspaceCwd;
+          if (isPortableAbsolutePath(selector)) {
+            const runtime = resolveRegisteredWorkspaceRuntimeByPathSelector(
+              workspaceRegistry,
+              selector,
+            );
+            if (runtime) return runtime.workspaceCwd;
+          }
         } catch {
-          return undefined;
+          return primaryBoundWorkspace;
         }
-      },
-    ),
+      }
+      return primaryBoundWorkspace;
+    }, deps.recordDaemonRequest),
   );
 
   const buildWorkspaceCtx = createBuildWorkspaceCtx(primaryBoundWorkspace);
@@ -1177,6 +1186,14 @@ export function createServeApp(
   registerWorkspaceQualifiedGitRoutes(app, {
     workspaceRegistry,
     gitState: workspaceGitState,
+    sendBridgeError,
+  });
+  registerWorkspaceGitDiffRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    sendBridgeError,
+  });
+  registerWorkspaceQualifiedGitDiffRoutes(app, {
+    workspaceRegistry,
     sendBridgeError,
   });
 
@@ -1265,6 +1282,7 @@ export function createServeApp(
   registerWorkspaceSetupGithubRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
+    env: primaryRuntimeEffectiveEnv,
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
@@ -1504,6 +1522,10 @@ export function createServeApp(
         parseAndValidateWorkspaceClientId(req, res, primaryBridge),
     });
   }
+  registerWorkspaceChannelObservedContactRoutes(app, {
+    primaryWorkspace: primaryBoundWorkspace,
+    workspaceRegistry,
+  });
   registerWorkspaceLifecycleRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     workspace: primaryWorkspace,
@@ -1567,6 +1589,14 @@ export function createServeApp(
     mutate,
     safeBody,
     bridge: deps.manageScheduledTaskSessions ? bridge : undefined,
+  });
+
+  // Workspace-wide active-goal listing (the Web Shell "Goals" page). Read-only
+  // GET like /daemon/status: it fans out to the live sessions and reports what
+  // their in-memory goal stores hold.
+  registerGoalsRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    bridge: primaryBridge,
   });
 
   // The same CRUD surface, workspace-qualified, so a multi-workspace Web Shell
@@ -1702,6 +1732,7 @@ export function createServeApp(
   // route through the JSON error contract below.
   acpHandleRef.current = mountAcpHttp(app, primaryBridge, {
     boundWorkspace: primaryBoundWorkspace,
+    daemonEnv,
     // Phase 4 (issue #6378): pass the registry so `/workspaces/:workspace/acp`
     // mounts a per-runtime ACP dispatcher for each registered workspace.
     workspaceRegistry,

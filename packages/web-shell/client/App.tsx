@@ -20,6 +20,7 @@ import {
   useSessionNotices,
   useStreamingState,
   useTranscriptBlocks,
+  useTranscriptHistory,
   useTranscriptStore,
   useWorkspace,
   useWorkspaceActions,
@@ -35,6 +36,7 @@ import type {
   DaemonSessionTaskStatus,
   DaemonSessionArtifact,
   DaemonWorkspaceCapability,
+  DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList, type MessageListHandle } from './components/MessageList';
@@ -72,6 +74,8 @@ import {
 import { MemoryMessage } from './components/messages/MemoryMessage';
 import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
+import { GitDiffDialog } from './components/dialogs/GitDiffDialog';
+import { SkillsManagerPage } from './components/skills/SkillsManagerPage';
 import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
 import { SplitView } from './components/SplitView';
@@ -92,9 +96,22 @@ import {
   getScheduledTasksByTurn,
 } from './components/artifacts/turnOutputSelectors';
 import { useIsLargeScreen } from './hooks/useIsLargeScreen';
-import { MAX_SPLIT_PANES, parseSplitSessionIds } from './utils/splitUrl';
+import {
+  clearSplitSessions,
+  loadSplitSessions,
+  MAX_SPLIT_PANES,
+  parseSplitSessionIds,
+  saveSplitSessions,
+} from './utils/splitUrl';
 import { ScheduledTasksDialog } from './components/dialogs/ScheduledTasksDialog';
+import { GoalsDialog } from './components/dialogs/GoalsDialog';
+import {
+  goalArgOf,
+  isGoalClearCommand,
+  isGoalClearKeyword,
+} from './utils/goalCondition';
 import { ExtensionsManagerPage } from './components/extensions/ExtensionsManagerPage';
+import { PluginManagerPage } from './components/plugins/PluginManagerPage';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { isAskUserPermission } from './utils/askUserPermission';
 import { ToolApproval } from './components/messages/ToolApproval';
@@ -110,6 +127,7 @@ import {
   type WebShellSidebarFooterOptions,
   type WebShellSidebarLockedWorkspace,
 } from './components/sidebar/WebShellSidebar';
+import { isSidebarToggleShortcut } from './components/sidebar/sidebarToggleShortcut';
 import {
   getLocalCommands,
   localizeBuiltinDescriptions,
@@ -148,6 +166,7 @@ import {
 import { appendOrDeferLocalUserMessage } from './utils/localCommandQueue';
 import { QueuedPromptDisplay } from './components/QueuedPromptDisplay';
 import { useQueuedPrompts } from './hooks/useQueuedPrompts';
+import { useNewSessionSuggestion } from './hooks/useNewSessionSuggestion';
 import {
   TasksStatusMessage,
   type SerializedTasksMessage,
@@ -163,7 +182,7 @@ import {
   type StatusInfo,
 } from './components/messages/StatusMessage';
 import type { SerializedMcpStatusMessage } from './components/messages/McpStatusMessage';
-import { McpDialog } from './components/dialogs/McpDialog';
+import { McpManagerPage } from './components/mcp/McpManagerPage';
 import {
   GOAL_STATUS_ACTIVE_EVENT,
   parseGoalStatusMessage,
@@ -301,13 +320,19 @@ interface PaneArtifactSnapshot {
 const BOUND_RUN_SWITCH_TIMEOUT_MS = 30_000;
 
 function availableSkillInfos(status: {
-  skills?: Array<{ status?: string; name: string; description?: string }>;
+  skills?: Array<{
+    status?: string;
+    name: string;
+    description?: string;
+    argumentHint?: string;
+  }>;
 }): SkillInfo[] {
   return (status.skills ?? [])
     .filter((skill) => skill.status === 'ok')
     .map((skill) => ({
       name: skill.name,
       description: skill.description ?? '',
+      ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -324,24 +349,6 @@ const MODE_TITLE_KEY: Record<ModelDialogMode, string> = {
 
 function normalizeHiddenCommand(command: string): string {
   return command.trim().replace(/^\/+/, '').toLowerCase();
-}
-
-// Keep in sync with CLEAR_KEYWORDS in packages/cli/src/ui/commands/goalCommand.ts
-const GOAL_CLEAR_KEYWORDS = new Set([
-  'clear',
-  'stop',
-  'off',
-  'reset',
-  'none',
-  'cancel',
-]);
-
-function isGoalClearCommand(text: string): boolean {
-  const goalArg = text
-    .replace(/^\/goal\b/i, '')
-    .trim()
-    .toLowerCase();
-  return GOAL_CLEAR_KEYWORDS.has(goalArg);
 }
 
 interface ActiveGoalStatus {
@@ -597,12 +604,14 @@ export interface WebShellProps {
 interface AppProps extends WebShellProps {
   lockedWorkspaceCwd?: string;
   lockedWorkspaceCapability?: DaemonWorkspaceCapability;
+  restartSseOnPrompt?: boolean;
 }
 
 type SessionActionsWithCreate = {
   createSession: (options?: {
     workspaceCwd?: string;
     approvalMode?: string;
+    sourceType?: string;
   }) => Promise<{ sessionId: string }>;
   attachSession: () => Promise<void>;
   clearSession: () => Promise<void>;
@@ -1033,6 +1042,7 @@ export function App({
   composerInputVersion,
   onSessionChange,
   onSubmitBefore,
+  restartSseOnPrompt,
   lockedWorkspaceCwd,
   lockedWorkspaceCapability,
 }: AppProps = {}) {
@@ -1133,6 +1143,33 @@ export function App({
     setSidebarCollapsed(collapsed);
     writeSidebarCollapsed(collapsed);
   }, []);
+
+  // #5074: Cmd+B / Ctrl+B toggles the session sidebar, matching the editor
+  // convention (VS Code et al.). It works while any element is focused —
+  // the composer has no bold formatting, so nothing competes for the
+  // binding. Phone-width layouts render the sidebar as a drawer, so the
+  // shortcut toggles that instead of the collapsed rail.
+  useEffect(() => {
+    if (!sidebarOptions.enabled) return undefined;
+    const onKey = (e: KeyboardEvent) => {
+      if (!isSidebarToggleShortcut(e)) return;
+      e.preventDefault();
+      if (window.matchMedia('(max-width: 760px)').matches) {
+        setMobileDrawerOpen((open) => {
+          if (open) setForceMobileDrawer(false);
+          return !open;
+        });
+        return;
+      }
+      setSidebarCollapsed((collapsed) => {
+        const next = !collapsed;
+        writeSidebarCollapsed(next);
+        return next;
+      });
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [sidebarOptions.enabled]);
   const customization = useMemo(
     () => ({
       composerTagIcons,
@@ -1184,6 +1221,7 @@ export function App({
   const store = useTranscriptStore();
   const blocks = useTranscriptBlocks();
   const connection = useConnection();
+  const transcriptHistory = useTranscriptHistory();
   const workspace = useWorkspace();
   const workspaces = useMemo(() => {
     const capabilityWorkspaces = workspace.capabilities?.workspaces ?? [];
@@ -1215,44 +1253,70 @@ export function App({
   >(undefined);
   const selectedWorkspaceCwdRef = useRef(selectedWorkspaceCwd);
   selectedWorkspaceCwdRef.current = selectedWorkspaceCwd;
-  const [selectedWorkspaceGitBranch, setSelectedWorkspaceGitBranch] = useState<
-    string | undefined
+  const [selectedWorkspaceGitStatus, setSelectedWorkspaceGitStatus] = useState<
+    DaemonWorkspaceGitStatus | undefined
   >(undefined);
+  // The workspace the chip's status was last fetched for. On a workspace switch
+  // we clear the status immediately so the chip never shows the previous repo's
+  // branch/dirty counts while the new fetch is in flight; same-workspace
+  // re-runs (branch change, focus, poll) keep the live value to avoid flicker.
+  const gitStatusWorkspaceCwdRef = useRef<string | undefined>(undefined);
+  // Active workspace: the connected session's workspace, else the workspace
+  // picked for the next session (locked / selected / primary). Computed once
+  // and shared by the git-status effect and the Changes-dialog entry point so
+  // the chip and the dialog always target the same repo.
+  const activeWorkspaceCwd = useMemo(
+    () =>
+      connection.sessionId
+        ? connection.workspaceCwd
+        : (lockedWorkspaceCwd ??
+          selectedWorkspaceCwd ??
+          workspaces.find((entry) => entry.primary)?.cwd),
+    [
+      connection.sessionId,
+      connection.workspaceCwd,
+      lockedWorkspaceCwd,
+      selectedWorkspaceCwd,
+      workspaces,
+    ],
+  );
   useEffect(() => {
-    if (connection.sessionId) {
-      setSelectedWorkspaceGitBranch(undefined);
+    if (!activeWorkspaceCwd) {
+      gitStatusWorkspaceCwdRef.current = undefined;
+      setSelectedWorkspaceGitStatus(undefined);
       return;
     }
-    const primaryWorkspaceCwd = workspaces.find((entry) => entry.primary)?.cwd;
-    const workspaceCwd =
-      lockedWorkspaceCwd ?? selectedWorkspaceCwd ?? primaryWorkspaceCwd;
-    if (!workspaceCwd) {
-      setSelectedWorkspaceGitBranch(undefined);
-      return;
+    if (gitStatusWorkspaceCwdRef.current !== activeWorkspaceCwd) {
+      gitStatusWorkspaceCwdRef.current = activeWorkspaceCwd;
+      setSelectedWorkspaceGitStatus(undefined);
     }
     let cancelled = false;
-    setSelectedWorkspaceGitBranch(undefined);
-    void workspace.client
-      .workspaceByCwd(workspaceCwd)
-      .workspaceGit()
-      .then((git) => {
-        if (!cancelled) {
-          setSelectedWorkspaceGitBranch(git.branch ?? undefined);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) setSelectedWorkspaceGitBranch(undefined);
-      });
+    const fetchStatus = () => {
+      void workspace.client
+        .workspaceByCwd(activeWorkspaceCwd)
+        .workspaceGit()
+        .then((git) => {
+          if (!cancelled) setSelectedWorkspaceGitStatus(git);
+        })
+        .catch(() => {
+          if (!cancelled) setSelectedWorkspaceGitStatus(undefined);
+        });
+    };
+    fetchStatus();
+    // The enriched working-tree summary isn't pushed over SSE, so refresh it on
+    // focus and on a slow poll for the active workspace only. A live branch
+    // change re-runs this effect via the connection.gitBranch dependency.
+    const onFocus = () => fetchStatus();
+    window.addEventListener('focus', onFocus);
+    const poll = window.setInterval(() => {
+      if (document.visibilityState === 'visible') fetchStatus();
+    }, 30_000);
     return () => {
       cancelled = true;
+      window.removeEventListener('focus', onFocus);
+      window.clearInterval(poll);
     };
-  }, [
-    connection.sessionId,
-    lockedWorkspaceCwd,
-    selectedWorkspaceCwd,
-    workspaces,
-    workspace.client,
-  ]);
+  }, [activeWorkspaceCwd, connection.gitBranch, workspace.client]);
   const onToastRef = useRef(onToast);
   onToastRef.current = onToast;
   const toastIdRef = useRef(0);
@@ -2021,6 +2085,13 @@ export function App({
       editorRef.current?.insertText(suggestion);
     },
   });
+  const composerTextRef = useRef('');
+  const composerTextDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const [composerText, setComposerText] = useState('');
+  const [isStartingNewSessionSuggestion, setIsStartingNewSessionSuggestion] =
+    useState(false);
   const streamingState = useStreamingState();
   const streamingStateRef = useRef<DaemonStreamingState>(streamingState);
   const localStreamingStartedAtRef = useRef(Date.now());
@@ -2051,16 +2122,33 @@ export function App({
   const showRetryHintRef = useRef(showRetryHint);
   showRetryHintRef.current = showRetryHint;
   const connected = connection.status === 'connected';
+  const workspaceEventSignals = useWorkspaceEventSignals();
   const [loadedSkills, setLoadedSkills] = useState<SkillInfo[]>([]);
+  const [loadedSkillsReady, setLoadedSkillsReady] = useState(false);
+  const loadedSkillsRequestRef = useRef(0);
+  const reloadLoadedSkills = useCallback(
+    async (workspaceCwd?: string) => {
+      const request = ++loadedSkillsRequestRef.current;
+      try {
+        const status =
+          workspaceCwd && workspace.client
+            ? await workspace.client
+                .workspaceByCwd(workspaceCwd)
+                .workspaceSkills()
+            : await workspaceActions.loadSkillsStatus();
+        if (request !== loadedSkillsRequestRef.current) return;
+        setLoadedSkills(availableSkillInfos(status));
+        setLoadedSkillsReady(true);
+      } catch {
+        return;
+      }
+    },
+    [workspace.client, workspaceActions],
+  );
   useEffect(() => {
     if (!connected) return;
-    workspaceActions
-      .loadSkillsStatus()
-      .then((status) => {
-        setLoadedSkills(availableSkillInfos(status));
-      })
-      .catch(() => {});
-  }, [connected, workspaceActions]);
+    void reloadLoadedSkills(connection.workspaceCwd);
+  }, [connected, connection.workspaceCwd, reloadLoadedSkills]);
 
   const [modelDialogMode, setModelDialogMode] =
     useState<ModelDialogMode | null>(null);
@@ -2087,13 +2175,19 @@ export function App({
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [showThemeDialog, setShowThemeDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
+  // The workspace the Changes dialog reads. Set by whichever entry point opened
+  // it — the composer git chip / `/diff` (current workspace) or a sidebar
+  // folder's git chip (that workspace) — so each can target its own repo.
+  const [diffWorkspaceCwd, setDiffWorkspaceCwd] = useState<string | undefined>(
+    undefined,
+  );
   // Main content view. The scheduled-tasks page replaces the chat pane inline
   // (not a modal overlay), mirroring the reference design; creating or opening
   // a chat returns to 'chat'. (Daemon Status is no longer a boolean dialog — it
   // is one of the activePanel values below.)
-  const [mainView, setMainView] = useState<'chat' | 'scheduledTasks' | 'split'>(
-    'chat',
-  );
+  const [mainView, setMainView] = useState<
+    'chat' | 'scheduledTasks' | 'goals' | 'split'
+  >('chat');
   // Sessions to seed the split view with (e.g. the selection from the overview).
   const [splitSessionIds, setSplitSessionIds] = useState<string[]>([]);
   // Latest pane list, readable from the shrink-close effect without making it a
@@ -2106,9 +2200,26 @@ export function App({
   // chat view (message list + composer), not as a modal overlay. Only one may be
   // active at a time; null means the normal chat view is shown.
   const [activePanel, setActivePanel] = useState<
-    'settings' | 'status' | 'sessions' | 'extensions' | null
+    | 'settings'
+    | 'status'
+    | 'sessions'
+    | 'extensions'
+    | 'mcp'
+    | 'skills'
+    | 'plugins'
+    | null
   >(null);
   const closePanel = useCallback(() => setActivePanel(null), []);
+  const handleUseSkill = useCallback(
+    (name: string) => {
+      closePanel();
+      window.setTimeout(() => {
+        editorRef.current?.setText(`/${name} `);
+        editorRef.current?.focus();
+      }, 0);
+    },
+    [closePanel],
+  );
   // The Settings/Status panel (activePanel) and the Scheduled Tasks page
   // (mainView) are mutually-exclusive full-pane views — the latter is a
   // position:absolute overlay that would otherwise cover the former — so opening
@@ -2116,15 +2227,39 @@ export function App({
   // Status left the panel rendered behind the Scheduled Tasks overlay, looking
   // like the button did nothing.
   const openPanel = useCallback(
-    (panel: 'settings' | 'status' | 'sessions' | 'extensions') => {
+    (
+      panel:
+        | 'settings'
+        | 'status'
+        | 'sessions'
+        | 'extensions'
+        | 'mcp'
+        | 'skills'
+        | 'plugins',
+    ) => {
       setMainView('chat');
       setActivePanel(panel);
     },
     [],
   );
+  const loadMcpManagerMessage = useCallback(async () => {
+    const status = await workspaceActions.loadMcpStatus();
+    setMcpDialogMessage({
+      status,
+      toolsByServer: {},
+      resourcesByServer: {},
+      showDescriptions: false,
+      showSchema: false,
+      showTips: false,
+    });
+  }, [workspaceActions]);
   const openScheduledTasks = useCallback(() => {
     setActivePanel(null);
     setMainView('scheduledTasks');
+  }, []);
+  const openGoals = useCallback(() => {
+    setActivePanel(null);
+    setMainView('goals');
   }, []);
   const openSessionDrawer = useCallback(() => {
     if (!sidebarOptions.enabled) return;
@@ -2217,6 +2352,9 @@ export function App({
   // to the Session Overview — the hub the split is launched from.
   const handleSplitExit = useCallback(() => {
     notifyControlledSplitClose();
+    // The user left the split of their own accord, so a refresh must not bring
+    // it back. (A shrink-fold is transient and deliberately doesn't clear it.)
+    clearSplitSessions();
     openPanel('sessions');
   }, [notifyControlledSplitClose, openPanel]);
   // A `?split=a,b` URL (opened in a new tab from the overview) enters the split
@@ -2224,14 +2362,33 @@ export function App({
   // or exit doesn't force the split back on.
   useEffect(() => {
     const ids = parseSplitSessionIds(window.location.search);
-    if (ids.length === 0) return;
-    const url = new URL(window.location.href);
-    url.searchParams.delete('split');
-    window.history.replaceState(null, '', url);
-    if (!externalSplitControlled) {
-      openSplitView(ids);
+    if (ids.length > 0) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('split');
+      window.history.replaceState(null, '', url);
+      if (!externalSplitControlled) {
+        openSplitView(ids);
+      }
+      return;
     }
+    // No `?split=` deep link: restore the in-window split the user had before a
+    // refresh, when one was persisted for this tab. sessionStorage is per-tab,
+    // so a fresh tab (or a controlled host, which owns its own lifecycle)
+    // restores nothing.
+    if (externalSplitControlled) return;
+    const saved = loadSplitSessions();
+    if (saved.length > 0) openSplitView(saved);
   }, [externalSplitControlled, openSplitView]);
+  // Mirror the live split session set to per-tab storage while the split is the
+  // active view, so a refresh restores exactly these panes. Not written when the
+  // split is merely folded by a shrink (mainView flips to 'chat' transiently) —
+  // the saved set is kept so growing back, or refreshing mid-fold, still restores.
+  useEffect(() => {
+    if (externalSplitControlled) return;
+    if (mainView === 'split' && splitSessionIds.length > 0) {
+      saveSplitSessions(splitSessionIds);
+    }
+  }, [mainView, splitSessionIds, externalSplitControlled]);
   // If the viewport shrinks below the large-screen breakpoint, fold away the
   // Session Overview panel and the split view — both are large-screen-only
   // surfaces whose entry points are hidden on small screens. The split is only
@@ -2270,6 +2427,18 @@ export function App({
       // split, or dropping back to that chat, is exactly what it was before.
       if (!externalSplitControlled) {
         splitFoldedByShrinkRef.current = true;
+        // …except when the chat has no session of its own — the common case
+        // when the split was entered from the Session Overview or a `?split=a,b`
+        // link. A bare fold would then strand the user on an empty "new chat",
+        // so land on the split's first (leftmost) pane instead. Guarded on the
+        // *empty* chat so it never re-points a chat that already has a session
+        // (which would wipe its git branch / change the session+URL it drops
+        // back to). Best-effort: a load failure (e.g. a non-primary-workspace
+        // pane the single connection can't own) just leaves the empty chat.
+        const firstPane = splitSessionIdsRef.current[0];
+        if (firstPane && !currentSessionIdRef.current) {
+          void sessionActions.loadSession(firstPane).catch(() => undefined);
+        }
       }
     }
   }, [
@@ -2278,6 +2447,7 @@ export function App({
     mainView,
     notifyControlledSplitClose,
     externalSplitControlled,
+    sessionActions,
   ]);
   // Land focus on the composer after a shrink-driven split close so keyboard
   // users aren't dropped onto <body> — but not when the chat now shows an
@@ -2293,6 +2463,7 @@ export function App({
   // closes, so keyboard users aren't stranded on an element that is hidden.
   const panelBackRef = useRef<HTMLButtonElement | null>(null);
   const panelHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  const pluginTabRef = useRef<HTMLButtonElement | null>(null);
   const prevActivePanelRef = useRef(activePanel);
   const prevApprovalOverlayRef = useRef(approvalOverlayActive);
   useEffect(() => {
@@ -2303,6 +2474,10 @@ export function App({
     if (activePanel) {
       if (activePanel === 'extensions') {
         panelHeadingRef.current?.focus();
+        return;
+      }
+      if (activePanel === 'plugins') {
+        pluginTabRef.current?.focus();
         return;
       }
       // Covers null→panel and panel→panel: the Back button lives outside the
@@ -2346,12 +2521,14 @@ export function App({
     if (activePanel) setActivePanel(null);
     if (modelDialogMode) setModelDialogMode(null);
     if (showApprovalModeDialog) setShowApprovalModeDialog(false);
-    // The Scheduled Tasks page is a full-pane overlay (position:absolute) that
-    // covers the chat footer too, so dismiss it for the same reason. The split
-    // view is deliberately NOT dismissed: each pane owns and renders its own
-    // session's approval, so an approval on the (outer) main session must not
-    // yank the user out of the panes they are working in.
-    if (mainView === 'scheduledTasks') setMainView('chat');
+    // The Scheduled Tasks and Goals pages are full-pane overlays
+    // (position:absolute) that cover the chat footer too, so dismiss them for
+    // the same reason. The split view is deliberately NOT dismissed: each pane
+    // owns and renders its own session's approval, so an approval on the (outer)
+    // main session must not yank the user out of the panes they are working in.
+    if (mainView === 'scheduledTasks' || mainView === 'goals') {
+      setMainView('chat');
+    }
   }, [
     approvalOverlayActive,
     activePanel,
@@ -2401,7 +2578,6 @@ export function App({
   }, []);
 
   // Refresh commands when extensions change (install/uninstall/update).
-  const workspaceEventSignals = useWorkspaceEventSignals();
   const extensionsVersionRef = useRef(
     workspaceEventSignals?.extensionsVersion ?? 0,
   );
@@ -2507,8 +2683,39 @@ export function App({
   const [isPreparingPrompt, setIsPreparingPrompt] = useState(false);
   const createSessionPromiseRef = useRef<Promise<void> | null>(null);
   const preparingSessionIdRef = useRef<string | null>(null);
+  const newSessionSuggestionSubmitTokenRef = useRef(0);
+  const pendingNewSessionSuggestionSubmitRef = useRef<{
+    token: number;
+    sourceSessionId: string | undefined;
+    sessionClearCompleted: boolean;
+    submitScheduled: boolean;
+  } | null>(null);
   const onSessionCreatedRef = useRef(onSessionCreated);
   onSessionCreatedRef.current = onSessionCreated;
+  /**
+   * The session a failed `/goal` submit left behind.
+   *
+   * Setting a goal starts a fresh session and then sends `/goal <condition>`
+   * into it, but the daemon session is not created by the "new session" step —
+   * `ensureSessionForPrompt` creates it lazily *inside* `sendPrompt`. So a
+   * prompt that fails leaves a session that exists but never got its goal.
+   *
+   * The Goals form keeps the condition and lets the user retry. Without this
+   * ref every retry would abandon that session and create another, piling up
+   * blank chats in the sidebar. Remembering it lets the retry reuse it — no
+   * session is ever deleted.
+   *
+   * Only valid while the Goals page stays mounted. The moment the user leaves,
+   * that session is reachable from the composer and may stop being a scratch
+   * session, so the effect below forgets it: a later goal then starts a fresh
+   * session rather than landing on top of a conversation.
+   */
+  const strandedGoalSessionRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (mainView !== 'goals') {
+      strandedGoalSessionRef.current = undefined;
+    }
+  }, [mainView]);
   const ensureSessionForPrompt = useCallback(() => {
     const currentSessionId = connectionRef.current.sessionId;
     if (createSessionPromiseRef.current) {
@@ -2697,6 +2904,10 @@ export function App({
       })),
     [connection.models],
   );
+  // The workspace the Changes dialog reads — the same active workspace the
+  // git-status effect targets (computed once above), so the chip and the
+  // dialog always target the same repo.
+  const gitDiffWorkspaceCwd = activeWorkspaceCwd;
   const dialogOpen =
     showResumeDialog ||
     showDeleteDialog ||
@@ -2705,6 +2916,7 @@ export function App({
     showHelpDialog ||
     showThemeDialog ||
     showToolsDialog ||
+    diffWorkspaceCwd !== undefined ||
     modelDialogMode !== null ||
     showApprovalModeDialog ||
     tasksDialogMessage !== null ||
@@ -3612,7 +3824,16 @@ export function App({
     return request;
   }, []);
   const createNewSession = useCallback(
-    async (workspaceCwd?: string) => {
+    async (
+      workspaceCwd?: string,
+      /**
+       * Leave `mainView` alone. The default is to switch to the chat, because a
+       * user who asks for a new chat wants to see it — but the Goals form has to
+       * stay mounted until its prompt is admitted, or a rejection has nowhere to
+       * render. Only that caller passes this.
+       */
+      opts?: { keepView?: boolean },
+    ) => {
       const targetWorkspaceCwd = lockedWorkspaceCwd ?? workspaceCwd;
       selectedWorkspaceCwdRef.current = targetWorkspaceCwd;
       setSelectedWorkspaceCwd(targetWorkspaceCwd);
@@ -3622,14 +3843,17 @@ export function App({
       // Starting a new chat means the user wants to see it — leave any open
       // Settings/Status panel so the fresh chat is visible (no-op when closed).
       closePanel();
-      setMainView('chat');
+      if (!opts?.keepView) setMainView('chat');
       let focusRequest: number | undefined;
       try {
         const clearPromise = (
           sessionActions as typeof sessionActions & SessionActionsWithCreate
         ).clearSession();
         focusRequest = scheduleComposerFocus();
-        await clearPromise;
+        await Promise.all([
+          clearPromise,
+          reloadLoadedSkills(targetWorkspaceCwd),
+        ]);
         return true;
       } catch (error) {
         if (composerFocusRequestRef.current === focusRequest) {
@@ -3644,10 +3868,150 @@ export function App({
       closePanel,
       lockedWorkspaceCwd,
       reportError,
+      reloadLoadedSkills,
       scheduleComposerFocus,
       sessionActions,
     ],
   );
+  useEffect(
+    () => () => {
+      if (composerTextDebounceRef.current) {
+        clearTimeout(composerTextDebounceRef.current);
+      }
+    },
+    [],
+  );
+
+  const handleComposerTextChange = useCallback((text: string) => {
+    composerTextRef.current = text;
+    if (composerTextDebounceRef.current) {
+      clearTimeout(composerTextDebounceRef.current);
+    }
+    composerTextDebounceRef.current = setTimeout(() => {
+      setComposerText(text);
+      composerTextDebounceRef.current = null;
+    }, 120);
+  }, []);
+
+  const {
+    suggestion: newSessionSuggestion,
+    dismiss: dismissNewSessionSuggestion,
+    suppress: suppressNewSessionSuggestion,
+  } = useNewSessionSuggestion({
+    enabled:
+      connection.capabilities?.features.includes('session_generation') === true,
+    inputText: composerText,
+    messages,
+    sessionId: connection.sessionId,
+    contextUsageRatio:
+      (connection.contextWindow ?? 0) > 0
+        ? (connection.tokenCount ?? 0) / (connection.contextWindow ?? 0)
+        : 0,
+    isRunning: streamingState !== 'idle',
+    dialogOpen: interactionBlocked || approvalOverlayActive,
+    generateContent: sessionActions.generateSessionContent,
+  });
+
+  const flushPendingNewSessionSuggestionSubmit = useCallback(
+    (expectedToken?: number) => {
+      const pending = pendingNewSessionSuggestionSubmitRef.current;
+      if (!pending) return;
+      if (expectedToken !== undefined && pending.token !== expectedToken)
+        return;
+
+      const activeSessionId = connectionRef.current.sessionId;
+      if (
+        pending.sourceSessionId !== undefined &&
+        activeSessionId !== undefined &&
+        activeSessionId !== pending.sourceSessionId
+      ) {
+        pendingNewSessionSuggestionSubmitRef.current = null;
+        setIsStartingNewSessionSuggestion(false);
+        return;
+      }
+
+      if (!pending.sessionClearCompleted) {
+        return;
+      }
+
+      if (activeSessionId !== undefined) {
+        return;
+      }
+
+      if (pending.submitScheduled) {
+        return;
+      }
+
+      pendingNewSessionSuggestionSubmitRef.current = {
+        ...pending,
+        submitScheduled: true,
+      };
+      window.setTimeout(() => {
+        const latestPending = pendingNewSessionSuggestionSubmitRef.current;
+        if (!latestPending || latestPending.token !== pending.token) {
+          return;
+        }
+        if (connectionRef.current.sessionId !== undefined) {
+          pendingNewSessionSuggestionSubmitRef.current = null;
+          setIsStartingNewSessionSuggestion(false);
+          return;
+        }
+        pendingNewSessionSuggestionSubmitRef.current = null;
+        editorRef.current?.submit();
+        editorRef.current?.focus();
+        setIsStartingNewSessionSuggestion(false);
+      }, 0);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    flushPendingNewSessionSuggestionSubmit();
+  }, [connection.sessionId, flushPendingNewSessionSuggestionSubmit]);
+
+  const handleAcceptNewSessionSuggestion = useCallback(() => {
+    const draft = composerTextRef.current.trim();
+    if (!draft || isStartingNewSessionSuggestion) return;
+    if (newSessionSuggestion?.classifiedInput !== draft) {
+      dismissNewSessionSuggestion();
+      return;
+    }
+    suppressNewSessionSuggestion();
+    setIsStartingNewSessionSuggestion(true);
+    const token = newSessionSuggestionSubmitTokenRef.current + 1;
+    newSessionSuggestionSubmitTokenRef.current = token;
+    pendingNewSessionSuggestionSubmitRef.current = {
+      token,
+      sourceSessionId: connectionRef.current.sessionId,
+      sessionClearCompleted: false,
+      submitScheduled: false,
+    };
+    void createNewSession().then((created) => {
+      const pending = pendingNewSessionSuggestionSubmitRef.current;
+      if (!created || pending?.token !== token) {
+        if (pending?.token === token) {
+          pendingNewSessionSuggestionSubmitRef.current = null;
+        }
+        setIsStartingNewSessionSuggestion(false);
+        return;
+      }
+      pendingNewSessionSuggestionSubmitRef.current = {
+        ...pending,
+        sessionClearCompleted: true,
+      };
+      onSessionIdChange?.(undefined);
+      flushPendingNewSessionSuggestionSubmit(token);
+    });
+  }, [
+    createNewSession,
+    dismissNewSessionSuggestion,
+    flushPendingNewSessionSuggestionSubmit,
+    isStartingNewSessionSuggestion,
+    newSessionSuggestion,
+    onSessionIdChange,
+    suppressNewSessionSuggestion,
+  ]);
+
   const shellApi = useMemo<WebShellApi>(
     () => ({
       openSplitView: () => {
@@ -3992,8 +4356,7 @@ export function App({
         commitComposerAccepted?: ComposerSubmitCommit;
       },
     ) => {
-      const goalArg = text.replace(/^\/goal\b/i, '').trim();
-      const lowerGoalArg = goalArg.toLowerCase();
+      const goalArg = goalArgOf(text);
       const sendToDaemon = opts?.sendToDaemon ?? true;
       const sendGoalPrompt = () => {
         const deferComposerCommit = Boolean(onSubmitBeforeRef.current);
@@ -4010,7 +4373,7 @@ export function App({
         return clearComposerOnPromptStart ? false : true;
       };
 
-      if (goalArg && GOAL_CLEAR_KEYWORDS.has(lowerGoalArg)) {
+      if (goalArg && isGoalClearKeyword(goalArg)) {
         if (!sendToDaemon) {
           store.appendLocalUserMessage(text);
           dispatchGoalCleared(activeGoalRef.current);
@@ -4026,16 +4389,17 @@ export function App({
         return sendGoalPrompt();
       }
 
-      if (sendToDaemon) {
-        return sendGoalPrompt();
-      }
-      store.appendLocalUserMessage(text);
+      // Bare `/goal` opens the Goals page instead of asking the daemon to print
+      // its status as text — the same move `/schedule` makes. Nothing is sent,
+      // so the composer is cleared by returning true.
+      openGoals();
       return true;
     },
     [
       dispatchGoalCleared,
       dispatchGoalSet,
       handleBusyGoalClear,
+      openGoals,
       reportError,
       sendPrompt,
       store,
@@ -4066,6 +4430,8 @@ export function App({
       if (
         shouldBlockComposerSubmit({
           connectionStatus: connectionRef.current.status,
+          hasSession: Boolean(connectionRef.current.sessionId),
+          restartSseOnPrompt: Boolean(restartSseOnPrompt),
         })
       ) {
         pushToast('warning', t('editor.connectionDisconnected'));
@@ -4119,11 +4485,27 @@ export function App({
             setShowHelpDialog(true);
             return true;
           }
+          if (cmd === 'diff') {
+            // Local intercept: open the working-tree Changes dialog instead of
+            // forwarding `/diff` to the agent. Targets the current workspace.
+            if (!gitDiffWorkspaceCwd) {
+              pushToast('info', t('localCommand.diffNoWorkspace'));
+              return true;
+            }
+            setDiffWorkspaceCwd(gitDiffWorkspaceCwd);
+            return true;
+          }
           if (cmd === 'tasks') {
             openTasksPanel();
             return true;
           }
           if (cmd === 'goal') {
+            // A bare `/goal` just opens the Goals page; it neither sends a
+            // prompt nor touches the session, so it works mid-turn too.
+            if (!goalArgOf(text)) {
+              openGoals();
+              return true;
+            }
             if (promptBlocked) {
               if (isGoalClearCommand(text)) {
                 return handleBusyGoalClear(text);
@@ -4409,53 +4791,16 @@ export function App({
             const mcpArg = text.slice(match[0].length).trim().toLowerCase();
             workspaceActions
               .loadMcpStatus()
-              .then(async (status) => {
-                const toolsByServer: Record<
-                  string,
-                  Awaited<ReturnType<typeof workspaceActions.loadMcpTools>>
-                > = {};
-                const resourcesByServer: Record<
-                  string,
-                  Awaited<ReturnType<typeof workspaceActions.loadMcpResources>>
-                > = {};
-                await Promise.all(
-                  (status?.servers ?? []).map(async (server) => {
-                    // Tools and resources load in parallel; a failure in one
-                    // must not hide the other, and per-server failures still
-                    // let sibling servers render.
-                    await Promise.all([
-                      (async () => {
-                        try {
-                          toolsByServer[server.name] =
-                            await workspaceActions.loadMcpTools(server.name);
-                        } catch {
-                          // Allow partial failure — other servers still render
-                        }
-                      })(),
-                      (async () => {
-                        // Skip the round-trip for servers that advertise no
-                        // resources (or older daemons that omit the count).
-                        if (!server.resourceCount) return;
-                        try {
-                          resourcesByServer[server.name] =
-                            await workspaceActions.loadMcpResources(
-                              server.name,
-                            );
-                        } catch {
-                          // Allow partial failure — other servers still render
-                        }
-                      })(),
-                    ]);
-                  }),
-                );
+              .then((status) => {
                 setMcpDialogMessage({
                   status,
-                  toolsByServer,
-                  resourcesByServer,
+                  toolsByServer: {},
+                  resourcesByServer: {},
                   showDescriptions: mcpArg === 'desc',
                   showSchema: mcpArg === 'schema',
                   showTips: !mcpArg,
                 });
+                openPanel('mcp');
               })
               .catch((error: unknown) => {
                 reportError(error, 'Failed to load MCP status');
@@ -4464,7 +4809,9 @@ export function App({
           }
           if (cmd === 'skills') {
             const skillArg = text.slice(match[0].length).trim();
-            if (skillArg) {
+            if (!skillArg || skillArg === 'detail' || skillArg === 'details') {
+              openPanel('skills');
+            } else {
               if (promptBlocked) {
                 return enqueuePrompt(
                   text,
@@ -4480,31 +4827,6 @@ export function App({
                 'Failed to send /skills command',
                 { inputAnnotations: metadata?.inputAnnotations },
               );
-            } else {
-              if (echoOrDeferLocalCommand(text, images)) return true;
-              workspaceActions
-                .loadSkillsStatus()
-                .then((status) => {
-                  const skills = availableSkillInfos(status);
-                  setLoadedSkills(skills);
-                  if (skills.length === 0) {
-                    store.dispatch([
-                      { type: 'status', text: t('skills.none') },
-                    ]);
-                  } else {
-                    const list = skills.map((s) => `- ${s.name}`).join('\n');
-                    store.dispatch([
-                      {
-                        type: 'status',
-                        text: `${t('skills.available')}\n\n${list}`,
-                      },
-                    ]);
-                  }
-                  resumeChatBottomFollow('smooth');
-                })
-                .catch((error: unknown) => {
-                  reportError(error, 'Failed to load skills');
-                });
             }
             return true;
           }
@@ -4971,7 +5293,9 @@ export function App({
       closePanel,
       openPanel,
       openScheduledTasks,
+      openGoals,
       createNewSession,
+      gitDiffWorkspaceCwd,
       handleBusyGoalClear,
       handleGoalSlashCommand,
       handleThemeChange,
@@ -4985,6 +5309,7 @@ export function App({
       runVisibleRecap,
       runVisibleBtw,
       requireActiveSessionForLocalCommand,
+      restartSseOnPrompt,
       resumeChatBottomFollow,
       selectedLanguage,
       setPendingModel,
@@ -5479,8 +5804,31 @@ export function App({
   }, [modelDialogMode, showFallbacksDialog, showAuthDialog]);
 
   const commands = useMemo(() => {
+    const previousSkillNames = new Set(
+      (connection.skills ?? []).map((skill) => skill.toLowerCase()),
+    );
+    const retainedCommands = loadedSkillsReady
+      ? (connection.commands ?? []).filter(
+          (command) =>
+            command.source !== 'skill' &&
+            !previousSkillNames.has(command.name.toLowerCase()),
+        )
+      : (connection.commands ?? []);
+    const refreshedSkillCommands = loadedSkillsReady
+      ? loadedSkills.map((skill) => ({
+          name: skill.name,
+          description: skill.description,
+          ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),
+          source: 'skill',
+          displayCategory: 'skill' as const,
+        }))
+      : [];
     return localizeBuiltinDescriptions(
-      mergeCommands(connection.commands ?? [], getLocalCommands(t)),
+      mergeCommands(
+        retainedCommands,
+        refreshedSkillCommands,
+        getLocalCommands(t),
+      ),
       t,
     )
       .filter(
@@ -5495,7 +5843,14 @@ export function App({
           description: t(skillKey),
         };
       });
-  }, [connection.commands, hiddenCommands, t]);
+  }, [
+    connection.commands,
+    connection.skills,
+    hiddenCommands,
+    loadedSkills,
+    loadedSkillsReady,
+    t,
+  ]);
 
   const welcomeHeaderProps = useMemo(
     () => ({
@@ -5750,17 +6105,11 @@ export function App({
               <ToolsDialog />
             </DialogShell>
           )}
-          {mcpDialogMessage && (
-            <DialogShell
-              title={t('mcp.manageServers')}
-              size="lg"
-              onClose={() => setMcpDialogMessage(null)}
-            >
-              <McpDialog
-                message={mcpDialogMessage}
-                onClose={() => setMcpDialogMessage(null)}
-              />
-            </DialogShell>
+          {diffWorkspaceCwd && (
+            <GitDiffDialog
+              workspaceCwd={diffWorkspaceCwd}
+              onClose={() => setDiffWorkspaceCwd(undefined)}
+            />
           )}
           {tasksDialogMessage && (
             <DialogShell
@@ -5973,6 +6322,10 @@ export function App({
                     closeMobileDrawer();
                     openPanel('settings');
                   }}
+                  onOpenPlugins={() => {
+                    closeMobileDrawer();
+                    openPanel('plugins');
+                  }}
                   onOpenDaemonStatus={() => {
                     closeMobileDrawer();
                     openPanel('status');
@@ -5980,6 +6333,10 @@ export function App({
                   onOpenScheduledTasks={() => {
                     closeMobileDrawer();
                     openScheduledTasks();
+                  }}
+                  onOpenGoals={() => {
+                    closeMobileDrawer();
+                    openGoals();
                   }}
                   onOpenSessions={() => {
                     closeMobileDrawer();
@@ -6007,11 +6364,17 @@ export function App({
                     setMainView('chat');
                     return loadSidebarSession(sessionId, workspaceCwd);
                   }}
+                  onSelectCurrentSession={() => {
+                    closeMobileDrawer();
+                    setMainView('chat');
+                    closePanel();
+                  }}
                   onError={reportError}
                   mobileOpen={mobileDrawerOpen}
                   sessionListReloadToken={sessionListReloadToken}
                   selectedWorkspaceCwd={selectedWorkspaceCwd}
                   onSelectWorkspace={setSelectedWorkspaceCwd}
+                  onOpenGitDiff={setDiffWorkspaceCwd}
                   workspaces={workspaces}
                   lockedWorkspaceCwd={lockedWorkspaceCwd}
                   lockedWorkspace={sidebarOptions.lockedWorkspace}
@@ -6080,10 +6443,19 @@ export function App({
                         ? t('daemon.title')
                         : activePanel === 'extensions'
                           ? t('extensions.manage.title')
-                        : t('sessionsOverview.title')
+                        : activePanel === 'mcp'
+                          ? t('mcp.title')
+                          : activePanel === 'skills'
+                            ? t('skills.title')
+                          : activePanel === 'plugins'
+                              ? t('plugins.title')
+                              : t('sessionsOverview.title')
                   }
                 >
-                  {activePanel !== 'extensions' && (
+                  {activePanel !== 'extensions' &&
+                    activePanel !== 'mcp' &&
+                    activePanel !== 'skills' &&
+                    activePanel !== 'plugins' && (
                     <div className={styles.panelHeader}>
                     <button
                       ref={panelBackRef}
@@ -6189,6 +6561,34 @@ export function App({
                         onClose={closePanel}
                         initialFocusRef={panelHeadingRef}
                       />
+                    ) : activePanel === 'mcp' && mcpDialogMessage ? (
+                      <McpManagerPage
+                        message={mcpDialogMessage}
+                        onClose={() => {
+                          setMcpDialogMessage(null);
+                          closePanel();
+                        }}
+                      />
+                    ) : activePanel === 'skills' ? (
+                      <SkillsManagerPage
+                        onClose={closePanel}
+                        onUseSkill={handleUseSkill}
+                      />
+                    ) : activePanel === 'plugins' ? (
+                      <PluginManagerPage
+                        mcpMessage={mcpDialogMessage}
+                        loadMcpMessage={async () => {
+                          try {
+                            await loadMcpManagerMessage();
+                          } catch (error) {
+                            reportError(error, 'Failed to load MCP status');
+                            throw error;
+                          }
+                        }}
+                        onClose={closePanel}
+                        onUseSkill={handleUseSkill}
+                        initialFocusRef={pluginTabRef}
+                      />
                     ) : (
                       <SessionOverviewPanel
                         onOpenSession={handleOpenSessionFromOverview}
@@ -6281,6 +6681,109 @@ export function App({
                   </div>
                 </div>
               )}
+              {mainView === 'goals' && (
+                <div className={styles.fullPage} data-testid="goals-page">
+                  <div className={styles.fullPageHeader}>
+                    <button
+                      type="button"
+                      className={styles.fullPageBack}
+                      onClick={() => setMainView('chat')}
+                      aria-label={t('common.back')}
+                      title={t('common.back')}
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        width="18"
+                        height="18"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M15 18l-6-6 6-6" />
+                      </svg>
+                    </button>
+                    <div className={styles.fullPageTitle}>
+                      {t('goals.title')}
+                    </div>
+                  </div>
+                  <div className={styles.fullPageBody}>
+                    <GoalsDialog
+                      onCreateGoal={async (condition) => {
+                        // Setting a goal registers the Stop hook AND kicks off
+                        // the first turn, so it has to travel the prompt path.
+                        // Start a FRESH session so the goal loop doesn't take
+                        // over the conversation the user was already having.
+                        //
+                        // Unless a previous attempt in this same visit to the
+                        // page already made one and then failed to send: that
+                        // session never got its goal and is still current, so
+                        // reuse it. Creating another would strand it, and a user
+                        // retrying a few times would end up with a column of
+                        // blank chats in the sidebar.
+                        //
+                        // Leaving the page forgets it (see the effect on
+                        // `strandedGoalSessionRef`), so this can never reuse a
+                        // session the user has since talked to.
+                        const stranded = strandedGoalSessionRef.current;
+                        const canReuseStranded =
+                          stranded !== undefined &&
+                          connectionRef.current.sessionId === stranded;
+                        if (!canReuseStranded) {
+                          // `keepView`: createNewSession switches to the chat by
+                          // default, which would unmount this form before the
+                          // prompt is even sent and leave a later rejection with
+                          // nowhere to render — the exact failure the deferred
+                          // switch below exists to prevent.
+                          const created = await createNewSession(undefined, {
+                            keepView: true,
+                          });
+                          // createNewSession already surfaced the failure; don't
+                          // drop the goal into the wrong (still-current) session.
+                          // `false` keeps the form open with the typed condition
+                          // still in it — returning normally would read as
+                          // "created" and reset it.
+                          if (!created) return false;
+                          onSessionIdChange?.(undefined);
+                        }
+                        // Switch to the chat only once the prompt is admitted.
+                        // Switching first unmounts the Goals page, and a later
+                        // rejection would then have nowhere to render: the user
+                        // would land in an empty session with no explanation.
+                        // Letting this reject keeps the error in the form the
+                        // user is looking at.
+                        try {
+                          await sendPrompt(`/goal ${condition}`, undefined, {
+                            clearComposerOnPromptStart: true,
+                          });
+                        } catch (error) {
+                          // `sendPrompt` creates the session lazily, so by now
+                          // one may exist even though the prompt never landed.
+                          // Remember it so the retry reuses it rather than
+                          // stranding it.
+                          strandedGoalSessionRef.current =
+                            connectionRef.current.sessionId;
+                          throw error;
+                        }
+                        strandedGoalSessionRef.current = undefined;
+                        setMainView('chat');
+                      }}
+                      onOpenSession={(sessionId) => {
+                        // The goal's session transcript IS its history.
+                        setMainView('chat');
+                        loadSidebarSession(sessionId).catch(
+                          (error: unknown) => {
+                            reportError(error, 'Failed to open session');
+                          },
+                        );
+                      }}
+                      onError={reportError}
+                    />
+                  </div>
+                </div>
+              )}
               {mainView === 'split' && (
                 <div className={styles.fullPage} data-testid="split-view-page">
                   {/* The outer session's approval overlay is suppressed under the
@@ -6324,6 +6827,7 @@ export function App({
                         onRightPanelOpen={handleTurnOutputOpen}
                         onPaneArtifactsChange={handlePaneArtifactsChange}
                         messageTurnOutputs={messageTurnOutputs}
+                        restartSseOnPrompt={restartSseOnPrompt}
                       />
                     </CompactModeContext.Provider>
                   </WebShellCustomizationProvider>
@@ -6404,6 +6908,12 @@ export function App({
                                 onShowContextDetail={handleShowContextDetail}
                                 loadingTranscript={connection.loadingTranscript}
                                 catchingUp={connection.catchingUp}
+                                hasOlderHistory={transcriptHistory.hasMore}
+                                loadingOlderHistory={transcriptHistory.loading}
+                                historyCapacityReached={
+                                  transcriptHistory.capacityReached
+                                }
+                                onLoadOlderHistory={transcriptHistory.loadMore}
                                 isResponding={streamingState !== 'idle'}
                                 activeTurnStartedAt={activeTurnStartedAt}
                                 workspaceCwd={connection.workspaceCwd || ''}
@@ -6445,6 +6955,13 @@ export function App({
                                 onReviewChanges={openReviewPanel}
                                 onOpenArtifact={openArtifactPanel}
                                 onOpenScheduledTask={openScheduledTaskPanel}
+                                generateContent={
+                                  connection.capabilities?.features.includes(
+                                    'session_generation',
+                                  )
+                                    ? sessionActions.generateSessionContent
+                                    : undefined
+                                }
                               />
                             );
 
@@ -6576,12 +7093,40 @@ export function App({
                         </div>
                       )}
                       <div className={styles.composer}>
-                        <StreamingStatus startedAt={activeTurnStartedAt} />
-                        {escapeHintVisible && streamingState === 'idle' && (
+                        {streamingState !== 'idle' ? (
+                          <StreamingStatus startedAt={activeTurnStartedAt} />
+                        ) : newSessionSuggestion ? (
+                          <div
+                            className={styles.composerActionTip}
+                            role="status"
+                            data-testid="new-session-suggestion"
+                          >
+                            <span
+                              className={styles.composerActionTipIcon}
+                              aria-hidden="true"
+                            >
+                              ✦
+                            </span>
+                            <span className={styles.composerActionTipText}>
+                              {t('editor.newSessionSuggestionTitle')}
+                            </span>
+                            <div className={styles.composerActionTipActions}>
+                              <button
+                                type="button"
+                                className={`${styles.composerActionTipButton} ${styles.composerActionTipButtonPrimary}`}
+                                data-testid="new-session-suggestion-start"
+                                onMouseDown={(event) => event.preventDefault()}
+                                onClick={handleAcceptNewSessionSuggestion}
+                              >
+                                {t('editor.newSessionSuggestionStart')}
+                              </button>
+                            </div>
+                          </div>
+                        ) : escapeHintVisible && streamingState === 'idle' ? (
                           <div className={styles.escClearStatus} role="status">
                             {t('editor.escClearHint')}
                           </div>
-                        )}
+                        ) : null}
                         <QueuedPromptDisplay
                           prompts={queuedPrompts}
                           t={t}
@@ -6603,13 +7148,18 @@ export function App({
                         <ChatEditor
                           ref={setEditorHandle}
                           onSubmit={handleEditorSubmit}
+                          onInputTextChange={handleComposerTextChange}
                           onCycleMode={handleCycleMode}
                           onToggleShortcuts={handleToggleShortcuts}
                           onCancel={handleCancel}
                           isRunning={streamingState !== 'idle'}
-                          isPreparing={isPreparingPrompt}
+                          isPreparing={
+                            isPreparingPrompt || isStartingNewSessionSuggestion
+                          }
                           cancelArmed={cancelArmed}
-                          disabled={isDisabled}
+                          disabled={
+                            isDisabled || isStartingNewSessionSuggestion
+                          }
                           commands={commands}
                           skills={loadedSkills}
                           slashCommandCategoryOrder={slashCommandCategoryOrder}
@@ -6625,7 +7175,13 @@ export function App({
                           gitBranch={
                             connection.sessionId
                               ? connection.gitBranch
-                              : selectedWorkspaceGitBranch
+                              : (selectedWorkspaceGitStatus?.branch ?? undefined)
+                          }
+                          gitStatus={selectedWorkspaceGitStatus}
+                          onOpenGitDiff={
+                            gitDiffWorkspaceCwd
+                              ? () => setDiffWorkspaceCwd(gitDiffWorkspaceCwd)
+                              : undefined
                           }
                           chatWidthMode={chatWidthMode}
                           showChatWidthToggle={!isChatEmptyState}
@@ -6758,6 +7314,7 @@ export function App({
                           onReturnToInput={handleReturnToEditor}
                           tasks={backgroundTasks}
                           activeGoal={activeGoal}
+                          onOpenGoals={openGoals}
                           hideSettings={hideSettings}
                           onToggleShortcuts={handleToggleShortcuts}
                           compact={true}

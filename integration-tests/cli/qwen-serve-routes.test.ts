@@ -306,6 +306,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_resume',
       'unstable_session_resume',
       'session_list',
+      'session_info',
       'session_source_metadata',
       'session_prompt',
       'session_cancel',
@@ -344,6 +345,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_organization',
       'session_export',
       'session_transcript',
+      'session_transcript_pagination',
       'mcp_guardrails',
       'workspace_mcp_manage',
       'mcp_guardrail_events',
@@ -354,6 +356,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_approval_mode_control',
       'workspace_tool_toggle',
       'workspace_skill_toggle',
+      'workspace_skill_manage',
       'workspace_settings',
       'workspace_permissions',
       'workspace_voice',
@@ -362,6 +365,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_github_setup',
       'workspace_mcp_restart',
       'session_recap',
+      'session_generation',
       'session_btw',
       'mcp_workspace_pool',
       'mcp_pool_restart',
@@ -376,6 +380,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_branch',
       'workspace_reload',
       'channel_control',
+      'workspace_channel_observed_contacts',
       'persistent_workspace_registration',
       'workspace_runtime_removal',
       'workspace_qualified_rest_core',
@@ -736,6 +741,46 @@ describe('qwen serve — cancel + list', () => {
     expect(typeof first.createdAt).toBe('string');
     expect(typeof first.clientCount).toBe('number');
     expect(typeof first.hasActivePrompt).toBe('boolean');
+  });
+});
+
+describe('qwen serve — GET /goals', () => {
+  const getGoals = async () => {
+    const res = await fetch(`${base}/goals`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    return { status: res.status, body: await res.json() };
+  };
+
+  it('returns an empty, versioned list when no session has a goal', async () => {
+    const { status, body } = await getGoals();
+    expect(status).toBe(200);
+    expect(body).toEqual({ v: 1, goals: [], droppedCount: 0 });
+  });
+
+  it('probes each live session over the bridge without reporting a goal', async () => {
+    // The real round trip: serve -> bridge -> `sessionGoalGet` ext method in
+    // the `qwen --acp` child -> back. A live session with no `/goal` must come
+    // back as "no goal" rather than an error or a phantom entry.
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      sessionScope: 'thread',
+    });
+    try {
+      const { status, body } = await getGoals();
+      expect(status).toBe(200);
+      // `droppedCount: 0` is the load-bearing half: it proves the ext-method
+      // probe actually reached the child. A dropped probe would also yield an
+      // empty `goals`, so that alone cannot tell success from a silent failure.
+      expect(body).toEqual({ v: 1, goals: [], droppedCount: 0 });
+    } finally {
+      await client.closeSession(session.sessionId);
+    }
+  });
+
+  it('requires the bearer token', async () => {
+    const res = await fetch(`${base}/goals`);
+    expect(res.status).toBe(401);
   });
 });
 

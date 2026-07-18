@@ -58,6 +58,7 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(actions.createSession).toHaveBeenCalledWith({
       workspaceCwd: '/ws/secondary',
       approvalMode: 'yolo',
+      sourceType: 'default',
     });
     // Model is still a post-create call, sequenced after attach.
     expect(order).toEqual(['create', 'attach', 'model']);
@@ -74,6 +75,7 @@ describe('createAndAttachSessionForPrompt', () => {
 
     expect(actions.createSession).toHaveBeenCalledWith({
       workspaceCwd: undefined,
+      sourceType: 'default',
     });
   });
 
@@ -88,6 +90,7 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(actions.createSession).toHaveBeenCalledWith({
       workspaceCwd: undefined,
       approvalMode: 'plan',
+      sourceType: 'default',
     });
     expect(actions.setModel).not.toHaveBeenCalled();
   });
@@ -162,6 +165,7 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(actions.createSession).toHaveBeenCalledWith({
       workspaceCwd: undefined,
       approvalMode: 'yolo',
+      sourceType: 'default',
     });
     expect(actions.attachSession).not.toHaveBeenCalled();
     expect(actions.setModel).not.toHaveBeenCalled();
@@ -249,6 +253,7 @@ describe('createAndAttachSessionForPrompt', () => {
     });
     expect(actions.createSession).toHaveBeenCalledWith({
       workspaceCwd: '/ws/secondary',
+      sourceType: 'default',
     });
   });
 

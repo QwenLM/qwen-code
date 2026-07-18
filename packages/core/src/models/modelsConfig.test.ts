@@ -2658,6 +2658,47 @@ describe('ModelsConfig', () => {
       expect(modelsConfig.getModelDisplayName('qwen3.7-max')).toBe(
         '[Idealab] qwen3.7-max',
       );
+      expect(modelsConfig.getCurrentRegistryBaseUrl()).toBe(idealabBaseUrl);
+    });
+
+    it('tracks implicit and explicit registry routes with the same effective URL', async () => {
+      const defaultBaseUrl = 'https://api.openai.com/v1';
+      const modelProvidersConfig: ModelProvidersConfig = {
+        openai: [
+          { id: 'shared', name: 'Implicit', envKey: 'IMPLICIT_KEY' },
+          {
+            id: 'shared',
+            name: 'Explicit',
+            baseUrl: defaultBaseUrl,
+            envKey: 'EXPLICIT_KEY',
+          },
+        ],
+      };
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig,
+      });
+
+      await modelsConfig.switchModel(AuthType.USE_OPENAI, 'shared');
+      expect(modelsConfig.getCurrentRegistryBaseUrl()).toBeNull();
+      modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'shared');
+      expect(modelsConfig.getGenerationConfig().apiKeyEnvKey).toBe(
+        'IMPLICIT_KEY',
+      );
+
+      await modelsConfig.switchModel(AuthType.USE_OPENAI, 'shared', {
+        baseUrl: defaultBaseUrl,
+      });
+      expect(modelsConfig.getCurrentRegistryBaseUrl()).toBe(defaultBaseUrl);
+
+      const restored = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        initialRegistryBaseUrl: defaultBaseUrl,
+        modelProvidersConfig,
+        generationConfig: { model: 'shared' },
+      });
+      restored.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'shared');
+      expect(restored.getGenerationConfig().apiKeyEnvKey).toBe('EXPLICIT_KEY');
     });
 
     it('should return raw modelId when currentAuthType is falsy', () => {

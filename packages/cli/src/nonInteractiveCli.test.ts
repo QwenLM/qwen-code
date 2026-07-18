@@ -17,6 +17,7 @@ import {
   ToolErrorType,
   shutdownTelemetry,
   GeminiEventType,
+  Kind,
   OutputFormat,
   uiTelemetryService,
   FatalInputError,
@@ -343,7 +344,7 @@ describe('runNonInteractive', () => {
         },
       },
       isTrusted: true,
-      migratedInMemorScopes: new Set(),
+      migratedInMemoryScopes: new Set(),
       forScope: vi.fn(),
       computeMergedSettings: vi.fn(),
     } as unknown as LoadedSettings;
@@ -1046,6 +1047,388 @@ describe('runNonInteractive', () => {
     expect(
       mockGeminiClient.consumePendingMemoryTaskPromises,
     ).toHaveBeenCalled();
+  });
+
+  describe('parallel tool execution', () => {
+    const finishTurn: ServerGeminiStreamEvent[] = [
+      { type: GeminiEventType.Content, value: 'done' },
+      {
+        type: GeminiEventType.Finished,
+        value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+      },
+    ];
+
+    function toolCallEvents(
+      ids: string[],
+      name: string,
+      promptId: string,
+    ): ServerGeminiStreamEvent[] {
+      return ids.map((callId) => ({
+        type: GeminiEventType.ToolCallRequest,
+        value: {
+          callId,
+          name,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: promptId,
+        },
+      }));
+    }
+
+    it('runs a batch of concurrency-safe tool calls concurrently', async () => {
+      setupMetricsMock();
+      // Kind.Read is concurrency-safe, so the whole batch is one parallel
+      // partition (mirrors the interactive scheduler).
+      vi.mocked(mockToolRegistry.getTool).mockReturnValue({
+        kind: Kind.Read,
+      } as unknown as ReturnType<typeof mockToolRegistry.getTool>);
+
+      const total = 3;
+      const startOrder: string[] = [];
+      let started = 0;
+      let openGate!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        openGate = resolve;
+      });
+      // Each call blocks on `gate`, which only opens once EVERY call in the
+      // batch has started. Under the old one-at-a-time loop, call #2 never
+      // starts until call #1 resolves — but call #1 is parked on the gate, so
+      // the gate never opens and the run deadlocks (the test then times out).
+      // Reaching `started === total` therefore proves the batch ran in
+      // parallel.
+      mockCoreExecuteToolCall.mockImplementation(
+        async (_config: unknown, req: { callId: string }) => {
+          startOrder.push(req.callId);
+          started += 1;
+          if (started === total) openGate();
+          await gate;
+          return { responseParts: [{ text: `resp-${req.callId}` }] };
+        },
+      );
+
+      mockGeminiClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents(
+            toolCallEvents(
+              ['tool-1', 'tool-2', 'tool-3'],
+              'read',
+              'p-parallel',
+            ),
+          ),
+        )
+        .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+      await runNonInteractive(mockConfig, mockSettings, 'go', 'p-parallel');
+
+      expect(started).toBe(total);
+      expect(startOrder).toEqual(['tool-1', 'tool-2', 'tool-3']);
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(total);
+    });
+
+    it('finalizes concurrent results in request order despite out-of-order completion', async () => {
+      setupMetricsMock();
+      vi.mocked(mockToolRegistry.getTool).mockReturnValue({
+        kind: Kind.Read,
+      } as unknown as ReturnType<typeof mockToolRegistry.getTool>);
+
+      const resolvers: Record<string, () => void> = {};
+      mockCoreExecuteToolCall.mockImplementation(
+        (_config: unknown, req: { callId: string }) =>
+          new Promise((resolve) => {
+            resolvers[req.callId] = () =>
+              resolve({
+                responseParts: [
+                  {
+                    functionResponse: {
+                      id: req.callId,
+                      name: req.callId,
+                      response: { output: `r-${req.callId}` },
+                    },
+                  },
+                ],
+              });
+          }),
+      );
+
+      mockGeminiClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents(
+            toolCallEvents(['a', 'b', 'c'], 'read', 'p-order'),
+          ),
+        )
+        .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+      const run = runNonInteractive(mockConfig, mockSettings, 'go', 'p-order');
+      // Wait for all three to launch, then resolve them out of order.
+      await vi.waitFor(() =>
+        expect(Object.keys(resolvers).sort()).toEqual(['a', 'b', 'c']),
+      );
+      resolvers['c']();
+      resolvers['a']();
+      resolvers['b']();
+      await run;
+
+      // The next model turn must receive the tool responses in the original
+      // request order a, b, c — not the completion order c, a, b.
+      const nextTurnParts = mockGeminiClient.sendMessageStream.mock
+        .calls[1][0] as Part[];
+      const ids = nextTurnParts
+        .map((part) => part.functionResponse?.id)
+        .filter((id): id is string => id === 'a' || id === 'b' || id === 'c');
+      expect(ids).toEqual(['a', 'b', 'c']);
+    });
+
+    it('runs side-effecting (unsafe) tool calls sequentially', async () => {
+      setupMetricsMock();
+      // Kind.Edit is a mutator: each unsafe call forms its own sequential
+      // batch, so call #2 must not start until call #1 has settled.
+      vi.mocked(mockToolRegistry.getTool).mockReturnValue({
+        kind: Kind.Edit,
+      } as unknown as ReturnType<typeof mockToolRegistry.getTool>);
+
+      const startOrder: string[] = [];
+      const resolvers: Array<() => void> = [];
+      mockCoreExecuteToolCall.mockImplementation(
+        (_config: unknown, req: { callId: string }) =>
+          new Promise((resolve) => {
+            startOrder.push(req.callId);
+            resolvers.push(() =>
+              resolve({ responseParts: [{ text: `resp-${req.callId}` }] }),
+            );
+          }),
+      );
+
+      mockGeminiClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents(toolCallEvents(['e1', 'e2'], 'edit', 'p-seq')),
+        )
+        .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+      const run = runNonInteractive(mockConfig, mockSettings, 'go', 'p-seq');
+      await vi.waitFor(() => expect(startOrder).toEqual(['e1']));
+      // Flush pending microtasks; the second call must still not have started
+      // while the first is unresolved.
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(startOrder).toEqual(['e1']);
+      resolvers[0]();
+      await vi.waitFor(() => expect(startOrder).toEqual(['e1', 'e2']));
+      resolvers[1]();
+      await run;
+
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(2);
+    });
+
+    it('caps a parallel batch at exactly --max-tool-calls', async () => {
+      setupMetricsMock();
+      vi.mocked(mockConfig.getMaxToolCalls).mockReturnValue(2);
+      vi.mocked(mockToolRegistry.getTool).mockReturnValue({
+        kind: Kind.Read,
+      } as unknown as ReturnType<typeof mockToolRegistry.getTool>);
+      mockCoreExecuteToolCall.mockResolvedValue({
+        responseParts: [{ text: 'r' }],
+      });
+
+      mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents(
+          toolCallEvents(['t1', 't2', 't3'], 'read', 'p-budget'),
+        ),
+      );
+
+      // Budget = 2, so the 3rd tick trips the budget and stops the launch
+      // loop before the 3rd call runs. The run then unwinds through the
+      // budget-abort path; assert on the cap rather than the terminal exit
+      // (which routes through the mocked process.exit / cleanup machinery and
+      // never settles under these mocks — the same routeAbort the serial path
+      // takes).
+      const run = runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'go',
+        'p-budget',
+      ).catch(() => undefined);
+
+      await vi.waitFor(() =>
+        expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(2),
+      );
+      // A would-be 3rd launch happens synchronously with the first two, so a
+      // couple of extra event-loop turns confirm it never fires.
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(2);
+
+      void run;
+    });
+
+    it('partitions a mixed batch: parallel reads, sequential edit, parallel reads', async () => {
+      setupMetricsMock();
+      // read → Kind.Read (safe), edit → Kind.Edit (unsafe). The batch
+      // [r1,r2,e1,r3,r4] partitions to [r1,r2](parallel), [e1](sequential),
+      // [r3,r4](parallel).
+      vi.mocked(mockToolRegistry.getTool).mockImplementation(
+        (name: string) =>
+          ({
+            kind: name.startsWith('read') ? Kind.Read : Kind.Edit,
+          }) as unknown as ReturnType<typeof mockToolRegistry.getTool>,
+      );
+
+      const startOrder: string[] = [];
+      const resolvers: Record<string, () => void> = {};
+      mockCoreExecuteToolCall.mockImplementation(
+        (_config: unknown, req: { callId: string }) =>
+          new Promise((resolve) => {
+            startOrder.push(req.callId);
+            resolvers[req.callId] = () =>
+              resolve({ responseParts: [{ text: `resp-${req.callId}` }] });
+          }),
+      );
+
+      mockGeminiClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            ...toolCallEvents(['r1', 'r2'], 'read', 'p-mixed'),
+            ...toolCallEvents(['e1'], 'edit', 'p-mixed'),
+            ...toolCallEvents(['r3', 'r4'], 'read', 'p-mixed'),
+          ]),
+        )
+        .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+      const run = runNonInteractive(mockConfig, mockSettings, 'go', 'p-mixed');
+
+      // Batch 1: r1 and r2 launch together; the edit and later reads wait.
+      await vi.waitFor(() => expect(startOrder).toEqual(['r1', 'r2']));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(startOrder).toEqual(['r1', 'r2']);
+      resolvers['r1']();
+      resolvers['r2']();
+
+      // Batch 2: the edit runs alone; r3/r4 must not start until it settles.
+      await vi.waitFor(() => expect(startOrder).toEqual(['r1', 'r2', 'e1']));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(startOrder).toEqual(['r1', 'r2', 'e1']);
+      resolvers['e1']();
+
+      // Batch 3: r3 and r4 launch together.
+      await vi.waitFor(() =>
+        expect(startOrder).toEqual(['r1', 'r2', 'e1', 'r3', 'r4']),
+      );
+      resolvers['r3']();
+      resolvers['r4']();
+      await run;
+
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(5);
+    });
+
+    it('throttles a parallel batch to QWEN_CODE_MAX_TOOL_CONCURRENCY in flight', async () => {
+      setupMetricsMock();
+      const prev = process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+      process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] = '2';
+      try {
+        vi.mocked(mockToolRegistry.getTool).mockReturnValue({
+          kind: Kind.Read,
+        } as unknown as ReturnType<typeof mockToolRegistry.getTool>);
+
+        let active = 0;
+        let maxActive = 0;
+        const startOrder: string[] = [];
+        const resolvers: Record<string, () => void> = {};
+        mockCoreExecuteToolCall.mockImplementation(
+          (_config: unknown, req: { callId: string }) =>
+            new Promise((resolve) => {
+              startOrder.push(req.callId);
+              active += 1;
+              maxActive = Math.max(maxActive, active);
+              resolvers[req.callId] = () => {
+                active -= 1;
+                resolve({ responseParts: [{ text: `resp-${req.callId}` }] });
+              };
+            }),
+        );
+
+        mockGeminiClient.sendMessageStream
+          .mockReturnValueOnce(
+            createStreamFromEvents(
+              toolCallEvents(['c1', 'c2', 'c3', 'c4'], 'read', 'p-cap'),
+            ),
+          )
+          .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+        const run = runNonInteractive(mockConfig, mockSettings, 'go', 'p-cap');
+
+        // Cap = 2: only c1 and c2 start; c3 waits on Promise.race(inFlight).
+        await vi.waitFor(() => expect(startOrder).toEqual(['c1', 'c2']));
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(startOrder).toEqual(['c1', 'c2']);
+        // Freeing one slot admits the next call, one at a time.
+        resolvers['c1']();
+        await vi.waitFor(() => expect(startOrder).toEqual(['c1', 'c2', 'c3']));
+        resolvers['c2']();
+        await vi.waitFor(() =>
+          expect(startOrder).toEqual(['c1', 'c2', 'c3', 'c4']),
+        );
+        resolvers['c3']();
+        resolvers['c4']();
+        await run;
+
+        expect(maxActive).toBe(2);
+        expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(4);
+      } finally {
+        if (prev === undefined) {
+          delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+        } else {
+          process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] = prev;
+        }
+      }
+    });
+
+    it('canonicalizes legacy tool aliases so they partition like the interactive path', async () => {
+      setupMetricsMock();
+      // `search_file_content` is a legacy alias for `grep_search`
+      // (Kind.Search, concurrency-safe). The registry only knows the canonical
+      // name, so the partitioner must canonicalize before the kind lookup —
+      // otherwise these classify unsafe → sequential here while the TUI runs
+      // them in parallel.
+      vi.mocked(mockToolRegistry.getTool).mockImplementation(
+        (name: string) =>
+          (name === 'grep_search'
+            ? { kind: Kind.Search }
+            : undefined) as unknown as ReturnType<
+            typeof mockToolRegistry.getTool
+          >,
+      );
+
+      const total = 2;
+      const startOrder: string[] = [];
+      let started = 0;
+      let openGate!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        openGate = resolve;
+      });
+      mockCoreExecuteToolCall.mockImplementation(
+        async (_config: unknown, req: { callId: string }) => {
+          startOrder.push(req.callId);
+          started += 1;
+          if (started === total) openGate();
+          await gate;
+          return { responseParts: [{ text: `resp-${req.callId}` }] };
+        },
+      );
+
+      mockGeminiClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents(
+            toolCallEvents(['s1', 's2'], 'search_file_content', 'p-alias'),
+          ),
+        )
+        .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+      await runNonInteractive(mockConfig, mockSettings, 'go', 'p-alias');
+
+      // Both alias calls run in parallel (the gate opens only once both have
+      // started); a raw-name lookup would classify them sequential and this
+      // would deadlock.
+      expect(started).toBe(total);
+      expect(startOrder).toEqual(['s1', 's2']);
+    });
   });
 
   it('should ignore duplicate provider tool-call ids across rounds', async () => {

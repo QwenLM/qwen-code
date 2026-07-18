@@ -57,12 +57,6 @@ function getWorkflowStep(job, stepName) {
 }
 
 describe('package scripts', () => {
-  it('exposes the local PR verification runner', () => {
-    expect(readPackageJson().scripts['verify:pr']).toBe(
-      'node scripts/verify-pr.js',
-    );
-  });
-
   it('keeps the serve fast-path bundle check outside unit test scripts', () => {
     const packageJson = readPackageJson();
 
@@ -110,26 +104,64 @@ describe('package scripts', () => {
     expect(vscodePackageJson.scripts['test:ci']).toContain('--coverage');
   });
 
-  it('can skip root prepare work for CI installs that build explicitly', () => {
+  it('skips build/bundle/husky but still generates git-commit info when CI builds explicitly', () => {
     const packageJson = readPackageJson();
 
     expect(packageJson.scripts.prepare).toBe('node scripts/prepare.js');
 
-    const result = spawnSync(
-      process.execPath,
-      [path.join(root, 'scripts/prepare.js')],
-      {
-        cwd: root,
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          QWEN_SKIP_PREPARE: '1',
-        },
-      },
-    );
+    const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-prepare-skip-'));
+    const logFile = path.join(binDir, 'commands.log');
+    writeFileSync(logFile, '');
 
-    expect(result.status).toBe(0);
-    expect(result.stdout).toContain('Skipping prepare');
+    try {
+      if (process.platform === 'win32') {
+        writeFileSync(
+          path.join(binDir, 'husky.cmd'),
+          '@echo husky >> "%PREPARE_LOG_FILE%"\r\n',
+        );
+        writeFileSync(
+          path.join(binDir, 'npm.cmd'),
+          '@echo npm %* >> "%PREPARE_LOG_FILE%"\r\n',
+        );
+      } else {
+        writeFileSync(
+          path.join(binDir, 'husky'),
+          '#!/bin/sh\necho husky >> "$PREPARE_LOG_FILE"\n',
+        );
+        writeFileSync(
+          path.join(binDir, 'npm'),
+          '#!/bin/sh\necho "npm $*" >> "$PREPARE_LOG_FILE"\n',
+        );
+        chmodSync(path.join(binDir, 'husky'), 0o755);
+        chmodSync(path.join(binDir, 'npm'), 0o755);
+      }
+
+      const result = spawnSync(
+        process.execPath,
+        [path.join(root, 'scripts/prepare.js')],
+        {
+          cwd: root,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ''}`,
+            PREPARE_LOG_FILE: logFile,
+            QWEN_SKIP_PREPARE: '1',
+          },
+        },
+      );
+
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain('Skipping prepare');
+      // git-commit info is still generated so a later per-workspace build or
+      // typecheck (e.g. the review tooling's) doesn't fail on the missing
+      // module; the heavy build/bundle/husky are skipped.
+      expect(readFileSync(logFile, 'utf8').trim().split(/\r?\n/)).toEqual([
+        'npm run generate',
+      ]);
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+    }
   });
 
   it('runs prepare steps in order when CI does not skip prepare', () => {

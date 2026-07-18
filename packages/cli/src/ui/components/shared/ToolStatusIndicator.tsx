@@ -15,7 +15,10 @@ import {
 } from '../../constants.js';
 import { theme } from '../../semantic-colors.js';
 
-export const STATUS_INDICATOR_WIDTH = 2;
+// One column for the status glyph plus two trailing columns so the tool
+// name never sits flush against the indicator. Paired with flexShrink={0}
+// on the indicator Box so the reservation survives a tight header row.
+export const STATUS_INDICATOR_WIDTH = 3;
 
 type ToolStatusIndicatorProps = {
   status: ToolCallStatus;
@@ -30,7 +33,7 @@ export const ToolStatusIndicator: React.FC<ToolStatusIndicatorProps> = ({
   const statusColor = isShell ? theme.ui.symbol : theme.status.warning;
 
   return (
-    <Box minWidth={STATUS_INDICATOR_WIDTH}>
+    <Box minWidth={STATUS_INDICATOR_WIDTH} flexShrink={0}>
       {status === ToolCallStatus.Pending && (
         <Text color={theme.status.success}>{TOOL_STATUS.PENDING}</Text>
       )}

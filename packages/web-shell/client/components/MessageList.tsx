@@ -32,6 +32,7 @@ import {
 import { useI18n } from '../i18n';
 import { useWebShellPortalRoot } from '../portalRoot';
 import { MessageItem } from './MessageItem';
+import type { SessionContentGenerator } from './messages/AssistantMessage';
 import { MessageTimestamp } from './MessageTimestamp';
 import {
   TurnOutputs,
@@ -55,6 +56,10 @@ interface MessageListProps {
   onShowContextDetail?: () => void;
   loadingTranscript?: boolean;
   catchingUp?: boolean;
+  hasOlderHistory?: boolean;
+  loadingOlderHistory?: boolean;
+  historyCapacityReached?: boolean;
+  onLoadOlderHistory?: () => Promise<void>;
   /**
    * True while the agent is still answering. The newest turn then stays
    * expanded and un-collapsible so streaming output is never hidden.
@@ -94,6 +99,7 @@ interface MessageListProps {
   onOpenArtifact?: (artifactId: string, previewContent?: string) => void;
   onOpenScheduledTask?: (task: TurnOutputScheduledTask) => void;
   onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
+  generateContent?: SessionContentGenerator;
 }
 
 function getLastUserMessageId(messages: Message[]): string | null {
@@ -1539,6 +1545,7 @@ const ESTIMATE_MESSAGE = 80;
 const ESTIMATE_TURN_COLLAPSE = 32;
 const ESTIMATE_TAIL = 240;
 const FOLLOW_BOTTOM_THRESHOLD_PX = 30;
+const LOAD_OLDER_HISTORY_THRESHOLD_PX = 48;
 export const VIRTUAL_SCROLL_THRESHOLD = 200;
 const SESSION_TIMELINE_MIN_VISIBLE_ENTRIES = 4;
 
@@ -2172,6 +2179,10 @@ export const MessageList = memo(
       onShowContextDetail,
       loadingTranscript,
       catchingUp,
+      hasOlderHistory = false,
+      loadingOlderHistory = false,
+      historyCapacityReached = false,
+      onLoadOlderHistory,
       isResponding = false,
       activeTurnStartedAt,
       welcomeHeader,
@@ -2194,6 +2205,7 @@ export const MessageList = memo(
       onOpenArtifact,
       onOpenScheduledTask,
       onTurnOutputOpen,
+      generateContent,
     },
     ref,
   ) {
@@ -2306,6 +2318,7 @@ export const MessageList = memo(
     const followPausedByUserRef = useRef(false);
     const userScrollIntentUntil = useRef(0);
     const lastScrollTop = useRef(0);
+    const olderHistoryLoadInFlight = useRef(false);
     const scrollCooldown = useRef(false);
     const scrollCooldownCount = useRef(0);
     const sessionTimelineFrame = useRef<number | null>(null);
@@ -2331,6 +2344,34 @@ export const MessageList = memo(
     const pendingOverflowFrame = useRef<number | undefined>(undefined);
     catchingUpRef.current = catchingUp;
     const containerRef = useRef<HTMLDivElement>(null);
+    const olderHistoryRetryBlocked = useRef(false);
+    const lastUnderfillAutoLoad = useRef<{
+      loader: typeof onLoadOlderHistory;
+      totalVirtualSize: number;
+    } | null>(null);
+    const [olderHistoryAnchor, setOlderHistoryAnchor] = useState<{
+      scrollHeight: number;
+      scrollTop: number;
+    } | null>(null);
+
+    useLayoutEffect(() => {
+      if (!olderHistoryAnchor) return;
+      const current = containerRef.current;
+      if (current) {
+        current.scrollTop =
+          olderHistoryAnchor.scrollTop +
+          Math.max(0, current.scrollHeight - olderHistoryAnchor.scrollHeight);
+      }
+      olderHistoryLoadInFlight.current = false;
+      setOlderHistoryAnchor(null);
+    }, [olderHistoryAnchor]);
+
+    useEffect(() => {
+      if (!hasOlderHistory) {
+        olderHistoryRetryBlocked.current = false;
+        lastUnderfillAutoLoad.current = null;
+      }
+    }, [hasOlderHistory]);
 
     const reportCanScrollToBottom = useCallback(() => {
       const el = containerRef.current;
@@ -2905,19 +2946,53 @@ export const MessageList = memo(
       performScrollToRow(idx + headerOffset, pending);
     }, [visibleItems, headerOffset, performScrollToRow]);
 
+    const loadOlderHistory = useCallback(
+      async (allowRetry = false) => {
+        const el = containerRef.current;
+        if (
+          !el ||
+          !onLoadOlderHistory ||
+          loadingOlderHistory ||
+          olderHistoryLoadInFlight.current ||
+          (olderHistoryRetryBlocked.current && !allowRetry)
+        ) {
+          return;
+        }
+        olderHistoryRetryBlocked.current = false;
+        olderHistoryLoadInFlight.current = true;
+        const previousHeight = el.scrollHeight;
+        const previousTop = el.scrollTop;
+        followPausedByUserRef.current = true;
+        try {
+          await onLoadOlderHistory();
+          setOlderHistoryAnchor({
+            scrollHeight: previousHeight,
+            scrollTop: previousTop,
+          });
+        } catch {
+          olderHistoryRetryBlocked.current = true;
+          olderHistoryLoadInFlight.current = false;
+        }
+      },
+      [loadingOlderHistory, onLoadOlderHistory],
+    );
+
     // Rules 2 & 3: detect scroll direction to toggle follow mode.
     // Runs synchronously in the scroll handler — no rAF needed since
     // the browser already coalesces scroll events.
     const handleScroll = useCallback(() => {
       const el = getScrollElement();
       if (!el) return;
+      const curr = el.scrollTop;
+      if (hasOlderHistory && curr <= LOAD_OLDER_HISTORY_THRESHOLD_PX) {
+        void loadOlderHistory(true);
+      }
       if (scrollCooldown.current) {
-        lastScrollTop.current = el.scrollTop;
+        lastScrollTop.current = curr;
         return;
       }
       scheduleSessionTimelineRangeUpdate();
       const prev = lastScrollTop.current;
-      const curr = el.scrollTop;
       lastScrollTop.current = curr;
       const distanceFromBottom = el.scrollHeight - curr - el.clientHeight;
       scheduleScrollOverflowReport();
@@ -2948,6 +3023,8 @@ export const MessageList = memo(
       }
     }, [
       getScrollElement,
+      hasOlderHistory,
+      loadOlderHistory,
       scheduleScrollOverflowReport,
       scheduleSessionTimelineRangeUpdate,
       setShouldFollow,
@@ -2960,9 +3037,65 @@ export const MessageList = memo(
       return () => el.removeEventListener('scroll', handleScroll);
     }, [getScrollElement, handleScroll]);
 
+    const loadOlderHistoryIfUnderfilled = useCallback(() => {
+      if (
+        !hasOlderHistory ||
+        loadingOlderHistory ||
+        catchingUp ||
+        showLoadingSkeleton
+      ) {
+        return;
+      }
+      const el = getScrollElement();
+      if (!el || el.scrollHeight > el.clientHeight + 1) return;
+      const previousLoad = lastUnderfillAutoLoad.current;
+      if (
+        previousLoad !== null &&
+        previousLoad.loader === onLoadOlderHistory &&
+        previousLoad.totalVirtualSize === totalVirtualSize
+      ) {
+        olderHistoryRetryBlocked.current = true;
+        return;
+      }
+      lastUnderfillAutoLoad.current = {
+        loader: onLoadOlderHistory,
+        totalVirtualSize,
+      };
+      void loadOlderHistory();
+    }, [
+      catchingUp,
+      getScrollElement,
+      hasOlderHistory,
+      loadOlderHistory,
+      loadingOlderHistory,
+      onLoadOlderHistory,
+      showLoadingSkeleton,
+      totalVirtualSize,
+    ]);
+
+    useEffect(() => {
+      loadOlderHistoryIfUnderfilled();
+    }, [loadOlderHistoryIfUnderfilled, totalVirtualSize]);
+
     useEffect(() => {
       const el = getScrollElement();
       if (!el) return;
+      const retryOlderHistoryAtTop = () => {
+        if (
+          olderHistoryRetryBlocked.current &&
+          el.scrollTop <= LOAD_OLDER_HISTORY_THRESHOLD_PX
+        ) {
+          void loadOlderHistory(true);
+        }
+      };
+      const markFromWheel = (event: WheelEvent) => {
+        markUserScrollIntent();
+        if (event.deltaY < 0) retryOlderHistoryAtTop();
+      };
+      const markFromTouch = () => {
+        markUserScrollIntent();
+        retryOlderHistoryAtTop();
+      };
       const markFromPointer = (event: PointerEvent) => {
         const rect = el.getBoundingClientRect();
         const scrollbarEdge = 20;
@@ -2984,26 +3117,36 @@ export const MessageList = memo(
           event.key === ' '
         ) {
           markUserScrollIntent();
+          if (
+            event.key === 'ArrowUp' ||
+            event.key === 'PageUp' ||
+            event.key === 'Home'
+          ) {
+            retryOlderHistoryAtTop();
+          }
         }
       };
-      el.addEventListener('wheel', markUserScrollIntent, { passive: true });
-      el.addEventListener('touchstart', markUserScrollIntent, {
+      el.addEventListener('wheel', markFromWheel, { passive: true });
+      el.addEventListener('touchstart', markFromTouch, {
         passive: true,
       });
       el.addEventListener('pointerdown', markFromPointer, { passive: true });
       el.addEventListener('keydown', markFromKey, { passive: true });
       return () => {
-        el.removeEventListener('wheel', markUserScrollIntent);
-        el.removeEventListener('touchstart', markUserScrollIntent);
+        el.removeEventListener('wheel', markFromWheel);
+        el.removeEventListener('touchstart', markFromTouch);
         el.removeEventListener('pointerdown', markFromPointer);
         el.removeEventListener('keydown', markFromKey);
       };
-    }, [getScrollElement, markUserScrollIntent]);
+    }, [getScrollElement, loadOlderHistory, markUserScrollIntent]);
 
     useEffect(() => {
       const el = getScrollElement();
       if (!el || typeof ResizeObserver === 'undefined') return;
-      const observer = new ResizeObserver(scheduleScrollOverflowReport);
+      const observer = new ResizeObserver(() => {
+        scheduleScrollOverflowReport();
+        loadOlderHistoryIfUnderfilled();
+      });
       observer.observe(el);
       for (const child of Array.from(el.children)) {
         observer.observe(child);
@@ -3025,7 +3168,11 @@ export const MessageList = memo(
         observer.disconnect();
         mutationObserver.disconnect();
       };
-    }, [getScrollElement, scheduleScrollOverflowReport]);
+    }, [
+      getScrollElement,
+      loadOlderHistoryIfUnderfilled,
+      scheduleScrollOverflowReport,
+    ]);
 
     // Clear screen (e.g. /clear) → reset to follow mode, drop stale per-turn
     // collapse overrides, and disarm any deferred scroll so it can't fire
@@ -3332,6 +3479,7 @@ export const MessageList = memo(
                 flashTarget,
               )}
               assistantTurnFooterInfo={assistantTurnFooterInfo}
+              generateContent={generateContent}
             />
           );
         };
@@ -3358,6 +3506,7 @@ export const MessageList = memo(
         tailContentIndex,
         pendingApproval,
         onShowContextDetail,
+        generateContent,
         headerOffset,
         visibleItems,
         flashTarget,
@@ -3437,6 +3586,16 @@ export const MessageList = memo(
       >
         {showLoadingSkeleton && (
           <LoadingTranscriptSkeleton label={t('editor.sessionLoading')} />
+        )}
+        {loadingOlderHistory && !showLoadingSkeleton && (
+          <div className={styles.historyStatus} role="status">
+            {t('history.loadingEarlier')}
+          </div>
+        )}
+        {historyCapacityReached && !showLoadingSkeleton && (
+          <div className={styles.historyStatus} role="status">
+            {t('history.capacityReached')}
+          </div>
         )}
         <SessionTimeline
           entries={sessionTimelineEntries}

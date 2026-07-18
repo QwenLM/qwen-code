@@ -129,6 +129,18 @@ describe('workspace actions', () => {
     expect(activeExtensionOperations).toHaveBeenCalledOnce();
   });
 
+  it('reloads MCP settings through the daemon client', async () => {
+    const reloadWorkspaceMcp = vi.fn().mockResolvedValue({ accepted: true });
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => ({ reloadWorkspaceMcp }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/workspace',
+      baseUrl: 'http://daemon',
+    });
+
+    await expect(actions.reloadMcp()).resolves.toEqual({ accepted: true });
+    expect(reloadWorkspaceMcp).toHaveBeenCalledOnce();
+  });
+
   it('forwards an extension interaction response to the daemon client', async () => {
     const respondToExtensionInteraction = vi
       .fn()

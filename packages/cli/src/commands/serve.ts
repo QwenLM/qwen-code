@@ -186,11 +186,10 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         array: true,
         requiresArg: true,
         description:
-          'Absolute workspace path this daemon binds to. ' +
+          'Absolute workspace path to register with this daemon. ' +
           'POST /session requests with a mismatched cwd return 400 workspace_mismatch. ' +
           'Defaults to process.cwd() when omitted. ' +
-          'Repeat for sessions-only multi-workspace mode; legacy workspace APIs ' +
-          'remain primary-workspace only.',
+          'Repeat to register isolated workspace runtimes; the first is primary.',
       })
       .option('max-connections', {
         type: 'number',
@@ -281,9 +280,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'boolean',
         default: true,
         description:
-          'HTTP bridge mode: one `qwen --acp` child per registered workspace ' +
-          '(sessions-only multi-workspace routing is enabled when multiple ' +
-          '--workspace values are supplied). Stage 2 native in-process mode is ' +
+          'HTTP bridge mode: attempt to preheat one primary `qwen --acp` child; trusted ' +
+          'secondaries start one on demand. Stage 2 native in-process mode is ' +
           'not yet implemented; this flag will become opt-in then.',
       })
       .option('mcp-client-budget', {

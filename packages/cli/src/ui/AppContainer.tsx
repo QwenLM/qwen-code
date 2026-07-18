@@ -81,7 +81,7 @@ import {
 import { loadLowlight } from './utils/lowlightLoader.js';
 import {
   getStickyTodos,
-  getStickyTodoMaxVisibleItems,
+  getStickyTodoMaxVisibleItemsForMode,
   getStickyTodosLayoutKey,
   getStickyTodosRenderKey,
 } from './utils/todoSnapshot.js';
@@ -202,6 +202,7 @@ import {
 } from './hooks/useExtensionUpdates.js';
 import { useProviderUpdates } from './hooks/useProviderUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
+import { StreamingContext } from './contexts/StreamingContext.js';
 import {
   RenderModeProvider,
   type RenderMode,
@@ -1430,11 +1431,11 @@ export const AppContainer = (props: AppContainerProps) => {
   const { isStatsDialogOpen, openStatsDialog, closeStatsDialog } =
     useStatsDialog();
 
-  // Ref bridge: the guarded openRewindSelector callback is defined later
-  // (after useDoublePress), but slashCommandActions needs it now. The ref
-  // lets the useMemo capture a stable function pointer whose implementation
-  // is swapped in once the real callback exists.
+  // Ref bridges: these callbacks are defined later, but slashCommandActions
+  // needs them now. The refs let the useMemo capture stable function pointers
+  // whose implementations are swapped in once the real callbacks exist.
   const openRewindSelectorRef = useRef<() => void>(() => {});
+  const cancelOngoingRequestRef = useRef<() => void>(() => {});
 
   // /diff opens a per-turn diff dialog. Unlike rewind, no double-press or
   // history-bound guard is needed, so the open/close handlers can live here
@@ -1557,6 +1558,11 @@ export const AppContainer = (props: AppContainerProps) => {
       openApprovalModeDialog,
       openEffortDialog,
       quit: (messages: HistoryItem[]) => {
+        try {
+          cancelOngoingRequestRef.current();
+        } catch (error) {
+          debugLogger.debug('Failed to cancel request while quitting:', error);
+        }
         setQuittingMessages(messages);
         // Signal the client to skip background memory tasks (extract, dream,
         // skill review) so the process can exit without spawning new agent
@@ -1859,6 +1865,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const cancelHandlerRef = useRef<(info?: CancelSubmitInfo) => void>(() => {});
   const midTurnDrainRef = useRef<(() => string[]) | null>(null);
+  const midTurnRestoreRef = useRef<((messages: string[]) => void) | null>(null);
 
   const {
     streamingState,
@@ -1898,7 +1905,9 @@ export const AppContainer = (props: AppContainerProps) => {
     logger,
     availableTerminalHeightRef,
     terminalWidthRef,
+    midTurnRestoreRef,
   );
+  cancelOngoingRequestRef.current = cancelOngoingRequest;
 
   // Now that streamingState is available, keep isIdleRef in sync and
   // flush any deferred update notifications when the model finishes responding.
@@ -2008,6 +2017,7 @@ export const AppContainer = (props: AppContainerProps) => {
     messageQueue,
     addMessage,
     popAllMessages,
+    restoreMessages,
     drainQueue,
     popNextSegment,
   } = useMessageQueue();
@@ -2016,6 +2026,7 @@ export const AppContainer = (props: AppContainerProps) => {
   // drainQueue reads the synchronous queueRef inside the hook, so it
   // stays consistent with popNextSegment even before React re-renders.
   midTurnDrainRef.current = drainQueue;
+  midTurnRestoreRef.current = restoreMessages;
 
   // Connect remote input watcher to submitQuery for bidirectional sync.
   // When an external process writes a command to the input-file,
@@ -2145,7 +2156,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(
-    (submittedValue: string) => {
+    (submittedValue: string, options?: { deferUntilIdle?: boolean }) => {
       // Route to active in-process agent if viewing a sub-agent tab.
       if (agentViewState.activeView !== 'main') {
         const agent = agentViewState.agents.get(agentViewState.activeView);
@@ -2193,6 +2204,10 @@ export const AppContainer = (props: AppContainerProps) => {
           `<system-reminder>\n${buildWorkflowSteeringNotice()}\n</system-reminder>\n\n` +
           submittedValue;
       }
+      if (options?.deferUntilIdle) {
+        addMessage(submittedValue, true);
+        return;
+      }
       if (
         streamingState === StreamingState.Responding &&
         isBtwCommand(submittedValue)
@@ -2201,9 +2216,9 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       }
 
-      // Handle bare exit/quit commands (without the / prefix)
+      // Quit must bypass the message queue so it can stop an active stream.
       if (
-        ['exit', 'quit', ':q', ':q!', ':wq', ':wq!'].includes(
+        ['/quit', '/exit', 'exit', 'quit', ':q', ':q!', ':wq', ':wq!'].includes(
           submittedValue.trim(),
         )
       ) {
@@ -2968,10 +2983,12 @@ export const AppContainer = (props: AppContainerProps) => {
     stickyTodos !== null &&
     !dialogsVisible &&
     !isFeedbackDialogOpen &&
-    streamingState !== StreamingState.WaitingForConfirmation;
+    streamingState === StreamingState.Responding;
   const stickyTodoWidth = Math.min(mainAreaWidth, 64);
-  const stickyTodoMaxVisibleItems =
-    getStickyTodoMaxVisibleItems(terminalHeight);
+  const stickyTodoMaxVisibleItems = getStickyTodoMaxVisibleItemsForMode(
+    terminalHeight,
+    useTerminalBuffer,
+  );
   const stickyTodosLayoutKey = shouldShowStickyTodos
     ? getStickyTodosLayoutKey(
         stickyTodos,
@@ -3012,6 +3029,13 @@ export const AppContainer = (props: AppContainerProps) => {
     dialogsVisible,
     stickyTodosLayoutKey,
     liveAgentPanelLayoutKey,
+    // Composer height also shifts with these; without them the footer isn't
+    // re-measured during a streaming turn and the VP viewport bottom clips.
+    // (elapsedTime/currentLoadingPhrase excluded: they tick without changing rows.)
+    streamingState,
+    embeddedShellFocused,
+    messageQueue.length,
+    isInputActive,
   ]);
 
   // agentViewState is declared earlier (before handleFinalSubmit) so it
@@ -3967,7 +3991,7 @@ export const AppContainer = (props: AppContainerProps) => {
     if (isTranscriptOpenRef.current) return;
 
     // Two-phase: batch plain prompts as one turn, else pop next slash command.
-    const plainPrompts = drainQueue();
+    const plainPrompts = drainQueue(true);
     const submission =
       plainPrompts.length > 0 ? plainPrompts.join('\n\n') : popNextSegment();
     if (submission === null) return;
@@ -4496,10 +4520,19 @@ export const AppContainer = (props: AppContainerProps) => {
                 <TerminalOutputProvider value={writeRaw}>
                   <ShellFocusContext.Provider value={isFocused}>
                     {transcriptFreeze ? (
-                      <TranscriptView
-                        items={transcriptItems}
-                        useAlternateScreen={!useTerminalBuffer}
-                      />
+                      // TranscriptView renders as a sibling of <App/>, which
+                      // owns the StreamingContext.Provider — so the frozen
+                      // transcript subtree has no provider of its own. A
+                      // pending tool group captured in the snapshot can hold a
+                      // tool in the Executing state, whose spinner calls
+                      // useStreamingContext and would otherwise throw. Provide
+                      // the context here so the transcript renders.
+                      <StreamingContext.Provider value={streamingState}>
+                        <TranscriptView
+                          items={transcriptItems}
+                          useAlternateScreen={!useTerminalBuffer}
+                        />
+                      </StreamingContext.Provider>
                     ) : (
                       <App />
                     )}

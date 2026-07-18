@@ -112,6 +112,7 @@ const HIDDEN_SETTING_KEYS = new Set([
   'ui.enableUserFeedback',
   'ui.compactMode',
   'ui.compactInline',
+  'mcpServers',
 ]);
 
 type Scope = 'user' | 'workspace';
@@ -450,8 +451,8 @@ export function SettingsMessage({
       themeGroup.items.splice(themeIndex + 1, 0, localItem);
     } else {
       groups.push({
-        id: t('settings.category.UI'),
-        label: t('settings.category.UI'),
+        id: 'UI',
+        label: formatSettingCategory('UI', t),
         items: [localItem],
       });
     }

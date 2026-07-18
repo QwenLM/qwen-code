@@ -66,7 +66,7 @@ daemon setting level. Until per-request `sessionScope` lands, multi-user channel
 or web deployments must choose one of these safe shapes:
 
 - one daemon per channel thread / web room
-- one daemon per user workspace
+- one daemon per user or security principal
 - single-user demo only
 
 Do not silently multiplex unrelated channel threads into one daemon session.

@@ -19,7 +19,6 @@ import {
 import type { FunctionDeclaration } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
-import { CAP_ESCALATION_LABELS } from '../plan-gate/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { InputFormat } from '../output/types.js';
 
@@ -260,9 +259,6 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
         })
         .join('\n');
 
-      // ── Plan gate metadata side effects ──────────────────────────
-      this.applyPlanGateMetadata();
-
       const messageBody =
         answersContent.length > 0
           ? answersContent
@@ -287,62 +283,6 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
         llmContent: errorLlmContent,
         returnDisplay: `Error processing answers: ${errorMessage}`,
       };
-    }
-  }
-
-  /**
-   * Updates Plan Approval Gate state based on the metadata.source field
-   * and the user's answer. Only acts on recognized gate metadata sources.
-   */
-  private applyPlanGateMetadata(): void {
-    const source = this.params.metadata?.source;
-    if (!source) return;
-
-    const gateState = this._config.getPlanGateState();
-    if (!gateState) return;
-
-    if (source === 'plan_gate_cap') {
-      // Cap escalation: only honor when a cap escalation actually
-      // occurred (prevents model from fabricating this metadata).
-      if (!gateState.capEscalationPending) {
-        debugLogger.warn(
-          '[applyPlanGateMetadata] plan_gate_cap ignored: no cap escalation pending',
-        );
-        return;
-      }
-
-      // The first answer determines the next gate mode.
-      // Match against the canonical labels from CAP_ESCALATION_LABELS.
-      const firstAnswer = Object.values(this.userAnswers)[0] ?? '';
-
-      if (firstAnswer === CAP_ESCALATION_LABELS.CONTINUE) {
-        gateState.gateMode = 'uncapped';
-      } else if (firstAnswer === CAP_ESCALATION_LABELS.APPROVE) {
-        gateState.gateMode = 'user_override';
-      } else {
-        // Free-text / Other: user takes manual control
-        gateState.gateMode = 'user_takeover';
-      }
-      gateState.capEscalationPending = false;
-    } else if (source === 'plan_gate_needs_user') {
-      // Only honor when the gate actually returned needs_user
-      // (prevents model from fabricating this metadata).
-      if (!gateState.needsUserPending) {
-        debugLogger.warn(
-          '[applyPlanGateMetadata] plan_gate_needs_user ignored: no needs_user pending',
-        );
-        return;
-      }
-      // User answered a gate-suggested question. Only reset the
-      // review count when the gate actually asked for user input
-      // (gateMode must still be active, not already overridden).
-      if (
-        gateState.gateMode === 'capped' ||
-        gateState.gateMode === 'uncapped'
-      ) {
-        gateState.reviewCount = 0;
-      }
-      gateState.needsUserPending = false;
     }
   }
 }
@@ -399,9 +339,12 @@ export class AskUserQuestionTool extends BaseDeclarativeTool<
         return `Question ${i + 1}: "header" must be a non-empty string.`;
       }
 
-      if (question.header.length > 12) {
-        return `Question ${i + 1}: "header" must be 12 characters or less.`;
-      }
+      // The schema advertises "max 12 chars" so the model keeps headers short
+      // enough for the chip/tab layout, but we deliberately do NOT hard-reject
+      // longer headers here: bouncing a slightly over-length label (e.g.
+      // "Target config", 13 chars) back to the model as a tool error is far
+      // worse UX than simply showing it. The TUI truncates over-length headers
+      // in the compact tab/chip contexts (see AskUserQuestionDialog).
 
       if (!Array.isArray(question.options)) {
         return `Question ${i + 1}: "options" must be an array.`;
