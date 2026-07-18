@@ -199,8 +199,8 @@ export const ListSessionsSchema = z.object({
   label: z.string().optional().describe('Filter by label'),
   search: z.string().optional().describe('Substring match on session name'),
   sortBy: z.enum(['recent', 'name', 'status']).optional().describe('Sort order (default: recent)'),
-  limit: z.number().optional().describe('Max sessions to return (default 20, max 100)'),
-  offset: z.number().optional().describe('Skip first N results (for pagination)'),
+  limit: z.number().int().min(1).optional().describe('Max sessions to return (default 20, max 100)'),
+  offset: z.number().int().min(0).optional().describe('Skip first N results (for pagination)'),
 });
 
 // Inter-session messaging
