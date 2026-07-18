@@ -55,6 +55,24 @@ describe('PairingStore workspace scoping (#7017)', () => {
     expect(storeB.isApproved('sender-1')).toBe(false);
   });
 
+  it('keeps path-traversal channel names inside the workspace scope', () => {
+    // Channel names come from unrestricted config keys. Without encoding,
+    // `../support` climbs out of the scope directory and both workspaces
+    // share one file at the channels root — silently undoing the isolation.
+    const storeA = new PairingStore('../support', workspaceA);
+    const code = storeA.createRequest('mallory', 'Mallory')!;
+    storeA.approve(code);
+
+    const storeB = new PairingStore('../support', workspaceB);
+    expect(storeB.isApproved('mallory')).toBe(false);
+
+    // Nothing may leak to the channels root.
+    const rootFiles = fs
+      .readdirSync(channelsRoot())
+      .filter((f) => f.endsWith('.json'));
+    expect(rootFiles).toEqual([]);
+  });
+
   it('maps equivalent spellings of the same workspace to the same store', () => {
     const store = new PairingStore('support-bot', workspaceA);
     const sameViaRelativeHop = new PairingStore(
@@ -226,6 +244,55 @@ describe('PairingStore workspace scoping (#7017)', () => {
       expect(store.isApproved('anyone')).toBe(false);
       const code = store.createRequest('new-sender', 'New')!;
       expect(typeof code).toBe('string');
+    });
+
+    it('migrates every channel of a workspace, not only the first one constructed', () => {
+      // One process starts several channels in turn (channel start supports
+      // this); a directory-level gate would let only the first migrate.
+      fs.mkdirSync(channelsRoot(), { recursive: true });
+      fs.writeFileSync(
+        path.join(channelsRoot(), 'chan-a-allowlist.json'),
+        JSON.stringify(['sender-a']),
+      );
+      fs.writeFileSync(
+        path.join(channelsRoot(), 'chan-b-allowlist.json'),
+        JSON.stringify(['sender-b']),
+      );
+
+      const storeA = new PairingStore('chan-a', workspaceA);
+      const storeB = new PairingStore('chan-b', workspaceA);
+      expect(storeA.isApproved('sender-a')).toBe(true);
+      expect(storeB.isApproved('sender-b')).toBe(true);
+    });
+
+    it('migrates a channel whose legacy file appears after another channel initialized the scope', () => {
+      // chan-a runs first with no legacy state; chan-b's legacy allowlist
+      // exists when chan-b starts later in the same (now existing) scope dir.
+      const storeA = new PairingStore('chan-a', workspaceA);
+      expect(storeA.isApproved('anyone')).toBe(false);
+
+      fs.mkdirSync(channelsRoot(), { recursive: true });
+      fs.writeFileSync(
+        path.join(channelsRoot(), 'chan-b-allowlist.json'),
+        JSON.stringify(['sender-b']),
+      );
+      const storeB = new PairingStore('chan-b', workspaceA);
+      expect(storeB.isApproved('sender-b')).toBe(true);
+    });
+
+    it('still migrates the allowlist when the legacy pairing file is unreadable', () => {
+      fs.mkdirSync(channelsRoot(), { recursive: true });
+      // Directory masquerading as the pairing file makes its copy throw.
+      fs.mkdirSync(path.join(channelsRoot(), 'support-bot-pairing.json'), {
+        recursive: true,
+      });
+      fs.writeFileSync(
+        path.join(channelsRoot(), 'support-bot-allowlist.json'),
+        JSON.stringify(['legacy-sender']),
+      );
+
+      const store = new PairingStore('support-bot', workspaceA);
+      expect(store.isApproved('legacy-sender')).toBe(true);
     });
 
     it('never overwrites existing scoped state with legacy content', () => {

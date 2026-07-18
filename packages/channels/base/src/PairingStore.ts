@@ -20,6 +20,7 @@ export class PairingStore {
   private dir: string;
   private pendingPath: string;
   private allowlistPath: string;
+  private migratedSentinelPath: string;
 
   /**
    * @param channelName Channel name the state is keyed by.
@@ -36,70 +37,94 @@ export class PairingStore {
     this.dir = workspaceCwd
       ? path.join(channelsRoot, getWorkspaceScopeDirName(workspaceCwd))
       : channelsRoot;
-    this.pendingPath = path.join(this.dir, `${channelName}-pairing.json`);
-    this.allowlistPath = path.join(this.dir, `${channelName}-allowlist.json`);
+    // Channel names come from user configuration keys and are not otherwise
+    // restricted; encode them so a name like `../support` cannot climb out
+    // of the scope directory and land both workspaces on one shared file —
+    // that would silently undo the workspace isolation this store exists
+    // for. Mirrors the GroupHistoryStore file-name encoding. Common names
+    // (letters, digits, `-`, `_`, `.`) encode to themselves, so existing
+    // layouts are unaffected.
+    const safeChannelName = encodeURIComponent(channelName);
+    this.pendingPath = path.join(this.dir, `${safeChannelName}-pairing.json`);
+    this.allowlistPath = path.join(
+      this.dir,
+      `${safeChannelName}-allowlist.json`,
+    );
+    this.migratedSentinelPath = path.join(
+      this.dir,
+      `${safeChannelName}.migrated`,
+    );
     if (workspaceCwd) {
-      this.migrateLegacyState(channelsRoot, channelName);
+      this.migrateLegacyState(channelsRoot, safeChannelName);
     }
   }
 
   /**
-   * One-time grandfathering of pre-scoping state: the first time a scope
-   * directory would come into existence, copy the legacy GLOBAL files in so
-   * senders that were already approved stay approved after upgrading.
+   * One-time grandfathering of pre-scoping state: the first time this
+   * (workspace, channel) pair is constructed, copy the legacy GLOBAL files in
+   * so senders that were already approved stay approved after upgrading.
    *
-   * Gated at the scope-DIRECTORY level, not per file: once the scoped
-   * directory exists — because this migration ran or because the workspace
-   * wrote any state of its own — legacy files are never consulted again. A
-   * per-file gate would let a legacy allowlist silently re-approve senders
-   * that an operator revoked by deleting the scoped allowlist file, and
-   * would let an in-use scope absorb a legacy file that appears later.
+   * Gated by a per-channel sentinel file inside the scope directory — NOT by
+   * the directory itself: one workspace can start several channels in turn,
+   * and a directory-level gate would let only the first channel ever migrate.
+   * The sentinel is written even when there was nothing to copy, so a legacy
+   * file written later (e.g. by an older version still running concurrently)
+   * is never absorbed into a scope that already went through this decision.
+   *
+   * Each file is copied independently and best-effort (an unreadable pairing
+   * file must not block the allowlist, and vice versa), via a
+   * uniquely-named temp file + atomic rename so a crash mid-copy cannot
+   * leave a truncated scoped file behind the closed gate. A file the scoped
+   * store already has is never overwritten.
    *
    * Copy, not move: another workspace upgrading later must be able to
    * grandfather the same baseline, and an older qwen version running
-   * concurrently still reads the global files. This is a snapshot — the
-   * scoped stores diverge from each other immediately afterwards, so the
-   * ongoing cross-workspace sharing that motivated #7017 is not reintroduced.
+   * concurrently still reads the global files.
    *
    * Revocation therefore means REMOVING ENTRIES from the scoped allowlist
    * (and from the legacy global file, while it exists) — not deleting files.
    */
-  private migrateLegacyState(channelsRoot: string, channelName: string): void {
+  private migrateLegacyState(
+    channelsRoot: string,
+    safeChannelName: string,
+  ): void {
     try {
-      if (fs.existsSync(this.dir)) {
+      if (fs.existsSync(this.migratedSentinelPath)) {
         return;
       }
       const legacyPairs: Array<[string, string]> = [
         [
-          path.join(channelsRoot, `${channelName}-pairing.json`),
+          path.join(channelsRoot, `${safeChannelName}-pairing.json`),
           this.pendingPath,
         ],
         [
-          path.join(channelsRoot, `${channelName}-allowlist.json`),
+          path.join(channelsRoot, `${safeChannelName}-allowlist.json`),
           this.allowlistPath,
         ],
       ];
-      const present = legacyPairs.filter(([legacyPath]) =>
-        fs.existsSync(legacyPath),
-      );
-      // Creating the directory is what marks the migration as done — also
-      // when there was nothing to copy. Skipping the marker in that case
-      // would leave the gate open, and a legacy file written later by an
-      // older version still running concurrently would be absorbed into a
-      // scope that already went through this decision.
       this.ensureDir();
-      for (const [legacyPath, scopedPath] of present) {
-        // Copy via a temp file + atomic rename: a crash mid-copy must not
-        // leave a truncated scoped file behind the now-closed migration
-        // gate, and a concurrent first construction of the same scope
-        // cannot observe a half-written allowlist.
-        const tmpPath = `${scopedPath}.migrating`;
-        fs.copyFileSync(legacyPath, tmpPath);
-        fs.renameSync(tmpPath, scopedPath);
+      for (const [legacyPath, scopedPath] of legacyPairs) {
+        try {
+          // Defense in depth: the encoded name cannot contain separators,
+          // but never read a legacy source from outside the channels root.
+          if (path.dirname(path.resolve(legacyPath)) !== channelsRoot) {
+            continue;
+          }
+          if (fs.existsSync(scopedPath) || !fs.existsSync(legacyPath)) {
+            continue;
+          }
+          const tmpPath = `${scopedPath}.${process.pid}.migrating`;
+          fs.copyFileSync(legacyPath, tmpPath);
+          fs.renameSync(tmpPath, scopedPath);
+        } catch {
+          // Best-effort per file: an unreadable legacy file must not block
+          // the other file or prevent the channel from starting.
+        }
       }
+      fs.writeFileSync(this.migratedSentinelPath, '');
     } catch {
-      // Best-effort: an unreadable legacy file must not prevent the channel
-      // from starting; the scoped store just starts empty.
+      // Best-effort: if even the sentinel cannot be written, the next
+      // construction simply retries the migration.
     }
   }
 
