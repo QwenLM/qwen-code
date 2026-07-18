@@ -126,6 +126,22 @@ describe('GitBranchIndicator', () => {
     expect(el.getAttribute('aria-label')).toContain('7 conflicted');
   });
 
+  it('treats a conflicted-only working tree as dirty', () => {
+    // A merge where every changed file is conflicted has staged=unstaged=
+    // untracked=0 but conflicted>0 — still uncommitted changes, so still dirty.
+    render({
+      branch: 'main',
+      status: {
+        v: 2,
+        workspaceCwd: '/repo',
+        branch: 'main',
+        conflicted: 3,
+      },
+    });
+
+    expect(chip().getAttribute('data-dirty')).toBe('true');
+  });
+
   it('flags a detached HEAD', () => {
     render({
       branch: 'a1b2c3d',

@@ -1541,6 +1541,19 @@ describe('parseStatusBranchLine', () => {
     });
   });
 
+  it('splits the branch from upstream at the last "..."', () => {
+    // Git forbids `..` in ref names so a real branch can't contain `...`, but
+    // the split must use the last `...` (the branch/upstream separator) so a
+    // dotted branch name isn't truncated at the first `...`.
+    expect(parseStatusBranchLine('## fix...feature...origin/main')).toEqual({
+      branch: 'fix...feature',
+      detached: false,
+      hasUpstream: true,
+      ahead: 0,
+      behind: 0,
+    });
+  });
+
   it('parses ahead-only and behind-only brackets', () => {
     expect(
       parseStatusBranchLine('## main...origin/main [ahead 3]'),

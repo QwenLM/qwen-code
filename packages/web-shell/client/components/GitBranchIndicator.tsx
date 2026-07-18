@@ -51,17 +51,20 @@ function deriveStatus(status?: DaemonWorkspaceGitStatus): DerivedStatus {
   const staged = status?.staged ?? 0;
   const unstaged = status?.unstaged ?? 0;
   const untracked = status?.untracked ?? 0;
+  const conflicted = status?.conflicted ?? 0;
   return {
     detached: status?.detached ?? false,
     staged,
     unstaged,
     untracked,
-    conflicted: status?.conflicted ?? 0,
+    conflicted,
     ahead: status?.ahead ?? 0,
     behind: status?.behind ?? 0,
     stashCount: status?.stashCount ?? 0,
     operation: status?.operation,
-    dirty: staged + unstaged + untracked > 0,
+    // Conflicted entries are uncommitted changes too — a merge where every
+    // changed file is conflicted (staged=unstaged=untracked=0) is still dirty.
+    dirty: staged + unstaged + untracked + conflicted > 0,
   };
 }
 

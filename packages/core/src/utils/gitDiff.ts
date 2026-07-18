@@ -1259,7 +1259,11 @@ export function parseStatusBranchLine(line: string): StatusBranchLine {
   }
 
   const hasUpstream = desc.includes('...');
-  const branch = desc.split('...')[0];
+  // Split at the last `...` (the branch/upstream separator). Git forbids `..`
+  // in ref names so a branch can't itself contain `...`, but lastIndexOf is the
+  // robust split point regardless.
+  const sepIndex = desc.lastIndexOf('...');
+  const branch = sepIndex >= 0 ? desc.slice(0, sepIndex) : desc;
   return {
     branch: branch || null,
     detached: false,

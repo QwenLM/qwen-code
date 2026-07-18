@@ -186,6 +186,58 @@ describe('GitDiffDialog', () => {
     expect(document.body.textContent).toContain('const a = 1');
   });
 
+  it('forwards the pre-rename oldPath when expanding a renamed file', async () => {
+    workspaceGitDiff.mockResolvedValue(
+      diffPayload({
+        files: [
+          {
+            path: 'src/new.ts',
+            oldPath: 'src/old.ts',
+            added: 1,
+            removed: 1,
+            isBinary: false,
+            isUntracked: false,
+            isDeleted: false,
+            truncated: false,
+          },
+        ],
+      }),
+    );
+    workspaceGitDiffFile.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      path: 'src/new.ts',
+      available: true,
+      hunks: [
+        {
+          oldStart: 1,
+          oldLines: 1,
+          newStart: 1,
+          newLines: 1,
+          lines: ['-const a = 1', '+const a = 2'],
+        },
+      ],
+    });
+    mount();
+    await flush();
+
+    const header = document.body.querySelector(
+      'button[aria-expanded="false"]',
+    ) as HTMLButtonElement;
+    expect(header).not.toBeNull();
+    await act(async () => {
+      header.click();
+    });
+    await flush();
+
+    // The pre-rename path is forwarded so the daemon diffs old→new (rename
+    // detection) instead of showing the new path as fully added.
+    expect(workspaceGitDiffFile).toHaveBeenCalledWith(
+      'src/new.ts',
+      'src/old.ts',
+    );
+  });
+
   it('shows a placeholder when git is unavailable', async () => {
     workspaceGitDiff.mockResolvedValue(
       diffPayload({ available: false, files: [] }),

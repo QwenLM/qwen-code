@@ -327,6 +327,24 @@ describe('workspace Git diff routes', () => {
     expect(fetchGitDiffMock).not.toHaveBeenCalled();
   });
 
+  it('rejects an untrusted workspace on the single-file endpoint too', async () => {
+    const app = express();
+    const primary = runtime('primary', '/work/main', true);
+    const untrusted = runtime('untrusted', '/work/untrusted', false);
+    registerWorkspaceQualifiedGitDiffRoutes(app, {
+      workspaceRegistry: registry([primary, untrusted]),
+      sendBridgeError,
+    });
+
+    const response = await request(app).get(
+      '/workspaces/untrusted/git/diff/file?path=a.ts',
+    );
+
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe('untrusted_workspace');
+    expect(fetchGitDiffHunksForFileMock).not.toHaveBeenCalled();
+  });
+
   it('rejects an unknown workspace', async () => {
     const app = express();
     const primary = runtime('primary', '/work/main', true);

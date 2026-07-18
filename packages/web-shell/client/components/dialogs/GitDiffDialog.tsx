@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
 import type {
   DaemonDiffHunk,
@@ -243,6 +243,15 @@ function DiffFileRow({
   const [truncated, setTruncated] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(false);
+  // Guard the in-flight fetch so closing the dialog before it resolves doesn't
+  // settle state on an unmounted row (matching DiffHunks / GitDiffDialog).
+  const cancelledRef = useRef(false);
+  useEffect(
+    () => () => {
+      cancelledRef.current = true;
+    },
+    [],
+  );
 
   const toggle = () => {
     const next = !open;
@@ -256,14 +265,15 @@ function DiffFileRow({
         // detection) instead of showing the new path as fully added.
         .workspaceGitDiffFile(file.path, file.oldPath)
         .then((result) => {
+          if (cancelledRef.current) return;
           setHunks(result.hunks);
           setTruncated(result.truncated === true);
         })
         .catch(() => {
-          setError(true);
+          if (!cancelledRef.current) setError(true);
         })
         .finally(() => {
-          setLoading(false);
+          if (!cancelledRef.current) setLoading(false);
         });
     }
   };
