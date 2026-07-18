@@ -204,6 +204,31 @@ describe('workspace Git diff routes', () => {
     );
   });
 
+  it('forwards the oldPath query to fetchGitDiffHunksForFile', async () => {
+    fetchGitDiffHunksForFileMock.mockResolvedValue({
+      hunks: [],
+      truncated: false,
+    });
+    const app = express();
+    registerWorkspaceGitDiffRoutes(app, {
+      boundWorkspace: '/work/main',
+      sendBridgeError,
+    });
+
+    const response = await request(app).get(
+      '/workspace/git/diff/file?path=src/new.ts&oldPath=src/old.ts',
+    );
+
+    expect(response.status).toBe(200);
+    // The route must parse ?oldPath= and forward it so the core diff is
+    // computed old→new (rename detection) instead of new-path-as-added.
+    expect(fetchGitDiffHunksForFileMock).toHaveBeenCalledWith(
+      '/work/main',
+      'src/new.ts',
+      'src/old.ts',
+    );
+  });
+
   it('surfaces the truncated flag when the diff was capped', async () => {
     fetchGitDiffHunksForFileMock.mockResolvedValue({
       hunks: [

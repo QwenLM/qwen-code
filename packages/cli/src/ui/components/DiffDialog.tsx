@@ -474,7 +474,12 @@ function FileRow({
             : '';
   // Head-truncate so the basename (the part users actually read) is kept.
   // Use the sanitized displayPath — `file.path` may carry raw control bytes.
-  const path = truncatePathStart(file.displayPath, maxPathChars);
+  // For a rename, split the budget between old and new (reserving the " → "
+  // separator) so the combined width stays within maxPathChars.
+  const pathBudget = file.oldDisplayPath
+    ? Math.max(8, Math.floor((maxPathChars - 3) / 2))
+    : maxPathChars;
+  const path = truncatePathStart(file.displayPath, pathBudget);
   return (
     <Box flexDirection="row">
       <Text
@@ -485,7 +490,7 @@ function FileRow({
       </Text>
       {file.oldDisplayPath ? (
         <Text color={theme.text.secondary}>
-          {truncatePathStart(file.oldDisplayPath, maxPathChars)} →{' '}
+          {truncatePathStart(file.oldDisplayPath, pathBudget)} →{' '}
         </Text>
       ) : null}
       <Text

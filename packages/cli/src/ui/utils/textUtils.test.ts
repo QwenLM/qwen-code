@@ -254,6 +254,16 @@ describe('textUtils', () => {
       expect(sanitizeFilenameForDisplay('a\x9fb')).toBe('a\\u009fb');
     });
 
+    it('escapes Unicode bidi embedding/isolate controls', () => {
+      // RLO/LRE (U+202A–202E) and LRI/PDI (U+2066–2069) can visually reorder
+      // a filename to spoof its extension (e.g. "report‮fdp.exe" reads as
+      // "reportexe.pdf").
+      expect(sanitizeFilenameForDisplay('a\u202eb')).toBe('a\\u202eb');
+      expect(sanitizeFilenameForDisplay('a\u202ab')).toBe('a\\u202ab');
+      expect(sanitizeFilenameForDisplay('a\u2066b')).toBe('a\\u2066b');
+      expect(sanitizeFilenameForDisplay('a\u2069b')).toBe('a\\u2069b');
+    });
+
     it('strips multi-byte ANSI CSI sequences', () => {
       // SGR color/reset and cursor movement should not survive to the
       // terminal — `escapeAnsiCtrlCodes` neutralizes the ESC byte, then

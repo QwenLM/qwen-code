@@ -468,8 +468,10 @@ const FILENAME_CONTROL_CHARS_REGEX =
 
 // Same as FILENAME_CONTROL_CHARS_REGEX minus `\n` (row separator) and `\t`
 // (benign indentation), which multi-line display treats as layout.
-// eslint-disable-next-line no-control-regex
-const MULTILINE_CONTROL_CHARS_REGEX = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
+/* eslint-disable no-control-regex */
+const MULTILINE_CONTROL_CHARS_REGEX =
+  /[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g;
+/* eslint-enable no-control-regex */
 
 function escapeControlChar(ch: string): string {
   switch (ch) {
