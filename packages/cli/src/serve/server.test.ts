@@ -33,9 +33,12 @@ import { ApprovalMode, TrustGateError } from '@qwen-code/qwen-code-core';
 import {
   InvalidClientIdError,
   InvalidPermissionOptionError,
+  InvalidRewindTurnError,
   InvalidSessionMetadataError,
   MAX_WORKSPACE_PATH_LENGTH,
   RestoreInProgressError,
+  RewindInProgressError,
+  RewindNotApplicableError,
   SessionLimitExceededError,
   SessionNotFoundError,
   WorkspaceInitConflictError,
@@ -219,6 +222,11 @@ interface FakeBridgeOpts {
     previous: ApprovalMode;
     persisted: boolean;
   }>;
+  rewindImpl?: (
+    sessionId: string,
+    req: { toTurn: number },
+    context?: BridgeClientRequestContext,
+  ) => Promise<{ targetTurnIndex: number; apiTruncateIndex: number }>;
   setToolEnabledImpl?: (
     toolName: string,
     enabled: boolean,
@@ -304,6 +312,11 @@ interface FakeBridge extends HttpAcpBridge {
     sessionId: string;
     mode: ApprovalMode;
     opts: { persist: boolean };
+    context?: BridgeClientRequestContext;
+  }>;
+  rewindCalls: Array<{
+    sessionId: string;
+    req: { toTurn: number };
     context?: BridgeClientRequestContext;
   }>;
   setToolEnabledCalls: Array<{
@@ -468,6 +481,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       previous: ApprovalMode.DEFAULT,
       persisted: o.persist,
     }));
+  const rewindCalls: FakeBridge['rewindCalls'] = [];
+  const rewindImpl =
+    opts.rewindImpl ??
+    (async (_sessionId: string, req: { toTurn: number }) => ({
+      targetTurnIndex: req.toTurn,
+      apiTruncateIndex: req.toTurn * 2,
+    }));
   const setToolEnabledCalls: FakeBridge['setToolEnabledCalls'] = [];
   const setToolEnabledImpl =
     opts.setToolEnabledImpl ??
@@ -526,6 +546,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionSupportedCommandsCalls,
     setModelCalls,
     setApprovalModeCalls,
+    rewindCalls,
     setToolEnabledCalls,
     initWorkspaceCalls,
     restartMcpServerCalls,
@@ -660,6 +681,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(context ? { context } : {}),
       });
       return setApprovalModeImpl(sessionId, mode, o, context);
+    },
+    async rewindSession(sessionId, req, context) {
+      rewindCalls.push({ sessionId, req, ...(context ? { context } : {}) });
+      return rewindImpl(sessionId, req, context);
     },
     async setWorkspaceToolEnabled(toolName, enabled, originatorClientId) {
       setToolEnabledCalls.push({
@@ -2340,6 +2365,143 @@ describe('createServeApp', () => {
       ).send({ mode: 'yolo' });
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('missing');
+    });
+  });
+
+  describe('POST /session/:id/rewind (add-remote-rewind Task 13)', () => {
+    // Strict-gated route (`mutate({ strict: true })`): rewind irreversibly
+    // truncates session history, so it refuses on a no-token loopback
+    // daemon — matching /approval-mode and /workspace/mcp/:server/restart,
+    // and strictly MORE protected than the non-strict /model switch. All
+    // success/error-mapping tests configure a token and forward
+    // `Authorization: Bearer …`; the first test locks in the no-auth 401.
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+    const auth = (req: request.Test): request.Test =>
+      req
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+    it('401 on no-token daemon: strict gate refuses without bearer auth', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/rewind')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ toTurn: 0 });
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('token_required');
+      expect(bridge.rewindCalls).toHaveLength(0);
+    });
+
+    it('200 with the typed result on success', async () => {
+      const bridge = fakeBridge({
+        rewindImpl: async () => ({ targetTurnIndex: 2, apiTruncateIndex: 5 }),
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/rewind'),
+      ).send({ toTurn: 2 });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ targetTurnIndex: 2, apiTruncateIndex: 5 });
+      expect(bridge.rewindCalls).toHaveLength(1);
+      expect(bridge.rewindCalls[0]?.sessionId).toBe('session-A');
+      expect(bridge.rewindCalls[0]?.req).toEqual({ toTurn: 2 });
+    });
+
+    it('passes client identity context into bridge.rewindSession', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/session/session-A/rewind'))
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ toTurn: 0 });
+      expect(res.status).toBe(200);
+      expect(bridge.rewindCalls[0]?.context).toEqual({ clientId: 'client-1' });
+    });
+
+    it('400 invalid_turn when toTurn is missing', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/rewind'),
+      ).send({});
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_turn');
+      expect(bridge.rewindCalls).toHaveLength(0);
+    });
+
+    it('400 invalid_turn when toTurn is negative or non-integer', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const negative = await auth(
+        request(app).post('/session/session-A/rewind'),
+      ).send({ toTurn: -1 });
+      expect(negative.status).toBe(400);
+      expect(negative.body.code).toBe('invalid_turn');
+      const nonInteger = await auth(
+        request(app).post('/session/session-A/rewind'),
+      ).send({ toTurn: 1.5 });
+      expect(nonInteger.status).toBe(400);
+      expect(nonInteger.body.code).toBe('invalid_turn');
+      expect(bridge.rewindCalls).toHaveLength(0);
+    });
+
+    it('404 when bridge reports unknown session', async () => {
+      const bridge = fakeBridge({
+        rewindImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/session/missing/rewind')).send(
+        { toTurn: 0 },
+      );
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
+    });
+
+    it('409 rewind_in_progress when the bridge reports a prompt in flight', async () => {
+      const bridge = fakeBridge({
+        rewindImpl: async () => {
+          throw new RewindInProgressError('session-A');
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/rewind'),
+      ).send({ toTurn: 0 });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('rewind_in_progress');
+    });
+
+    it('409 rewind_not_applicable when the bridge reports an out-of-range/compressed turn', async () => {
+      const bridge = fakeBridge({
+        rewindImpl: async () => {
+          throw new RewindNotApplicableError('session-A', 99);
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/rewind'),
+      ).send({ toTurn: 99 });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('rewind_not_applicable');
+    });
+
+    it('400 invalid_turn when the bridge reports InvalidRewindTurnError (defense in depth)', async () => {
+      const bridge = fakeBridge({
+        rewindImpl: async () => {
+          throw new InvalidRewindTurnError(-1);
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/rewind'),
+      ).send({ toTurn: 0 });
+      // Route-level validation would normally catch this before the bridge
+      // is ever called; this test exercises the bridge-error mapping path
+      // directly via a bridge stub that throws regardless of the request.
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_turn');
     });
   });
 

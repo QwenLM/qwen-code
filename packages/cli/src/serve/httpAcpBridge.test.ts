@@ -42,10 +42,13 @@ import {
   findChannelInfoForEntry,
   InvalidClientIdError,
   InvalidPermissionOptionError,
+  InvalidRewindTurnError,
   InvalidSessionMetadataError,
   InvalidSessionScopeError,
   MAX_WORKSPACE_PATH_LENGTH,
   RestoreInProgressError,
+  RewindInProgressError,
+  RewindNotApplicableError,
   SessionNotFoundError,
   WorkspaceInitConflictError,
   WorkspaceMismatchError,
@@ -4765,6 +4768,200 @@ describe('createHttpAcpBridge', () => {
       ]);
       expect(timed.kind).toBe('timeout');
       aborts.forEach((a) => a.abort());
+      await bridge.shutdown();
+    });
+  });
+
+  describe('rewindSession (add-remote-rewind Task 13)', () => {
+    /**
+     * Build a channel whose `extMethod` answers the literal `'rewindSession'`
+     * ext-method the daemon's ACP agent switches on (`acpAgent.ts` case
+     * `'rewindSession'`) — NOT a `SERVE_CONTROL_EXT_METHODS` constant, since
+     * this ext-method predates the Wave 4 PR 17 naming convention and is
+     * also invoked directly by the local `/rewind` TUI command.
+     */
+    function rewindFactory(
+      impl: (
+        params: Record<string, unknown>,
+      ) => Promise<Record<string, unknown>>,
+    ): {
+      factory: ChannelFactory;
+      getCalls: () => Array<{
+        method: string;
+        params: Record<string, unknown>;
+      }>;
+    } {
+      const calls: Array<{ method: string; params: Record<string, unknown> }> =
+        [];
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const agent = new FakeAgent({
+          extMethodImpl: async (method, params) => {
+            calls.push({ method, params });
+            if (method === 'rewindSession') return impl(params);
+            return {};
+          },
+        });
+        new AgentSideConnection(() => agent as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      return { factory, getCalls: () => calls };
+    }
+
+    it('forwards toTurn as targetTurnIndex and strips historyBeforeRewind from the result', async () => {
+      const { factory, getCalls } = rewindFactory(async () => ({
+        success: true,
+        historyBeforeRewind: [
+          { role: 'user', parts: [{ text: 'secret transcript content' }] },
+        ],
+        targetTurnIndex: 2,
+        apiTruncateIndex: 5,
+      }));
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const result = await bridge.rewindSession(session.sessionId, {
+        toTurn: 2,
+      });
+      expect(result).toEqual({ targetTurnIndex: 2, apiTruncateIndex: 5 });
+      expect('historyBeforeRewind' in result).toBe(false);
+      expect(getCalls()[0]).toEqual({
+        method: 'rewindSession',
+        params: { sessionId: session.sessionId, targetTurnIndex: 2 },
+      });
+      await bridge.shutdown();
+    });
+
+    it('publishes a session_rewound event on the session event bus', async () => {
+      const { factory } = rewindFactory(async () => ({
+        success: true,
+        historyBeforeRewind: [],
+        targetTurnIndex: 1,
+        apiTruncateIndex: 3,
+      }));
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      await bridge.rewindSession(session.sessionId, { toTurn: 1 });
+      const it = iter[Symbol.asyncIterator]();
+      const next = await it.next();
+      expect(next.value?.type).toBe('session_rewound');
+      expect(next.value?.data).toEqual({
+        sessionId: session.sessionId,
+        targetTurnIndex: 1,
+        apiTruncateIndex: 3,
+      });
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('stamps the event with the trusted originator client id', async () => {
+      const { factory } = rewindFactory(async () => ({
+        success: true,
+        historyBeforeRewind: [],
+        targetTurnIndex: 0,
+        apiTruncateIndex: 0,
+      }));
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      await bridge.rewindSession(
+        session.sessionId,
+        { toTurn: 0 },
+        { clientId: session.clientId },
+      );
+      const it = iter[Symbol.asyncIterator]();
+      const next = await it.next();
+      expect(next.value?.originatorClientId).toBe(session.clientId);
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('maps "prompt is running" ACP rejections to RewindInProgressError', async () => {
+      const { factory } = rewindFactory(async () => {
+        throw new RequestError(
+          -32602,
+          'Cannot rewind while a prompt is running',
+        );
+      });
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await expect(
+        bridge.rewindSession(session.sessionId, { toTurn: 0 }),
+      ).rejects.toBeInstanceOf(RewindInProgressError);
+      await bridge.shutdown();
+    });
+
+    it('maps "compressed or does not exist" ACP rejections to RewindNotApplicableError', async () => {
+      const { factory } = rewindFactory(async () => {
+        throw new RequestError(
+          -32602,
+          'Cannot rewind to the requested turn. It may have been compressed or does not exist.',
+        );
+      });
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await expect(
+        bridge.rewindSession(session.sessionId, { toTurn: 99 }),
+      ).rejects.toBeInstanceOf(RewindNotApplicableError);
+      await bridge.shutdown();
+    });
+
+    it('maps "must be a non-negative integer" ACP rejections to InvalidRewindTurnError (defense in depth)', async () => {
+      const { factory } = rewindFactory(async () => {
+        throw new RequestError(
+          -32602,
+          'targetTurnIndex must be a non-negative integer',
+        );
+      });
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await expect(
+        bridge.rewindSession(session.sessionId, { toTurn: -1 }),
+      ).rejects.toBeInstanceOf(InvalidRewindTurnError);
+      await bridge.shutdown();
+    });
+
+    it('throws SessionNotFoundError for unknown session ids', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => {
+          throw new Error('factory should not be called');
+        },
+      });
+      await expect(
+        bridge.rewindSession('unknown', { toTurn: 0 }),
+      ).rejects.toBeInstanceOf(SessionNotFoundError);
+    });
+
+    it('rejects unregistered client ids on session-scoped requests', async () => {
+      const { factory } = rewindFactory(async () => ({
+        success: true,
+        historyBeforeRewind: [],
+        targetTurnIndex: 0,
+        apiTruncateIndex: 0,
+      }));
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await expect(
+        bridge.rewindSession(
+          session.sessionId,
+          { toTurn: 0 },
+          { clientId: 'client-not-issued' },
+        ),
+      ).rejects.toBeInstanceOf(InvalidClientIdError);
       await bridge.shutdown();
     });
   });

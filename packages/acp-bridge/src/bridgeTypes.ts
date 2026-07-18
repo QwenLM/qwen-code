@@ -96,6 +96,31 @@ export interface BridgeClientRequestContext {
 }
 
 /**
+ * Body of `POST /session/:id/rewind` (add-remote-rewind Task 13). `toTurn`
+ * is a 0-indexed user-turn number, forwarded to the ACP child's
+ * `rewindSession` ext-method as `targetTurnIndex` — the SAME field name
+ * `packages/sdk-typescript/src/daemon/types.ts`'s `RewindSessionRequest`
+ * uses on the SDK side of this same HTTP contract (add-remote-rewind Task
+ * 5); the two types are deliberately structurally identical even though
+ * they live in different packages, since one is the wire body the other
+ * sends verbatim.
+ */
+export interface RewindSessionRequest {
+  toTurn: number;
+}
+
+/**
+ * Result of `POST /session/:id/rewind`. Mirrors
+ * `packages/sdk-typescript/src/daemon/types.ts`'s `DaemonRewindResult`
+ * field-for-field (`targetTurnIndex`, `apiTruncateIndex`) — the SDK type
+ * this bridge method's response is deserialized into on the client side.
+ */
+export interface RewindSessionResult {
+  targetTurnIndex: number;
+  apiTruncateIndex: number;
+}
+
+/**
  * Returned from `recordHeartbeat`. `lastSeenAt` is the server-side
  * `Date.now()` epoch (ms) the bridge stored for this session/client
  * pair. `clientId` is echoed only when the caller provided a trusted
@@ -312,6 +337,29 @@ export interface HttpAcpBridge {
     previous: ApprovalMode;
     persisted: boolean;
   }>;
+
+  /**
+   * Destructively rewind a live session's history to before the Nth user
+   * turn (`req.toTurn`, 0-indexed) — proxies the ACP child's `rewindSession`
+   * ext-method (`packages/cli/src/acp-integration/acpAgent.ts` case
+   * `'rewindSession'`, which delegates to `Session.rewindToTurn`). Throws
+   * `SessionNotFoundError` for unknown ids, `RewindInProgressError` when a
+   * prompt is currently running, `RewindNotApplicableError` when the target
+   * turn was compressed away or does not exist, `InvalidRewindTurnError` for
+   * a malformed `toTurn` (route-level validation should catch this first),
+   * and `InvalidClientIdError` for an untrusted `context.clientId`.
+   *
+   * The ACP method's response also carries `historyBeforeRewind` (full
+   * message content, captured for the LOCAL `/rewind` TUI undo path) —
+   * deliberately NOT part of `RewindSessionResult`; the bridge strips it
+   * before returning so full transcript content never crosses the HTTP
+   * boundary to a remote caller.
+   */
+  rewindSession(
+    sessionId: string,
+    req: RewindSessionRequest,
+    context?: BridgeClientRequestContext,
+  ): Promise<RewindSessionResult>;
 
   /**
    * Add or remove a tool name from the workspace's `tools.disabled`

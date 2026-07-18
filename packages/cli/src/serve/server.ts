@@ -35,12 +35,15 @@ import {
   createHttpAcpBridge,
   InvalidClientIdError,
   InvalidPermissionOptionError,
+  InvalidRewindTurnError,
   InvalidSessionMetadataError,
   InvalidSessionScopeError,
   MAX_WORKSPACE_PATH_LENGTH,
   McpServerNotFoundError,
   McpServerRestartFailedError,
   RestoreInProgressError,
+  RewindInProgressError,
+  RewindNotApplicableError,
   SessionLimitExceededError,
   SessionNotFoundError,
   WorkspaceInitConflictError,
@@ -1409,6 +1412,47 @@ export function createServeApp(
   );
 
   app.post(
+    '/session/:id/rewind',
+    mutate({ strict: true }),
+    async (req, res) => {
+      // add-remote-rewind Task 13: mirrors /model and /approval-mode's
+      // shape exactly (200 + typed result on success), per the contract
+      // Task 5's `DaemonClient.rewindSession` was built against. `strict:
+      // true` because rewind is destructive, matching /approval-mode and
+      // /workspace/mcp/:server/restart's Wave-4-style posture.
+      const sessionId = req.params['id'];
+      const body = safeBody(req);
+      const toTurn = body['toTurn'];
+      if (
+        typeof toTurn !== 'number' ||
+        !Number.isInteger(toTurn) ||
+        toTurn < 0
+      ) {
+        res.status(400).json({
+          error: '`toTurn` is required and must be a non-negative integer',
+          code: 'invalid_turn',
+        });
+        return;
+      }
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
+      try {
+        const response = await bridge.rewindSession(
+          sessionId,
+          { toTurn },
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json(response);
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: 'POST /session/:id/rewind',
+          sessionId,
+        });
+      }
+    },
+  );
+
+  app.post(
     '/workspace/mcp/:server/restart',
     mutate({ strict: true }),
     async (req, res) => {
@@ -2405,6 +2449,34 @@ function sendBridgeError(
       error: err.message,
       code: 'trust_gate',
       errorKind: 'auth_env_error',
+    });
+    return;
+  }
+  if (err instanceof RewindInProgressError) {
+    // add-remote-rewind Task 13: the ACP child's own prompt-in-flight
+    // guard rejected the rewind (defense-in-depth — rc-gateway's
+    // PromptQueue-based 409 guard normally catches this first, but a
+    // direct daemon caller bypassing the gateway relies on this check).
+    res.status(409).json({
+      error: err.message,
+      code: 'rewind_in_progress',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof RewindNotApplicableError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'rewind_not_applicable',
+      sessionId: err.sessionId,
+      targetTurnIndex: err.targetTurnIndex,
+    });
+    return;
+  }
+  if (err instanceof InvalidRewindTurnError) {
+    res.status(400).json({
+      error: err.message,
+      code: 'invalid_turn',
     });
     return;
   }

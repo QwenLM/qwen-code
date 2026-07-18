@@ -231,3 +231,68 @@ export class McpServerRestartFailedError extends Error {
     this.mcpStatus = mcpStatus;
   }
 }
+
+/**
+ * add-remote-rewind Task 13. Thrown by `rewindSession` when the ACP
+ * child's `Session.rewindToTurn` rejects because a prompt is currently
+ * running (`this.pendingPrompt || this.cronProcessing ||
+ * this.cronAbortController` in `acp-integration/session/Session.ts`).
+ * Translated to HTTP 409 + `code: 'rewind_in_progress'` by the route —
+ * the same vocabulary rc-gateway's OWN `PromptQueue`-based 409 guard
+ * uses (`add-remote-rewind` design.md), even though this is a distinct,
+ * defense-in-depth check at the daemon layer: the daemon's ACP method
+ * re-validates independently of whatever the gateway already checked.
+ */
+export class RewindInProgressError extends Error {
+  readonly sessionId: string;
+  constructor(sessionId: string) {
+    super(
+      `Cannot rewind session "${sessionId}": a prompt is currently running`,
+    );
+    this.name = 'RewindInProgressError';
+    this.sessionId = sessionId;
+  }
+}
+
+/**
+ * add-remote-rewind Task 13. Thrown by `rewindSession` when the ACP
+ * child's `Session.rewindToTurn` rejects because the target turn was
+ * compressed away or does not exist
+ * (`#computeApiTruncationIndexForUserTurn` returning a negative index).
+ * Translated to HTTP 409 + `code: 'rewind_not_applicable'` — the same
+ * vocabulary rc-gateway's `resolveTurn` uses for an equivalent
+ * out-of-range/compressed rejection.
+ */
+export class RewindNotApplicableError extends Error {
+  readonly sessionId: string;
+  readonly targetTurnIndex: number;
+  constructor(sessionId: string, targetTurnIndex: number) {
+    super(
+      `Cannot rewind session "${sessionId}" to turn ${targetTurnIndex}: ` +
+        'it may have been compressed or does not exist',
+    );
+    this.name = 'RewindNotApplicableError';
+    this.sessionId = sessionId;
+    this.targetTurnIndex = targetTurnIndex;
+  }
+}
+
+/**
+ * add-remote-rewind Task 13. Thrown by `rewindSession` when the ACP
+ * child's `Session.rewindToTurn` rejects a malformed `targetTurnIndex`
+ * (non-integer / negative). In practice unreachable in production —
+ * the HTTP route validates `toTurn`'s shape before ever calling the
+ * bridge — but kept as a typed defense-in-depth mapping so a direct
+ * embedder that skips the route's validation still gets a structured
+ * 400 instead of a generic 500.
+ */
+export class InvalidRewindTurnError extends Error {
+  readonly targetTurnIndex: unknown;
+  constructor(targetTurnIndex: unknown) {
+    super(
+      `Invalid targetTurnIndex ${JSON.stringify(targetTurnIndex)}: must be a non-negative integer`,
+    );
+    this.name = 'InvalidRewindTurnError';
+    this.targetTurnIndex = targetTurnIndex;
+  }
+}

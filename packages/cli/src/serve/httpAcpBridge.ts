@@ -101,6 +101,8 @@ import type {
   BridgeHeartbeatResult,
   BridgeHeartbeatState,
   HttpAcpBridge,
+  RewindSessionRequest,
+  RewindSessionResult,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 export type {
   BridgeSpawnRequest,
@@ -114,6 +116,8 @@ export type {
   BridgeHeartbeatResult,
   BridgeHeartbeatState,
   HttpAcpBridge,
+  RewindSessionRequest,
+  RewindSessionResult,
 };
 
 // Bridge errors lifted to `@qwen-code/acp-bridge/bridgeErrors` in
@@ -134,6 +138,9 @@ import {
   WorkspaceInitConflictError,
   McpServerNotFoundError,
   McpServerRestartFailedError,
+  RewindInProgressError,
+  RewindNotApplicableError,
+  InvalidRewindTurnError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 import { MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';
 export {
@@ -148,6 +155,9 @@ export {
   WorkspaceInitConflictError,
   McpServerNotFoundError,
   McpServerRestartFailedError,
+  RewindInProgressError,
+  RewindNotApplicableError,
+  InvalidRewindTurnError,
   MAX_WORKSPACE_PATH_LENGTH,
 };
 
@@ -3565,6 +3575,77 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       };
     },
 
+    async rewindSession(sessionId, req, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
+      const { toTurn } = req;
+      // No `modelChangeQueue`-style serialization is needed here: unlike
+      // `setSessionModel` (which races against `applyModelServiceId`, a
+      // SEPARATE async caller that can mutate the same model state),
+      // `Session.rewindToTurn`'s own prompt-in-flight guard
+      // (`this.pendingPrompt || this.cronProcessing ||
+      // this.cronAbortController`) is checked synchronously inside the
+      // SAME ACP request/response round trip this method awaits below —
+      // there is no async gap between the check and the truncation for a
+      // second concurrent rewind (or a prompt starting) to land in. Two
+      // concurrent rewind calls would both reach the ACP child, but the
+      // child processes ext-method calls one at a time on its single
+      // event loop, so the second call's guard check runs AFTER the
+      // first's truncation has already completed — it either succeeds
+      // against the new (already-rewound) history or fails cleanly, never
+      // observing torn state.
+      const transportClosed = getTransportClosedReject(entry);
+      let raw: Record<string, unknown>;
+      try {
+        raw = await Promise.race([
+          withTimeout(
+            entry.connection.extMethod('rewindSession', {
+              sessionId,
+              targetTurnIndex: toTurn,
+            }),
+            initTimeoutMs,
+            'rewindSession',
+          ),
+          transportClosed,
+        ]);
+      } catch (err) {
+        throw mapRewindError(err, sessionId, toTurn);
+      }
+      const targetTurnIndex = raw['targetTurnIndex'];
+      const apiTruncateIndex = raw['apiTruncateIndex'];
+      if (
+        typeof targetTurnIndex !== 'number' ||
+        typeof apiTruncateIndex !== 'number'
+      ) {
+        throw new Error(
+          'rewindSession: malformed ACP response (missing targetTurnIndex/apiTruncateIndex)',
+        );
+      }
+      // `raw` also carries `historyBeforeRewind` (full message content,
+      // captured by acpAgent.ts for the LOCAL `/rewind` TUI undo path) —
+      // deliberately dropped here; only the 2 typed fields cross the HTTP
+      // boundary to a remote SDK caller.
+      const result: RewindSessionResult = { targetTurnIndex, apiTruncateIndex };
+      try {
+        entry.events.publish({
+          type: 'session_rewound',
+          data: {
+            sessionId: entry.sessionId,
+            targetTurnIndex,
+            apiTruncateIndex,
+          },
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+      } catch {
+        /* bus closed */
+      }
+      return result;
+    },
+
     async setWorkspaceToolEnabled(toolName, enabled, originatorClientId) {
       // #4175 Wave 4 PR 17. Pure file IO + event fan-out — no ACP
       // roundtrip. The settings file is the source of truth; live
@@ -4120,6 +4201,53 @@ async function withTimeout<T>(
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+/**
+ * `Session.rewindToTurn` (acp-integration/session/Session.ts) throws
+ * `RequestError.invalidParams(undefined, message)` for all 3 of its
+ * rejection cases — there is no structured `data.errorKind` to branch on
+ * (unlike `TrustGateError`'s `errorKind: 'trust_gate'` convention used by
+ * `setSessionApprovalMode`). The 3 messages are stable string literals in
+ * `Session.rewindToTurn`'s source; matching on them is the only signal
+ * available today. A future refactor of `rewindToTurn` to attach a
+ * structured `data.errorKind` (mirroring `TrustGateError`'s pattern) would
+ * let this become an `instanceof`/`data` check instead of substring
+ * matching — tracked as a Stage 2 cleanup, not blocking for Task 13.
+ */
+function mapRewindError(
+  err: unknown,
+  sessionId: string,
+  targetTurnIndex: number,
+): Error {
+  // The ACP client rejects failed ext-method calls with the raw JSON-RPC
+  // `error` object (`{code, message, data}`) — a plain object, NOT a
+  // RequestError/Error instance (see `@agentclientprotocol/sdk`'s
+  // `#handleResponse` → `pendingResponse.reject(response.error)`). So
+  // `err instanceof Error` is false on the wire path; read `.message` off
+  // the plain object the same way `setSessionApprovalMode` destructures
+  // `.data` off its rejection. `Session.rewindToTurn` throws via
+  // `RequestError.invalidParams(undefined, msg)`, which serializes the
+  // message to `"Invalid params: <msg>"` — still carrying the substrings
+  // matched below.
+  const rawMessage =
+    typeof err === 'object' && err !== null && 'message' in err
+      ? (err as { message?: unknown }).message
+      : undefined;
+  const message = typeof rawMessage === 'string' ? rawMessage : String(err);
+  if (message.includes('prompt is running')) {
+    return new RewindInProgressError(sessionId);
+  }
+  if (
+    message.includes('may have been compressed') ||
+    message.includes('does not exist')
+  ) {
+    return new RewindNotApplicableError(sessionId, targetTurnIndex);
+  }
+  if (message.includes('non-negative integer')) {
+    return new InvalidRewindTurnError(targetTurnIndex);
+  }
+  return err instanceof Error ? err : new Error(message);
 }
 
 /**
