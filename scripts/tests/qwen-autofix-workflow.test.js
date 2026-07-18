@@ -460,6 +460,17 @@ describe('qwen-autofix workflow', () => {
       reviews: [F2],
     });
     expect(sentinel.wm).toBe(W);
+    // …and the != sentinel guard itself, on a path that actually reaches
+    // the adoption block: a live conflict skips the stale gate, so without
+    // the guard the terminal ts would be adopted as the feedback watermark
+    // and filter ALL future feedback out of the renderers.
+    const sentinelConflict = runStaleGate({
+      marks: [{ ts: '9999-12-31T23:59:59Z', round: 3 }],
+      conflict: 'true',
+      round: 2,
+    });
+    expect(sentinelConflict.stale).toBe(false);
+    expect(sentinelConflict.wm).toBe(W);
   });
 
   it('behaviorally replays the eligibility recheck across lifecycle and label states', () => {
@@ -508,6 +519,7 @@ describe('qwen-autofix workflow', () => {
         );
         return {
           passed: stdout.endsWith('PASSED'),
+          log: stdout,
           out: readFileSync(out, 'utf8'),
         };
       } finally {
@@ -553,7 +565,13 @@ describe('qwen-autofix workflow', () => {
     // all discard.
     expect(runRecheck(pr({ isCrossRepository: true })).passed).toBe(false);
     expect(runRecheck(pr({ headRefName: 'renamed' })).passed).toBe(false);
-    expect(runRecheck(null).passed).toBe(false);
+    // Retargeted off main while queued → discard (previously only pinned).
+    expect(runRecheck(pr({ baseRefName: 'develop' })).passed).toBe(false);
+    // A FAILED fetch discards too, but with an infra-distinct message so an
+    // API outage is never misread as a PR-state change.
+    const failed = runRecheck(null);
+    expect(failed.passed).toBe(false);
+    expect(failed.log).toContain('metadata fetch failed (API error)');
   });
 
   it('rechecks target eligibility at address time and discards inactive targets', () => {
@@ -583,6 +601,15 @@ describe('qwen-autofix workflow', () => {
       '"${LIVE_AUTHOR}" != "${AUTOFIX_BOT}" && "${LIVE_TAKEOVER}" != "true"',
     );
     expect(prepareBranchAndFeedbackStep).toContain('"${LIVE_SKIP}" == "true"');
+    // Skip is ALSO filtered at candidate selection: the address-gate discard
+    // writes no marker, so an unfiltered scan would re-emit a skip-labeled
+    // PR (full checkout/install) every tick forever.
+    expect(reviewScanJob).toContain(
+      'select([.labels[]?.name] | index($skip) | not)',
+    );
+    expect(reviewScanJob).toContain(
+      '--json number,headRefName,isCrossRepository,labels',
+    );
     expect(workflow).toContain("TAKEOVER_LABEL: 'autofix/takeover'");
     expect(workflow).toContain("SKIP_LABEL: 'autofix/skip'");
     expect(prepareBranchAndFeedbackStep).toContain(
@@ -682,6 +709,14 @@ describe('qwen-autofix workflow', () => {
     );
     expect(routeJob).toContain(
       "github.event.review.user.login == 'qwen-code-ci-bot'",
+    );
+    // The load-bearing STRUCTURE, not just substrings: the trust || is
+    // parenthesized and the whole clause gates the per-PR format. Without
+    // the parens, Actions' && binding tighter than || would hand every
+    // OWNER/MEMBER/COLLABORATOR review the run-unique group and the
+    // review-bot the per-PR group unconditionally.
+    expect(routeJob).toContain(
+      "(github.event_name == 'pull_request_review' && (contains(fromJSON('[\"OWNER\", \"MEMBER\", \"COLLABORATOR\"]'), github.event.review.author_association) || github.event.review.user.login == 'qwen-code-ci-bot') && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number))",
     );
     expect(workflow).toContain(
       'TRUSTED_ASSOC: \'["OWNER", "MEMBER", "COLLABORATOR"]\'',

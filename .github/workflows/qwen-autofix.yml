@@ -81,9 +81,11 @@ env:
   # excess is logged and deferred to the next scan).
   MAX_TARGETS_PER_SCAN: '10'
   # Maintainer-facing engagement labels (applying labels requires GitHub
-  # triage+, so the permission gate is GitHub's own): TAKEOVER opts a PR —
-  # including a human-authored one — into the loop; SKIP opts any PR out
-  # everywhere, and wins when both are present.
+  # triage+, so the permission gate is GitHub's own). In THIS change they are
+  # honored at the address-time eligibility gate and the scan's skip filter;
+  # the scan-side widening that makes TAKEOVER actually summon the loop onto
+  # human-authored PRs ships with the takeover feature PR — the two commute
+  # in either merge order.
   TAKEOVER_LABEL: 'autofix/takeover'
   SKIP_LABEL: 'autofix/skip'
   # Do not claim more issues when too many existing autofix PRs are still open.
@@ -1026,9 +1028,15 @@ jobs:
           else
             gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" \
               --base main \
-              --limit 100 --json number,headRefName,isCrossRepository > "${WORKDIR}/bot-prs.json"
-            CANDIDATES="$(jq -r \
-              '.[] | select(.isCrossRepository != true) | .number' \
+              --limit 100 --json number,headRefName,isCrossRepository,labels > "${WORKDIR}/bot-prs.json"
+            # Skip-labeled PRs are excluded HERE, not only at the address
+            # gate: that gate discards without writing a marker, so the
+            # watermark never advances and an unfiltered scan would re-emit
+            # the PR (checkout, npm ci, build) every tick forever.
+            CANDIDATES="$(jq -r --arg skip "${SKIP_LABEL}" \
+              '.[] | select(.isCrossRepository != true)
+                   | select([.labels[]?.name] | index($skip) | not)
+                   | .number' \
               "${WORKDIR}/bot-prs.json")"
           fi
 
@@ -1404,7 +1412,8 @@ jobs:
           LIVE_TAKEOVER="$(jq -r --arg t "${TAKEOVER_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${PR_LIVE}")"
           LIVE_SKIP="$(jq -r --arg t "${SKIP_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${PR_LIVE}")"
           INELIGIBLE=''
-          if [[ "${LIVE_STATE}" != "OPEN" ]]; then INELIGIBLE="state='${LIVE_STATE:-unknown}'"
+          if [[ "${PR_LIVE}" == '{}' ]]; then INELIGIBLE='metadata fetch failed (API error) — fail-closed'
+          elif [[ "${LIVE_STATE}" != "OPEN" ]]; then INELIGIBLE="state='${LIVE_STATE:-unknown}'"
           elif [[ "${LIVE_SKIP}" == "true" ]]; then INELIGIBLE="${SKIP_LABEL} label present"
           elif [[ "${LIVE_AUTHOR}" != "${AUTOFIX_BOT}" && "${LIVE_TAKEOVER}" != "true" ]]; then INELIGIBLE="author='${LIVE_AUTHOR:-unknown}' without ${TAKEOVER_LABEL}"
           elif [[ "${LIVE_XREPO}" != "false" ]]; then INELIGIBLE='fork head'
