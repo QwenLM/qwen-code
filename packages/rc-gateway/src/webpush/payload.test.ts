@@ -12,6 +12,8 @@ import {
   MAX_PAYLOAD_BYTES,
   AGENT_EVENT_KINDS,
 } from './payload.js';
+import { KIND_SCOPE, SNOOZE_BYPASS_KINDS } from './notifier.js';
+import { SESSION_READ } from '../scopes.js';
 
 describe('buildDigestPayload', () => {
   it('summarizes the total with a metadata-only payload (no session content)', () => {
@@ -255,5 +257,10 @@ describe('session_rewound push payload', () => {
     });
     expect(payload?.summary).toContain('3');
     expect(JSON.stringify(payload)).not.toContain('truncatedEventId');
+  });
+
+  it('scope-gates at session:read and does NOT bypass snooze', () => {
+    expect(KIND_SCOPE['session.rewound']).toBe(SESSION_READ);
+    expect(SNOOZE_BYPASS_KINDS.has('session.rewound')).toBe(false);
   });
 });
