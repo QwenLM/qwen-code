@@ -58,7 +58,9 @@ import {
   MCPOAuthTokenStorage,
   InvalidSessionTranscriptCursorError,
   SESSION_TRANSCRIPT_MAX_LIMIT,
+  SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
   SessionTranscriptReader,
+  SessionTranscriptPageTooLargeError,
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
   encodeSessionTranscriptCursor,
@@ -100,6 +102,7 @@ import {
   type SessionArtifactEventRecordPayload,
   type SessionArtifactSnapshotRecordPayload,
   type WorkspaceRememberContextMode,
+  type ChatRecord,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -214,9 +217,7 @@ import {
 } from '../utils/acpModelUtils.js';
 import {
   updateOutputLanguageFile,
-  resolveOutputLanguage,
-  isAutoLanguage,
-  OUTPUT_LANGUAGE_AUTO,
+  resolveOutputLanguageOrPreserveAuto,
   getOutputLanguageFilePath,
   writeOutputLanguageAndRegisterPath,
 } from '../utils/languageUtils.js';
@@ -280,14 +281,24 @@ import {
 } from '@qwen-code/acp-bridge/status';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
 import {
+  CHANNEL_STARTUP_PROFILE_META_KEY,
+  CHANNEL_STARTUP_PROFILE_VERSION,
   CLIENT_MCP_OVER_WS_CONFIG_FLAG,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_META_KEY,
   LOAD_REPLAY_MODE_META_KEY,
+  LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
+  TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   type ClientMcpOverWsRuntimeConfig,
   type BridgeLoadReplayEnvelope,
 } from '@qwen-code/acp-bridge/bridgeTypes';
+import {
+  beginAcpBootstrapConfigProfiling,
+  buildAndFreezeAcpStartupProfile,
+  endAcpBootstrapConfigProfiling,
+  markAcpStartup,
+} from '../utils/acp-startup-profiler.js';
 import { isValidServerName } from '../serve/validate-server-name.js';
 import { MAX_REMEMBER_CONTENT_BYTES } from '../serve/workspace-memory-remember-constants.js';
 import { computeCpuPercent } from '../serve/daemon-metrics-ring.js';
@@ -495,6 +506,47 @@ function invalidArtifactPersistPayload(): Error {
 function isBulkLoadReplayRequest(params: LoadSessionRequest): boolean {
   const meta = isObjectRecord(params._meta) ? params._meta : undefined;
   return meta?.[LOAD_REPLAY_MODE_META_KEY] === LOAD_REPLAY_BULK_MODE;
+}
+
+function getLoadReplayPageSize(params: LoadSessionRequest): number | undefined {
+  const meta = isObjectRecord(params._meta) ? params._meta : undefined;
+  const value = meta?.[LOAD_REPLAY_PAGE_SIZE_META_KEY];
+  if (value === undefined) return undefined;
+  if (
+    !Number.isSafeInteger(value) ||
+    (value as number) < 1 ||
+    (value as number) > SESSION_TRANSCRIPT_MAX_LIMIT
+  ) {
+    throw RequestError.invalidParams(
+      undefined,
+      `Invalid load replay page size; expected 1..${SESSION_TRANSCRIPT_MAX_LIMIT}`,
+    );
+  }
+  return value as number;
+}
+
+function isHistoryTurnStart(record: ChatRecord): boolean {
+  return record.type === 'user' && record.subtype !== 'mid_turn_user_message';
+}
+
+function selectRecentHistoryRecords(
+  records: ChatRecord[],
+  pageSize: number | undefined,
+): { records: ChatRecord[]; hasMore: boolean } {
+  if (pageSize === undefined || records.length <= pageSize) {
+    return { records, hasMore: false };
+  }
+  let start = records.length - pageSize;
+  for (let i = start; i < records.length; i++) {
+    if (isHistoryTurnStart(records[i]!)) {
+      start = i;
+      break;
+    }
+  }
+  while (start > 0 && !isHistoryTurnStart(records[start]!)) {
+    start--;
+  }
+  return { records: records.slice(start), hasMore: start > 0 };
 }
 
 function createHiddenWorkspaceMemoryConfig(config: Config): Config {
@@ -2500,16 +2552,21 @@ export async function runAcpAgent(
   const bootstrapClientMcpSender: SendSdkMcpMessage = (serverName, message) =>
     deliverClientMcpMessage(acpConnection, serverName, message);
 
-  await config.initialize({
-    skipGeminiInitialization: true,
-    // Bootstrap skips MCP discovery — each session runs its own
-    // pool-routed discovery, so bootstrap-level spawns would be
-    // redundant subprocess leaks (W119).
-    skipMcpDiscovery: true,
-    // Bind the workspace-level manager's SDK callback so a runtime-added
-    // client-hosted MCP server (#5626) round-trips over the parent WS.
-    sendSdkMcpMessage: bootstrapClientMcpSender,
-  });
+  beginAcpBootstrapConfigProfiling();
+  try {
+    await config.initialize({
+      skipGeminiInitialization: true,
+      // Bootstrap skips MCP discovery — each session runs its own
+      // pool-routed discovery, so bootstrap-level spawns would be
+      // redundant subprocess leaks (W119).
+      skipMcpDiscovery: true,
+      // Bind the workspace-level manager's SDK callback so a runtime-added
+      // client-hosted MCP server (#5626) round-trips over the parent WS.
+      sendSdkMcpMessage: bootstrapClientMcpSender,
+    });
+  } finally {
+    endAcpBootstrapConfigProfiling();
+  }
   const eventLoopMonitor = startEventLoopLagMonitor({
     onNewMaxStall: (maxMs) => {
       console.error(`[perf] acp agent event loop stall: max=${maxMs}ms`);
@@ -2518,6 +2575,7 @@ export async function runAcpAgent(
 
   let agentInstance: QwenAgent | undefined;
   let connection: AgentSideConnection;
+  markAcpStartup('transportSetupStart');
   try {
     const stdout = Writable.toWeb(process.stdout) as WritableStream;
     const stdin = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
@@ -2534,6 +2592,7 @@ export async function runAcpAgent(
       agentInstance = new QwenAgent(config, settings, argv, conn);
       return agentInstance;
     }, stream);
+    markAcpStartup('transportSetupEnd');
   } catch (err) {
     eventLoopMonitor.dispose();
     throw err;
@@ -3299,11 +3358,12 @@ class QwenAgent implements Agent {
   }
 
   async initialize(args: InitializeRequest): Promise<InitializeResponse> {
+    markAcpStartup('initializeHandlerStart');
     this.clientCapabilities = args.clientCapabilities;
     const authMethods = buildAuthMethods();
     const version = process.env['CLI_VERSION'] || process.version;
 
-    return {
+    const response: InitializeResponse = {
       protocolVersion: PROTOCOL_VERSION,
       agentInfo: {
         name: 'qwen-code',
@@ -3331,6 +3391,30 @@ class QwenAgent implements Agent {
         },
       },
     };
+    markAcpStartup('initializeHandlerEnd');
+    markAcpStartup('responseBuilt');
+    let startupProfile;
+    try {
+      startupProfile = buildAndFreezeAcpStartupProfile();
+    } catch {
+      startupProfile = undefined;
+    }
+    const requestedProfile = args._meta?.[CHANNEL_STARTUP_PROFILE_META_KEY];
+    const profileRequested =
+      requestedProfile !== null &&
+      typeof requestedProfile === 'object' &&
+      !Array.isArray(requestedProfile) &&
+      (requestedProfile as Record<string, unknown>)['v'] ===
+        CHANNEL_STARTUP_PROFILE_VERSION;
+
+    return profileRequested && startupProfile
+      ? {
+          ...response,
+          _meta: {
+            [CHANNEL_STARTUP_PROFILE_META_KEY]: startupProfile,
+          },
+        }
+      : response;
   }
 
   async authenticate({ methodId }: AuthenticateRequest): Promise<void> {
@@ -3441,6 +3525,9 @@ class QwenAgent implements Agent {
 
     const sessionData = config.getResumedSessionData();
     const bulkReplay = isBulkLoadReplayRequest(params);
+    const replayPageSize = bulkReplay
+      ? getLoadReplayPageSize(params)
+      : undefined;
     const session = await this.createAndStoreSession(
       config,
       settings,
@@ -3456,11 +3543,15 @@ class QwenAgent implements Agent {
         let replayUpdates: SessionUpdate[] = [];
         if (records) {
           session.primeTurnFromHistory(records);
+          const replayPage = selectRecentHistoryRecords(
+            records,
+            replayPageSize,
+          );
           const replayUsage = createReplayCumulativeUsage();
           const replay = await collectHistoryReplayUpdates({
             sessionId: params.sessionId,
             config,
-            records,
+            records: replayPage.records,
             gaps: sessionData?.historyGaps,
             cumulativeUsage: replayUsage,
             logger: debugLogger,
@@ -3473,8 +3564,14 @@ class QwenAgent implements Agent {
               updates: replayUpdates,
               partial: true,
               replayError: replay.replayError,
+              ...(replayPage.hasMore ? { hasMore: true } : {}),
             };
           }
+          replayEnvelope ??= {
+            v: LOAD_REPLAY_VERSION,
+            updates: replayUpdates,
+            ...(replayPage.hasMore ? { hasMore: true } : {}),
+          };
         }
         replayEnvelope ??= {
           v: LOAD_REPLAY_VERSION,
@@ -5928,6 +6025,25 @@ class QwenAgent implements Agent {
     const SESSION_ID_RE = /^[0-9a-fA-F-]{32,36}$/;
 
     switch (method) {
+      case TODO_STOP_GUARD_QUEUE_RELEASE_METHOD: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const session = this.sessions.get(sessionId);
+        if (!session) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Session not found for id: ${sessionId}`,
+          );
+        }
+        return {
+          released: session.releaseTodoStopGuardQueuedPromptWait(),
+        };
+      }
       case 'qwen/providers/list': {
         return {
           providers: ALL_PROVIDERS.map((provider) =>
@@ -6212,6 +6328,23 @@ class QwenAgent implements Agent {
             'Invalid transcript cursor',
           );
         }
+        const rawBeforeRecordId = params['beforeRecordId'];
+        if (
+          rawBeforeRecordId !== undefined &&
+          (typeof rawBeforeRecordId !== 'string' ||
+            rawBeforeRecordId.length === 0)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid transcript record boundary',
+          );
+        }
+        if (rawCursor !== undefined && rawBeforeRecordId !== undefined) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Transcript cursor and record boundary are mutually exclusive',
+          );
+        }
         const rawLimit = params['limit'];
         if (
           rawLimit !== undefined &&
@@ -6231,7 +6364,11 @@ class QwenAgent implements Agent {
             const reader = new SessionTranscriptReader(cwd);
             const page = await reader.readPage(sessionId, {
               ...(typeof rawCursor === 'string' ? { cursor: rawCursor } : {}),
+              ...(typeof rawBeforeRecordId === 'string'
+                ? { beforeRecordId: rawBeforeRecordId }
+                : {}),
               ...(typeof rawLimit === 'number' ? { limit: rawLimit } : {}),
+              maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
             });
             const config = await this.getTranscriptReplayConfig(cwd, settings);
             const replay = await replayTranscriptRecordPage({
@@ -6288,6 +6425,14 @@ class QwenAgent implements Agent {
               errorKind: 'transcript_too_large',
               sessionId,
               snapshotSize: error.snapshotSize,
+              maxBytes: error.maxBytes,
+            });
+          }
+          if (error instanceof SessionTranscriptPageTooLargeError) {
+            throw new RequestError(-32012, error.message, {
+              errorKind: 'transcript_page_too_large',
+              sessionId,
+              pageBytes: error.pageBytes,
               maxBytes: error.maxBytes,
             });
           }
@@ -7409,6 +7554,8 @@ class QwenAgent implements Agent {
           );
         }
 
+        session.clearTodoStopGuardTrust();
+
         return { previousCwd, newCwd: canonicalPath, warnings };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionApprovalMode: {
@@ -7449,6 +7596,9 @@ class QwenAgent implements Agent {
           throw err;
         }
         const current = config.getApprovalMode();
+        if (current === 'plan') {
+          session.clearTodoStopGuardTrust();
+        }
         return { previous, current };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionLanguage: {
@@ -7504,10 +7654,7 @@ class QwenAgent implements Agent {
         let refreshed = false;
 
         if (syncOutputLanguage) {
-          const resolved = resolveOutputLanguage(language);
-          const settingValue = isAutoLanguage(language)
-            ? OUTPUT_LANGUAGE_AUTO
-            : resolved;
+          const settingValue = resolveOutputLanguageOrPreserveAuto(language);
 
           let fileWriteOk = false;
           try {
@@ -7569,7 +7716,7 @@ class QwenAgent implements Agent {
             }
             refreshed = results.length === 0 || failedCount === 0;
           }
-          outputLanguage = fileWriteOk ? resolved : null;
+          outputLanguage = fileWriteOk ? settingValue : null;
         }
 
         return { language: resolvedLanguage, outputLanguage, refreshed };
@@ -8952,6 +9099,9 @@ class QwenAgent implements Agent {
               ) {
                 try {
                   config.setApprovalMode(newMode as ApprovalMode);
+                  if (newMode === 'plan') {
+                    session.clearTodoStopGuardTrust();
+                  }
                 } catch (err) {
                   debugLogger.warn(
                     `reload: setApprovalMode failed for session ${id}: ${err}`,

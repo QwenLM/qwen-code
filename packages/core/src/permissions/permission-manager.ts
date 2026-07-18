@@ -290,19 +290,21 @@ export class PermissionManager {
     // Compute the base decision from explicit Bash/file/domain rules.
     // Using an IIFE to keep the priority-cascade logic clean.
     const baseDecision: PermissionDecision = (() => {
+      // Restrictive rules follow canonical destinations; allow rules stay
+      // lexical so a symlink cannot widen what the user explicitly allowed.
       // Priority 1: deny rules (session first, then persistent)
       for (const rule of [
         ...this.sessionRules.deny,
         ...this.persistentRules.deny,
       ]) {
-        if (matchesRule(rule, ...matchArgs)) return 'deny';
+        if (matchesRule(rule, ...matchArgs, 'canonical')) return 'deny';
       }
       // Priority 2: ask rules
       for (const rule of [
         ...this.sessionRules.ask,
         ...this.persistentRules.ask,
       ]) {
-        if (matchesRule(rule, ...matchArgs)) return 'ask';
+        if (matchesRule(rule, ...matchArgs, 'canonical')) return 'ask';
       }
       // Priority 3: allow rules
       for (const rule of [
@@ -646,7 +648,7 @@ export class PermissionManager {
       ...this.sessionRules.deny,
       ...this.persistentRules.deny,
     ]) {
-      if (matchesRule(rule, ...matchArgs)) {
+      if (matchesRule(rule, ...matchArgs, 'canonical')) {
         return rule.raw;
       }
     }
@@ -712,9 +714,11 @@ export class PermissionManager {
           }
         : undefined;
 
-    const allRules = [
+    const allowRules = [
       ...this.sessionRules.allow,
       ...this.persistentRules.allow,
+    ];
+    const restrictiveRules = [
       ...this.sessionRules.ask,
       ...this.persistentRules.ask,
       ...this.sessionRules.deny,
@@ -747,7 +751,14 @@ export class PermissionManager {
             pathCtx,
             undefined,
           ] as const;
-          return allRules.some((rule) => matchesRule(rule, ...opMatchArgs));
+          return (
+            restrictiveRules.some((rule) =>
+              matchesRule(rule, ...opMatchArgs, undefined, 'canonical'),
+            ) ||
+            allowRules.some((rule) =>
+              matchesRule(rule, ...opMatchArgs, undefined),
+            )
+          );
         })
       ) {
         return true;
@@ -773,7 +784,11 @@ export class PermissionManager {
       toolParams,
     ] as const;
 
-    return allRules.some((rule) => matchesRule(rule, ...matchArgs));
+    return (
+      restrictiveRules.some((rule) =>
+        matchesRule(rule, ...matchArgs, 'canonical'),
+      ) || allowRules.some((rule) => matchesRule(rule, ...matchArgs))
+    );
   }
 
   /**
@@ -824,7 +839,9 @@ export class PermissionManager {
             pathCtx,
             undefined,
           ] as const;
-          return askRules.some((rule) => matchesRule(rule, ...opMatchArgs));
+          return askRules.some((rule) =>
+            matchesRule(rule, ...opMatchArgs, undefined, 'canonical'),
+          );
         })
       ) {
         return true;
@@ -850,7 +867,9 @@ export class PermissionManager {
       toolParams,
     ] as const;
 
-    return askRules.some((rule) => matchesRule(rule, ...matchArgs));
+    return askRules.some((rule) =>
+      matchesRule(rule, ...matchArgs, 'canonical'),
+    );
   }
 
   private hasAskRuleForTool(toolName: string): boolean {

@@ -67,6 +67,42 @@ const { delimiter, dirname, join, parse, resolve, sep } = await import(
 );
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// The entry a subprocess should call to reach THIS build.
+//
+// A skill that shells out to `qwen …` gets whatever `qwen` PATH resolves to, which
+// is not necessarily the code that launched it: with an older global install on the
+// machine, a current-source daemon's `qwen review agent-prompt --role 0` landed in a
+// v0.19.10 binary whose `agent-prompt` predates `--role`, and the run died on
+// "Missing required argument: chunk". This file is the executable entry and the one
+// thing that knows its own path, so it publishes it; `getShellContextEnvVars` passes
+// it to every shell subprocess, and a caller prefers it over a bare `qwen`.
+//
+// Assignment, not `||=`: an inherited value is another session's CLI — an outer
+// qwen shelling out to this one — and honouring it re-creates the exact skew above,
+// one level up. Each entry stamps itself, so nested sessions each call their own
+// build. Nothing downstream overwrites this: the spawn below runs dist/cli.js,
+// which never re-executes this wrapper, and the post-update relaunch re-enters
+// through the launcher's own wrapper — which stamps the updated entry, as it must.
+//
+// One exception, and it points the SAME way: the standalone package launches this
+// file through a shim (`bin/qwen`) that selects the BUNDLED Node — the host may
+// have none — and announces itself via QWEN_CODE_LAUNCHER_PATH. There, "the entry
+// that reaches this build" is the shim: stamping this file instead would hand
+// subprocesses a `#!/usr/bin/env node` script on a machine where that resolves to
+// nothing. Read before the spawn path deletes the variable below.
+// Captured AND deleted here, not just read: the serve/mcp fast path below never
+// reaches the spawn branch that used to delete it, so the hint leaked into every
+// child of a standalone daemon — and a child qwen from a DIFFERENT checkout
+// would read the outer shim and republish it as its own entry: the wrong build,
+// wearing this one's stamp.
+const standaloneShim = process.env['QWEN_CODE_LAUNCHER_PATH'];
+delete process.env['QWEN_CODE_LAUNCHER_PATH'];
+process.env['QWEN_CODE_CLI'] =
+  standaloneShim && existsSync(standaloneShim)
+    ? standaloneShim
+    : fileURLToPath(import.meta.url);
+
 const cliPathCandidates = [
   join(__dirname, 'cli.js'),
   join(__dirname, '..', 'dist', 'cli.js'),
@@ -105,8 +141,7 @@ if (isInProcessFastPath()) {
     process.platform === 'win32' ? ['qwen.cmd', 'qwen.exe', 'qwen'] : ['qwen'];
   const entryPath = resolve(process.argv[1]);
   const entryRootLength = parse(entryPath).root.length;
-  const launcherFromEnv = process.env['QWEN_CODE_LAUNCHER_PATH'];
-  delete process.env['QWEN_CODE_LAUNCHER_PATH'];
+  const launcherFromEnv = standaloneShim;
   delete process.env['QWEN_CODE_LAUNCHER_PID'];
   const launcherCandidates = process.env['PATH']
     ?.split(delimiter)

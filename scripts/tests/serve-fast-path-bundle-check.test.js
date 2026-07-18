@@ -100,6 +100,40 @@ describe('serve fast-path bundle check', () => {
     );
   });
 
+  it('keeps the ACP startup profiler out of the pre-listen closure', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/run-qwen-serve.js': output({
+        inputs: [
+          'packages/cli/src/serve/run-qwen-serve.ts',
+          'packages/cli/src/utils/acp-startup-profiler.ts',
+        ],
+      }),
+    });
+
+    expect(findServeFastPathBundleOffenders(metafile)).toEqual([
+      expect.objectContaining({ label: 'ACP startup profiler' }),
+    ]);
+  });
+
+  it('keeps the Gemini and ACP runtimes out of the pre-listen closure', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/run-qwen-serve.js': output({
+        inputs: [
+          'packages/cli/src/serve/run-qwen-serve.ts',
+          'packages/cli/src/gemini.tsx',
+          'packages/cli/src/acp-integration/acpAgent.ts',
+        ],
+      }),
+    });
+
+    expect(findServeFastPathBundleOffenders(metafile)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: 'Gemini runtime' }),
+        expect.objectContaining({ label: 'ACP agent runtime' }),
+      ]),
+    );
+  });
+
   it('reports forbidden built package files reached through static imports', () => {
     const metafile = makeMetafile({
       'dist/chunks/run-qwen-serve.js': output({

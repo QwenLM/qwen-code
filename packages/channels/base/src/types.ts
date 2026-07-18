@@ -271,7 +271,18 @@ export interface ChannelMemoryCallbacks {
 }
 
 export type ChannelMemoryIntentClassifierResult =
-  | { intent: 'remember'; memory: string; confidence: number }
+  | {
+      intent: 'remember';
+      memory: string;
+      memories?: never;
+      confidence: number;
+    }
+  | {
+      intent: 'remember';
+      memory?: never;
+      memories: string[];
+      confidence: number;
+    }
   | { intent: 'list'; targetIds?: string[]; confidence: number }
   | { intent: 'inspect' | 'remove'; targetIds: string[]; confidence: number }
   | {

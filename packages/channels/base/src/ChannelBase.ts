@@ -2988,7 +2988,7 @@ export abstract class ChannelBase {
       try {
         result = await channelMemory.addChannelMemoryEntries(
           this.channelMemoryTarget(envelope),
-          [intent.text],
+          intent.texts,
           envelope.senderId,
         );
       } catch (error) {
@@ -3007,9 +3007,11 @@ export abstract class ChannelBase {
         const ids = result.added.map((entry) => entry.id);
         await this.sendMessage(
           envelope.chatId,
-          ids.length === 1
-            ? `Channel memory ${ids[0]} saved.`
-            : `Channel memory saved: ${ids.join(', ')}.`,
+          result.duplicateIds.length > 0
+            ? `Channel memory saved: ${ids.join(', ')}. Skipped duplicates: ${result.duplicateIds.join(', ')}.`
+            : ids.length === 1
+              ? `Channel memory ${ids[0]} saved.`
+              : `Channel memory saved: ${ids.join(', ')}.`,
         );
       } else if (result.duplicateIds.length > 0) {
         await this.sendMessage(
@@ -3276,92 +3278,134 @@ export abstract class ChannelBase {
       return null;
     }
 
-    const confidence =
-      classified && typeof classified === 'object'
-        ? (classified as { confidence?: unknown }).confidence
-        : undefined;
-    if (
-      typeof confidence !== 'number' ||
-      !Number.isFinite(confidence) ||
-      confidence < 0 ||
-      confidence > 1 ||
-      confidence < CHANNEL_MEMORY_CLASSIFIER_MIN_CONFIDENCE
-    ) {
-      return null;
-    }
+    try {
+      if (typeof classified !== 'object' || classified === null) return null;
+      const result = classified as {
+        intent?: unknown;
+        memory?: unknown;
+        memories?: unknown;
+        targetIds?: unknown;
+        confidence?: unknown;
+      };
+      const confidence = result.confidence;
+      if (
+        typeof confidence !== 'number' ||
+        !Number.isFinite(confidence) ||
+        confidence < 0 ||
+        confidence > 1 ||
+        confidence < CHANNEL_MEMORY_CLASSIFIER_MIN_CONFIDENCE
+      ) {
+        return null;
+      }
 
-    const result = classified as {
-      intent?: unknown;
-      memory?: unknown;
-      targetIds?: unknown;
-    };
-    const targetIds = result.targetIds;
-    const entryById = new Map(entries.map((entry) => [entry.id, entry]));
-    const resolvedEntries =
-      targetIds === undefined
-        ? undefined
-        : Array.isArray(targetIds) &&
-            targetIds.every(
-              (id): id is string => typeof id === 'string' && entryById.has(id),
-            ) &&
-            new Set(targetIds).size === targetIds.length
-          ? this.entriesForChannelMemoryIds(entries, targetIds)
+      const intent = result.intent;
+      if (intent === 'remember') {
+        const hasMemory = Object.prototype.hasOwnProperty.call(
+          result,
+          'memory',
+        );
+        const hasMemories = Object.prototype.hasOwnProperty.call(
+          result,
+          'memories',
+        );
+        if (hasMemory === hasMemories) return null;
+
+        let texts: string[] = [];
+        if (hasMemory) {
+          const memory = result.memory;
+          texts = typeof memory === 'string' ? [memory.trim()] : [];
+        } else {
+          const memories = result.memories;
+          if (Array.isArray(memories)) {
+            const snapshot = Array.from(memories);
+            if (
+              snapshot.every(
+                (memory): memory is string => typeof memory === 'string',
+              )
+            ) {
+              texts = snapshot.map((memory) => memory.trim());
+            }
+          }
+        }
+        return texts.length >= 1 &&
+          texts.length <= 10 &&
+          texts.every((text) => text.length > 0)
+          ? { kind: 'remember', texts }
           : null;
+      }
+      if (intent === 'clear_all') return { kind: 'clear_request' };
+      if (
+        intent !== 'list' &&
+        intent !== 'inspect' &&
+        intent !== 'update' &&
+        intent !== 'remove'
+      ) {
+        return null;
+      }
 
-    if (result.intent === 'remember') {
-      const memory =
-        typeof result.memory === 'string' ? result.memory.trim() : '';
-      return memory ? { kind: 'remember', text: memory } : null;
-    }
-    if (result.intent === 'list') {
-      if (resolvedEntries === undefined) return { kind: 'list', page: 1 };
-      if (resolvedEntries === null) return null;
-      return resolvedEntries.length === 0
-        ? { kind: 'no_match' }
-        : {
-            kind: 'list_matches',
-            ids: resolvedEntries.map((entry) => entry.id),
-          };
-    }
-    if (result.intent === 'clear_all') {
-      return { kind: 'clear_request' };
-    }
+      const targetIds = result.targetIds;
+      if (intent === 'list' && targetIds === undefined) {
+        return { kind: 'list', page: 1 };
+      }
+      if (!Array.isArray(targetIds)) return null;
+      const targetIdSnapshot = Array.from(targetIds);
+      const entryById = new Map(entries.map((entry) => [entry.id, entry]));
+      if (
+        !targetIdSnapshot.every(
+          (id): id is string => typeof id === 'string' && entryById.has(id),
+        ) ||
+        new Set(targetIdSnapshot).size !== targetIdSnapshot.length
+      ) {
+        return null;
+      }
+      const resolvedEntries = this.entriesForChannelMemoryIds(
+        entries,
+        targetIdSnapshot,
+      );
+      if (intent === 'list') {
+        return resolvedEntries.length === 0
+          ? { kind: 'no_match' }
+          : {
+              kind: 'list_matches',
+              ids: resolvedEntries.map((entry) => entry.id),
+            };
+      }
+      if (resolvedEntries.length === 0) return { kind: 'no_match' };
+      if (resolvedEntries.length > 1) {
+        return {
+          kind: 'ambiguous',
+          ids: resolvedEntries.map((entry) => entry.id),
+        };
+      }
 
-    if (
-      result.intent !== 'inspect' &&
-      result.intent !== 'update' &&
-      result.intent !== 'remove'
-    ) {
+      const entry = resolvedEntries[0]!;
+      if (intent === 'inspect') return { kind: 'inspect', id: entry.id };
+      if (intent === 'remove') {
+        return {
+          kind: 'natural_remove',
+          id: entry.id,
+          expectedText: entry.text,
+        };
+      }
+      const memory = result.memory;
+      const text = typeof memory === 'string' ? memory.trim() : '';
+      return text
+        ? {
+            kind: 'natural_update',
+            id: entry.id,
+            text,
+            expectedText: entry.text,
+          }
+        : null;
+    } catch (error) {
+      process.stderr.write(
+        `[${this.name}] channel memory intent validation failed: ${sanitizeLogText(
+          this.channelMemoryErrorMessage(error),
+          200,
+        )}\n`,
+      );
       return null;
     }
-    if (resolvedEntries === null || resolvedEntries === undefined) return null;
-    if (resolvedEntries.length === 0) return { kind: 'no_match' };
-    if (resolvedEntries.length > 1) {
-      return {
-        kind: 'ambiguous',
-        ids: resolvedEntries.map((entry) => entry.id),
-      };
-    }
-
-    const entry = resolvedEntries[0]!;
-    if (result.intent === 'inspect') return { kind: 'inspect', id: entry.id };
-    if (result.intent === 'remove') {
-      return {
-        kind: 'natural_remove',
-        id: entry.id,
-        expectedText: entry.text,
-      };
-    }
-    const text = typeof result.memory === 'string' ? result.memory.trim() : '';
-    if (text) {
-      return {
-        kind: 'natural_update',
-        id: entry.id,
-        text,
-        expectedText: entry.text,
-      };
-    }
-    return null;
   }
 
   private channelMemoryErrorMessage(error: unknown): string {

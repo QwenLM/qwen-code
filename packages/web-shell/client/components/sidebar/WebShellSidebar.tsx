@@ -1191,6 +1191,11 @@ export function WebShellSidebar({
     [t, workspaceActions, workspace],
   );
 
+  const handleSuggestWorkspacePaths = useCallback(
+    (prefix: string) => workspaceActions.suggestWorkspacePaths(prefix),
+    [workspaceActions],
+  );
+
   const reconcileRemovedWorkspace = useCallback(
     async (removed: DaemonWorkspaceCapability) => {
       if (!workspaceRemovalMountedRef.current) return;
@@ -3768,6 +3773,7 @@ export function WebShellSidebar({
         <AddWorkspaceDialog
           onClose={() => setShowAddWorkspaceDialog(false)}
           onAdd={handleAddWorkspace}
+          onSuggest={handleSuggestWorkspacePaths}
         />
       )}
     </>

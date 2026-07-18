@@ -112,6 +112,7 @@ import {
 } from '../../agents/agent-transcript.js';
 import type { BackgroundSlotReservation } from '../../agents/background-tasks.js';
 import { getGitBranch } from '../../utils/gitUtils.js';
+import { buildModelIdContext, resolveModelId } from '../../utils/modelId.js';
 
 // Memoize git branch per cwd for the agent-launch path. `getGitBranch`
 // shells out to `git rev-parse` synchronously; caching avoids the per-launch
@@ -591,6 +592,7 @@ function applyPersistedCliFlagOverrides(
 function capturePersistedCliFlags(
   config: Config,
   resolvedApprovalMode: ApprovalMode,
+  modelOverride?: string,
 ): AgentPersistedCliFlags {
   return {
     approvalMode: resolvedApprovalMode,
@@ -598,7 +600,7 @@ function capturePersistedCliFlags(
     safeMode: config.isSafeMode(),
     sandbox: config.getSandbox() ?? null,
     screenReader: config.getScreenReader(),
-    model: config.getModel(),
+    model: modelOverride ?? config.getModel(),
     maxSessionTurns: config.getMaxSessionTurns(),
     maxToolCalls: config.getMaxToolCalls(),
     maxSubagentDepth: config.getMaxSubagentDepth(),
@@ -1001,9 +1003,8 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       ) {
         return 'Parameter "subagent_type" must be a non-empty string.';
       }
-      // Validate that the subagent exists (case-insensitive). `fork` is an
-      // explicit pseudo-type resolved by the dispatch logic (not a loadable
-      // subagent), so accept it regardless of the registered list; when
+      // `fork` is an explicit pseudo-type resolved by the dispatch logic (not
+      // a loadable subagent), so it never appears in the registered list; when
       // forking is unavailable, dispatch falls back to general-purpose.
       const lowerType = params.subagent_type.toLowerCase();
       if (lowerType !== FORK_SUBAGENT_TYPE) {
@@ -1012,8 +1013,13 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
         );
 
         if (!subagentExists) {
-          const availableNames = this.availableSubagents.map((s) => s.name);
-          return `Subagent "${params.subagent_type}" not found. Available subagents: ${availableNames.join(', ')}`;
+          // Not in the cached list — the agent file may have been created
+          // after this tool was initialized. Don't reject here: execution
+          // resolves the type via loadSubagent(), which reads from disk and
+          // fails with a clear "not found" error if the agent truly doesn't
+          // exist. Kick a refresh (validation must stay synchronous) so the
+          // cache and schema catch up for subsequent calls.
+          void this.refreshSubagents();
         }
       }
     }
@@ -2232,6 +2238,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     let restoreParentPM: () => void = () => {};
     let backgroundSlotReservation: BackgroundSlotReservation | undefined;
     let backgroundSlotReservationConsumed = false;
+    // Concrete model ID the sub-agent will run with, resolved from its model
+    // selector once subagentConfig is loaded. Used to enforce per-model
+    // background-agent concurrency caps (agents.maxParallelAgentsByModel).
+    let subagentModelId: string | undefined;
     const releaseBackgroundSlotReservation = () => {
       if (backgroundSlotReservation && !backgroundSlotReservationConsumed) {
         this.config
@@ -2285,15 +2295,29 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           effectiveSubagentType!,
         );
         if (!loadedConfig) {
+          // loadSubagent() reads from disk, so reaching this point means the
+          // agent genuinely doesn't exist (validation no longer rejects on a
+          // stale cache miss). List what is available to help correct typos.
+          let notFoundMessage = `Subagent "${effectiveSubagentType}" not found`;
+          try {
+            const available = await this.subagentManager.listSubagents();
+            if (available.length > 0) {
+              notFoundMessage += `. Available subagents: ${available
+                .map((s) => s.name)
+                .join(', ')}`;
+            }
+          } catch {
+            // Listing is best-effort; the bare message is still actionable.
+          }
           return {
-            llmContent: `Subagent "${effectiveSubagentType}" not found`,
+            llmContent: notFoundMessage,
             returnDisplay: {
               type: 'task_execution' as const,
               subagentName: effectiveSubagentType!,
               taskDescription: this.params.description,
               taskPrompt: this.params.prompt,
               status: 'failed' as const,
-              terminateReason: `Subagent "${effectiveSubagentType}" not found`,
+              terminateReason: notFoundMessage,
             },
           };
         }
@@ -2348,9 +2372,20 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         );
       }
 
-      if (!isFork && shouldRunInBackground) {
+      if (shouldRunInBackground) {
+        // Resolve the concrete model the sub-agent (or fork) will run with so the
+        // registry can apply a per-model cap. `subagentConfig.model` is a
+        // selector (omitted/"inherit"/"fast"/modelId/authType:modelId);
+        // resolveModelId maps it to the actual model ID, falling back to the
+        // parent's current model when the sub-agent inherits (forks always
+        // inherit, since FORK_AGENT has no model selector).
+        subagentModelId = resolveModelId(
+          subagentConfig.model,
+          buildModelIdContext(this.config),
+        )?.modelId;
         const registry = this.config.getBackgroundTaskRegistry();
-        backgroundSlotReservation = registry.tryReserveBackgroundSlot();
+        backgroundSlotReservation =
+          registry.tryReserveBackgroundSlot(subagentModelId);
         if (!backgroundSlotReservation) {
           const queuedCount = registry.getQueuedCount();
           const queueText =
@@ -2366,8 +2401,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             },
             updateOutput,
           );
-          backgroundSlotReservation =
-            await registry.waitForBackgroundSlot(signal);
+          backgroundSlotReservation = await registry.waitForBackgroundSlot(
+            signal,
+            subagentModelId,
+          );
         }
         this.updateDisplay(
           {
@@ -2794,6 +2831,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               agentId: hookOpts.agentId,
               description: this.params.description,
               subagentType: subagentConfig.name,
+              // Concrete model ID for per-model concurrency accounting; the
+              // slot reservation above was taken against this same model.
+              model: subagentModelId,
               isBackgrounded: true,
               status: 'running',
               startTime: Date.now(),
@@ -2904,6 +2944,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           persistedCliFlags: capturePersistedCliFlags(
             this.config,
             resolvedApprovalMode,
+            bgSubagent.getCore().modelConfig.model,
           ),
           subagentName: subagentConfig.name,
           agentColor: subagentConfig.color,
@@ -2911,6 +2952,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           // Persisted so resume restores the original nesting level; see
           // childLaunchDepth() for the rationale.
           depth: childLaunchDepth(),
+          model: subagentModelId,
         });
 
         // Subscribe to the subagent's tool-call event stream so the
@@ -3473,6 +3515,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           persistedCliFlags: capturePersistedCliFlags(
             this.config,
             resolvedApprovalMode,
+            subagent.getCore().modelConfig.model,
           ),
           subagentName: subagentConfig.name,
           agentColor: subagentConfig.color,

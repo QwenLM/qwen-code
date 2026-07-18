@@ -303,6 +303,52 @@ jobs:
           fi
           echo "Triage response received (${#RESPONSE} chars)."
 
+      - name: 'Notify silent triage re-run'
+        if: >-
+          success() &&
+          github.event_name == 'issue_comment' &&
+          github.event.issue.pull_request &&
+          startsWith(github.event.comment.body, '@qwen-code /triage')
+        shell: 'bash'
+        env:
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          NUMBER: '${{ steps.resolve.outputs.number }}'
+          TRIGGERED_AT: '${{ github.event.comment.created_at }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+        run: |-
+          set -euo pipefail
+          HAS_REVIEW=false
+          if BOT_LOGIN="$(gh api user --jq '.login')" &&
+             REVIEWS="$(
+               gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER/reviews" \
+                 --method GET \
+                 --paginate \
+                 -F per_page=100
+             )"; then
+            if ! HAS_REVIEW="$(
+              printf '%s' "$REVIEWS" |
+                jq -s \
+                  --arg bot "$BOT_LOGIN" \
+                  --arg since "$TRIGGERED_AT" \
+                  'any(.[][]; .user.login == $bot and .submitted_at != null and .submitted_at >= $since)'
+            )"; then
+              echo "::warning::Failed to inspect triage reviews; posting a summary comment."
+              HAS_REVIEW=false
+            fi
+          else
+            echo "::warning::Failed to fetch triage reviews; posting a summary comment."
+          fi
+          if [ "$HAS_REVIEW" = true ]; then
+            echo "Triage re-run posted a review; no summary comment needed."
+            exit 0
+          fi
+          printf -v BODY '%s\n\n%s\n\n%s' \
+            '<!-- qwen-triage stage=rerun-summary -->' \
+            'Triage re-run completed without a new review.' \
+            "The stage comments above were updated with the latest result. [View workflow run]($RUN_URL)."
+          gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+            -f body="$BODY" >/dev/null
+
   # On-demand real-user testing: a write-permission user comments
   # `@qwen-code /tmux` on a PR to launch the changed app in a tmux TUI and
   # exercise the affected flow. EXECUTES untrusted PR code, so: gated on the PR

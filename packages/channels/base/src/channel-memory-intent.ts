@@ -1,7 +1,7 @@
 import { PROMPT_UNSAFE_INVISIBLES } from './sanitize.js';
 
 export type ChannelMemoryIntent =
-  | { kind: 'remember'; text: string }
+  | { kind: 'remember'; texts: string[] }
   | { kind: 'list'; page: number }
   | { kind: 'inspect'; id: string }
   | { kind: 'remove'; id: string }
@@ -146,7 +146,7 @@ export function parseChannelMemoryIntent(
     const match = trimmed.match(pattern);
     const remembered = match?.[1]?.replace(PROMPT_UNSAFE_INVISIBLES, '').trim();
     if (remembered) {
-      return { kind: 'remember', text: remembered };
+      return { kind: 'remember', texts: [remembered] };
     }
   }
 
