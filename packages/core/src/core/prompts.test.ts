@@ -67,6 +67,25 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).toContain('stop and ask the user for explicit approval');
   });
 
+  it('instructs the model to preserve unrelated existing work', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    vi.mocked(isGitRepository).mockReturnValue(true);
+    const prompt = getCoreSystemPrompt();
+
+    expect(prompt).toContain(
+      'Treat existing or unexpected changes as user-owned',
+    );
+    expect(prompt).toContain(
+      'Do not modify, stage, commit, or revert unrelated changes',
+    );
+    expect(prompt).toContain(
+      'Stage only paths that belong to the requested change',
+    );
+    expect(prompt).toContain(
+      'Do not use broad staging commands such as `git add -A` when unrelated changes are present',
+    );
+  });
+
   it('does not tell the model to enter plan mode without user opt-in', () => {
     vi.stubEnv('SANDBOX', undefined);
     const prompt = getCoreSystemPrompt();

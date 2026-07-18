@@ -11,6 +11,7 @@ import type {
   DaemonFileStat,
   DaemonScheduledTask,
   DaemonWorkspaceActions,
+  DaemonWorkspacePathSuggestions,
 } from './types.js';
 
 const AGENT_GENERATE_TIMEOUT_MS = 330_000;
@@ -819,6 +820,15 @@ export function createDaemonWorkspaceActions({
         client.addWorkspace(cwd, options),
         'Add workspace timed out',
       );
+    },
+
+    async suggestWorkspacePaths(prefix) {
+      const client = requireClient(getClient, 'Suggest workspace paths failed');
+      const result = await withActionTimeout(
+        client.workspacePathSuggestions(prefix),
+        'Suggest workspace paths timed out',
+      );
+      return result as DaemonWorkspacePathSuggestions;
     },
 
     async removeWorkspace(workspaceId, options) {

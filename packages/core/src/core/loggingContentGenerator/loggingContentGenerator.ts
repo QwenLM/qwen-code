@@ -645,6 +645,9 @@ export class LoggingContentGenerator implements ContentGenerator {
       const consolidatedResponse = shouldCollectResponses
         ? this.consolidateGeminiResponsesForLogging(responses)
         : undefined;
+      if (consolidatedResponse) {
+        consolidatedResponse.usageMetadata = lastUsageMetadata;
+      }
       const shouldCollectSensitiveSpanAttributes =
         !isInternal &&
         span !== undefined &&

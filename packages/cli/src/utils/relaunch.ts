@@ -66,7 +66,13 @@ export async function relaunchAppInChildProcess(
       ...additionalScriptArgs,
       ...scriptArgs,
     ];
-    const newEnv = { ...process.env, QWEN_CODE_NO_RELAUNCH: 'true' };
+    const newEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      QWEN_CODE_NO_RELAUNCH: 'true',
+    };
+    if (newEnv['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'] === '1') {
+      newEnv['ELECTRON_RUN_AS_NODE'] = '1';
+    }
 
     // The parent process should not be reading from stdin while the child is running.
     process.stdin.pause();

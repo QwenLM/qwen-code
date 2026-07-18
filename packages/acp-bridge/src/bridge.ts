@@ -88,7 +88,9 @@ import {
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_META_KEY,
   LOAD_REPLAY_MODE_META_KEY,
+  LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
+  TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
 } from './bridgeTypes.js';
 import type {
   BridgeSession,
@@ -218,6 +220,7 @@ function extractLoadReplayResponse(state: BridgeSessionState): {
   updates: SessionUpdate[];
   partial?: true;
   replayError?: string;
+  hasMore?: boolean;
 } {
   const meta = isRecord(state._meta) ? state._meta : undefined;
   const replay = meta?.[LOAD_REPLAY_META_KEY];
@@ -256,6 +259,13 @@ function extractLoadReplayResponse(state: BridgeSessionState): {
         `(version=${LOAD_REPLAY_VERSION}, replayError=${describeLoadReplayValue(replayError)})`,
     );
   }
+  const hasMore = replay['hasMore'];
+  if (hasMore !== undefined && typeof hasMore !== 'boolean') {
+    throw new Error(
+      `Invalid qwen.session.loadReplay hasMore ` +
+        `(version=${LOAD_REPLAY_VERSION}, hasMore=${describeLoadReplayValue(hasMore)})`,
+    );
+  }
   const invalidUpdateIndex = rawUpdates.findIndex(
     (update) => !isBulkReplayUpdate(update),
   );
@@ -284,6 +294,7 @@ function extractLoadReplayResponse(state: BridgeSessionState): {
     updates: rawUpdates,
     ...(partial === true ? { partial: true as const } : {}),
     ...(typeof replayError === 'string' ? { replayError } : {}),
+    ...(hasMore === true ? { hasMore: true } : {}),
   };
 }
 
@@ -447,6 +458,8 @@ interface SessionEntry {
    * tail of `sendPrompt`.
    */
   pendingPromptList: PendingPromptEntry[];
+  /** Set only when the child Guard explicitly yielded to this FIFO. */
+  todoStopGuardAwaitingQueuedPrompt?: boolean;
   /**
    * Mid-turn user messages pushed by the browser (`POST
    * /session/:id/mid-turn-message`) while a turn is running. The ACP child
@@ -526,6 +539,12 @@ interface SessionEntry {
    */
   clientIds: Map<string, number>;
   /**
+   * Admitted id for the prompt currently running on this session. ACP enforces
+   * one active prompt per session, and this bridge FIFO-serializes prompts, so
+   * turn-scoped events can safely inherit this id.
+   */
+  activePromptId?: string;
+  /**
    * Originator for the prompt currently running on this session. ACP enforces
    * one active prompt per session, and this bridge FIFO-serializes prompts, so
    * inline session updates / permission requests can safely inherit this id.
@@ -588,6 +607,7 @@ interface SessionEntry {
   /** Response-mode `session/load` can return a partial replay prefix. */
   restoreReplayPartial?: true;
   restoreReplayError?: string;
+  restoreHistoryHasMore?: true;
   /**
    * Most recent heartbeat across any client on this session (Date.now()
    * epoch ms). Set on every `recordHeartbeat` call regardless of whether
@@ -832,6 +852,7 @@ function pickUserInputEchoMeta(meta: unknown): Record<string, unknown> {
 function echoPromptToSessionBus(
   entry: SessionEntry,
   req: PromptRequest,
+  promptId: string,
   originatorClientId: string | undefined,
 ): void {
   // `PromptRequest.prompt` is a non-optional `ContentBlock[]` per the
@@ -856,6 +877,7 @@ function echoPromptToSessionBus(
     try {
       entry.events.publish({
         type: 'session_update',
+        promptId,
         data: {
           sessionId: req.sessionId,
           update: {
@@ -902,12 +924,14 @@ function echoPromptToSessionBus(
 function broadcastPromptCancelled(
   entry: SessionEntry,
   sessionId: string,
+  promptId: string | undefined,
   originatorClientId: string | undefined,
   reason?: 'forward_failed',
 ): void {
   try {
     entry.events.publish({
       type: 'prompt_cancelled',
+      ...(promptId ? { promptId } : {}),
       data: { sessionId, ...(reason ? { reason } : {}) },
       ...(originatorClientId ? { originatorClientId } : {}),
     });
@@ -926,6 +950,7 @@ function broadcastPromptCancelled(
 function broadcastPromptCancelledOnce(
   entry: SessionEntry,
   sessionId: string,
+  promptId: string | undefined,
   originatorClientId: string | undefined,
   reason?: 'forward_failed',
 ): void {
@@ -936,7 +961,13 @@ function broadcastPromptCancelledOnce(
     return;
   }
   entry.cancelBroadcast = true;
-  broadcastPromptCancelled(entry, sessionId, originatorClientId, reason);
+  broadcastPromptCancelled(
+    entry,
+    sessionId,
+    promptId,
+    originatorClientId,
+    reason,
+  );
 }
 
 function broadcastTurnComplete(
@@ -949,6 +980,7 @@ function broadcastTurnComplete(
   try {
     entry.events.publish({
       type: 'turn_complete',
+      ...(promptId ? { promptId } : {}),
       data: {
         sessionId,
         stopReason: promptResult.stopReason ?? 'end_turn',
@@ -1042,6 +1074,7 @@ function broadcastTurnError(
   try {
     entry.events.publish({
       type: 'turn_error',
+      ...(promptId ? { promptId } : {}),
       data: {
         sessionId,
         message,
@@ -3263,6 +3296,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // programming error (e.g. a `TypeError`) as a benign bus-closed swallow.
     entry.events.publish({
       type: 'model_switched',
+      ...(entry.activePromptId ? { promptId: entry.activePromptId } : {}),
       data: { sessionId: entry.sessionId, modelId },
       ...(originatorClientId ? { originatorClientId } : {}),
     });
@@ -3278,6 +3312,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // See `publishModelSwitched`: `publish()` never throws, so no wrapper.
     entry.events.publish({
       type: 'approval_mode_changed',
+      ...(entry.activePromptId ? { promptId: entry.activePromptId } : {}),
       data: {
         sessionId: entry.sessionId,
         previous: payload.previous,
@@ -3637,7 +3672,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   const replayFieldsFor = (
     entry: Pick<
       SessionEntry,
-      'events' | 'restoreReplayPartial' | 'restoreReplayError'
+      | 'events'
+      | 'restoreReplayPartial'
+      | 'restoreReplayError'
+      | 'restoreHistoryHasMore'
     >,
     action: 'load' | 'resume',
   ): Pick<
@@ -3647,6 +3685,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     | 'lastEventId'
     | 'partial'
     | 'replayError'
+    | 'historyHasMore'
   > => {
     const replayStatus =
       action === 'load' && entry.restoreReplayPartial === true
@@ -3667,6 +3706,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         liveJournal: snapshot.liveJournal,
         lastEventId: snapshot.lastEventId,
         ...replayStatus,
+        ...(entry.restoreHistoryHasMore === true
+          ? { historyHasMore: true }
+          : {}),
       };
     }
     return { lastEventId: snapshot.lastEventId, ...replayStatus };
@@ -3890,6 +3932,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       let replayUpdates: SessionUpdate[] = [];
       let replayPartial: true | undefined;
       let replayError: string | undefined;
+      let replayHasMore: true | undefined;
       try {
         if (action === 'load') {
           state = await Promise.race([
@@ -3907,6 +3950,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   ? {
                       _meta: {
                         [LOAD_REPLAY_MODE_META_KEY]: LOAD_REPLAY_BULK_MODE,
+                        ...(req.historyPageSize !== undefined
+                          ? {
+                              [LOAD_REPLAY_PAGE_SIZE_META_KEY]:
+                                req.historyPageSize,
+                            }
+                          : {}),
                       },
                     }
                   : {}),
@@ -3936,6 +3985,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           replayUpdates = extracted.updates;
           replayPartial = extracted.partial;
           replayError = extracted.replayError;
+          replayHasMore = extracted.hasMore === true ? true : undefined;
         }
       } catch (err) {
         restoreEvents.close();
@@ -4031,6 +4081,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (replayError !== undefined) {
         entry.restoreReplayError = replayError;
       }
+      if (replayHasMore === true) {
+        entry.restoreHistoryHasMore = true;
+      }
       seedSnapshotCaches(entry, publicState);
       const artifactRestoreWarnings = await entry.artifacts.restore(
         restoredArtifactSnapshot,
@@ -4050,6 +4103,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ingestArtifacts:
             restoredArtifactSnapshot === undefined || artifactRestoreFailed,
         });
+        if (
+          req.historyPageSize !== undefined &&
+          entry.events
+            .snapshotReplay()
+            ?.compactedTurns.some((event) => event.type === 'history_truncated')
+        ) {
+          entry.restoreHistoryHasMore = true;
+        }
         ci.client.drainEarlyEvents(entry.sessionId, entry);
       }
       const clientId = registerClient(entry, req.clientId);
@@ -4663,8 +4724,33 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       };
       entry.pendingPromptList.push(pendingEntry);
       if (isQueued) {
+        pendingAbort.signal.addEventListener(
+          'abort',
+          () => {
+            if (pendingEntry.state !== 'queued') return;
+            if (!entry.todoStopGuardAwaitingQueuedPrompt) return;
+            const hasAnotherQueuedPrompt = entry.pendingPromptList.some(
+              (candidate) =>
+                candidate !== pendingEntry &&
+                candidate.state === 'queued' &&
+                !candidate.abortController.signal.aborted,
+            );
+            if (hasAnotherQueuedPrompt) return;
+            entry.todoStopGuardAwaitingQueuedPrompt = false;
+            void entry.connection
+              .extMethod(TODO_STOP_GUARD_QUEUE_RELEASE_METHOD, { sessionId })
+              .catch((error) => {
+                writeStderrLine(
+                  `qwen serve: Todo Stop Guard queued-prompt release failed for ` +
+                    `${JSON.stringify(sessionId)}: ${error instanceof Error ? error.message : String(error)}`,
+                );
+              });
+          },
+          { once: true },
+        );
         entry.events.publish({
           type: 'pending_prompt_added',
+          promptId: pendingEntry.promptId,
           data: {
             sessionId,
             promptId: pendingEntry.promptId,
@@ -4691,9 +4777,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // 'running' and publish a started event now that it has
           // reached the head of the FIFO.
           if (pendingEntry.state === 'queued') {
+            entry.todoStopGuardAwaitingQueuedPrompt = false;
             pendingEntry.state = 'running';
             entry.events.publish({
               type: 'pending_prompt_started',
+              promptId: pendingEntry.promptId,
               data: {
                 sessionId,
                 promptId: pendingEntry.promptId,
@@ -4761,6 +4849,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   return copy;
                 })();
                 entry.promptActive = true;
+                entry.activePromptId = pendingEntry.promptId;
                 delete entry.turnError;
                 activePromptCounter++;
                 entry.sessionLastSeenAt = Date.now();
@@ -4799,10 +4888,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                     echoPromptToSessionBus(
                       entry,
                       promptRequest,
+                      pendingEntry.promptId,
                       originatorClientId,
                     );
                   }
                 } catch (echoErr) {
+                  delete entry.activePromptId;
                   delete entry.activePromptOriginatorClientId;
                   if (entry.promptActive) {
                     entry.promptActive = false;
@@ -4820,6 +4911,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                       entry.sessionLastSeenAt = Date.now();
                       touchActivity();
                     }
+                    delete entry.activePromptId;
                     delete entry.activePromptOriginatorClientId;
                     if (
                       entry.clientIds.size === 0 &&
@@ -4887,6 +4979,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                       broadcastPromptCancelledOnce(
                         entry,
                         sessionId,
+                        pendingEntry.promptId,
                         originatorClientId,
                         'forward_failed',
                       );
@@ -4908,6 +5001,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   broadcastPromptCancelledOnce(
                     entry,
                     sessionId,
+                    pendingEntry.promptId,
                     originatorClientId,
                   );
                   cancelPendingForSession(sessionId);
@@ -4982,6 +5076,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               try {
                 entry.events.publish({
                   type: 'pending_prompt_completed',
+                  promptId: pendingEntry.promptId,
                   data: {
                     sessionId,
                     promptId: pendingEntry.promptId,
@@ -5054,7 +5149,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // that POSTs /cancel and then drops its socket doesn't emit two
       // `prompt_cancelled` frames for the same turn. The latch resets at
       // the next prompt start, so a later turn still broadcasts.
-      broadcastPromptCancelledOnce(entry, sessionId, cancelOriginatorClientId);
+      broadcastPromptCancelledOnce(
+        entry,
+        sessionId,
+        entry.activePromptId,
+        cancelOriginatorClientId,
+      );
       // ACP spec: cancelling a prompt MUST resolve outstanding
       // requestPermission calls with outcome.cancelled. Do this *before*
       // forwarding the notification so the agent's wind-down sees the
@@ -6612,6 +6712,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       try {
         entry.events.publish({
           type: 'pending_prompt_completed',
+          promptId,
           data: { sessionId, promptId, state: 'removed' },
           ...(target.originatorClientId
             ? { originatorClientId: target.originatorClientId }
