@@ -9,6 +9,7 @@ import type {
   Envelope,
   SessionTarget,
 } from '@qwen-code/channel-base';
+import type { ChannelProactiveDeliveryError } from '@qwen-code/channel-base';
 
 type LifecycleBase = Omit<
   Extract<ChannelTaskLifecycleEvent, { type: 'started' }>,
@@ -91,6 +92,7 @@ vi.mock('@qwen-code/channel-base', async () => {
     '@qwen-code/channel-base',
   );
   return {
+    ChannelProactiveDeliveryError: real.ChannelProactiveDeliveryError,
     ChannelBase: class {
       protected config: Record<string, unknown>;
       protected name: string;
@@ -2305,6 +2307,12 @@ describe('DingtalkChannel proactive send', () => {
     await expect(
       channel.pushProactive(groupTarget, 'hello'),
     ).rejects.not.toThrow(/perm denied/);
+    await expect(channel.pushProactive(groupTarget, 'hello')).rejects.toEqual(
+      expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
+        disposition: 'permanent',
+        name: 'ChannelProactiveDeliveryError',
+      }),
+    );
 
     const logged = writeSpy.mock.calls.map((c) => String(c[0])).join('');
     expect(logged).toContain(

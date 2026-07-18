@@ -20032,7 +20032,28 @@ describe('Session', () => {
       mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
       mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
       rebuildSessionWithGuard();
-      installPendingTodoTool();
+      const executeTodo = installPendingTodoTool();
+      const completedTodos = pendingTodos.map((todo) => ({
+        ...todo,
+        status: 'completed' as const,
+      }));
+      executeTodo
+        .mockResolvedValueOnce({
+          llmContent: JSON.stringify(pendingTodos),
+          returnDisplay: {
+            type: 'todo_list',
+            todos: pendingTodos,
+            changes: {},
+          },
+        })
+        .mockResolvedValueOnce({
+          llmContent: JSON.stringify(completedTodos),
+          returnDisplay: {
+            type: 'todo_list',
+            todos: completedTodos,
+            changes: {},
+          },
+        });
       mockChat.getLastModelMessageText = vi
         .fn()
         .mockReturnValue('terminal guarded answer');
@@ -20068,6 +20089,23 @@ describe('Session', () => {
         )
         // Tool follow-up is a draft; Guard continuations replace it.
         .mockResolvedValueOnce(answerStream('draft answer'))
+        // Guard finishes the outstanding Todo.
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'guard-complete-todo',
+                    name: core.ToolNames.TODO_WRITE,
+                    args: { todos: completedTodos },
+                  },
+                ],
+              },
+            },
+          ]),
+        )
         .mockResolvedValue(answerStream('terminal guarded answer'));
 
       await runGuardPrompt();
@@ -20084,6 +20122,113 @@ describe('Session', () => {
           },
         ),
       );
+    });
+
+    it('does not deliver a cron draft when a Guard continuation is permission-cancelled', async () => {
+      const firedAt = 1_718_000_000_000;
+      const delivery: core.CronTaskDelivery = {
+        kind: 'channel',
+        target: { channelName: 'dingtalk', chatId: 'group-42' },
+      };
+      const scheduler = {
+        hasPendingWork: true,
+        enableDurable: vi.fn().mockResolvedValue(undefined),
+        start: vi.fn(
+          (
+            callback: (job: {
+              id: string;
+              prompt: string;
+              cronExpr: string;
+              lastFiredAt: number;
+              delivery: core.CronTaskDelivery;
+            }) => void,
+          ) =>
+            callback({
+              id: 'cancelled-guard-task',
+              prompt: 'scheduled work',
+              cronExpr: '* * * * *',
+              lastFiredAt: firedAt,
+              delivery,
+            }),
+        ),
+        stop: vi.fn(),
+        list: vi.fn().mockReturnValue([]),
+        getExitSummary: vi.fn().mockReturnValue(undefined),
+      };
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+      rebuildSessionWithGuard();
+      installPendingTodoTool();
+      const todoTool = mockToolRegistry.getTool(core.ToolNames.TODO_WRITE);
+      const cancelledExecute = vi.fn();
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        name === core.ToolNames.TODO_WRITE
+          ? todoTool
+          : mockConfirmingTool(name, cancelledExecute),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
+        outcome: { outcome: 'cancelled' },
+      });
+      mockChat.getLastModelMessageText = vi
+        .fn()
+        .mockReturnValue('draft before cancelled continuation');
+      const answerStream = (text: string) =>
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: { candidates: [{ content: { parts: [{ text }] } }] },
+          },
+        ]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'cron-todo-before-cancel',
+                    name: core.ToolNames.TODO_WRITE,
+                    args: { todos: pendingTodos },
+                  },
+                ],
+              },
+            },
+          ]),
+        )
+        .mockResolvedValueOnce(answerStream('draft answer'))
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'guard-permission-cancel',
+                    name: core.ToolNames.ASK_USER_QUESTION,
+                    args: {
+                      questions: [
+                        { header: 'Continue?', question: 'Continue?' },
+                      ],
+                    },
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+
+      await runGuardPrompt();
+      const internals = session as unknown as { cronProcessing: boolean };
+      await vi.waitFor(() => {
+        expect(mockClient.requestPermission).toHaveBeenCalled();
+        expect(internals.cronProcessing).toBe(false);
+      });
+
+      expect(cancelledExecute).not.toHaveBeenCalled();
+      expect(enqueueScheduledDeliverySpy).not.toHaveBeenCalled();
     });
 
     it('suspends an armed guard when a cron stream aborts', async () => {

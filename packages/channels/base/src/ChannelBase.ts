@@ -18,6 +18,7 @@ import type {
   SessionTarget,
 } from './types.js';
 import { BlockStreamer } from './BlockStreamer.js';
+import { ChannelProactiveDeliveryError } from './ChannelProactiveDeliveryError.js';
 import { GroupGate } from './GroupGate.js';
 import { DmGate } from './DmGate.js';
 import { GroupHistoryStore } from './group-history-store.js';
@@ -699,10 +700,14 @@ export abstract class ChannelBase {
     text: string,
   ): Promise<void> {
     if (target.channelName !== this.name) {
-      throw new Error(`Channel "${this.name}" does not own delivery target.`);
+      throw new ChannelProactiveDeliveryError(
+        'permanent',
+        `Channel "${this.name}" does not own delivery target.`,
+      );
     }
     if (!this.supportsProactiveSend()) {
-      throw new Error(
+      throw new ChannelProactiveDeliveryError(
+        'permanent',
         `Channel "${this.name}" does not support proactive delivery.`,
       );
     }
@@ -714,7 +719,8 @@ export abstract class ChannelBase {
       ...(target.isGroup !== undefined ? { isGroup: target.isGroup } : {}),
     };
     if (!this.supportsProactiveTarget(sessionTarget)) {
-      throw new Error(
+      throw new ChannelProactiveDeliveryError(
+        'permanent',
         `Channel "${this.name}" does not support this proactive target.`,
       );
     }
@@ -4161,6 +4167,7 @@ export abstract class ChannelBase {
         : sanitizedChatName || envelope.chatId;
     const observation: ObservedChannelContactObservation = {
       user: { id: envelope.senderId, label: userLabel },
+      ...(!envelope.isGroup ? { chatId: envelope.chatId } : {}),
       ...(envelope.isGroup
         ? {
             group: { id: envelope.chatId, label: groupLabel },

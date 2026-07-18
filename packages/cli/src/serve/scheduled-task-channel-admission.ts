@@ -41,13 +41,13 @@ export function resolveObservedScheduledTaskChannelTarget(
       ? graph.users.find(
           (candidate) =>
             candidate.channelName === target.channelName &&
-            candidate.id === target.chatId,
+            candidate.chatId === target.chatId,
         )
       : undefined;
-  const userTarget = user
+  const userTarget = user?.chatId
     ? ({
         channelName: user.channelName,
-        chatId: user.id,
+        chatId: user.chatId,
         isGroup: false,
       } satisfies CronTaskChannelTarget)
     : null;

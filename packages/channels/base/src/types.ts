@@ -143,12 +143,16 @@ export interface ObservedChannelIdentity {
 
 export interface ObservedChannelContactObservation {
   user: ObservedChannelIdentity;
+  /** Routable conversation id for a direct chat. Omitted for group observations. */
+  chatId?: string;
   group?: ObservedChannelIdentity;
   topic?: ObservedChannelIdentity;
 }
 
 export interface ObservedChannelContact extends ObservedChannelIdentity {
   channelName: string;
+  /** Routable direct-chat id. Users observed only in groups do not have one. */
+  chatId?: string;
   lastObservedAt: string;
 }
 

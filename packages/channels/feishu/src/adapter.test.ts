@@ -21,6 +21,7 @@ import { FeishuChannel } from './FeishuAdapter.js';
 import type {
   ChannelAgentBridge,
   ChannelConfig,
+  ChannelProactiveDeliveryError,
   ChannelTaskLifecycleEvent,
   SessionTarget,
 } from '@qwen-code/channel-base';
@@ -1290,6 +1291,34 @@ describe('FeishuChannel', () => {
         expect.stringContaining('sendMessage failed: HTTP 500'),
       );
       stderrSpy.mockRestore();
+    });
+
+    it('classifies a proactive 4xx response as a permanent delivery failure', async () => {
+      const channel = createTestableChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      vi.spyOn(global, 'fetch').mockResolvedValue(
+        new Response('permission denied', { status: 403 }),
+      );
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+      await expect(
+        channel.pushLoop(
+          {
+            channelName: 'test',
+            senderId: 'ou_user',
+            chatId: 'oc_chat_id',
+          },
+          'hello',
+        ),
+      ).rejects.toEqual(
+        expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
+          disposition: 'permanent',
+          message: 'Feishu sendMessage failed: HTTP 403',
+        }),
+      );
     });
 
     it('sends proactive loop output to direct chats', async () => {

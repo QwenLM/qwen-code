@@ -86,9 +86,11 @@ and is therefore the wrong contract for delivering an already-produced result.
 
 ### Observed contacts
 
-#7109 exposes complete `channelName`, user ID, group ID, and topic ID values for
-recent accepted inbound conversations. The registry is bounded and freshness
-filtered. It is a discovery source, not a permanent routing database.
+#7109 exposes `channelName`, user ID, group ID, and topic ID values for recent
+accepted inbound conversations. This branch also retains the routable direct
+conversation `chatId`, because some platforms (notably Feishu) use a chat ID
+that is different from the sender's user ID. The registry is bounded and
+freshness filtered. It is a discovery source, not a permanent routing database.
 
 ## Deployment and client model
 
@@ -201,7 +203,9 @@ There are two trusted admission paths:
 The second check prevents an authenticated UI request from turning arbitrary
 platform identifiers into an unreviewed outbound route. Admission is checked
 when the target is created or replaced. Delivery does not require the
-observation to remain fresh afterward.
+observation to remain fresh afterward. Direct-message admission matches the
+observed conversation `chatId`, never the display/user identity as a routing
+substitute.
 
 ## Run and delivery model
 
@@ -276,7 +280,10 @@ to a same-named Channel in another workspace.
 The daemon persists delivery state before the first send. The dispatcher makes
 at most five attempts. Retry delay doubles from one second and is capped at one
 minute. `channel_delivery_invalid` is permanent; worker unavailability,
-timeouts, queue pressure, and generic delivery failure are retried.
+timeouts, queue pressure, and generic delivery failure are retried. Adapters
+classify platform responses with a typed proactive-delivery error: ordinary
+HTTP 4xx and invalid recipients are permanent, while 408, 429, 5xx, rate limits,
+and transport failures are transient.
 
 Where a platform supports an idempotency key, the adapter should use
 `deliveryId`. Without platform support, a timeout after the remote platform
@@ -320,9 +327,11 @@ typed error and never silently drops the target.
 The implementation is based on `main`, including the merged #7109 observed
 contact registry. The production daemon wires that registry through a narrow
 target-admission dependency and accepts only an exact workspace-scoped match
-observed within the last seven days. Minimal embedders that do not install the
-provider continue to fail closed. The trusted current-IM-chat path is admitted
-directly by the daemon Channel controller after the normal inbound gates.
+observed within the last seven days. For direct messages it uses the observed
+routable conversation `chatId`; it does not assume that a platform user ID is a
+sendable chat ID. Minimal embedders that do not install the provider continue
+to fail closed. The trusted current-IM-chat path is admitted directly by the
+daemon Channel controller after the normal inbound gates.
 
 ## IM-originated task creation and compatibility
 
@@ -468,7 +477,8 @@ a second scheduler and is outside this design.
 4. Connect #7109's merged observed-contact provider to target admission and
    expose the capability to authenticated daemon clients.
 5. Add Web Shell and daemon-aware CLI presentation while keeping standalone
-   local cron/loop behavior unchanged.
+   local cron/loop behavior unchanged. That presentation work is not part of
+   the current runtime PR.
 6. Add an optional hosting wake-up integration only for deployments that stop
    daemons between deadlines.
 

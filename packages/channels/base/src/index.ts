@@ -27,6 +27,8 @@ export type {
 export { BlockStreamer } from './BlockStreamer.js';
 export type { BlockStreamerOptions } from './BlockStreamer.js';
 export { ChannelBase } from './ChannelBase.js';
+export { ChannelProactiveDeliveryError } from './ChannelProactiveDeliveryError.js';
+export type { ChannelProactiveDeliveryDisposition } from './ChannelProactiveDeliveryError.js';
 export type {
   ChannelBaseOptions,
   ChannelLoopController,

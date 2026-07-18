@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import * as lark from '@larksuiteoapi/node-sdk';
 import {
   ChannelBase,
+  ChannelProactiveDeliveryError,
   isTerminalTaskLifecycleType,
 } from '@qwen-code/channel-base';
 import { buildCardContent, extractTitle, splitChunks } from './markdown.js';
@@ -740,14 +741,20 @@ export class FeishuChannel extends ChannelBase {
             `[Feishu:${this.name}] sendMessage failed: HTTP ${resp.status} ${detail}\n`,
           );
           if (throwOnFailure) {
-            throw new Error(`Feishu sendMessage failed: HTTP ${resp.status}`);
+            throw new ChannelProactiveDeliveryError(
+              resp.status === 408 || resp.status === 429 || resp.status >= 500
+                ? 'transient'
+                : 'permanent',
+              `Feishu sendMessage failed: HTTP ${resp.status}`,
+            );
           }
         }
       } catch (err) {
         if (
           throwOnFailure &&
           err instanceof Error &&
-          err.message.startsWith('Feishu sendMessage failed:')
+          (err instanceof ChannelProactiveDeliveryError ||
+            err.message.startsWith('Feishu sendMessage failed:'))
         ) {
           throw err;
         }

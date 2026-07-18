@@ -85,6 +85,17 @@ const mockSelectFirstModel = vi.hoisted(() =>
 const mockSanitizeLogText = vi.hoisted(() =>
   vi.fn((value: unknown) => String(value).replace(/[\r\n]/g, ' ')),
 );
+const MockChannelProactiveDeliveryError = vi.hoisted(
+  () =>
+    class extends Error {
+      constructor(
+        readonly disposition: 'permanent' | 'transient',
+        message: string,
+      ) {
+        super(message);
+      }
+    },
+);
 const mockDefaultDaemonClientCapabilities = vi.hoisted(() =>
   vi.fn().mockResolvedValue({
     v: 1,
@@ -210,6 +221,7 @@ vi.mock('./durable-loop-controller.js', () => ({
 
 vi.mock('@qwen-code/channel-base', () => ({
   DaemonChannelBridge: mockDaemonChannelBridge,
+  ChannelProactiveDeliveryError: MockChannelProactiveDeliveryError,
   sanitizeLogText: mockSanitizeLogText,
   SessionRouter: mockSessionRouter,
 }));
@@ -2395,7 +2407,8 @@ describe('daemonWorkerCommand', () => {
       deliverProactive: vi
         .fn()
         .mockRejectedValue(
-          new Error(
+          new MockChannelProactiveDeliveryError(
+            'permanent',
             `DingTalk proactive send failed: invalid direct recipient ${secret}`,
           ),
         ),

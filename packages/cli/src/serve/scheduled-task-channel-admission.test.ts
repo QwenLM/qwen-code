@@ -7,6 +7,7 @@ const graph: ObservedChannelContactGraph = {
     {
       channelName: 'dingtalk',
       id: 'user-1',
+      chatId: 'direct-chat-1',
       label: 'Ada',
       lastObservedAt: '2026-07-18T00:00:00.000Z',
     },
@@ -50,13 +51,20 @@ describe('resolveObservedScheduledTaskChannelTarget', () => {
     expect(
       resolveObservedScheduledTaskChannelTarget(graph, {
         channelName: 'dingtalk',
-        chatId: 'user-1',
+        chatId: 'direct-chat-1',
       }),
     ).toEqual({
       channelName: 'dingtalk',
-      chatId: 'user-1',
+      chatId: 'direct-chat-1',
       isGroup: false,
     });
+
+    expect(
+      resolveObservedScheduledTaskChannelTarget(graph, {
+        channelName: 'dingtalk',
+        chatId: 'user-1',
+      }),
+    ).toBeNull();
   });
 
   it('rejects unknown, mismatched, and ambiguous targets', () => {
@@ -79,6 +87,7 @@ describe('resolveObservedScheduledTaskChannelTarget', () => {
         {
           channelName: 'dingtalk',
           id: 'same-id',
+          chatId: 'same-id',
           label: 'User',
           lastObservedAt: '2026-07-18T00:00:00.000Z',
         },

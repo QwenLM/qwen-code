@@ -378,6 +378,8 @@ type StopContinuationResult =
       supersededAutomaticContinuation?: boolean;
     };
 
+type StopHookCompletionState = { interrupted: boolean };
+
 type BeforeModelSendDecision =
   | { kind: 'send'; message: Part[] }
   | { kind: 'stop'; stopReason: PromptResponse['stopReason'] };
@@ -2728,7 +2730,11 @@ export class Session implements SessionContext {
     messageBus: MessageBus | undefined,
     allowExternalHooks = true,
     modelOverride?: string,
+    completionState?: StopHookCompletionState,
   ): Promise<{ stopReason: PromptResponse['stopReason'] }> {
+    const markInterrupted = () => {
+      if (completionState) completionState.interrupted = true;
+    };
     const stopHookBlockingCap = this.config.getStopHookBlockingCap();
     let stopHookIterationCount = 0;
     let stopHookReasons: string[] = [];
@@ -2744,6 +2750,7 @@ export class Session implements SessionContext {
     while (true) {
       if (pendingSend.signal.aborted) {
         this.todoStopGuard.suspend();
+        markInterrupted();
         return { stopReason: 'cancelled' };
       }
 
@@ -2752,6 +2759,7 @@ export class Session implements SessionContext {
       }
 
       if (this.todoStopGuardQueuedPromptPriority) {
+        markInterrupted();
         return { stopReason: 'end_turn' };
       }
 
@@ -2778,11 +2786,13 @@ export class Session implements SessionContext {
             },
           );
           if (continuation.kind === 'terminal') {
+            markInterrupted();
             return { stopReason: continuation.stopReason };
           }
           continue;
         }
         if (waitsForQueuedPrompt) {
+          markInterrupted();
           return { stopReason: 'end_turn' };
         }
       }
@@ -2830,6 +2840,7 @@ export class Session implements SessionContext {
 
         if (pendingSend.signal.aborted) {
           this.todoStopGuard.suspend();
+          markInterrupted();
           return { stopReason: 'cancelled' };
         }
 
@@ -2856,6 +2867,7 @@ export class Session implements SessionContext {
               },
             );
             if (continuation.kind === 'terminal') {
+              markInterrupted();
               return { stopReason: continuation.stopReason };
             }
             // The hook already completed. Process its output below so its
@@ -2895,7 +2907,10 @@ export class Session implements SessionContext {
 
       if (guardDecision?.kind === 'exhausted') {
         await this.#emitTodoStopGuardExhausted(guardDecision);
-        if (!externalReason) return { stopReason: 'end_turn' };
+        if (!externalReason) {
+          markInterrupted();
+          return { stopReason: 'end_turn' };
+        }
       }
 
       if (externalReason && stopHookIterationCount >= stopHookBlockingCap) {
@@ -2911,10 +2926,12 @@ export class Session implements SessionContext {
         this.todoStopGuard.suspend();
         await this.messageEmitter.emitAgentMessage(warning);
         debugLogger.warn(warning);
+        markInterrupted();
         return { stopReason: 'end_turn' };
       }
 
       if (queuedPromptArrivedDuringStopHook) {
+        markInterrupted();
         return { stopReason: 'end_turn' };
       }
 
@@ -2970,6 +2987,7 @@ export class Session implements SessionContext {
         stopHookReasons = stopHookReasons.slice(0, -1);
       }
       if (continuation.kind === 'terminal') {
+        markInterrupted();
         return { stopReason: continuation.stopReason };
       }
     }
@@ -4569,17 +4587,25 @@ export class Session implements SessionContext {
                 }
               }
               if (this.todoStopGuard.needsStopInspection) {
+                const stopCompletion: StopHookCompletionState = {
+                  interrupted: false,
+                };
                 const guardStop = await this.#handleStopHookLoop(
                   ac,
                   promptId,
                   false,
                   undefined,
                   false,
+                  undefined,
+                  stopCompletion,
                 );
                 if (guardStop.stopReason === 'max_tokens') {
                   this.#stopCronAfterTokenLimit();
                 }
-                if (guardStop.stopReason !== 'end_turn') {
+                if (
+                  stopCompletion.interrupted ||
+                  guardStop.stopReason !== 'end_turn'
+                ) {
                   return;
                 }
                 // Stop hooks and Todo Stop Guard may have produced one or more

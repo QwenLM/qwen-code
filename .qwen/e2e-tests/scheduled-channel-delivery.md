@@ -5,8 +5,10 @@
 Verify that a daemon-owned scheduled task can deliver an already-produced
 final response through the Channel worker without starting another Agent turn.
 The implementation includes task persistence, `/loop` integration, final-turn
-capture, durable outbox recovery, and daemon-to-worker transport. Selecting an
-arbitrary observed group through Web Shell remains gated on #7109 integration.
+capture, durable outbox recovery, daemon-to-worker transport, and exact fresh
+target admission from the merged #7109 observed-contact registry. Web Shell can
+round-trip the additive task fields, but its destination-picker presentation
+and a real platform send remain manual E2E work outside this runtime PR.
 
 ## Baseline
 
@@ -49,11 +51,12 @@ arbitrary observed group through Web Shell remains gated on #7109 integration.
    recovery sends the stored final text.
 3. Verify Web Shell can read tasks containing additive `delivery` and
    `sessionBinding` fields and still edits other fields without clearing them.
-4. After #7109 lands, wire its observed-target admission provider, create a task
-   through Web Shell/hosted BFF, and verify an owned task session delivers to
-   the selected group.
-5. Verify a hosted client uses the workspace-qualified REST route and owns no
+4. Verify the merged #7109 provider exposes only fresh observed targets and
+   direct-message entries retain a routable chat ID distinct from user identity.
+5. After the Web Shell/hosted BFF picker is implemented, create a task through
+   it and verify an owned task session delivers to the selected group.
+6. Verify a hosted client uses the workspace-qualified REST route and owns no
    local timer, task store, daemon token, or Channel credential.
-6. Stop the daemon before a deadline; verify the documented deployment
+7. Stop the daemon before a deadline; verify the documented deployment
    boundary (no exact fire without an external wake-up) and catch-up behavior
    after restart.

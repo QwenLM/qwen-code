@@ -12,6 +12,7 @@ import {
 import { loadSettings } from '../../config/settings.js';
 import {
   DaemonChannelBridge,
+  ChannelProactiveDeliveryError,
   sanitizeLogText,
   SessionRouter,
 } from '@qwen-code/channel-base';
@@ -1095,6 +1096,12 @@ function classifyWebhookTaskValidationError(
 function classifyChannelDeliveryError(
   error: unknown,
 ): ChannelDeliveryErrorCode {
+  if (
+    error instanceof ChannelProactiveDeliveryError &&
+    error.disposition === 'permanent'
+  ) {
+    return 'channel_delivery_invalid';
+  }
   const message = error instanceof Error ? error.message : String(error);
   if (/^Channel ".+" is not running\.$/u.test(message)) {
     return 'channel_worker_unavailable';
@@ -1102,8 +1109,7 @@ function classifyChannelDeliveryError(
   if (
     message.includes('does not own delivery target') ||
     message.includes('does not support proactive delivery') ||
-    message.includes('does not support this proactive target') ||
-    message.includes('invalid direct recipient')
+    message.includes('does not support this proactive target')
   ) {
     return 'channel_delivery_invalid';
   }

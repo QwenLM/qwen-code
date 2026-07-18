@@ -20,6 +20,7 @@ export const OBSERVED_CONTACT_MAX_FRESH_WITHIN_SECONDS = 365 * 24 * 60 * 60;
 interface PersistedObservedContact {
   channelName: string;
   user: ObservedChannelIdentity;
+  chatId?: string;
   group?: ObservedChannelIdentity;
   topic?: ObservedChannelIdentity;
   lastObservedAt: string;
@@ -69,6 +70,7 @@ export class ObservedChannelContactStore {
     const next: PersistedObservedContact = {
       channelName,
       user: this.normalizeIdentity(observation.user),
+      ...(observation.chatId ? { chatId: observation.chatId } : {}),
       ...(observation.group
         ? { group: this.normalizeIdentity(observation.group) }
         : {}),
@@ -121,6 +123,7 @@ export class ObservedChannelContactStore {
           users.set(key, {
             channelName: observation.channelName,
             ...observation.user,
+            ...(observation.chatId ? { chatId: observation.chatId } : {}),
             lastObservedAt: observation.lastObservedAt,
           });
         }
@@ -231,6 +234,7 @@ export class ObservedChannelContactStore {
     const channelName = record['channelName'];
     const lastObservedAt = record['lastObservedAt'];
     const user = this.parseIdentity(record['user']);
+    const chatId = record['chatId'];
     const group =
       record['group'] === undefined
         ? undefined
@@ -241,6 +245,7 @@ export class ObservedChannelContactStore {
         : this.parseIdentity(record['topic']);
     if (
       !this.isBoundedString(channelName, MAX_CHANNEL_NAME_LENGTH) ||
+      (chatId !== undefined && !this.isBoundedString(chatId, MAX_ID_LENGTH)) ||
       typeof lastObservedAt !== 'string' ||
       !this.isCanonicalTimestamp(lastObservedAt) ||
       (topic !== undefined && group === undefined)
@@ -250,6 +255,7 @@ export class ObservedChannelContactStore {
     return {
       channelName,
       user,
+      ...(typeof chatId === 'string' ? { chatId } : {}),
       ...(group ? { group } : {}),
       ...(topic ? { topic } : {}),
       lastObservedAt,
@@ -279,6 +285,9 @@ export class ObservedChannelContactStore {
     if (
       !this.isBoundedString(channelName, MAX_CHANNEL_NAME_LENGTH) ||
       !this.isIdentity(observation.user) ||
+      (observation.chatId !== undefined &&
+        !this.isBoundedString(observation.chatId, MAX_ID_LENGTH)) ||
+      (observation.chatId !== undefined && observation.group !== undefined) ||
       (observation.group !== undefined &&
         !this.isIdentity(observation.group)) ||
       (observation.topic !== undefined &&

@@ -745,6 +745,7 @@ describe('ChannelBase', () => {
 
       expect(observe).toHaveBeenCalledWith('test-chan', {
         user: { id: 'user1', label: 'User 1' },
+        chatId: 'chat1',
       });
       expect(bridge.prompt).toHaveBeenCalled();
     });
@@ -757,6 +758,7 @@ describe('ChannelBase', () => {
 
       expect(observe).toHaveBeenCalledWith('test-chan', {
         user: { id: 'user1', label: 'user1' },
+        chatId: 'chat1',
       });
     });
 
