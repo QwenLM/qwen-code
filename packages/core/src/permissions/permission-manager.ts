@@ -779,7 +779,13 @@ export class PermissionManager {
           ] as const;
           return (
             restrictiveRules.some((rule) =>
-              matchesRule(rule, ...opMatchArgs, undefined, 'canonical'),
+              matchesRule(
+                rule,
+                ...opMatchArgs,
+                undefined,
+                undefined,
+                'canonical',
+              ),
             ) ||
             allowRules.some((rule) =>
               matchesRule(rule, ...opMatchArgs, undefined),
@@ -875,7 +881,13 @@ export class PermissionManager {
             undefined,
           ] as const;
           return askRules.some((rule) =>
-            matchesRule(rule, ...opMatchArgs, undefined, 'canonical'),
+            matchesRule(
+              rule,
+              ...opMatchArgs,
+              undefined,
+              undefined,
+              'canonical',
+            ),
           );
         })
       ) {
