@@ -108,7 +108,18 @@ jobs:
       # coalesce, unrelated targets never collide); anything else (dispatch)
       # → unique per run_id, and cancel-in-progress false below means manual
       # dispatches are never cancelled at all.
-      group: "${{ github.event_name == 'schedule' && 'qwen-autofix-route-cron' || (github.event_name == 'pull_request_review' && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)) || (github.event_name == 'issues' && format('qwen-autofix-route-issue-{0}', github.event.issue.number)) || format('qwen-autofix-route-{0}', github.run_id) }}"
+      # SECURITY: only reviews whose PAYLOAD already looks trusted (repo
+      # association, or the review bot) may share the per-PR group — the group
+      # is entered before any step runs, so an arbitrary commenter's review
+      # would otherwise cancel a queued legitimate route for the same PR and
+      # then die in 'Decide phases', losing the real-time scan. Untrusted
+      # payloads get a run-unique group (cancel nothing, still fully
+      # authorized inside). The payload check is a CHEAP PRE-FILTER for group
+      # assignment only — 'Decide phases' remains the real permission gate,
+      # and a trusted sender the payload misses merely loses coalescing. The
+      # association list mirrors TRUSTED_ASSOC; the login mirrors REVIEW_BOT.
+      group: >-
+        ${{ github.event_name == 'schedule' && 'qwen-autofix-route-cron' || (github.event_name == 'pull_request_review' && (contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association) || github.event.review.user.login == 'qwen-code-ci-bot') && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)) || (github.event_name == 'issues' && format('qwen-autofix-route-issue-{0}', github.event.issue.number)) || format('qwen-autofix-route-{0}', github.run_id) }}
       cancel-in-progress: |-
         ${{ github.event_name != 'workflow_dispatch' }}
     permissions:
@@ -1363,6 +1374,41 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
         run: |-
           mkdir -p "${WORKDIR}"
+
+          # ---- address-time eligibility recheck ---------------------------
+          # Fan-out can hold this job queued for hours behind max-parallel,
+          # and the matrix snapshot cannot see lifecycle changes: a PR
+          # closed or merged while queued must not get a secret-bearing
+          # agent run, a branch push, or a comment; an author/base/head
+          # change must not be processed against stale assumptions. Re-fetch
+          # and require the same shape the scan selected. A failed fetch is
+          # UNKNOWN and discards too (fail closed — the next scan re-emits a
+          # still-valid target).
+          PR_LIVE="$(gh pr view "${PR}" --repo "${REPO}" \
+            --json state,author,isCrossRepository,baseRefName,headRefName 2> /dev/null || echo '{}')"
+          LIVE_STATE="$(jq -r '.state // ""' <<< "${PR_LIVE}")"
+          LIVE_AUTHOR="$(jq -r '.author.login // ""' <<< "${PR_LIVE}")"
+          LIVE_XREPO="$(jq -r 'if has("isCrossRepository") then .isCrossRepository else true end' <<< "${PR_LIVE}")"
+          LIVE_BASE="$(jq -r '.baseRefName // ""' <<< "${PR_LIVE}")"
+          LIVE_BRANCH="$(jq -r '.headRefName // ""' <<< "${PR_LIVE}")"
+          INELIGIBLE=''
+          if [[ "${LIVE_STATE}" != "OPEN" ]]; then INELIGIBLE="state='${LIVE_STATE:-unknown}'"
+          elif [[ "${LIVE_AUTHOR}" != "${AUTOFIX_BOT}" ]]; then INELIGIBLE="author='${LIVE_AUTHOR:-unknown}'"
+          elif [[ "${LIVE_XREPO}" != "false" ]]; then INELIGIBLE='fork head'
+          elif [[ "${LIVE_BASE}" != "main" ]]; then INELIGIBLE="base='${LIVE_BASE:-unknown}'"
+          elif [[ "${LIVE_BRANCH}" != "${BRANCH}" ]]; then INELIGIBLE="head branch is now '${LIVE_BRANCH:-unknown}'"
+          fi
+          if [[ -n "${INELIGIBLE}" ]]; then
+            echo "🫥 target no longer eligible (${INELIGIBLE}) — discarding without action or marker"
+            {
+              echo "stale=true"
+              echo "conflict=false"
+              echo "newest=${WATERMARK}"
+              echo "effective_round=${ROUND}"
+            } >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
           echo 'Restoring tracked build output before switching to the PR branch.'
           git status --short
           git restore --source=HEAD --staged --worktree .
@@ -1459,7 +1505,30 @@ jobs:
               echo "🫥 stale duplicate target: a sibling run already evaluated through ${LIVE_EVAL_WM} (round ${LIVE_MAX_ROUND}) and nothing is newer — discarding without action or marker"
             fi
           fi
+          # A NON-stale run must still not replay a sibling's work: if live
+          # markers advanced past the matrix snapshot, adopt the live
+          # watermark (so the renderers below list only feedback the fleet
+          # has not yet evaluated) and the live round (so the next marker
+          # continues the live sequence instead of double-writing a round).
+          if [[ "${STALE}" != "true" && -n "${LIVE_EVAL_WM}" && "${LIVE_EVAL_WM}" > "${WATERMARK}" && "${LIVE_EVAL_WM}" != "9999-12-31T23:59:59Z" ]]; then
+            echo "⏩ adopting live watermark ${LIVE_EVAL_WM} (matrix had ${WATERMARK})"
+            WATERMARK="${LIVE_EVAL_WM}"
+          fi
+          if [[ "${STALE}" != "true" && "${LIVE_MAX_ROUND}" -gt "${ROUND}" ]]; then
+            echo "⏩ adopting live round ${LIVE_MAX_ROUND} (matrix had ${ROUND})"
+            ROUND="${LIVE_MAX_ROUND}"
+          fi
+          # The live round may already sit at the hard cap (a sibling consumed
+          # the final round after this target was emitted). Running would do
+          # round MAX+1 work and write a second capped marker, concealing the
+          # cap — the scan itself skips capped PRs before even looking at
+          # conflicts, so mirror that and discard.
+          if [[ "${STALE}" != "true" && "${ROUND}" -ge "${MAX_ROUNDS}" ]]; then
+            STALE='true'
+            echo "⛔ live round ${ROUND} already at MAX_ROUNDS (${MAX_ROUNDS}) — discarding without action or marker"
+          fi
           echo "stale=${STALE}" >> "${GITHUB_OUTPUT}"
+          echo "effective_round=${ROUND}" >> "${GITHUB_OUTPUT}"
 
           # Render the actionable feedback into one prompt-ready file.
           {
@@ -1704,7 +1773,11 @@ jobs:
           OUTCOME: '${{ steps.verify.outputs.outcome }}'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
           NEWEST: '${{ steps.prepare.outputs.newest }}'
+          EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
         run: |-
+          # Prepare may have adopted a sibling's live round; the matrix value
+          # would double-write that round's marker.
+          ROUND="${EFFECTIVE_ROUND:-${ROUND}}"
           if [[ -z "${GITHUB_TOKEN}" ]]; then
             echo '::error::CI_DEV_BOT_PAT is required to push and report as qwen-code-dev-bot.'
             exit 1
@@ -1781,7 +1854,10 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           NEWEST: '${{ steps.prepare.outputs.newest }}'
           JOB_STATUS: '${{ job.status }}'
+          STALE: '${{ steps.prepare.outputs.stale }}'
+          EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
         run: |-
+          ROUND="${EFFECTIVE_ROUND:-${ROUND}}"
           SUFFIX=''
           [[ "${DRY_RUN}" == "true" ]] && SUFFIX=' (dry-run, nothing pushed)'
           {
@@ -1811,8 +1887,13 @@ jobs:
           # post a contradictory acted=false handoff on top of the published fix.
           # (A genuine push failure leaves OUTCOME=fixed but writes no marker, so
           # the next scan simply retries — it does not need a handoff here.)
+          #
+          # SUPPRESS likewise for a stale-discarded run: it did no work, so a
+          # late always()-step failure (e.g. artifact upload) must not turn a
+          # deliberate no-comment/no-marker discard into a handoff that
+          # consumes a round.
           POST_HANDOFF=false
-          if [[ "${DRY_RUN}" != "true" && -n "${GITHUB_TOKEN:-}" && "${OUTCOME:-unknown}" != "fixed" && "${OUTCOME:-unknown}" != "noop" ]]; then
+          if [[ "${DRY_RUN}" != "true" && "${STALE:-}" != "true" && -n "${GITHUB_TOKEN:-}" && "${OUTCOME:-unknown}" != "fixed" && "${OUTCOME:-unknown}" != "noop" ]]; then
             if [[ "${OUTCOME:-unknown}" == "failed" || "${JOB_STATUS:-}" != "success" ]]; then
               POST_HANDOFF=true
             fi
