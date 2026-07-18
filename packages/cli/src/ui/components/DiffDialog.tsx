@@ -474,10 +474,12 @@ function FileRow({
             : '';
   // Head-truncate so the basename (the part users actually read) is kept.
   // Use the sanitized displayPath — `file.path` may carry raw control bytes.
-  // For a rename, split the budget between old and new (reserving the " → "
-  // separator) so the combined width stays within maxPathChars.
-  const pathBudget = file.oldDisplayPath
-    ? Math.max(8, Math.floor((maxPathChars - 3) / 2))
+  // For a rename, show "old → new" only when there's room for both sides
+  // (≥19 cols, so each side gets ≥8 without overflowing); otherwise fall back
+  // to the new path alone so a narrow terminal doesn't break the row layout.
+  const renameFits = !!file.oldDisplayPath && maxPathChars >= 19;
+  const pathBudget = renameFits
+    ? Math.floor((maxPathChars - 3) / 2)
     : maxPathChars;
   const path = truncatePathStart(file.displayPath, pathBudget);
   return (
@@ -488,9 +490,9 @@ function FileRow({
       >
         {pointer}
       </Text>
-      {file.oldDisplayPath ? (
+      {renameFits ? (
         <Text color={theme.text.secondary}>
-          {truncatePathStart(file.oldDisplayPath, pathBudget)} →{' '}
+          {truncatePathStart(file.oldDisplayPath!, pathBudget)} →{' '}
         </Text>
       ) : null}
       <Text

@@ -8,7 +8,7 @@ import type { DaemonWorkspaceGitStatus } from '@qwen-code/sdk/daemon';
 import { getTranslator, I18nProvider } from '../i18n';
 import { GitBranchIndicator } from './GitBranchIndicator';
 
-let container: HTMLDivElement;
+let container: HTMLDivElement | undefined;
 let root: Root | undefined;
 
 function render(
@@ -40,11 +40,13 @@ afterEach(() => {
     act(() => root.unmount());
     root = undefined;
   }
-  container.remove();
+  // container is undefined when a non-render test (e.g. a localization test)
+  // runs in isolation; guard so remove() doesn't throw a TypeError.
+  container?.remove();
 });
 
 function chip(): HTMLElement {
-  const el = container.querySelector('[data-web-shell-git-branch]');
+  const el = container?.querySelector('[data-web-shell-git-branch]');
   if (!el) throw new Error('branch indicator was not rendered');
   return el as HTMLElement;
 }
@@ -58,7 +60,7 @@ describe('GitBranchIndicator', () => {
     expect(el.tagName).toBe('OUTPUT');
     expect(el.textContent).toContain(branch);
     // No interactive control — it is a status chip, not a button.
-    expect(container.querySelector('button')).toBeNull();
+    expect(container?.querySelector('button')).toBeNull();
     // A clean repo carries no dirty / operation markers.
     expect(el.getAttribute('data-dirty')).toBeNull();
     expect(el.getAttribute('data-operation')).toBeNull();
@@ -68,7 +70,7 @@ describe('GitBranchIndicator', () => {
     let opened = 0;
     render({ branch: 'main', onOpenDiff: () => (opened += 1) });
 
-    const button = container.querySelector('button');
+    const button = container?.querySelector('button');
     expect(button).not.toBeNull();
     expect(button?.getAttribute('data-clickable')).toBe('true');
     expect(button?.tagName).toBe('BUTTON');
@@ -163,6 +165,10 @@ describe('GitBranchIndicator', () => {
         branch: 'main',
         conflicted: 2,
         staged: 1,
+        // ahead would render ↑3 in the expanded chip; compact must suppress it
+        // (without ahead this assertion would be vacuously true).
+        hasUpstream: true,
+        ahead: 3,
       },
     });
 

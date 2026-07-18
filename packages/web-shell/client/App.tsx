@@ -1234,14 +1234,26 @@ export function App({
   // branch/dirty counts while the new fetch is in flight; same-workspace
   // re-runs (branch change, focus, poll) keep the live value to avoid flicker.
   const gitStatusWorkspaceCwdRef = useRef<string | undefined>(undefined);
+  // Active workspace: the connected session's workspace, else the workspace
+  // picked for the next session (locked / selected / primary). Computed once
+  // and shared by the git-status effect and the Changes-dialog entry point so
+  // the chip and the dialog always target the same repo.
+  const activeWorkspaceCwd = useMemo(
+    () =>
+      connection.sessionId
+        ? connection.workspaceCwd
+        : (lockedWorkspaceCwd ??
+          selectedWorkspaceCwd ??
+          workspaces.find((entry) => entry.primary)?.cwd),
+    [
+      connection.sessionId,
+      connection.workspaceCwd,
+      lockedWorkspaceCwd,
+      selectedWorkspaceCwd,
+      workspaces,
+    ],
+  );
   useEffect(() => {
-    // Active workspace: the connected session's workspace, else the workspace
-    // picked for the next session (locked / selected / primary).
-    const activeWorkspaceCwd = connection.sessionId
-      ? connection.workspaceCwd
-      : (lockedWorkspaceCwd ??
-        selectedWorkspaceCwd ??
-        workspaces.find((entry) => entry.primary)?.cwd);
     if (!activeWorkspaceCwd) {
       gitStatusWorkspaceCwdRef.current = undefined;
       setSelectedWorkspaceGitStatus(undefined);
@@ -1277,15 +1289,7 @@ export function App({
       window.removeEventListener('focus', onFocus);
       window.clearInterval(poll);
     };
-  }, [
-    connection.sessionId,
-    connection.workspaceCwd,
-    connection.gitBranch,
-    lockedWorkspaceCwd,
-    selectedWorkspaceCwd,
-    workspaces,
-    workspace.client,
-  ]);
+  }, [activeWorkspaceCwd, connection.gitBranch, workspace.client]);
   const onToastRef = useRef(onToast);
   onToastRef.current = onToast;
   const toastIdRef = useRef(0);
@@ -2807,14 +2811,10 @@ export function App({
       })),
     [connection.models],
   );
-  // The workspace the Changes dialog reads: the connected session's workspace,
-  // else the workspace picked for the next session (mirrors the git-status
-  // effect above so the chip and the dialog always target the same repo).
-  const gitDiffWorkspaceCwd = connection.sessionId
-    ? connection.workspaceCwd
-    : (lockedWorkspaceCwd ??
-      selectedWorkspaceCwd ??
-      workspaces.find((entry) => entry.primary)?.cwd);
+  // The workspace the Changes dialog reads — the same active workspace the
+  // git-status effect targets (computed once above), so the chip and the
+  // dialog always target the same repo.
+  const gitDiffWorkspaceCwd = activeWorkspaceCwd;
   const dialogOpen =
     showResumeDialog ||
     showDeleteDialog ||
