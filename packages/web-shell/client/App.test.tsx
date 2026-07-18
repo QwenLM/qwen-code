@@ -156,6 +156,8 @@ const {
       blocks: [] as unknown[],
       messages: [] as unknown[],
       latestChatEditorProps: null as ChatEditorTestProps | null,
+      latestToolApprovalKeyboardActive: null as boolean | null,
+      latestAskUserQuestionKeyboardActive: null as boolean | null,
       latestScheduledTasksProps: null as {
         onRunPrompt?: (
           prompt: string,
@@ -766,8 +768,30 @@ mockComponent('./components/dialogs/RewindDialog', 'RewindDialog');
 mockComponent('./components/messages/AgentsMessage', 'AgentsMessage');
 mockComponent('./components/messages/MemoryMessage', 'MemoryMessage');
 mockComponent('./components/messages/AuthMessage', 'AuthMessage');
-mockComponent('./components/messages/ToolApproval', 'ToolApproval');
-mockComponent('./components/messages/AskUserQuestion', 'AskUserQuestion');
+// Record keyboardActive so app-level tests can assert the overlay is told to
+// grab focus when it becomes topmost (the actual focus lives in the real
+// components, covered by their own unit tests).
+vi.doMock('./components/messages/ToolApproval', async () => {
+  const React = await import('react');
+  return {
+    ToolApproval: (props: { keyboardActive?: boolean }) => {
+      testState.latestToolApprovalKeyboardActive = props.keyboardActive ?? null;
+      return React.createElement('div', {
+        'data-web-shell-permission-panel': '',
+      });
+    },
+  };
+});
+vi.doMock('./components/messages/AskUserQuestion', async () => {
+  const React = await import('react');
+  return {
+    AskUserQuestion: (props: { keyboardActive?: boolean }) => {
+      testState.latestAskUserQuestionKeyboardActive =
+        props.keyboardActive ?? null;
+      return React.createElement('div', { 'data-web-shell-ask-panel': '' });
+    },
+  };
+});
 mockComponent('./components/messages/TasksStatusMessage', 'TasksStatusMessage');
 mockComponent('./components/messages/BtwMessage', 'BtwMessage');
 mockComponent('./components/QueuedPromptDisplay', 'QueuedPromptDisplay');
@@ -904,6 +928,8 @@ beforeEach(() => {
   testState.blocks = [];
   testState.messages = [];
   testState.latestChatEditorProps = null;
+  testState.latestToolApprovalKeyboardActive = null;
+  testState.latestAskUserQuestionKeyboardActive = null;
   testState.latestScheduledTasksProps = null;
   testState.latestGoalsProps = null;
   sidebarTokens.length = 0;
@@ -1350,10 +1376,14 @@ describe('App session callbacks', () => {
     editorFocus.mockClear();
     act(() => vi.runOnlyPendingTimers());
 
+    // The editor isn't refocused while an approval is pending; instead the app
+    // tells the approval overlay to take focus (keyboardActive), so a stray
+    // keystroke can't send a message past the pending approval.
     expect(editorFocus).not.toHaveBeenCalled();
-    expect(document.activeElement).toBe(
+    expect(
       document.querySelector('[data-testid="approval-overlay"]'),
-    );
+    ).not.toBeNull();
+    expect(testState.latestToolApprovalKeyboardActive).toBe(true);
   });
 
   it('does not show missing-session state for non-404/410 errors', async () => {
@@ -4178,7 +4208,10 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
   });
 
-  it('moves focus to the approval overlay when it appears', async () => {
+  it('marks the approval overlay keyboard-active when it appears', async () => {
+    // Focus itself is owned by ToolApproval/AskUserQuestion (covered by their
+    // own tests); the app's job is to render the overlay and tell it to grab
+    // focus (keyboardActive) once it's the topmost surface.
     const { rerender } = renderApp();
     await flush();
 
@@ -4188,9 +4221,31 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
 
-    const overlay = document.querySelector('[data-testid="approval-overlay"]');
-    expect(overlay).not.toBeNull();
-    expect(document.activeElement).toBe(overlay);
+    expect(
+      document.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+    expect(testState.latestToolApprovalKeyboardActive).toBe(true);
+  });
+
+  it('marks the ask-user question overlay keyboard-active when it appears', async () => {
+    // Symmetric to the ToolApproval case: guards against askUserOverlayVisible
+    // being mis-derived (e.g. from pendingToolApproval) so the question overlay
+    // would never pull focus.
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    expect(
+      document.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+    expect(testState.latestAskUserQuestionKeyboardActive).toBe(true);
   });
 
   it('closes the panel on Escape from outside the sidebar', async () => {
