@@ -270,6 +270,24 @@ index 1111111..2222222 100644
     const hunk = result.get('big.ts')![0];
     expect(hunk.lines.length).toBe(MAX_LINES_PER_FILE);
   });
+
+  it('records the capped file in the provided truncatedPaths set', () => {
+    const header = `diff --git a/big.ts b/big.ts
+index 1111111..2222222 100644
+--- a/big.ts
++++ b/big.ts
+@@ -1,${MAX_LINES_PER_FILE + 50} +1,${MAX_LINES_PER_FILE + 50} @@
+`;
+    const body = Array.from(
+      { length: MAX_LINES_PER_FILE + 50 },
+      (_, i) => ` line${i}`,
+    ).join('\n');
+    const truncatedPaths = new Set<string>();
+    parseGitDiff(header + body + '\n', truncatedPaths);
+    // The caller keys its `truncated` flag off this set, so it must name the
+    // file that actually lost lines to the cap.
+    expect(truncatedPaths.has('big.ts')).toBe(true);
+  });
 });
 
 describe('fetchGitDiff', () => {
@@ -693,6 +711,23 @@ describe('fetchGitDiffHunksForFile', () => {
     // An absolute path outside the git root is rejected.
     const outside = path.join(os.tmpdir(), 'elsewhere.txt');
     expect(await fetchGitDiffHunksForFile(repo, outside)).toBeNull();
+  });
+
+  it('accepts a literal `..foo` filename at the root (not a traversal)', async () => {
+    // A file literally named `..foo` is not a `..` segment; the absolute-path
+    // normalization must allow it (a bare startsWith('..') wrongly rejected it,
+    // so the diff viewer could not render such a file).
+    await fs.writeFile(path.join(repo, '..foo'), 'one\ntwo\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'init');
+    await fs.writeFile(path.join(repo, '..foo'), 'one\nTWO\n');
+
+    const result = await fetchGitDiffHunksForFile(
+      repo,
+      path.join(repo, '..foo'),
+    );
+    expect(result).not.toBeNull();
+    expect(result!.hunks[0].lines.some((l) => l === '+TWO')).toBe(true);
   });
 
   it('returns null outside a git repo', async () => {

@@ -414,7 +414,15 @@ function toRepoRelativePath(gitRoot: string, filePath: string): string | null {
     return filePath;
   }
   const rel = path.relative(gitRoot, filePath);
-  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  // Reject only a real climb-out (`..` or `../…`), not a literal `..foo`
+  // filename at the root, which a bare `startsWith('..')` would over-reject.
+  if (
+    rel === '' ||
+    rel === '..' ||
+    rel.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(rel)
+  )
+    return null;
   return rel;
 }
 
