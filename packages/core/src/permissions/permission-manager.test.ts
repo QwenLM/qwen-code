@@ -1073,6 +1073,17 @@ describe('matchesRule', () => {
     expect(matchesRule(parseRule(legacyName), providerSafeName)).toBe(true);
   });
 
+  it('keeps exact provider-safe MCP permission matches collision-safe', () => {
+    const dottedName = 'mcp__zybio__literature.search';
+    const slashedName = 'mcp__zybio__literature/search';
+    const dottedProviderName = normalizeToolNameForProvider(dottedName);
+    const slashedProviderName = normalizeToolNameForProvider(slashedName);
+
+    expect(dottedProviderName).not.toBe(slashedProviderName);
+    expect(matchesRule(parseRule(dottedName), dottedProviderName)).toBe(true);
+    expect(matchesRule(parseRule(dottedName), slashedProviderName)).toBe(false);
+  });
+
   it('MCP server-level match (2-part pattern)', async () => {
     const rule = parseRule('mcp__puppeteer');
     expect(matchesRule(rule, 'mcp__puppeteer__puppeteer_navigate')).toBe(true);
@@ -1080,10 +1091,34 @@ describe('matchesRule', () => {
     expect(matchesRule(rule, 'mcp__other__tool')).toBe(false);
   });
 
+  it('matches a legacy dotted MCP server rule against provider-safe names', () => {
+    const rule = parseRule('mcp__zybio.db');
+
+    expect(
+      matchesRule(
+        rule,
+        normalizeToolNameForProvider('mcp__zybio.db__query_uniprot'),
+      ),
+    ).toBe(true);
+    expect(matchesRule(rule, 'mcp__other__query_uniprot')).toBe(false);
+  });
+
   it('MCP wildcard match', async () => {
     const rule = parseRule('mcp__puppeteer__*');
     expect(matchesRule(rule, 'mcp__puppeteer__puppeteer_navigate')).toBe(true);
     expect(matchesRule(rule, 'mcp__other__tool')).toBe(false);
+  });
+
+  it('matches a legacy dotted MCP wildcard rule against provider-safe names', () => {
+    const rule = parseRule('mcp__zybio.db__*');
+
+    expect(
+      matchesRule(
+        rule,
+        normalizeToolNameForProvider('mcp__zybio.db__query_uniprot'),
+      ),
+    ).toBe(true);
+    expect(matchesRule(rule, 'mcp__other__query_uniprot')).toBe(false);
   });
 
   it('MCP intra-segment wildcard match (e.g. mcp__chrome__use_*)', async () => {
@@ -1490,20 +1525,19 @@ describe('PermissionManager', () => {
       ).toBe('allow');
     });
 
-    it('does not apply legacy aliases to MCP wildcard rules', async () => {
+    it('honors legacy MCP wildcard deny rules for provider-safe names', async () => {
       const legacyName = 'mcp__server__literature.search_pubmed';
       const providerSafeName = normalizeToolNameForProvider(legacyName);
       const pm2 = new PermissionManager(
-        makeConfig({ permissionsAllow: ['mcp__server__literature.*'] }),
+        makeConfig({ permissionsDeny: ['mcp__server__literature.*'] }),
       );
       pm2.initialize();
 
       expect(
         await pm2.evaluate({
           toolName: providerSafeName,
-          toolAliases: [legacyName],
         }),
-      ).toBe('default');
+      ).toBe('deny');
     });
 
     it('deny takes precedence over ask and allow', async () => {
