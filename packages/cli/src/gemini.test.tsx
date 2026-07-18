@@ -1806,29 +1806,14 @@ describe('gemini.tsx main function kitty protocol', () => {
     );
   });
 
-  it('should run cleanup before exiting on interactive SIGINT', async () => {
-    const { loadCliConfig, parseArguments } = await import(
-      './config/config.js'
-    );
-    const { loadSettings } = await import('./config/settings.js');
-    const cleanupModule = await import('./utils/cleanup.js');
-    const signalHandlers = new Map<string, (...args: unknown[]) => void>();
-    const processOnceSpy = vi.spyOn(process, 'once').mockImplementation(((
-      eventName: string | symbol,
-      listener: (...args: unknown[]) => void,
-    ) => {
-      if (eventName === 'SIGTERM' || eventName === 'SIGINT') {
-        signalHandlers.set(eventName, listener);
-      }
-      return process;
-    }) as typeof process.once);
-    const processExitSpy = vi
-      .spyOn(process, 'exit')
-      .mockImplementation((() => undefined) as unknown as typeof process.exit);
-    const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
-    runExitCleanupMock.mockResolvedValue(undefined);
-
-    vi.mocked(loadCliConfig).mockResolvedValue({
+  // Shared config/settings mocks for the interactive signal-handler tests.
+  function applyInteractiveSigintConfigMocks(
+    loadCliConfig: unknown,
+    loadSettings: unknown,
+  ) {
+    vi.mocked(
+      loadCliConfig as (typeof import('./config/config.js'))['loadCliConfig'],
+    ).mockResolvedValue({
       isInteractive: () => true,
       getQuestion: () => '',
       getSandbox: () => false,
@@ -1853,7 +1838,9 @@ describe('gemini.tsx main function kitty protocol', () => {
       getSessionId: () => 'test-session-id',
       isTelemetryInitializationDeferred: () => true,
     } as unknown as Config);
-    vi.mocked(loadSettings).mockReturnValue({
+    vi.mocked(
+      loadSettings as (typeof import('./config/settings.js'))['loadSettings'],
+    ).mockReturnValue({
       errors: [],
       merged: {
         advanced: {},
@@ -1866,20 +1853,198 @@ describe('gemini.tsx main function kitty protocol', () => {
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
+  }
+
+  it('exits on interactive SIGINT only after a second press inside the confirm window', async () => {
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const cleanupModule = await import('./utils/cleanup.js');
+    const signalHandlers = new Map<string, (...args: unknown[]) => void>();
+    const realProcessOn = process.on.bind(process);
+    const processOnSpy = vi.spyOn(process, 'on').mockImplementation(((
+      eventName: string | symbol,
+      listener: (...args: unknown[]) => void,
+    ) => {
+      if (eventName === 'SIGTERM' || eventName === 'SIGINT') {
+        // Keep only the first (named) handler per signal; the swallow
+        // listener registered when cleanup begins is tracked separately.
+        if (!signalHandlers.has(eventName as string)) {
+          signalHandlers.set(eventName as string, listener);
+        }
+        return process;
+      }
+      return realProcessOn(
+        eventName as string,
+        listener as (...args: unknown[]) => void,
+      );
+    }) as typeof process.on);
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as unknown as typeof process.exit);
+    const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
+    runExitCleanupMock.mockResolvedValue(undefined);
+
+    applyInteractiveSigintConfigMocks(loadCliConfig, loadSettings);
+    vi.mocked(parseArguments).mockResolvedValue({
+      extensions: undefined,
+    } as never);
+
+    const nowSpy = vi.spyOn(Date, 'now');
+    try {
+      await main();
+
+      // First SIGINT: no cleanup, no exit — just the press-again hint.
+      mockWriteStderrLine.mockClear();
+      nowSpy.mockReturnValue(100_000);
+      signalHandlers.get('SIGINT')?.();
+      await Promise.resolve();
+      expect(runExitCleanupMock).not.toHaveBeenCalled();
+      expect(processExitSpy).not.toHaveBeenCalled();
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        'Press Ctrl+C again to exit.',
+      );
+
+      // `when-exit` re-raises the signal microseconds later — the repeat is
+      // the same press, not a confirmation.
+      nowSpy.mockReturnValue(100_002);
+      signalHandlers.get('SIGINT')?.();
+      await Promise.resolve();
+      expect(runExitCleanupMock).not.toHaveBeenCalled();
+      expect(processExitSpy).not.toHaveBeenCalled();
+
+      // Second real press inside the confirm window: cleanup once, exit 130.
+      nowSpy.mockReturnValue(100_400);
+      signalHandlers.get('SIGINT')?.();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(setRawModeSpy).toHaveBeenCalledWith(false);
+      expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
+      expect(processExitSpy).toHaveBeenCalledWith(130);
+      // Cleanup registered a stand-in SIGINT listener so a stray Ctrl+C
+      // while cleanup runs cannot fall back to Node's default handler
+      // (#6776).
+      expect(
+        processOnSpy.mock.calls.filter(([event]) => event === 'SIGINT').length,
+      ).toBeGreaterThan(1);
+
+      // Further SIGINTs during cleanup are ignored (single cleanup pass).
+      nowSpy.mockReturnValue(100_800);
+      signalHandlers.get('SIGINT')?.();
+      await Promise.resolve();
+      expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
+    } finally {
+      nowSpy.mockRestore();
+      processOnSpy.mockRestore();
+      processExitSpy.mockRestore();
+    }
+  });
+
+  it('re-arms the SIGINT confirm window after it expires', async () => {
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const cleanupModule = await import('./utils/cleanup.js');
+    const signalHandlers = new Map<string, (...args: unknown[]) => void>();
+    const realProcessOn = process.on.bind(process);
+    const processOnSpy = vi.spyOn(process, 'on').mockImplementation(((
+      eventName: string | symbol,
+      listener: (...args: unknown[]) => void,
+    ) => {
+      if (eventName === 'SIGTERM' || eventName === 'SIGINT') {
+        if (!signalHandlers.has(eventName as string)) {
+          signalHandlers.set(eventName as string, listener);
+        }
+        return process;
+      }
+      return realProcessOn(
+        eventName as string,
+        listener as (...args: unknown[]) => void,
+      );
+    }) as typeof process.on);
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as unknown as typeof process.exit);
+    const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
+    runExitCleanupMock.mockResolvedValue(undefined);
+    applyInteractiveSigintConfigMocks(loadCliConfig, loadSettings);
+    vi.mocked(parseArguments).mockResolvedValue({
+      extensions: undefined,
+    } as never);
+
+    const nowSpy = vi.spyOn(Date, 'now');
+    try {
+      await main();
+
+      nowSpy.mockReturnValue(100_000);
+      signalHandlers.get('SIGINT')?.();
+      // 1.5s later — outside the window, so this press re-arms instead of
+      // exiting…
+      nowSpy.mockReturnValue(101_500);
+      signalHandlers.get('SIGINT')?.();
+      await Promise.resolve();
+      expect(runExitCleanupMock).not.toHaveBeenCalled();
+      expect(processExitSpy).not.toHaveBeenCalled();
+
+      // …and a press right after it lands inside the fresh window.
+      nowSpy.mockReturnValue(101_900);
+      signalHandlers.get('SIGINT')?.();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
+      expect(processExitSpy).toHaveBeenCalledWith(130);
+    } finally {
+      nowSpy.mockRestore();
+      processOnSpy.mockRestore();
+      processExitSpy.mockRestore();
+    }
+  });
+
+  it('still exits on the first SIGTERM with code 143', async () => {
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const cleanupModule = await import('./utils/cleanup.js');
+    const signalHandlers = new Map<string, (...args: unknown[]) => void>();
+    const realProcessOn = process.on.bind(process);
+    const processOnSpy = vi.spyOn(process, 'on').mockImplementation(((
+      eventName: string | symbol,
+      listener: (...args: unknown[]) => void,
+    ) => {
+      if (eventName === 'SIGTERM' || eventName === 'SIGINT') {
+        if (!signalHandlers.has(eventName as string)) {
+          signalHandlers.set(eventName as string, listener);
+        }
+        return process;
+      }
+      return realProcessOn(
+        eventName as string,
+        listener as (...args: unknown[]) => void,
+      );
+    }) as typeof process.on);
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as unknown as typeof process.exit);
+    const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
+    runExitCleanupMock.mockResolvedValue(undefined);
+    applyInteractiveSigintConfigMocks(loadCliConfig, loadSettings);
     vi.mocked(parseArguments).mockResolvedValue({
       extensions: undefined,
     } as never);
 
     await main();
-    signalHandlers.get('SIGINT')?.();
+    signalHandlers.get('SIGTERM')?.();
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(setRawModeSpy).toHaveBeenCalledWith(false);
     expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
-    expect(processExitSpy).toHaveBeenCalledWith(130);
+    expect(processExitSpy).toHaveBeenCalledWith(143);
 
-    processOnceSpy.mockRestore();
+    processOnSpy.mockRestore();
     processExitSpy.mockRestore();
   });
 
