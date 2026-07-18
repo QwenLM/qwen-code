@@ -711,12 +711,21 @@ export abstract class ChannelBase {
         `Channel "${this.name}" does not support proactive delivery.`,
       );
     }
+    if (
+      (target.type !== 'user' && target.type !== 'chat') ||
+      typeof target.id !== 'string' ||
+      target.id.trim().length === 0
+    ) {
+      throw new ChannelProactiveDeliveryError(
+        'permanent',
+        `Channel "${this.name}" received an invalid proactive target.`,
+      );
+    }
     const sessionTarget: SessionTarget = {
       channelName: target.channelName,
-      senderId: target.chatId,
-      chatId: target.chatId,
-      ...(target.threadId !== undefined ? { threadId: target.threadId } : {}),
-      ...(target.isGroup !== undefined ? { isGroup: target.isGroup } : {}),
+      senderId: target.id,
+      chatId: target.id,
+      isGroup: target.type === 'chat',
     };
     if (!this.supportsProactiveTarget(sessionTarget)) {
       throw new ChannelProactiveDeliveryError(

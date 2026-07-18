@@ -132,7 +132,7 @@ const webhookTask: ChannelWebhookTask = {
 const deliveryRequest: ChannelDeliveryRequest = {
   deliveryId: 'delivery-1',
   channelName: 'b',
-  target: { channelName: 'b', chatId: 'group-1', isGroup: true },
+  target: { type: 'chat', id: 'group-1' },
   text: 'inspection result',
 };
 

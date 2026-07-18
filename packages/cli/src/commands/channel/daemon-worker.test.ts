@@ -285,9 +285,8 @@ const deliveryRequest = {
   deliveryId: 'delivery-1',
   channelName: 'telegram',
   target: {
-    channelName: 'telegram',
-    chatId: 'group-1',
-    isGroup: true,
+    type: 'chat' as const,
+    id: 'group-1',
   },
   text: 'inspection result',
 };
@@ -1672,7 +1671,7 @@ describe('runChannelDaemonWorker', () => {
     await handle.deliverChannelMessage(deliveryRequest);
 
     expect(deliverProactive).toHaveBeenCalledWith(
-      deliveryRequest.target,
+      { channelName: 'telegram', ...deliveryRequest.target },
       deliveryRequest.text,
     );
     expect(mockBridgePrompt).not.toHaveBeenCalled();
@@ -2331,7 +2330,7 @@ describe('daemonWorkerCommand', () => {
       });
 
       expect(deliverProactive).toHaveBeenCalledWith(
-        deliveryRequest.target,
+        { channelName: 'telegram', ...deliveryRequest.target },
         deliveryRequest.text,
       );
       expect(send).not.toHaveBeenCalledWith(
@@ -2387,7 +2386,6 @@ describe('daemonWorkerCommand', () => {
         request: {
           ...deliveryRequest,
           channelName: 'missing',
-          target: { ...deliveryRequest.target, channelName: 'missing' },
         },
       });
 
@@ -2457,7 +2455,6 @@ describe('daemonWorkerCommand', () => {
         request: {
           ...deliveryRequest,
           channelName: 'telegram',
-          target: { ...deliveryRequest.target, channelName: 'telegram' },
         },
       });
 
@@ -2523,7 +2520,6 @@ describe('daemonWorkerCommand', () => {
         request: {
           ...deliveryRequest,
           channelName: 'telegram',
-          target: { ...deliveryRequest.target, channelName: 'telegram' },
         },
       });
 

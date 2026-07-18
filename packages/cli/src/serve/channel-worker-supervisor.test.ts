@@ -49,9 +49,8 @@ const deliveryRequest: ChannelDeliveryRequest = {
   deliveryId: 'delivery-1',
   channelName: 'telegram',
   target: {
-    channelName: 'telegram',
-    chatId: 'group-1',
-    isGroup: true,
+    type: 'chat',
+    id: 'group-1',
   },
   text: 'inspection result',
 };

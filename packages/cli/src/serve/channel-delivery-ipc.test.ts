@@ -13,9 +13,8 @@ const request = {
   deliveryId: 'delivery-1',
   channelName: 'dingtalk-main',
   target: {
-    channelName: 'dingtalk-main',
-    chatId: 'group-1',
-    isGroup: true,
+    type: 'chat' as const,
+    id: 'group-1',
   },
   text: 'inspection result',
 };
@@ -68,7 +67,7 @@ describe('channel delivery IPC', () => {
       expiresAt: 1,
       request: {
         ...request,
-        target: { ...request.target, channelName: 'other' },
+        target: { ...request.target, id: '' },
       },
     },
     {
@@ -77,7 +76,7 @@ describe('channel delivery IPC', () => {
       expiresAt: 1,
       request: {
         ...request,
-        target: { ...request.target, chatId: 42 },
+        target: { ...request.target, type: 'topic' },
       },
     },
     {
@@ -86,7 +85,7 @@ describe('channel delivery IPC', () => {
       expiresAt: 1,
       request: {
         ...request,
-        target: { ...request.target, threadId: 42 },
+        target: { ...request.target, threadId: 'thread-1' },
       },
     },
     {
@@ -95,7 +94,25 @@ describe('channel delivery IPC', () => {
       expiresAt: 1,
       request: {
         ...request,
-        target: { ...request.target, isGroup: 'yes' },
+        target: { ...request.target, topicId: 'topic-1' },
+      },
+    },
+    {
+      type: 'channel_delivery',
+      id: 'ipc-1',
+      expiresAt: 1,
+      request: {
+        ...request,
+        target: { ...request.target, chatId: 'group-1' },
+      },
+    },
+    {
+      type: 'channel_delivery',
+      id: 'ipc-1',
+      expiresAt: 1,
+      request: {
+        ...request,
+        target: { ...request.target, isGroup: true },
       },
     },
   ])('rejects malformed request messages %#', (message) => {

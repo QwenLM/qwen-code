@@ -756,7 +756,7 @@ describe('createChannelWorkerManager', () => {
     const delivery = {
       deliveryId: 'task-1:1000',
       channelName: 'telegram',
-      target: { channelName: 'telegram', chatId: 'group-42' },
+      target: { type: 'chat' as const, id: 'group-42' },
       text: 'daily result',
     };
 

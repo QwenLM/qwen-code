@@ -618,7 +618,10 @@ export async function runChannelDaemonWorker(
         if (!channel || !connected.includes(request.channelName)) {
           throw new Error(`Channel "${request.channelName}" is not running.`);
         }
-        await channel.deliverProactive(request.target, request.text);
+        await channel.deliverProactive(
+          { channelName: request.channelName, ...request.target },
+          request.text,
+        );
       },
       validateWebhookTask(task: ChannelWebhookTask): void {
         const channel = channels.get(task.channelName);

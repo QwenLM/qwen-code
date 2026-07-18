@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import type { ChannelProactiveTarget } from '@qwen-code/channel-base';
 
 export type ChannelDeliveryErrorCode =
   | 'channel_worker_unavailable'
@@ -47,7 +46,7 @@ export function isChannelDeliveryError(
 export interface ChannelDeliveryRequest {
   deliveryId: string;
   channelName: string;
-  target: ChannelProactiveTarget;
+  target: { type: 'user'; id: string } | { type: 'chat'; id: string };
   text: string;
 }
 
@@ -93,17 +92,15 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
-function isChannelProactiveTarget(
+function isChannelDeliveryTarget(
   value: unknown,
-): value is ChannelProactiveTarget {
+): value is ChannelDeliveryRequest['target'] {
   if (typeof value !== 'object' || value === null) return false;
   const target = value as Record<string, unknown>;
   return (
-    isNonEmptyString(target['channelName']) &&
-    isNonEmptyString(target['chatId']) &&
-    (target['threadId'] === undefined ||
-      isNonEmptyString(target['threadId'])) &&
-    (target['isGroup'] === undefined || typeof target['isGroup'] === 'boolean')
+    (target['type'] === 'user' || target['type'] === 'chat') &&
+    isNonEmptyString(target['id']) &&
+    Object.keys(target).every((key) => key === 'type' || key === 'id')
   );
 }
 
@@ -115,8 +112,7 @@ function isChannelDeliveryRequest(
   return (
     isNonEmptyString(request['deliveryId']) &&
     isNonEmptyString(request['channelName']) &&
-    isChannelProactiveTarget(request['target']) &&
-    request['target'].channelName === request['channelName'] &&
+    isChannelDeliveryTarget(request['target']) &&
     isNonEmptyString(request['text'])
   );
 }

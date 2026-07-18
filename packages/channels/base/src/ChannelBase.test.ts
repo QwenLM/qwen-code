@@ -372,7 +372,7 @@ describe('ChannelBase', () => {
       ).toBe(false);
     });
 
-    it('delivers through the adapter proactive path', async () => {
+    it('derives a group session target for a chat delivery', async () => {
       const ch = createChannel();
       ch.proactiveSupported = true;
       ch.proactiveTargetSupported = true;
@@ -380,8 +380,8 @@ describe('ChannelBase', () => {
       await ch.deliverProactive(
         {
           channelName: 'test-chan',
-          chatId: 'group-1',
-          isGroup: true,
+          type: 'chat',
+          id: 'group-1',
         },
         'inspection result',
       );
@@ -399,6 +399,26 @@ describe('ChannelBase', () => {
       ]);
     });
 
+    it('derives a direct session target for a user delivery', async () => {
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+      ch.proactiveTargetSupported = true;
+
+      await ch.deliverProactive(
+        { channelName: 'test-chan', type: 'user', id: 'user-1' },
+        'inspection result',
+      );
+
+      expect(ch.proactiveTargets).toEqual([
+        {
+          channelName: 'test-chan',
+          senderId: 'user-1',
+          chatId: 'user-1',
+          isGroup: false,
+        },
+      ]);
+    });
+
     it('rejects a target owned by another channel', async () => {
       const ch = createChannel();
       ch.proactiveSupported = true;
@@ -406,7 +426,7 @@ describe('ChannelBase', () => {
 
       await expect(
         ch.deliverProactive(
-          { channelName: 'other', chatId: 'group-1', isGroup: true },
+          { channelName: 'other', type: 'chat', id: 'group-1' },
           'inspection result',
         ),
       ).rejects.toThrow('does not own delivery target');
@@ -418,7 +438,7 @@ describe('ChannelBase', () => {
 
       await expect(
         ch.deliverProactive(
-          { channelName: 'test-chan', chatId: 'group-1', isGroup: true },
+          { channelName: 'test-chan', type: 'chat', id: 'group-1' },
           'inspection result',
         ),
       ).rejects.toThrow('does not support proactive delivery');
@@ -432,7 +452,7 @@ describe('ChannelBase', () => {
 
       await expect(
         ch.deliverProactive(
-          { channelName: 'test-chan', chatId: 'group-1', isGroup: true },
+          { channelName: 'test-chan', type: 'chat', id: 'group-1' },
           'inspection result',
         ),
       ).rejects.toThrow('does not support this proactive target');
