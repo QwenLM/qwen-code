@@ -95,9 +95,14 @@ describe('fleet shepherd workflow', () => {
     );
     // A failed marker read must skip the PR, never act on empty history.
     expect(workflow).toContain('marker read failed; skipping this tick');
+    // A failed fleet fetch skips the walk AND preserves the previous
+    // dashboard body — never an empty-table overwrite.
+    expect(workflow).toContain(
+      'fleet enumeration failed; skipping this tick',
+    );
     // Per-tick blast-radius caps.
     expect(workflow).toContain("MAX_SYNCS_PER_TICK: '3'");
-    expect(workflow).toContain("MAX_DISPATCHES_PER_TICK: '2'");
+    expect(workflow).toContain("MAX_CONFLICT_DISPATCHES_PER_TICK: '2'");
   });
 
   it('leaves flaky-rerun ownership with the CI Failure Patrol', () => {
@@ -123,6 +128,8 @@ describe('fleet shepherd workflow', () => {
     expect(workflow).toContain(
       '<!-- fleet-shepherd liveness-dispatched: ${LIVENESS_OUT} -->',
     );
+    // A wide window so event storms can't push schedule runs out of view.
+    expect(workflow).toContain('--limit 50 --json event,createdAt,status');
     // One run-list call feeds both the age and the in-flight computation.
     expect(
       workflow.match(

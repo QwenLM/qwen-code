@@ -52,7 +52,7 @@ env:
   BEHIND_SYNC_THRESHOLD: '25'
   SCAN_LIVENESS_MINUTES: '60'
   MAX_SYNCS_PER_TICK: '3'
-  MAX_DISPATCHES_PER_TICK: '2'
+  MAX_CONFLICT_DISPATCHES_PER_TICK: '2'
   DASHBOARD_TITLE: 'Fleet Shepherd Dashboard'
 
 jobs:
@@ -128,7 +128,7 @@ jobs:
           # workflow token: actions read/write is guaranteed there, while the
           # PAT's actions scope is not.
           env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run list --repo "${REPO}" --workflow qwen-autofix.yml \
-            --limit 20 --json event,createdAt,status > /tmp/scan-runs.json 2> /dev/null || echo '[]' > /tmp/scan-runs.json
+            --limit 50 --json event,createdAt,status > /tmp/scan-runs.json 2> /dev/null || echo '[]' > /tmp/scan-runs.json
           LAST_SCHEDULE="$(jq -r '[.[] | select(.event == "schedule")] | first | .createdAt // ""' /tmp/scan-runs.json)"
           SCAN_INFLIGHT="$(jq -r '[.[] | select((.event == "schedule" or .event == "workflow_dispatch") and .status != "completed")] | length' /tmp/scan-runs.json)"
           LAST_SIGNAL="${LAST_SCHEDULE}"
@@ -149,9 +149,15 @@ jobs:
           fi
 
           # ---- walk the bot fleet (one list call carries all per-PR meta) --
-          gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" --base main \
+          if ! gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" --base main \
             --limit 50 --json number,headRefName,headRefOid,mergeable,isCrossRepository,statusCheckRollup \
-            --jq '[.[] | select(.isCrossRepository != true)]' > /tmp/fleet.json 2> /dev/null || echo '[]' > /tmp/fleet.json
+            --jq '[.[] | select(.isCrossRepository != true)]' > /tmp/fleet.json 2> /dev/null; then
+            # A failed fleet fetch must not masquerade as an empty fleet: the
+            # walk is skipped AND the dashboard keeps its previous body rather
+            # than being overwritten with a misleading empty table.
+            echo "::warning::fleet enumeration failed; skipping this tick's walk and dashboard update"
+            exit 0
+          fi
 
           while IFS= read -r ROW; do
             [[ -z "${ROW}" ]] && continue
@@ -192,7 +198,7 @@ jobs:
                 ACTION_NOTE="checks in flight (${PENDING}) — deferring conflict dispatch"
               elif [[ "${MY_MARKS}" == *"<!-- fleet-shepherd conflict-dispatch sha=${HEAD} -->"* ]]; then
                 ACTION_NOTE='conflict dispatch already sent for this head'
-              elif [[ "${DISPATCHES}" -lt "${MAX_DISPATCHES_PER_TICK}" ]]; then
+              elif [[ "${DISPATCHES}" -lt "${MAX_CONFLICT_DISPATCHES_PER_TICK}" ]]; then
                 if act "#${PR}: dispatch autofix for conflict resolution" \
                   env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh workflow run qwen-autofix.yml --repo "${REPO}" -f pr_number="${PR}"; then
                   # The dispatch HAPPENED, so it counts against the per-tick
