@@ -38,6 +38,27 @@ const SERVE_PRE_LISTEN_ROOTS = [
 
 const FORBIDDEN_SOURCE_INPUTS = [
   {
+    label: 'Gemini runtime',
+    suffixes: [
+      'packages/cli/src/gemini.tsx',
+      'packages/cli/dist/src/gemini.js',
+    ],
+  },
+  {
+    label: 'ACP agent runtime',
+    suffixes: [
+      'packages/cli/src/acp-integration/acpAgent.ts',
+      'packages/cli/dist/src/acp-integration/acpAgent.js',
+    ],
+  },
+  {
+    label: 'ACP startup profiler',
+    suffixes: [
+      'packages/cli/src/utils/acp-startup-profiler.ts',
+      'packages/cli/dist/src/utils/acp-startup-profiler.js',
+    ],
+  },
+  {
     label: 'Serve ACP compatibility shim',
     suffixes: [
       'packages/cli/src/serve/acp-session-bridge.ts',
