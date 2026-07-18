@@ -852,6 +852,7 @@ describe('ChannelBase', () => {
 
       expect(observe).toHaveBeenCalledWith('test-chan', {
         user: { id: 'user1', label: 'User 1' },
+        chatId: 'chat1',
       });
     });
 
