@@ -375,7 +375,18 @@ export async function completeScheduledDelivery(
 
 function sanitizeError(error: ScheduledDeliveryError): ScheduledDeliveryError {
   const code = error.code.trim().slice(0, MAX_ERROR_CODE_LENGTH);
-  const message = error.message.trim().slice(0, MAX_ERROR_MESSAGE_LENGTH);
+  const message = redactPersistedCredentials(error.message)
+    .trim()
+    .slice(0, MAX_ERROR_MESSAGE_LENGTH);
   if (!code || !message) throw new Error('Invalid scheduled delivery error.');
   return { code, message };
+}
+
+function redactPersistedCredentials(message: string): string {
+  return message
+    .replace(/(Authorization\s*:\s*Bearer\s+)[^\s,;]+/giu, '$1<redacted>')
+    .replace(
+      /\b(api[_-]?key|access[_-]?token|auth[_-]?token|password|secret)\s*([=:])\s*[^\s,;]+/giu,
+      '$1$2<redacted>',
+    );
 }

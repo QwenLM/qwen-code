@@ -128,6 +128,29 @@ describe('scheduledDeliveryOutbox', () => {
     ).toMatchObject({ status: 'sending', attempts: 2 });
   });
 
+  it('redacts credential-shaped values before persisting an error', async () => {
+    await enqueue();
+    await claimScheduledDelivery(workspace, {
+      now: 1718000002000,
+      leaseMs: 30_000,
+    });
+    await completeScheduledDelivery(workspace, {
+      deliveryId: 'task-1:1718000000000',
+      outcome: 'failed',
+      now: 1718000003000,
+      error: {
+        code: 'channel_delivery_failed',
+        message:
+          'request failed: Authorization: Bearer secret-token api_key=another-secret',
+      },
+    });
+
+    const [record] = await readScheduledDeliveryOutbox(workspace);
+    expect(record?.lastError?.message).toBe(
+      'request failed: Authorization: Bearer <redacted> api_key=<redacted>',
+    );
+  });
+
   it.each(['delivered', 'failed'] as const)(
     'stores terminal %s state and never reclaims it',
     async (outcome) => {

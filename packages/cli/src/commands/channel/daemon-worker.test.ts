@@ -2382,6 +2382,76 @@ describe('daemonWorkerCommand', () => {
     }
   });
 
+  it('redacts adapter diagnostics and classifies an invalid recipient as permanent', async () => {
+    const exit = mockProcessExitNoThrow();
+    const send = vi.fn();
+    const restoreSend = stubProcessSend(send as NodeJS.Process['send']);
+    const secret = 'adapter-secret-value';
+    mockCreateChannel.mockResolvedValueOnce({
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn(),
+      name: 'telegram',
+      validateWebhookTask: vi.fn(),
+      deliverProactive: vi
+        .fn()
+        .mockRejectedValue(
+          new Error(
+            `DingTalk proactive send failed: invalid direct recipient ${secret}`,
+          ),
+        ),
+    });
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+    vi.stubEnv('QWEN_TEST_API_KEY', secret);
+    const existingMessageListeners = process.listeners('message');
+
+    try {
+      const handler = daemonWorkerCommand.handler({
+        channel: ['telegram'],
+        _: [],
+        $0: 'qwen',
+      });
+      await vi.waitFor(() => {
+        expect(send).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'ready' }),
+        );
+      });
+      send.mockClear();
+
+      const listener = process
+        .listeners('message')
+        .find((candidate) => !existingMessageListeners.includes(candidate));
+      (listener as ((message: unknown) => void) | undefined)?.({
+        type: 'channel_delivery',
+        id: 'ipc-delivery-invalid-recipient',
+        expiresAt: Date.now() + 1000,
+        request: {
+          ...deliveryRequest,
+          channelName: 'telegram',
+          target: { ...deliveryRequest.target, channelName: 'telegram' },
+        },
+      });
+
+      await vi.waitFor(() => {
+        expect(send).toHaveBeenCalledWith({
+          type: 'channel_delivery_result',
+          id: 'ipc-delivery-invalid-recipient',
+          ok: false,
+          code: 'channel_delivery_invalid',
+          error:
+            'DingTalk proactive send failed: invalid direct recipient <redacted>',
+        });
+      });
+
+      process.emit('SIGTERM', 'SIGTERM');
+      await handler;
+      expect(exit).toHaveBeenCalledWith(0);
+    } finally {
+      restoreSend();
+    }
+  });
+
   it('rejects webhook IPC messages for channels that are not running', async () => {
     const exit = mockProcessExitNoThrow();
     const send = vi.fn();

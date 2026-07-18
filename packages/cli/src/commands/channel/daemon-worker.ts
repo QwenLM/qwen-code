@@ -887,9 +887,13 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
               sendChannelDeliveryResult(deliveryId, {
                 ok: false,
                 code: classifyChannelDeliveryError(err),
-                error: sanitizeLogText(
+                error: sanitizeWorkerDiagnostic(
                   err instanceof Error ? err.message : String(err),
                   512,
+                  {
+                    ...(daemonToken ? { daemonToken } : {}),
+                    workerEnv: process.env,
+                  },
                 ),
               });
             })
@@ -1098,7 +1102,8 @@ function classifyChannelDeliveryError(
   if (
     message.includes('does not own delivery target') ||
     message.includes('does not support proactive delivery') ||
-    message.includes('does not support this proactive target')
+    message.includes('does not support this proactive target') ||
+    message.includes('invalid direct recipient')
   ) {
     return 'channel_delivery_invalid';
   }

@@ -2291,7 +2291,7 @@ describe('DingtalkChannel proactive send', () => {
     expect(directSendCalls()).toHaveLength(1);
   });
 
-  it('surfaces API detail in the error and log on failure', async () => {
+  it('keeps API detail in local logs but out of the propagated error', async () => {
     const channel = proactive(createChannel());
     const writeSpy = vi
       .spyOn(process.stderr, 'write')
@@ -2299,8 +2299,12 @@ describe('DingtalkChannel proactive send', () => {
     stubProactiveFetch(() => new Response('perm denied', { status: 403 }));
 
     await expect(channel.pushProactive(groupTarget, 'hello')).rejects.toThrow(
-      'DingTalk proactive send failed: HTTP 403 perm denied',
+      'DingTalk proactive send failed: HTTP 403',
     );
+
+    await expect(
+      channel.pushProactive(groupTarget, 'hello'),
+    ).rejects.not.toThrow(/perm denied/);
 
     const logged = writeSpy.mock.calls.map((c) => String(c[0])).join('');
     expect(logged).toContain(

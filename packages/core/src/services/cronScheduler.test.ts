@@ -2094,6 +2094,39 @@ describe('CronScheduler', () => {
       });
     });
 
+    it.each(['never-fired', 'previously-fired'] as const)(
+      'stamps a fresh delivery identity on an aged final fire (%s)',
+      async (history) => {
+        const createdAt = Date.now() - 8 * 24 * 60 * 60_000;
+        const priorFireAt = Date.now() - 2 * 60 * 60_000;
+        await writeCronTasks(tmpDir, [
+          {
+            id: `aged-${history}`,
+            cron: '0 * * * *',
+            prompt: 'aged delivery',
+            recurring: true,
+            createdAt,
+            lastFiredAt: history === 'never-fired' ? null : priorFireAt,
+            delivery: {
+              kind: 'channel',
+              target: { channelName: 'dingtalk', chatId: 'group-1' },
+            },
+          },
+        ]);
+
+        const fired: CronJob[] = [];
+        scheduler.start((job) => fired.push(job));
+        const beforeMinute = Date.now() - (Date.now() % 60_000);
+        await scheduler.enableDurable('session-1');
+        const afterMinute = Date.now() - (Date.now() % 60_000);
+
+        expect(fired).toHaveLength(1);
+        expect(fired[0]!.lastFiredAt).toBeGreaterThanOrEqual(beforeMinute);
+        expect(fired[0]!.lastFiredAt).toBeLessThanOrEqual(afterMinute);
+        expect(fired[0]!.lastFiredAt).not.toBe(priorFireAt);
+      },
+    );
+
     it('re-detects a dropped catch-up fire on re-enable', async () => {
       const createdAt = Date.now() - 3 * 60 * 60_000;
       await writeCronTasks(tmpDir, [

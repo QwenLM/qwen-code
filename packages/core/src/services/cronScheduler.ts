@@ -931,10 +931,18 @@ export class CronScheduler {
       this.fireOrBuffer({ kind: 'catch-up', ids: catchUpIds });
     }
     if (finalTasks.length > 0) {
+      // A final age-out fire is a new execution, not a replay of the task's
+      // previous scheduled slot. Give it a fresh stable stamp so downstream
+      // consumers can correlate and deduplicate this final result even when the
+      // task has never fired before or already has an older lastFiredAt.
+      const finalFireAt = now - (now % 60_000);
       this.fireOrBuffer({
         kind: 'final',
         jobs: finalTasks.map((t) =>
-          durableTaskToJob(t, this.recurringMaxAgeMs),
+          durableTaskToJob(
+            { ...t, lastFiredAt: finalFireAt },
+            this.recurringMaxAgeMs,
+          ),
         ),
       });
     }

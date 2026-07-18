@@ -4579,6 +4579,16 @@ export class Session implements SessionContext {
                 if (guardStop.stopReason === 'max_tokens') {
                   this.#stopCronAfterTokenLimit();
                 }
+                if (guardStop.stopReason !== 'end_turn') {
+                  return;
+                }
+                // Stop hooks and Todo Stop Guard may have produced one or more
+                // continuation turns. The chat's terminal model message is the
+                // deliverable; the streamed value captured above belongs to the
+                // pre-continuation draft.
+                const terminalAnswer =
+                  this.#getCurrentChat().getLastModelMessageText?.();
+                if (terminalAnswer?.trim()) finalAnswer = terminalAnswer;
               }
               cronCompleted = !ac.signal.aborted;
             } catch (error) {

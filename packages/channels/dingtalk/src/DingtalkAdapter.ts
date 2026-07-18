@@ -622,9 +622,7 @@ export class DingtalkChannel extends ChannelBase {
         process.stderr.write(
           `[DingTalk:${this.name}] proactive send failed (${targetKind}, ${chunkLabel}): HTTP ${resp.status} ${detail}\n`,
         );
-        throw new Error(
-          `DingTalk proactive send failed: HTTP ${resp.status}${detail ? ` ${detail}` : ''}`,
-        );
+        throw new Error(`DingTalk proactive send failed: HTTP ${resp.status}`);
       }
       if (target.isGroup === false) {
         let data: DingTalkDirectMessageResponse;
