@@ -204,6 +204,10 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     input.unreviewedDimensions,
     'unreviewedDimensions',
   );
+  // The coverage-derived disclosures, kept STRUCTURAL ({subject, reason})
+  // from the site that knows the boundary — reparsing the rendered prose for
+  // it was the bug. `unreviewed` above stays what the caller wrote, verbatim.
+  const coverageEntries: Array<{ subject: string; reason: string }> = [];
   // The fixes for the gaps above, for stderr — never for the body. The gap says
   // what the review cannot certify, to the PR author; the remediation names the
   // command that repairs it, to the orchestrator. #7012's public body was fourteen
@@ -241,10 +245,12 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // What it supplies is `planPath` — a path, whose contents the CLI wrote. The
   // transcripts are found from the environment the CLI exported.
   if (!input.planPath) {
-    unreviewed.push(
-      'coverage — no plan was given, so this run cannot show that any of the ' +
-        'diff was read',
-    );
+    coverageEntries.push({
+      subject: 'coverage',
+      reason:
+        'no plan was given, so this run cannot show that any of the diff ' +
+        'was read',
+    });
   } else {
     try {
       const cov = coverageFromTranscripts(input.planPath, input.env);
@@ -261,9 +267,10 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
         if (!already) uncoverable.push(prefix);
       }
       for (const label of cov.idleAgents) {
-        unreviewed.push(
-          `${label} — the agent made no tool call: it read nothing`,
-        );
+        coverageEntries.push({
+          subject: label,
+          reason: 'the agent made no tool call: it read nothing',
+        });
       }
       if (cov.idleAgents.length > 0) {
         remediation.push(
@@ -280,10 +287,12 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       // this line: the line lands in the posted body, and `qwen review
       // agent-prompt` is not something a PR author can run.
       for (const label of cov.blindAgents) {
-        unreviewed.push(
-          `${label} — launched with a prompt that never named the diff file, ` +
-            'so it could not have read it',
-        );
+        coverageEntries.push({
+          subject: label,
+          reason:
+            'launched with a prompt that never named the diff file, so it ' +
+            'could not have read it',
+        });
       }
       if (cov.blindAgents.length > 0) {
         remediation.push(
@@ -298,10 +307,12 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       // spent its run somewhere else, which on a diff with deletions means it
       // reviewed a file the removed lines are simply not in.
       for (const label of cov.unopenedAgents) {
-        unreviewed.push(
-          `${label} — pointed at diff lines it never opened: it made tool calls, ` +
-            'but none of them read the diff',
-        );
+        coverageEntries.push({
+          subject: label,
+          reason:
+            'pointed at diff lines it never opened: it made tool calls, but ' +
+            'none of them read the diff',
+        });
       }
       if (cov.unopenedAgents.length > 0) {
         remediation.push(
@@ -317,9 +328,10 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       // prompt that is not the one the CLI built`), so push the label as-is —
       // wrapping it in a second ` — ` clause read as one run-on sentence with two
       // dashes. Same for `missingRoles` below; `unreadBriefs` already did this.
-      for (const label of cov.rewrittenPrompts) {
-        unreviewed.push(label);
-      }
+      // rewritten, missing-role and unread-brief entries arrive structurally
+      // (`cov.disclosures`, push order preserved) — their labels can carry
+      // em-dashes of their own, which is why they are never reparsed here.
+      coverageEntries.push(...cov.disclosures);
       if (cov.rewrittenPrompts.length > 0) {
         remediation.push(
           'rewritten launches: re-run `"${QWEN_CODE_CLI:-qwen}" review ' +
@@ -333,9 +345,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       // A dimension nobody reviewed. This is exactly what `unreviewedDimensions`
       // has always meant, arrived at from the plan instead of from the orchestrator
       // noticing — which, on the run that never launched Agent 0, it did not.
-      for (const label of cov.missingRoles) {
-        unreviewed.push(label);
-      }
+
       if (cov.missingRoles.length > 0) {
         remediation.push(
           'missing briefs: build every required prompt in one call — ' +
@@ -347,9 +357,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       }
       // Launched, but never read the brief it was pointed at: it reviewed with no
       // dimension, no severity definitions and no project rules.
-      for (const label of cov.unreadBriefs) {
-        unreviewed.push(label);
-      }
+
       if (cov.unreadBriefs.length > 0) {
         remediation.push(
           'unread briefs: relaunch each agent with the same printed prompt — ' +
@@ -368,9 +376,10 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
         err instanceof TranscriptsUnavailableError
           ? `could not read the agents' transcripts (${err.message})`
           : `the plan could not be used (${(err as Error).message})`;
-      unreviewed.push(
-        `coverage — ${why}, so this run cannot show that any of the diff was read`,
-      );
+      coverageEntries.push({
+        subject: 'coverage',
+        reason: `${why}, so this run cannot show that any of the diff was read`,
+      });
     }
 
     // Step 4 (verify) and Step 5 (reverse audit) ran, and read their briefs?
@@ -394,13 +403,27 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
         { postsFindings: findingsToVerify > 0 },
         input.env,
       );
-      for (const gap of verification.gaps) unreviewed.push(gap);
+      for (const gap of verification.gaps) {
+        // The machine's own two subjects ('verification', 'reverse audit'),
+        // dash-free by construction — the first separator is the boundary.
+        const cut = gap.indexOf(' — ');
+        coverageEntries.push(
+          cut === -1
+            ? { subject: gap, reason: '' }
+            : {
+                subject: gap.slice(0, cut),
+                reason: gap.slice(cut + ' — '.length),
+              },
+        );
+      }
       remediation.push(...verification.remediation);
     } catch (err) {
-      unreviewed.push(
-        `verification — could not check that Step 4 and Step 5 ran ` +
+      coverageEntries.push({
+        subject: 'verification',
+        reason:
+          `could not check that Step 4 and Step 5 ran ` +
           `(${(err as Error).message})`,
-      );
+      });
     }
   }
   const contextUnavailable = toBool(
@@ -451,7 +474,9 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   if (cannotTell.length > 0) cappedBy.push('cannot-tell-existing-critical');
   if (missingReceipts.length > 0) cappedBy.push('chunk-nobody-read');
   if (uncoverable.length > 0) cappedBy.push('uncoverable-chunk');
-  if (unreviewed.length > 0) cappedBy.push('unreviewed-dimension');
+  if (unreviewed.length + coverageEntries.length > 0) {
+    cappedBy.push('unreviewed-dimension');
+  }
   if (contextUnavailable) cappedBy.push('context-unavailable');
 
   let event: ReviewEvent = baseEvent;
@@ -504,18 +529,69 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       `Not reviewed: ${uncoverable.join(', ')} — a line there exceeds the read limit.`,
     );
   }
-  // Bare dimension names share the whiffed-agent explanation; an entry that
-  // brought its own reason (after an em-dash) must not have the whiff
-  // sentence appended to it — that would misstate why it went unreviewed.
-  const whiffedDimensions = unreviewed.filter((d) => !d.includes(' — '));
-  const explainedDimensions = unreviewed.filter((d) => d.includes(' — '));
+  // One disclosure per subject, one sentence per cause — structurally, not by
+  // reparsing prose. The first cut recovered a subject/reason boundary from
+  // the rendered text (the last ` — ` segment), and a reason is free-form:
+  // an invariant label carries a dash for its file, an error interpolation
+  // can carry anything, and a boundary guessed wrong regroups the entries it
+  // garbles. Coverage now hands the entries over as `{subject, reason}`
+  // pairs; only the CALLER\'s entries are prose, and those are never parsed —
+  // they are matched against known coverage subjects by prefix (exactly how
+  // the chunk list above dedupes), and rendered verbatim when nothing
+  // matches. A run that pasted the gate\'s own gap lines into its input
+  // posted every disclosure twice — 22 clauses for 11 roles on a public PR
+  // (#7188) — and the coverage-derived text wins the collision: it is the
+  // evidence-bounded register this body is written in.
+  const covEntries = coverageEntries;
+  const callerLeft: string[] = [];
+  const seenCaller = new Set<string>();
+  for (const d of unreviewed) {
+    if (seenCaller.has(d)) continue; // a caller pasting itself twice
+    seenCaller.add(d);
+    const echoesCoverage = covEntries.some(
+      (e) => d === e.subject || d.startsWith(`${e.subject} — `),
+    );
+    if (!echoesCoverage) callerLeft.push(d);
+  }
+  // Bare caller names share the whiffed-agent explanation; an entry that
+  // brought its own reason (after an em-dash) is rendered verbatim, its own
+  // line — unparsed, ungrouped, because its structure is not ours to guess.
+  const whiffedDimensions = callerLeft.filter((d) => !d.includes(' — '));
+  const explainedCaller = callerLeft.filter((d) => d.includes(' — '));
   if (whiffedDimensions.length > 0) {
     notReviewedParts.push(
       `Not reviewed: ${whiffedDimensions.join(', ')} — the agent returned no evidence of its walk twice.`,
     );
   }
-  for (const d of explainedDimensions) {
+  for (const d of explainedCaller) {
     notReviewedParts.push(`Not reviewed: ${d}.`);
+  }
+  // Same cause, one sentence: forty-three chunks launched with rewritten
+  // prompts are one failure with forty-three subjects, not forty-three
+  // paragraphs — a posted body on #7166 was ninety-nine clauses over four
+  // causes, the six real findings buried beneath. Grouped by the reason
+  // STRING, so a reason embedding per-subject detail (an unread brief\'s own
+  // path) differs per entry and keeps its own line. One subject that appears
+  // under two causes keeps the FIRST — the categories push in precision
+  // order, and a chunk flagged `rewritten` is also, to the roster, a
+  // requirement with no verbatim launch; repeating it under the later, vaguer
+  // cause would tell the author "no agent was launched" about an agent that
+  // demonstrably ran.
+  const seenSubjects = new Set<string>();
+  const byReason = new Map<string, string[]>();
+  for (const { subject, reason } of covEntries) {
+    if (seenSubjects.has(subject)) continue;
+    seenSubjects.add(subject);
+    const subjects = byReason.get(reason) ?? [];
+    subjects.push(subject);
+    byReason.set(reason, subjects);
+  }
+  for (const [reason, subjects] of byReason) {
+    notReviewedParts.push(
+      reason
+        ? `Not reviewed: ${subjects.join(', ')} — ${reason}.`
+        : `Not reviewed: ${subjects.join(', ')}.`,
+    );
   }
 
   // Clause 5 — blockers the review could neither confirm nor clear. They
@@ -599,7 +675,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       c === 0 &&
       cannotTell.length === 0 &&
       uncoverable.length === 0 &&
-      unreviewed.length === 0 &&
+      unreviewed.length + coverageEntries.length === 0 &&
       // A missing receipt caps the event but was left out of certification, so a
       // body could open "Reviewed — no blockers." two lines above "nobody read
       // them." Nothing nobody read can be certified blocker-free.
@@ -614,8 +690,14 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   //    above.)
   if (suggestionsInline > 0) clauses.push('Suggestions are inline.');
   if (suggestionsDiscarded > 0) {
+    // Self-contained: this lands in the posted body, and "see the terminal
+    // output" pointed the PR author at a terminal only the operator has —
+    // eight hours of real bot reviews carried that dead reference on five
+    // different pull requests.
     clauses.push(
-      `${suggestionsDiscarded} Suggestion-level finding(s) could not be anchored to the diff; see the terminal output.`,
+      `${suggestionsDiscarded} Suggestion-level finding(s) could not be ` +
+        `anchored to a changed line and were dropped; nothing further to act ` +
+        `on here.`,
     );
   }
 
