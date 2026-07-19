@@ -31,9 +31,14 @@ describe('release note classification', () => {
       },
       {
         title: 'Fix flaky CI routing',
-        labels: ['scope/ci-cd'],
+        labels: [{ name: 'scope/ci-cd' }],
         files: ['.github/workflows/ci.yml'],
         expected: true,
+      },
+      {
+        title: 'ci!: breaking dispatch change',
+        files: ['.github/workflows/ci.yml'],
+        expected: false,
       },
       {
         title: 'Update action permissions',
@@ -46,6 +51,24 @@ describe('release note classification', () => {
         labels: ['scope/ci-cd'],
         files: ['.github/workflows/ci.yml'],
         expected: false,
+      },
+      {
+        title: 'ci: fix check',
+        labels: ['bug'],
+        files: ['.github/workflows/ci.yml'],
+        expected: false,
+      },
+      {
+        title: 'ci: fix check',
+        labels: ['breaking-change'],
+        files: ['.github/workflows/ci.yml'],
+        expected: false,
+      },
+      {
+        title: 'ci: keep automatic exclusion stable',
+        labels: ['skip-changelog-auto'],
+        files: ['.github/workflows/ci.yml'],
+        expected: true,
       },
       {
         title: 'ci: update release automation',
