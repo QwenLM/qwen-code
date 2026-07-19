@@ -118,6 +118,7 @@ import { useDualOutput } from '../../dualOutput/DualOutputContext.js';
 import { recordGoalStatusItem } from '../utils/restoreGoal.js';
 import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import process from 'node:process';
+import { GOAL_COMMAND_RE } from './useMessageQueue.js';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
 
@@ -164,8 +165,6 @@ interface ResolvedSteerMessages {
   accept: () => void;
   restoreMessages: string[];
 }
-
-const GOAL_COMMAND_RE = /^\/goal(?:\s|$)/;
 
 /**
  * Pull the assistant's most recent visible text from the UI history. Used as

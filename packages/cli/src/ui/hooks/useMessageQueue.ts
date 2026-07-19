@@ -31,7 +31,7 @@ interface QueuedMessage {
   deferUntilIdle: boolean;
 }
 
-const GOAL_COMMAND_RE = /^\/goal(?:\s|$)/;
+export const GOAL_COMMAND_RE = /^\/goal(?:\s|$)/;
 
 export function useMessageQueue(): UseMessageQueueReturn {
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
