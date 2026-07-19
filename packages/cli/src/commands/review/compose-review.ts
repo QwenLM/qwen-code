@@ -526,7 +526,16 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     event = 'COMMENT';
     downgraded = true;
     downgradedFrom = 'Approve';
-  } else if (event === 'REQUEST_CHANGES' && downgradeRequestChanges) {
+  } else if (
+    (event === 'REQUEST_CHANGES' ||
+      (baseEvent === 'REQUEST_CHANGES' && criticalsUnverified)) &&
+    downgradeRequestChanges
+  ) {
+    // The unverified-blockers cap softened the event first, but the presubmit
+    // still ruled: without this arm its reasons (self-PR, failing CI) would
+    // silently vanish from the body whenever both held. The verdict line
+    // keeps the unverified sentence — the more fundamental defect — and the
+    // body's downgrade clause carries the presubmit reasons.
     event = 'COMMENT';
     downgraded = true;
     downgradedFrom = 'Request changes';

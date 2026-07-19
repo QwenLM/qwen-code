@@ -1538,6 +1538,38 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
     );
   });
 
+  it('keeps the presubmit downgrade reasons when the unverified cap also holds', () => {
+    // The softening runs first, so without the widened downgrade arm the
+    // presubmit reasons silently vanished whenever both held. Verdict keeps
+    // the unverified sentence; the body downgrade clause carries the reasons.
+    const r = composeReview({
+      criticalsInline: 1,
+      planPath: coveredPlan(['reverse-audit']),
+      env: ENV,
+      presubmit: {
+        downgradeRequestChanges: true,
+        downgradeReasons: ['self-PR'],
+      },
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain(
+      'Downgraded from Request changes to Comment: self-PR',
+    );
+    expect(verdictLine(r)).toContain('its blockers were never verified');
+  });
+
+  it('verify on record with the reverse audit absent still blocks — softening gates on verify alone', () => {
+    const r = composeReview({
+      criticalsInline: 1,
+      planPath: coveredPlan(['verify']),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.cappedBy).not.toContain('criticals-unverified');
+  });
+
   it('keeps the body Criticals when the unverified cap softens the event — the only copy survives', () => {
     // The presubmit RC→Comment carve-out learned this the hard way: a softened
     // event must never erase the body copy of an unanchorable blocker.
