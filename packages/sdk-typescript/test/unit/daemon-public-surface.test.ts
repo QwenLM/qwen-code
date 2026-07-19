@@ -23,12 +23,24 @@ import type {
   DaemonClientEvictedEvent,
   DaemonChannelControlState,
   DaemonChannelControlTransition,
+  DaemonChannelConfigFieldDescriptor,
+  DaemonChannelInstanceSnapshot,
+  DaemonChannelManagementOptions,
+  DaemonChannelMutationResult,
+  DaemonChannelRuntimeState,
+  DaemonChannelSecretState,
+  DaemonChannelSecretUpdate,
   DaemonChannelSelection,
   DaemonChannelSetResult,
   DaemonChannelStartupAttemptFailure,
   DaemonChannelStartupFailure,
   DaemonChannelStopResult,
+  DaemonChannelsSnapshot,
+  DaemonChannelTypeCatalog,
+  DaemonChannelTypeDescriptor,
+  DaemonChannelUpsertRequest,
   DaemonChannelWorkerStartErrorResponse,
+  DaemonRevisionRequest,
   DaemonControlEvent,
   DaemonEvent,
   DaemonEventEnvelope,
@@ -317,6 +329,42 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     // mismatch.
     expect(Public.DAEMON_ERROR_KINDS).toContain('prompt_deadline_exceeded');
     expect(Public.DAEMON_ERROR_KINDS).toContain('writer_idle_timeout');
+  });
+
+  it('exports the channel management contract without secret response values', () => {
+    expectTypeOf<DaemonChannelConfigFieldDescriptor>().not.toBeNever();
+    expectTypeOf<DaemonChannelTypeDescriptor>().not.toBeNever();
+    expectTypeOf<DaemonChannelTypeCatalog>().toEqualTypeOf<
+      DaemonChannelTypeDescriptor[]
+    >();
+    expectTypeOf<DaemonChannelRuntimeState>().not.toBeNever();
+    expectTypeOf<DaemonChannelSecretState>().toEqualTypeOf<{
+      present: boolean;
+      source?: 'literal' | 'environment';
+    }>();
+    expectTypeOf<DaemonChannelInstanceSnapshot>().not.toBeNever();
+    expectTypeOf<DaemonChannelsSnapshot>().not.toBeNever();
+    expectTypeOf<DaemonChannelSecretUpdate>().not.toBeNever();
+    expectTypeOf<DaemonChannelUpsertRequest>().not.toBeNever();
+    expectTypeOf<DaemonRevisionRequest>().toEqualTypeOf<{
+      expectedRevision: string;
+    }>();
+    expectTypeOf<DaemonChannelMutationResult>().not.toBeNever();
+    expectTypeOf<DaemonChannelManagementOptions>().toEqualTypeOf<{
+      clientId?: string;
+      timeoutMs?: number;
+    }>();
+
+    expectTypeOf<DaemonChannelSecretState>().not.toHaveProperty('value');
+    expectTypeOf<
+      DaemonChannelInstanceSnapshot['secrets'][string]
+    >().not.toHaveProperty('value');
+    expectTypeOf(
+      Public.DaemonClient.prototype.workspaceChannelTypes,
+    ).toBeFunction();
+    expectTypeOf(
+      Public.WorkspaceDaemonClient.prototype.workspaceChannels,
+    ).toBeFunction();
   });
 });
 

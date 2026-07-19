@@ -4115,6 +4115,217 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('workspace channel management', () => {
+    const snapshot = {
+      revision: 'r2',
+      instances: {
+        bot: {
+          name: 'bot',
+          config: { type: 'telegram' },
+          secrets: { token: { present: true, source: 'literal' as const } },
+          startsWithServe: false,
+          runtime: { state: 'stopped' as const },
+        },
+      },
+    };
+    const mutation = { snapshot, instance: snapshot.instances.bot };
+
+    it('reads the primary channel type catalog and sanitized snapshot', async () => {
+      const catalog = [
+        {
+          type: 'telegram',
+          displayName: 'Telegram',
+          manageable: true,
+          fields: [
+            { key: 'token', label: 'Token', kind: 'secret', required: true },
+          ],
+          auth: ['credentials'],
+        },
+      ];
+      const { fetch, calls } = recordingFetch((request) =>
+        jsonResponse(
+          200,
+          request.url.endsWith('/channel-types') ? catalog : snapshot,
+        ),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.workspaceChannelTypes()).resolves.toEqual(catalog);
+      await expect(client.workspaceChannels()).resolves.toEqual(snapshot);
+      expect(calls.map((call) => [call.method, call.url])).toEqual([
+        ['GET', 'http://daemon/workspace/channel-types'],
+        ['GET', 'http://daemon/workspace/channels'],
+      ]);
+    });
+
+    it('updates an encoded workspace channel with revision and explicit secret operations', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, mutation),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        token: 'daemon-token',
+        fetch,
+      });
+      const request = {
+        expectedRevision: 'r1',
+        config: { type: 'telegram' },
+        secrets: {
+          token: { operation: 'preserve' as const },
+          webhookSecret: {
+            operation: 'replace' as const,
+            value: 'replacement',
+          },
+          legacyToken: { operation: 'clear' as const },
+        },
+      };
+
+      await expect(
+        client.upsertWorkspaceChannel('bot/name', request, {
+          clientId: 'client-1',
+        }),
+      ).resolves.toEqual(mutation);
+      expect(calls[0]).toMatchObject({
+        method: 'PUT',
+        url: 'http://daemon/workspace/channels/bot%2Fname',
+        body: JSON.stringify(request),
+      });
+      expect(calls[0]?.headers).toMatchObject({
+        authorization: 'Bearer daemon-token',
+        'content-type': 'application/json',
+        'x-qwen-client-id': 'client-1',
+      });
+    });
+
+    it('deletes and controls primary workspace channels', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, mutation),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.deleteWorkspaceChannel('bot', { expectedRevision: 'r2' });
+      await client.startWorkspaceChannel('bot');
+      await client.stopWorkspaceChannel('bot');
+      await client.restartWorkspaceChannel('bot');
+
+      expect(calls.map((call) => [call.method, call.url, call.body])).toEqual([
+        [
+          'DELETE',
+          'http://daemon/workspace/channels/bot',
+          JSON.stringify({ expectedRevision: 'r2' }),
+        ],
+        ['POST', 'http://daemon/workspace/channels/bot/start', '{}'],
+        ['POST', 'http://daemon/workspace/channels/bot/stop', '{}'],
+        ['POST', 'http://daemon/workspace/channels/bot/restart', '{}'],
+      ]);
+    });
+
+    it('targets workspace-qualified channel routes with the same transport contract', async () => {
+      const catalog = [
+        {
+          type: 'telegram',
+          displayName: 'Telegram',
+          manageable: true,
+          fields: [],
+          auth: ['credentials'],
+        },
+      ];
+      const { fetch, calls } = recordingFetch((request) =>
+        jsonResponse(
+          200,
+          request.url.endsWith('/channel-types')
+            ? catalog
+            : request.url.endsWith('/channels')
+              ? snapshot
+              : mutation,
+        ),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const workspace = client.workspaceByCwd('/tmp/work space');
+
+      await workspace.workspaceChannelTypes({ clientId: 'client-read' });
+      await workspace.workspaceChannels();
+      await workspace.upsertWorkspaceChannel(
+        'bot/name',
+        {
+          expectedRevision: 'r1',
+          config: { type: 'telegram' },
+        },
+        { clientId: 'client-write' },
+      );
+      await workspace.deleteWorkspaceChannel('bot', {
+        expectedRevision: 'r2',
+      });
+      await workspace.startWorkspaceChannel('bot');
+      await workspace.stopWorkspaceChannel('bot');
+      await workspace.restartWorkspaceChannel('bot');
+
+      expect(calls.map((call) => [call.method, call.url])).toEqual([
+        ['GET', 'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channel-types'],
+        ['GET', 'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels'],
+        [
+          'PUT',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot%2Fname',
+        ],
+        [
+          'DELETE',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot',
+        ],
+        [
+          'POST',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot/start',
+        ],
+        [
+          'POST',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot/stop',
+        ],
+        [
+          'POST',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot/restart',
+        ],
+      ]);
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-read');
+      expect(calls[2]?.headers['x-qwen-client-id']).toBe('client-write');
+    });
+
+    it('maps channel management failures through DaemonHttpError', async () => {
+      const body = {
+        error: 'Channel settings changed.',
+        code: 'channel_settings_conflict',
+      };
+      const { fetch } = recordingFetch(() => jsonResponse(409, body));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.deleteWorkspaceChannel('bot', { expectedRevision: 'stale' }),
+      ).rejects.toMatchObject({ status: 409, body });
+    });
+
+    it('allows channel management operations to outlive the generic fetch timeout', async () => {
+      const fetch = vi.fn(
+        (_input: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => {
+              reject(
+                init.signal!.reason ??
+                  new DOMException('aborted', 'AbortError'),
+              );
+            });
+            setTimeout(() => resolve(jsonResponse(200, mutation)), 20);
+          }),
+      ) as unknown as typeof globalThis.fetch;
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        fetchTimeoutMs: 1,
+      });
+
+      await expect(client.restartWorkspaceChannel('bot')).resolves.toEqual(
+        mutation,
+      );
+    });
+  });
+
   describe('restartMcpServer (#4175 Wave 4 PR 17)', () => {
     it('POSTs an empty body and returns the typed result on success', async () => {
       const { fetch, calls } = recordingFetch(() =>

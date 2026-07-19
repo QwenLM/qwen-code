@@ -107,6 +107,12 @@ import type {
   DaemonMcpRestartResult,
   DaemonReloadResponse,
   DaemonChannelReloadResult,
+  DaemonChannelManagementOptions,
+  DaemonChannelMutationResult,
+  DaemonChannelsSnapshot,
+  DaemonChannelTypeCatalog,
+  DaemonChannelUpsertRequest,
+  DaemonRevisionRequest,
   DaemonChannelControlState,
   DaemonChannelSelection,
   DaemonChannelSetResult,
@@ -3261,6 +3267,101 @@ export class DaemonClient {
     );
   }
 
+  workspaceChannelTypes(
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelTypeCatalog> {
+    return this.jsonRequest<DaemonChannelTypeCatalog>(
+      '/workspace/channel-types',
+      'GET /workspace/channel-types',
+      { clientId: opts?.clientId, timeoutMs: opts?.timeoutMs, mode: 'rest' },
+    );
+  }
+
+  workspaceChannels(
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelsSnapshot> {
+    return this.jsonRequest<DaemonChannelsSnapshot>(
+      '/workspace/channels',
+      'GET /workspace/channels',
+      { clientId: opts?.clientId, timeoutMs: opts?.timeoutMs, mode: 'rest' },
+    );
+  }
+
+  upsertWorkspaceChannel(
+    name: string,
+    request: DaemonChannelUpsertRequest,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelMutationResult> {
+    return this.jsonRequest<DaemonChannelMutationResult>(
+      `/workspace/channels/${urlEncode(name)}`,
+      'PUT /workspace/channels/:name',
+      {
+        method: 'PUT',
+        body: request,
+        clientId: opts?.clientId,
+        timeoutMs: opts?.timeoutMs ?? CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS,
+        mode: 'rest',
+      },
+    );
+  }
+
+  deleteWorkspaceChannel(
+    name: string,
+    request: DaemonRevisionRequest,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelMutationResult> {
+    return this.jsonRequest<DaemonChannelMutationResult>(
+      `/workspace/channels/${urlEncode(name)}`,
+      'DELETE /workspace/channels/:name',
+      {
+        method: 'DELETE',
+        body: request,
+        clientId: opts?.clientId,
+        timeoutMs: opts?.timeoutMs ?? CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS,
+        mode: 'rest',
+      },
+    );
+  }
+
+  startWorkspaceChannel(
+    name: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelMutationResult> {
+    return this.controlWorkspaceChannel(name, 'start', opts);
+  }
+
+  stopWorkspaceChannel(
+    name: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelMutationResult> {
+    return this.controlWorkspaceChannel(name, 'stop', opts);
+  }
+
+  restartWorkspaceChannel(
+    name: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelMutationResult> {
+    return this.controlWorkspaceChannel(name, 'restart', opts);
+  }
+
+  private controlWorkspaceChannel(
+    name: string,
+    operation: 'start' | 'stop' | 'restart',
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelMutationResult> {
+    return this.jsonRequest<DaemonChannelMutationResult>(
+      `/workspace/channels/${urlEncode(name)}/${operation}`,
+      `POST /workspace/channels/:name/${operation}`,
+      {
+        method: 'POST',
+        body: {},
+        clientId: opts?.clientId,
+        timeoutMs: opts?.timeoutMs ?? CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS,
+        mode: 'rest',
+      },
+    );
+  }
+
   async manageMcpServer(
     serverName: string,
     action: DaemonMcpManageAction,
@@ -4149,6 +4250,90 @@ export class WorkspaceDaemonClient {
 
   workspaceMcp(): Promise<DaemonWorkspaceMcpStatus> {
     return this.get('/mcp', 'GET /workspaces/:workspace/mcp');
+  }
+
+  workspaceChannelTypes(
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelTypeCatalog> {
+    return this.client.workspaceJsonRequest<DaemonChannelTypeCatalog>(
+      this.workspaceSelector,
+      '/channel-types',
+      'GET /workspaces/:workspace/channel-types',
+      { clientId: opts?.clientId, timeoutMs: opts?.timeoutMs, mode: 'rest' },
+    );
+  }
+
+  workspaceChannels(
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelsSnapshot> {
+    return this.client.workspaceJsonRequest<DaemonChannelsSnapshot>(
+      this.workspaceSelector,
+      '/channels',
+      'GET /workspaces/:workspace/channels',
+      { clientId: opts?.clientId, timeoutMs: opts?.timeoutMs, mode: 'rest' },
+    );
+  }
+
+  upsertWorkspaceChannel(
+    name: string,
+    request: DaemonChannelUpsertRequest,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelMutationResult> {
+    return this.mutateWorkspaceChannel(name, '', 'PUT', request, opts);
+  }
+
+  deleteWorkspaceChannel(
+    name: string,
+    request: DaemonRevisionRequest,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelMutationResult> {
+    return this.mutateWorkspaceChannel(name, '', 'DELETE', request, opts);
+  }
+
+  startWorkspaceChannel(
+    name: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelMutationResult> {
+    return this.mutateWorkspaceChannel(name, '/start', 'POST', {}, opts);
+  }
+
+  stopWorkspaceChannel(
+    name: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelMutationResult> {
+    return this.mutateWorkspaceChannel(name, '/stop', 'POST', {}, opts);
+  }
+
+  restartWorkspaceChannel(
+    name: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelMutationResult> {
+    return this.mutateWorkspaceChannel(name, '/restart', 'POST', {}, opts);
+  }
+
+  private mutateWorkspaceChannel(
+    name: string,
+    suffix: '' | '/start' | '/stop' | '/restart',
+    method: 'PUT' | 'DELETE' | 'POST',
+    body: DaemonChannelUpsertRequest | DaemonRevisionRequest | object,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelMutationResult> {
+    const operation = suffix ? suffix.slice(1) : undefined;
+    const label = operation
+      ? `POST /workspaces/:workspace/channels/:name/${operation}`
+      : `${method} /workspaces/:workspace/channels/:name`;
+    return this.client.workspaceJsonRequest<DaemonChannelMutationResult>(
+      this.workspaceSelector,
+      `/channels/${urlEncode(name)}${suffix}`,
+      label,
+      {
+        method,
+        body,
+        clientId: opts?.clientId,
+        timeoutMs: opts?.timeoutMs ?? CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS,
+        mode: 'rest',
+      },
+    );
   }
 
   initializeWorkspaceMcp(): Promise<DaemonWorkspaceMcpInitializeResult> {

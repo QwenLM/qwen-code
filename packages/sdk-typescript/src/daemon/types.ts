@@ -2592,6 +2592,80 @@ export interface DaemonChannelReloadResult {
   worker: DaemonChannelWorkerSnapshot;
 }
 
+export type DaemonChannelConfigFieldKind =
+  | 'string'
+  | 'secret'
+  | 'boolean'
+  | 'number'
+  | 'enum';
+
+export interface DaemonChannelConfigFieldDescriptor {
+  key: string;
+  label: string;
+  kind: DaemonChannelConfigFieldKind;
+  required?: boolean;
+  envResolvable?: boolean;
+  options?: ReadonlyArray<{ value: string; label: string }>;
+  description?: string;
+}
+
+export interface DaemonChannelTypeDescriptor {
+  type: string;
+  displayName: string;
+  manageable: boolean;
+  fields: readonly DaemonChannelConfigFieldDescriptor[];
+  auth: ReadonlyArray<'credentials' | 'qr'>;
+}
+
+export type DaemonChannelTypeCatalog = DaemonChannelTypeDescriptor[];
+
+export interface DaemonChannelRuntimeState {
+  state: 'stopped' | 'starting' | 'connected' | 'partial' | 'error';
+  lastError?: string;
+}
+
+export interface DaemonChannelSecretState {
+  present: boolean;
+  source?: 'literal' | 'environment';
+}
+
+export interface DaemonChannelInstanceSnapshot {
+  name: string;
+  config: Record<string, unknown>;
+  secrets: Record<string, DaemonChannelSecretState>;
+  startsWithServe: boolean;
+  runtime: DaemonChannelRuntimeState;
+}
+
+export interface DaemonChannelsSnapshot {
+  revision: string;
+  instances: Record<string, DaemonChannelInstanceSnapshot>;
+}
+
+export type DaemonChannelSecretUpdate =
+  | { operation: 'preserve' }
+  | { operation: 'replace'; value: string }
+  | { operation: 'clear' };
+
+export interface DaemonRevisionRequest {
+  expectedRevision: string;
+}
+
+export interface DaemonChannelUpsertRequest extends DaemonRevisionRequest {
+  config: Record<string, unknown> & { type: string };
+  secrets?: Record<string, DaemonChannelSecretUpdate>;
+}
+
+export interface DaemonChannelMutationResult {
+  snapshot: DaemonChannelsSnapshot;
+  instance: DaemonChannelInstanceSnapshot;
+}
+
+export interface DaemonChannelManagementOptions {
+  clientId?: string;
+  timeoutMs?: number;
+}
+
 export type DaemonMcpRestartResult =
   | {
       serverName: string;
