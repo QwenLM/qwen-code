@@ -73,6 +73,9 @@ export { useDaemonAgents as useAgents } from './daemon/index.js';
 /** Authentication state for the daemon connection. */
 export { useDaemonAuth as useAuth } from './daemon/index.js';
 
+/** Channel catalog, configuration, runtime controls, and QR authentication. */
+export { useDaemonChannels as useChannels } from './daemon/index.js';
+
 /** Language diagnostics (errors, warnings) from the workspace. */
 export { useDaemonDiagnostics as useDiagnostics } from './daemon/index.js';
 
@@ -258,6 +261,8 @@ export type {
 export type {
   /** All workspace-level actions: MCP, tools, memory, agents, files, auth. */
   DaemonWorkspaceActions,
+  DaemonChannelAuthActions,
+  DaemonChannelsResource,
   /** Internal workspace context value (client + actions + status + error). */
   DaemonWorkspaceContextValue,
   /** Props accepted by `<DaemonWorkspaceProvider>`. */
@@ -364,6 +369,24 @@ export type {
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceProviderStatus,
   DaemonWorkspaceProviderModel,
+  DaemonChannelAuthState,
+  DaemonChannelAuthSession,
+  DaemonChannelAuthBeginRequest,
+  DaemonChannelAuthCommitRequest,
+  DaemonChannelAuthCancelResult,
+  DaemonChannelConfigFieldKind,
+  DaemonChannelConfigFieldDescriptor,
+  DaemonChannelTypeDescriptor,
+  DaemonChannelTypeCatalog,
+  DaemonChannelRuntimeState,
+  DaemonChannelSecretState,
+  DaemonChannelInstanceSnapshot,
+  DaemonChannelsSnapshot,
+  DaemonChannelSecretUpdate,
+  DaemonRevisionRequest,
+  DaemonChannelUpsertRequest,
+  DaemonChannelStartupRequest,
+  DaemonChannelMutationResult,
   /** Request/result for DELETE /workspace/models. */
   DaemonModelDeleteRequest,
   DaemonModelDeleteResult,

@@ -153,6 +153,156 @@ export function createDaemonWorkspaceActions({
       return result.unarchived.length > 0 || result.alreadyActive.length > 0;
     },
 
+    async loadChannels() {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Load channels failed',
+      );
+      const [catalog, snapshot] = await withActionTimeout(
+        Promise.all([
+          workspace.workspaceChannelTypes(),
+          workspace.workspaceChannels(),
+        ]),
+        'Load channels timed out',
+      );
+      return { catalog, snapshot };
+    },
+
+    async upsertChannel(name, request) {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Update channel failed',
+      );
+      return withActionTimeout(
+        workspace.upsertWorkspaceChannel(name, request),
+        'Update channel timed out',
+      );
+    },
+
+    async removeChannel(name, request) {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Remove channel failed',
+      );
+      return withActionTimeout(
+        workspace.deleteWorkspaceChannel(name, request),
+        'Remove channel timed out',
+      );
+    },
+
+    async setChannelStartup(name, request) {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Update channel startup failed',
+      );
+      return withActionTimeout(
+        workspace.setWorkspaceChannelStartup(name, request),
+        'Update channel startup timed out',
+      );
+    },
+
+    async startChannel(name) {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Start channel failed',
+      );
+      return withActionTimeout(
+        workspace.startWorkspaceChannel(name),
+        'Start channel timed out',
+      );
+    },
+
+    async stopChannel(name) {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Stop channel failed',
+      );
+      return withActionTimeout(
+        workspace.stopWorkspaceChannel(name),
+        'Stop channel timed out',
+      );
+    },
+
+    async restartChannel(name) {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Restart channel failed',
+      );
+      return withActionTimeout(
+        workspace.restartWorkspaceChannel(name),
+        'Restart channel timed out',
+      );
+    },
+
+    channelAuth: {
+      async begin(name, request) {
+        const workspace = requireWorkspaceClient(
+          getClient,
+          getWorkspaceCwd,
+          'Begin channel auth failed',
+        );
+        return withActionTimeout(
+          workspace.beginWorkspaceChannelAuth(name, request),
+          'Begin channel auth timed out',
+        );
+      },
+
+      async status(name, sessionId) {
+        const workspace = requireWorkspaceClient(
+          getClient,
+          getWorkspaceCwd,
+          'Load channel auth failed',
+        );
+        return withActionTimeout(
+          workspace.workspaceChannelAuth(name, sessionId),
+          'Load channel auth timed out',
+        );
+      },
+
+      async qr(name, sessionId) {
+        const workspace = requireWorkspaceClient(
+          getClient,
+          getWorkspaceCwd,
+          'Load channel auth QR failed',
+        );
+        return withActionTimeout(
+          workspace.workspaceChannelAuthQr(name, sessionId),
+          'Load channel auth QR timed out',
+        );
+      },
+
+      async cancel(name, sessionId) {
+        const workspace = requireWorkspaceClient(
+          getClient,
+          getWorkspaceCwd,
+          'Cancel channel auth failed',
+        );
+        return withActionTimeout(
+          workspace.cancelWorkspaceChannelAuth(name, sessionId),
+          'Cancel channel auth timed out',
+        );
+      },
+
+      async commit(name, sessionId, request) {
+        const workspace = requireWorkspaceClient(
+          getClient,
+          getWorkspaceCwd,
+          'Commit channel auth failed',
+        );
+        return withActionTimeout(
+          workspace.commitWorkspaceChannelAuth(name, sessionId, request),
+          'Commit channel auth timed out',
+        );
+      },
+    },
+
     async loadMcpStatus() {
       const client = requireClient(getClient, 'Load MCP status failed');
       return withActionTimeout(
@@ -917,6 +1067,15 @@ function requireWorkspaceCwd(
     throw new Error('Daemon workspace is not connected');
   }
   return cwd;
+}
+
+function requireWorkspaceClient(
+  getClient: () => DaemonClient | undefined,
+  getWorkspaceCwd: () => string | undefined,
+  action: string,
+) {
+  const client = requireClient(getClient, action);
+  return client.workspaceByCwd(requireWorkspaceCwd(getWorkspaceCwd));
 }
 
 // Builds a scheduled-tasks REST path. With a `workspaceId` it targets that

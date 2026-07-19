@@ -181,4 +181,70 @@ describe('workspace actions', () => {
       }),
     ).rejects.toThrow('Respond to extension interaction failed');
   });
+
+  it('routes channel management and auth actions through the current workspace', async () => {
+    let cwd = '/workspace-a';
+    const catalog = [{ type: 'qq', displayName: 'QQ', manageable: true }];
+    const snapshot = { revision: '1', instances: {} };
+    const qr = new Blob(['qr'], { type: 'image/png' });
+    const workspace = {
+      workspaceChannelTypes: vi.fn().mockResolvedValue(catalog),
+      workspaceChannels: vi.fn().mockResolvedValue(snapshot),
+      upsertWorkspaceChannel: vi.fn().mockResolvedValue({ snapshot }),
+      deleteWorkspaceChannel: vi.fn().mockResolvedValue({ snapshot }),
+      setWorkspaceChannelStartup: vi.fn().mockResolvedValue({ snapshot }),
+      startWorkspaceChannel: vi.fn().mockResolvedValue({ snapshot }),
+      stopWorkspaceChannel: vi.fn().mockResolvedValue({ snapshot }),
+      restartWorkspaceChannel: vi.fn().mockResolvedValue({ snapshot }),
+      beginWorkspaceChannelAuth: vi.fn().mockResolvedValue({ id: 'auth-1' }),
+      workspaceChannelAuth: vi.fn().mockResolvedValue({ id: 'auth-1' }),
+      workspaceChannelAuthQr: vi.fn().mockResolvedValue(qr),
+      cancelWorkspaceChannelAuth: vi.fn().mockResolvedValue({
+        cancelled: true,
+      }),
+      commitWorkspaceChannelAuth: vi.fn().mockResolvedValue({ snapshot }),
+    };
+    const workspaceByCwd = vi.fn(() => workspace);
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => ({ workspaceByCwd }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => cwd,
+      baseUrl: 'http://daemon',
+    });
+
+    await expect(actions.loadChannels()).resolves.toEqual({
+      catalog,
+      snapshot,
+    });
+    cwd = '/workspace-b';
+    await actions.upsertChannel('bot', {
+      expectedRevision: '1',
+      config: { type: 'qq' },
+    });
+    await actions.removeChannel('bot', { expectedRevision: '1' });
+    await actions.setChannelStartup('bot', {
+      expectedRevision: '1',
+      enabled: true,
+    });
+    await actions.startChannel('bot');
+    await actions.stopChannel('bot');
+    await actions.restartChannel('bot');
+    await actions.channelAuth.begin('bot', { channelType: 'qq' });
+    await actions.channelAuth.status('bot', 'auth-1');
+    await expect(actions.channelAuth.qr('bot', 'auth-1')).resolves.toBe(qr);
+    await actions.channelAuth.cancel('bot', 'auth-1');
+    await actions.channelAuth.commit('bot', 'auth-1', {
+      channelType: 'qq',
+    });
+
+    expect(workspaceByCwd).toHaveBeenNthCalledWith(1, '/workspace-a');
+    expect(workspaceByCwd).toHaveBeenLastCalledWith('/workspace-b');
+    expect(workspace.upsertWorkspaceChannel).toHaveBeenCalledWith('bot', {
+      expectedRevision: '1',
+      config: { type: 'qq' },
+    });
+    expect(workspace.workspaceChannelAuthQr).toHaveBeenCalledWith(
+      'bot',
+      'auth-1',
+    );
+  });
 });

@@ -13,6 +13,15 @@ import type {
   DaemonAuthProviderInstallResult,
   DaemonAuthStatusSnapshot,
   DaemonCapabilities,
+  DaemonChannelAuthBeginRequest,
+  DaemonChannelAuthCancelResult,
+  DaemonChannelAuthCommitRequest,
+  DaemonChannelAuthSession,
+  DaemonChannelMutationResult,
+  DaemonChannelsSnapshot,
+  DaemonChannelStartupRequest,
+  DaemonChannelTypeCatalog,
+  DaemonChannelUpsertRequest,
   DaemonClient,
   DaemonCreateAgentRequest,
   DaemonGeneratedAgentContent,
@@ -81,6 +90,7 @@ import type {
   DaemonUsageRange,
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
+  DaemonRevisionRequest,
 } from '@qwen-code/sdk/daemon';
 
 // ── Resource Hook Types (shared by workspace hooks) ────────────────
@@ -307,6 +317,29 @@ export interface DaemonWorkspacePathSuggestions {
   truncated: boolean;
 }
 
+export interface DaemonChannelsResource {
+  catalog: DaemonChannelTypeCatalog;
+  snapshot: DaemonChannelsSnapshot;
+}
+
+export interface DaemonChannelAuthActions {
+  begin(
+    name: string,
+    request: DaemonChannelAuthBeginRequest,
+  ): Promise<DaemonChannelAuthSession>;
+  status(name: string, sessionId: string): Promise<DaemonChannelAuthSession>;
+  qr(name: string, sessionId: string): Promise<Blob>;
+  cancel(
+    name: string,
+    sessionId: string,
+  ): Promise<DaemonChannelAuthCancelResult>;
+  commit(
+    name: string,
+    sessionId: string,
+    request: DaemonChannelAuthCommitRequest,
+  ): Promise<DaemonChannelMutationResult>;
+}
+
 export interface DaemonWorkspaceActions {
   // Sessions
   listSessions(
@@ -346,6 +379,25 @@ export interface DaemonWorkspaceActions {
   archiveSession(sessionId: string): Promise<boolean>;
   /** Restore an archived session to the active directory. Idempotent. */
   unarchiveSession(sessionId: string): Promise<boolean>;
+
+  // Channels
+  loadChannels(): Promise<DaemonChannelsResource>;
+  upsertChannel(
+    name: string,
+    request: DaemonChannelUpsertRequest,
+  ): Promise<DaemonChannelMutationResult>;
+  removeChannel(
+    name: string,
+    request: DaemonRevisionRequest,
+  ): Promise<DaemonChannelMutationResult>;
+  setChannelStartup(
+    name: string,
+    request: DaemonChannelStartupRequest,
+  ): Promise<DaemonChannelMutationResult>;
+  startChannel(name: string): Promise<DaemonChannelMutationResult>;
+  stopChannel(name: string): Promise<DaemonChannelMutationResult>;
+  restartChannel(name: string): Promise<DaemonChannelMutationResult>;
+  channelAuth: DaemonChannelAuthActions;
 
   // MCP
   loadMcpStatus(): Promise<DaemonWorkspaceMcpStatus>;

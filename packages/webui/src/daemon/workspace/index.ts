@@ -23,6 +23,8 @@ export type {
   DaemonCreateScheduledTaskRequest,
   DaemonUpdateScheduledTaskRequest,
   DaemonResourceOptions,
+  DaemonChannelAuthActions,
+  DaemonChannelsResource,
   DaemonWorkspaceActions,
   DaemonWorkspaceContextValue,
   DaemonWorkspaceProviderProps,
@@ -33,6 +35,7 @@ export type {
 export {
   useDaemonAgents,
   useDaemonAuth,
+  useDaemonChannels,
   useDaemonDiagnostics,
   useDaemonFiles,
   useDaemonGlob,
