@@ -22,6 +22,7 @@ import {
 import {
   abortGoalForStopHookCap,
   createGoalStopHookCallback,
+  getStopHookContinuationReason,
   GOAL_HOOK_ID_OUTPUT_KEY,
   GOAL_HOOK_TIMEOUT_MS,
   GOAL_JUDGE_TIMEOUT_MS,
@@ -70,6 +71,14 @@ const stopInput = (overrides: Partial<StopInput> = {}): HookInput =>
     last_assistant_message: 'I wrote a function.',
     ...overrides,
   }) as HookInput;
+
+it('falls back when a goal hook omits both continuation reasons', () => {
+  expect(
+    getStopHookContinuationReason({
+      hookSpecificOutput: { [GOAL_HOOK_ID_OUTPUT_KEY]: 'h1' },
+    }),
+  ).toBe('No reason provided');
+});
 
 describe('createGoalStopHookCallback', () => {
   beforeEach(() => {
