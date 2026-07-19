@@ -1864,8 +1864,26 @@ describe('qwen-autofix workflow', () => {
     // ACTUAL runner against the staged layout and asserts it reads the
     // staged SKILL, exercising the stage↔resolve contract for real.
     const runner = readFileSync(autofixRunnerScriptPath, 'utf8');
-    const dir = mkdtempSync(join(tmpdir(), 'autofix-stage-'));
-    try {
+    const printPrompt = (scriptPath, dir) =>
+      spawnSync(
+        process.execPath,
+        [
+          scriptPath,
+          '--mode',
+          'address-review',
+          '--pr',
+          '1',
+          '--issue',
+          '1',
+          '--workdir',
+          dir,
+          '--print-prompt',
+        ],
+        // spawnSync blocks the event loop, so vitest's async timeout can't
+        // fire — bound each subprocess directly against a hung runner.
+        { encoding: 'utf8', timeout: 10_000 },
+      );
+    withRunnerDir((dir) => {
       // Mirror the workflow's staging: autofix-skill/{SKILL.md,scripts/run-agent.mjs}.
       mkdirSync(join(dir, 'autofix-skill', 'scripts'), { recursive: true });
       writeFileSync(
@@ -1879,22 +1897,7 @@ describe('qwen-autofix workflow', () => {
         'run-agent.mjs',
       );
       writeFileSync(stagedRunner, runner);
-      const ok = spawnSync(
-        'node',
-        [
-          stagedRunner,
-          '--mode',
-          'address-review',
-          '--pr',
-          '1',
-          '--issue',
-          '1',
-          '--workdir',
-          dir,
-          '--print-prompt',
-        ],
-        { encoding: 'utf8' },
-      );
+      const ok = printPrompt(stagedRunner, dir);
       expect(ok.status).toBe(0);
       // The real runner resolved ../SKILL.md to the STAGED copy and inlined it.
       expect(ok.stdout).toContain('STAGED_SKILL_SENTINEL');
@@ -1903,31 +1906,18 @@ describe('qwen-autofix workflow', () => {
       expect(ok.stdout).toMatch(/Skill directory: \S*[/\\]autofix-skill\n/);
 
       // And the FLAT layout #7165 shipped (runner alone, no ../SKILL.md) must
-      // crash with ENOENT — proving this test catches that regression.
-      const flatRunner = join(dir, 'run-agent.mjs');
+      // crash with ENOENT — proving this test catches that regression. Nest it
+      // under dir/flat/ so its ../SKILL.md resolves to dir/SKILL.md (which this
+      // test never creates) rather than a shared tmpdir()/SKILL.md a concurrent
+      // job could leave behind and make the runner exit 0 spuriously.
+      mkdirSync(join(dir, 'flat'), { recursive: true });
+      const flatRunner = join(dir, 'flat', 'run-agent.mjs');
       writeFileSync(flatRunner, runner);
-      const flat = spawnSync(
-        'node',
-        [
-          flatRunner,
-          '--mode',
-          'address-review',
-          '--pr',
-          '1',
-          '--issue',
-          '1',
-          '--workdir',
-          dir,
-          '--print-prompt',
-        ],
-        { encoding: 'utf8' },
-      );
+      const flat = printPrompt(flatRunner, dir);
       expect(flat.status).not.toBe(0);
       expect(flat.stderr).toContain('ENOENT');
       expect(flat.stderr).toContain("SKILL.md'");
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   it('runs heavy autofix jobs on hosted runners with sandbox images', () => {
