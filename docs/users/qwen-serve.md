@@ -242,6 +242,11 @@ curl -X PUT "$DAEMON/workspace/channels/alerts/startup" \
 Enabling appends the name once while preserving the saved order; disabling
 removes it. The operation changes only `serve.channels`: it neither starts nor
 stops the current process's worker and does not rewrite `channels.<name>`.
+When the saved list is `['all']`, every configured instance reports
+`startsWithServe: true`. Enabling one instance is a revision-checked no-op.
+Disabling one replaces the sentinel with the explicit, persisted-order list of
+all other selectable configured instances, or `[]` when none remain; the
+daemon never persists `['all', ...]`.
 
 Daemon startup precedence is:
 

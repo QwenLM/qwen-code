@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import { normalizeServeChannelSelection } from './channel-selection.js';
 import type { ChannelSettingsSnapshot } from './channel-settings-store.js';
 import {
   createChannelManagementService,
@@ -145,6 +146,25 @@ describe('createChannelManagementService', () => {
     });
   });
 
+  it('projects the all startup sentinel onto every configured instance', async () => {
+    const { service } = setup({
+      snapshot: settingsSnapshot({
+        channels: {
+          all: { type: 'telegram' },
+          first: { type: 'telegram' },
+          bot: { type: 'telegram' },
+        },
+        startupNames: ['all'],
+      }),
+    });
+
+    const result = await service.list();
+
+    expect(result.instances['all']?.startsWithServe).toBe(true);
+    expect(result.instances['first']?.startsWithServe).toBe(true);
+    expect(result.instances['bot']?.startsWithServe).toBe(true);
+  });
+
   it('keeps a failed replacement config and reports the instance as error', async () => {
     const { service, store, manager, persisted } = setup({
       committedNames: ['other', 'bot'],
@@ -262,6 +282,81 @@ describe('createChannelManagementService', () => {
     expect(manager.setSelection).not.toHaveBeenCalled();
     expect(manager.stopSelection).not.toHaveBeenCalled();
     expect(manager.reloadWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('treats enabling one instance under all as a revision-checked no-op', async () => {
+    const { service, store, manager } = setup({
+      snapshot: settingsSnapshot({ startupNames: ['all'] }),
+    });
+
+    const result = await service.setStartup('bot', {
+      expectedRevision: 'rev-1',
+      enabled: true,
+    });
+
+    expect(result.instance.startsWithServe).toBe(true);
+    expect(result.snapshot.revision).toBe('rev-1');
+    expect(store.setStartupNames).not.toHaveBeenCalled();
+    expect(manager.setSelection).not.toHaveBeenCalled();
+    expect(manager.stopSelection).not.toHaveBeenCalled();
+    expect(manager.reloadWorkspace).not.toHaveBeenCalled();
+
+    await expect(
+      service.setStartup('bot', {
+        expectedRevision: 'stale',
+        enabled: true,
+      }),
+    ).rejects.toMatchObject({ code: 'channel_settings_conflict' });
+    expect(store.setStartupNames).not.toHaveBeenCalled();
+  });
+
+  it('expands all to the other configured instances when disabling one', async () => {
+    const { service, store, manager } = setup({
+      snapshot: settingsSnapshot({
+        channels: {
+          all: { type: 'telegram' },
+          first: { type: 'telegram' },
+          bot: { type: 'telegram' },
+          last: { type: 'telegram' },
+        },
+        startupNames: ['all'],
+      }),
+    });
+
+    const result = await service.setStartup('bot', {
+      expectedRevision: 'rev-1',
+      enabled: false,
+    });
+
+    expect(store.setStartupNames).toHaveBeenCalledWith(['first', 'last'], {
+      expectedRevision: 'rev-1',
+    });
+    expect(normalizeServeChannelSelection(['first', 'last'])).toEqual({
+      mode: 'names',
+      names: ['first', 'last'],
+    });
+    expect(result.instance.startsWithServe).toBe(false);
+    expect(result.snapshot.instances['first']?.startsWithServe).toBe(true);
+    expect(result.snapshot.instances['last']?.startsWithServe).toBe(true);
+    expect(manager.setSelection).not.toHaveBeenCalled();
+    expect(manager.stopSelection).not.toHaveBeenCalled();
+    expect(manager.reloadWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('writes an empty startup list when disabling the only instance under all', async () => {
+    const { service, store } = setup({
+      snapshot: settingsSnapshot({ startupNames: ['all'] }),
+    });
+
+    await service.setStartup('bot', {
+      expectedRevision: 'rev-1',
+      enabled: false,
+    });
+
+    expect(store.setStartupNames).toHaveBeenCalledWith([], {
+      expectedRevision: 'rev-1',
+    });
+    expect(normalizeServeChannelSelection([])).toBeUndefined();
   });
 
   it('rejects startup changes for an unconfigured instance', async () => {

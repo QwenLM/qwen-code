@@ -319,6 +319,30 @@ describe('serve rate limit env parsing', () => {
     expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
   });
 
+  it('treats an explicit empty channel list as overriding persisted startup', async () => {
+    const { workspace, settingsPath } = workspaceWithSettings({
+      channels: { telegram: { type: 'telegram' } },
+      serve: { channels: ['telegram'] },
+    });
+    const before = fs.readFileSync(settingsPath, 'utf8');
+    const handler = serveCommand.handler;
+    if (!handler) throw new Error('serve handler missing');
+    const argv = buildParser().parseSync(`--no-web --workspace ${workspace}`);
+    argv['channel'] = [];
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    void handler(argv as Parameters<typeof handler>[0]);
+    await vi.waitFor(() => expect(mockRunQwenServe).toHaveBeenCalled());
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.not.objectContaining({ channelSelection: expect.anything() }),
+    );
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+  });
+
   it('does not infer startup from configured channels alone', async () => {
     const { workspace } = workspaceWithSettings({
       channels: { telegram: { type: 'telegram' } },

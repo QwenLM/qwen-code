@@ -246,7 +246,8 @@ export function createChannelManagementService(
       name,
       config,
       secrets,
-      startsWithServe: startupNames.includes(name),
+      startsWithServe:
+        startupNames.includes('all') || startupNames.includes(name),
       runtime: runtimeFor(name),
     };
   };
@@ -337,11 +338,25 @@ export function createChannelManagementService(
           `Channel "${name}" is not configured in this workspace.`,
         );
       }
-      const startupNames = request.enabled
-        ? current.startupNames.includes(name)
-          ? current.startupNames
-          : [...current.startupNames, name]
-        : current.startupNames.filter((item) => item !== name);
+      const startsAll = current.startupNames.includes('all');
+      if (startsAll && request.enabled) {
+        if (current.revision !== request.expectedRevision) {
+          throw new ChannelManagementError(
+            'channel_settings_conflict',
+            'Channel settings changed; reload before trying again.',
+          );
+        }
+        return resultFor(name, current);
+      }
+      const startupNames = startsAll
+        ? Object.keys(current.channels).filter(
+            (item) => item !== 'all' && item !== name,
+          )
+        : request.enabled
+          ? current.startupNames.includes(name)
+            ? current.startupNames
+            : [...current.startupNames, name]
+          : current.startupNames.filter((item) => item !== name);
       const persisted = await opts.store.setStartupNames(startupNames, {
         expectedRevision: request.expectedRevision,
       });

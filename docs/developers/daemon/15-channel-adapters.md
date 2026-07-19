@@ -276,7 +276,11 @@ The persistence/lifecycle ordering is intentional:
 - PUT `.../:name/startup` requires an own configured instance, then adds its
   name once to or removes it from the ordered `serve.channels` list through
   the same revision check. It does not touch the manager or the instance
-  configuration.
+  configuration. With the `all` sentinel active, every configured instance
+  projects `startsWithServe: true`; enabling one is a revision-checked no-op,
+  while disabling one expands the sentinel to all other selectable configured
+  names in persisted object order (or `[]`). The service never writes a mixed
+  `['all', ...]` list.
 - Start adds the name to the manager's ordered, process-local committed
   selection after unique workspace ownership preflight. Stop removes it;
   Restart performs the same targeted owning-workspace reload as an active PUT.
