@@ -62,6 +62,7 @@ export {
   type DaemonChannelSecretUpdate,
   type DaemonRevisionRequest,
   type DaemonChannelUpsertRequest,
+  type DaemonChannelStartupRequest,
   type DaemonChannelMutationResult,
   type DaemonChannelManagementOptions,
   type DaemonSessionRecapResult,

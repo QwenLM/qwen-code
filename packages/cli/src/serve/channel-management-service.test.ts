@@ -67,6 +67,14 @@ function setup(options: {
       });
       return persisted;
     }),
+    setStartupNames: vi.fn(async (startupNames) => {
+      persisted = settingsSnapshot({
+        revision: 'rev-2',
+        channels: persisted.channels,
+        startupNames: [...startupNames],
+      });
+      return persisted;
+    }),
   };
   let names = options.committedNames ?? [];
   const manager: ChannelManagementWorkerManager & {
@@ -212,6 +220,62 @@ describe('createChannelManagementService', () => {
     });
     expect(store.upsert).not.toHaveBeenCalled();
     expect(store.remove).not.toHaveBeenCalled();
+  });
+
+  it('enables persisted startup once while preserving order and runtime state', async () => {
+    const { service, store, manager, persisted } = setup({
+      committedNames: ['bot'],
+      snapshot: settingsSnapshot({ startupNames: ['first'] }),
+    });
+
+    const result = await service.setStartup('bot', {
+      expectedRevision: 'rev-1',
+      enabled: true,
+    });
+
+    expect(store.setStartupNames).toHaveBeenCalledWith(['first', 'bot'], {
+      expectedRevision: 'rev-1',
+    });
+    expect(persisted().channels).toEqual(settingsSnapshot().channels);
+    expect(result.instance.startsWithServe).toBe(true);
+    expect(result.instance.runtime.state).toBe('connected');
+    expect(manager.setSelection).not.toHaveBeenCalled();
+    expect(manager.stopSelection).not.toHaveBeenCalled();
+    expect(manager.reloadWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('disables persisted startup without mutating the runtime manager', async () => {
+    const { service, store, manager } = setup({
+      committedNames: ['bot'],
+      snapshot: settingsSnapshot({ startupNames: ['first', 'bot', 'last'] }),
+    });
+
+    const result = await service.setStartup('bot', {
+      expectedRevision: 'rev-1',
+      enabled: false,
+    });
+
+    expect(store.setStartupNames).toHaveBeenCalledWith(['first', 'last'], {
+      expectedRevision: 'rev-1',
+    });
+    expect(result.instance.startsWithServe).toBe(false);
+    expect(manager.setSelection).not.toHaveBeenCalled();
+    expect(manager.stopSelection).not.toHaveBeenCalled();
+    expect(manager.reloadWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('rejects startup changes for an unconfigured instance', async () => {
+    const { service, store, manager } = setup({ committedNames: [] });
+
+    await expect(
+      service.setStartup('missing', {
+        expectedRevision: 'rev-1',
+        enabled: true,
+      }),
+    ).rejects.toMatchObject({ code: 'channel_instance_not_found' });
+
+    expect(store.setStartupNames).not.toHaveBeenCalled();
+    expect(manager.setSelection).not.toHaveBeenCalled();
   });
 
   it('fails closed when an active instance belongs to another workspace', async () => {

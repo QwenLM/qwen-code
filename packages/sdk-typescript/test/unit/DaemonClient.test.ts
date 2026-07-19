@@ -4204,6 +4204,10 @@ describe('DaemonClient', () => {
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
 
       await client.deleteWorkspaceChannel('bot', { expectedRevision: 'r2' });
+      await client.setWorkspaceChannelStartup('bot', {
+        expectedRevision: 'r2',
+        enabled: true,
+      });
       await client.startWorkspaceChannel('bot');
       await client.stopWorkspaceChannel('bot');
       await client.restartWorkspaceChannel('bot');
@@ -4213,6 +4217,11 @@ describe('DaemonClient', () => {
           'DELETE',
           'http://daemon/workspace/channels/bot',
           JSON.stringify({ expectedRevision: 'r2' }),
+        ],
+        [
+          'PUT',
+          'http://daemon/workspace/channels/bot/startup',
+          JSON.stringify({ expectedRevision: 'r2', enabled: true }),
         ],
         ['POST', 'http://daemon/workspace/channels/bot/start', '{}'],
         ['POST', 'http://daemon/workspace/channels/bot/stop', '{}'],
@@ -4256,6 +4265,10 @@ describe('DaemonClient', () => {
       await workspace.deleteWorkspaceChannel('bot', {
         expectedRevision: 'r2',
       });
+      await workspace.setWorkspaceChannelStartup('bot', {
+        expectedRevision: 'r2',
+        enabled: false,
+      });
       await workspace.startWorkspaceChannel('bot');
       await workspace.stopWorkspaceChannel('bot');
       await workspace.restartWorkspaceChannel('bot');
@@ -4270,6 +4283,10 @@ describe('DaemonClient', () => {
         [
           'DELETE',
           'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot',
+        ],
+        [
+          'PUT',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot/startup',
         ],
         [
           'POST',

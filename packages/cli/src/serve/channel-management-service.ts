@@ -54,6 +54,10 @@ export interface ChannelUpsertRequest {
 
 export type RevisionRequest = ChannelSettingsMutationOptions;
 
+export interface ChannelStartupRequest extends RevisionRequest {
+  enabled: boolean;
+}
+
 export interface ChannelMutationResult {
   snapshot: DaemonChannelsSnapshot;
   instance: ChannelInstanceSnapshot;
@@ -69,6 +73,10 @@ export interface ChannelManagementService {
     name: string,
     request: RevisionRequest,
   ): Promise<ChannelMutationResult>;
+  setStartup(
+    name: string,
+    request: ChannelStartupRequest,
+  ): Promise<ChannelMutationResult>;
   start(name: string): Promise<ChannelMutationResult>;
   stop(name: string): Promise<ChannelMutationResult>;
   restart(name: string): Promise<ChannelMutationResult>;
@@ -82,6 +90,10 @@ interface ChannelManagementSettingsStore {
   ): Promise<ChannelSettingsSnapshot>;
   remove(
     name: string,
+    options: ChannelSettingsMutationOptions,
+  ): Promise<ChannelSettingsSnapshot>;
+  setStartupNames(
+    names: readonly string[],
     options: ChannelSettingsMutationOptions,
   ): Promise<ChannelSettingsSnapshot>;
 }
@@ -315,6 +327,24 @@ export function createChannelManagementService(
       }
       const persisted = await opts.store.remove(name, request);
       diagnostics.delete(name);
+      return resultFor(name, persisted);
+    },
+    async setStartup(name, request) {
+      const current = opts.store.snapshot();
+      if (!Object.hasOwn(current.channels, name)) {
+        throw new ChannelManagementError(
+          'channel_instance_not_found',
+          `Channel "${name}" is not configured in this workspace.`,
+        );
+      }
+      const startupNames = request.enabled
+        ? current.startupNames.includes(name)
+          ? current.startupNames
+          : [...current.startupNames, name]
+        : current.startupNames.filter((item) => item !== name);
+      const persisted = await opts.store.setStartupNames(startupNames, {
+        expectedRevision: request.expectedRevision,
+      });
       return resultFor(name, persisted);
     },
     async start(name) {

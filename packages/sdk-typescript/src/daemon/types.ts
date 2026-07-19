@@ -2656,6 +2656,10 @@ export interface DaemonChannelUpsertRequest extends DaemonRevisionRequest {
   secrets?: Record<string, DaemonChannelSecretUpdate>;
 }
 
+export interface DaemonChannelStartupRequest extends DaemonRevisionRequest {
+  enabled: boolean;
+}
+
 export interface DaemonChannelMutationResult {
   snapshot: DaemonChannelsSnapshot;
   instance: DaemonChannelInstanceSnapshot;

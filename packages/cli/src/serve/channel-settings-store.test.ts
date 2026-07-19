@@ -200,6 +200,17 @@ describe('WorkspaceChannelSettingsStore', () => {
     expect(next.startupNames).toEqual(['bot']);
   });
 
+  it('rejects stale startup names without changing workspace settings', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const before = fs.readFileSync(settingsPath, 'utf8');
+
+    await expect(
+      store.setStartupNames(['bot'], { expectedRevision: 'stale' }),
+    ).rejects.toMatchObject({ code: 'channel_settings_conflict' });
+
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+  });
+
   it('removes the channel and its startup selection together', async () => {
     writeWorkspaceSettings(`{
   "$version": 4,

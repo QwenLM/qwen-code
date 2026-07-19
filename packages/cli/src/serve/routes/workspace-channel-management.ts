@@ -10,6 +10,7 @@ import { sanitizeLogText } from '@qwen-code/channel-base';
 import { supportedChannelCatalog } from '../../commands/channel/channel-registry.js';
 import type {
   ChannelManagementService,
+  ChannelStartupRequest,
   ChannelUpsertRequest,
   RevisionRequest,
 } from '../channel-management-service.js';
@@ -114,6 +115,25 @@ function parseUpsertRequest(
   };
 }
 
+function parseStartupRequest(
+  body: Record<string, unknown>,
+  res: Response,
+): ChannelStartupRequest | undefined {
+  const revision = parseRevisionRequest(body, res);
+  if (!revision) return undefined;
+  if (typeof body['enabled'] !== 'boolean') {
+    res.status(400).json({
+      error: '`enabled` must be a boolean.',
+      code: 'invalid_channel_management_request',
+    });
+    return undefined;
+  }
+  return {
+    expectedRevision: revision.expectedRevision,
+    enabled: body['enabled'],
+  };
+}
+
 function errorCode(error: unknown): string | undefined {
   if (!error || typeof error !== 'object') return undefined;
   try {
@@ -197,6 +217,7 @@ export function registerWorkspaceChannelManagementRoutes(
     resolveWorkspaceRuntimeFromParam(deps.workspaceRegistry, req, res);
   const putMutation = deps.mutate({ strict: true });
   const deleteMutation = deps.mutate({ strict: true });
+  const startupMutation = deps.mutate({ strict: true });
   const startMutation = deps.mutate({ strict: true });
   const stopMutation = deps.mutate({ strict: true });
   const restartMutation = deps.mutate({ strict: true });
@@ -273,6 +294,31 @@ export function registerWorkspaceChannelManagementRoutes(
         sendManagementError(res, error);
       }
     });
+
+    app.put(
+      `${prefix}/channels/:name/startup`,
+      startupMutation,
+      async (req, res) => {
+        const target = await resolveTarget(
+          req,
+          res,
+          resolveRuntime,
+          deps.resolveService,
+        );
+        if (!target) return;
+        if (deps.parseAndValidateClientId(req, res, target.runtime) === null)
+          return;
+        const name = parseInstanceName(req, res);
+        if (!name) return;
+        const body = parseStartupRequest(deps.safeBody(req), res);
+        if (!body) return;
+        try {
+          res.status(200).json(await target.service.setStartup(name, body));
+        } catch (error) {
+          sendManagementError(res, error);
+        }
+      },
+    );
 
     const action = (
       operation: 'start' | 'stop' | 'restart',

@@ -29,6 +29,7 @@ import type {
   DaemonChannelMutationResult,
   DaemonChannelRuntimeState,
   DaemonChannelSecretState,
+  DaemonChannelStartupRequest,
   DaemonChannelSecretUpdate,
   DaemonChannelSelection,
   DaemonChannelSetResult,
@@ -346,6 +347,10 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonChannelsSnapshot>().not.toBeNever();
     expectTypeOf<DaemonChannelSecretUpdate>().not.toBeNever();
     expectTypeOf<DaemonChannelUpsertRequest>().not.toBeNever();
+    expectTypeOf<DaemonChannelStartupRequest>().toEqualTypeOf<{
+      expectedRevision: string;
+      enabled: boolean;
+    }>();
     expectTypeOf<DaemonRevisionRequest>().toEqualTypeOf<{
       expectedRevision: string;
     }>();
@@ -364,6 +369,12 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     ).toBeFunction();
     expectTypeOf(
       Public.WorkspaceDaemonClient.prototype.workspaceChannels,
+    ).toBeFunction();
+    expectTypeOf(
+      Public.DaemonClient.prototype.setWorkspaceChannelStartup,
+    ).toBeFunction();
+    expectTypeOf(
+      Public.WorkspaceDaemonClient.prototype.setWorkspaceChannelStartup,
     ).toBeFunction();
   });
 });

@@ -357,6 +357,7 @@ export type {
   DaemonChannelSecretUpdate,
   DaemonRevisionRequest,
   DaemonChannelUpsertRequest,
+  DaemonChannelStartupRequest,
   DaemonChannelMutationResult,
   DaemonChannelManagementOptions,
   DaemonChannelWorkerGroupSnapshot,

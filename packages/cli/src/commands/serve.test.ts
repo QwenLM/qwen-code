@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import yargs, { type Argv } from 'yargs';
 import { serveCommand, maybeOpenWebShellBrowser } from './serve.js';
+import { resetHomeEnvBootstrapForTesting } from '../config/settings.js';
 
 const mockOpenBrowserSecurely = vi.hoisted(() => vi.fn());
 const mockShouldLaunchBrowser = vi.hoisted(() => vi.fn(() => true));
@@ -152,6 +153,7 @@ describe('serve command args', () => {
 
 describe('serve rate limit env parsing', () => {
   const originalEnv = process.env;
+  const tempRoots: string[] = [];
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -160,8 +162,30 @@ describe('serve rate limit env parsing', () => {
 
   afterEach(() => {
     process.env = originalEnv;
+    resetHomeEnvBootstrapForTesting();
+    for (const root of tempRoots.splice(0)) {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
     vi.restoreAllMocks();
   });
+
+  function workspaceWithSettings(settings: Record<string, unknown>): {
+    workspace: string;
+    settingsPath: string;
+  } {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-serve-settings-'));
+    tempRoots.push(root);
+    const workspace = path.join(root, 'workspace');
+    const settingsPath = path.join(workspace, '.qwen', 'settings.json');
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(
+      settingsPath,
+      `${JSON.stringify({ $version: 4, ...settings }, null, 2)}\n`,
+    );
+    process.env['QWEN_HOME'] = path.join(root, 'home');
+    resetHomeEnvBootstrapForTesting();
+    return { workspace, settingsPath };
+  }
 
   async function invokeServeHandler() {
     const handler = serveCommand.handler;
@@ -244,6 +268,70 @@ describe('serve rate limit env parsing', () => {
       expect.objectContaining({
         channelSelection: { mode: 'names', names: ['telegram', 'feishu'] },
       }),
+    );
+  });
+
+  it('uses primary workspace serve.channels when --channel is absent', async () => {
+    const { workspace } = workspaceWithSettings({
+      channels: {
+        telegram: { type: 'telegram' },
+        feishu: { type: 'feishu' },
+      },
+      serve: { channels: ['telegram', 'telegram', 'feishu'] },
+    });
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs(`--no-web --workspace ${workspace}`);
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channelSelection: { mode: 'names', names: ['telegram', 'feishu'] },
+      }),
+    );
+  });
+
+  it('keeps explicit --channel precedence without rewriting serve.channels', async () => {
+    const { workspace, settingsPath } = workspaceWithSettings({
+      channels: {
+        telegram: { type: 'telegram' },
+        feishu: { type: 'feishu' },
+      },
+      serve: { channels: ['telegram'] },
+    });
+    const before = fs.readFileSync(settingsPath, 'utf8');
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs(
+      `--no-web --workspace ${workspace} --channel feishu`,
+    );
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channelSelection: { mode: 'names', names: ['feishu'] },
+      }),
+    );
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+  });
+
+  it('does not infer startup from configured channels alone', async () => {
+    const { workspace } = workspaceWithSettings({
+      channels: { telegram: { type: 'telegram' } },
+    });
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs(`--no-web --workspace ${workspace}`);
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.not.objectContaining({ channelSelection: expect.anything() }),
     );
   });
 

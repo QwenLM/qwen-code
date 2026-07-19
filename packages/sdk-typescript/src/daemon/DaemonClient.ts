@@ -112,6 +112,7 @@ import type {
   DaemonChannelsSnapshot,
   DaemonChannelTypeCatalog,
   DaemonChannelUpsertRequest,
+  DaemonChannelStartupRequest,
   DaemonRevisionRequest,
   DaemonChannelControlState,
   DaemonChannelSelection,
@@ -3323,6 +3324,24 @@ export class DaemonClient {
     );
   }
 
+  setWorkspaceChannelStartup(
+    name: string,
+    request: DaemonChannelStartupRequest,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelMutationResult> {
+    return this.jsonRequest<DaemonChannelMutationResult>(
+      `/workspace/channels/${urlEncode(name)}/startup`,
+      'PUT /workspace/channels/:name/startup',
+      {
+        method: 'PUT',
+        body: request,
+        clientId: opts?.clientId,
+        timeoutMs: opts?.timeoutMs ?? CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS,
+        mode: 'rest',
+      },
+    );
+  }
+
   startWorkspaceChannel(
     name: string,
     opts?: DaemonChannelManagementOptions,
@@ -4288,6 +4307,25 @@ export class WorkspaceDaemonClient {
     opts?: DaemonChannelManagementOptions,
   ): Promise<DaemonChannelMutationResult> {
     return this.mutateWorkspaceChannel(name, '', 'DELETE', request, opts);
+  }
+
+  setWorkspaceChannelStartup(
+    name: string,
+    request: DaemonChannelStartupRequest,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelMutationResult> {
+    return this.client.workspaceJsonRequest<DaemonChannelMutationResult>(
+      this.workspaceSelector,
+      `/channels/${urlEncode(name)}/startup`,
+      'PUT /workspaces/:workspace/channels/:name/startup',
+      {
+        method: 'PUT',
+        body: request,
+        clientId: opts?.clientId,
+        timeoutMs: opts?.timeoutMs ?? CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS,
+        mode: 'rest',
+      },
+    );
   }
 
   startWorkspaceChannel(

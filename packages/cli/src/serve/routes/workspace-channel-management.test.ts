@@ -53,6 +53,13 @@ function service(): ChannelManagementService {
       result(name, 'stopped', { type: 'telegram' }),
     ),
     remove: vi.fn(async (name) => result(name, 'stopped')),
+    setStartup: vi.fn(async (name, request) => ({
+      ...result(name, 'stopped'),
+      instance: {
+        ...result(name, 'stopped').instance,
+        startsWithServe: request.enabled,
+      },
+    })),
     start: vi.fn(async (name) => result(name, 'connected')),
     stop: vi.fn(async (name) => result(name, 'stopped')),
     restart: vi.fn(async (name) => result(name, 'connected')),
@@ -159,6 +166,11 @@ describe('workspace Channel management routes', () => {
         .delete('/workspace/channels/bot')
         .send({ expectedRevision: 'r2' }),
     ).expect(200);
+    await auth(
+      request(app)
+        .put('/workspace/channels/bot/startup')
+        .send({ expectedRevision: 'r2', enabled: true }),
+    ).expect(200);
     await auth(request(app).post('/workspace/channels/bot/start')).expect(200);
     await auth(request(app).post('/workspace/channels/bot/stop')).expect(200);
     await auth(request(app).post('/workspace/channels/bot/restart')).expect(
@@ -173,14 +185,48 @@ describe('workspace Channel management routes', () => {
     expect(primaryService.remove).toHaveBeenCalledWith('bot', {
       expectedRevision: 'r2',
     });
+    expect(primaryService.setStartup).toHaveBeenCalledWith('bot', {
+      expectedRevision: 'r2',
+      enabled: true,
+    });
     expect(primaryService.start).toHaveBeenCalledWith('bot');
     expect(primaryService.stop).toHaveBeenCalledWith('bot');
     expect(primaryService.restart).toHaveBeenCalledWith('bot');
-    expect(strictOptions).toHaveLength(5);
+    expect(strictOptions).toHaveLength(6);
     expect(strictOptions).toEqual(
-      Array.from({ length: 5 }, () => ({ strict: true })),
+      Array.from({ length: 6 }, () => ({ strict: true })),
     );
-    expect(parseAndValidateClientId).toHaveBeenCalledTimes(5);
+    expect(parseAndValidateClientId).toHaveBeenCalledTimes(6);
+  });
+
+  it('routes qualified startup changes only to the trusted selected workspace', async () => {
+    const { app, primaryService, secondaryService } = mount({});
+
+    await auth(
+      request(app)
+        .put('/workspaces/secondary/channels/bot/startup')
+        .send({ expectedRevision: 'r1', enabled: false }),
+    ).expect(200);
+
+    expect(secondaryService.setStartup).toHaveBeenCalledWith('bot', {
+      expectedRevision: 'r1',
+      enabled: false,
+    });
+    expect(primaryService.setStartup).not.toHaveBeenCalled();
+  });
+
+  it('rejects invalid startup bodies before calling the service', async () => {
+    const { app, primaryService } = mount({});
+
+    const response = await auth(
+      request(app)
+        .put('/workspace/channels/bot/startup')
+        .send({ expectedRevision: 'r1', enabled: 'yes' }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('invalid_channel_management_request');
+    expect(primaryService.setStartup).not.toHaveBeenCalled();
   });
 
   it('returns 409 for stale PUT', async () => {

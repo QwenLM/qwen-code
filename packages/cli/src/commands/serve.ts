@@ -404,7 +404,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     }
     let channelSelection: ServeChannelSelection | undefined;
     try {
-      channelSelection = normalizeServeChannelSelection(argv.channel);
+      const configuredChannels =
+        argv.channel === undefined
+          ? loadSettings(primaryWorkspaceArg(argv.workspace) ?? process.cwd())
+              .workspace.settings.serve?.channels
+          : undefined;
+      channelSelection = normalizeServeChannelSelection(
+        argv.channel ?? configuredChannels,
+      );
     } catch (err) {
       writeStderrLine(
         `qwen serve: ${err instanceof Error ? err.message : String(err)}`,
