@@ -83,6 +83,20 @@ describe('approvalModeCommand', () => {
       expect(mockSetApprovalMode).toHaveBeenCalledWith('yolo');
     });
 
+    it('should emit the entry notice when switching to auto mode', async () => {
+      const result = (await approvalModeCommand.action?.(
+        mockContext,
+        'auto',
+      )) as MessageActionReturn;
+
+      expect(result.type).toBe('message');
+      expect(mockSetApprovalMode).toHaveBeenCalledWith('auto');
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'info' }),
+        expect.any(Number),
+      );
+    });
+
     it('should set approval mode to "auto-edit" when argument is "auto-edit"', async () => {
       const result = (await approvalModeCommand.action?.(
         mockContext,

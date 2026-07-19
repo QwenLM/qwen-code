@@ -25,6 +25,7 @@ import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import type { EventEmitter } from 'node:events';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
+import { normalizeMcpToolName } from '../utils/tool-name-utils.js';
 
 type ToolParams = Record<string, unknown>;
 
@@ -238,8 +239,24 @@ export class ToolRegistry {
    * built-ins and MCP-discovered tools flow through `registerTool`, so
    * gating here covers every registration path.
    */
-  private isToolDisabled(name: string): boolean {
-    return this.config.getDisabledTools().has(name);
+  private isToolDisabled(
+    name: string,
+    aliases: readonly string[] = [],
+  ): boolean {
+    const disabledTools = this.config.getDisabledTools();
+    const hasExactMatch =
+      disabledTools.has(name) ||
+      aliases.some((alias) => disabledTools.has(alias));
+    if (hasExactMatch || !name.startsWith('mcp__')) {
+      return hasExactMatch;
+    }
+
+    for (const disabledName of disabledTools) {
+      if (normalizeMcpToolName(disabledName) === name) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -247,7 +264,12 @@ export class ToolRegistry {
    * @param tool - The tool object containing schema and execution logic.
    */
   registerTool(tool: AnyDeclarativeTool): void {
-    if (this.isToolDisabled(tool.name)) {
+    if (
+      this.isToolDisabled(
+        tool.name,
+        tool instanceof DiscoveredMCPTool ? tool.permissionAliases : [],
+      )
+    ) {
       debugLogger.info(
         `Tool "${tool.name}" skipped: present in disabledTools set.`,
       );
@@ -284,7 +306,12 @@ export class ToolRegistry {
     // `isToolDisabled(tool.name)` gate above when the operator
     // disabled the renamed-and-exposed name. Re-evaluating after the
     // rename closes that hole.
-    if (this.isToolDisabled(tool.name)) {
+    if (
+      this.isToolDisabled(
+        tool.name,
+        tool instanceof DiscoveredMCPTool ? tool.permissionAliases : [],
+      )
+    ) {
       debugLogger.info(
         `Tool "${tool.name}" skipped (post-rename): present in disabledTools set.`,
       );

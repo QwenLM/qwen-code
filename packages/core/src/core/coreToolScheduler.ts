@@ -20,6 +20,7 @@ import type {
   ToolArtifact,
 } from '../index.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { sanitizeToolNameForProvider } from '../utils/tool-name-utils.js';
 import { compactToolResultDisplayForHistory } from '../utils/toolResultDisplayCompaction.js';
 import {
   generateToolUseId,
@@ -1896,12 +1897,11 @@ export class CoreToolScheduler {
     if (!unknownToolName.startsWith('mcp__')) {
       return null;
     }
-    // Mirror generateValidName's per-char sanitization when rebuilding a
-    // server's registered prefix. The trailing `__` makes the match exact at a
-    // server boundary (so `foo` does not match a `foobar` server). Truncation
-    // (>63-char names) is the rare case we let fall through.
+    // Rebuild the provider-safe server prefix without the full-name hash. The
+    // trailing `__` keeps matching exact at the server boundary; truncation
+    // (>63-char names) remains the rare case that falls through.
     const prefixOf = (server: string): string =>
-      `mcp__${server}__`.replace(/[^a-zA-Z0-9_.-]/g, '_');
+      sanitizeToolNameForProvider(`mcp__${server}__`);
     // When one server name is a prefix of another after sanitization (e.g.
     // `foo` vs `foo__bar`), a tool of the longer server also startsWith the
     // shorter one's prefix. Match longest-first so the most specific server

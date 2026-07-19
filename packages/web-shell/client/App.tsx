@@ -1154,23 +1154,50 @@ export function App({
     if (!sidebarOptions.enabled) return undefined;
     const onKey = (e: KeyboardEvent) => {
       if (!isSidebarToggleShortcut(e)) return;
-      e.preventDefault();
-      if (window.matchMedia('(max-width: 760px)').matches) {
-        setMobileDrawerOpen((open) => {
-          if (open) setForceMobileDrawer(false);
-          return !open;
-        });
+      // The composer keeps the editor-convention behavior (VS Code toggles
+      // the sidebar while the editor is focused), but other editable targets
+      // — sidebar search, session rename, settings inputs — must not have
+      // the sidebar yanked around while the user is typing, matching the
+      // codebase's isEditableTarget convention.
+      const target = e.target as HTMLElement | null;
+      if (
+        isEditableTarget(target) &&
+        !target?.closest('[data-web-shell-composer-editor]')
+      ) {
         return;
       }
-      setSidebarCollapsed((collapsed) => {
-        const next = !collapsed;
-        writeSidebarCollapsed(next);
-        return next;
-      });
+      e.preventDefault();
+      // All state updates are dispatched sequentially outside the updater
+      // functions (React purity contract — mirrors the hamburger handler),
+      // which is why this effect re-binds on state changes: the listener
+      // closure must stay fresh.
+      if (
+        forceMobileDrawer ||
+        window.matchMedia('(max-width: 760px)').matches
+      ) {
+        // A forced drawer on a wide viewport still belongs to the drawer
+        // path: collapsing the rail underneath the overlay would look like
+        // a no-op to the user.
+        if (mobileDrawerOpen) {
+          setMobileDrawerOpen(false);
+          setForceMobileDrawer(false);
+        } else {
+          setMobileDrawerOpen(true);
+        }
+        return;
+      }
+      const next = !sidebarCollapsed;
+      setSidebarCollapsed(next);
+      writeSidebarCollapsed(next);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [sidebarOptions.enabled]);
+  }, [
+    sidebarOptions.enabled,
+    mobileDrawerOpen,
+    forceMobileDrawer,
+    sidebarCollapsed,
+  ]);
   const customization = useMemo(
     () => ({
       composerTagIcons,

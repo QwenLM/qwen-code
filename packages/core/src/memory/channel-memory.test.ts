@@ -16,6 +16,7 @@ import {
   CHANNEL_MEMORY_FILE_NAME,
   clearChannelMemory,
   getChannelMemoryFilePath,
+  getChannelMemoryRevision,
   getLegacyChannelMemoryFilePath,
   listChannelMemoryEntries,
   MAX_CHANNEL_MEMORY_BYTES,
@@ -271,6 +272,86 @@ describe('channel memory', () => {
     expect(
       getChannelMemoryFilePath({ ...target, threadId: 'thread-1' }),
     ).not.toBe(getChannelMemoryFilePath({ ...target, threadId: 'thread-2' }));
+  });
+
+  it('returns a stable opaque revision when channel memory is missing', async () => {
+    const first = await getChannelMemoryRevision(target);
+    const second = await getChannelMemoryRevision(target);
+
+    expect(second).toBe(first);
+    expect(first).not.toContain(qwenHome);
+    expect(first).not.toContain('CHANNEL.json');
+    expect(first).not.toContain('CHANNEL.md');
+  });
+
+  it('changes revision when canonical channel memory changes', async () => {
+    const missing = await getChannelMemoryRevision(target);
+    writeJson(
+      serializeChannelMemoryDocument({
+        version: 1,
+        entries: [{ id: 'm-111111111111', text: 'Use staging' }],
+      }),
+    );
+    const created = await getChannelMemoryRevision(target);
+    writeJson(
+      serializeChannelMemoryDocument({
+        version: 1,
+        entries: [{ id: 'm-111111111111', text: 'Use production instead' }],
+      }),
+    );
+    const replaced = await getChannelMemoryRevision(target);
+
+    expect(created).not.toBe(missing);
+    expect(replaced).not.toBe(created);
+  });
+
+  it('changes revision after an external atomic replacement', async () => {
+    const raw = serializeChannelMemoryDocument({
+      version: 1,
+      entries: [{ id: 'm-111111111111', text: 'Use staging' }],
+    });
+    const filePath = writeJson(raw);
+    const before = await getChannelMemoryRevision(target);
+    const replacementPath = path.join(path.dirname(filePath), '.external.tmp');
+    fs.writeFileSync(replacementPath, raw);
+    fs.renameSync(replacementPath, filePath);
+
+    expect(await getChannelMemoryRevision(target)).not.toBe(before);
+  });
+
+  it('changes revision after each successful structured mutation', async () => {
+    const revisions = [await getChannelMemoryRevision(target)];
+    const added = await addChannelMemoryEntries(target, ['Use staging']);
+    revisions.push(await getChannelMemoryRevision(target));
+    await updateChannelMemoryEntry(target, {
+      id: added.added[0]!.id,
+      text: 'Use production',
+    });
+    revisions.push(await getChannelMemoryRevision(target));
+    await removeChannelMemoryEntries(target, { ids: [added.added[0]!.id] });
+    revisions.push(await getChannelMemoryRevision(target));
+    await addChannelMemoryEntries(target, ['Run tests']);
+    revisions.push(await getChannelMemoryRevision(target));
+    await clearChannelMemory(target);
+    revisions.push(await getChannelMemoryRevision(target));
+
+    for (let index = 1; index < revisions.length; index += 1) {
+      expect(revisions[index]).not.toBe(revisions[index - 1]);
+    }
+  });
+
+  it('changes revision when legacy channel memory changes', async () => {
+    const missing = await getChannelMemoryRevision(target);
+    const legacyPath = writeLegacy('Use staging\n');
+    const created = await getChannelMemoryRevision(target);
+    fs.writeFileSync(legacyPath, 'Use production instead\n');
+    const replaced = await getChannelMemoryRevision(target);
+    fs.unlinkSync(legacyPath);
+    const removed = await getChannelMemoryRevision(target);
+
+    expect(created).not.toBe(missing);
+    expect(replaced).not.toBe(created);
+    expect(removed).toBe(missing);
   });
 
   it('renders JSON entries through the compatibility read API', async () => {

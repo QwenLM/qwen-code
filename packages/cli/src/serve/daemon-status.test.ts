@@ -24,6 +24,7 @@ import {
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
 import type { RateLimiterInstance, RateLimitTier } from './rate-limit.js';
 import type { DaemonWorkspaceService } from './workspace-service/index.js';
+import type { DaemonLogger } from './daemon-logger.js';
 
 const BASE_WORKSPACE = '/work/status';
 
@@ -48,6 +49,76 @@ afterEach(() => {
 });
 
 describe('buildDaemonStatusResponse', () => {
+  it('uses one logger snapshot and exposes summary/full log diagnostics', async () => {
+    const getStatus = vi.fn(() => ({
+      runId: '0123456789abcdef0123456789abcdef',
+      mode: 'stable' as const,
+      health: 'ok' as const,
+      issues: [] as const,
+      droppedRecords: 2,
+      droppedBytes: 42,
+    }));
+    const daemonLog = {
+      getStatus,
+      getDaemonId: () => 'daemon:123',
+      getLogPath: () => '/runtime/debug/daemon/daemon.log',
+    } as unknown as DaemonLogger;
+
+    const summary = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({ daemonLog }),
+    );
+    expect(getStatus).toHaveBeenCalledOnce();
+    expect(summary.daemon).toMatchObject({
+      runId: '0123456789abcdef0123456789abcdef',
+      logMode: 'stable',
+      logHealth: 'ok',
+    });
+    expect(summary.daemon).not.toHaveProperty('logPath');
+    expect(summary.daemon).not.toHaveProperty('logIssues');
+
+    getStatus.mockClear();
+    const full = await buildDaemonStatusResponse(
+      'full',
+      makeOptions({ daemonLog }),
+    );
+    expect(getStatus).toHaveBeenCalledOnce();
+    expect(full.daemon).toMatchObject({
+      logPath: '/runtime/debug/daemon/daemon.log',
+      logIssues: [],
+      logDroppedRecords: 2,
+      logDroppedBytes: 42,
+    });
+  });
+
+  it('rolls degraded logger health into a path-free warning', async () => {
+    const daemonLog = {
+      getStatus: () => ({
+        runId: '0123456789abcdef0123456789abcdef',
+        mode: 'stderr-only' as const,
+        health: 'degraded' as const,
+        issues: ['init_failed'] as const,
+        droppedRecords: 0,
+        droppedBytes: 0,
+      }),
+      getDaemonId: () => 'daemon:123',
+      getLogPath: () => '/secret/path',
+    } as unknown as DaemonLogger;
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({ daemonLog }),
+    );
+
+    expect(response.status).toBe('warning');
+    expect(response.issues).toContainEqual({
+      code: 'daemon_log_degraded',
+      severity: 'warning',
+      message:
+        'Daemon file logging is degraded; inspect full status for details.',
+    });
+    expect(JSON.stringify(response.issues)).not.toContain('/secret/path');
+  });
+
   it('includes maxTotalSessions in daemon status limits', async () => {
     const options = makeOptions();
     options.opts.maxTotalSessions = 50;
@@ -1045,6 +1116,7 @@ interface MakeOptionsInput {
   lastActivityAt?: number | null;
   totalAdmissionLiveCount?: number;
   totalAdmissionInFlight?: number;
+  daemonLog?: DaemonLogger;
 }
 
 function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
@@ -1086,6 +1158,7 @@ function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
     bridge,
     workspace,
     qwenCodeVersion: 'test',
+    daemonLog: input.daemonLog,
     ...(input.acpSnapshot
       ? {
           acpHandle: {

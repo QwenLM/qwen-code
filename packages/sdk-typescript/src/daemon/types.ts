@@ -276,6 +276,16 @@ export type DaemonStatusReportDetail = 'summary' | 'full';
 /** Overall health rollup of a daemon status report. */
 export type DaemonStatusReportLevel = 'ok' | 'warning' | 'error';
 
+export type DaemonLogMode = 'stable' | 'fallback' | 'stderr-only';
+export type DaemonLogHealth = 'ok' | 'degraded';
+export type DaemonLogIssue =
+  | 'init_failed'
+  | 'rotation_failed'
+  | 'retention_failed'
+  | 'queue_overflow'
+  | 'write_failed'
+  | 'lease_compromised';
+
 /** One triage finding surfaced by the daemon status rollup. */
 export interface DaemonStatusReportIssue {
   code: string;
@@ -418,8 +428,17 @@ export interface DaemonStatusReport {
     };
     qwenCodeVersion?: string;
     daemonId?: string;
+    runId?: string;
+    logMode?: DaemonLogMode;
+    logHealth?: DaemonLogHealth;
     /** Present only in `detail=full` responses. */
     logPath?: string;
+    /** Present only in `detail=full` responses. */
+    logIssues?: readonly DaemonLogIssue[];
+    /** Present only in `detail=full` responses. */
+    logDroppedRecords?: number;
+    /** Present only in `detail=full` responses. */
+    logDroppedBytes?: number;
   };
   security: {
     tokenConfigured: boolean;

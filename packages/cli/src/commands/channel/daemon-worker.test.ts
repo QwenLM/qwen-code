@@ -6,6 +6,7 @@ const mockLoadChannelsFromExtensions = vi.hoisted(() => vi.fn());
 const mockParseConfiguredChannels = vi.hoisted(() => vi.fn());
 const mockCreateChannel = vi.hoisted(() => vi.fn());
 const mockReadChannelMemory = vi.hoisted(() => vi.fn());
+const mockGetChannelMemoryRevision = vi.hoisted(() => vi.fn());
 const mockListChannelMemoryEntries = vi.hoisted(() => vi.fn());
 const mockAddChannelMemoryEntries = vi.hoisted(() => vi.fn());
 const mockUpdateChannelMemoryEntry = vi.hoisted(() => vi.fn());
@@ -146,6 +147,7 @@ vi.mock('@qwen-code/acp-bridge/workspacePaths', () => ({
 vi.mock('@qwen-code/qwen-code-core', () => ({
   addChannelMemoryEntries: mockAddChannelMemoryEntries,
   clearChannelMemory: mockClearChannelMemory,
+  getChannelMemoryRevision: mockGetChannelMemoryRevision,
   listChannelMemoryEntries: mockListChannelMemoryEntries,
   readChannelMemory: mockReadChannelMemory,
   removeChannelMemoryEntries: mockRemoveChannelMemoryEntries,
@@ -696,6 +698,7 @@ describe('runChannelDaemonWorker', () => {
         router: mockSessionRouter.mock.results[0]!.value,
         channelMemory: {
           readChannelMemory: mockReadChannelMemory,
+          getChannelMemoryRevision: mockGetChannelMemoryRevision,
           listChannelMemoryEntries: mockListChannelMemoryEntries,
           addChannelMemoryEntries: mockAddChannelMemoryEntries,
           updateChannelMemoryEntry: mockUpdateChannelMemoryEntry,

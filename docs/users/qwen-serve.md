@@ -712,15 +712,47 @@ const result = await flow.awaitCompletion({ signal: abortCtrl.signal });
 
 ## Daemon log file
 
-`qwen serve` writes a per-process diagnostic log to:
+`qwen serve` appends diagnostic records across normal restarts at the stable
+active path:
 
 ```
-${QWEN_RUNTIME_DIR or ~/.qwen}/debug/daemon/serve-<pid>-<workspaceHash>.log
+${QWEN_RUNTIME_DIR or ~/.qwen}/debug/daemon/daemon.log
 ```
 
-A `latest` symlink in the same directory always points at the current process's log, so `tail -f ~/.qwen/debug/daemon/latest` will follow whichever daemon is running.
+Every file record includes a random per-start `runId` and the daemon PID. A
+successful stable owner also updates `debug/daemon/latest` to `daemon.log` on
+platforms that support symlinks. On macOS/Linux, follow rotation with:
+
+```bash
+tail -F ~/.qwen/debug/daemon/daemon.log
+```
+
+On other platforms, configure the viewer to reopen the pathname after it is
+replaced. A viewer that keeps only the old file handle will remain on the
+archive after rotation.
 
 The log captures lifecycle messages, route errors (with `route=` and `sessionId=` context), ACP child stderr, and — when `QWEN_SERVE_DEBUG=1` is set — extra bridge breadcrumbs. Lines that go to stderr today still go to stderr; the file log is **additive**, not a replacement.
+
+The active file rotates before it would exceed 10 MiB. Each family retains
+four archives under `archive/`, and each file record is capped at 256 KiB. The
+in-memory queue accepts at most 4 MiB of unsettled file payload. Queue pressure,
+rotation failures, or filesystem failures can therefore drop file copies;
+`GET /daemon/status?detail=full` exposes logger health, issues, and dropped
+record/byte counters.
+
+Only one daemon may own the stable family in a log namespace. A concurrent
+daemon writes to `debug/daemon/runs/run-<runId>/daemon.log`; the startup banner
+and full status contain the authoritative path. `runs/recent-fallback` is a
+best-effort locator for a recent fallback family and may point to one that is
+still live. A healthy namespace converges to roughly 100 MiB: about 50 MiB for
+stable plus one inactive fallback family. Live or not-yet-stale fallback
+families are retained, so concurrent daemons or crash/restart storms can
+temporarily use more.
+
+One runtime directory is one ownership and retention namespace. Use distinct
+`QWEN_RUNTIME_DIR` values when daemons need independent history. New daemon log
+directories are private to the user (`0700`) and new files use `0600` on POSIX.
+There is no age-based expiry.
 
 ### Disabling
 
@@ -730,9 +762,14 @@ Set `QWEN_DAEMON_LOG_FILE=0` (or `false`/`off`/`no`) to skip file logging entire
 
 Session-scoped debug logs (`~/.qwen/debug/<sessionId>.txt` and the `~/.qwen/debug/latest` symlink) are independent. The daemon log lives in a sibling `daemon/` subdirectory; per-session debug semantics are unchanged by this feature.
 
-### No rotation
+### External rotation
 
-The daemon log appends indefinitely. Rotate manually if it grows large. A future enhancement may add automatic rotation; track via [#4548](https://github.com/QwenLM/qwen-code/issues/4548) follow-ups.
+Do not point an external logrotate rule at the active `daemon.log`. The daemon
+is the sole supported writer and rotator; external rename, deletion, or
+truncation invalidates its size model. Copying or shipping records without
+mutating the family is safe. Older `serve-<pid>.log` and
+`serve-<pid>-<workspaceHash>.log` files are left untouched and are not counted
+by the new retention policy.
 
 ## Runtime MCP server management (issue [#4514](https://github.com/QwenLM/qwen-code/issues/4514))
 

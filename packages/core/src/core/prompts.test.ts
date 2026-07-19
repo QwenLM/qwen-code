@@ -543,6 +543,40 @@ describe('Model-specific tool call formats', () => {
 
     expect(prompt).toMatchSnapshot();
   });
+
+  it('should use native Gemma 4 format for gemma4 models', () => {
+    vi.mocked(isGitRepository).mockReturnValue(false);
+
+    // Test detection via regex
+    const prompt = getCoreSystemPrompt(
+      undefined,
+      'unsloth/gemma-4-26B-A4B-it-qat',
+    );
+
+    // Should contain Gemma native token boundaries and quotes
+    expect(prompt).toContain('<|tool_call>call:run_shell_command');
+    expect(prompt).toContain(
+      '{command:<|"|>node server.js<|"|>,is_background:true}<tool_call|>',
+    );
+
+    // Should NOT contain legacy/generic formats
+    expect(prompt).not.toContain('[tool_call: run_shell_command for');
+    expect(prompt).not.toContain('<function=run_shell_command>');
+    expect(prompt).not.toContain('{"name": "run_shell_command"');
+
+    expect(prompt).toMatchSnapshot();
+  });
+
+  it('should override tool call format via QWEN_CODE_TOOL_CALL_STYLE env variable for gemma4', () => {
+    vi.stubEnv('QWEN_CODE_TOOL_CALL_STYLE', 'gemma4');
+    vi.mocked(isGitRepository).mockReturnValue(false);
+
+    // Pass a non-gemma model string to verify env var takes precedence
+    const prompt = getCoreSystemPrompt(undefined, 'gpt-4');
+
+    expect(prompt).toContain('<|tool_call>call:run_shell_command');
+    expect(prompt).not.toContain('[tool_call: run_shell_command for');
+  });
 });
 
 describe('getCustomSystemPrompt', () => {
