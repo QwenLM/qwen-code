@@ -62,6 +62,7 @@ export {
   getRuntimeContentGenerator,
   runWithRuntimeContentGenerator,
   type RuntimeContentGeneratorView,
+  runOutsideAgentContext,
 } from './agents/runtime/agent-context.js';
 export * from './core/reasoning-effort.js';
 export * from './core/coreToolScheduler.js';

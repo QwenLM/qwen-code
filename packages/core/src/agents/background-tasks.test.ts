@@ -16,6 +16,12 @@ import {
   type BackgroundApproval,
   type BackgroundTaskEntry,
 } from './background-tasks.js';
+import {
+  getCurrentAgentId,
+  getRuntimeContentGenerator,
+  runWithAgentContext,
+  runWithRuntimeContentGenerator,
+} from './runtime/agent-context.js';
 import * as transcript from './agent-transcript.js';
 import { AgentEventEmitter, AgentEventType } from './runtime/agent-events.js';
 import { ToolConfirmationOutcome } from '../tools/tools.js';
@@ -51,6 +57,56 @@ function makeRegistration(
     ...overrides,
   };
 }
+
+describe('notification emission and agent context (#7156)', () => {
+  // A background agent's terminal transition fires inside its own
+  // AsyncLocalStorage frame, and ALS context follows every async
+  // continuation the notification callback starts (React state updates,
+  // the drain effect, the next conversation turn). The callback must
+  // therefore run with NO agent frame, or Config.getModel() resolves to
+  // the subagent's model for the notification turn and the main session's
+  // history can overflow the smaller context window.
+  it('invokes the notification callback outside the agent ALS frame', async () => {
+    const registry = new BackgroundTaskRegistry();
+    const seen: Array<{
+      agentId: string | null;
+      runtimeView: unknown;
+    }> = [];
+    registry.setNotificationCallback(() => {
+      seen.push({
+        agentId: getCurrentAgentId(),
+        runtimeView: getRuntimeContentGenerator(),
+      });
+    });
+
+    registry.register({
+      agentId: 'bg-1',
+      description: 'bg agent',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/bg.jsonl',
+    });
+
+    const fakeView = {
+      contentGenerator: {} as never,
+      contentGeneratorConfig: { model: 'subagent-model' } as never,
+    };
+    await runWithAgentContext('bg-1', () =>
+      runWithRuntimeContentGenerator(fakeView, async () => {
+        // Sanity: we ARE inside the subagent frame here.
+        expect(getCurrentAgentId()).toBe('bg-1');
+        expect(getRuntimeContentGenerator()).toBe(fakeView);
+        registry.complete('bg-1', 'done');
+      }),
+    );
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.agentId).toBeNull();
+    expect(seen[0]!.runtimeView).toBeUndefined();
+  });
+});
 
 describe('BackgroundTaskRegistry', () => {
   let registry: BackgroundTaskRegistry;
