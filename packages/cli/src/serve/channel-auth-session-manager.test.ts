@@ -114,6 +114,22 @@ function createHarness(driver = driverHarness()) {
   return { driver, manager, service };
 }
 
+async function expectEvicted(
+  manager: ReturnType<typeof createChannelAuthSessionManager>,
+  sessionKey: ChannelAuthSessionKey,
+  sessionId: string,
+) {
+  expect(() => manager.get(sessionKey, sessionId)).toThrowError(
+    expect.objectContaining({ code: 'channel_auth_session_not_found' }),
+  );
+  expect(() => manager.getQr(sessionKey, sessionId)).toThrowError(
+    expect.objectContaining({ code: 'channel_auth_session_not_found' }),
+  );
+  await expect(manager.commit(sessionKey, sessionId)).rejects.toMatchObject({
+    code: 'channel_auth_session_not_found',
+  });
+}
+
 afterEach(() => {
   vi.useRealTimers();
 });
@@ -299,23 +315,29 @@ describe('createChannelAuthSessionManager', () => {
   });
 
   it('cancels matching sessions on workspace removal and all sessions on shutdown', async () => {
+    vi.useFakeTimers({ now: new Date('2026-07-19T00:00:00.000Z') });
     const { driver, manager } = createHarness();
     const inRemovedRuntime = await manager.begin(key);
     const otherRuntime = await manager.begin({
       ...key,
       runtimeId: 'runtime-b',
     });
+    expect(vi.getTimerCount()).toBe(2);
 
     manager.removeWorkspace(key.workspaceCwd, key.runtimeId);
 
-    expect(manager.get(key, inRemovedRuntime.id).state).toBe('cancelled');
+    await expectEvicted(manager, key, inRemovedRuntime.id);
+    expect(vi.getTimerCount()).toBe(1);
     expect(
       manager.get({ ...key, runtimeId: 'runtime-b' }, otherRuntime.id).state,
     ).toBe('awaiting_scan');
     manager.shutdown();
-    expect(
-      manager.get({ ...key, runtimeId: 'runtime-b' }, otherRuntime.id).state,
-    ).toBe('cancelled');
+    await expectEvicted(
+      manager,
+      { ...key, runtimeId: 'runtime-b' },
+      otherRuntime.id,
+    );
+    expect(vi.getTimerCount()).toBe(0);
     expect(driver.cancel).toHaveBeenCalledTimes(2);
   });
 
@@ -350,6 +372,44 @@ describe('createChannelAuthSessionManager', () => {
     manager.shutdown();
   });
 
+  it('commits an undefined credential value exactly once', async () => {
+    const ready = deferred<undefined>();
+    const commit = vi.fn(async (_credentials: undefined) => {});
+    const driver: ChannelAuthDriver<undefined> = {
+      kind: 'qr',
+      begin: vi.fn(async () => ({
+        snapshot: () => ({
+          state: 'pending',
+          qrPayload: 'https://example.test/qr',
+          qrRevision: 1,
+        }),
+        ready: ready.promise,
+        cancel: vi.fn(),
+        commit,
+      })),
+    };
+    const manager = createChannelAuthSessionManager({
+      resolve: async () => ({
+        driver,
+        managementService: managementService(),
+      }),
+    });
+    const session = await manager.begin(key);
+    ready.resolve(undefined);
+    await vi.waitFor(() => {
+      expect(manager.get(key, session.id).state).toBe('ready');
+    });
+
+    await expect(manager.commit(key, session.id)).resolves.toMatchObject({
+      state: 'committed',
+    });
+    await expect(manager.commit(key, session.id)).rejects.toMatchObject({
+      code: 'channel_auth_already_committed',
+    });
+    expect(commit).toHaveBeenCalledOnce();
+    expect(commit).toHaveBeenCalledWith(undefined);
+  });
+
   it('does not overwrite shutdown cancellation with a late commit result', async () => {
     const harness = driverHarness();
     const committing = deferred<void>();
@@ -363,13 +423,13 @@ describe('createChannelAuthSessionManager', () => {
 
     const commit = manager.commit(key, session.id);
     manager.shutdown();
-    expect(manager.get(key, session.id).state).toBe('cancelled');
+    await expectEvicted(manager, key, session.id);
     committing.resolve();
 
     await expect(commit).rejects.toMatchObject({
       code: 'channel_auth_cancelled',
     });
-    expect(manager.get(key, session.id).state).toBe('cancelled');
+    await expectEvicted(manager, key, session.id);
     expect(harness.commit).toHaveBeenCalledOnce();
   });
 
@@ -416,6 +476,67 @@ describe('createChannelAuthSessionManager', () => {
       code: 'channel_auth_failed',
     });
     expect(harness.commit).toHaveBeenCalledOnce();
+  });
+
+  it('retains then evicts committed, cancelled, expired, and error tombstones', async () => {
+    vi.useFakeTimers({ now: new Date('2026-07-19T00:00:00.000Z') });
+    const retainThenEvict = async (
+      manager: ReturnType<typeof createChannelAuthSessionManager>,
+      sessionId: string,
+      state: 'committed' | 'cancelled' | 'expired' | 'error',
+    ) => {
+      expect(manager.get(key, sessionId).state).toBe(state);
+      await vi.advanceTimersByTimeAsync(59_999);
+      expect(manager.get(key, sessionId).state).toBe(state);
+      await vi.advanceTimersByTimeAsync(1);
+      await expectEvicted(manager, key, sessionId);
+    };
+
+    const committedHarness = createHarness();
+    const committed = await committedHarness.manager.begin(key);
+    committedHarness.driver.ready.resolve({ token: 'ready-secret' });
+    await Promise.resolve();
+    await committedHarness.manager.commit(key, committed.id);
+    await retainThenEvict(committedHarness.manager, committed.id, 'committed');
+
+    const cancelledHarness = createHarness();
+    const cancelled = await cancelledHarness.manager.begin(key);
+    cancelledHarness.manager.cancel(key, cancelled.id);
+    await retainThenEvict(cancelledHarness.manager, cancelled.id, 'cancelled');
+
+    const expiredHarness = createHarness();
+    const expired = await expiredHarness.manager.begin(key);
+    await vi.advanceTimersByTimeAsync(600_000);
+    await retainThenEvict(expiredHarness.manager, expired.id, 'expired');
+
+    const errorHarness = createHarness();
+    const failed = await errorHarness.manager.begin(key);
+    errorHarness.driver.ready.reject(new Error('driver failed'));
+    await Promise.resolve();
+    await retainThenEvict(errorHarness.manager, failed.id, 'error');
+  });
+
+  it('evicts repeated terminal cycles without retaining timers or sessions', async () => {
+    vi.useFakeTimers({ now: new Date('2026-07-19T00:00:00.000Z') });
+    const { manager } = createHarness();
+    const ids: string[] = [];
+
+    for (let index = 0; index < 100; index++) {
+      const session = await manager.begin(key);
+      ids.push(session.id);
+      manager.cancel(key, session.id);
+    }
+    expect(vi.getTimerCount()).toBe(100);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(vi.getTimerCount()).toBe(0);
+    for (const id of ids) await expectEvicted(manager, key, id);
+    await expect(manager.begin(key)).resolves.toMatchObject({
+      state: 'awaiting_scan',
+    });
+    manager.shutdown();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('fails closed when the configured instance type does not match the key', async () => {

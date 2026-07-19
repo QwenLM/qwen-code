@@ -15,6 +15,7 @@ import type { ChannelManagementService } from './channel-management-service.js';
 import { daemonChannelStateDir } from './channel-state-dir.js';
 
 const DEFAULT_AUTH_SESSION_TTL_MS = 10 * 60 * 1000;
+export const CHANNEL_AUTH_TERMINAL_RETENTION_MS = 60 * 1000;
 const MAX_AUTH_ERROR_LENGTH = 512;
 
 export type ChannelAuthState =
@@ -54,7 +55,7 @@ export interface ChannelAuthSessionResources {
   managementService: ChannelManagementService;
 }
 
-interface ChannelAuthClock {
+export interface ChannelAuthClock {
   now(): number;
   setTimeout(
     callback: () => void,
@@ -68,6 +69,7 @@ export interface CreateChannelAuthSessionManagerOptions {
     key: ChannelAuthSessionKey,
   ): ChannelAuthSessionResources | Promise<ChannelAuthSessionResources>;
   ttlMs?: number;
+  terminalRetentionMs?: number;
   clock?: ChannelAuthClock;
   createSessionId?: () => string;
 }
@@ -88,7 +90,8 @@ interface SessionRecord {
   readonly keyId: string;
   readonly expiresAtMs: number;
   readonly controller: AbortController;
-  timer?: ReturnType<typeof setTimeout>;
+  expiryTimer?: ReturnType<typeof setTimeout>;
+  evictionTimer?: ReturnType<typeof setTimeout>;
   state: ChannelAuthState;
   qrRevision: number;
   error?: string;
@@ -98,7 +101,11 @@ interface SessionRecord {
 
 const systemClock: ChannelAuthClock = {
   now: Date.now,
-  setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+  setTimeout: (callback, delayMs) => {
+    const handle = setTimeout(callback, delayMs);
+    handle.unref();
+    return handle;
+  },
   clearTimeout: (handle) => clearTimeout(handle),
 };
 
@@ -221,8 +228,15 @@ export function createChannelAuthSessionManager(
   options: CreateChannelAuthSessionManagerOptions,
 ): ChannelAuthSessionManager {
   const ttlMs = options.ttlMs ?? DEFAULT_AUTH_SESSION_TTL_MS;
+  const terminalRetentionMs =
+    options.terminalRetentionMs ?? CHANNEL_AUTH_TERMINAL_RETENTION_MS;
   if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0) {
     throw new Error('Channel auth session TTL must be a positive integer.');
+  }
+  if (!Number.isSafeInteger(terminalRetentionMs) || terminalRetentionMs <= 0) {
+    throw new Error(
+      'Channel auth terminal retention must be a positive integer.',
+    );
   }
   const clock = options.clock ?? systemClock;
   const createSessionId = options.createSessionId ?? randomUUID;
@@ -238,9 +252,16 @@ export function createChannelAuthSessionManager(
   };
 
   const clearExpiry = (record: SessionRecord) => {
-    if (record.timer !== undefined) {
-      clock.clearTimeout(record.timer);
-      record.timer = undefined;
+    if (record.expiryTimer !== undefined) {
+      clock.clearTimeout(record.expiryTimer);
+      record.expiryTimer = undefined;
+    }
+  };
+
+  const clearEviction = (record: SessionRecord) => {
+    if (record.evictionTimer !== undefined) {
+      clock.clearTimeout(record.evictionTimer);
+      record.evictionTimer = undefined;
     }
   };
 
@@ -262,6 +283,22 @@ export function createChannelAuthSessionManager(
     ...(record.error ? { error: record.error } : {}),
   });
 
+  const evict = (record: SessionRecord) => {
+    credentials.delete(record.id);
+    releaseActive(record);
+    clearExpiry(record);
+    clearEviction(record);
+    if (sessions.get(record.id) === record) sessions.delete(record.id);
+  };
+
+  const retainTerminal = (record: SessionRecord) => {
+    clearEviction(record);
+    record.evictionTimer = clock.setTimeout(
+      () => evict(record),
+      terminalRetentionMs,
+    );
+  };
+
   const finish = (
     record: SessionRecord,
     state: Extract<ChannelAuthState, 'cancelled' | 'expired' | 'error'>,
@@ -275,6 +312,7 @@ export function createChannelAuthSessionManager(
     clearExpiry(record);
     record.controller.abort();
     cancelDriver(record);
+    retainTerminal(record);
   };
 
   const expire = (record: SessionRecord) => {
@@ -362,7 +400,7 @@ export function createChannelAuthSessionManager(
         qrRevision: 0,
         commitStarted: false,
       };
-      record.timer = clock.setTimeout(() => expire(record), ttlMs);
+      record.expiryTimer = clock.setTimeout(() => expire(record), ttlMs);
       sessions.set(id, record);
       activeByKey.set(exactKeyId, id);
 
@@ -497,13 +535,13 @@ export function createChannelAuthSessionManager(
         );
       }
       if (record.state !== 'ready') throw errorForState(record.state);
-      const resolvedCredentials = credentials.get(record.id);
-      if (resolvedCredentials === undefined || !record.driverSession) {
+      if (!credentials.has(record.id) || !record.driverSession) {
         throw new ChannelAuthSessionError(
           'channel_auth_not_ready',
           'Channel authentication is not ready to commit.',
         );
       }
+      const resolvedCredentials = credentials.get(record.id);
 
       record.commitStarted = true;
       credentials.delete(record.id);
@@ -519,6 +557,7 @@ export function createChannelAuthSessionManager(
         clearExpiry(record);
         record.controller.abort();
         cancelDriver(record);
+        retainTerminal(record);
         return snapshot(record);
       } catch (error) {
         if (error instanceof ChannelAuthSessionError) throw error;
@@ -534,10 +573,10 @@ export function createChannelAuthSessionManager(
       for (const record of sessions.values()) {
         if (
           record.key.workspaceCwd === workspaceCwd &&
-          (runtimeId === undefined || record.key.runtimeId === runtimeId) &&
-          !terminal(record.state)
+          (runtimeId === undefined || record.key.runtimeId === runtimeId)
         ) {
-          finish(record, 'cancelled');
+          if (!terminal(record.state)) finish(record, 'cancelled');
+          evict(record);
         }
       }
     },
@@ -546,6 +585,7 @@ export function createChannelAuthSessionManager(
       stopped = true;
       for (const record of sessions.values()) {
         if (!terminal(record.state)) finish(record, 'cancelled');
+        evict(record);
       }
     },
   };
