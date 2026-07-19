@@ -87,6 +87,49 @@ test('flow: submit a prompt and watch the reply stream in', async ({
   });
 });
 
+test('flow: open channel management and its editor', async ({
+  browser,
+}, testInfo) => {
+  const url = resolveBaseURL(testInfo);
+  await recordFlow(browser, url, 'channel-management', async (page) => {
+    const scenario = createWebShellDaemonScenario({
+      workspaceCwd: '/workspace/project',
+      capabilities: {
+        features: [
+          'session_events',
+          'workspace_settings',
+          'channel_management',
+          'channel_auth',
+        ],
+      },
+    });
+    const daemon = await installScenario(page, scenario, url);
+    await gotoSession(page, scenario, daemon, 'dark', {
+      token: scenario.bearerToken,
+    });
+    await beat(page);
+
+    const editor = page.locator('[data-web-shell-composer-editor] .cm-content');
+    await editor.click();
+    await page.keyboard.type('/settings');
+    await page.locator('[data-web-shell-composer-submit]').click();
+    await expect(page.getByRole('region', { name: 'Settings' })).toBeVisible();
+    await beat(page);
+    await page
+      .getByRole('navigation', { name: 'Settings' })
+      .getByRole('button', { name: /^Channels/ })
+      .click();
+    await page.getByRole('button', { name: 'Manage channels' }).click();
+    await expect(page.getByRole('heading', { name: 'Channels' })).toBeVisible();
+    await beat(page);
+    await page.getByRole('button', { name: 'Add channel' }).click();
+    await expect(
+      page.getByRole('heading', { name: 'Add channel' }),
+    ).toBeVisible();
+    await beat(page);
+  });
+});
+
 // Guards the error-handling path in recordFlow: a throwing `drive` must
 // surface its own error (not a masked video-save / context-close error), even
 // though the video is saved best-effort.

@@ -89,10 +89,14 @@ export async function gotoSession(
   scenario: WebShellDaemonScenario,
   daemon: MockDaemonController,
   theme: VisualTheme,
+  options: { token?: string; language?: string } = {},
 ): Promise<void> {
   await primeTheme(page, theme);
+  const query = new URLSearchParams({ theme });
+  if (options.token) query.set('token', options.token);
+  if (options.language) query.set('language', options.language);
   await page.goto(
-    `/session/${encodeURIComponent(scenario.sessionId)}?theme=${theme}`,
+    `/session/${encodeURIComponent(scenario.sessionId)}?${query.toString()}`,
   );
   await expect(page.locator('[data-web-shell-root]')).toBeVisible();
   await expect(page.locator('html')).toHaveClass(new RegExp(`theme-${theme}`));

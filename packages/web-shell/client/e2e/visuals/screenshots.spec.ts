@@ -162,6 +162,60 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `extensions-manager-${theme}`);
     });
 
+    test(`channels manager`, async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        workspaceCwd: '/workspace/project',
+        capabilities: {
+          features: [
+            'session_events',
+            'workspace_settings',
+            'channel_management',
+            'channel_auth',
+          ],
+        },
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme, {
+        token: scenario.bearerToken,
+      });
+      await openChannels(page, {
+        category: /^Channels/,
+        manage: 'Manage channels',
+        heading: 'Channels',
+      });
+      await expect(page.getByText('primary-credential')).toBeVisible();
+      await expect(page.getByText('primary-qr')).toBeVisible();
+      await captureScreenshot(page, `channels-manager-${theme}`);
+
+      if (theme === 'dark') {
+        await page
+          .getByRole('button', { name: 'More actions for primary-credential' })
+          .click();
+        await page
+          .getByRole('menuitem', { name: 'Edit primary-credential' })
+          .click();
+        await expect(
+          page.getByRole('heading', { name: 'Edit primary-credential' }),
+        ).toBeVisible();
+        await captureScreenshot(page, 'channels-editor-dark');
+        await page.keyboard.press('Escape');
+
+        await page
+          .getByRole('button', { name: 'Authenticate primary-qr' })
+          .click();
+        await expect(
+          page.getByRole('img', {
+            name: 'QR code for QR Adapter channel primary-qr',
+          }),
+        ).toBeVisible();
+        await captureScreenshot(page, 'channels-qr-auth-dark');
+      }
+    });
+
     test(`mermaid diagram`, async ({ page }, testInfo) => {
       const scenario = createWebShellDaemonScenario({
         events: [
@@ -452,4 +506,54 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `permission-panel-${theme}`);
     });
   });
+}
+
+test('channels manager narrow zh-CN', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 440, height: 860 });
+  const scenario = createWebShellDaemonScenario({
+    workspaceCwd: '/workspace/project',
+    capabilities: {
+      features: [
+        'session_events',
+        'workspace_settings',
+        'channel_management',
+        'channel_auth',
+      ],
+    },
+  });
+  const daemon = await installScenario(
+    page,
+    scenario,
+    resolveBaseURL(testInfo),
+  );
+  await gotoSession(page, scenario, daemon, 'light', {
+    token: scenario.bearerToken,
+    language: 'zh-CN',
+  });
+  await openChannels(page, {
+    category: /^频道/,
+    manage: '管理频道',
+    heading: '频道',
+  });
+  await expect
+    .poll(() => page.evaluate(() => document.documentElement.scrollWidth))
+    .toBeLessThanOrEqual(440);
+  await captureScreenshot(page, 'channels-manager-narrow-zh-CN-light');
+});
+
+async function openChannels(
+  page: import('@playwright/test').Page,
+  labels: { category: RegExp; manage: string; heading: string },
+): Promise<void> {
+  await submitLocalCommand(page, '/settings');
+  await page
+    .getByRole('navigation', {
+      name: labels.heading === '频道' ? '设置' : 'Settings',
+    })
+    .getByRole('button', { name: labels.category })
+    .click();
+  await page.getByRole('button', { name: labels.manage }).click();
+  await expect(
+    page.getByRole('heading', { name: labels.heading, exact: true }),
+  ).toBeVisible();
 }

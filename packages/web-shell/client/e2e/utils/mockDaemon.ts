@@ -1,6 +1,12 @@
 import type { Page, Route } from '@playwright/test';
 import {
   DAEMON_APPROVAL_MODES,
+  type DaemonChannelAuthSession,
+  type DaemonChannelInstanceSnapshot,
+  type DaemonChannelMutationResult,
+  type DaemonChannelsSnapshot,
+  type DaemonChannelTypeCatalog,
+  type DaemonChannelUpsertRequest,
   type DaemonApprovalMode,
   type DaemonCapabilities,
   type DaemonEvent,
@@ -51,6 +57,23 @@ export interface WebShellDaemonScenario {
   sessionGroups: DaemonSessionGroup[];
   events: DaemonEvent[];
   state: DaemonSessionState;
+  bearerToken: string;
+  channelWorkspaces: Record<string, MockChannelWorkspaceState>;
+  channelFailures: Record<string, MockChannelFailure[]>;
+}
+
+export interface MockChannelFailure {
+  status: number;
+  body: Record<string, unknown>;
+}
+
+export interface MockChannelWorkspaceState {
+  catalog: DaemonChannelTypeCatalog;
+  snapshot: DaemonChannelsSnapshot;
+  authSessions: Record<
+    string,
+    { session: DaemonChannelAuthSession; pollCount: number }
+  >;
 }
 
 export interface MockDaemonController {
@@ -92,6 +115,8 @@ type ScenarioOverrides = Partial<
 };
 
 const now = '2026-07-03T00:00:00.000Z';
+const channelAuthExpiresAt = '2099-01-01T00:00:00.000Z';
+const defaultBearerToken = 'web-shell-channel-e2e-token';
 
 export function applyScenarioCurrentModel(
   scenario: WebShellDaemonScenario,
@@ -271,6 +296,13 @@ export function createWebShellDaemonScenario(
     },
   ];
 
+  const channelWorkspaces =
+    overrides.channelWorkspaces ??
+    createDefaultChannelWorkspaces(
+      workspaceCwd,
+      '/tmp/qwen-secondary-workspace',
+    );
+
   return {
     workspaceCwd,
     sessionId,
@@ -289,6 +321,93 @@ export function createWebShellDaemonScenario(
     sessionGroups: overrides.sessionGroups ?? [],
     events: overrides.events ?? [],
     state,
+    bearerToken: overrides.bearerToken ?? defaultBearerToken,
+    channelWorkspaces,
+    channelFailures: overrides.channelFailures ?? {},
+  };
+}
+
+export function queueMockDaemonFailure(
+  scenario: WebShellDaemonScenario,
+  method: string,
+  path: string,
+  failure: MockChannelFailure,
+): void {
+  const key = `${method.toUpperCase()} ${path}`;
+  (scenario.channelFailures[key] ??= []).push(failure);
+}
+
+function createDefaultChannelWorkspaces(
+  primaryCwd: string,
+  secondaryCwd: string,
+): Record<string, MockChannelWorkspaceState> {
+  return {
+    [primaryCwd]: createDefaultChannelWorkspace(primaryCwd),
+    [secondaryCwd]: createDefaultChannelWorkspace(secondaryCwd, 'secondary'),
+  };
+}
+
+function createDefaultChannelWorkspace(
+  workspaceCwd: string,
+  prefix = 'primary',
+): MockChannelWorkspaceState {
+  const credentialName = `${prefix}-credential`;
+  const qrName = `${prefix}-qr`;
+  const catalog: DaemonChannelTypeCatalog = [
+    {
+      type: 'credential-adapter',
+      displayName: 'Credential Adapter',
+      manageable: true,
+      auth: ['credentials'],
+      fields: [
+        {
+          key: 'token',
+          label: 'Access token',
+          kind: 'secret',
+          envResolvable: true,
+        },
+        {
+          key: 'endpoint',
+          label: 'Endpoint',
+          kind: 'string',
+          required: true,
+        },
+      ],
+    },
+    {
+      type: 'qr-adapter',
+      displayName: 'QR Adapter',
+      manageable: true,
+      auth: ['qr'],
+      fields: [],
+    },
+  ];
+  const instances: Record<string, DaemonChannelInstanceSnapshot> = {
+    [credentialName]: {
+      name: credentialName,
+      config: {
+        type: 'credential-adapter',
+        endpoint: 'https://adapter.invalid/messages',
+        cwd: workspaceCwd,
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      webhookSecrets: {},
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    },
+    [qrName]: {
+      name: qrName,
+      config: { type: 'qr-adapter', cwd: workspaceCwd },
+      secrets: {},
+      webhookSecrets: {},
+      startsWithServe: true,
+      runtime: { state: 'connected' },
+    },
+  };
+  return {
+    catalog,
+    snapshot: { revision: 'revision-1', instances },
+    authSessions: {},
   };
 }
 
@@ -481,10 +600,11 @@ function isDaemonPath(path: string): boolean {
     path === '/workspace/extensions/check-updates' ||
     path === '/workspace/mcp' ||
     path === '/workspace/voice' ||
+    isChannelPath(path) ||
     /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/resources\/?$/.test(path) ||
-    /^\/workspace\/.+\/sessions\/?$/.test(path) ||
-    /^\/workspace\/.+\/session-groups\/?$/.test(path) ||
+    /^\/workspaces?\/.+\/sessions\/?$/.test(path) ||
+    /^\/workspaces?\/.+\/session-groups\/?$/.test(path) ||
     path === '/session' ||
     /^\/permission\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/pending-prompts(?:\/[^/]+)?\/?$/.test(path) ||
@@ -495,6 +615,7 @@ function isDaemonPath(path: string): boolean {
 }
 
 function isDaemonRoute(method: string, path: string): boolean {
+  if (isChannelPath(path)) return isChannelMethod(method, path);
   if (method === 'GET' && (path === '/health' || path === '/capabilities')) {
     return true;
   }
@@ -525,10 +646,10 @@ function isDaemonRoute(method: string, path: string): boolean {
   ) {
     return true;
   }
-  if (method === 'GET' && /^\/workspace\/.+\/sessions\/?$/.test(path)) {
+  if (method === 'GET' && /^\/workspaces?\/.+\/sessions\/?$/.test(path)) {
     return true;
   }
-  if (method === 'GET' && /^\/workspace\/.+\/session-groups\/?$/.test(path)) {
+  if (method === 'GET' && /^\/workspaces?\/.+\/session-groups\/?$/.test(path)) {
     return true;
   }
   if (method === 'POST' && path === '/session') return true;
@@ -556,6 +677,341 @@ function isDaemonRoute(method: string, path: string): boolean {
   );
 }
 
+interface ParsedChannelPath {
+  workspaceCwd: string;
+  rest: string;
+}
+
+function parseChannelPath(
+  path: string,
+  primaryWorkspaceCwd = '',
+): ParsedChannelPath | undefined {
+  const primary = path.match(
+    /^\/workspace\/(channel-types|channels(?:\/.*)?)$/,
+  );
+  if (primary) {
+    return { workspaceCwd: primaryWorkspaceCwd, rest: primary[1] };
+  }
+  const selected = path.match(
+    /^\/workspaces\/([^/]+)\/(channel-types|channels(?:\/.*)?)$/,
+  );
+  if (!selected) return undefined;
+  return {
+    workspaceCwd: decodeURIComponent(selected[1]),
+    rest: selected[2],
+  };
+}
+
+function isChannelPath(path: string): boolean {
+  return parseChannelPath(path) !== undefined;
+}
+
+function isChannelMethod(method: string, path: string): boolean {
+  const parsed = parseChannelPath(path);
+  if (!parsed) return false;
+  if (parsed.rest === 'channel-types' || parsed.rest === 'channels') {
+    return method === 'GET';
+  }
+  if (/^channels\/[^/]+$/.test(parsed.rest)) {
+    return method === 'PUT' || method === 'DELETE';
+  }
+  if (/^channels\/[^/]+\/startup$/.test(parsed.rest)) {
+    return method === 'PUT';
+  }
+  if (/^channels\/[^/]+\/(start|stop|restart)$/.test(parsed.rest)) {
+    return method === 'POST';
+  }
+  if (/^channels\/[^/]+\/auth-sessions$/.test(parsed.rest)) {
+    return method === 'POST';
+  }
+  if (/^channels\/[^/]+\/auth-sessions\/[^/]+$/.test(parsed.rest)) {
+    return method === 'GET' || method === 'DELETE';
+  }
+  if (/^channels\/[^/]+\/auth-sessions\/[^/]+\/qr$/.test(parsed.rest)) {
+    return method === 'GET';
+  }
+  if (/^channels\/[^/]+\/auth-sessions\/[^/]+\/commit$/.test(parsed.rest)) {
+    return method === 'POST';
+  }
+  return false;
+}
+
+async function handleChannelRoute(
+  route: Route,
+  method: string,
+  path: string,
+  scenario: WebShellDaemonScenario,
+  body: unknown,
+): Promise<void> {
+  if (
+    route.request().headers()['authorization'] !==
+    `Bearer ${scenario.bearerToken}`
+  ) {
+    await json(
+      route,
+      { code: 'unauthorized', error: 'A valid bearer token is required.' },
+      401,
+    );
+    return;
+  }
+
+  const failureKey = `${method} ${path}`;
+  const failure = scenario.channelFailures[failureKey]?.shift();
+  if (failure) {
+    await json(route, failure.body, failure.status);
+    return;
+  }
+
+  const parsed = parseChannelPath(path, scenario.workspaceCwd);
+  if (!parsed) {
+    await json(route, { code: 'channel_route_not_found' }, 404);
+    return;
+  }
+  const workspace = scenario.channelWorkspaces[parsed.workspaceCwd];
+  if (!workspace) {
+    await json(
+      route,
+      { code: 'workspace_not_found', workspaceCwd: parsed.workspaceCwd },
+      404,
+    );
+    return;
+  }
+
+  if (parsed.rest === 'channel-types') {
+    await json(route, workspace.catalog);
+    return;
+  }
+  if (parsed.rest === 'channels') {
+    await json(route, workspace.snapshot);
+    return;
+  }
+
+  const segments = parsed.rest.split('/').map(decodeURIComponent);
+  const name = segments[1] ?? '';
+  if (!name) {
+    await badRequest(route, 'Channel name is required.');
+    return;
+  }
+
+  if (segments.length === 2 && method === 'PUT') {
+    const request = body as DaemonChannelUpsertRequest;
+    if (!(await requireChannelRevision(route, workspace, request))) return;
+    const previous = workspace.snapshot.instances[name];
+    const instance: DaemonChannelInstanceSnapshot = {
+      name,
+      config: { ...(request.config ?? {}) },
+      secrets: applySecretUpdates(previous?.secrets ?? {}, request.secrets),
+      webhookSecrets: applySecretUpdates(
+        previous?.webhookSecrets ?? {},
+        request.webhookSecrets,
+      ),
+      startsWithServe: previous?.startsWithServe ?? false,
+      runtime: previous?.runtime ?? { state: 'stopped' },
+    };
+    workspace.snapshot.instances[name] = instance;
+    await json(route, mutateChannelSnapshot(workspace, instance));
+    return;
+  }
+
+  const instance = workspace.snapshot.instances[name];
+  if (!instance) {
+    await json(route, { code: 'channel_not_found', name }, 404);
+    return;
+  }
+
+  if (segments.length === 2 && method === 'DELETE') {
+    if (!(await requireChannelRevision(route, workspace, body))) return;
+    delete workspace.snapshot.instances[name];
+    const result = mutateChannelSnapshot(workspace, instance);
+    await json(route, result);
+    return;
+  }
+
+  if (segments[2] === 'startup' && method === 'PUT') {
+    if (!(await requireChannelRevision(route, workspace, body))) return;
+    instance.startsWithServe = getRecordValue(body, 'enabled') === true;
+    await json(route, mutateChannelSnapshot(workspace, instance));
+    return;
+  }
+
+  if (
+    segments.length === 3 &&
+    method === 'POST' &&
+    (segments[2] === 'start' ||
+      segments[2] === 'stop' ||
+      segments[2] === 'restart')
+  ) {
+    instance.runtime = {
+      state: segments[2] === 'stop' ? 'stopped' : 'connected',
+    };
+    await json(route, channelMutationResult(workspace, instance));
+    return;
+  }
+
+  if (segments[2] === 'auth-sessions') {
+    await handleChannelAuthRoute(
+      route,
+      method,
+      segments,
+      workspace,
+      instance,
+      body,
+    );
+    return;
+  }
+
+  await json(route, { code: 'channel_route_not_found' }, 404);
+}
+
+async function requireChannelRevision(
+  route: Route,
+  workspace: MockChannelWorkspaceState,
+  body: unknown,
+): Promise<boolean> {
+  const expectedRevision = getRecordValue(body, 'expectedRevision');
+  if (expectedRevision === workspace.snapshot.revision) return true;
+  await json(
+    route,
+    {
+      code: 'channel_settings_conflict',
+      expectedRevision,
+      actualRevision: workspace.snapshot.revision,
+    },
+    409,
+  );
+  return false;
+}
+
+function applySecretUpdates(
+  current: DaemonChannelInstanceSnapshot['secrets'],
+  updates: DaemonChannelUpsertRequest['secrets'],
+): DaemonChannelInstanceSnapshot['secrets'] {
+  const next = { ...current };
+  for (const [key, update] of Object.entries(updates ?? {})) {
+    if (update.operation === 'preserve') continue;
+    next[key] =
+      update.operation === 'replace'
+        ? { present: true, source: 'literal' }
+        : { present: false };
+  }
+  return next;
+}
+
+function mutateChannelSnapshot(
+  workspace: MockChannelWorkspaceState,
+  instance: DaemonChannelInstanceSnapshot,
+): DaemonChannelMutationResult {
+  workspace.snapshot.revision = nextRevision(workspace.snapshot.revision);
+  return channelMutationResult(workspace, instance);
+}
+
+function channelMutationResult(
+  workspace: MockChannelWorkspaceState,
+  instance: DaemonChannelInstanceSnapshot,
+): DaemonChannelMutationResult {
+  return { snapshot: workspace.snapshot, instance };
+}
+
+function nextRevision(revision: string): string {
+  const match = /^(.*?)(\d+)$/.exec(revision);
+  return match ? `${match[1]}${Number(match[2]) + 1}` : `${revision}-next`;
+}
+
+async function handleChannelAuthRoute(
+  route: Route,
+  method: string,
+  segments: string[],
+  workspace: MockChannelWorkspaceState,
+  instance: DaemonChannelInstanceSnapshot,
+  body: unknown,
+): Promise<void> {
+  const name = segments[1];
+  if (segments.length === 3 && method === 'POST') {
+    if (getRecordValue(body, 'channelType') !== instance.config['type']) {
+      await badRequest(route, 'Channel type does not match the instance.');
+      return;
+    }
+    const id = `auth-${name}`;
+    const session: DaemonChannelAuthSession = {
+      id,
+      state: 'awaiting_scan',
+      expiresAt: channelAuthExpiresAt,
+      qrRevision: 1,
+    };
+    workspace.authSessions[id] = { session, pollCount: 0 };
+    await json(route, session);
+    return;
+  }
+
+  const sessionId = segments[3] ?? '';
+  const auth = workspace.authSessions[sessionId];
+  if (!auth) {
+    await json(route, { code: 'channel_auth_session_not_found' }, 404);
+    return;
+  }
+
+  if (segments.length === 4 && method === 'DELETE') {
+    auth.session = { ...auth.session, state: 'cancelled' };
+    await json(route, { cancelled: true });
+    return;
+  }
+  if (segments.length === 4 && method === 'GET') {
+    auth.pollCount += 1;
+    const progression: Array<{
+      state: DaemonChannelAuthSession['state'];
+      qrRevision: number;
+    }> = [
+      { state: 'scanned', qrRevision: 1 },
+      { state: 'refreshing', qrRevision: 2 },
+      { state: 'awaiting_scan', qrRevision: 2 },
+      { state: 'scanned', qrRevision: 2 },
+      { state: 'ready', qrRevision: 2 },
+    ];
+    const next =
+      progression[Math.min(auth.pollCount - 1, progression.length - 1)];
+    auth.session = { ...auth.session, ...next };
+    await json(route, auth.session);
+    return;
+  }
+  if (segments[4] === 'qr' && method === 'GET') {
+    await svg(route, auth.session.qrRevision);
+    return;
+  }
+  if (segments[4] === 'commit' && method === 'POST') {
+    if (auth.session.state !== 'ready') {
+      await json(route, { code: 'channel_auth_not_ready' }, 409);
+      return;
+    }
+    if (getRecordValue(body, 'channelType') !== instance.config['type']) {
+      await badRequest(route, 'Channel type does not match the instance.');
+      return;
+    }
+    auth.session = { ...auth.session, state: 'committed' };
+    instance.runtime = { state: 'connected' };
+    await json(route, mutateChannelSnapshot(workspace, instance));
+    return;
+  }
+  await json(route, { code: 'channel_auth_route_not_found' }, 404);
+}
+
+async function svg(route: Route, revision: number): Promise<void> {
+  const foreground = revision === 1 ? '#111827' : '#1d4ed8';
+  const body =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="224" height="224" viewBox="0 0 224 224">` +
+    `<rect width="224" height="224" fill="#fff"/>` +
+    `<path fill="${foreground}" d="M20 20h56v56H20zm128 0h56v56h-56zM20 148h56v56H20zm92-52h20v20h-20zm36 36h20v20h-20zm-52 36h20v20H96z"/>` +
+    `</svg>`;
+  await route.fulfill({
+    status: 200,
+    contentType: 'image/svg+xml',
+    headers: {
+      'cache-control': 'no-store, no-cache, must-revalidate',
+      pragma: 'no-cache',
+    },
+    body,
+  });
+}
+
 async function handleDaemonRoute(
   route: Route,
   method: string,
@@ -564,6 +1020,10 @@ async function handleDaemonRoute(
   body: unknown,
   searchParams: URLSearchParams = new URLSearchParams(),
 ): Promise<void> {
+  if (isChannelPath(path)) {
+    await handleChannelRoute(route, method, path, scenario, body);
+    return;
+  }
   if (method === 'GET' && path === '/health') {
     await json(route, { ok: true, healthy: true });
     return;
@@ -639,19 +1099,26 @@ async function handleDaemonRoute(
     await json(route, workspaceMcpResources(scenario, serverName));
     return;
   }
-  if (method === 'GET' && /^\/workspace\/.+\/sessions\/?$/.test(path)) {
+  if (method === 'GET' && /^\/workspaces?\/.+\/sessions\/?$/.test(path)) {
     // Mirror production query modes: `group=pinned` is the pinned bucket;
     // `group=all` (and missing group) returns the full active list. The UI
     // excludes pinned rows from organized sections via `excludePinned`.
     const group = searchParams.get('group');
+    const workspaceSelector = path
+      .replace(/^\/workspaces?\//, '')
+      .replace(/\/sessions\/?$/, '');
+    const workspaceCwd = decodeURIComponent(workspaceSelector);
+    const workspaceSessions = scenario.sessions.filter(
+      (session) => session.workspaceCwd === workspaceCwd,
+    );
     const sessions =
       group === 'pinned'
-        ? scenario.sessions.filter((session) => Boolean(session.isPinned))
-        : scenario.sessions;
+        ? workspaceSessions.filter((session) => Boolean(session.isPinned))
+        : workspaceSessions;
     await json(route, { sessions });
     return;
   }
-  if (method === 'GET' && /^\/workspace\/.+\/session-groups\/?$/.test(path)) {
+  if (method === 'GET' && /^\/workspaces?\/.+\/session-groups\/?$/.test(path)) {
     const catalog: DaemonSessionGroupCatalog = {
       groups: scenario.sessionGroups,
       colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
@@ -703,10 +1170,11 @@ async function handleDaemonRoute(
       return;
     }
     if (action === 'context') {
+      const sessionWorkspaceCwd = workspaceCwdForSession(scenario, sessionId);
       await json(route, {
         v: 1,
         sessionId,
-        workspaceCwd: scenario.workspaceCwd,
+        workspaceCwd: sessionWorkspaceCwd,
         state: scenario.state,
       });
       return;
@@ -809,7 +1277,7 @@ function restoredSessionEnvelope(
 ): DaemonRestoredSession {
   return {
     sessionId,
-    workspaceCwd: scenario.workspaceCwd,
+    workspaceCwd: workspaceCwdForSession(scenario, sessionId),
     attached: true,
     clientId: scenario.clientId,
     createdAt: now,
@@ -819,6 +1287,16 @@ function restoredSessionEnvelope(
     liveJournal: [],
     lastEventId: maxEventId(scenario.events),
   };
+}
+
+function workspaceCwdForSession(
+  scenario: WebShellDaemonScenario,
+  sessionId: string,
+): string {
+  return (
+    scenario.sessions.find((session) => session.sessionId === sessionId)
+      ?.workspaceCwd ?? scenario.workspaceCwd
+  );
 }
 
 function maxEventId(events: readonly DaemonEvent[]): number {
