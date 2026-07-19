@@ -17,7 +17,7 @@ Here is a breakdown of the specific automation workflows that run in our reposit
 This is the first bot you will interact with when you create an issue. Its job is to perform an initial analysis and apply the correct labels.
 
 - **Workflow File**: `.github/workflows/qwen-triage.yml`
-- **When it runs**: Immediately after an issue is created, or when a maintainer manually requests triage.
+- **When it runs**: Immediately after an issue is created, edited, or reopened, or when a maintainer manually requests triage.
 - **What it does**:
   - It uses a Qwen model to analyze the issue's title and body against a detailed set of guidelines.
   - **Applies one `area/*` label**: Categorizes the issue into a functional area of the project (e.g., `area/ux`, `area/models`, `area/platform`).
