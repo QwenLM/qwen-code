@@ -41,10 +41,8 @@ import {
   UpstreamDeviceFlowError,
 } from '../auth/device-flow.js';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
-import {
-  parseSessionSource,
-  translateWindowsWorkspaceForPosixSandbox,
-} from '@qwen-code/acp-bridge';
+import { parseSessionSource } from '@qwen-code/acp-bridge';
+import { translateWindowsWorkspaceForPosixSandbox , canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
   SessionShellClientRequiredError,
@@ -55,7 +53,6 @@ import {
   SessionArtifactAuthorizationError,
   SessionArtifactValidationError,
 } from '@qwen-code/acp-bridge/sessionArtifacts';
-import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from '../fs/paths.js';
 import {

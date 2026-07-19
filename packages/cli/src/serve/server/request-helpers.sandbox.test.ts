@@ -6,7 +6,7 @@
 
 import type { Response } from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { _setSandboxMountExistsForTest } from '@qwen-code/acp-bridge';
+import { _setSandboxMountExistsForTest } from '@qwen-code/acp-bridge/workspacePaths';
 import { parseOptionalWorkspaceCwd } from './request-helpers.js';
 
 // Regression for the #7228 review finding: every workspace-ingestion path
