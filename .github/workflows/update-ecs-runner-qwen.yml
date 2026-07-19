@@ -28,11 +28,12 @@ jobs:
         env:
           INPUT_VERSION: '${{ inputs.version }}'
         run: |-
+          set -euo pipefail
           specifier="@qwen-code/qwen-code@${INPUT_VERSION#v}"
           if [[ "${specifier}" == '@qwen-code/qwen-code@' ]]; then
             specifier='@qwen-code/qwen-code@latest'
           fi
-          version="$(npm view "${specifier}" version | tail -n 1)"
+          version="$(npm view "${specifier}" version | tail -n 1)" || true
           if [[ -z "${version}" ]]; then
             echo "::error::No published qwen version matches '${INPUT_VERSION:-latest}'."
             exit 1
@@ -44,6 +45,7 @@ jobs:
         env:
           VERSION: '${{ steps.version.outputs.version }}'
         run: |-
+          set -euo pipefail
           global_root="$(npm root -g)"
           global_bin="$(npm prefix -g)/bin"
           if [[ -w "${global_root}" && -w "${global_bin}" ]]; then
@@ -59,6 +61,7 @@ jobs:
         env:
           VERSION: '${{ steps.version.outputs.version }}'
         run: |-
+          set -euo pipefail
           actual="$(qwen --version)"
           echo "qwen version: ${actual}"
           test "${actual}" = "${VERSION}"
