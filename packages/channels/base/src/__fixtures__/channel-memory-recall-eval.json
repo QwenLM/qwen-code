@@ -230,7 +230,8 @@
         "text": "数据治理规范包含资产分级和质量责任制度。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
       }
     ],
-    "relevantIds": []
+    "relevantIds": [],
+    "expectedSelectedIds": []
   },
   {
     "id": "ja-hiragana",
@@ -476,7 +477,8 @@
       }
     ],
     "relevantIds": ["first", "second", "third"],
-    "expectedTopId": "first"
+    "expectedTopId": "first",
+    "expectedSelectedIds": ["first", "second", "third"]
   },
   {
     "id": "fallback-after-positive",
@@ -497,7 +499,8 @@
       }
     ],
     "relevantIds": ["positive", "first-fallback", "second-fallback"],
-    "expectedTopId": "positive"
+    "expectedTopId": "positive",
+    "expectedSelectedIds": ["positive", "first-fallback", "second-fallback"]
   },
   {
     "id": "none-long-unrelated",
@@ -509,7 +512,8 @@
         "text": "quarterly accessibility review covers keyboard navigation and contrast. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
       }
     ],
-    "relevantIds": []
+    "relevantIds": [],
+    "expectedSelectedIds": []
   },
   {
     "id": "none-single-cjk",
@@ -521,7 +525,8 @@
         "text": "数据治理规范要求资产责任人定期完成复核。 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
       }
     ],
-    "relevantIds": []
+    "relevantIds": [],
+    "expectedSelectedIds": []
   },
   {
     "id": "none-short-latin",
@@ -533,7 +538,8 @@
         "text": "x is a deliberately isolated single character in this fact. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
       }
     ],
-    "relevantIds": []
+    "relevantIds": [],
+    "expectedSelectedIds": []
   },
   {
     "id": "none-unsafe-separators",
@@ -545,7 +551,8 @@
         "text": "deploytarget is a single joined identifier with no separator. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
       }
     ],
-    "relevantIds": []
+    "relevantIds": [],
+    "expectedSelectedIds": []
   },
   {
     "id": "ranking-overlap-count",
@@ -604,6 +611,7 @@
       }
     ],
     "relevantIds": ["first", "later-fit"],
-    "expectedTopId": "first"
+    "expectedTopId": "first",
+    "expectedSelectedIds": ["first", "later-fit"]
   }
 ]
