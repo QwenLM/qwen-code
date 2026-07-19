@@ -349,9 +349,15 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
       source?: 'literal' | 'environment';
     }>();
     expectTypeOf<DaemonChannelInstanceSnapshot>().not.toBeNever();
+    expectTypeOf<
+      DaemonChannelInstanceSnapshot['webhookSecrets']
+    >().toEqualTypeOf<Record<string, DaemonChannelSecretState>>();
     expectTypeOf<DaemonChannelsSnapshot>().not.toBeNever();
     expectTypeOf<DaemonChannelSecretUpdate>().not.toBeNever();
     expectTypeOf<DaemonChannelUpsertRequest>().not.toBeNever();
+    expectTypeOf<DaemonChannelUpsertRequest['webhookSecrets']>().toEqualTypeOf<
+      Record<string, DaemonChannelSecretUpdate> | undefined
+    >();
     expectTypeOf<DaemonChannelStartupRequest>().toEqualTypeOf<{
       expectedRevision: string;
       enabled: boolean;

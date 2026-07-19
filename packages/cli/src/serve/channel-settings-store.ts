@@ -28,6 +28,7 @@ export interface ChannelSettingsUpsertOptions
   extends ChannelSettingsMutationOptions {
   config: Record<string, unknown> & { type: string };
   secrets?: Record<string, ChannelSecretUpdate>;
+  webhookSecrets?: Record<string, ChannelSecretUpdate>;
 }
 
 export class ChannelSettingsError extends Error {
@@ -63,6 +64,94 @@ function applySecretUpdate(
 
 function invalidSecret(message: string): ChannelSettingsError {
   return new ChannelSettingsError('channel_settings_invalid_secret', message);
+}
+
+const UNSAFE_OBJECT_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function webhookSources(
+  config: Record<string, unknown>,
+): Record<string, Record<string, unknown>> {
+  const webhooks = config['webhooks'];
+  if (!isRecord(webhooks)) return {};
+  const sources = webhooks['sources'];
+  if (!isRecord(sources)) return {};
+  const result: Record<string, Record<string, unknown>> = {};
+  for (const [name, source] of Object.entries(sources)) {
+    if (UNSAFE_OBJECT_KEYS.has(name) || !isRecord(source)) {
+      throw invalidSecret(`Webhook source ${JSON.stringify(name)} is invalid.`);
+    }
+    result[name] = source;
+  }
+  return result;
+}
+
+function mergeWebhookSecrets(
+  previousConfig: Record<string, unknown>,
+  requestedConfig: Record<string, unknown>,
+  updates: Record<string, ChannelSecretUpdate>,
+): void {
+  const requestedWebhooks = requestedConfig['webhooks'];
+  if (!isRecord(requestedWebhooks)) {
+    if (Object.keys(updates).length > 0) {
+      throw invalidSecret('Webhook secret updates require retained sources.');
+    }
+    return;
+  }
+  const requestedSources = webhookSources(requestedConfig);
+  const previousSources = webhookSources(previousConfig);
+  for (const name of Object.keys(updates)) {
+    if (
+      UNSAFE_OBJECT_KEYS.has(name) ||
+      !Object.hasOwn(requestedSources, name)
+    ) {
+      throw invalidSecret(
+        `Webhook secret update ${JSON.stringify(name)} does not match a retained source.`,
+      );
+    }
+  }
+  const nextSources: Record<string, unknown> = {};
+  for (const [name, requestedSource] of Object.entries(requestedSources)) {
+    if (Object.hasOwn(requestedSource, 'secret')) {
+      throw invalidSecret(
+        `Webhook source ${JSON.stringify(name)} must update its literal secret explicitly.`,
+      );
+    }
+    const nextSource = { ...requestedSource };
+    const secretEnv = requestedSource['secretEnv'];
+    const update = updates[name] ?? { operation: 'preserve' };
+    if (secretEnv !== undefined) {
+      if (typeof secretEnv !== 'string' || secretEnv.length === 0) {
+        throw invalidSecret(
+          `Webhook source ${JSON.stringify(name)} has an invalid secretEnv.`,
+        );
+      }
+      if (update.operation === 'replace') {
+        throw invalidSecret(
+          `Webhook source ${JSON.stringify(name)} cannot replace a literal while using secretEnv.`,
+        );
+      }
+      delete nextSource['secret'];
+      nextSources[name] = nextSource;
+      continue;
+    }
+    const previousSecret = previousSources[name]?.['secret'];
+    const nextSecret = applySecretUpdate(previousSecret, update);
+    if (typeof nextSecret !== 'string' || nextSecret.length === 0) {
+      throw invalidSecret(
+        `Webhook source ${JSON.stringify(name)} requires a literal secret or secretEnv.`,
+      );
+    }
+    nextSource['secret'] = nextSecret;
+    nextSources[name] = nextSource;
+  }
+  requestedConfig['webhooks'] = {
+    ...requestedWebhooks,
+    sources: nextSources,
+  };
 }
 
 function workspaceValues(workspaceCwd: string): {
@@ -137,6 +226,7 @@ export class WorkspaceChannelSettingsStore {
       const value = applySecretUpdate(previous[key], update);
       if (value !== undefined) nextConfig[key] = value;
     }
+    mergeWebhookSecrets(previous, nextConfig, options.webhookSecrets ?? {});
 
     const channels = { ...current.channels, [name]: nextConfig };
     const workspaceFile = loadSettings(this.workspaceCwd, {

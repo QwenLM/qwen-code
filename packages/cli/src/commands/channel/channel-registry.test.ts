@@ -21,6 +21,13 @@ describe('channel registry', () => {
         required: true,
       }),
     );
+    expect(catalog.find((entry) => entry.type === 'qq')).toMatchObject({
+      auth: ['credentials', 'qr'],
+      fields: [
+        { key: 'appID', kind: 'string' },
+        { key: 'appSecret', kind: 'secret' },
+      ],
+    });
     expect(JSON.stringify(catalog)).not.toContain('createChannel');
     expect(JSON.stringify(catalog)).not.toContain('authDriver');
   });

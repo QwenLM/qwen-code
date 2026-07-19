@@ -16,8 +16,11 @@ export const plugin: ChannelPlugin = {
   // through the built-in channel path.
   requiredConfigFields: [],
   management: {
-    fields: [],
-    auth: ['qr'],
+    fields: [
+      { key: 'appID', label: 'App ID', kind: 'string' },
+      { key: 'appSecret', label: 'App Secret', kind: 'secret' },
+    ],
+    auth: ['credentials', 'qr'],
   },
   authDriver,
   createChannel: (name, config, bridge, options) =>

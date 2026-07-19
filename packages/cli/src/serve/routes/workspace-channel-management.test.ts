@@ -44,6 +44,7 @@ function service(): ChannelManagementService {
       name,
       config,
       secrets: {},
+      webhookSecrets: {},
       startsWithServe: false,
       runtime: { state },
     },
@@ -175,6 +176,7 @@ function authService(): ChannelManagementService {
         name: 'bot',
         config: { type: 'weixin' },
         secrets: {},
+        webhookSecrets: {},
         startsWithServe: false,
         runtime: { state: 'stopped' },
       },
@@ -383,6 +385,7 @@ describe('workspace Channel management routes', () => {
           expectedRevision: 'r1',
           config: { type: 'telegram' },
           secrets: { token: { operation: 'preserve' } },
+          webhookSecrets: { github: { operation: 'preserve' } },
         }),
     ).expect(200);
     await auth(
@@ -405,6 +408,7 @@ describe('workspace Channel management routes', () => {
       expectedRevision: 'r1',
       config: { type: 'telegram' },
       secrets: { token: { operation: 'preserve' } },
+      webhookSecrets: { github: { operation: 'preserve' } },
     });
     expect(primaryService.remove).toHaveBeenCalledWith('bot', {
       expectedRevision: 'r2',

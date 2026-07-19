@@ -2633,6 +2633,7 @@ export interface DaemonChannelInstanceSnapshot {
   name: string;
   config: Record<string, unknown>;
   secrets: Record<string, DaemonChannelSecretState>;
+  webhookSecrets: Record<string, DaemonChannelSecretState>;
   startsWithServe: boolean;
   runtime: DaemonChannelRuntimeState;
 }
@@ -2654,6 +2655,7 @@ export interface DaemonRevisionRequest {
 export interface DaemonChannelUpsertRequest extends DaemonRevisionRequest {
   config: Record<string, unknown> & { type: string };
   secrets?: Record<string, DaemonChannelSecretUpdate>;
+  webhookSecrets?: Record<string, DaemonChannelSecretUpdate>;
 }
 
 export interface DaemonChannelStartupRequest extends DaemonRevisionRequest {

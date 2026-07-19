@@ -153,8 +153,58 @@ describe('createChannelManagementService', () => {
       name: 'bot',
       config: { type: 'telegram', senderPolicy: 'open' },
       secrets: { token: { present: true, source: 'environment' } },
+      webhookSecrets: {},
       startsWithServe: false,
       runtime: { state: 'connected' },
+    });
+  });
+
+  it('deeply redacts webhook literals and QQ app secrets from snapshots', async () => {
+    const webhookSecret = 'webhook-literal-sentinel';
+    const qqSecret = 'qq-app-secret-sentinel';
+    const { service } = setup({
+      snapshot: settingsSnapshot({
+        channels: {
+          bot: {
+            type: 'dingtalk',
+            webhooks: {
+              sources: {
+                github: {
+                  secret: webhookSecret,
+                  targets: { main: { chatId: 'chat-1' } },
+                },
+                ci: { secretEnv: 'CI_WEBHOOK_SECRET', targets: {} },
+              },
+            },
+          },
+          qq: { type: 'qq', appID: 'app-id', appSecret: qqSecret },
+        },
+      }),
+    });
+
+    const snapshot = await service.list();
+    const serialized = JSON.stringify(snapshot);
+
+    expect(serialized).not.toContain(webhookSecret);
+    expect(serialized).not.toContain(qqSecret);
+    expect(snapshot.instances['bot']).toMatchObject({
+      config: {
+        webhooks: {
+          sources: {
+            github: { targets: { main: { chatId: 'chat-1' } } },
+            ci: { secretEnv: 'CI_WEBHOOK_SECRET', targets: {} },
+          },
+        },
+      },
+      webhookSecrets: {
+        github: { present: true, source: 'literal' },
+        ci: { present: true, source: 'environment' },
+      },
+    });
+    expect(snapshot.instances['qq']).toMatchObject({
+      config: { type: 'qq', appID: 'app-id' },
+      secrets: { appSecret: { present: true, source: 'literal' } },
+      webhookSecrets: {},
     });
   });
 

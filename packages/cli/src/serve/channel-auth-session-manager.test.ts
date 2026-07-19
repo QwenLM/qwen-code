@@ -47,6 +47,7 @@ function managementService(
           name: instanceName,
           config: { type: channelType },
           secrets: {},
+          webhookSecrets: {},
           startsWithServe: false,
           runtime: { state: 'stopped' as const },
         },

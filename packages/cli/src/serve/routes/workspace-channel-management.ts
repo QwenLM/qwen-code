@@ -100,15 +100,17 @@ function parseUpsertRequest(
   if (!revision) return undefined;
   const config = body['config'];
   const secrets = body['secrets'];
+  const webhookSecrets = body['webhookSecrets'];
   if (
     !isRecord(config) ||
     typeof config['type'] !== 'string' ||
     config['type'].length === 0 ||
-    (secrets !== undefined && !isRecord(secrets))
+    (secrets !== undefined && !isRecord(secrets)) ||
+    (webhookSecrets !== undefined && !isRecord(webhookSecrets))
   ) {
     res.status(400).json({
       error:
-        '`config` must be an object with a non-empty `type`; `secrets` must be an object when provided.',
+        '`config` must be an object with a non-empty `type`; secret updates must be objects when provided.',
       code: 'invalid_channel_management_request',
     });
     return undefined;
@@ -119,6 +121,13 @@ function parseUpsertRequest(
     ...(secrets
       ? {
           secrets: secrets as NonNullable<ChannelUpsertRequest['secrets']>,
+        }
+      : {}),
+    ...(webhookSecrets
+      ? {
+          webhookSecrets: webhookSecrets as NonNullable<
+            ChannelUpsertRequest['webhookSecrets']
+          >,
         }
       : {}),
   };

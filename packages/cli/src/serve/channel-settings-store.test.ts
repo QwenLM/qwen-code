@@ -156,6 +156,140 @@ describe('WorkspaceChannelSettingsStore', () => {
     ).rejects.toMatchObject({ code: 'channel_settings_invalid_secret' });
   });
 
+  it('preserves and replaces webhook literals only through explicit updates', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": {
+    "bot": {
+      "type": "dingtalk",
+      "webhooks": { "sources": { "github": {
+        "secret": "webhook-literal-sentinel",
+        "targets": { "main": { "chatId": "chat-1" } }
+      } } }
+    }
+  }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const sanitized = {
+      type: 'dingtalk',
+      webhooks: {
+        sources: {
+          github: { targets: { main: { chatId: 'chat-1' } } },
+        },
+      },
+    };
+
+    const preserved = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: sanitized,
+      webhookSecrets: { github: { operation: 'preserve' } },
+    });
+    expect(
+      (
+        readWorkspaceSettings()['channels'] as Record<
+          string,
+          Record<string, unknown>
+        >
+      )['bot'],
+    ).toMatchObject({
+      webhooks: {
+        sources: {
+          github: {
+            secret: 'webhook-literal-sentinel',
+            targets: { main: { chatId: 'chat-1' } },
+          },
+        },
+      },
+    });
+
+    await store.upsert('bot', {
+      expectedRevision: preserved.revision,
+      config: sanitized,
+      webhookSecrets: {
+        github: { operation: 'replace', value: 'replacement-secret' },
+      },
+    });
+    expect(JSON.stringify(readWorkspaceSettings()['channels'])).toContain(
+      'replacement-secret',
+    );
+  });
+
+  it('switches webhook literals to environment references without retaining literals', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": { "type": "dingtalk", "webhooks": {
+    "sources": { "github": { "secret": "literal-sentinel", "targets": {} } }
+  } } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'dingtalk',
+        webhooks: {
+          sources: {
+            github: { secretEnv: 'GITHUB_WEBHOOK_SECRET', targets: {} },
+          },
+        },
+      },
+      webhookSecrets: { github: { operation: 'clear' } },
+    });
+
+    const serialized = JSON.stringify(readWorkspaceSettings()['channels']);
+    expect(serialized).toContain('GITHUB_WEBHOOK_SECRET');
+    expect(serialized).not.toContain('literal-sentinel');
+  });
+
+  it('rejects unsafe webhook secret updates without writing', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": { "type": "dingtalk", "webhooks": {
+    "sources": { "github": { "secret": "literal-sentinel", "targets": {} } }
+  } } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const before = fs.readFileSync(settingsPath, 'utf8');
+    const revision = store.snapshot().revision;
+    const baseConfig = {
+      type: 'dingtalk',
+      webhooks: { sources: { github: { targets: {} } } },
+    };
+
+    const invalid = [
+      {
+        config: baseConfig,
+        webhookSecrets: { github: { operation: 'clear' } },
+      },
+      {
+        config: baseConfig,
+        webhookSecrets: { removed: { operation: 'preserve' } },
+      },
+      {
+        config: {
+          type: 'dingtalk',
+          webhooks: {
+            sources: {
+              github: { secret: 'ordinary-config-secret', targets: {} },
+            },
+          },
+        },
+      },
+      {
+        config: {
+          type: 'dingtalk',
+          webhooks: { sources: { constructor: { targets: {} } } },
+        },
+      },
+    ] as const;
+    for (const request of invalid) {
+      await expect(
+        store.upsert('bot', { expectedRevision: revision, ...request }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_secret' });
+      expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+    }
+  });
+
   it('rejects channel types without management descriptors', async () => {
     const store = new WorkspaceChannelSettingsStore(workspace);
 

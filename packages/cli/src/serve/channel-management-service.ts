@@ -38,6 +38,7 @@ export interface ChannelInstanceSnapshot {
   name: string;
   config: Record<string, unknown>;
   secrets: Record<string, ChannelSecretState>;
+  webhookSecrets: Record<string, ChannelSecretState>;
   startsWithServe: boolean;
   runtime: ChannelRuntimeState;
 }
@@ -51,6 +52,7 @@ export interface ChannelUpsertRequest {
   expectedRevision: string;
   config: Record<string, unknown> & { type: string };
   secrets?: Record<string, ChannelSecretUpdate>;
+  webhookSecrets?: Record<string, ChannelSecretUpdate>;
 }
 
 export type RevisionRequest = ChannelSettingsMutationOptions;
@@ -228,7 +230,39 @@ export function createChannelManagementService(
     );
     const config: Record<string, unknown> = {};
     const secrets: Record<string, ChannelSecretState> = {};
+    const webhookSecrets = Object.create(null) as Record<
+      string,
+      ChannelSecretState
+    >;
     for (const [key, value] of Object.entries(rawConfig)) {
+      if (key === 'webhooks' && value && typeof value === 'object') {
+        const webhooks = structuredClone(value) as Record<string, unknown>;
+        const rawSources = webhooks['sources'];
+        const sources = Object.create(null) as Record<string, unknown>;
+        if (rawSources && typeof rawSources === 'object') {
+          for (const [sourceName, rawSource] of Object.entries(rawSources)) {
+            if (!rawSource || typeof rawSource !== 'object') {
+              sources[sourceName] = rawSource;
+              continue;
+            }
+            const source = { ...(rawSource as Record<string, unknown>) };
+            const literal = source['secret'];
+            const secretEnv = source['secretEnv'];
+            delete source['secret'];
+            sources[sourceName] = source;
+            webhookSecrets[sourceName] = {
+              present: literal !== undefined || secretEnv !== undefined,
+              ...(literal !== undefined
+                ? { source: 'literal' as const }
+                : secretEnv !== undefined
+                  ? { source: 'environment' as const }
+                  : {}),
+            };
+          }
+        }
+        config[key] = { ...webhooks, sources };
+        continue;
+      }
       if (!secretKeys.has(key)) {
         config[key] = value;
         continue;
@@ -247,6 +281,7 @@ export function createChannelManagementService(
       name,
       config,
       secrets,
+      webhookSecrets,
       startsWithServe:
         startupNames.some(isAllChannelSelectionName) ||
         startupNames.includes(name),
@@ -283,6 +318,7 @@ export function createChannelManagementService(
           name,
           config: {},
           secrets: {},
+          webhookSecrets: {},
           startsWithServe: false,
           runtime: runtimeFor(name),
         } satisfies ChannelInstanceSnapshot);
