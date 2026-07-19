@@ -846,7 +846,9 @@ export async function runNonInteractive(
         }
       }
 
-      let initialParts = normalizePartList(initialPartList);
+      let initialParts = normalizePartList(
+        geminiClient.resolveImageReferences(initialPartList),
+      );
       let fullTurnModelOverride: string | undefined;
       let fullTurnRuntimeView: RuntimeContentGeneratorView | undefined;
       const emitVisionNotice = (subtype: string, notice: string) => {

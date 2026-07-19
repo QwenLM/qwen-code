@@ -199,6 +199,7 @@ describe('runNonInteractive', () => {
   let processStderrSpy: MockInstance;
   let mockGeminiClient: {
     sendMessageStream: Mock;
+    resolveImageReferences: Mock;
     getChatRecordingService: Mock;
     getChat: Mock;
     stripOrphanedUserEntriesFromHistory: Mock;
@@ -261,6 +262,7 @@ describe('runNonInteractive', () => {
 
     mockGeminiClient = {
       sendMessageStream: vi.fn(),
+      resolveImageReferences: vi.fn((parts) => parts),
       consumePendingMemoryTaskPromises: vi.fn().mockReturnValue([]),
       recordCompletedToolCall: vi.fn(),
       stripOrphanedUserEntriesFromHistory: vi.fn(),
@@ -2170,6 +2172,37 @@ describe('runNonInteractive', () => {
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining('Converted 1 image(s)'),
     );
+  });
+
+  it('resolves a stored image id before applying the headless vision bridge', async () => {
+    setupMetricsMock();
+    configureHeadlessVisionModel({ id: 'vision-bridge' });
+    mockGeminiClient.resolveImageReferences.mockReturnValue(headlessImageParts);
+    runVisionBridgeSpy.mockResolvedValue({
+      applied: true,
+      status: 'ok',
+      parts: [{ text: 'focused transcription' }],
+      convertedCount: 1,
+      omittedCount: 0,
+      modelId: 'vision-bridge',
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'inspect Image #abc123abc123',
+      'prompt-stored-image',
+    );
+
+    expect(mockGeminiClient.resolveImageReferences).toHaveBeenCalled();
+    expect(runVisionBridgeSpy).toHaveBeenCalledWith({
+      config: mockConfig,
+      parts: headlessImageParts,
+      signal: expect.any(AbortSignal),
+    });
   });
 
   it('strips headless images when a non-agent vision bridge is skipped', async () => {

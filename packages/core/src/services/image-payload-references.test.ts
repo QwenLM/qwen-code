@@ -8,10 +8,8 @@ import type { Content, Part } from '@google/genai';
 import { describe, expect, it } from 'vitest';
 import {
   InMemoryImagePayloadStore,
-  buildReattachParts,
   countAllInlineImages,
   prepareImagePayloadsForRequest,
-  replaceImagePayloadsInPlace,
 } from './image-payload-references.js';
 
 function toolImageTurn(data: string): Content {
@@ -108,6 +106,36 @@ describe('prepareImagePayloadsForRequest', () => {
     ]);
   });
 
+  it('reattaches only the explicitly referenced images', () => {
+    const store = new InMemoryImagePayloadStore();
+    const history = prepareImagePayloadsForRequest(
+      [
+        toolImageTurn('shot-a'),
+        toolImageTurn('shot-b'),
+        toolImageTurn('shot-c'),
+        { role: 'model', parts: [{ text: 'done' }] },
+      ],
+      { maxRecentImages: 0, store },
+    );
+    const ids = JSON.stringify(history).match(/Image #([a-f0-9]{12})/g) ?? [];
+
+    const prepared = prepareImagePayloadsForRequest(
+      [
+        ...history,
+        {
+          role: 'user',
+          parts: [{ text: `compare ${ids[0]} with ${ids[2]}` }],
+        },
+      ],
+      { maxRecentImages: 0, store },
+    );
+
+    expect(imageParts(prepared).map((part) => part.inlineData?.data)).toEqual([
+      'shot-a',
+      'shot-c',
+    ]);
+  });
+
   it('reattaches a stored image when only its stable reference remains in history', () => {
     const store = new InMemoryImagePayloadStore();
     const firstPass = prepareImagePayloadsForRequest(
@@ -157,31 +185,24 @@ describe('prepareImagePayloadsForRequest', () => {
     ]);
   });
 
-  it('preserves images in the current user request when maxRecentImages is zero', () => {
+  it('does not append historical image payloads to the live current turn', () => {
     const store = new InMemoryImagePayloadStore();
+    const current: Content = {
+      role: 'user',
+      parts: [{ text: 'continue' }],
+    };
+
     const prepared = prepareImagePayloadsForRequest(
-      [
-        toolImageTurn('old-shot'),
-        {
-          role: 'user',
-          parts: [
-            { text: 'inspect this' },
-            { inlineData: { mimeType: 'image/png', data: 'current-shot' } },
-          ],
-        },
-      ],
+      [toolImageTurn('old-shot'), current],
       {
-        maxRecentImages: 0,
-        preserveLastUserImagePartCount: 2,
+        maxRecentImages: 1,
+        preserveImagePartsForContentIndex: 1,
         store,
       },
     );
 
-    const serialized = JSON.stringify(prepared);
-    expect(serialized).not.toContain('"data":"old-shot"');
-    expect(imageParts(prepared).map((part) => part.inlineData?.data)).toEqual([
-      'current-shot',
-    ]);
+    expect(prepared.at(-1)?.parts).toHaveLength(3);
+    expect(current.parts).toEqual([{ text: 'continue' }]);
   });
 
   it('does not echo tool-controlled image metadata into text references', () => {
@@ -238,62 +259,5 @@ describe('countAllInlineImages', () => {
         { role: 'model', parts: [{ text: 'hi' }] },
       ]),
     ).toBe(0);
-  });
-});
-
-describe('replaceImagePayloadsInPlace', () => {
-  it('mutates contents in-place and returns replaced payloads', () => {
-    const store = new InMemoryImagePayloadStore();
-    const contents: Content[] = [
-      toolImageTurn('shot-a'),
-      toolImageTurn('shot-b'),
-      { role: 'user', parts: [{ text: 'continue' }] },
-    ];
-    const replaced = replaceImagePayloadsInPlace(contents, store);
-    expect(replaced).toHaveLength(2);
-    expect(countAllInlineImages(contents)).toBe(0);
-    const serialized = JSON.stringify(contents);
-    expect(serialized).toMatch(
-      /\[Image #[a-f0-9]{12}: image\/png, \d+ bytes\]/,
-    );
-  });
-
-  it('skips the specified content entry', () => {
-    const store = new InMemoryImagePayloadStore();
-    const current: Content = {
-      role: 'user',
-      parts: [{ inlineData: { mimeType: 'image/png', data: 'current-shot' } }],
-    };
-    const contents: Content[] = [toolImageTurn('old-shot'), current];
-    replaceImagePayloadsInPlace(contents, store, current);
-    expect(countAllInlineImages(contents)).toBe(1);
-    expect(JSON.stringify(contents)).toContain('"data":"current-shot"');
-    expect(JSON.stringify(contents)).not.toContain('"data":"old-shot"');
-  });
-});
-
-describe('buildReattachParts', () => {
-  it('picks the most recent unique images', () => {
-    const store = new InMemoryImagePayloadStore();
-    const contents: Content[] = [
-      toolImageTurn('a'),
-      toolImageTurn('b'),
-      toolImageTurn('c'),
-      toolImageTurn('c'),
-    ];
-    const replaced = replaceImagePayloadsInPlace(contents, store);
-    const parts = buildReattachParts(replaced, 2);
-    expect(parts).toHaveLength(3);
-    expect(parts[0]?.text).toContain('Recent images reattached');
-    const data = parts
-      .filter((p) => p.inlineData)
-      .map((p) => p.inlineData?.data);
-    expect(data).toEqual(['b', 'c']);
-  });
-
-  it('returns empty when maxRecentImages is zero', () => {
-    const store = new InMemoryImagePayloadStore();
-    const replaced = replaceImagePayloadsInPlace([toolImageTurn('a')], store);
-    expect(buildReattachParts(replaced, 0)).toEqual([]);
   });
 });

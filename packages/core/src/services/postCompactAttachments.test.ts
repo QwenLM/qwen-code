@@ -646,6 +646,7 @@ import {
   buildImageRestorationBlock,
   type ExtractedImage,
 } from './postCompactAttachments.js';
+import { imagePartToStoredPayload } from './image-payload-references.js';
 
 describe('buildImageRestorationBlock', () => {
   it('returns null when no images are provided', () => {
@@ -674,6 +675,12 @@ describe('buildImageRestorationBlock', () => {
 
     const header = (block!.parts![0] as { text: string }).text;
     expect(header).toContain('Recent visual snapshots');
+    expect(header).toContain(
+      `- Image #${imagePartToStoredPayload(images[0].part).id}, turn 5: computer_use__get_app_state args={"app":"Safari"}`,
+    );
+    expect(header).toContain(
+      `- Image #${imagePartToStoredPayload(images[1].part).id}, turn 11: computer_use__get_app_state args={"app":"Mail"}`,
+    );
     expect(header).toContain('turn 5');
     expect(header).toContain('computer_use__get_app_state');
     expect(header).toContain('"app":"Safari"');
@@ -693,8 +700,9 @@ describe('buildImageRestorationBlock', () => {
     ];
     const block = buildImageRestorationBlock(images);
     const header = (block!.parts![0] as { text: string }).text;
-    expect(header).toContain('turn 3');
-    expect(header).toContain('user-provided'); // labeled instead of tool name
+    expect(header).toContain(
+      `- Image #${imagePartToStoredPayload(images[0].part).id}, turn 3: user-provided image`,
+    );
   });
 });
 

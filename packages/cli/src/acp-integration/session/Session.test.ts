@@ -343,6 +343,9 @@ describe('Session', () => {
   };
   let mockGeminiClient: {
     getChat: ReturnType<typeof vi.fn>;
+    setHistory: ReturnType<typeof vi.fn>;
+    truncateHistory: ReturnType<typeof vi.fn>;
+    stripOrphanedUserEntriesFromHistory: ReturnType<typeof vi.fn>;
     isInitialized: ReturnType<typeof vi.fn>;
     tryCompressChat: ReturnType<typeof vi.fn>;
   };
@@ -475,6 +478,7 @@ describe('Session', () => {
       getHistoryShallow: vi.fn().mockReturnValue([]),
       getHistoryFunctionResponseIds: vi.fn().mockReturnValue(new Set<string>()),
       getLastModelMessageText: vi.fn().mockReturnValue(''),
+      resolveImageReferences: vi.fn((parts) => parts),
       setHistory: vi.fn(),
       truncateHistory: vi.fn(),
       stripThoughtsFromHistory: vi.fn(),
@@ -482,6 +486,13 @@ describe('Session', () => {
     } as unknown as GeminiChat;
     mockGeminiClient = {
       getChat: vi.fn().mockReturnValue(mockChat),
+      setHistory: vi.fn(),
+      truncateHistory: vi.fn((keepCount) =>
+        mockChat.truncateHistory(keepCount),
+      ),
+      stripOrphanedUserEntriesFromHistory: vi.fn(() =>
+        mockChat.stripOrphanedUserEntriesFromHistory(),
+      ),
       isInitialized: vi.fn().mockReturnValue(true),
       tryCompressChat: vi.fn().mockResolvedValue({
         originalTokenCount: 0,
@@ -967,6 +978,7 @@ describe('Session', () => {
       const result = session.rewindToTurn(1);
 
       expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 2 });
+      expect(mockGeminiClient.truncateHistory).toHaveBeenCalledWith(2);
       expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
       expect(mockChat.stripThoughtsFromHistory).toHaveBeenCalled();
       expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
@@ -1221,7 +1233,7 @@ describe('Session', () => {
       session.restoreHistory(snapshot);
 
       expect(snapshot).toEqual(history);
-      expect(mockChat.setHistory).toHaveBeenCalledWith(history);
+      expect(mockGeminiClient.setHistory).toHaveBeenCalledWith(history);
       expect(mockChat.getHistory).not.toHaveBeenCalled();
     });
 
@@ -1232,7 +1244,7 @@ describe('Session', () => {
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
       );
-      expect(mockChat.setHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.setHistory).not.toHaveBeenCalled();
     });
 
     it('rejects history restore while a cron prompt is mutating history', () => {
@@ -1241,7 +1253,7 @@ describe('Session', () => {
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
       );
-      expect(mockChat.setHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.setHistory).not.toHaveBeenCalled();
     });
 
     it('rejects history restore while a cron abort is active', () => {
@@ -1252,7 +1264,7 @@ describe('Session', () => {
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
       );
-      expect(mockChat.setHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.setHistory).not.toHaveBeenCalled();
     });
 
     it('rejects history restore while a notification prompt is processing', () => {
@@ -1263,7 +1275,7 @@ describe('Session', () => {
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
       );
-      expect(mockChat.setHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.setHistory).not.toHaveBeenCalled();
     });
 
     it('rejects history restore while a notification abort controller is active', () => {
@@ -1274,7 +1286,7 @@ describe('Session', () => {
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
       );
-      expect(mockChat.setHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.setHistory).not.toHaveBeenCalled();
     });
   });
 
@@ -3446,6 +3458,45 @@ describe('Session', () => {
       expect(sent.some((part) => 'inlineData' in part)).toBe(false);
     });
 
+    it('resolves a stored image id before applying the ACP vision bridge', async () => {
+      const resolvedImage = {
+        inlineData: { mimeType: 'image/png', data: 'stored-image' },
+      };
+      mockChat.resolveImageReferences = vi
+        .fn()
+        .mockReturnValue([
+          { text: 'inspect Image #abc123abc123' },
+          resolvedImage,
+        ]);
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi
+        .fn()
+        .mockReturnValue({ id: 'qwen3.7-plus' });
+      runVisionBridgeSpy.mockResolvedValue({
+        applied: true,
+        status: 'ok',
+        parts: [{ text: '[focused transcription]' }],
+        convertedCount: 1,
+        omittedCount: 0,
+        modelId: 'qwen3.7-plus',
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'inspect Image #abc123abc123' }],
+      });
+
+      expect(mockChat.resolveImageReferences).toHaveBeenCalled();
+      expect(runVisionBridgeSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          parts: expect.arrayContaining([resolvedImage]),
+        }),
+      );
+    });
+
     it('routes an agent-capable image prompt for that ACP prompt only', async () => {
       const runtimeView = {
         contentGenerator: {},
@@ -5126,6 +5177,7 @@ describe('Session', () => {
           getHistory: vi.fn().mockReturnValue([]),
           getHistoryShallow: vi.fn().mockReturnValue([]),
           getLastModelMessageText: vi.fn().mockReturnValue(''),
+          resolveImageReferences: vi.fn((parts) => parts),
         } as unknown as GeminiChat;
 
         mockChat.sendMessageStream = vi
@@ -5482,6 +5534,7 @@ describe('Session', () => {
           getHistory: vi.fn().mockReturnValue([]),
           getHistoryShallow: vi.fn().mockReturnValue([]),
           getLastModelMessageText: vi.fn().mockReturnValue(''),
+          resolveImageReferences: vi.fn((parts) => parts),
         } as unknown as GeminiChat;
         mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
         mockGeminiClient.tryCompressChat
