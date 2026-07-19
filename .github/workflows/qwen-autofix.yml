@@ -1225,7 +1225,7 @@ jobs:
           # FRONT — unlike the label path this job runs in issue_comment
           # context WITH secrets, so it can explain itself, and refusing here
           # keeps the label from ever sticking to a fork PR via the command.
-          if ! PR_INFO="$(gh pr view "${PR}" --repo "${REPO}" --json labels,isCrossRepository,state,baseRefName 2> /dev/null)"; then
+          if ! PR_INFO="$(gh pr view "${PR}" --repo "${REPO}" --json labels,isCrossRepository,state,baseRefName,author,maintainerCanModify 2> /dev/null)"; then
             echo "::error::could not read PR #${PR}"
             exit 1
           fi
@@ -1249,12 +1249,30 @@ jobs:
           # (org-owned forks cannot — adoption stays the path there), and
           # only write+ senders reach this job for forks (fork authors are
           # silently dropped at route). Without allow-edits, refuse with the
-          # actionable ask.
-          if [[ "$(jq -r 'if has("isCrossRepository") then .isCrossRepository else true end' <<< "${PR_INFO}")" != "false" \
+          # actionable ask. Engage-side requirement only: release ('stop')
+          # is never blocked.
+          if [[ "${CMD}" == 'add' && "$(jq -r 'if has("isCrossRepository") then .isCrossRepository else true end' <<< "${PR_INFO}")" != "false" \
             && "$(jq -r '.maintainerCanModify // false' <<< "${PR_INFO}")" != "true" ]]; then
             gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🚫 Takeover needs push access to this fork branch: please tick “Allow edits from maintainers” on the PR and re-run `%s`. (Org-owned forks cannot enable it — a maintainer can adopt the PR instead: snapshot the head into an in-repo branch and take that over.)\n\n<details>\n<summary>中文说明</summary>\n\n🚫 托管需要对 fork 分支的推送权限：请在 PR 上勾选 “Allow edits from maintainers” 后重新执行 `%s`。（组织账号的 fork 无法勾选 —— 维护者可改用领养：将 head 快照为本仓库分支后接管。）\n\n</details>\n\n<!-- takeover-ack fork-refused -->' "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}")"
             echo "🧭 takeover command refused: fork PR #${PR} without maintainer-edit access"
             exit 0
+          fi
+          # The fork AUTHOR must hold write+ too (the scan re-checks this on
+          # every pickup and the address job once more live): engaging a
+          # below-write fork would stick a label that nothing ever manages —
+          # a silent ghost engagement with no ack and no explanation.
+          # Engage-side only; release is never blocked.
+          if [[ "${CMD}" == 'add' && "$(jq -r 'if has("isCrossRepository") then .isCrossRepository else true end' <<< "${PR_INFO}")" != "false" ]]; then
+            FORK_PR_AUTHOR="$(jq -r '.author.login // ""' <<< "${PR_INFO}")"
+            FORK_AUTHOR_PERM="$(gh api "repos/${REPO}/collaborators/${FORK_PR_AUTHOR}/permission" --jq '.permission // ""' 2> /dev/null || echo '')"
+            case "${FORK_AUTHOR_PERM}" in
+              admin|maintain|write) : ;;
+              *)
+                gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🚫 Takeover not engaged: fork takeover requires the PR author to hold write access on this repository (author `%s` currently: `%s`). A maintainer can adopt the PR instead: snapshot the head into an in-repo branch, open a new PR (commit authorship is preserved), and take that over.\n\n<details>\n<summary>中文说明</summary>\n\n🚫 未接管：fork 托管要求 PR 作者在本仓库持有 write 及以上权限（作者 `%s` 当前为：`%s`）。维护者可改用领养：将 head 快照为本仓库分支并另开 PR（commit 署名保留），再对新 PR 执行接管。\n\n</details>\n\n<!-- takeover-ack fork-refused -->' "${FORK_PR_AUTHOR}" "${FORK_AUTHOR_PERM:-none}" "${FORK_PR_AUTHOR}" "${FORK_AUTHOR_PERM:-none}")"
+                echo "🧭 takeover command refused: fork PR #${PR} author '${FORK_PR_AUTHOR}' permission='${FORK_AUTHOR_PERM:-none}' below write"
+                exit 0
+                ;;
+            esac
           fi
           HAS="$(jq -r --arg t "${TAKEOVER_LABEL}" '[.labels[].name] | index($t) != null' <<< "${PR_INFO}")"
           if [[ "${CMD}" == 'add' ]]; then
@@ -1389,7 +1407,7 @@ jobs:
                  and (.isCrossRepository == false)
                  and ((.baseRefName // "") == "main"))' <<< "${META}")"
             if [[ "${OK}" != "true" ]]; then
-              echo "❌ #${FORCED_PR} is not an open in-repo main-targeting PR owned by ${AUTOFIX_BOT} or labeled ${TAKEOVER_LABEL} (or it carries ${SKIP_LABEL})"
+              echo "❌ #${FORCED_PR} is not an open in-repo main-targeting PR owned by ${AUTOFIX_BOT} or labeled ${TAKEOVER_LABEL} (or it carries ${SKIP_LABEL}); fork takeover PRs are engaged by the scheduled scan, not manual dispatch"
               echo "targets=[]" >> "${GITHUB_OUTPUT}"
               echo "has_targets=false" >> "${GITHUB_OUTPUT}"
               exit 0
@@ -1425,6 +1443,9 @@ jobs:
             # hold write+ RIGHT NOW (the same live-privilege rule as the
             # comment command) and the PR must allow maintainer edits (or
             # the bot cannot push). Rare set — one permission call each.
+            # Appended after the rotated in-repo list: forks sit outside the
+            # anti-starvation rotation, which only bites once in-repo
+            # candidates alone exhaust the inspection budget.
             while IFS=$'\t' read -r FPR FAUTHOR; do
               [[ -z "${FPR}" ]] && continue
               FPERM="$(gh api "repos/${REPO}/collaborators/${FAUTHOR}/permission" --jq '.permission // ""' 2> /dev/null || echo '')"
@@ -1508,11 +1529,15 @@ jobs:
               --json headRefName,statusCheckRollup,createdAt,labels,isCrossRepository,headRepositoryOwner,headRepository 2> /dev/null || echo '{}')"
             HEAD_REPO_FULL="${REPO}"
             if [[ "$(jq -r '.isCrossRepository // false' <<< "${PR_META}")" == "true" ]]; then
-              HEAD_REPO_FULL="$(jq -r '(.headRepositoryOwner.login // "") + "/" + (.headRepository.name // "")' <<< "${PR_META}")"
-              if [[ "${HEAD_REPO_FULL}" == "/" ]]; then
-                echo "⚠️ #${PR}: fork head repository unresolved — skipping"
+              HR_OWNER="$(jq -r '.headRepositoryOwner.login // ""' <<< "${PR_META}")"
+              HR_NAME="$(jq -r '.headRepository.name // ""' <<< "${PR_META}")"
+              # Component-wise: a deleted fork yields owner XOR name empty,
+              # which a joined '/' test would wave through into a red fetch.
+              if [[ -z "${HR_OWNER}" || -z "${HR_NAME}" ]]; then
+                echo "⚠️ #${PR}: fork head repository unresolved (owner='${HR_OWNER}' name='${HR_NAME}') — skipping"
                 continue
               fi
+              HEAD_REPO_FULL="${HR_OWNER}/${HR_NAME}"
             fi
             BRANCH="$(jq -r '.headRefName // ""' <<< "${PR_META}")"
             HAS_TAKEOVER="$(jq -r --arg t "${TAKEOVER_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${PR_META}")"
@@ -1525,51 +1550,6 @@ jobs:
             fi
             EFF_MAX_ROUNDS="${MAX_ROUNDS}"
             [[ "${HAS_TAKEOVER}" == "true" ]] && EFF_MAX_ROUNDS="${TAKEOVER_MAX_ROUNDS}"
-            # First-pickup engage ack: fork label events carry no secrets and
-            # manual labels may race the ack job, so a takeover PR with NO
-            # engage ack yet gets one here (identity-verified) — it is also
-            # the round-window anchor. ic.json is re-fetched so THIS scan
-            # already counts under the fresh key. Dedup is author-filtered
-            # (a forged human marker must not suppress the real ack), and a
-            # label application NEWER than the latest bot ack means a fresh
-            # engagement — post a fresh ack so the round window and cap
-            # reset as documented (re-arm), which no ack job can do for
-            # forks.
-            NEED_ENGAGE_ACK='false'
-            if [[ "${HAS_TAKEOVER}" == "true" ]]; then
-              LAST_ENGAGE_ACK_TS="$(jq -r --arg ab "${AUTOFIX_BOT}" '
-                [.[] | select((.user.login // "") == $ab)
-                     | select(.body // "" | contains("<!-- takeover-ack engaged -->"))
-                     | .created_at] | sort | last // ""' "${WORKDIR}/ic.json")"
-              if [[ -z "${LAST_ENGAGE_ACK_TS}" ]]; then
-                NEED_ENGAGE_ACK='true'
-              else
-                gh api "repos/${REPO}/issues/${PR}/events" --paginate > "${WORKDIR}/pr-events.json" 2> /dev/null \
-                  || echo '[]' > "${WORKDIR}/pr-events.json"
-                LAST_LABELED_TS="$(jq -r --arg lb "${TAKEOVER_LABEL}" '
-                  [.[] | select(.event == "labeled")
-                       | select((.label.name // "") == $lb)
-                       | .created_at] | sort | last // ""' "${WORKDIR}/pr-events.json")"
-                if [[ -n "${LAST_LABELED_TS}" && "${LAST_LABELED_TS}" > "${LAST_ENGAGE_ACK_TS}" ]]; then
-                  NEED_ENGAGE_ACK='true'
-                fi
-              fi
-            fi
-            if [[ "${NEED_ENGAGE_ACK}" == "true" ]]; then
-              if [[ -z "${SCAN_BOT_ACTOR:-}" ]]; then
-                SCAN_BOT_ACTOR="$(gh api user --jq '.login' 2> /dev/null || echo 'unknown')"
-              fi
-              if [[ "${SCAN_BOT_ACTOR}" == "${AUTOFIX_BOT}" ]]; then
-                if gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🤝 Takeover engaged: the autofix loop now manages this PR — it will address new review feedback and resolve base conflicts until the label is removed or the round cap is reached. Remove the `%s` label (or comment `%s stop`) to release.\n\n<details>\n<summary>中文说明</summary>\n\n🤝 已接管：autofix 循环现在管理此 PR —— 将持续处理新的评审反馈与 base 冲突，直到移除标签或达到轮次上限。移除 `%s` 标签（或评论 `%s stop`）即可释放。\n\n</details>\n\n<!-- takeover-ack engaged -->' "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}")"; then
-                  gh api "repos/${REPO}/issues/${PR}/comments" --paginate > "${WORKDIR}/ic.json" \
-                    || echo "::warning::ic re-fetch after engage ack failed for #${PR}"
-                else
-                  echo "::warning::first-pickup engage ack failed for #${PR}; window anchors on a later scan"
-                fi
-              else
-                echo "::warning::engage ack skipped: PAT authenticates as '${SCAN_BOT_ACTOR}'"
-              fi
-            fi
             if [[ -z "${BRANCH}" ]]; then
               # Metadata fetch failed (transient API error / rate limit). Skip rather
               # than fall through with an empty branch, which would make the address
@@ -1611,6 +1591,59 @@ jobs:
             CREATED_WM="$(jq -r '.createdAt // ""' <<< "${PR_META}")"
 
             gh api "repos/${REPO}/issues/${PR}/comments" --paginate > "${WORKDIR}/ic.json"
+            # First-pickup engage ack: fork label events carry no secrets and
+            # manual labels may race the ack job, so a takeover PR with NO
+            # engage ack yet gets one here (identity-verified) — it is also
+            # the round-window anchor. ic.json is re-fetched so THIS scan
+            # already counts under the fresh key. ORDERING IS LOAD-BEARING:
+            # ic.json for THIS candidate is fetched just above — reading a
+            # previous candidate's file would mis-dedup (spurious re-ack →
+            # window reset every scan), and a missing file would kill the
+            # whole scan step under -eo pipefail. Dedup is author-filtered
+            # (a forged human marker must not suppress the real ack), and a
+            # label application NEWER than the latest bot ack means a fresh
+            # engagement — post a fresh ack so the round window and cap
+            # reset as documented (re-arm), which no ack job can do for
+            # forks.
+            NEED_ENGAGE_ACK='false'
+            if [[ "${HAS_TAKEOVER}" == "true" ]]; then
+              LAST_ENGAGE_ACK_TS="$(jq -rs --arg ab "${AUTOFIX_BOT}" '
+                add | [.[] | select((.user.login // "") == $ab)
+                     | select(.body // "" | contains("<!-- takeover-ack engaged -->"))
+                     | .created_at] | sort | last // ""' "${WORKDIR}/ic.json")"
+              if [[ -z "${LAST_ENGAGE_ACK_TS}" ]]; then
+                NEED_ENGAGE_ACK='true'
+              else
+                gh api "repos/${REPO}/issues/${PR}/events" --paginate > "${WORKDIR}/pr-events.json" 2> /dev/null \
+                  || echo '[]' > "${WORKDIR}/pr-events.json"
+                LAST_LABELED_TS="$(jq -rs --arg lb "${TAKEOVER_LABEL}" '
+                  add | [.[] | select(.event == "labeled")
+                       | select((.label.name // "") == $lb)
+                       | .created_at] | sort | last // ""' "${WORKDIR}/pr-events.json")"
+                if [[ -n "${LAST_LABELED_TS}" && "${LAST_LABELED_TS}" > "${LAST_ENGAGE_ACK_TS}" ]]; then
+                  NEED_ENGAGE_ACK='true'
+                fi
+              fi
+            fi
+            if [[ "${NEED_ENGAGE_ACK}" == "true" && "${DRY_RUN}" == "true" ]]; then
+              echo "🧪 DRY-RUN: would post engage ack on #${PR} (window key untouched)"
+              NEED_ENGAGE_ACK='false'
+            fi
+            if [[ "${NEED_ENGAGE_ACK}" == "true" ]]; then
+              if [[ -z "${SCAN_BOT_ACTOR:-}" ]]; then
+                SCAN_BOT_ACTOR="$(gh api user --jq '.login' 2> /dev/null || echo 'unknown')"
+              fi
+              if [[ "${SCAN_BOT_ACTOR}" == "${AUTOFIX_BOT}" ]]; then
+                if gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🤝 Takeover engaged: the autofix loop now manages this PR — it will address new review feedback and resolve base conflicts until the label is removed or the round cap is reached. Remove the `%s` label (or comment `%s stop`) to release.\n\n<details>\n<summary>中文说明</summary>\n\n🤝 已接管：autofix 循环现在管理此 PR —— 将持续处理新的评审反馈与 base 冲突，直到移除标签或达到轮次上限。移除 `%s` 标签（或评论 `%s stop`）即可释放。\n\n</details>\n\n<!-- takeover-ack engaged -->' "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}")"; then
+                  gh api "repos/${REPO}/issues/${PR}/comments" --paginate > "${WORKDIR}/ic.json" \
+                    || echo "::warning::ic re-fetch after engage ack failed for #${PR}"
+                else
+                  echo "::warning::first-pickup engage ack failed for #${PR}; window anchors on a later scan"
+                fi
+              else
+                echo "::warning::engage ack skipped: PAT authenticates as '${SCAN_BOT_ACTOR}'"
+              fi
+            fi
             # Eval markers the bot left after a previous evaluation carry the
             # newest feedback timestamp it already considered, plus the round.
             # Only our own comments are trusted, so a spoofed marker is ignored.
@@ -2016,8 +2049,22 @@ jobs:
           if [[ "${HEAD_REPO:-${REPO}}" != "${REPO}" ]]; then
             # Maintainer-fork target: the branch does not exist on origin —
             # fetch it (data only; hooks are severed) from the fork.
-            git fetch "https://github.com/${HEAD_REPO}.git" "${BRANCH}"
+            git fetch "https://github.com/${HEAD_REPO}.git" "refs/heads/${BRANCH}"
             git checkout -B "${BRANCH}" FETCH_HEAD
+            # Allow-edits pushes ride the classic-PAT grant — GITHUB_TOKEN
+            # and fine-grained PATs are documented as NOT receiving it.
+            # Prove push access NOW, before an agent round is spent, instead
+            # of 403ing at the report step after the work is done.
+            if ! git push --no-verify --dry-run "https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}" > /dev/null 2>&1; then
+              echo "🫥 fork push preflight failed for ${HEAD_REPO} (allow-edits grant or PAT type) — discarding without action or marker"
+              {
+                echo "stale=true"
+                echo "conflict=false"
+                echo "newest=${WATERMARK}"
+                echo "effective_round=${ROUND}"
+              } >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
           else
             git checkout -B "${BRANCH}" "origin/${BRANCH}"
           fi

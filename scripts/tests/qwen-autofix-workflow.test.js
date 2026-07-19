@@ -902,7 +902,7 @@ describe('qwen-autofix workflow', () => {
     const ackBodies = workflow.match(
       /printf '[^']*takeover-(?:ack|cap)[^']*'/g,
     );
-    expect(ackBodies).toHaveLength(10);
+    expect(ackBodies).toHaveLength(11);
     for (const body of ackBodies) {
       expect(body).toContain('<summary>中文说明</summary>');
     }
@@ -1069,13 +1069,20 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain("HEAD_REPO: '${{ matrix.target.head_repo }}'");
     expect(reviewScanJob).toContain('head_repo: $hr');
     expect(workflow).toContain(
-      'git fetch "https://github.com/${HEAD_REPO}.git" "${BRANCH}"',
+      'git fetch "https://github.com/${HEAD_REPO}.git" "refs/heads/${BRANCH}"',
     );
     expect(workflow).toContain(
       'git push --no-verify "https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}"',
     );
+    // The allow-edits grant rides the classic-PAT path only — prepare must
+    // prove push access BEFORE an agent round is spent, discarding
+    // gracefully instead of 403ing at the report step.
+    expect(workflow).toContain(
+      'git push --no-verify --dry-run "https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}"',
+    );
+    expect(workflow).toContain('fork push preflight failed');
     // First-pickup engage ack anchors the window when the label path could
-    // not (fork events carry no secrets), deduped on any existing ack,
+    // not (fork events carry no secrets), author-filtered-deduped,
     // identity-verified, with ic.json re-fetched so the same scan counts
     // under the fresh key.
     expect(reviewScanJob).toContain('takeover-ack engaged');
@@ -1085,78 +1092,100 @@ describe('qwen-autofix workflow', () => {
     // the latest bot ack posts a fresh ack, resetting the round window.
     const ackTsProgram = reviewScanJob
       .match(
-        /LAST_ENGAGE_ACK_TS="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" '([\s\S]*?)' "\$\{WORKDIR\}\/ic\.json"\)"/,
+        /LAST_ENGAGE_ACK_TS="\$\(jq -rs --arg ab "\$\{AUTOFIX_BOT\}" '([\s\S]*?)' "\$\{WORKDIR\}\/ic\.json"\)"/,
       )?.[1]
       ?.replace(/\n {16}/g, '\n');
     expect(ackTsProgram).toBeTruthy();
+    // Two concatenated page-documents, the true latest in page 2 — proves
+    // the slurp handles gh api --paginate output past 100 comments.
     const ackTs = execFileSync(
       'jq',
-      ['-r', '--arg', 'ab', 'bot', ackTsProgram],
+      ['-rs', '--arg', 'ab', 'bot', ackTsProgram],
       {
         encoding: 'utf8',
-        input: JSON.stringify([
-          {
-            user: { login: 'bot' },
-            body: 'x <!-- takeover-ack engaged -->',
-            created_at: '2026-07-01T00:00:00Z',
-          },
-          {
-            user: { login: 'mallory' },
-            body: 'fake <!-- takeover-ack engaged -->',
-            created_at: '2026-07-05T00:00:00Z',
-          },
-          {
-            user: { login: 'bot' },
-            body: 'y <!-- takeover-ack engaged -->',
-            created_at: '2026-07-03T00:00:00Z',
-          },
-          {
-            user: { login: 'bot' },
-            body: 'released <!-- takeover-ack released -->',
-            created_at: '2026-07-04T00:00:00Z',
-          },
-        ]),
+        input:
+          JSON.stringify([
+            {
+              user: { login: 'bot' },
+              body: 'x <!-- takeover-ack engaged -->',
+              created_at: '2026-07-01T00:00:00Z',
+            },
+            {
+              user: { login: 'mallory' },
+              body: 'fake <!-- takeover-ack engaged -->',
+              created_at: '2026-07-05T00:00:00Z',
+            },
+          ]) +
+          JSON.stringify([
+            {
+              user: { login: 'bot' },
+              body: 'y <!-- takeover-ack engaged -->',
+              created_at: '2026-07-03T00:00:00Z',
+            },
+            {
+              user: { login: 'bot' },
+              body: 'released <!-- takeover-ack released -->',
+              created_at: '2026-07-04T00:00:00Z',
+            },
+          ]),
       },
     ).trim();
     expect(ackTs).toBe('2026-07-03T00:00:00Z');
     const labeledTsProgram = reviewScanJob
       .match(
-        /LAST_LABELED_TS="\$\(jq -r --arg lb "\$\{TAKEOVER_LABEL\}" '([\s\S]*?)' "\$\{WORKDIR\}\/pr-events\.json"\)"/,
+        /LAST_LABELED_TS="\$\(jq -rs --arg lb "\$\{TAKEOVER_LABEL\}" '([\s\S]*?)' "\$\{WORKDIR\}\/pr-events\.json"\)"/,
       )?.[1]
       ?.replace(/\n {18}/g, '\n');
     expect(labeledTsProgram).toBeTruthy();
     const labeledTs = execFileSync(
       'jq',
-      ['-r', '--arg', 'lb', 'autofix/takeover', labeledTsProgram],
+      ['-rs', '--arg', 'lb', 'autofix/takeover', labeledTsProgram],
       {
         encoding: 'utf8',
-        input: JSON.stringify([
-          {
-            event: 'labeled',
-            label: { name: 'autofix/takeover' },
-            created_at: '2026-07-02T00:00:00Z',
-          },
-          {
-            event: 'labeled',
-            label: { name: 'other' },
-            created_at: '2026-07-09T00:00:00Z',
-          },
-          {
-            event: 'unlabeled',
-            label: { name: 'autofix/takeover' },
-            created_at: '2026-07-08T00:00:00Z',
-          },
-          {
-            event: 'labeled',
-            label: { name: 'autofix/takeover' },
-            created_at: '2026-07-06T00:00:00Z',
-          },
-        ]),
+        input:
+          JSON.stringify([
+            {
+              event: 'labeled',
+              label: { name: 'autofix/takeover' },
+              created_at: '2026-07-02T00:00:00Z',
+            },
+            {
+              event: 'labeled',
+              label: { name: 'other' },
+              created_at: '2026-07-09T00:00:00Z',
+            },
+          ]) +
+          JSON.stringify([
+            {
+              event: 'unlabeled',
+              label: { name: 'autofix/takeover' },
+              created_at: '2026-07-08T00:00:00Z',
+            },
+            {
+              event: 'labeled',
+              label: { name: 'autofix/takeover' },
+              created_at: '2026-07-06T00:00:00Z',
+            },
+          ]),
       },
     ).trim();
     expect(labeledTs).toBe('2026-07-06T00:00:00Z');
     expect(reviewScanJob).toContain(
       '"${LAST_LABELED_TS}" > "${LAST_ENGAGE_ACK_TS}"',
+    );
+    // The dedup must read the CURRENT candidate's comments: pin the per-PR
+    // ic.json fetch BEFORE the first ack-timestamp read (reading a previous
+    // candidate's file mis-dedups; a missing file kills the scan step under
+    // -eo pipefail). Same textual-order technique as the hooks-severed pins.
+    const icFetchAt = reviewScanJob.indexOf(
+      'gh api "repos/${REPO}/issues/${PR}/comments" --paginate > "${WORKDIR}/ic.json"',
+    );
+    const ackReadAt = reviewScanJob.indexOf('LAST_ENGAGE_ACK_TS=');
+    expect(icFetchAt).toBeGreaterThan(-1);
+    expect(ackReadAt).toBeGreaterThan(icFetchAt);
+    // A dry-run scan must neither comment nor advance the real window key.
+    expect(reviewScanJob).toContain(
+      'DRY-RUN: would post engage ack on #${PR} (window key untouched)',
     );
     // The producers must actually REQUEST labels — the jq consumers above
     // stay green on handcrafted fixtures even if a future edit drops the
@@ -1299,6 +1328,7 @@ describe('qwen-autofix workflow', () => {
       labels = [],
       fork = false,
       canModify = true,
+      authorPerm = 'write',
       state = 'OPEN',
       base = 'main',
     }) => {
@@ -1307,6 +1337,7 @@ describe('qwen-autofix workflow', () => {
         const prJson = JSON.stringify({
           isCrossRepository: fork,
           maintainerCanModify: canModify,
+          author: { login: 'fork-owner' },
           state,
           baseRefName: base,
           labels: labels.map((name) => ({ name })),
@@ -1315,7 +1346,8 @@ describe('qwen-autofix workflow', () => {
           join(dir, 'gh'),
           [
             '#!/bin/bash',
-            `if [[ "$1" == "pr" && "$2" == "view" ]]; then printf '%s' '${prJson}';`,
+            `if [[ "$1" == "api" && "$2" == */collaborators/*/permission ]]; then printf '%s' '${authorPerm}';`,
+            `elif [[ "$1" == "pr" && "$2" == "view" ]]; then printf '%s' '${prJson}';`,
             `elif [[ "$1" == "pr" && "$2" == "edit" ]]; then echo "EDIT $*" >> '${join(dir, 'writes.log')}';`,
             `elif [[ "$1" == "pr" && "$2" == "comment" ]]; then echo "COMMENT $4" >> '${join(dir, 'writes.log')}'; cat > /dev/null <<< "$6";`,
             'fi',
@@ -1382,6 +1414,21 @@ describe('qwen-autofix workflow', () => {
     const forkManaged = runToggle({ cmd: 'add', fork: true });
     expect(forkManaged.writes).toContain('--add-label');
     expect(forkManaged.writes).not.toContain('COMMENT');
+    // A below-write fork author would be a ghost engagement (label sticks,
+    // nothing ever manages it) — the command refuses with the adoption ask.
+    const forkGhost = runToggle({ cmd: 'add', fork: true, authorPerm: 'read' });
+    expect(forkGhost.writes).toContain('COMMENT');
+    expect(forkGhost.writes).not.toContain('EDIT');
+    expect(forkGhost.log).toContain('below write');
+    // Release is NEVER blocked by engage-side fork requirements: stop on an
+    // allow-edits-revoked fork still removes the label.
+    const forkStop = runToggle({
+      cmd: 'remove',
+      fork: true,
+      canModify: false,
+      labels: ['autofix/takeover'],
+    });
+    expect(forkStop.writes).toContain('--remove-label');
   });
 
   it('behaviorally resets round counting at the latest takeover engage ack', () => {
@@ -2458,12 +2505,15 @@ describe('qwen-autofix workflow', () => {
     // the PAT in env there); the agent step — no PAT, sandboxed tools —
     // re-points .husky itself so its commits still get checked.
     // Hooks are severed BEFORE either checkout form (origin branch or the
-    // fork-remote FETCH_HEAD path used by maintainer-fork takeover).
+    // fork-remote FETCH_HEAD path used by maintainer-fork takeover). The
+    // origin form sits in the else-branch AFTER the fork branch's push
+    // preflight, hence the wider window — the assertion is about order,
+    // and one hooksPath site genuinely covers both arms of the if.
     expect(workflow).toMatch(
       /git config core\.hooksPath \/dev\/null\n[\s\S]{0,400}git checkout -B "\$\{BRANCH\}" FETCH_HEAD/,
     );
     expect(workflow).toMatch(
-      /git config core\.hooksPath \/dev\/null\n[\s\S]{0,400}git checkout -B "\$\{BRANCH\}" "origin\/\$\{BRANCH\}"/,
+      /git config core\.hooksPath \/dev\/null\n[\s\S]{0,1500}git checkout -B "\$\{BRANCH\}" "origin\/\$\{BRANCH\}"/,
     );
     expect(workflow).toMatch(
       /git config core\.hooksPath \.husky\n[\s\S]{0,200}node "\$\{RUNNER_TEMP\}\/run-agent\.mjs"/,
