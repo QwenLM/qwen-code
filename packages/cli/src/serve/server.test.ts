@@ -257,6 +257,8 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_mcp',
   'workspace_skills',
   'workspace_providers',
+  'workspace_acp_preheat',
+  'workspace_acp_status',
   'auth_provider_install',
   'workspace_memory',
   'workspace_memory_remember',
@@ -3562,6 +3564,26 @@ describe('createServeApp', () => {
 
       const res = await request(app)
         .post('/workspace/acp/preheat?timeoutMs=60001')
+        .set('Host', `127.0.0.1:${opts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_timeout',
+        error: '`timeoutMs` must be a positive integer no greater than 60000',
+      });
+    });
+
+    it.each([
+      '/workspace/acp/preheat?timeoutMs=',
+      '/workspace/acp/preheat?timeoutMs=1&timeoutMs=2',
+    ])('rejects malformed workspace ACP preheat timeout %s', async (path) => {
+      const bridge = fakeBridge();
+      const opts = { ...baseOpts, workspace: WS_BOUND, token: 'secret' };
+      const app = createServeApp(opts, undefined, { bridge });
+
+      const res = await request(app)
+        .post(path)
         .set('Host', `127.0.0.1:${opts.port}`)
         .set('Authorization', 'Bearer secret');
 
