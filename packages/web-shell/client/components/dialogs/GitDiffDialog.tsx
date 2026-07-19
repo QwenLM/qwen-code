@@ -443,14 +443,22 @@ export function GitDiffDialog({
     >
       <div className={styles.content}>
         {onOpenLog && (
-          <div className={styles.tabBar}>
+          <div className={styles.tabBar} role="tablist">
             <button
               type="button"
+              role="tab"
+              aria-selected
               className={`${styles.tab} ${styles.tabActive}`}
             >
               {t('gitDiff.title')}
             </button>
-            <button type="button" className={styles.tab} onClick={onOpenLog}>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={false}
+              className={styles.tab}
+              onClick={onOpenLog}
+            >
               {t('gitLog.title')}
             </button>
           </div>

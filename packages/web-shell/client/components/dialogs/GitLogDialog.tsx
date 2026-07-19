@@ -38,7 +38,7 @@ function timeAgo(timestamp: number, now: number): string {
   if (weeks < 5) return `${weeks}w ago`;
   const months = Math.floor(days / 30);
   if (months < 12) return `${months}mo ago`;
-  return `${Math.floor(days / 365)}y ago`;
+  return `${Math.max(1, Math.floor(days / 365))}y ago`;
 }
 
 function parseRefs(refs: string): { label: string; isHead: boolean }[] {
@@ -75,10 +75,13 @@ function CommitRow({
 
   const copySha = (e: MouseEvent) => {
     e.stopPropagation();
-    void navigator.clipboard.writeText(entry.sha).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    });
+    void navigator.clipboard
+      .writeText(entry.sha)
+      .then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      })
+      .catch(() => {});
   };
 
   useEffect(() => {
@@ -240,6 +243,7 @@ export function GitLogDialog({
     let cancelled = false;
     setLoading(true);
     setError(false);
+    setLoadMoreError(false);
     client
       .workspaceByCwd(workspaceCwd)
       .workspaceGitLog(PAGE_SIZE, 0)
@@ -267,8 +271,9 @@ export function GitLogDialog({
         setLog((prev) =>
           prev
             ? {
-                ...result,
+                ...prev,
                 entries: [...prev.entries, ...result.entries],
+                hasMore: result.hasMore,
               }
             : result,
         );
@@ -337,12 +342,20 @@ export function GitLogDialog({
     >
       <div className={styles.content}>
         {onOpenDiff && (
-          <div className={styles.tabBar}>
-            <button type="button" className={styles.tab} onClick={onOpenDiff}>
+          <div className={styles.tabBar} role="tablist">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={false}
+              className={styles.tab}
+              onClick={onOpenDiff}
+            >
               {t('gitDiff.title')}
             </button>
             <button
               type="button"
+              role="tab"
+              aria-selected
               className={`${styles.tab} ${styles.tabActive}`}
             >
               {t('gitLog.title')}
