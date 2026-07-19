@@ -1028,7 +1028,7 @@ export default {
   // ============================================================================
   // Diàleg de gestió MCP
   // ============================================================================
-  'Manage MCP servers': 'Gestiona els servidors de MCP',
+  'Manage MCP servers': 'Gestiona els MCP servers',
   'Server Detail': 'Detalls del servidor',
   Tools: 'Eines',
   'Tool Detail': "Detalls de l'eina",
