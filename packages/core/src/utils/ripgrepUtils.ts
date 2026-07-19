@@ -195,6 +195,8 @@ export async function ensureRipgrepHealthy(
     return;
 
   let working = false;
+  let probeOutput = '';
+  let probeCode = -1;
   try {
     const { stdout, code } = await execCommand(
       selection.command,
@@ -203,6 +205,8 @@ export async function ensureRipgrepHealthy(
         timeout: RIPGREP_TEST_TIMEOUT_MS,
       },
     );
+    probeOutput = stdout;
+    probeCode = code;
     working = code === 0 && stdout.startsWith('ripgrep');
     cachedHealth = { working, lastTested: Date.now(), selection };
   } catch (error) {
@@ -212,8 +216,11 @@ export async function ensureRipgrepHealthy(
 
   // Callers only tell healthy from unhealthy by the throw, so a probe that
   // returns without identifying itself as ripgrep must not read as success.
+  // Carry what it printed, so a wrapper or wrong tool is identifiable.
   if (!working) {
-    throw new Error(`${selection.command} is not a working ripgrep binary.`);
+    throw new Error(
+      `${selection.command} is not a working ripgrep binary (exit ${probeCode}): ${probeOutput.trim() || '(no output)'}`,
+    );
   }
 }
 
@@ -278,8 +285,10 @@ async function resolveHealthyRipgrep(
       if (fallback) {
         await ensureRipgrepHealthy(fallback);
       }
-    } catch {
-      // System rg is unusable too; report the bundled failure as the root cause.
+    } catch (fallbackError) {
+      // System rg is unusable too. The bundled failure is the root cause, but
+      // keep the system reason visible or it is lost entirely.
+      debugLogger.warn(`System rg is unusable as well: ${fallbackError}`);
       throw error;
     }
     if (!fallback) {

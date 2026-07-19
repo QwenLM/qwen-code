@@ -267,6 +267,18 @@ describe('ripgrepUtils', () => {
       await expect(runRipgrep(['--version'])).resolves.toBeDefined();
     });
 
+    it('reports the bundled failure when no system rg is installed', async () => {
+      vi.mocked(fileExists).mockResolvedValue(true);
+      vi.mocked(isCommandAvailable).mockReturnValue({
+        available: false,
+        error: undefined,
+      });
+      vi.mocked(execCommand).mockRejectedValue(new Error('bundled rg broken'));
+
+      // Bundled binary fails and there is no system rg to fall back to.
+      await expect(canUseRipgrep(true)).rejects.toThrow('bundled rg broken');
+    });
+
     it('returns false when neither bundled nor system rg is available', async () => {
       vi.mocked(fileExists).mockResolvedValue(false);
       vi.mocked(isCommandAvailable).mockReturnValue({
