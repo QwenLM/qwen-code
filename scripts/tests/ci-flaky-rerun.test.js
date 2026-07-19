@@ -414,25 +414,79 @@ describe('ci flaky rerun patrol', () => {
     );
   });
 
-  it('rejects a malformed flakyTest so no bogus deflake issue is opened', async () => {
+  it('never lets a malformed flakyTest drop the valid rerun', async () => {
+    // The rerun is valid independently of flakyTest, so a malformed one only
+    // skips the deflake issue — it must NEVER gate the primary action.
     for (const bad of [
+      null,
       { file: '', name: 'x' },
-      { file: 'a.test.ts' },
+      { file: 'a.test.ts' }, // missing name
       { file: 'a.test.ts', name: 42 },
-      { file: 'a'.repeat(201), name: 'x' },
+      { file: 'a'.repeat(201), name: 'x' }, // over-length file
+      { file: 'a.test.ts', name: 'y'.repeat(201) }, // over-length name
     ]) {
       const c = client();
       await actOnDecision(c, target(), decision({ flakyTest: bad }));
-      expect(c.calls).toEqual([]); // invalid decision → no action at all
+      const kinds = c.calls.map((call) => call[0]);
+      expect(kinds).toContain('rerunFailedJobs');
+      expect(kinds).toContain('comment');
+      expect(kinds).not.toContain('createIssue');
     }
-    // flakyTest is only valid with action: rerun.
+  });
+
+  it('truncates a very long deflake title to GitHub-safe length', async () => {
     const c = client();
-    await actOnDecision(
-      c,
-      target(),
-      decision({ action: 'no_action', confidence: 'low', flakyTest: flaky() }),
+    const longFlaky = { file: 'x'.repeat(150), name: 'y'.repeat(150) };
+    await actOnDecision(c, target(), decision({ flakyTest: longFlaky }));
+    const created = c.calls.find((call) => call[0] === 'createIssue')?.[1];
+    expect(created).toBeTruthy();
+    expect(created.title.length).toBeLessThanOrEqual(240);
+  });
+
+  it('neutralizes backticks in the test path/name so the issue body cannot inject markup', async () => {
+    // A backtick in a file path (valid on Linux) or name would break out of
+    // the inline code span and turn `@user` into a live mention. The body must
+    // strip them so file/name stay inert.
+    const evil = { file: 'x`@ghost`y.test.ts', name: 'boom `@owner` case' };
+    const body = deflakeIssueBody(
+      evil,
+      { reason_en: 'x', reason_zh: 'x' },
+      {
+        prNumber: 1,
+        runId: 2,
+      },
     );
-    expect(c.calls).toEqual([]);
+    expect(body).not.toContain('`@ghost`');
+    expect(body).not.toContain('`@owner`');
+    // The whole marker + SKILL pointer survive intact.
+    expect(body).toContain(deflakeMarker(evil));
+    expect(body).toContain('.qwen/skills/deflake/SKILL.md');
+  });
+
+  it('points the run link at the patrol repo, not a hardcoded upstream', async () => {
+    const body = deflakeIssueBody(
+      flaky(),
+      { reason_en: 'x', reason_zh: 'x' },
+      { prNumber: 7, runId: 42 },
+      'my-fork/qwen-code',
+    );
+    expect(body).toContain(
+      'https://github.com/my-fork/qwen-code/actions/runs/42',
+    );
+    expect(body).not.toContain('QwenLM/qwen-code/actions/runs/42');
+  });
+
+  it('keeps the rerun when deflake issue creation fails (best-effort)', async () => {
+    const c = client({
+      async createIssue() {
+        throw new Error('502 from GitHub');
+      },
+    });
+    // Must not throw: the rerun + marker already succeeded.
+    await actOnDecision(c, target(), decision({ flakyTest: flaky() }));
+    const kinds = c.calls.map((call) => call[0]);
+    expect(kinds).toContain('rerunFailedJobs');
+    expect(kinds).toContain('comment');
   });
 
   it('reruns before recording the hidden action marker', async () => {
