@@ -5511,10 +5511,11 @@ describe('Server Config (config.ts)', () => {
       cwdSpy.mockRestore();
     });
 
-    it('relocateWorkingDirectory should fail closed when cwd rollback fails', async () => {
+    it('relocateWorkingDirectory should keep the recovered writer usable when cwd rollback fails', async () => {
       const config = new Config(baseParams);
       const lease = activateTestRecorder(config);
       const oldDir = config.getTargetDir();
+      const oldTranscriptPath = config.getTranscriptPath();
       const newDir = path.resolve('/path/to/other');
       const oldRuntimeStatusPath = new Storage(oldDir).getRuntimeStatusPath(
         config.getSessionId(),
@@ -5544,13 +5545,13 @@ describe('Server Config (config.ts)', () => {
         }
       });
 
-      await expect(
-        config.relocateWorkingDirectory(newDir),
-      ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
-      await expect(config.assertCanStartTurn()).rejects.toBeInstanceOf(
-        SessionWriterUnavailableError,
+      await expect(config.relocateWorkingDirectory(newDir)).rejects.toBe(
+        moveError,
       );
-      expect(lease.release).toHaveBeenCalledOnce();
+      await expect(config.assertCanStartTurn()).resolves.toBeUndefined();
+      expect(config.getTargetDir()).toBe(oldDir);
+      expect(config.getTranscriptPath()).toBe(oldTranscriptPath);
+      expect(lease.release).not.toHaveBeenCalled();
 
       chdirSpy.mockRestore();
       cwdSpy.mockRestore();

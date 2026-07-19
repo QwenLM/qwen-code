@@ -4522,10 +4522,6 @@ export class Config {
             'Failed to roll back working directory after session artifact migration failed',
             rollbackError,
           );
-          const failure = new SessionArtifactMigrationRollbackError();
-          this.sessionTransitionFailure = failure;
-          await recorder?.close().catch(() => {});
-          throw failure;
         }
       }
       if (rollbackFailure) throw rollbackFailure;
