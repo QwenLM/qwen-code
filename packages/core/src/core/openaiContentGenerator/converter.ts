@@ -22,6 +22,11 @@ import type OpenAI from 'openai';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { createOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
+import {
+  estimateTextTokens,
+  estimateTextTokenUnits,
+  TOKEN_ESTIMATE_UNITS_PER_TOKEN,
+} from '../../utils/request-tokenizer/textTokenizer.js';
 import type { RequestContext, StreamingTextDeltaState } from './types.js';
 import { parseTaggedThinkingText } from './taggedThinkingParser.js';
 import {
@@ -1172,16 +1177,6 @@ function throwProtocolTagLeak(requestContext: RequestContext): never {
 }
 
 /**
- * Estimate token count from text length when the provider does not return
- * reasoning_tokens in usage. Uses ~4 chars/token as a rough approximation
- * for English/mixed content.
- */
-function estimateTokensFromText(text: string | undefined | null): number {
-  if (!text) return 0;
-  return Math.ceil(text.length / 4);
-}
-
-/**
  * Convert OpenAI response to Gemini format.
  */
 export function convertOpenAIResponseToGemini(
@@ -1189,6 +1184,8 @@ export function convertOpenAIResponseToGemini(
   requestContext: RequestContext,
 ): GenerateContentResponse {
   const choice = openaiResponse.choices?.[0];
+  const message = choice?.message as ExtendedCompletionMessage | undefined;
+  const reasoningText = message?.reasoning_content ?? message?.reasoning;
   const response = new GenerateContentResponse();
 
   if (choice) {
@@ -1201,9 +1198,6 @@ export function convertOpenAIResponseToGemini(
     // Tagged thinking providers may put thoughts in content, while other
     // responses still use reasoning_content. Preserve the separate reasoning
     // channel unless content parsing already produced thought parts.
-    const reasoningText =
-      (choice.message as ExtendedCompletionMessage).reasoning_content ??
-      (choice.message as ExtendedCompletionMessage).reasoning;
     if (reasoningText && !hasThoughtPart(textParts)) {
       parts.push(createOpenAIReasoningThoughtPart(reasoningText));
     }
@@ -1270,15 +1264,9 @@ export function convertOpenAIResponseToGemini(
       usage.prompt_tokens_details?.cached_tokens ??
       extendedUsage.cached_tokens ??
       0;
-    // reasoningText is scoped inside if(choice), so extract it here for the fallback
-    const reasoningTextForUsage =
-      (openaiResponse.choices?.[0]?.message as ExtendedCompletionMessage | undefined)
-        ?.reasoning_content ??
-      (openaiResponse.choices?.[0]?.message as ExtendedCompletionMessage | undefined)
-        ?.reasoning;
     const thinkingTokens =
       usage.completion_tokens_details?.reasoning_tokens ||
-      estimateTokensFromText(reasoningTextForUsage);
+      estimateTextTokens(reasoningText ?? '');
 
     // If we only have total tokens but no breakdown, estimate the split
     // Typically input is ~70% and output is ~30% for most conversations
@@ -1380,15 +1368,19 @@ export function convertOpenAIChunkToGemini(
       (!requestContext.responseParsingOptions?.taggedThinkingTags ||
         !requestContext.hasTaggedThinkingThought)
     ) {
+      const reasoningDeltaState = (requestContext.reasoningDeltaState ??= {
+        emittedText: '',
+        emittedLength: 0,
+        cumulativeMode: false,
+      });
       const normalizedReasoningText = normalizeStreamingTextDelta(
         reasoningText,
-        (requestContext.reasoningDeltaState ??= {
-          emittedText: '',
-          emittedLength: 0,
-          cumulativeMode: false,
-        }),
+        reasoningDeltaState,
       );
       if (normalizedReasoningText) {
+        reasoningDeltaState.emittedTokenUnits =
+          (reasoningDeltaState.emittedTokenUnits ?? 0) +
+          estimateTextTokenUnits(normalizedReasoningText);
         requestContext.hasStructuredReasoningContent = true;
         if (THINKING_TAG_PATTERN.test(normalizedReasoningText)) {
           requestContext.hasThinkingTagInReasoning = true;
@@ -1737,7 +1729,10 @@ export function convertOpenAIChunkToGemini(
     const totalTokens = usage.total_tokens || 0;
     const thinkingTokens =
       usage.completion_tokens_details?.reasoning_tokens ||
-      Math.ceil((requestContext.reasoningDeltaState?.emittedLength ?? 0) / 4);
+      Math.ceil(
+        (requestContext.reasoningDeltaState?.emittedTokenUnits ?? 0) /
+          TOKEN_ESTIMATE_UNITS_PER_TOKEN,
+      );
     // Support both formats: prompt_tokens_details.cached_tokens (OpenAI standard)
     // and cached_tokens (some models return it at top level)
     const extendedUsage = usage as ExtendedCompletionUsage;
