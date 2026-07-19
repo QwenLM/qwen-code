@@ -407,10 +407,14 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
         // The machine's own two subjects ('verification', 'reverse audit'),
         // dash-free by construction — the first separator is the boundary.
         const cut = gap.indexOf(' — ');
-        coverageEntries.push({
-          subject: gap.slice(0, cut),
-          reason: gap.slice(cut + ' — '.length),
-        });
+        coverageEntries.push(
+          cut === -1
+            ? { subject: gap, reason: '' }
+            : {
+                subject: gap.slice(0, cut),
+                reason: gap.slice(cut + ' — '.length),
+              },
+        );
       }
       remediation.push(...verification.remediation);
     } catch (err) {
@@ -538,9 +542,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // posted every disclosure twice — 22 clauses for 11 roles on a public PR
   // (#7188) — and the coverage-derived text wins the collision: it is the
   // evidence-bounded register this body is written in.
-  const covEntries: Array<{ subject: string; reason: string }> = [
-    ...coverageEntries,
-  ];
+  const covEntries = coverageEntries;
   const callerLeft: string[] = [];
   const seenCaller = new Set<string>();
   for (const d of unreviewed) {
@@ -585,7 +587,11 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     byReason.set(reason, subjects);
   }
   for (const [reason, subjects] of byReason) {
-    notReviewedParts.push(`Not reviewed: ${subjects.join(', ')} — ${reason}.`);
+    notReviewedParts.push(
+      reason
+        ? `Not reviewed: ${subjects.join(', ')} — ${reason}.`
+        : `Not reviewed: ${subjects.join(', ')}.`,
+    );
   }
 
   // Clause 5 — blockers the review could neither confirm nor clear. They
