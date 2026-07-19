@@ -759,7 +759,7 @@ jobs:
             # GNU timeout may report 137 if --kill-after escalates to SIGKILL.
             if [ "$qwen_status" -eq 124 ] || [ "$qwen_status" -eq 137 ]; then
               OUTCOME='timeout'
-              REASON="Qwen review timed out after ${QWEN_TIMEOUT} minutes."
+              REASON="Qwen review timed out after ${attempt_timeout} seconds (of the ${QWEN_TIMEOUT}-minute budget)."
               KIND='timeout'
               return
             fi
@@ -796,11 +796,11 @@ jobs:
             fi
             case "$RESULT_TEXT" in
               *"[API Error"*)
-                if printf '%s' "$RESULT_TEXT" | grep -qiE 'quota'; then
+                if printf '%s' "$RESULT_TEXT" | grep -qiE 'quota.*(exhaust|exceed|limit|reset)'; then
                   OUTCOME='quota'
                   KIND='quota'
                   local detail
-                  detail="$(printf '%s' "$RESULT_TEXT" | grep -oiE 'reset at [^]]*' | head -n1)"
+                  detail="$(printf '%s' "$RESULT_TEXT" | grep -oiE 'reset at [^]]*' | head -n1 || true)"
                   REASON="Qwen review stopped: the model API quota is exhausted${detail:+ (${detail})}."
                 else
                   OUTCOME='retryable'
