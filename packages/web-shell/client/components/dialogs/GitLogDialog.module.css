@@ -24,13 +24,13 @@
 }
 
 .tab:hover {
-  background: var(--subtle-bg);
+  background: var(--subtle-bg, rgba(128, 128, 128, 0.06));
 }
 
 .tabActive {
   color: inherit;
   font-weight: 500;
-  background: var(--subtle-bg);
+  background: var(--subtle-bg, rgba(128, 128, 128, 0.06));
 }
 
 .placeholder {
@@ -63,7 +63,7 @@
 }
 
 .commitHeader:hover {
-  background: var(--subtle-bg);
+  background: var(--subtle-bg, rgba(128, 128, 128, 0.06));
 }
 
 .commitSha {
@@ -127,7 +127,7 @@
 }
 
 .refHead {
-  background: var(--success-bg);
+  background: var(--success-bg, rgba(76, 175, 80, 0.12));
   color: var(--success-color);
 }
 
@@ -140,7 +140,7 @@
 .commitDetail {
   padding: 8px 10px 12px;
   border-top: 1px solid var(--border);
-  background: var(--subtle-bg);
+  background: var(--subtle-bg, rgba(128, 128, 128, 0.06));
 }
 
 .commitBody {
@@ -227,5 +227,5 @@
 }
 
 .loadMore:hover {
-  background: var(--subtle-bg);
+  background: var(--subtle-bg, rgba(128, 128, 128, 0.06));
 }

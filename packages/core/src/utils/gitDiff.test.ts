@@ -1995,14 +1995,20 @@ describe('fetchGitLog', () => {
     expect(page2!.entries[0].subject).toBe('commit 1');
   }, 15_000);
 
-  it('clamps limit to MAX_LOG_LIMIT', async () => {
-    await fs.writeFile(path.join(repo, 'a.txt'), 'x\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'c1');
+  it('respects limit and clamps edge values', async () => {
+    for (let i = 0; i < 3; i++) {
+      await fs.writeFile(path.join(repo, `f${i}.txt`), `${i}\n`);
+      await git(repo, 'add', '.');
+      await git(repo, 'commit', '-q', '-m', `c${i}`);
+    }
 
-    const result = await fetchGitLog(repo, { limit: 9999 });
-    expect(result!.entries).toHaveLength(1);
-  });
+    const limited = await fetchGitLog(repo, { limit: 2 });
+    expect(limited!.entries).toHaveLength(2);
+    expect(limited!.hasMore).toBe(true);
+
+    const clamped = await fetchGitLog(repo, { limit: 0 });
+    expect(clamped!.entries).toHaveLength(1);
+  }, 15_000);
 
   it('includes refs for HEAD', async () => {
     await fs.writeFile(path.join(repo, 'a.txt'), 'x\n');

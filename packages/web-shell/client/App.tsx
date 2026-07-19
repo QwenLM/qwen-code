@@ -991,6 +991,9 @@ function readScopedModelSetting(
   return scope === 'user' ? setting.values.user : setting.values.workspace;
 }
 
+/** Delay between closing one git dialog and opening the other (Radix portal cleanup). */
+const GIT_DIALOG_SWITCH_DELAY_MS = 300;
+
 export function App({
   onSessionIdChange,
   onSessionCreated,
@@ -6216,7 +6219,10 @@ export function App({
               onOpenLog={() => {
                 const cwd = diffWorkspaceCwd;
                 setDiffWorkspaceCwd(undefined);
-                window.setTimeout(() => setLogWorkspaceCwd(cwd), 300);
+                window.setTimeout(
+                  () => setLogWorkspaceCwd(cwd),
+                  GIT_DIALOG_SWITCH_DELAY_MS,
+                );
               }}
             />
           )}
@@ -6227,7 +6233,10 @@ export function App({
               onOpenDiff={() => {
                 const cwd = logWorkspaceCwd;
                 setLogWorkspaceCwd(undefined);
-                window.setTimeout(() => setDiffWorkspaceCwd(cwd), 300);
+                window.setTimeout(
+                  () => setDiffWorkspaceCwd(cwd),
+                  GIT_DIALOG_SWITCH_DELAY_MS,
+                );
               }}
             />
           )}

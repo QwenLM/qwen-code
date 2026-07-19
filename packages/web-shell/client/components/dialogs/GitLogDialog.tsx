@@ -191,7 +191,19 @@ function CommitRow({
         <span className={styles.commitSha} title={entry.sha}>
           {entry.shortSha}
         </span>
-        <span className={styles.copyBtn} onClick={copySha} aria-hidden="true">
+        <span
+          className={styles.copyBtn}
+          tabIndex={0}
+          onClick={copySha}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              e.stopPropagation();
+              copySha(e as unknown as MouseEvent);
+            }
+          }}
+          aria-label={`Copy ${entry.shortSha}`}
+        >
           {copied ? <CheckIcon size={12} /> : <CopyIcon size={12} />}
         </span>
         <span className={styles.commitSubject}>{entry.subject}</span>
