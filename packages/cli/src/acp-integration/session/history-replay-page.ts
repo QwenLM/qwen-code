@@ -12,6 +12,7 @@ import type {
   SessionTranscriptRecordPage,
 } from '@qwen-code/qwen-code-core';
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
+import type { TranscriptReplayStateV1 } from '@qwen-code/acp-bridge/transcriptReplay';
 import { HistoryReplayer } from './history-replayer.js';
 import type { PendingReplayToolCall } from './history-replayer.js';
 import type { CumulativeUsage, SessionEmitterContext } from './types.js';
@@ -70,6 +71,19 @@ function isPendingReplayToolCall(
   );
 }
 
+function isCurrentPendingReplayToolCall(
+  value: unknown,
+): value is TranscriptReplayStateV1['pendingToolCalls'][number] {
+  if (!isObjectRecord(value)) return false;
+  return (
+    typeof value['callId'] === 'string' &&
+    typeof value['toolName'] === 'string' &&
+    typeof value['sourceRecordId'] === 'string' &&
+    (value['sourceTimestamp'] === undefined ||
+      typeof value['sourceTimestamp'] === 'string')
+  );
+}
+
 function parseTranscriptReplayState(
   replay: unknown,
   logger?: ReplayLogger,
@@ -83,9 +97,27 @@ function parseTranscriptReplayState(
       cumulativeUsage: createReplayCumulativeUsage(),
     };
   }
+  if ('v' in replay && replay['v'] !== 1) {
+    throw new TypeError('Unsupported transcript replay state version.');
+  }
   const rawPending = replay['pendingToolCalls'];
   const pendingToolCalls = Array.isArray(rawPending)
-    ? rawPending.filter(isPendingReplayToolCall)
+    ? rawPending.flatMap((pending): PendingReplayToolCall[] => {
+        if (isPendingReplayToolCall(pending)) return [pending];
+        if (isCurrentPendingReplayToolCall(pending)) {
+          return [
+            {
+              callId: pending.callId,
+              toolName: pending.toolName,
+              recordId: pending.sourceRecordId,
+              ...(pending.sourceTimestamp
+                ? { timestamp: pending.sourceTimestamp }
+                : {}),
+            },
+          ];
+        }
+        return [];
+      })
     : [];
   if (
     logger &&
@@ -214,16 +246,16 @@ export async function replayTranscriptRecordPage({
   const replayer = new HistoryReplayer(
     replayContext(sessionId, updates, state.cumulativeUsage, config),
   );
-  let pendingToolCalls: PendingReplayToolCall[];
+  let replayState: TranscriptReplayStateV1;
   let replayError: string | undefined;
   try {
-    const replayState = await replayer.replayPage(page.records, {
+    const replayPageState = await replayer.replayPage(page.records, {
       pendingToolCalls:
         page.direction === 'backward' ? [] : state.pendingToolCalls,
       finalizeDangling: page.direction === 'backward' || !page.hasMore,
       gaps: page.gaps,
     });
-    pendingToolCalls = replayState.pendingToolCalls;
+    replayState = replayPageState.replay;
   } catch (error) {
     logger?.warn(
       '[historyReplay] Paged history replay failed for session %s (partial updates: %d):',
@@ -231,7 +263,7 @@ export async function replayTranscriptRecordPage({
       updates.length,
       error,
     );
-    pendingToolCalls = replayer.getPendingToolCalls();
+    replayState = replayer.getReplayState();
     replayError = 'Replay conversion failed for this page';
   }
 
@@ -239,14 +271,7 @@ export async function replayTranscriptRecordPage({
     page.nextCursorState && replayError === undefined
       ? encodeCursor({
           ...page.nextCursorState,
-          ...(page.direction === 'backward'
-            ? {}
-            : {
-                replay: {
-                  pendingToolCalls,
-                  cumulativeUsage: state.cumulativeUsage,
-                },
-              }),
+          ...(page.direction === 'backward' ? {} : { replay: replayState }),
         })
       : undefined;
 

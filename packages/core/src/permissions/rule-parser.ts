@@ -10,6 +10,10 @@ import os from 'node:os';
 import picomatch from 'picomatch';
 import { parse } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  normalizeMcpToolName,
+  sanitizeToolNameForProvider,
+} from '../utils/tool-name-utils.js';
 import { isNodeError } from '../utils/errors.js';
 
 const debugLogger = createDebugLogger('PERMISSIONS');
@@ -1190,12 +1194,22 @@ export function matchesMcpPattern(pattern: string, toolName: string): boolean {
     return true;
   }
 
+  // Exact rules persisted before provider-safe MCP names were introduced
+  // should continue matching their deterministic normalized registration.
+  if (
+    !pattern.endsWith('*') &&
+    pattern.split('__').length >= 3 &&
+    normalizeMcpToolName(pattern) === normalizeMcpToolName(toolName)
+  ) {
+    return true;
+  }
+
   // Wildcard: patterns ending with "*" match by prefix.
   // e.g. "mcp__server__*" matches all tools from that server,
   //      "mcp__chrome__use_*" matches all "use_*" tools from chrome.
   if (pattern.endsWith('*')) {
-    const prefix = pattern.slice(0, -1); // strip trailing "*"
-    return toolName.startsWith(prefix);
+    const prefix = sanitizeToolNameForProvider(pattern.slice(0, -1));
+    return sanitizeToolNameForProvider(toolName).startsWith(prefix);
   }
 
   // Server-level match: "mcp__puppeteer" matches "mcp__puppeteer__anything"
@@ -1206,7 +1220,8 @@ export function matchesMcpPattern(pattern: string, toolName: string): boolean {
     patternParts.length === 2 &&
     toolParts.length >= 3 &&
     patternParts[0] === toolParts[0] &&
-    patternParts[1] === toolParts[1]
+    sanitizeToolNameForProvider(patternParts[1]) ===
+      sanitizeToolNameForProvider(toolParts[1])
   ) {
     return true;
   }
@@ -1264,6 +1279,7 @@ export function matchesRule(
   pathContext?: PathMatchContext,
   specifier?: string,
   toolParams?: Record<string, unknown>,
+  toolAliases?: readonly string[],
   pathMatchMode: 'lexical' | 'canonical' = 'lexical',
 ): boolean {
   const canonicalCtxToolName = resolveToolName(toolName);
@@ -1278,7 +1294,16 @@ export function matchesRule(
     rule.toolName.startsWith('mcp__') ||
     canonicalCtxToolName.startsWith('mcp__')
   ) {
-    if (!matchesMcpPattern(rule.toolName, canonicalCtxToolName)) {
+    const matchesLegacyExactName =
+      !rule.toolName.endsWith('*') &&
+      rule.toolName.split('__').length >= 3 &&
+      (toolAliases ?? []).some(
+        (alias) => rule.toolName === resolveToolName(alias),
+      );
+    const matchesMcpName =
+      matchesMcpPattern(rule.toolName, canonicalCtxToolName) ||
+      matchesLegacyExactName;
+    if (!matchesMcpName) {
       return false;
     }
 

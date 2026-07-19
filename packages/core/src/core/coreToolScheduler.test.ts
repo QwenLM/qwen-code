@@ -70,6 +70,7 @@ import {
   type RuntimeContentGeneratorView,
 } from '../agents/runtime/agent-context.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
+import { normalizeToolNameForProvider } from '../utils/tool-name-utils.js';
 
 type ToolSpanRecord = {
   name: string;
@@ -3799,6 +3800,21 @@ describe('CoreToolScheduler', () => {
         'mcp__pangu-server__pangu_search',
       );
       expect(msg).toContain('"pangu-server"');
+      expect(msg).toContain('removed during this session');
+    });
+
+    it('identifies a removed server whose name required normalization', () => {
+      const scheduler = makeScheduler({
+        mcpServers: {},
+        removed: ['zybio.db'],
+      });
+      const registeredName = normalizeToolNameForProvider(
+        'mcp__zybio.db__literature.search_pubmed',
+      );
+
+      // @ts-expect-error accessing private method
+      const msg = scheduler.getMcpToolUnavailableMessage(registeredName);
+      expect(msg).toContain('"zybio.db"');
       expect(msg).toContain('removed during this session');
     });
 

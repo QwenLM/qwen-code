@@ -6,6 +6,17 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { EOL } from 'node:os';
+import { promises as fsp } from 'node:fs';
+
+// Capture launches of the external editor so the full-plan viewer (#7001)
+// can be asserted without spawning a real editor process.
+const { launchEditorMock } = vi.hoisted(() => ({
+  launchEditorMock: vi.fn((_filePath: string) => Promise.resolve()),
+}));
+vi.mock('../../hooks/useLaunchEditor.js', () => ({
+  useLaunchEditor: () => launchEditorMock,
+}));
+
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import type {
   ToolCallConfirmationDetails,
@@ -200,6 +211,93 @@ describe('ToolConfirmationMessage', () => {
     expect(lastFrame()).toContain('No, keep planning');
     expect(lastFrame()).toContain('Implementation Plan');
     expect(lastFrame()).toContain('Step one');
+  });
+
+  describe('full-plan viewer (#7001)', () => {
+    const plan = [
+      '# Big Plan',
+      ...Array.from({ length: 60 }, (_, i) => `- Step ${i + 1}`),
+    ].join('\n');
+
+    const planDetails = (onConfirm = vi.fn()): ToolCallConfirmationDetails => ({
+      type: 'plan',
+      title: 'Would you like to proceed?',
+      plan,
+      onConfirm,
+    });
+
+    it('shows the open-in-editor hint on plan confirmations', () => {
+      launchEditorMock.mockClear();
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={planDetails()}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+      );
+      expect(lastFrame()).toContain('o open full plan in editor');
+    });
+
+    it('`o` writes the FULL plan to a temp file and opens the editor without confirming', async () => {
+      launchEditorMock.mockClear();
+      const onConfirm = vi.fn();
+      const { stdin } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={planDetails(onConfirm)}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+      );
+
+      stdin.write('o');
+      await vi.waitFor(() => expect(launchEditorMock).toHaveBeenCalledTimes(1));
+
+      const openedPath = launchEditorMock.mock.calls[0]![0];
+      // The staged file must contain the COMPLETE plan, not the truncated view.
+      expect(await fsp.readFile(openedPath, 'utf-8')).toBe(plan);
+      // Viewing the plan must not resolve the confirmation either way.
+      expect(onConfirm).not.toHaveBeenCalled();
+    });
+
+    it('Ctrl+O does not open the editor', async () => {
+      launchEditorMock.mockClear();
+      const { stdin } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={planDetails()}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+      );
+      stdin.write('\x0f'); // Ctrl+O
+      await new Promise((r) => setTimeout(r, 50));
+      expect(launchEditorMock).not.toHaveBeenCalled();
+    });
+
+    it('`o` is inert for non-plan confirmations', async () => {
+      launchEditorMock.mockClear();
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'info',
+        title: 'Confirm Web Fetch',
+        prompt: 'https://example.com',
+        urls: ['https://example.com'],
+        onConfirm: vi.fn(),
+      };
+      const { stdin, lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+      );
+      expect(lastFrame()).not.toContain('o open full plan in editor');
+      stdin.write('o');
+      await new Promise((r) => setTimeout(r, 50));
+      expect(launchEditorMock).not.toHaveBeenCalled();
+    });
   });
 
   describe('with folder trust', () => {

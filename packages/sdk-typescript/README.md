@@ -173,6 +173,29 @@ for await (const event of session.events()) {
 }
 ```
 
+### Offline daemon transcript projection
+
+The opt-in browser-safe transcript entry converts already-parsed append-only
+ChatRecord values into the same block model used by daemon clients. It does not
+read files, parse JSONL text, start a daemon, or access network or browser
+storage.
+
+```typescript
+import { projectChatRecordsToDaemonTranscript } from '@qwen-code/sdk/daemon/transcript';
+
+const projection = projectChatRecordsToDaemonTranscript(records);
+if (!projection.complete) {
+  console.warn(projection.diagnostics);
+}
+renderTranscript(projection.blocks);
+```
+
+Projection is synchronous and scans all records and message parts. `maxBlocks`
+limits retained output blocks, not computation. As a conservative browser
+guideline, project up to roughly 1,000 ordinary records on the main thread;
+move larger or unusually text-heavy inputs to a Web Worker and call the same
+entry there.
+
 ### Message Types
 
 The SDK provides type guards to identify different message types:

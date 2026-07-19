@@ -7,7 +7,12 @@
 import type { ServeProtocolVersions } from './capabilities.js';
 import type { AcpHttpHandle, AcpHttpSnapshot } from './acp-http/index.js';
 import type { DeviceFlowRegistry } from './auth/device-flow.js';
-import type { DaemonLogger } from './daemon-logger.js';
+import type {
+  DaemonLogger,
+  DaemonLogHealth,
+  DaemonLogIssue,
+  DaemonLogMode,
+} from './daemon-logger.js';
 import type {
   AcpSessionBridge,
   BridgeDaemonStatusSnapshot,
@@ -76,7 +81,8 @@ export interface DaemonStatusIssue {
     | 'channel_worker_exited'
     | 'channel_worker_partial_connect'
     | 'daemon_runtime_starting'
-    | 'daemon_runtime_failed';
+    | 'daemon_runtime_failed'
+    | 'daemon_log_degraded';
   severity: IssueSeverity;
   message: string;
   section?: string;
@@ -249,6 +255,12 @@ export interface DaemonStatusResponse {
     uptimeMs: number;
     mode: ServeOptions['mode'];
     workspaceCwd: string;
+    runId?: string;
+    logMode?: DaemonLogMode;
+    logHealth?: DaemonLogHealth;
+    logIssues?: readonly DaemonLogIssue[];
+    logDroppedRecords?: number;
+    logDroppedBytes?: number;
   };
   security: DaemonStatusSecurity;
   limits: DaemonStatusLimits;
@@ -290,6 +302,7 @@ export async function buildDaemonStatusResponse(
   detail: DaemonStatusDetail,
   input: BuildDaemonStatusOptions,
 ): Promise<DaemonStatusResponse> {
+  const daemonLogStatus = input.daemonLog?.getStatus();
   const bridgeSnapshot = input.bridge.getDaemonStatusSnapshot();
   const lastActivity = input.bridge.lastActivityAt ?? null;
   const workspaceRuntimes = input.workspaceRegistry?.list();
@@ -389,6 +402,14 @@ export async function buildDaemonStatusResponse(
     totalAdmissionSnapshot,
     workspaceSnapshots,
   );
+  if (daemonLogStatus?.health === 'degraded') {
+    issues.push({
+      code: 'daemon_log_degraded',
+      severity: 'warning',
+      message:
+        'Daemon file logging is degraded; inspect full status for details.',
+    });
+  }
 
   if (detail === 'full') {
     full = await buildFullStatus(
@@ -417,8 +438,22 @@ export async function buildDaemonStatusResponse(
       ...(input.daemonLog?.getDaemonId()
         ? { daemonId: input.daemonLog.getDaemonId() }
         : {}),
+      ...(daemonLogStatus
+        ? {
+            runId: daemonLogStatus.runId,
+            logMode: daemonLogStatus.mode,
+            logHealth: daemonLogStatus.health,
+          }
+        : {}),
       ...(detail === 'full' && input.daemonLog?.getLogPath()
         ? { logPath: input.daemonLog.getLogPath() }
+        : {}),
+      ...(detail === 'full' && daemonLogStatus
+        ? {
+            logIssues: daemonLogStatus.issues,
+            logDroppedRecords: daemonLogStatus.droppedRecords,
+            logDroppedBytes: daemonLogStatus.droppedBytes,
+          }
         : {}),
     },
     security: {

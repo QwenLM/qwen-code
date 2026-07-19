@@ -1459,7 +1459,7 @@
   display: inline-flex;
   align-items: center;
   color: var(--agent-gray-500);
-  line-height: 1;
+  line-height: 1.4;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
