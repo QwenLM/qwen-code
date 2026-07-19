@@ -21,7 +21,12 @@ name: 'Qwen Autofix'
 #                             unlabeled releases it. autofix/skip opts any PR
 #                             out everywhere and wins over takeover. Labels
 #                             need GitHub triage+, so the permission gate is
-#                             GitHub's own.
+#                             GitHub's own. The bot's OWN fork PRs (author ==
+#                             the autofix bot, e.g. its codex flow) are auto-
+#                             managed WITHOUT a label when allow-edits is on —
+#                             they are the bot's own generated work, trust-
+#                             equal to an in-repo bot PR; autofix/skip still
+#                             opts them out.
 #   • issue_comment         → '@qwen-code /takeover' (apply the label) and
 #                             '@qwen-code /takeover stop' (remove it) — sugar
 #                             for people without label access: the PR author,
@@ -1423,7 +1428,7 @@ jobs:
           else
             gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" \
               --base main \
-              --limit 100 --json number,headRefName,isCrossRepository,labels > "${WORKDIR}/bot-prs.json"
+              --limit 100 --json number,headRefName,isCrossRepository,labels,author,maintainerCanModify > "${WORKDIR}/bot-prs.json"
             gh pr list --repo "${REPO}" --state open --label "${TAKEOVER_LABEL}" \
               --base main \
               --limit 100 --json number,headRefName,isCrossRepository,labels,author,maintainerCanModify > "${WORKDIR}/takeover-prs.json"
@@ -1446,10 +1451,15 @@ jobs:
                | .[]
                | .number' \
               "${WORKDIR}/bot-prs.json" "${WORKDIR}/takeover-prs.json")"
-            # FORK takeover PRs are admitted per candidate: the author must
-            # hold write+ RIGHT NOW (the same live-privilege rule as the
-            # comment command) and the PR must allow maintainer edits (or
-            # the bot cannot push). Rare set — one permission call each.
+            # FORK PRs are admitted per candidate: the author must hold write+
+            # RIGHT NOW (the same live-privilege rule as the comment command)
+            # and the PR must allow maintainer edits (or the bot cannot push).
+            # Two sources, unioned: takeover-LABELED forks (any eligible author,
+            # explicit opt-in) AND the bot's OWN forks (bot-prs.json is
+            # --author AUTOFIX_BOT) — a fork the bot itself opened is its own
+            # generated work, trust-equal to an in-repo bot PR, so it needs no
+            # label (autofix/skip still opts it out). Rare set — one permission
+            # call each; the write+ check below still gates every candidate.
             # Appended after the rotated in-repo list: forks sit outside the
             # anti-starvation rotation, which only bites once in-repo
             # candidates alone exhaust the inspection budget.
@@ -1465,12 +1475,13 @@ jobs:
                   echo "🧭 fork takeover candidate #${FPR} skipped: author ${FAUTHOR} permission='${FPERM:-none}' below write"
                   ;;
               esac
-            done < <(jq -r --arg skip "${SKIP_LABEL}" '
-              .[] | select(.isCrossRepository == true)
-                  | select(.maintainerCanModify == true)
-                  | select([.labels[]?.name] | index($skip) | not)
-                  | [(.number | tostring), (.author.login // "")] | @tsv' \
-              "${WORKDIR}/takeover-prs.json")
+            done < <(jq -rs --arg skip "${SKIP_LABEL}" '
+              add | unique_by(.number)
+              | .[] | select(.isCrossRepository == true)
+                    | select(.maintainerCanModify == true)
+                    | select([.labels[]?.name] | index($skip) | not)
+                    | [(.number | tostring), (.author.login // "")] | @tsv' \
+              "${WORKDIR}/bot-prs.json" "${WORKDIR}/takeover-prs.json")
           fi
 
           # Pending-check staleness bound (invariant across candidate PRs, computed
@@ -2045,7 +2056,7 @@ jobs:
           # Base/branch invariants sit ABOVE the fork chain: the last fork
           # elif ends the ladder for eligible forks, so anything below it
           # would be unreachable for exactly the PR class we fetch and push.
-          elif [[ "${LIVE_XREPO}" != "false" && "${LIVE_TAKEOVER}" != "true" ]]; then INELIGIBLE='fork head without takeover'
+          elif [[ "${LIVE_XREPO}" != "false" && "${LIVE_TAKEOVER}" != "true" && "${LIVE_AUTHOR}" != "${AUTOFIX_BOT}" ]]; then INELIGIBLE='fork head without takeover (a non-bot fork needs the label)'
           elif [[ "${LIVE_XREPO}" != "false" && "${LIVE_CAN_MODIFY}" != "true" ]]; then INELIGIBLE='fork head without maintainer-edit access'
           elif [[ "${LIVE_XREPO}" != "false" ]]; then
             # Live author-privilege re-check for fork targets: an author who
