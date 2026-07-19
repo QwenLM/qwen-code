@@ -515,7 +515,11 @@ describe('checkForUpdates', () => {
         fetchInfo: vi.fn().mockReturnValue(new Promise(() => {})),
       });
 
-      const resultPromise = checkForUpdatesDetailed();
+      // Stub the global-npm probe: the real isGlobalNpmInstallation runs a
+      // real realpath() I/O before the timeout is armed, which races with the
+      // fake-timer advance below and makes this test hang non-deterministically
+      // on slow/loaded runners.
+      const resultPromise = checkForUpdatesDetailed(async () => false);
       await vi.advanceTimersByTimeAsync(FETCH_TIMEOUT_MS + 1);
       const result = await resultPromise;
 
@@ -543,7 +547,7 @@ describe('checkForUpdates', () => {
           .mockResolvedValue({ current: '1.0.0', latest: '1.1.0' }),
       });
 
-      const result = await checkForUpdatesDetailed();
+      const result = await checkForUpdatesDetailed(async () => false);
 
       expect(result.status).toBe('update');
       if (result.status === 'update') {
@@ -572,7 +576,7 @@ describe('checkForUpdates', () => {
               }),
       }));
 
-      const resultPromise = checkForUpdatesDetailed();
+      const resultPromise = checkForUpdatesDetailed(async () => false);
       await vi.advanceTimersByTimeAsync(FETCH_TIMEOUT_MS + 1);
       const result = await resultPromise;
 
@@ -597,7 +601,7 @@ describe('checkForUpdates', () => {
         fetchInfo: () => new Promise(() => {}),
       }));
 
-      const resultPromise = checkForUpdatesDetailed();
+      const resultPromise = checkForUpdatesDetailed(async () => false);
       await vi.advanceTimersByTimeAsync(FETCH_TIMEOUT_MS + 1);
       const result = await resultPromise;
 
