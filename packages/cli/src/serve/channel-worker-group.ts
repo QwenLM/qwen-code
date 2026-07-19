@@ -464,6 +464,13 @@ export function createChannelWorkerGroup(
         const targets = new Map(
           targetGroups.map((target) => [target.workspaceCwd, target]),
         );
+        if (reconcileOptions?.forceWorkspaceCwd) {
+          for (const workspaceCwd of targets.keys()) {
+            if (workspaceCwd !== reconcileOptions.forceWorkspaceCwd) {
+              targets.delete(workspaceCwd);
+            }
+          }
+        }
         const unchanged = new Map<string, ChannelWorkerGroupEntry>();
         const oldAffected: ChannelWorkerGroupEntry[] = [];
         const newEntries: ChannelWorkerGroupEntry[] = [];

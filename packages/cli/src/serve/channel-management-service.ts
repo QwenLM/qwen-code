@@ -95,7 +95,10 @@ export interface ChannelManagementWorkerManager {
   ): Promise<unknown>;
   stopSelection(): Promise<unknown>;
   reload(): Promise<ChannelWorkerSnapshot>;
-  reloadWorkspace(workspaceCwd: string): Promise<ChannelWorkerSnapshot>;
+  reloadWorkspace(
+    workspaceCwd: string,
+    name: string,
+  ): Promise<ChannelWorkerSnapshot>;
 }
 
 export interface CreateChannelManagementServiceOptions {
@@ -296,7 +299,7 @@ export function createChannelManagementService(
       diagnostics.delete(name);
       if (active) {
         try {
-          await opts.manager.reloadWorkspace(opts.workspaceCwd);
+          await opts.manager.reloadWorkspace(opts.workspaceCwd, name);
         } catch (error) {
           await stopFromNames(name, committedNames);
           diagnostics.set(name, diagnostic(error));
@@ -355,7 +358,7 @@ export function createChannelManagementService(
       }
       assertOwnedRuntime(name);
       try {
-        await opts.manager.reloadWorkspace(opts.workspaceCwd);
+        await opts.manager.reloadWorkspace(opts.workspaceCwd, name);
         diagnostics.delete(name);
       } catch (error) {
         diagnostics.set(name, diagnostic(error));

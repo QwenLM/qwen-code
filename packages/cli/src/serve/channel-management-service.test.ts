@@ -162,7 +162,7 @@ describe('createChannelManagementService', () => {
       lastError: 'invalid token token=<redacted>',
     });
     expect(manager.reload).not.toHaveBeenCalled();
-    expect(manager.reloadWorkspace).toHaveBeenCalledWith(WORKSPACE);
+    expect(manager.reloadWorkspace).toHaveBeenCalledWith(WORKSPACE, 'bot');
   });
 
   it('does not delete config when worker stop is unconfirmed', async () => {
