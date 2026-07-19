@@ -788,6 +788,106 @@ describe('runChannelDaemonWorker', () => {
     expect(mockRouterClearAll).not.toHaveBeenCalled();
   });
 
+  it('allows legacy credentials for a unique adapter in the primary trusted workspace', async () => {
+    const sdk = createSdk();
+    sdk.client.capabilities.mockResolvedValueOnce({
+      v: 1,
+      mode: 'http-bridge',
+      features: [],
+      modelServices: [],
+      workspaceCwd: '/workspace',
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    });
+    mockLoadChannelsConfig.mockReturnValueOnce({
+      'qq-main': { type: 'qq' },
+      telegram: { type: 'telegram' },
+    });
+    mockParseConfiguredChannels.mockResolvedValueOnce([
+      {
+        name: 'qq-main',
+        config: { ...parsedTelegram.config, type: 'qq' },
+      },
+    ]);
+
+    await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['qq-main'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(mockCreateChannel).toHaveBeenCalledWith(
+      'qq-main',
+      expect.any(Object),
+      expect.any(Object),
+      expect.objectContaining({ allowLegacyCredentialFallback: true }),
+    );
+  });
+
+  it.each([
+    {
+      label: 'the workspace is secondary',
+      workspaces: [
+        { id: 'primary', cwd: '/primary', primary: true, trusted: true },
+        { id: 'worker', cwd: '/workspace', primary: false, trusted: true },
+      ],
+      channels: { 'qq-main': { type: 'qq' } },
+    },
+    {
+      label: 'the primary workspace is untrusted',
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: false },
+      ],
+      channels: { 'qq-main': { type: 'qq' } },
+    },
+    {
+      label: 'only one of multiple same-type workspace adapters was selected',
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+      channels: {
+        'qq-main': { type: 'qq' },
+        'qq-backup': { type: 'qq' },
+      },
+    },
+  ])(
+    'denies legacy credentials when $label',
+    async ({ workspaces, channels }) => {
+      const sdk = createSdk();
+      sdk.client.capabilities.mockResolvedValueOnce({
+        v: 1,
+        mode: 'http-bridge',
+        features: [],
+        modelServices: [],
+        workspaceCwd: workspaces.length === 1 ? '/workspace' : '/primary',
+        workspaces,
+      });
+      mockLoadChannelsConfig.mockReturnValueOnce(channels);
+      mockParseConfiguredChannels.mockResolvedValueOnce([
+        {
+          name: 'qq-main',
+          config: { ...parsedTelegram.config, type: 'qq' },
+        },
+      ]);
+
+      await runChannelDaemonWorker({
+        daemonUrl: 'http://127.0.0.1:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['qq-main'] },
+        loadDaemonSdk: async () => sdk,
+      });
+
+      expect(mockCreateChannel).toHaveBeenCalledWith(
+        'qq-main',
+        expect.any(Object),
+        expect.any(Object),
+        expect.objectContaining({ allowLegacyCredentialFallback: false }),
+      );
+    },
+  );
+
   it('selects all configured channels in one shared router', async () => {
     const sdk = createSdk();
     mockParseConfiguredChannels.mockResolvedValueOnce([

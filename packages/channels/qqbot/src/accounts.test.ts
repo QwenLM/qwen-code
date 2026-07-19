@@ -57,6 +57,51 @@ describe('QQ credential storage', () => {
     ).toEqual({ appId: 'legacy-id', appSecret: 'legacy-secret' });
   });
 
+  it.each(['missing', 'corrupt'])(
+    'falls back when scoped credentials are %s',
+    (state) => {
+      const root = mkdtempSync(join(tmpdir(), 'qq-fallback-state-'));
+      const scopedFile = join(root, 'scoped', 'credentials.json');
+      const legacyFile = join(root, 'legacy-name-credentials.json');
+      mkdirSync(join(root, 'scoped'));
+      if (state === 'corrupt') writeFileSync(scopedFile, 'not-json');
+      writeFileSync(
+        legacyFile,
+        JSON.stringify({ appId: 'legacy-id', appSecret: 'legacy-secret' }),
+      );
+
+      expect(
+        loadCredentials(scopedFile, {
+          allowLegacyFallback: true,
+          legacyFile,
+        }),
+      ).toEqual({ appId: 'legacy-id', appSecret: 'legacy-secret' });
+    },
+  );
+
+  it('prefers scoped credentials over the fallback file', () => {
+    const root = mkdtempSync(join(tmpdir(), 'qq-scoped-wins-'));
+    const scopedFile = join(root, 'workspace-a', 'credentials.json');
+    const otherWorkspaceFile = join(root, 'workspace-b', 'credentials.json');
+    mkdirSync(join(root, 'workspace-a'));
+    mkdirSync(join(root, 'workspace-b'));
+    writeFileSync(
+      scopedFile,
+      JSON.stringify({ appId: 'scoped-id', appSecret: 'scoped-secret' }),
+    );
+    writeFileSync(
+      otherWorkspaceFile,
+      JSON.stringify({ appId: 'other-id', appSecret: 'other-secret' }),
+    );
+
+    expect(
+      loadCredentials(scopedFile, {
+        allowLegacyFallback: true,
+        legacyFile: otherWorkspaceFile,
+      }),
+    ).toEqual({ appId: 'scoped-id', appSecret: 'scoped-secret' });
+  });
+
   it('rejects incomplete and corrupt credentials', () => {
     const root = mkdtempSync(join(tmpdir(), 'qq-invalid-'));
     const credsFile = join(root, 'credentials.json');

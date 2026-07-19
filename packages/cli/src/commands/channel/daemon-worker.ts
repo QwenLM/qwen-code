@@ -271,6 +271,32 @@ function validateChannelWorkspaces(
   }
 }
 
+function isPrimaryTrustedWorkspace(
+  capabilities: DaemonCapabilitiesLike,
+  workspace: string,
+): boolean {
+  const matches = capabilities.workspaces?.filter(
+    (runtime) => canonicalizeWorkspace(runtime.cwd) === workspace,
+  );
+  return (
+    matches?.length === 1 &&
+    matches[0]!.primary === true &&
+    matches[0]!.trusted === true
+  );
+}
+
+function countConfiguredChannelType(
+  channelsConfig: Record<string, unknown>,
+  type: string,
+): number {
+  return Object.values(channelsConfig).filter(
+    (channel) =>
+      typeof channel === 'object' &&
+      channel !== null &&
+      Reflect.get(channel, 'type') === type,
+  ).length;
+}
+
 function validateDaemonWorkerUrl(daemonUrl: string): void {
   let parsed: URL;
   try {
@@ -494,6 +520,9 @@ export async function runChannelDaemonWorker(
             ...(proxy ? { proxy } : {}),
             router: createdRouter,
             stateDir: daemonChannelStateDir(daemonWorkspace, name, config.type),
+            allowLegacyCredentialFallback:
+              isPrimaryTrustedWorkspace(capabilities, daemonWorkspace) &&
+              countConfiguredChannelType(channelsConfig, config.type) === 1,
             channelMemory: {
               readChannelMemory,
               getChannelMemoryRevision,

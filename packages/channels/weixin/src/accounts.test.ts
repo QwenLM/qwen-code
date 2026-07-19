@@ -4,6 +4,7 @@ import {
   readdirSync,
   readFileSync,
   statSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -44,6 +45,42 @@ describe('Weixin account storage', () => {
 
     expect(loadAccount(scopedDir)).toBeNull();
     expect(loadAccount()).toMatchObject({ token: 'legacy-token' });
+  });
+
+  it.each(['missing', 'corrupt'])(
+    'uses explicit legacy fallback when scoped state is %s',
+    (state) => {
+      const root = mkdtempSync(join(tmpdir(), 'weixin-fallback-'));
+      const scopedDir = join(root, 'scoped');
+      const legacyDir = join(root, 'legacy');
+      mkdirSync(scopedDir, { recursive: true });
+      if (state === 'corrupt') {
+        writeFileSync(join(scopedDir, 'account.json'), 'not-json');
+      }
+      saveAccount(account('legacy-token'), legacyDir);
+
+      expect(
+        loadAccount(scopedDir, {
+          allowLegacyFallback: true,
+          legacyStateDir: legacyDir,
+        }),
+      ).toMatchObject({ token: 'legacy-token' });
+    },
+  );
+
+  it('prefers scoped state over the fallback directory', () => {
+    const root = mkdtempSync(join(tmpdir(), 'weixin-scoped-wins-'));
+    const scopedDir = join(root, 'workspace-a');
+    const otherWorkspaceDir = join(root, 'workspace-b');
+    saveAccount(account('scoped-token'), scopedDir);
+    saveAccount(account('other-token'), otherWorkspaceDir);
+
+    expect(
+      loadAccount(scopedDir, {
+        allowLegacyFallback: true,
+        legacyStateDir: otherWorkspaceDir,
+      }),
+    ).toMatchObject({ token: 'scoped-token' });
   });
 
   it('writes scoped credentials atomically with mode 0600', () => {

@@ -18,7 +18,7 @@ import type {
   ChannelAgentBridge,
   ChannelTaskLifecycleEvent,
 } from '@qwen-code/channel-base';
-import { loadAccount, DEFAULT_BASE_URL } from './accounts.js';
+import { getStateDir, loadAccount, DEFAULT_BASE_URL } from './accounts.js';
 import { startPollLoop, getContextToken } from './monitor.js';
 import type { CdnRef, FileCdnRef } from './monitor.js';
 import { sendText, sendImage, detectImageMime } from './send.js';
@@ -40,6 +40,7 @@ export class WeixinChannel extends ChannelBase {
   private baseUrl: string;
   private token: string = '';
   private readonly stateDir?: string;
+  private readonly allowLegacyCredentialFallback: boolean;
 
   constructor(
     name: string,
@@ -49,6 +50,8 @@ export class WeixinChannel extends ChannelBase {
   ) {
     super(name, config, bridge, options);
     this.stateDir = options?.stateDir;
+    this.allowLegacyCredentialFallback =
+      options?.allowLegacyCredentialFallback === true;
     this.baseUrl =
       (config as ChannelConfig & { baseUrl?: string }).baseUrl ||
       DEFAULT_BASE_URL;
@@ -84,7 +87,14 @@ export class WeixinChannel extends ChannelBase {
       this.config.instructions =
         this.config.instructions + '\n' + imageInstructions;
     }
-    const account = this.stateDir ? loadAccount(this.stateDir) : loadAccount();
+    const account = this.stateDir
+      ? this.allowLegacyCredentialFallback
+        ? loadAccount(this.stateDir, {
+            allowLegacyFallback: true,
+            legacyStateDir: getStateDir(),
+          })
+        : loadAccount(this.stateDir)
+      : loadAccount();
     if (!account) {
       throw new Error(
         'WeChat account not configured. Run "qwen channel configure-weixin" first.',

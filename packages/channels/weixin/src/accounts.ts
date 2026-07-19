@@ -38,14 +38,43 @@ function accountPath(stateDir: string): string {
   return join(stateDir, 'account.json');
 }
 
-export function loadAccount(stateDir = getStateDir()): AccountData | null {
+export interface LoadAccountOptions {
+  allowLegacyFallback?: boolean;
+  legacyStateDir?: string;
+}
+
+function readAccount(stateDir: string): AccountData | null {
   const p = accountPath(stateDir);
   if (!existsSync(p)) return null;
   try {
-    return JSON.parse(readFileSync(p, 'utf-8')) as AccountData;
+    const account = JSON.parse(
+      readFileSync(p, 'utf-8'),
+    ) as Partial<AccountData>;
+    if (
+      typeof account.token !== 'string' ||
+      account.token.length === 0 ||
+      typeof account.baseUrl !== 'string' ||
+      account.baseUrl.length === 0 ||
+      typeof account.savedAt !== 'string' ||
+      account.savedAt.length === 0
+    ) {
+      return null;
+    }
+    return account as AccountData;
   } catch {
     return null;
   }
+}
+
+export function loadAccount(
+  stateDir = getStateDir(),
+  options: LoadAccountOptions = {},
+): AccountData | null {
+  const scoped = readAccount(stateDir);
+  if (scoped || !options.allowLegacyFallback || !options.legacyStateDir) {
+    return scoped;
+  }
+  return readAccount(options.legacyStateDir);
 }
 
 export function saveAccount(data: AccountData, stateDir = getStateDir()): void {

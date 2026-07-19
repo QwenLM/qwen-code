@@ -210,6 +210,7 @@ export class QQChannel extends ChannelBase {
   private flushedSessions: Set<string> = new Set();
   private readonly qqStatePath: string;
   private readonly credsFile: string;
+  private readonly legacyCredsFile?: string;
   /**
    * Path to the global sessions.json managed by start.ts.
    * start.ts deletes it on shutdown, so we back it up.
@@ -267,6 +268,9 @@ export class QQChannel extends ChannelBase {
     }
     this.blockStreaming = this.config.blockStreaming === 'on';
     this.credsFile = getCredsFilePath(safeName, options?.stateDir);
+    if (options?.stateDir && options.allowLegacyCredentialFallback) {
+      this.legacyCredsFile = getCredsFilePath(safeName);
+    }
     this.qqStatePath = join(stateDir, `${safeName}-state.json`);
     // In standalone mode (no external router), use the per-channel
     // sessions path so the channel owns its own session file.
@@ -1665,7 +1669,12 @@ export class QQChannel extends ChannelBase {
     let appSecret = this.qqConfig.appSecret;
 
     if (!appID || !appSecret) {
-      const saved = loadCredentials(this.credsFile);
+      const saved = this.legacyCredsFile
+        ? loadCredentials(this.credsFile, {
+            allowLegacyFallback: true,
+            legacyFile: this.legacyCredsFile,
+          })
+        : loadCredentials(this.credsFile);
       if (saved) {
         appID = saved.appId;
         appSecret = saved.appSecret;

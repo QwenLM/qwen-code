@@ -4,7 +4,10 @@ const apiMocks = vi.hoisted(() => ({
   getConfig: vi.fn(),
   sendTyping: vi.fn(),
 }));
-const accountMocks = vi.hoisted(() => ({ loadAccount: vi.fn() }));
+const accountMocks = vi.hoisted(() => ({
+  getStateDir: vi.fn(() => '/legacy/weixin'),
+  loadAccount: vi.fn(),
+}));
 const monitorMocks = vi.hoisted(() => ({ startPollLoop: vi.fn() }));
 
 vi.mock('./api.js', async () => {
@@ -18,6 +21,7 @@ vi.mock('./api.js', async () => {
 
 vi.mock('./accounts.js', () => ({
   DEFAULT_BASE_URL: 'https://ilinkai.weixin.qq.com',
+  getStateDir: accountMocks.getStateDir,
   loadAccount: accountMocks.loadAccount,
 }));
 
@@ -108,6 +112,28 @@ describe('WeixinChannel', () => {
     await channel.connect();
 
     expect(accountMocks.loadAccount).toHaveBeenCalledWith('/scoped/weixin');
+  });
+
+  it('uses the singleton legacy state only when the daemon supplies proof', async () => {
+    accountMocks.loadAccount.mockReturnValue({
+      token: 'legacy-token',
+      baseUrl: 'https://bot.example',
+      savedAt: '2026-07-19T00:00:00.000Z',
+    });
+    const channel = createChannel(
+      {},
+      {
+        stateDir: '/scoped/weixin',
+        allowLegacyCredentialFallback: true,
+      },
+    );
+
+    await channel.connect();
+
+    expect(accountMocks.loadAccount).toHaveBeenCalledWith('/scoped/weixin', {
+      allowLegacyFallback: true,
+      legacyStateDir: '/legacy/weixin',
+    });
   });
 
   it('preserves the standalone no-argument account lookup', async () => {

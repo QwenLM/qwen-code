@@ -1,12 +1,21 @@
 import { writeFileSync, renameSync } from 'node:fs';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-const { mockSendQQMessage, mockFetchAccessToken, mockGetCredsFilePath } =
-  vi.hoisted(() => ({
-    mockSendQQMessage: vi.fn(),
-    mockFetchAccessToken: vi.fn(),
-    mockGetCredsFilePath: vi.fn(() => '/tmp/test-creds.json'),
-  }));
+const {
+  mockSendQQMessage,
+  mockFetchAccessToken,
+  mockGetCredsFilePath,
+  mockLoadCredentials,
+} = vi.hoisted(() => ({
+  mockSendQQMessage: vi.fn(),
+  mockFetchAccessToken: vi.fn(),
+  mockGetCredsFilePath: vi.fn((safeName: string, stateDir?: string) =>
+    stateDir
+      ? `${stateDir}/credentials.json`
+      : `/tmp/test-qwen/channels/${safeName}-credentials.json`,
+  ),
+  mockLoadCredentials: vi.fn(() => null),
+}));
 
 let fsStore: Record<string, string> = {};
 let fsExists: Record<string, boolean> = {};
@@ -37,7 +46,7 @@ vi.mock('./api.js', () => ({
 
 vi.mock('./accounts.js', () => ({
   getCredsFilePath: mockGetCredsFilePath,
-  loadCredentials: () => null,
+  loadCredentials: mockLoadCredentials,
   saveCredentials: vi.fn(),
 }));
 
@@ -140,6 +149,38 @@ describe('credential storage scope', () => {
     expect(mockGetCredsFilePath).toHaveBeenCalledWith(
       'test-bot',
       '/tmp/daemon/qq/test-bot',
+    );
+  });
+
+  it('passes explicit legacy proof and the exact legacy name file to credential loading', async () => {
+    mockLoadCredentials.mockReturnValueOnce({
+      appId: 'legacy-id',
+      appSecret: 'legacy-secret',
+    });
+    mockFetchAccessToken.mockResolvedValueOnce({
+      accessToken: 'access-token',
+      expiresIn: 3600,
+    });
+    const ch = makeChannel({
+      stateDir: '/tmp/daemon/qq/test-bot',
+      allowLegacyCredentialFallback: true,
+    });
+    const qqConfig = (
+      ch as unknown as {
+        qqConfig: { appID?: string; appSecret?: string };
+      }
+    ).qqConfig;
+    qqConfig.appID = undefined;
+    qqConfig.appSecret = undefined;
+
+    await (ch as unknown as { fetchToken: () => Promise<void> }).fetchToken();
+
+    expect(mockLoadCredentials).toHaveBeenCalledWith(
+      '/tmp/daemon/qq/test-bot/credentials.json',
+      {
+        allowLegacyFallback: true,
+        legacyFile: '/tmp/test-qwen/channels/test-bot-credentials.json',
+      },
     );
   });
 });

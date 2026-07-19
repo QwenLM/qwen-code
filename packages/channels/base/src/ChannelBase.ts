@@ -167,6 +167,8 @@ export interface ChannelBaseOptions {
   router?: SessionRouter;
   proxy?: string;
   stateDir?: string;
+  /** Daemon-computed proof that this adapter may read singleton legacy state. */
+  allowLegacyCredentialFallback?: boolean;
   channelMemory?: ChannelMemoryCallbacks;
   memoryIntentClassifier?: ChannelMemoryIntentClassifier;
   /**
