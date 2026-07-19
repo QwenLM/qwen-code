@@ -132,7 +132,11 @@ async function handleCommitDetail(
   route: string,
 ): Promise<void> {
   const sha = req.query['sha'];
-  if (typeof sha !== 'string' || sha.length === 0) {
+  if (
+    typeof sha !== 'string' ||
+    sha.length === 0 ||
+    !/^[0-9a-f]{7,40}$/i.test(sha)
+  ) {
     applyReadHeaders(res);
     res.status(400).json({
       errorKind: 'parse_error',

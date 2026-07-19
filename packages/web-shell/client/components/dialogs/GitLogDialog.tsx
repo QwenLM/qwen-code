@@ -166,6 +166,12 @@ function CommitRow({
           )}
         </div>
       );
+    } else if (detail && !detail.available) {
+      detailBody = (
+        <div className={styles.commitDetail}>
+          <span className={styles.detailError}>{t('gitLog.detailError')}</span>
+        </div>
+      );
     }
   }
 

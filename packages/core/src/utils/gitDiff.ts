@@ -1444,7 +1444,17 @@ const LOG_DETAIL_FORMAT =
 const FIELD_SEP = '\x1f';
 
 function parseLogFields(raw: string): GitLogEntry | null {
-  const parts = raw.split(FIELD_SEP);
+  // Bounded split: only the first 7 separators, so a subject containing a
+  // literal \x1f cannot shift the parents field.
+  const parts: string[] = [];
+  let rest = raw;
+  for (let i = 0; i < 7; i++) {
+    const idx = rest.indexOf(FIELD_SEP);
+    if (idx < 0) break;
+    parts.push(rest.slice(0, idx));
+    rest = rest.slice(idx + 1);
+  }
+  parts.push(rest);
   if (parts.length < 8) return null;
   return {
     sha: parts[0],
