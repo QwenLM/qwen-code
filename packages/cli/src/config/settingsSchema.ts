@@ -305,6 +305,17 @@ const SETTINGS_SCHEMA = {
     mergeStrategy: MergeStrategy.SHALLOW_MERGE,
   },
 
+  serve: {
+    type: 'object',
+    label: 'Serve',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: {} as { channels?: string[] },
+    description: 'Persistent qwen serve settings.',
+    showInDialog: false,
+    mergeStrategy: MergeStrategy.SHALLOW_MERGE,
+  },
+
   // Model providers configuration grouped by authType
   modelProviders: {
     type: 'object',
