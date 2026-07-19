@@ -1732,6 +1732,19 @@ describe('createDaemonWorkspaceService', () => {
       expect(preheatAcpChild).not.toHaveBeenCalled();
     });
 
+    it('returns an error when ACP preheat is unavailable', async () => {
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ isChannelLive: () => false }),
+      );
+
+      await expect(svc.preheatAcpChild(makeCtx())).resolves.toMatchObject({
+        ready: false,
+        channelLive: false,
+        reason: 'error',
+        error: 'ACP preheat is unavailable',
+      });
+    });
+
     it('preheats the ACP child when the channel is not live', async () => {
       let live = false;
       const preheatAcpChild = vi.fn().mockImplementation(async () => {
