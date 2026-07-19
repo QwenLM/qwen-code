@@ -13,6 +13,10 @@ export const plugin: ChannelPlugin = {
   // before QQChannel is ever constructed — QR-only login would be unreachable
   // through the built-in channel path.
   requiredConfigFields: [],
+  management: {
+    fields: [],
+    auth: ['qr'],
+  },
   createChannel: (name, config, bridge, options) =>
     new QQChannel(name, config, bridge, options),
 };

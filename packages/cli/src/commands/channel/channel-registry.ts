@@ -1,4 +1,15 @@
-import type { ChannelPlugin } from '@qwen-code/channel-base';
+import type {
+  ChannelConfigFieldDescriptor,
+  ChannelPlugin,
+} from '@qwen-code/channel-base';
+
+export interface ChannelTypeDescriptor {
+  type: string;
+  displayName: string;
+  manageable: boolean;
+  fields: readonly ChannelConfigFieldDescriptor[];
+  auth: ReadonlyArray<'credentials' | 'qr'>;
+}
 
 const registry = new Map<string, ChannelPlugin>();
 let builtinsPromise: Promise<void> | null = null;
@@ -51,4 +62,19 @@ export async function getPlugin(
 export async function supportedTypes(): Promise<string[]> {
   await ensureBuiltins();
   return [...registry.keys()];
+}
+
+export async function supportedChannelCatalog(): Promise<
+  ChannelTypeDescriptor[]
+> {
+  await ensureBuiltins();
+  return [...registry.values()].map(
+    ({ channelType, displayName, management }) => ({
+      type: channelType,
+      displayName,
+      manageable: management !== undefined,
+      fields: management?.fields ?? [],
+      auth: management?.auth ?? [],
+    }),
+  );
 }
