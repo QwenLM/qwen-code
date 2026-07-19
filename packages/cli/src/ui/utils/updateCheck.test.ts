@@ -364,6 +364,30 @@ describe('checkForUpdates', () => {
     ).resolves.toBe(false);
   });
 
+  it('does not treat local npm installs as global npm installs', async () => {
+    const run = vi.fn().mockResolvedValue({
+      stdout: '/global/node_modules\n',
+      stderr: '',
+    });
+    const canonicalize = vi.fn(async (candidate: string) =>
+      candidate === '/global/node_modules'
+        ? '/global/node_modules'
+        : '/repo/node_modules/@qwen-code/qwen-code/cli.js',
+    );
+
+    await expect(
+      isGlobalNpmInstallation(
+        '/repo/node_modules/@qwen-code/qwen-code/cli.js',
+        run as unknown as NonNullable<
+          Parameters<typeof isGlobalNpmInstallation>[1]
+        >,
+        canonicalize as unknown as NonNullable<
+          Parameters<typeof isGlobalNpmInstallation>[2]
+        >,
+      ),
+    ).resolves.toBe(false);
+  });
+
   it('does not fall back when the global npm query fails', async () => {
     const run = vi.fn().mockRejectedValue(new Error('npm view failed'));
 

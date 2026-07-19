@@ -269,6 +269,25 @@ describe('handleAutoUpdate', () => {
     );
   });
 
+  it('runs non-npm package-manager updates through the shell', () => {
+    vi.spyOn(os, 'platform').mockReturnValue('linux');
+    mockGetInstallationInfo.mockReturnValue({
+      updateCommand: 'pnpm add -g @qwen-code/qwen-code@latest',
+      isGlobal: true,
+      packageManager: PackageManager.PNPM,
+    });
+
+    handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn);
+
+    expect(mockSpawn).toHaveBeenCalledWith(
+      'bash',
+      ['-c', 'pnpm add -g @qwen-code/qwen-code@2.0.0'],
+      {
+        stdio: ['pipe', 'ignore', 'pipe'],
+      },
+    );
+  });
+
   it('should emit "update-success" when the update process succeeds', async () => {
     await new Promise<void>((resolve) => {
       mockGetInstallationInfo.mockReturnValue({
