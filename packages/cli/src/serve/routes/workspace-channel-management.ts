@@ -16,7 +16,7 @@ import type {
 } from '../channel-management-service.js';
 import {
   isSafeChannelName,
-  MAX_CHANNEL_INSTANCE_NAME_LENGTH,
+  MAX_CHANNEL_INSTANCE_NAME_BYTES,
 } from '../channel-selection.js';
 import {
   requireTrustedWorkspaceRuntime,
@@ -61,7 +61,7 @@ function parseInstanceName(
   const name = req.params['name'] ?? '';
   if (!isSafeChannelName(name, options)) {
     res.status(400).json({
-      error: `Channel instance names must be non-empty safe path components, differ from the reserved name "all", and be at most ${MAX_CHANNEL_INSTANCE_NAME_LENGTH} characters.`,
+      error: `Channel instance names must be non-empty portable path components, differ from the reserved name "all", and be at most ${MAX_CHANNEL_INSTANCE_NAME_BYTES} UTF-8 bytes.`,
       code: 'invalid_channel_instance_name',
     });
     return undefined;

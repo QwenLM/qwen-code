@@ -288,7 +288,16 @@ describe('workspace Channel management routes', () => {
       request(app).post('/workspace/channels/a%2Fb/start'),
     );
     const overlong = await auth(
-      request(app).post(`/workspace/channels/${'a'.repeat(257)}/start`),
+      request(app).post(`/workspace/channels/${'a'.repeat(256)}/start`),
+    );
+    const portableUnsafe = await Promise.all(
+      ['bad:name', 'bot.', 'NUL.json', '界'.repeat(86)].map((name) =>
+        auth(
+          request(app).post(
+            `/workspace/channels/${encodeURIComponent(name)}/start`,
+          ),
+        ),
+      ),
     );
     const reservedPut = await auth(
       request(app)
@@ -329,6 +338,9 @@ describe('workspace Channel management routes', () => {
     expect(encodedSlash.status).toBe(400);
     expect(encodedSlash.body.code).toBe('invalid_channel_instance_name');
     expect(overlong.status).toBe(400);
+    expect(portableUnsafe.map((response) => response.status)).toEqual([
+      400, 400, 400, 400,
+    ]);
     expect(reservedPut.status).toBe(400);
     expect(reservedStart.status).toBe(400);
     expect(reservedStartup.status).toBe(400);

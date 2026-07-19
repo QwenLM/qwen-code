@@ -203,8 +203,8 @@ Both forms resolve and require a trusted `WorkspaceRuntime` before resolving
 its management service. Unknown, ambiguous, untrusted, draining, or removed
 targets fail closed; qualified routes never reuse the primary service. Every
 mutation uses the strict bearer gate and validates the client ID against the
-resolved runtime. Instance names must be non-empty, contain no slash, and be
-at most 256 characters.
+resolved runtime. Instance names must be portable filesystem components of at
+most 255 UTF-8 bytes.
 
 `GET .../channel-types` returns the serializable projection of
 `ChannelPlugin.management`: type, display name, `manageable`, safe field
@@ -245,10 +245,12 @@ The revision is a deterministic SHA-256 digest of the workspace-scope
 latest value as `expectedRevision`; mismatch returns
 `409 channel_settings_conflict` before writing.
 
-Instance names must be non-empty, contain no slash, be at most 256 characters,
-and not trim to the reserved startup sentinel `all`. The management service
-uses the channel-selection canonicalization as a domain invariant for
-configuration, lifecycle, and per-instance startup mutations; routes map
+Instance names must be non-empty portable filesystem components of at most 255
+UTF-8 bytes and must not trim to the reserved startup sentinel `all`. Portable
+components exclude path separators, control and Windows-forbidden characters,
+trailing dots or spaces, and Windows device names. The management service uses
+the channel-selection canonicalization as a domain invariant for configuration,
+lifecycle, and per-instance startup mutations; routes map
 `invalid_channel_instance_name` to 400. List may still expose a legacy
 `channels.all` entry, and DELETE alone accepts that name for cleanup.
 

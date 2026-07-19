@@ -1,6 +1,8 @@
 import type { ServeChannelSelection } from './types.js';
 
-export const MAX_CHANNEL_INSTANCE_NAME_LENGTH = 256;
+export const MAX_CHANNEL_INSTANCE_NAME_BYTES = 255;
+
+const WINDOWS_DEVICE_NAME = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 
 export function isAllChannelSelectionName(name: string): boolean {
   return name.trim() === 'all';
@@ -13,6 +15,11 @@ function hasControlCharacter(value: string): boolean {
   });
 }
 
+function isWindowsDeviceName(value: string): boolean {
+  const baseName = value.split('.', 1)[0]!.trimEnd();
+  return WINDOWS_DEVICE_NAME.test(baseName);
+}
+
 export function isSafePathComponent(value: string): boolean {
   return (
     value.trim().length > 0 &&
@@ -20,8 +27,12 @@ export function isSafePathComponent(value: string): boolean {
     value !== '..' &&
     !value.includes('/') &&
     !value.includes('\\') &&
+    !/[:*?"<>|]/u.test(value) &&
     !hasControlCharacter(value) &&
-    value.length <= MAX_CHANNEL_INSTANCE_NAME_LENGTH
+    !value.endsWith('.') &&
+    !value.endsWith(' ') &&
+    !isWindowsDeviceName(value) &&
+    Buffer.byteLength(value, 'utf8') <= MAX_CHANNEL_INSTANCE_NAME_BYTES
   );
 }
 
@@ -29,10 +40,10 @@ export function isSafeChannelName(
   name: string,
   options: { allowReservedAll?: boolean } = {},
 ): boolean {
-  return (
-    isSafePathComponent(name) &&
-    (options.allowReservedAll === true || !isAllChannelSelectionName(name))
-  );
+  if (options.allowReservedAll === true && isAllChannelSelectionName(name)) {
+    return true;
+  }
+  return isSafePathComponent(name) && !isAllChannelSelectionName(name);
 }
 
 export function assertSafeChannelName(name: string): void {
