@@ -303,11 +303,60 @@ Available helpers are `workspaceChannelTypes()`, `workspaceChannels()`,
 `stopWorkspaceChannel()`, and `restartWorkspaceChannel()` on both
 `DaemonClient` and the client returned by `workspaceByCwd()`.
 
-Phase 1 provides the daemon and SDK contract only. Browser QR authentication,
-the `channel_auth` capability and auth-session routes, and the Web Shell
-Channels page are later phases; QQ and WeChat catalog entries advertising
-`auth: ["qr"]` are descriptors, not a claim that browser QR authentication is
-available.
+#### Authenticate QQ and WeChat from a daemon client
+
+When capabilities include `channel_auth`, a client can authenticate a
+configured QQ or WeChat instance without exposing the provider's QR payload or
+credentials through the Channel snapshot. The primary and
+workspace-qualified route families provide the same operations:
+
+| Operation        | Primary route                                             | SDK helper                     |
+| ---------------- | --------------------------------------------------------- | ------------------------------ |
+| Begin            | `POST /workspace/channels/:name/auth-sessions`            | `beginWorkspaceChannelAuth()`  |
+| Read status      | `GET /workspace/channels/:name/auth-sessions/:id`         | `workspaceChannelAuth()`       |
+| Read rendered QR | `GET /workspace/channels/:name/auth-sessions/:id/qr`      | `workspaceChannelAuthQr()`     |
+| Cancel           | `DELETE /workspace/channels/:name/auth-sessions/:id`      | `cancelWorkspaceChannelAuth()` |
+| Commit           | `POST /workspace/channels/:name/auth-sessions/:id/commit` | `commitWorkspaceChannelAuth()` |
+
+For a secondary workspace, use
+`/workspaces/:workspace/channels/:name/auth-sessions...` or the same helpers on
+`client.workspaceByCwd(cwd)`. Begin and Commit bodies contain only the
+configured `channelType`. Every request must send the same non-empty
+`X-Qwen-Client-Id`; the daemon binds ownership to the exact runtime, canonical
+workspace, instance name, channel type, and client id. Unknown, ambiguous, or
+untrusted workspace targets fail instead of falling back to primary. Begin,
+Cancel, and Commit use the strict mutation gate; Status and QR use the normal
+bearer gate.
+
+An auth session expires ten minutes after Begin. Its public state progresses
+through `requesting`, `awaiting_scan`, optional `scanned` or `refreshing`, and
+`ready`, then a terminal `committed`, `cancelled`, `expired`, or `error` state.
+Only one active session is allowed for the same ownership key. The public
+session contains only its id, state, expiry, QR revision, and an optional
+sanitized error. Provider credentials remain in daemon memory while the state
+is `ready`; they are not durable until the owning client explicitly calls
+Commit. Cancellation, expiry, workspace removal, or daemon shutdown clears
+that private value. Terminal status is retained briefly for polling and then
+reads return not found.
+
+The QR route returns a daemon-rendered SVG rather than the provider payload,
+with `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`. Clients
+should refetch it when `qrRevision` changes. A successful Commit writes the
+credential to that instance's daemon-scoped state and returns the current
+Channel management snapshot; it does not start or restart the worker.
+
+Daemon workers normally read only state scoped by canonical workspace,
+instance name, and channel type. Read-only migration from older standalone
+storage is allowed only when daemon capability metadata proves that the worker
+targets the primary trusted workspace and the complete workspace `channels`
+map contains exactly one configured instance of that type. Selecting one of
+multiple same-type instances does not qualify. Secondary, untrusted,
+unregistered, ambiguous, and legacy-metadata-only runtimes never fall back.
+Scoped state wins; if it is missing or corrupt and the proof holds, QQ may read
+only that instance's exact legacy name file and WeChat may read only its legacy
+singleton state directory. A legacy read never deletes or rewrites the old
+state. A later successful Commit writes scoped state, completing the copy on
+save.
 
 The daemon reads each channel's settings (tokens, `proxy`, per-channel `model`) when its worker starts. To re-read settings without changing the committed selection, call `POST /workspace/channel/reload` (SDK `client.reloadChannelWorker()`, or `qwen channel reload`). Reload re-resolves workspace ownership and restarts selected workers through the same rollback-safe reconcile path. The `channel_control` capability is present whenever runtime control is wired; `channel_reload` is present only while the manager is enabled. Persisted threads are restored from disk.
 

@@ -27,6 +27,31 @@ qwen channel start my-qq
 # Scan the QR code in the terminal with your QQ app
 ```
 
+### Authenticate from a daemon client
+
+If `qwen serve` advertises the `channel_auth` capability, a browser or SDK
+client can begin authentication for a configured QQ instance, display the
+daemon-rendered QR SVG, poll until the session is `ready`, and explicitly
+commit it. App credentials remain only in daemon memory until Commit, and the
+session expires ten minutes after Begin. Cancellation, workspace removal,
+daemon shutdown, or expiry discards uncommitted credentials. Commit writes to
+that exact instance's workspace-scoped daemon state and does not start or
+restart the channel. See
+[Authenticate QQ and WeChat from a daemon client](../../qwen-serve#authenticate-qq-and-wechat-from-a-daemon-client)
+for routes, SDK helpers, ownership, and QR response security.
+
+Daemon startup normally reads only the scoped credential file. It may read the
+exact legacy `~/.qwen/channels/<safe-name>-credentials.json` file read-only
+only when daemon metadata proves this is the primary trusted workspace and the
+workspace's complete `channels` map contains exactly one configured QQ
+instance. Selecting one QQ instance while another is configured does not
+qualify; secondary, untrusted, or ambiguous workspaces never fall back. Scoped
+credentials take precedence; missing or corrupt scoped credentials may use the
+legacy name file only with that proof. The legacy file is not deleted or
+rewritten. A later successful browser Commit writes the scoped file, so the
+credential is copied only after a successful save. Standalone QR login and its
+legacy name-based storage remain unchanged.
+
 ### Manual Configuration (Developer Portal)
 
 You can also use credentials from the [QQ Bot Open Platform](https://q.qq.com/) developer portal if you already have an app registered there:
@@ -167,6 +192,7 @@ Token refresh continues across WebSocket reconnects — the channel never goes o
 
 - The QR code is displayed in the terminal. Scan it with your QQ mobile app (Me → Scan)
 - If the QR code expires (typically after a few minutes), restart the channel to get a new one
+- For daemon browser authentication, refetch the QR when `qrRevision` changes and Commit only after the session reports `ready`; the whole auth session expires after ten minutes
 
 ### Markdown messages appear as plain text
 

@@ -41,6 +41,33 @@ Add the channel to `~/.qwen/settings.json`:
 
 Note: WeChat channels do not use a `token` field — credentials come from the QR login step.
 
+### Authenticate from a daemon client
+
+If `qwen serve` advertises the `channel_auth` capability, a browser or SDK
+client can start an auth session for a configured WeChat instance, render the
+daemon-provided QR SVG, poll until the session is `ready`, and explicitly
+commit it. The confirmed account remains only in daemon memory until Commit;
+the session expires ten minutes after it starts. Cancelling it, removing its
+workspace, shutting down the daemon, or allowing it to expire discards the
+uncommitted account. Commit writes the account to that exact instance's
+workspace-scoped daemon state and does not start or restart the channel. See
+[Authenticate QQ and WeChat from a daemon client](../../qwen-serve#authenticate-qq-and-wechat-from-a-daemon-client)
+for routes, SDK helpers, ownership, and QR response security.
+
+Daemon startup does not normally read the standalone
+`~/.qwen/channels/weixin/account.json` file (or the directory selected by
+`WEIXIN_STATE_DIR`). It may use that singleton legacy account read-only only
+when daemon metadata proves this is the primary trusted workspace and the
+workspace's complete `channels` map contains exactly one configured WeChat
+instance. Selecting one WeChat instance while another is configured does not
+qualify, and secondary, untrusted, or ambiguous workspaces never fall back.
+Scoped state takes precedence; missing or corrupt scoped state may use the
+legacy account only with that proof. The legacy file is not deleted or
+rewritten. A later successful browser Commit writes the scoped account, so the
+credential is copied only after a successful save. The standalone
+`qwen channel configure-weixin` and no-argument account lookup remain
+unchanged.
+
 ### 3. Start the channel
 
 ```bash
@@ -89,6 +116,8 @@ WeChat channels support all the standard channel options (see [Channel Overview]
 ### "WeChat account not configured"
 
 Run `qwen channel configure-weixin` to log in via QR code first.
+For a daemon-managed instance, use its browser auth session and Commit before
+starting or restarting the instance.
 
 ### "Session expired (errcode -14)"
 
