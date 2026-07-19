@@ -229,9 +229,6 @@ export default {
     'obrir la documentació completa de Qwen Code al navegador',
   'Configuration not available.': 'Configuració no disponible.',
   'Connect an LLM provider': 'Connectar un proveïdor LLM',
-  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
-    "Copia l'última resposta de la IA al porta-retalls (/copy N per a l'N-èsima)",
-
   // ============================================================================
   // Ordres - Agents
   // ============================================================================
@@ -1417,7 +1414,6 @@ export default {
   'Press Ctrl+C again to exit.': 'Premeu Ctrl+C de nou per sortir.',
   'Press Ctrl+D again to exit.': 'Premeu Ctrl+D de nou per sortir.',
   'Press Esc again to clear.': 'Premeu Esc de nou per esborrar.',
-  'Press ↑ to edit queued messages': 'Premeu ↑ per editar els missatges en cua',
 
   // ============================================================================
   // Estat MCP
@@ -2185,4 +2181,570 @@ export default {
     "L'enregistrament de la sessió s'ha aturat després d'un error d'escriptura. Els missatges nous de la sessió afectada no es desaran. Comproveu l'espai de disc i els permisos i, després, inicieu una sessió nova per reprendre l'enregistrament. Consulteu el registre de depuració per obtenir-ne més informació.",
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
     "L'enregistrament de la sessió s'ha aturat després d'un error d'escriptura. Els missatges nous de la sessió afectada no es desaran. Comproveu l'espai de disc i els permisos i, després, executeu `/clear` per iniciar una sessió nova que es pugui enregistrar. Consulteu el registre de depuració per obtenir-ne més informació.",
+
+  // ============================================================================
+  // Gestor d'extensions (pestanyes Instal·lades / Descobreix / Fonts)
+  // ============================================================================
+  'Cannot disable an extension-provided MCP server here.':
+    'Aquí no es pot desactivar un MCP server proporcionat per una extensió.',
+  'Cleared authentication for "{{name}}".':
+    "S'ha esborrat l'autenticació de «{{name}}».",
+  'MCP "{{name}}" disabled for all projects.':
+    'MCP «{{name}}» desactivat per a tots els projectes.',
+  'Enable extension "{{name}}" to manage this MCP server.':
+    "Activeu l'extensió «{{name}}» per gestionar aquest MCP server.",
+  'Extension-provided MCP servers cannot be favorited.':
+    'No es poden marcar com a preferits els MCP servers proporcionats per una extensió.',
+  'User level': "Nivell d'usuari",
+  'Project level': 'Nivell de projecte',
+  'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.':
+    "L'enganxament d'imatges del porta-retalls no està disponible perquè no s'ha pogut carregar el mòdul natiu del porta-retalls. Reinstal·leu Qwen Code o useu el mètode d'instal·lació per npm.",
+  ' · {{marketplace}} (Tab to clear)': ' · {{marketplace}} (Tab per netejar)',
+  '"{{name}}" {{state}}.': '«{{name}}» {{state}}.',
+  '(Tab / ←→ to switch)': '(Tab / ←→ per canviar)',
+  '+ Add new marketplace': '+ Afegir un mercat nou',
+  '+ Install a new extension': '+ Instal·lar una extensió nova',
+  Actions: 'Accions',
+  'Add Marketplace': 'Afegir un mercat',
+  'Add a marketplace in the Sources tab to discover extensions.':
+    'Afegiu un mercat a la pestanya Fonts per descobrir extensions.',
+  'Add new': 'Afegir de nou',
+  'Add to Favorites': 'Afegir als preferits',
+  'Added "{{name}}" to favorites.': "S'ha afegit «{{name}}» als preferits.",
+  'Added marketplace "{{name}}".': "S'ha afegit el mercat «{{name}}».",
+  'Adding...': 'Afegint...',
+  'Back to extension list': "Tornar a la llista d'extensions",
+  'Browse extensions ({{count}})': 'Explorar extensions ({{count}})',
+  'By: {{a}}': 'Per: {{a}}',
+  'Change scope': "Canviar l'àmbit",
+  'Change scope for "{{name}}":': "Canviar l'àmbit de «{{name}}»:",
+  'Changing scope...': "Canviant l'àmbit...",
+  'Uninstalling "{{name}}"...': 'Desinstal·lant «{{name}}»...',
+  'Update available for "{{name}}".':
+    'Hi ha una actualització disponible per a «{{name}}».',
+  '"{{name}}" is already up to date.': '«{{name}}» ja està al dia.',
+  'Checking "{{name}}" for updates...':
+    'Comprovant actualitzacions per a «{{name}}»...',
+  '"{{name}}" does not support update checks.':
+    "«{{name}}» no admet la comprovació d'actualitzacions.",
+  '"{{name}}" cannot be update-checked (Claude marketplace plugins update by reinstalling).':
+    "No es poden comprovar actualitzacions per a «{{name}}» (els connectors del mercat de Claude s'actualitzen reinstal·lant-los).",
+  'Failed to check "{{name}}" for updates.':
+    "No s'han pogut comprovar les actualitzacions de «{{name}}».",
+  'Claude plugin marketplace': 'Mercat de connectors de Claude',
+  Commands: 'Ordres',
+  'Components:': 'Components:',
+  'Could not load this marketplace.': "No s'ha pogut carregar aquest mercat.",
+  'Current: {{scope}}': 'Actual: {{scope}}',
+  Disabled: 'Desactivat',
+  Discover: 'Descobrir',
+  'Disabling "{{name}}"...': 'Desactivant «{{name}}»...',
+  'Disabling MCP "{{name}}"...': 'Desactivant MCP «{{name}}»...',
+  'Discover extensions': 'Descobrir extensions',
+  'Discovering extensions...': 'Descobrint extensions...',
+  'Enabling "{{name}}"...': 'Activant «{{name}}»...',
+  'Enabling MCP "{{name}}"...': 'Activant MCP «{{name}}»...',
+  'Enter extension source:': "Introduïu la font de l'extensió:",
+  'Enter marketplace source (Claude format):':
+    'Introduïu la font del mercat (format Claude):',
+  'Examples:': 'Exemples:',
+  'Extension details': "Detalls de l'extensió",
+  'Extension v{{version}}': 'Extensió v{{version}}',
+  'Extensions are not available in this environment.':
+    'Les extensions no estan disponibles en aquest entorn.',
+  'Failed to open {{url}}': "No s'ha pogut obrir {{url}}",
+  Favorites: 'Preferits',
+  'Global (User Scope)': "Global (àmbit d'usuari)",
+  'Install Extension': 'Instal·lar extensió',
+  'Install for the current workspace (project scope)':
+    "Instal·lar per a l'espai de treball actual (àmbit del projecte)",
+  'Install for you (user scope)': "Instal·lar per a vós (àmbit d'usuari)",
+  'Install {{count}} extension(s) to which scope?':
+    'En quin àmbit voleu instal·lar {{count}} extensió/ns?',
+  Installed: 'Instal·lades',
+  'Installed extension "{{name}}".': "S'ha instal·lat l'extensió «{{name}}».",
+  'Installed extensions ({{count}}):': 'Extensions instal·lades ({{count}}):',
+  'Installed {{count}} extension(s).': "S'ha instal·lat {{count}} extensió/ns.",
+  '{{name}}: installed, but the scope rollback failed — it may be disabled at all scopes; re-enable it from the Installed tab.':
+    "{{name}}: instal·lada, però la restauració de l'àmbit ha fallat — pot estar desactivada a tots els àmbits; reactiveu-la des de la pestanya Instal·lades.",
+  'Could not change scope, and the rollback also failed — "{{name}}" may be disabled at all scopes. Re-enable it from the Installed tab. ({{error}})':
+    "No s'ha pogut canviar l'àmbit i la restauració també ha fallat — «{{name}}» pot estar desactivada a tots els àmbits. Reactiveu-la des de la pestanya Instal·lades. ({{error}})",
+  'Installed {{ok}}, failed {{fail}}: {{detail}}':
+    'Instal·lades {{ok}}, fallides {{fail}}: {{detail}}',
+  'Installing...': 'Instal·lant...',
+  'Last updated: {{date}}': 'Darrera actualització: {{date}}',
+  MCP: 'MCP',
+  'MCP "{{name}}" {{state}}.': 'MCP «{{name}}» {{state}}.',
+  'MCP servers': 'MCP servers',
+  'Mark for Update': 'Marcar per actualitzar',
+  Marketplaces: 'Mercats',
+  'No extensions discovered.': "No s'ha descobert cap extensió.",
+  'No extensions match your search.':
+    'Cap extensió coincideix amb la vostra cerca.',
+  'No extensions or marketplaces added yet.':
+    "Encara no s'ha afegit cap extensió ni mercat.",
+  'No homepage available.': 'No hi ha pàgina principal disponible.',
+  'No installable extensions selected.':
+    "No s'ha seleccionat cap extensió instal·lable.",
+  'No plugins or MCP servers installed.':
+    'No hi ha connectors ni MCP servers instal·lats.',
+  None: 'Cap',
+  'Note: Uninstall permanently removes this extension.':
+    'Nota: Desinstal·lar elimina aquesta extensió permanentment.',
+  'Open homepage': 'Obrir la pàgina principal',
+  'Project (Workspace)': 'Projecte (espai de treball)',
+  'Refreshed {{count}} extension(s).': "S'han refrescat {{count}} extensió/ns.",
+  'Remove from Favorites': 'Treure dels preferits',
+  'Remove marketplace': 'Treure el mercat',
+  'Remove marketplace "{{name}}"?': 'Voleu treure el mercat «{{name}}»?',
+  'Removed "{{name}}" from favorites.': "S'ha tret «{{name}}» dels preferits.",
+  'Removed marketplace "{{name}}".': "S'ha tret el mercat «{{name}}».",
+  'Scope:': 'Àmbit:',
+  'Set "{{name}}" scope to {{scope}}.':
+    "S'ha establert l'àmbit de «{{name}}» a {{scope}}.",
+  Sources: 'Fonts',
+  'Type to search · Space to toggle · Enter to view · Ctrl+R refresh · Esc to go back':
+    'Escriviu per cercar · Espai per canviar · Retorn per veure · Ctrl+R refrescar · Esc per tornar',
+  Uninstall: 'Desinstal·lar',
+  'Uninstalled "{{name}}".': "S'ha desinstal·lat «{{name}}».",
+  'Update Now': 'Actualitzar ara',
+  'Update marketplace': 'Actualitzar el mercat',
+  'Update marketplace (last updated {{date}})':
+    'Actualitzar el mercat (darrera actualització {{date}})',
+  'Could not update marketplace "{{name}}".':
+    "No s'ha pogut actualitzar el mercat «{{name}}».",
+  'Updated "{{name}}".': "S'ha actualitzat «{{name}}».",
+  'Updated marketplace "{{name}}".': "S'ha actualitzat el mercat «{{name}}».",
+  'Use the Discover tab to find and install plugins.':
+    'Useu la pestanya Descobrir per trobar i instal·lar connectors.',
+  'Version: {{v}}': 'Versió: {{v}}',
+  'Will install:': 'Instal·larà:',
+  'Would open: {{url}}': 'Obriria: {{url}}',
+  'Y/Enter to confirm · N/Esc to cancel':
+    'Y/Retorn per confirmar · N/Esc per cancel·lar',
+  'Press R to retry · Esc to go back':
+    'Premeu R per tornar-ho a provar · Esc per tornar',
+  'Enter to select · R refresh · Esc to go back':
+    'Retorn per seleccionar · R per refrescar · Esc per tornar',
+  'from {{marketplace}}': 'de {{marketplace}}',
+  installed: 'instal·lada',
+  '{{count}} Agents': '{{count}} agents',
+  '{{count}} Commands': '{{count}} ordres',
+  '{{count}} MCP': '{{count}} MCP',
+  '{{count}} Skills': '{{count}} habilitats',
+  '{{count}} available extensions': '{{count}} extensions disponibles',
+  '↑ more above': '↑ més amunt',
+  '↑↓ navigate · Enter open · d remove marketplace · Esc close':
+    '↑↓ navegar · Retorn per obrir · d treure el mercat · Esc per tancar',
+  '↑↓ navigate · Enter select · Esc close':
+    '↑↓ navegar · Retorn per seleccionar · Esc per tancar',
+  '↑↓ navigate · Enter select · d remove marketplace · Esc close':
+    '↑↓ navegar · Retorn per seleccionar · d treure el mercat · Esc per tancar',
+  '↑↓ navigate · Space enable/disable · f favorite · Enter details · Esc close':
+    '↑↓ navegar · Espai per activar/desactivar · f preferit · Retorn per veure els detalls · Esc per tancar',
+  '↓ more below': '↓ més avall',
+  '⚠ Make sure you trust an extension before installing, updating, or using it. We cannot verify what MCP servers, files, or other software an extension includes, or that it works as intended. See the extension homepage for more information.':
+    "⚠ Assegureu-vos que confieu en una extensió abans d'instal·lar-la, actualitzar-la o usar-la. No podem verificar quins MCP servers, fitxers o altres programaris inclou una extensió, ni que funcioni tal com es pretén. Consulteu la pàgina principal de l'extensió per a més informació.",
+
+  // ============================================================================
+  // Noms d'eines (toolDisplayName.*)
+  // ============================================================================
+  'toolDisplayName.Edit': 'Edita',
+  'toolDisplayName.WriteFile': 'Escriu fitxer',
+  'toolDisplayName.ReadFile': 'Llegeix fitxer',
+  'toolDisplayName.Grep': 'Grep',
+  'toolDisplayName.Glob': 'Glob',
+  'toolDisplayName.Shell': 'Executa ordre',
+  'toolDisplayName.Shell Command': 'Ordre de shell',
+  'toolDisplayName.TodoList': 'Llista de tasques',
+  'toolDisplayName.SaveMemory': 'Desa a la memòria',
+  'toolDisplayName.Agent': 'Agent',
+  'toolDisplayName.Artifact': 'Artefacte',
+  'toolDisplayName.RecordArtifact': "Enregistra l'artefacte",
+  'toolDisplayName.Skill': 'Habilitat',
+  'toolDisplayName.EnterPlanMode': 'Entra al mode de planificació',
+  'toolDisplayName.ExitPlanMode': 'Surt del mode de planificació',
+  'toolDisplayName.WebFetch': 'Descàrrega web',
+  'toolDisplayName.WebSearch': 'Cerca web',
+  'toolDisplayName.ListFiles': 'Llista fitxers',
+  'toolDisplayName.Lsp': 'LSP',
+  'toolDisplayName.AskUserQuestion': "Pregunta a l'usuari",
+  'toolDisplayName.CronCreate': 'Crea tasca programada',
+  'toolDisplayName.CronList': 'Llista tasques programades',
+  'toolDisplayName.CronDelete': 'Suprimeix tasca programada',
+  'toolDisplayName.LoopWakeup': 'Desperta el bucle',
+  'toolDisplayName.CreateSubSession': 'Crea subsessió',
+  'toolDisplayName.TaskCreate': 'Crea tasca',
+  'toolDisplayName.TaskUpdate': 'Actualitza tasca',
+  'toolDisplayName.TaskList': 'Llista tasques',
+  'toolDisplayName.TaskStop': 'Atura tasca',
+  'toolDisplayName.TeamCreate': 'Crea equip',
+  'toolDisplayName.TeamDelete': 'Suprimeix equip',
+  'toolDisplayName.TeamPlanApproval': "Aprovació del pla d'equip",
+  'toolDisplayName.SendMessage': 'Envia missatge',
+  'toolDisplayName.StructuredOutput': 'Sortida estructurada',
+  'toolDisplayName.Monitor': 'Monitor',
+  'toolDisplayName.NotebookEdit': 'Edita notebook',
+  'toolDisplayName.ToolSearch': "Cerca d'eines",
+  'toolDisplayName.EnterWorktree': "Entra a l'arbre de treball",
+  'toolDisplayName.ExitWorktree': "Surt de l'arbre de treball",
+  'toolDisplayName.Workflow': 'Flux de treball',
+  'toolDisplayName.ReadMcpResource': 'Llegeix recurs MCP',
+
+  // ============================================================================
+  // Ordres noves i noves cadenes
+  // ============================================================================
+  'show paths for current session files and logs':
+    'mostra els camins dels fitxers i registres de la sessió actual',
+  'Move this session to a new working directory':
+    'Mou aquesta sessió a un directori de treball nou',
+  'Fast context compression without AI. Strips old tool outputs and thinking parts.':
+    "Compressió ràpida del context sense IA. Elimina sortides d'eines antigues i parts de pensament.",
+  'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest message, index = block number':
+    'Copia al porta-retalls: resposta, codi (per llenguatge), LaTeX o Mermaid. N = N-èsim missatge més recent, índex = número de bloc',
+  'Show working-tree change stats versus HEAD':
+    "Mostra les estadístiques de canvis de l'arbre de treball respecte a HEAD",
+  'Could not determine current working directory.':
+    "No s'ha pogut determinar el directori de treball actual.",
+  'Failed to compute git diff stats':
+    "No s'han pogut calcular les estadístiques del diff de git",
+  'No diff available. Either this is not a git repository, HEAD is missing, or a merge/rebase/cherry-pick/revert is in progress.':
+    'No hi ha diff disponible. O bé no és un repositori git, falta HEAD, o hi ha un merge/rebase/cherry-pick/revert en curs.',
+  'Clean working tree — no changes against HEAD.':
+    "L'arbre de treball és net — cap canvi respecte a HEAD.",
+  '{{count}} file changed, +{{added}} / -{{removed}}':
+    '{{count}} fitxer canviat, +{{added}} / -{{removed}}',
+  '{{count}} files changed, +{{added}} / -{{removed}}':
+    '{{count}} fitxers canviats, +{{added}} / -{{removed}}',
+  '{{count}} file changed': '{{count}} fitxer canviat',
+  '{{count}} files changed': '{{count}} fitxers canviats',
+  '…and {{hidden}} more (showing first {{shown}})':
+    '…i {{hidden}} més (es mostren els primers {{shown}})',
+  '(binary)': '(binari)',
+  '(binary, new)': '(binari, nou)',
+  '(new)': '(nou)',
+  '(new, partial)': '(nou, parcial)',
+  '(deleted)': '(suprimit)',
+  '(binary, deleted)': '(binari, suprimit)',
+  'Create a reusable skill from a knowledge source (file, URL, conversation, or text).':
+    "Crea una habilitat reutilitzable a partir d'una font de coneixement (fitxer, URL, conversa o text).",
+  'Show skill-specific usage statistics.':
+    "Mostra estadístiques d'ús específiques de l'habilitat.",
+  'The scope to install the extension in: "user" (global, default) or "project" (current workspace only).':
+    "L'àmbit on instal·lar l'extensió: «user» (global, per defecte) o «project» (només l'espai de treball actual).",
+  'Extension "{{name}}" installed successfully and enabled for the current workspace.':
+    "L'extensió «{{name}}» s'ha instal·lat correctament i està activada per a l'espai de treball actual.",
+  'Marketplace "{{name}}" not found.': "No s'ha trobat el mercat «{{name}}».",
+  'No marketplace sources added yet.':
+    "Encara no s'ha afegit cap font de mercat.",
+  'No marketplaces added yet.': "Encara no s'ha afegit cap mercat.",
+  'Adds a marketplace source (Claude format).':
+    'Afegeix una font de mercat (format Claude).',
+  'The marketplace source to add: owner/repo (GitHub), a git or https URL, or a local path.':
+    'La font del mercat a afegir: propietari/repo (GitHub), una URL git o https, o un camí local.',
+  'Removes a marketplace source.': 'Treu una font de mercat.',
+  'The name of the marketplace to remove.': 'El nom del mercat a treure.',
+  'Lists configured marketplace sources.':
+    'Llista les fonts de mercat configurades.',
+  'Re-fetches a marketplace source and its plugin listing.':
+    'Torna a descarregar una font de mercat i la seva llista de connectors.',
+  'The name of the marketplace to update.': 'El nom del mercat a actualitzar.',
+  'Manage marketplace sources for discovering extensions.':
+    'Gestiona les fonts de mercat per descobrir extensions.',
+  'You need at least one command before continuing.':
+    'Cal com a mínim una ordre abans de continuar.',
+  '--registry is only applicable for npm extensions.':
+    "--registry només s'aplica a extensions npm.",
+  'Custom npm registry URL (only for npm extensions).':
+    'URL de registre npm personalitzat (només per a extensions npm).',
+  '--ref is not applicable for npm extensions. Use @version suffix instead (e.g. @scope/package@1.2.0).':
+    "--ref no s'aplica a extensions npm. Useu el sufix @versió (p. ex. @scope/paquet@1.2.0).",
+  'Installs an extension from a git repository URL, local path, scoped npm package (@scope/name), or claude marketplace (marketplace-url:plugin-name).':
+    "Instal·la una extensió des d'una URL de repositori git, un camí local, un paquet npm amb àmbit (@scope/nom) o del mercat de Claude (marketplace-url:nom-del-connector).",
+  Description: 'Descripció',
+  'Delete Session': 'Suprimir sessió',
+  'List installed extensions': 'Llistar les extensions instal·lades',
+  'When a new todo item is created': 'Quan es crea una tasca nova',
+  'When a todo item is marked as completed':
+    'Quan una tasca es marca com a completada',
+  'Input to command is JSON with todo_id, todo_content, todo_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    "L'entrada de l'ordre és un JSON amb todo_id, todo_content, todo_status, all_todos i phase. En validació, retorna un JSON amb decision (allow/block/deny) i reason. A postWrite, block/deny s'ignora.",
+  'Input to command is JSON with todo_id, todo_content, previous_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    "L'entrada de l'ordre és un JSON amb todo_id, todo_content, previous_status, all_todos i phase. En validació, retorna un JSON amb decision (allow/block/deny) i reason. A postWrite, block/deny s'ignora.",
+  'allow todo creation': 'permet crear la tasca',
+  'block todo creation and show reason to model':
+    'bloqueja la creació de la tasca i mostra el motiu al model',
+  'allow todo completion': 'permet completar la tasca',
+  'block todo completion and show reason to model':
+    'bloqueja la finalització de la tasca i mostra el motiu al model',
+  'the background agent could not be started.':
+    "no s'ha pogut iniciar l'agent en segon pla.",
+  'Import MCP servers from Claude configs':
+    'Importar MCP servers de les configuracions de Claude',
+  'View resources': 'Veure recursos',
+  resource: 'recurs',
+  resources: 'recursos',
+  'needs authentication': 'necessita autenticació',
+  'No resources available for this server.':
+    'No hi ha recursos disponibles per a aquest servidor.',
+  'Resources for {{serverName}}': 'Recursos de {{serverName}}',
+  'No resource selected': 'Cap recurs seleccionat',
+  'Resource Detail': 'Detall del recurs',
+  'URI:': 'URI:',
+  'MIME Type:': 'Tipus MIME:',
+  'Size:': 'Mida:',
+  '{{count}} bytes': '{{count}} bytes',
+  'Reference in chat': 'Referenciar al xat',
+  'MCP server': 'MCP server',
+  'MCP resource server': 'Servidor de recursos MCP',
+
+  // ============================================================================
+  // Model, veu, visió
+  // ============================================================================
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).':
+    'Canvia el model per a aquesta sessió (--fast per al model de suggeriments, --voice per al model de transcripció de veu, [model-id] per canviar immediatament).',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
+    "Canvia el model per a aquesta sessió (--fast per al model de suggeriments, --voice per al model de transcripció de veu, --vision per al model pont de visió, --project per persistir a la configuració del projecte, --global per persistir a la configuració d'usuari, [model-id] per canviar immediatament, o [model-id] [prompt] per executar un únic prompt en un altre model; el prompt en línia s'envia literalment sense expansió de @fitxer).",
+  "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.":
+    "La sobreescriptura d'un únic ús en línia no s'admet en aquest mode — executeu primer '/model {{model}}' i, després, envieu el vostre prompt.",
+  "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.":
+    "La sobreescriptura d'un únic ús en línia no pot canviar de proveïdor. «{{model}}» pertany a un proveïdor diferent — executeu primer '/model {{model}}' i, després, envieu el vostre prompt.",
+  "⚠ '{{model}}' is not a known image-capable model; the vision bridge may fail on images.":
+    "⚠ «{{model}}» no és un model conegut amb suport d'imatges; el pont de visió pot fallar amb les imatges.",
+  'Toggle voice dictation input': 'Activar/desactivar el dictat de veu',
+  'Set the model for voice transcription':
+    'Establir el model per a la transcripció de veu',
+  'Set the image-capable model used to transcribe images for a text-only main model':
+    "Establir el model amb suport d'imatges usat per transcriure imatges per a un model principal només de text",
+  'Persist the model selection to the project settings (workspace scope)':
+    "Persistir la selecció de model a la configuració del projecte (àmbit de l'espai de treball)",
+  'Persist the model selection to the user settings (global scope)':
+    "Persistir la selecció de model a la configuració d'usuari (àmbit global)",
+  'Select Fast Model': 'Seleccionar el model ràpid',
+  'Select Vision Model': 'Seleccionar el model de visió',
+  'Select Voice Model': 'Seleccionar el model de veu',
+  'Vision Model': 'Model de visió',
+  'Voice Model': 'Model de veu',
+  'Selected voice model is unavailable.':
+    'El model de veu seleccionat no està disponible.',
+  "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.":
+    "El model de veu «{{model}}» està configurat més d'una vegada. Elimineu els identificadors de model duplicats abans de seleccionar-lo per a la transcripció de veu.",
+  'Voice dictation: {{status}} (mode: {{mode}}, {{modelText}}).':
+    'Dictat de veu: {{status}} (mode: {{mode}}, {{modelText}}).',
+  'model: {{voiceModel}}': 'model: {{voiceModel}}',
+  'no voice model selected': 'cap model de veu seleccionat',
+  'Voice dictation disabled.': 'Dictat de veu desactivat.',
+  'Usage: /voice [hold|tap|off|status]': 'Ús: /voice [hold|tap|off|status]',
+  'No voice model selected. Run /model --voice to choose one before enabling voice dictation.':
+    "Cap model de veu seleccionat. Executeu /model --voice per triar-ne un abans d'activar el dictat de veu.",
+  'Voice dictation enabled (tap mode). Tap Space at an empty prompt to start, tap again or pause to stop and submit, using {{voiceModel}}.':
+    'Dictat de veu activat (mode toc). Toqueu Espai amb un prompt buit per començar, toqueu de nou o feu una pausa per aturar i enviar, usant {{voiceModel}}.',
+  'Voice dictation enabled (hold mode). Hold Space at an empty prompt to dictate with {{voiceModel}}.':
+    'Dictat de veu activat (mode manteniment). Mantingueu premut Espai amb un prompt buit per dictar amb {{voiceModel}}.',
+  'No models are configured.': 'No hi ha cap model configurat.',
+  'Configured models: {{models}}.': 'Models configurats: {{models}}.',
+  'Configure a unique model id in settings.modelProviders or run /model --voice to select an available model.':
+    'Configureu un identificador de model únic a settings.modelProviders o executeu /model --voice per seleccionar un model disponible.',
+  "Voice model '{{modelName}}' is not configured.":
+    'El model de veu «{{modelName}}» no està configurat.',
+  "Voice model '{{modelName}}' cannot be used for transcription.":
+    'El model de veu «{{modelName}}» no es pot usar per a la transcripció.',
+  "Voice model '{{modelName}}' cannot be used for transcription. Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.":
+    'El model de veu «{{modelName}}» no es pot usar per a la transcripció. Configureu un model compatible amb OpenAI amb baseUrl a settings.modelProviders.',
+  'Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.':
+    'Configureu un model compatible amb OpenAI amb baseUrl a settings.modelProviders.',
+  'Microphone access is denied. Enable it for your terminal in System Settings → Privacy & Security → Microphone, then restart voice dictation.':
+    "L'accés al micròfon està denegat. Activeu-lo per al vostre terminal a Configuració del sistema → Privadesa i seguretat → Micròfon, després reinicieu el dictat de veu.",
+  'Voice dictation is not supported on {{platform}}.':
+    'El dictat de veu no està suportat a {{platform}}.',
+  'Voice dictation needs microphone access, which is unavailable in this WSL session. Use WSLg/PulseAudio, or run Qwen Code on a host with a microphone.':
+    'El dictat de veu necessita accés al micròfon, que no està disponible en aquesta sessió WSL. Useu WSLg/PulseAudio o executeu Qwen Code en un amfitrió amb micròfon.',
+  'Voice dictation needs microphone access. macOS will ask the first time you record — approve it, then start again. Your first recording may be empty while the dialog is open.':
+    'El dictat de veu necessita accés al micròfon. macOS ho preguntarà la primera vegada que enregistreu — aproveu-ho i, després, torneu a començar. El primer enregistrament pot estar buit mentre el diàleg estigui obert.',
+  'Voice: recording': 'Veu: enregistrant',
+  'Voice: transcribing': 'Veu: transcrivint',
+  'Voice: refining': 'Veu: refinant',
+  'listening…': 'escoltant…',
+  'transcribing…': 'transcrivint…',
+  'refining…': 'refinant…',
+
+  // ============================================================================
+  // Plans i subscripcions
+  // ============================================================================
+  'For teams · Paid · Up to 6,000 requests/5 hrs · All Alibaba Cloud Coding Plan Models':
+    "Per a equips · De pagament · Fins a 6.000 sol·licituds/5 h · Tots els models del Coding Plan d'Alibaba Cloud",
+  'For individual developers · Pay per model call · 5-hour/weekly quotas':
+    'Per a desenvolupadors individuals · Pagament per crida al model · Quotes de 5 h/setmanals',
+  Subscribe: 'Subscriure',
+  'Paid subscription plans from Alibaba Cloud ModelStudio':
+    "Plans de subscripció de pagament d'Alibaba Cloud ModelStudio",
+  'Select Subscription Plan': 'Seleccionar el pla de subscripció',
+  'Alibaba Cloud Token Plan': "Token Plan d'Alibaba Cloud",
+  'Pay-as-you-go tokens · Configure ModelStudio standard API key':
+    'Tokens de pagament per ús · Configura la clau API estàndard de ModelStudio',
+  'For individuals · Pay-as-you-go tokens · Dedicated Token Plan endpoint':
+    'Per a particulars · Tokens de pagament per ús · Endpoint dedicat de Token Plan',
+  'For teams/companies · Credits deducted by token usage · Dedicated API key and base URL':
+    "Per a equips/empreses · Crèdits descomptats per l'ús de tokens · Clau API i URL base dedicades",
+  'Token Plan documentation': 'Documentació del Token Plan',
+  ' (this project)': ' (aquest projecte)',
+  ' (global)': ' (global)',
+  'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.':
+    'Model de veu actual: {{voiceModel}}\nUseu «/model --voice <model-id>» per establir el model de veu.',
+  'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
+    'Model de visió actual: {{visionModel}}\nUseu «/model --vision <model-id>» per establir el model pont de visió.',
+  "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":
+    "El model de veu «{{modelName}}» és ambigu. Configureu un identificador de model únic abans d'usar /model --voice.",
+
+  // ============================================================================
+  // Cua de missatges i sessions
+  // ============================================================================
+  'Ctrl+Q to queue · ↑ to edit queued messages':
+    'Ctrl+Q per posar a la cua · ↑ per editar els missatges en cua',
+  'Enter to steer · Ctrl+Q to queue':
+    'Retorn per redirigir · Ctrl+Q per posar a la cua',
+  'Queue message for the next turn':
+    'Posar el missatge a la cua per al torn següent',
+  '{{count}} session': '{{count}} sessió',
+  '{{count}} sessions': '{{count}} sessions',
+  '{{count}} topic': '{{count}} tema',
+  '{{count}} topics': '{{count}} temes',
+  '{{count}} tokens': '{{count}} tokens',
+  '{{count}} tool call': '{{count}} crida a eina',
+  '{{count}} tool calls': '{{count}} crides a eines',
+  '{{count}} event': '{{count}} esdeveniment',
+  '{{count}} events': '{{count}} esdeveniments',
+  '{{count}} dropped': '{{count}} descartats',
+  'pid {{pid}}': 'pid {{pid}}',
+  'exit {{exitCode}}': 'sortida {{exitCode}}',
+  'Sessions reviewing': 'Sessions en revisió',
+  Progress: 'Progrés',
+  'Resume blocked': 'Represa bloquejada',
+  'Working dir': 'Directori de treball',
+  'Output file': 'Fitxer de sortida',
+  'Topics touched ({{count}})': 'Temes tocats ({{count}})',
+  '{{count}} more': '{{count}} més',
+  'to queue for the next turn': 'per posar a la cua per al torn següent',
+
+  // ============================================================================
+  // Token Plan / Coding Plan
+  // ============================================================================
+  'You can get your Token Plan API key here':
+    'Podeu obtenir la vostra clau API del Token Plan aquí',
+  'API key is stored in settings.env. You can migrate it to a .env file for better security.':
+    'La clau API es desa a settings.env. Podeu migrar-la a un fitxer .env per a més seguretat.',
+  'New model configurations are available for Alibaba Cloud Coding Plan. Update now?':
+    "Hi ha configuracions de model noves disponibles per al Coding Plan d'Alibaba Cloud. Voleu actualitzar ara?",
+  'Coding Plan configuration updated successfully. New models are now available.':
+    "La configuració del Coding Plan s'ha actualitzat correctament. Ja hi ha models nous disponibles.",
+  'Coding Plan API key not found. Please re-authenticate with Coding Plan.':
+    "No s'ha trobat la clau API del Coding Plan. Torneu-vos a autenticar amb el Coding Plan.",
+  'Enter Token Plan API Key': 'Introduïu la clau API del Token Plan',
+
+  // ============================================================================
+  // /config — obtenció/definició de paràmetres
+  // ============================================================================
+  'Get or set any setting by dot-path key':
+    'Obté o estableix qualsevol paràmetre per clau amb notació per punts',
+  'Invalid boolean value: "{{value}}". Use "true" or "false".':
+    'Valor booleà no vàlid: «{{value}}». Useu «true» o «false».',
+  'Cannot toggle a number setting. Provide a value: key=<number>.':
+    'No es pot commutar un paràmetre numèric. Doneu un valor: clau=<número>.',
+  'Invalid number value: "{{value}}".': 'Valor numèric no vàlid: «{{value}}».',
+  'Cannot toggle a string setting. Provide a value: key=<value>.':
+    'No es pot commutar un paràmetre de cadena. Doneu un valor: clau=<valor>.',
+  'Cannot toggle an enum setting. Provide one of: {{options}}.':
+    "No es pot commutar un paràmetre d'enumeració. Doneu-ne un de: {{options}}.",
+  'Invalid enum value: "{{value}}". Valid values: {{options}}.':
+    "Valor d'enumeració no vàlid: «{{value}}». Valors vàlids: {{options}}.",
+  'Setting "{{type}}" type cannot be set via /config. Edit settings.json directly.':
+    'El tipus de paràmetre «{{type}}» no es pot definir mitjançant /config. Editeu settings.json directament.',
+  'Unsupported setting type: "{{type}}".':
+    'Tipus de paràmetre no admès: «{{type}}».',
+  'Available settings:': 'Paràmetres disponibles:',
+  'Unknown setting key: "{{key}}". Did you mean "{{suggestion}}"?':
+    'Clau de paràmetre desconeguda: «{{key}}». Volíeu dir «{{suggestion}}»?',
+  'Unknown setting key: "{{key}}".':
+    'Clau de paràmetre desconeguda: «{{key}}».',
+  'Failed to set "{{key}}": {{error}}':
+    "No s'ha pogut establir «{{key}}»: {{error}}",
+  'Set {{key}} = {{value}}': 'Establert {{key}} = {{value}}',
+  '(This setting requires a restart to take effect.)':
+    '(Aquest paràmetre requereix reiniciar per aplicar-se.)',
+  '(Security-sensitive setting — verify you are not exposing credentials.)':
+    '(Paràmetre sensible per a la seguretat — verifiqueu que no exposeu credencials.)',
+  'Setting tools.approvalMode to "yolo" is blocked via /config for security reasons. Edit settings.json directly if you understand the risks.':
+    'Establir tools.approvalMode a «yolo» està bloquejat via /config per motius de seguretat. Editeu settings.json directament si enteneu els riscos.',
+  '(empty)': '(buit)',
+
+  // ============================================================================
+  // Ordres diverses
+  // ============================================================================
+  'Set a goal — keep working until the condition is met':
+    'Estableix un objectiu — continua treballant fins que es compleixi la condició',
+  'Show current process memory diagnostics':
+    'Mostra els diagnòstics de memòria del procés actual',
+  'Record a CPU profile for Chrome DevTools analysis':
+    'Enregistra un perfil de CPU per analitzar-lo amb Chrome DevTools',
+  'Roll back a standalone update to the previous version':
+    'Reverteix una actualització autònoma a la versió anterior',
+  'Rollback is not available in ACP mode.':
+    'La reversió no està disponible en mode ACP.',
+  'Rollback is only available for standalone installations.':
+    'La reversió només està disponible per a instal·lacions autònomes.',
+  'Rollback successful. Restart your terminal to use the previous version.':
+    'Reversió correcta. Reinicieu el terminal per usar la versió anterior.',
+  'Rollback failed:': 'La reversió ha fallat:',
+  'Rollback on Windows requires manual intervention. Rename qwen-code.old to qwen-code in your installation directory.':
+    "La reversió a Windows requereix intervenció manual. Reanomeneu qwen-code.old a qwen-code dins del directori d'instal·lació.",
+  'No compression needed.': 'No cal compressió.',
+
+  // ============================================================================
+  // Estadístiques de sessió
+  // ============================================================================
+  'Session duration: {{duration}}': 'Durada de la sessió: {{duration}}',
+  'Prompts: {{count}}': 'Prompts: {{count}}',
+  'API requests: {{count}}': 'Sol·licituds a la API: {{count}}',
+  'Tokens — prompt: {{prompt}}, output: {{output}}':
+    'Tokens — prompt: {{prompt}}, sortida: {{output}}',
+  'Tool calls: {{total}} ({{success}} ok, {{fail}} fail)':
+    'Crides a eines: {{total}} ({{success}} correctes, {{fail}} fallides)',
+  'Files: +{{added}} / -{{removed}} lines':
+    'Fitxers: +{{added}} / -{{removed}} línies',
+  prompt: 'prompt',
+  output: 'sortida',
+  cached: 'a la memòria cau',
+  'Estimated cost: ${{cost}}': 'Cost estimat: {{cost}} $',
+  'No model usage data yet.': "Encara no hi ha dades d'ús del model.",
+  'No tool usage data yet.': "Encara no hi ha dades d'ús d'eines.",
+  'N/A': 'N/D',
+  days: 'dies',
+  'Tool calls': 'Crides a eines',
+  'Code changes': 'Canvis de codi',
+  Name: 'Nom',
+  '↑ tabs · r to cycle dates · esc to close':
+    '↑ pestanyes · r per canviar de data · esc per tancar',
+  Cost: 'Cost',
+  Session: 'Sessió',
+  'Failed to load stats. Press r to retry.':
+    "No s'han pogut carregar les estadístiques. Premeu r per tornar-ho a provar.",
+  '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
+    "⚠️ Buit a l'historial: la conversa anterior s'ha perdut abans d'aquest punt (interrupció d'emmagatzematge) i no s'ha pogut recuperar.",
+
+  // ============================================================================
+  // Tasques programades (cron)
+  // ============================================================================
+  'Precondition check': 'Comprovació de precondicions',
+  'Precondition not met — this scheduled run was skipped.':
+    "La precondició no s'ha complert — aquesta execució programada s'ha omès.",
+  'The precondition check was cancelled — this scheduled run was skipped.':
+    "La comprovació de la precondició s'ha cancel·lat — aquesta execució programada s'ha omès.",
+  'The precondition check was interrupted — this scheduled run was skipped.':
+    "La comprovació de la precondició s'ha interromput — aquesta execució programada s'ha omès.",
+  'The precondition check failed — this scheduled run was skipped.':
+    "La comprovació de la precondició ha fallat — aquesta execució programada s'ha omès.",
+  'Running this scheduled task in a new session: {{link}}':
+    'Executant aquesta tasca programada en una sessió nova: {{link}}',
+  'This scheduled run could not be started: {{error}}':
+    "Aquesta execució programada no s'ha pogut iniciar: {{error}}",
 };
