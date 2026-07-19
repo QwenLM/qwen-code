@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/mobile-mcp",
-  "version": "0.19.12",
+  "version": "0.19.12-nightly.20260719.86ad532de",
   "description": "Mobile MCP with opt-in relative coordinate support",
   "repository": {
     "type": "git",
