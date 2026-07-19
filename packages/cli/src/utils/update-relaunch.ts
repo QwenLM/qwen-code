@@ -15,6 +15,7 @@ const UPDATE_FAILED_MESSAGE =
 export async function updateBeforeRelaunch(
   settings: LoadedSettings,
   projectRoot: string,
+  relaunchOnFailure: boolean,
 ): Promise<boolean> {
   let translate = (message: string) => message;
   try {
@@ -56,7 +57,7 @@ export async function updateBeforeRelaunch(
           installationInfo.updateMessage ??
             t('Manual update required. Please reinstall Qwen Code.'),
         );
-        return true;
+        return relaunchOnFailure;
       }
       const updateProcess = handleAutoUpdate(
         result.info,
@@ -76,12 +77,12 @@ export async function updateBeforeRelaunch(
             : UPDATE_FAILED_MESSAGE,
         ),
       );
-      return true;
+      return success || relaunchOnFailure;
     } else if (result.status === 'error') {
       writeStderrLine(t(UPDATE_CHECK_FAILED_MESSAGE));
     }
   } catch {
     writeStderrLine(translate(UPDATE_FAILED_MESSAGE));
   }
-  return true;
+  return relaunchOnFailure;
 }

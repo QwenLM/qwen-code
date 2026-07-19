@@ -230,14 +230,39 @@ describe('checkForUpdates', () => {
       '--global',
     ];
     expect(run).toHaveBeenCalledWith(
-      process.platform === 'win32' ? process.execPath : 'npm',
-      process.platform === 'win32'
-        ? [expect.stringMatching(/npm-cli\.js$/), ...npmArgs]
-        : npmArgs,
+      process.execPath,
+      [expect.stringMatching(/npm-cli\.js$/), ...npmArgs],
       expect.objectContaining({
         timeout: FETCH_TIMEOUT_MS,
       }),
     );
+  });
+
+  it('selects the global npm registry for global npm installs', async () => {
+    getPackageJson.mockResolvedValue({
+      name: '@qwen-code/qwen-code',
+      version: '1.0.0',
+    });
+    const detectGlobalNpm = vi.fn().mockResolvedValue(true);
+    const fetchGlobalNpm = vi.fn().mockResolvedValue({
+      current: '1.0.0',
+      latest: '1.1.0',
+    });
+
+    await expect(
+      checkForUpdatesDetailed(detectGlobalNpm, fetchGlobalNpm),
+    ).resolves.toMatchObject({
+      status: 'update',
+      info: { update: { current: '1.0.0', latest: '1.1.0' } },
+    });
+
+    expect(detectGlobalNpm).toHaveBeenCalledOnce();
+    expect(fetchGlobalNpm).toHaveBeenCalledWith(
+      '@qwen-code/qwen-code',
+      '1.0.0',
+      'latest',
+    );
+    expect(updateNotifier).not.toHaveBeenCalled();
   });
 
   it('does not treat pnpm installs as global npm installs', async () => {
@@ -279,6 +304,10 @@ describe('checkForUpdates', () => {
       ],
       expect.not.objectContaining({ shell: true }),
     );
+    expect(resolveNpmCliPath).toHaveBeenCalledWith(
+      'C:\\Program Files\\nodejs\\node.exe',
+      'win32',
+    );
   });
 
   it('canonicalizes the global npm root before comparing paths', async () => {
@@ -303,6 +332,11 @@ describe('checkForUpdates', () => {
         >,
       ),
     ).resolves.toBe(true);
+    expect(run).toHaveBeenCalledWith(
+      process.execPath,
+      [expect.stringMatching(/npm-cli\.js$/), 'root', '--global'],
+      expect.objectContaining({ timeout: FETCH_TIMEOUT_MS }),
+    );
   });
 
   it('does not treat a missing global npm root as a global install', async () => {

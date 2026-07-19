@@ -22,14 +22,20 @@ export enum PackageManager {
   UNKNOWN = 'unknown',
 }
 
-export function getWindowsNpmCliPath(nodePath = process.execPath): string {
-  return path.win32.join(
-    path.win32.dirname(nodePath),
-    'node_modules',
-    'npm',
-    'bin',
-    'npm-cli.js',
-  );
+export function getNpmCliPath(
+  nodePath = process.execPath,
+  platform = process.platform,
+): string {
+  if (platform === 'win32') {
+    return path.win32.join(
+      path.win32.dirname(nodePath),
+      'node_modules',
+      'npm',
+      'bin',
+      'npm-cli.js',
+    );
+  }
+  return fs.realpathSync(path.join(path.dirname(nodePath), 'npm'));
 }
 
 const debugLogger = createDebugLogger('INSTALLATION_INFO');

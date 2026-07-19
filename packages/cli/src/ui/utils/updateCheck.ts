@@ -12,7 +12,7 @@ import { realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { getPackageJson } from '../../utils/package.js';
-import { getWindowsNpmCliPath } from '../../utils/installationInfo.js';
+import { getNpmCliPath } from '../../utils/installationInfo.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 
@@ -71,15 +71,16 @@ export async function runGlobalNpm(
   run: typeof execFileAsync = execFileAsync,
   platform = process.platform,
   nodePath = process.execPath,
-  resolveNpmCliPath = getWindowsNpmCliPath,
+  resolveNpmCliPath = getNpmCliPath,
 ): Promise<string> {
-  const isWindows = platform === 'win32';
-  const command = isWindows ? nodePath : 'npm';
-  const commandArgs = isWindows ? [resolveNpmCliPath(nodePath), ...args] : args;
-  const { stdout } = await run(command, commandArgs, {
-    encoding: 'utf8',
-    timeout: FETCH_TIMEOUT_MS,
-  });
+  const { stdout } = await run(
+    nodePath,
+    [resolveNpmCliPath(nodePath, platform), ...args],
+    {
+      encoding: 'utf8',
+      timeout: FETCH_TIMEOUT_MS,
+    },
+  );
   return String(stdout).trim();
 }
 
@@ -173,7 +174,10 @@ function getBestAvailableUpdate(
   return semver.gt(stableVer, nightlyVer) ? stable : nightly;
 }
 
-export async function checkForUpdatesDetailed(): Promise<UpdateCheckResult> {
+export async function checkForUpdatesDetailed(
+  detectGlobalNpm = isGlobalNpmInstallation,
+  fetchGlobalNpm = fetchGlobalNpmUpdateInfo,
+): Promise<UpdateCheckResult> {
   let currentVersion: string | undefined;
   try {
     // Skip update check when running from source (development mode)
@@ -186,13 +190,13 @@ export async function checkForUpdatesDetailed(): Promise<UpdateCheckResult> {
     }
 
     const { name, version } = packageJson;
-    const isGlobalNpm = await isGlobalNpmInstallation();
+    const isGlobalNpm = await detectGlobalNpm();
     currentVersion = version;
     const isNightly = version.includes('nightly');
     const createNotifier = (distTag: 'latest' | 'nightly') =>
       isGlobalNpm
         ? {
-            fetchInfo: () => fetchGlobalNpmUpdateInfo(name, version, distTag),
+            fetchInfo: () => fetchGlobalNpm(name, version, distTag),
           }
         : updateNotifier({
             pkg: {

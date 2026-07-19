@@ -7,7 +7,7 @@
 import type { UpdateObject } from '../ui/utils/updateCheck.js';
 import type { LoadedSettings } from '../config/settings.js';
 import {
-  getWindowsNpmCliPath,
+  getNpmCliPath,
   getInstallationInfo,
   PackageManager,
   resolveUpdateCommand,
@@ -95,16 +95,20 @@ export function handleAutoUpdate(
     installationInfo.updateCommand,
     info.update.latest,
   );
-  const isWindows = os.platform() === 'win32';
+  const platform = os.platform();
+  const isWindows = platform === 'win32';
   const command =
-    isWindows && installationInfo.packageManager === PackageManager.NPM
+    installationInfo.packageManager === PackageManager.NPM
       ? process.execPath
       : isWindows
         ? 'cmd.exe'
         : 'bash';
   const commandArgs =
-    isWindows && installationInfo.packageManager === PackageManager.NPM
-      ? [getWindowsNpmCliPath(), ...updateCommand.split(' ').slice(1)]
+    installationInfo.packageManager === PackageManager.NPM
+      ? [
+          getNpmCliPath(process.execPath, platform),
+          ...updateCommand.split(' ').slice(1),
+        ]
       : isWindows
         ? ['/c', updateCommand]
         : ['-c', updateCommand];
