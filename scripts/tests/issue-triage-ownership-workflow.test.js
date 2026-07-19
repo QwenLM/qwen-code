@@ -15,18 +15,30 @@ const legacyWorkflows = [
   'qwen-scheduled-issue-triage.yml',
 ];
 
-function openedIssueOwners() {
+function triggersOnIssuesEvent(workflow, eventType) {
+  const on = workflow?.on;
+  if (on === 'issues') return true;
+  if (Array.isArray(on) && on.includes('issues')) return true;
+  if (on?.issues != null && !on.issues?.types) return true;
+  return on?.issues?.types?.includes(eventType) ?? false;
+}
+
+function issueEventOwners(eventType) {
   return readdirSync(workflowsDir)
     .filter((file) => /\.ya?ml$/.test(file))
     .filter((file) => {
       const workflow = parse(readFileSync(`${workflowsDir}/${file}`, 'utf8'));
-      return workflow?.on?.issues?.types?.includes('opened');
+      return triggersOnIssuesEvent(workflow, eventType);
     });
 }
 
 describe('issue triage workflow ownership', () => {
   it('keeps one immediate owner for newly opened issues', () => {
-    expect(openedIssueOwners()).toEqual(['qwen-triage.yml']);
+    expect(issueEventOwners('opened')).toEqual(['qwen-triage.yml']);
+  });
+
+  it('keeps one immediate owner for reopened issues', () => {
+    expect(issueEventOwners('reopened')).toEqual(['qwen-triage.yml']);
   });
 
   it('removes disabled legacy issue triage workflows', () => {
