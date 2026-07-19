@@ -24,39 +24,51 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-const { channelState, workspace, actions } = vi.hoisted(() => ({
-  channelState: {
-    loading: false,
-    error: undefined as Error | undefined,
-    catalog: [
-      {
-        type: 'dingtalk',
-        displayName: 'DingTalk',
-        manageable: true,
-        fields: [],
-        auth: ['credentials'] as const,
+const { channelState, workspace, actions, authActions } = vi.hoisted(() => {
+  const authActions = {
+    begin: vi.fn(),
+    status: vi.fn(),
+    qr: vi.fn(),
+    cancel: vi.fn(),
+    commit: vi.fn(),
+  };
+  return {
+    channelState: {
+      loading: false,
+      error: undefined as Error | undefined,
+      catalog: [
+        {
+          type: 'dingtalk',
+          displayName: 'DingTalk',
+          manageable: true,
+          fields: [],
+          auth: ['credentials'] as const,
+        },
+      ],
+      snapshot: {
+        revision: 'revision-1',
+        instances: {} as Record<string, DaemonChannelInstanceSnapshot>,
       },
-    ],
-    snapshot: {
-      revision: 'revision-1',
-      instances: {} as Record<string, DaemonChannelInstanceSnapshot>,
     },
-  },
-  workspace: {
-    workspaceCwd: '/workspace/demo',
-    token: 'test-token' as string | undefined,
-    capabilities: { features: ['channel_management'] },
-  },
-  actions: {
-    reload: vi.fn(),
-    createOrUpdate: vi.fn(),
-    remove: vi.fn(),
-    setStartup: vi.fn(),
-    start: vi.fn(),
-    stop: vi.fn(),
-    restart: vi.fn(),
-  },
-}));
+    workspace: {
+      client: {},
+      workspaceCwd: '/workspace/demo',
+      token: 'test-token' as string | undefined,
+      capabilities: { features: ['channel_management'] },
+    },
+    actions: {
+      reload: vi.fn(),
+      createOrUpdate: vi.fn(),
+      remove: vi.fn(),
+      setStartup: vi.fn(),
+      start: vi.fn(),
+      stop: vi.fn(),
+      restart: vi.fn(),
+      auth: authActions,
+    },
+    authActions,
+  };
+});
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useChannels: () => ({ ...channelState, ...actions }),
@@ -140,14 +152,37 @@ beforeEach(() => {
   root = createRoot(container);
   channelState.loading = false;
   channelState.error = undefined;
+  channelState.catalog = [
+    {
+      type: 'dingtalk',
+      displayName: 'DingTalk',
+      manageable: true,
+      fields: [],
+      auth: ['credentials'] as const,
+    },
+  ];
   channelState.snapshot = { revision: 'revision-1', instances: {} };
+  workspace.client = {};
   workspace.workspaceCwd = '/workspace/demo';
   workspace.token = 'test-token';
-  workspace.capabilities = { features: ['channel_management'] };
+  workspace.capabilities = {
+    features: ['channel_management', 'channel_auth'],
+  };
   for (const mock of Object.values(actions)) {
+    if (typeof mock !== 'function') continue;
     mock.mockReset();
     mock.mockResolvedValue(undefined);
   }
+  for (const mock of Object.values(authActions)) {
+    mock.mockReset();
+    mock.mockResolvedValue(undefined);
+  }
+  authActions.begin.mockResolvedValue({
+    id: 'auth-1',
+    state: 'requesting',
+    qrRevision: 0,
+    expiresAt: new Date(Date.now() + 600_000).toISOString(),
+  });
 });
 
 afterEach(() => {
@@ -634,5 +669,146 @@ describe('ChannelsManagerPage', () => {
     });
 
     expect(headingRef.current?.textContent).toBe('Channels');
+  });
+
+  it('opens QR authentication after a successful save-and-continue handoff', async () => {
+    channelState.catalog = [
+      {
+        type: 'qq',
+        displayName: 'QQ',
+        manageable: true,
+        fields: [],
+        auth: ['credentials', 'qr'] as const,
+      },
+    ];
+    await renderPage();
+
+    click(button('Add channel'));
+    await flush();
+    const nameInput = document.querySelector<HTMLInputElement>(
+      '#channel-editor-name',
+    );
+    if (!nameInput) throw new Error('Channel name input not found');
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set;
+      setter?.call(nameInput, 'qq-main');
+      nameInput.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    click(button('Continue with QR code'));
+    click(button('Save and continue'));
+    await flush();
+
+    expect(actions.createOrUpdate).toHaveBeenCalledOnce();
+    expect(authActions.begin).toHaveBeenCalledWith('qq-main', {
+      channelType: 'qq',
+    });
+    expect(document.body.textContent).toContain('Authenticate qq-main');
+  });
+
+  it('offers Authenticate only for configured QR types with auth capability and token', async () => {
+    channelState.catalog = [
+      {
+        type: 'qq',
+        displayName: 'QQ',
+        manageable: true,
+        fields: [],
+        auth: ['qr'] as const,
+      },
+    ];
+    channelState.snapshot.instances.bot = instance('stopped', {
+      config: { type: 'qq' },
+    });
+    await renderPage();
+
+    click(button('Authenticate bot'));
+    await flush();
+    expect(authActions.begin).toHaveBeenCalledWith('bot', {
+      channelType: 'qq',
+    });
+  });
+
+  it('does not bind QR authentication to the channel-management feature gate', async () => {
+    workspace.capabilities = { features: ['channel_auth'] };
+    channelState.catalog = [
+      {
+        type: 'qq',
+        displayName: 'QQ',
+        manageable: true,
+        fields: [],
+        auth: ['qr'] as const,
+      },
+    ];
+    channelState.snapshot.instances.bot = instance('stopped', {
+      config: { type: 'qq' },
+    });
+    await renderPage();
+
+    expect(button('Authenticate bot').disabled).toBe(false);
+  });
+
+  it('closes and cancels the old QR session instead of rebinding it on workspace switch', async () => {
+    channelState.catalog = [
+      {
+        type: 'qq',
+        displayName: 'QQ',
+        manageable: true,
+        fields: [],
+        auth: ['qr'] as const,
+      },
+    ];
+    channelState.snapshot.instances.bot = instance('stopped', {
+      config: { type: 'qq' },
+    });
+    await renderPage();
+    click(button('Authenticate bot'));
+    await flush();
+
+    workspace.client = {};
+    workspace.workspaceCwd = '/workspace/other';
+    await renderPage();
+    await flush();
+
+    expect(authActions.cancel).toHaveBeenCalledWith('bot', 'auth-1');
+    expect(authActions.begin).toHaveBeenCalledOnce();
+    expect(document.body.textContent).not.toContain('Authenticate bot');
+  });
+
+  it.each([
+    { features: ['channel_management'], token: 'test-token' },
+    {
+      features: ['channel_management', 'channel_auth'],
+      token: undefined,
+    },
+  ])('hides QR actions when auth access is unavailable', async (access) => {
+    workspace.capabilities = { features: access.features };
+    workspace.token = access.token;
+    channelState.catalog = [
+      {
+        type: 'qq',
+        displayName: 'QQ',
+        manageable: true,
+        fields: [],
+        auth: ['qr'] as const,
+      },
+    ];
+    channelState.snapshot.instances.bot = instance('stopped', {
+      config: { type: 'qq' },
+    });
+    await renderPage();
+
+    expect(
+      Array.from(document.querySelectorAll('button')).some(
+        (element) => element.getAttribute('aria-label') === 'Authenticate bot',
+      ),
+    ).toBe(false);
+  });
+
+  it('does not offer QR authentication for unsupported channel types', async () => {
+    channelState.snapshot.instances.bot = instance('stopped');
+    await renderPage();
+    expect(document.body.textContent).not.toContain('Authenticate');
   });
 });

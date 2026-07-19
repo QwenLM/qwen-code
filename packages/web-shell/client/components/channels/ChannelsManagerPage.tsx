@@ -70,6 +70,7 @@ import {
   ChannelEditorDialog,
   type ChannelEditorQrHandoff,
 } from './ChannelEditorDialog';
+import { ChannelQrAuthDialog } from './ChannelQrAuthDialog';
 
 interface ChannelsManagerPageProps {
   onClose: () => void;
@@ -78,6 +79,11 @@ interface ChannelsManagerPageProps {
 
 type EditorIntent = { mode: 'add' } | { mode: 'edit'; name: string };
 type FocusTarget = 'primary' | 'restart' | 'startup';
+interface QrDialogTarget {
+  name: string;
+  type: string;
+  identity: object;
+}
 
 const STATUS_LABELS: Record<DaemonChannelRuntimeState['state'], string> = {
   stopped: 'Stopped',
@@ -124,11 +130,19 @@ export function ChannelsManagerPage({
     start,
     stop,
     restart,
+    auth,
   } = useChannels({ autoLoad: true });
   const supportsManagement =
     workspace.capabilities?.features.includes('channel_management') === true;
   const hasBearerToken = Boolean(workspace.token);
   const canManage = supportsManagement && hasBearerToken;
+  const supportsChannelAuth =
+    workspace.capabilities?.features.includes('channel_auth') === true;
+  const canAuthenticate = supportsChannelAuth && hasBearerToken;
+  const workspaceIdentity = useMemo(
+    () => ({ client: workspace.client, workspaceCwd: workspace.workspaceCwd }),
+    [workspace.client, workspace.workspaceCwd],
+  );
   const hasManageableTypes = catalog.some((entry) => entry.manageable);
   const instances = useMemo(
     () =>
@@ -143,9 +157,7 @@ export function ChannelsManagerPage({
   const [revisionBlocked, setRevisionBlocked] = useState(false);
   const [deleteName, setDeleteName] = useState<string | null>(null);
   const [editorIntent, setEditorIntent] = useState<EditorIntent | null>(null);
-  const [qrHandoff, setQrHandoff] = useState<ChannelEditorQrHandoff | null>(
-    null,
-  );
+  const [qrHandoff, setQrHandoff] = useState<QrDialogTarget | null>(null);
   const returnFocusRef = useRef<{ name: string; target: FocusTarget } | null>(
     null,
   );
@@ -182,6 +194,12 @@ export function ChannelsManagerPage({
       setRevisionBlocked(false);
     }
   }, [revisionBlocked, snapshot]);
+
+  useEffect(() => {
+    if (qrHandoff && qrHandoff.identity !== workspaceIdentity) {
+      setQrHandoff(null);
+    }
+  }, [qrHandoff, workspaceIdentity]);
 
   const runAction = useCallback(
     async (
@@ -407,22 +425,25 @@ export function ChannelsManagerPage({
       ) : null}
 
       {qrHandoff ? (
-        <Alert>
-          <QrCodeIcon />
-          <AlertTitle>QR authentication is ready</AlertTitle>
-          <AlertDescription>
-            {qrHandoff.name} was saved. Continue its QR authentication in the
-            next step.
-            <Button
-              className="ml-2"
-              variant="link"
-              size="xs"
-              onClick={() => setQrHandoff(null)}
-            >
-              Dismiss
-            </Button>
-          </AlertDescription>
-        </Alert>
+        !canAuthenticate ? (
+          <Alert>
+            <QrCodeIcon />
+            <AlertTitle>QR authentication is unavailable</AlertTitle>
+            <AlertDescription>
+              {supportsChannelAuth
+                ? 'Restart Qwen Code with a bearer token to authenticate this channel.'
+                : 'Update Qwen Code to a version that supports channel authentication.'}
+              <Button
+                className="ml-2"
+                variant="link"
+                size="xs"
+                onClick={() => setQrHandoff(null)}
+              >
+                Dismiss
+              </Button>
+            </AlertDescription>
+          </Alert>
+        ) : null
       ) : null}
 
       {loading && instances.length === 0 ? (
@@ -476,6 +497,10 @@ export function ChannelsManagerPage({
               (entry) =>
                 entry.type === configuredType && entry.manageable === true,
             );
+            const authDescriptor = catalog.find(
+              (entry) => entry.type === configuredType,
+            );
+            const supportsQr = authDescriptor?.auth.includes('qr') === true;
             return (
               <Card
                 key={channel.name}
@@ -594,6 +619,24 @@ export function ChannelsManagerPage({
                       Start with serve
                     </label>
                     <div className="flex flex-wrap items-center gap-2">
+                      {canAuthenticate && supportsQr ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={busyName !== null}
+                          aria-label={`Authenticate ${channel.name}`}
+                          onClick={() =>
+                            setQrHandoff({
+                              name: channel.name,
+                              type: configuredType,
+                              identity: workspaceIdentity,
+                            })
+                          }
+                        >
+                          <QrCodeIcon />
+                          Authenticate
+                        </Button>
+                      ) : null}
                       {renderPrimaryActions(channel)}
                     </div>
                   </div>
@@ -623,7 +666,13 @@ export function ChannelsManagerPage({
           onOpenChange={(open) => {
             if (!open) setEditorIntent(null);
           }}
-          onQrHandoff={setQrHandoff}
+          onQrHandoff={(handoff: ChannelEditorQrHandoff) =>
+            setQrHandoff({
+              name: handoff.name,
+              type: handoff.type,
+              identity: workspaceIdentity,
+            })
+          }
           onSubmit={(name, request) =>
             runAction(
               editorIntent.mode === 'edit' ? name : '__create__',
@@ -632,6 +681,25 @@ export function ChannelsManagerPage({
               true,
             )
           }
+        />
+      ) : null}
+
+      {qrHandoff &&
+      canAuthenticate &&
+      qrHandoff.identity === workspaceIdentity ? (
+        <ChannelQrAuthDialog
+          open
+          identity={qrHandoff.identity}
+          name={qrHandoff.name}
+          channelType={qrHandoff.type}
+          channelDisplayName={
+            catalog.find((entry) => entry.type === qrHandoff.type)
+              ?.displayName ?? qrHandoff.type
+          }
+          actions={auth}
+          onOpenChange={(open) => {
+            if (!open) setQrHandoff(null);
+          }}
         />
       ) : null}
 
