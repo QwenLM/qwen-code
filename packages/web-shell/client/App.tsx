@@ -6533,6 +6533,11 @@ export function App({
                         onChatWidthModeChange={handleChatWidthModeChange}
                         onOpenChannels={() => openPanel('channels')}
                         channelsTriggerRef={channelsSettingsTriggerRef}
+                        initialCategory={
+                          prevActivePanelRef.current === 'channels'
+                            ? 'Channels'
+                            : undefined
+                        }
                         modelManagement={{
                           providers: providersState.providers,
                           currentModelId:

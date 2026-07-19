@@ -114,6 +114,7 @@ function renderPanel(
     onSubDialog: (key: string, scope: 'workspace' | 'user') => void;
     onOpenChannels: () => void;
     modelManagement: ModelManagementProps;
+    initialCategory: string;
   }> = {},
 ): HTMLElement {
   return render(
@@ -125,6 +126,7 @@ function renderPanel(
         onThemeChange={noop}
         onSubDialog={overrides.onSubDialog ?? noop}
         onOpenChannels={overrides.onOpenChannels ?? noop}
+        initialCategory={overrides.initialCategory}
         chatWidthMode="1000"
         onChatWidthModeChange={noop}
         modelManagement={overrides.modelManagement}
@@ -177,6 +179,17 @@ describe('SettingsMessage user-scope editing', () => {
     act(() => manageButton.click());
 
     expect(onOpenChannels).toHaveBeenCalledOnce();
+  });
+
+  it('restores the Channels category when returning from its manager', () => {
+    const container = renderPanel(makeState([], vi.fn()), {
+      initialCategory: 'Channels',
+    });
+
+    const manageButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'Manage channels');
+    expect(manageButton).toBeDefined();
   });
 
   it('persists a boolean toggle to the user scope from the User tab', async () => {

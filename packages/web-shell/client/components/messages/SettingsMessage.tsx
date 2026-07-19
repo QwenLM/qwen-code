@@ -87,6 +87,7 @@ interface SettingsMessageProps {
   onChatWidthModeChange: (mode: ChatWidthMode) => void;
   onOpenChannels: () => void;
   channelsTriggerRef?: Ref<HTMLButtonElement>;
+  initialCategory?: string;
   /** Model list/add/delete/select, rendered inside the Model category. */
   modelManagement?: ModelManagementProps;
   embedded?: boolean;
@@ -414,6 +415,7 @@ export function SettingsMessage({
   onChatWidthModeChange,
   onOpenChannels,
   channelsTriggerRef,
+  initialCategory,
   modelManagement,
   embedded = false,
 }: SettingsMessageProps) {
@@ -421,7 +423,9 @@ export function SettingsMessage({
   const selectedTheme = useTheme();
   const { status, settings, loading, error, reload, setValue } = settingsState;
   const [scope, setScope] = useState<Scope>('workspace');
-  const [activeCategory, setActiveCategory] = useState('');
+  const [activeCategory, setActiveCategory] = useState(
+    () => initialCategory ?? '',
+  );
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [restartPending, setRestartPending] = useState(false);
