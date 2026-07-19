@@ -6,7 +6,10 @@
 
 import { BaseEmitter } from './base-emitter.js';
 import type { TodoItem } from '../types.js';
-import type { PlanEntry } from '@agentclientprotocol/sdk';
+import {
+  createTranscriptPlanUpdate,
+  extractTranscriptTodos,
+} from '@qwen-code/acp-bridge/transcriptReplay';
 
 /**
  * Handles emission of plan/todo updates.
@@ -22,12 +25,6 @@ export class PlanEmitter extends BaseEmitter {
    * @param todos - Array of todo items to send as plan entries
    */
   async emitPlan(todos: TodoItem[]): Promise<void> {
-    const entries: PlanEntry[] = todos.map((todo) => ({
-      content: todo.content,
-      priority: 'medium' as const, // Default priority since todos don't have priority
-      status: todo.status,
-    }));
-
     // Snapshot the running cumulative usage as a per-snapshot baseline. The
     // web-shell diffs consecutive snapshots to attribute tokens/API time to the
     // task that ran between two todo updates. Copied so later accumulation
@@ -38,11 +35,7 @@ export class PlanEmitter extends BaseEmitter {
     // emitting a plan ahead of its turn's usage would record a stale baseline
     // and zero out that task's stats.
     const cumulative = this.ctx.cumulativeUsage;
-    await this.sendUpdate({
-      sessionUpdate: 'plan',
-      entries,
-      ...(cumulative ? { _meta: { stats: { ...cumulative } } } : {}),
-    });
+    await this.sendUpdate(createTranscriptPlanUpdate(todos, cumulative));
   }
 
   /**
@@ -60,48 +53,13 @@ export class PlanEmitter extends BaseEmitter {
     resultDisplay: unknown,
     args?: Record<string, unknown>,
   ): TodoItem[] | null {
-    // Try resultDisplay first (final state from tool execution)
-    const fromDisplay = this.extractFromResultDisplay(resultDisplay);
-    if (fromDisplay) return fromDisplay;
-
-    // Fallback to args (initial state)
-    if (args && Array.isArray(args['todos'])) {
-      return args['todos'] as TodoItem[];
-    }
-
-    return null;
-  }
-
-  /**
-   * Extracts todos from a result display value.
-   * Handles both object and JSON string formats.
-   */
-  private extractFromResultDisplay(resultDisplay: unknown): TodoItem[] | null {
-    if (!resultDisplay) return null;
-
-    // Handle direct object with type 'todo_list'
-    if (typeof resultDisplay === 'object') {
-      const obj = resultDisplay as Record<string, unknown>;
-      if (obj['type'] === 'todo_list' && Array.isArray(obj['todos'])) {
-        return obj['todos'] as TodoItem[];
-      }
-    }
-
-    // Handle JSON string (from subagent events)
-    if (typeof resultDisplay === 'string') {
-      try {
-        const parsed = JSON.parse(resultDisplay) as Record<string, unknown>;
-        if (
-          parsed?.['type'] === 'todo_list' &&
-          Array.isArray(parsed['todos'])
-        ) {
-          return parsed['todos'] as TodoItem[];
-        }
-      } catch {
-        // Not JSON, ignore
-      }
-    }
-
-    return null;
+    const todos = extractTranscriptTodos(resultDisplay, args);
+    return (
+      todos?.map((todo, index) => ({
+        id: todo.id ?? String(index),
+        content: todo.content,
+        status: todo.status,
+      })) ?? null
+    );
   }
 }

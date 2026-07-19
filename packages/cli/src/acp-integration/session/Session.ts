@@ -208,7 +208,7 @@ import {
   parseAcpModelOption,
   resolveAcpModelOption,
 } from '../../utils/acpModelUtils.js';
-import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
+import { classifyApiError } from '../../utils/classify-api-error.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {

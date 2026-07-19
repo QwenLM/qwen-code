@@ -48,8 +48,20 @@ interface CheckRun {
   name: string;
   status: string;
   conclusion: string | null;
+  /** ISO timestamps from the API — how re-runs of one name are ordered. */
+  started_at?: string | null;
+  completed_at?: string | null;
   details_url?: string;
   html_url?: string;
+}
+
+/**
+ * When this run's verdict was reached, for ordering re-runs of one name.
+ * ISO-8601 strings compare correctly as strings; a run with no timestamp
+ * sorts earliest, so it can never displace a dated verdict.
+ */
+function verdictStamp(run: CheckRun): string {
+  return run.completed_at ?? run.started_at ?? '';
 }
 
 interface CommitStatus {
@@ -145,13 +157,35 @@ export function classifyCi(checkRuns: CheckRun[], statuses: CommitStatus[]) {
     .filter((n) => !executedNames.has(n))
     .sort();
 
+  // Failure is judged per NAME, like execution above — and by the name's
+  // LATEST verdict, because a name's runs supersede each other: this repo's
+  // routing workflows re-dispatch a name several times per commit and cancel
+  // the displaced runs, and a flaky job re-run to green leaves its failed
+  // attempt behind. Any single failing run used to push its name into
+  // `failedCheckNames`, so a check whose newest run PASSED was reported as
+  // "CI failing" — two real reviews were downgraded from Approve over exactly
+  // that (`route` at #7150, seven routing names at #7171), each on a commit
+  // whose every live check was green. The latest run per name is also what
+  // GitHub's own PR page shows, so this judges the same evidence a human
+  // reviewer sees there. Skipped/neutral/stale runs stay non-verdicts: a
+  // re-dispatch that skipped must not erase a real failure beside it.
+  const latestVerdicts = new Map<string, CheckRun>();
   for (const run of relevantCheckRuns) {
-    if (run.status === 'completed') {
-      if (run.conclusion && FAIL_CONCLUSIONS.has(run.conclusion)) {
-        failedCheckNames.push(run.name);
-      }
-    } else if (PENDING_STATES.has(run.status)) {
-      hasPending = true;
+    if (run.status !== 'completed') {
+      if (PENDING_STATES.has(run.status)) hasPending = true;
+      continue;
+    }
+    if (!run.conclusion || NOT_RUN_CONCLUSIONS.has(run.conclusion)) continue;
+    const prev = latestVerdicts.get(run.name);
+    // Strict `>`: on equal (or absent) stamps the first-seen run keeps the
+    // name, and the API lists newest first.
+    if (!prev || verdictStamp(run) > verdictStamp(prev)) {
+      latestVerdicts.set(run.name, run);
+    }
+  }
+  for (const [name, run] of latestVerdicts) {
+    if (FAIL_CONCLUSIONS.has(run.conclusion as string)) {
+      failedCheckNames.push(name);
     }
   }
   for (const s of statuses) {

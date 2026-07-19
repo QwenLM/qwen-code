@@ -337,6 +337,22 @@ jobs:
           fi
           echo "Settings schema is up-to-date"
 
+      - name: 'Generate VS Code companion notices'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'npm run generate:notices --workspace=qwen-code-vscode-ide-companion'
+
+      - name: 'Check VS Code companion notices are up-to-date'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          if [[ -n $(git status --porcelain packages/vscode-ide-companion/NOTICES.txt) ]]; then
+            echo "Error: NOTICES.txt is out of date."
+            echo "Please run: npm run generate:notices --workspace=qwen-code-vscode-ide-companion"
+            echo "Then commit the updated file."
+            git diff --stat packages/vscode-ide-companion/NOTICES.txt
+            exit 1
+          fi
+          echo "NOTICES.txt is up-to-date"
+
       # Keep this Linux-only PR gate explicit. macOS/Windows merge-queue jobs run
       # npm run test:ci only, so they intentionally do not repeat this
       # platform-independent bundle closure check.

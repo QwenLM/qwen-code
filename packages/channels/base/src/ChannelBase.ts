@@ -58,7 +58,12 @@ import {
   parseChannelMemoryIntent,
   type ChannelMemoryIntent,
 } from './channel-memory-intent.js';
-import { selectRelevantChannelMemory } from './channel-memory-recall.js';
+import {
+  createChannelMemoryRecallIndex,
+  selectRelevantChannelMemory,
+  selectRelevantChannelMemoryFromIndex,
+  type ChannelMemoryRecallIndex,
+} from './channel-memory-recall.js';
 
 /**
  * Max time /clear waits for a cancelled in-flight turn to wind down before
@@ -69,6 +74,7 @@ import { selectRelevantChannelMemory } from './channel-memory-recall.js';
  * later is already invalidated.
  */
 export const CLEAR_CANCEL_TIMEOUT_MS = 3000;
+const CHANNEL_MEMORY_RECALL_CACHE_MAX_TARGETS = 128;
 const GROUP_HISTORY_CONTEXT_MARKER =
   '[Chat messages since your last reply - for context]';
 const CURRENT_MESSAGE_MARKER = '[Current message - respond to this]';
@@ -150,6 +156,11 @@ interface ChannelMemoryReadToken {
   state: ChannelMemoryReadState;
   generation: number;
   context?: string;
+}
+
+interface ChannelMemoryRecallCacheEntry {
+  revision: string;
+  index: ChannelMemoryRecallIndex;
 }
 
 export interface ChannelBaseOptions {
@@ -304,6 +315,10 @@ export abstract class ChannelBase {
   private instructedSessions: Set<string> = new Set();
   private unattendedMemorySessions: Set<string> = new Set();
   private channelMemoryReads = new Map<string, ChannelMemoryReadState>();
+  private channelMemoryRecallCache = new Map<
+    string,
+    ChannelMemoryRecallCacheEntry
+  >();
   private commands: Map<string, CommandHandler> = new Map();
   /** Per-session promise chain to serialize prompt + send (followup mode). */
   private sessionQueues: Map<string, Promise<void>> = new Map();
@@ -501,8 +516,12 @@ export abstract class ChannelBase {
     this.groupGate = new GroupGate(config.groupPolicy, config.groups);
     this.dmGate = new DmGate(config.dmPolicy);
 
+    // Scoped by the channel's workspace cwd: two workspaces reusing the same
+    // channel name must not share pairing/allowlist state (#7017).
     const pairingStore =
-      config.senderPolicy === 'pairing' ? new PairingStore(name) : undefined;
+      config.senderPolicy === 'pairing'
+        ? new PairingStore(name, config.cwd)
+        : undefined;
     this.gate = new SenderGate(
       config.senderPolicy,
       config.allowedUsers,
@@ -771,6 +790,90 @@ export abstract class ChannelBase {
     ) {
       this.channelMemoryReads.delete(token.key);
     }
+  }
+
+  private getCachedChannelMemoryRecallIndex(
+    key: string,
+    revision: string,
+  ): ChannelMemoryRecallIndex | undefined {
+    const cached = this.channelMemoryRecallCache.get(key);
+    if (!cached || cached.revision !== revision) return undefined;
+    this.channelMemoryRecallCache.delete(key);
+    this.channelMemoryRecallCache.set(key, cached);
+    return cached.index;
+  }
+
+  private setCachedChannelMemoryRecallIndex(
+    key: string,
+    revision: string,
+    index: ChannelMemoryRecallIndex,
+  ): void {
+    this.channelMemoryRecallCache.delete(key);
+    this.channelMemoryRecallCache.set(key, { revision, index });
+    if (
+      this.channelMemoryRecallCache.size >
+      CHANNEL_MEMORY_RECALL_CACHE_MAX_TARGETS
+    ) {
+      const oldestKey = this.channelMemoryRecallCache.keys().next().value;
+      if (oldestKey !== undefined) {
+        this.channelMemoryRecallCache.delete(oldestKey);
+      }
+    }
+  }
+
+  private async selectRelevantChannelMemory(
+    envelope: Envelope,
+    target: ChannelMemoryTarget,
+    read: ChannelMemoryReadToken,
+  ): Promise<ChannelMemoryEntry[]> {
+    const message = envelope.text;
+    const channelMemory = this.channelMemory;
+    if (!channelMemory) return [];
+    if (!channelMemory.getChannelMemoryRevision) {
+      const entries = await channelMemory.listChannelMemoryEntries(target);
+      return selectRelevantChannelMemory(message, entries);
+    }
+
+    let revision: string;
+    try {
+      revision = await channelMemory.getChannelMemoryRevision(target);
+    } catch {
+      const entries = await channelMemory.listChannelMemoryEntries(target);
+      return selectRelevantChannelMemory(message, entries);
+    }
+
+    let latestEntries: ChannelMemoryEntry[] = [];
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const cached = this.getCachedChannelMemoryRecallIndex(read.key, revision);
+      if (cached) {
+        return selectRelevantChannelMemoryFromIndex(message, cached);
+      }
+
+      latestEntries = await channelMemory.listChannelMemoryEntries(target);
+      let verifiedRevision: string;
+      try {
+        verifiedRevision = await channelMemory.getChannelMemoryRevision(target);
+      } catch {
+        return selectRelevantChannelMemory(message, latestEntries);
+      }
+      if (revision !== verifiedRevision) {
+        if (read.generation !== read.state.generation) return [];
+        revision = verifiedRevision;
+        continue;
+      }
+
+      const index = createChannelMemoryRecallIndex(latestEntries);
+      if (read.generation === read.state.generation) {
+        this.setCachedChannelMemoryRecallIndex(read.key, revision, index);
+      }
+      return selectRelevantChannelMemoryFromIndex(message, index);
+    }
+    this.logChannelMemoryError(
+      'read',
+      envelope,
+      'recall revision unstable after retry',
+    );
+    return selectRelevantChannelMemory(message, latestEntries);
   }
 
   private drainCollectBufferForCurrentPrompt(
@@ -2825,9 +2928,9 @@ export abstract class ChannelBase {
 
   private invalidateUnattendedMemory(envelope: Envelope): void {
     const target = this.channelMemoryTarget(envelope);
-    const activeRead = this.channelMemoryReads.get(
-      this.channelMemoryReadKey(target),
-    );
+    const readKey = this.channelMemoryReadKey(target);
+    this.channelMemoryRecallCache.delete(readKey);
+    const activeRead = this.channelMemoryReads.get(readKey);
     if (activeRead) {
       activeRead.generation += 1;
     }
@@ -4424,27 +4527,19 @@ export abstract class ChannelBase {
         const memoryTarget = this.channelMemoryTarget(envelope);
         recallRead = this.beginChannelMemoryRead(memoryTarget);
         try {
-          const entries = [
-            ...(await this.channelMemory.listChannelMemoryEntries(
-              memoryTarget,
-            )),
-          ];
-          const relevantEntries = selectRelevantChannelMemory(
-            envelope.text,
-            entries,
+          const relevantEntries = await this.selectRelevantChannelMemory(
+            envelope,
+            memoryTarget,
+            recallRead,
           );
           if (relevantEntries.length > 0) {
             recallContext =
               this.formatRelevantChannelMemoryContext(relevantEntries);
           }
-        } catch (error) {
+        } catch {
           this.releaseChannelMemoryRead(recallRead);
           recallRead = undefined;
-          this.logChannelMemoryError(
-            'read',
-            envelope,
-            this.channelMemoryErrorMessage(error),
-          );
+          this.logChannelMemoryError('read', envelope, 'entry listing failed');
         }
       }
       if (this.dropQueuedTurnIfStale(sessionId, generation, envelope)) {
