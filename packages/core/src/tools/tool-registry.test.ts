@@ -217,6 +217,47 @@ describe('ToolRegistry', () => {
       expect(registry.getTool('mcp__github__create_issue')).toBeUndefined();
     });
 
+    it('honors a legacy dotted disabled MCP tool name', () => {
+      const legacyName = 'mcp__zybio__literature.search_pubmed';
+      const disabledConfig = new Config({
+        ...baseConfigParams,
+        disabledTools: [legacyName],
+      });
+      const registry = new ToolRegistry(disabledConfig);
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'zybio',
+        'literature.search_pubmed',
+        'description',
+        {},
+      );
+
+      expect(mcpTool.name).not.toBe(legacyName);
+      registry.registerTool(mcpTool);
+      expect(registry.getTool(mcpTool.name)).toBeUndefined();
+    });
+
+    it('honors a legacy truncated disabled MCP tool name', () => {
+      const rawName = `mcp__server__${'x'.repeat(80)}`;
+      const legacyName = rawName.slice(0, 28) + '___' + rawName.slice(-32);
+      const disabledConfig = new Config({
+        ...baseConfigParams,
+        disabledTools: [legacyName],
+      });
+      const registry = new ToolRegistry(disabledConfig);
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'server',
+        'x'.repeat(80),
+        'description',
+        {},
+      );
+
+      expect(mcpTool.name).not.toBe(legacyName);
+      registry.registerTool(mcpTool);
+      expect(registry.getTool(mcpTool.name)).toBeUndefined();
+    });
+
     it('skips lazy factories whose name is in Config.disabledTools', async () => {
       const disabledConfig = new Config({
         ...baseConfigParams,
