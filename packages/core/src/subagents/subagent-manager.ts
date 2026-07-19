@@ -326,6 +326,14 @@ export class SubagentManager {
       );
     }
 
+    if (existing.level === 'extension') {
+      throw new SubagentError(
+        `Cannot update extension-provided subagent "${name}"`,
+        SubagentErrorCode.INVALID_CONFIG,
+        name,
+      );
+    }
+
     // Merge updates with existing configuration
     const updatedConfig = this.mergeConfigurations(existing, updates);
 
