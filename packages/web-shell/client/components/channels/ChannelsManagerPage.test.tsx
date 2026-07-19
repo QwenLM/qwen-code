@@ -250,6 +250,83 @@ describe('ChannelsManagerPage', () => {
     expect(actions.restart).toHaveBeenCalledWith('bot');
   });
 
+  it('saves an edit with the authoritative revision and restores focus', async () => {
+    channelState.snapshot.instances.bot = instance('stopped');
+    await renderPage();
+
+    const trigger = button('More actions for bot');
+    pointerDown(trigger);
+    await flush();
+    click(elementWithText('[role="menuitem"]', 'Edit bot'));
+    await flush();
+
+    expect(
+      document.querySelector<HTMLInputElement>('#channel-editor-name')
+        ?.disabled,
+    ).toBe(true);
+    click(button('Save changes'));
+    await flush();
+    await act(
+      async () => new Promise((resolve) => window.setTimeout(resolve, 0)),
+    );
+
+    expect(actions.createOrUpdate).toHaveBeenCalledWith('bot', {
+      expectedRevision: 'revision-1',
+      config: { type: 'dingtalk', appKey: 'visible-config' },
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it('keeps the editor open and reloads on a save conflict', async () => {
+    actions.createOrUpdate.mockRejectedValue(
+      new DaemonHttpError(
+        409,
+        { code: 'channel_settings_conflict' },
+        'Channel settings changed.',
+      ),
+    );
+    actions.reload.mockResolvedValue(channelState);
+    channelState.snapshot.instances.bot = instance('stopped');
+    await renderPage();
+
+    pointerDown(button('More actions for bot'));
+    await flush();
+    click(elementWithText('[role="menuitem"]', 'Edit bot'));
+    await flush();
+    click(button('Save changes'));
+    await flush();
+
+    expect(actions.reload).toHaveBeenCalledOnce();
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(document.body.textContent).toContain('Channel settings changed.');
+  });
+
+  it('keeps unmanaged channel configuration read-only', async () => {
+    channelState.catalog.push({
+      type: 'legacy',
+      displayName: 'Legacy',
+      manageable: false,
+      fields: [],
+      auth: [],
+    });
+    channelState.snapshot.instances.bot = instance('stopped', {
+      config: { type: 'legacy', inheritedField: true },
+    });
+    await renderPage();
+
+    pointerDown(button('More actions for bot'));
+    await flush();
+
+    const item = elementWithText(
+      '[role="menuitem"]',
+      'Configuration is read-only',
+    );
+    expect(item.getAttribute('data-disabled')).not.toBeNull();
+    click(item);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
   it('confirms before deleting a channel', async () => {
     channelState.snapshot.instances.bot = instance('stopped');
     await renderPage();

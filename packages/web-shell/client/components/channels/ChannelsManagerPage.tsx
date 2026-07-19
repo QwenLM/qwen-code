@@ -17,6 +17,7 @@ import {
   ArrowLeftIcon,
   EllipsisVerticalIcon,
   PlusIcon,
+  QrCodeIcon,
   RadioTowerIcon,
 } from 'lucide-react';
 import {
@@ -65,6 +66,10 @@ import {
 } from '../ui/empty';
 import { Spinner } from '../ui/spinner';
 import { Switch } from '../ui/switch';
+import {
+  ChannelEditorDialog,
+  type ChannelEditorQrHandoff,
+} from './ChannelEditorDialog';
 
 interface ChannelsManagerPageProps {
   onClose: () => void;
@@ -113,6 +118,7 @@ export function ChannelsManagerPage({
     loading,
     error,
     reload,
+    createOrUpdate,
     remove,
     setStartup,
     start,
@@ -123,6 +129,7 @@ export function ChannelsManagerPage({
     workspace.capabilities?.features.includes('channel_management') === true;
   const hasBearerToken = Boolean(workspace.token);
   const canManage = supportsManagement && hasBearerToken;
+  const hasManageableTypes = catalog.some((entry) => entry.manageable);
   const instances = useMemo(
     () =>
       Object.values(snapshot?.instances ?? {}).sort((left, right) =>
@@ -136,12 +143,17 @@ export function ChannelsManagerPage({
   const [revisionBlocked, setRevisionBlocked] = useState(false);
   const [deleteName, setDeleteName] = useState<string | null>(null);
   const [editorIntent, setEditorIntent] = useState<EditorIntent | null>(null);
+  const [qrHandoff, setQrHandoff] = useState<ChannelEditorQrHandoff | null>(
+    null,
+  );
   const returnFocusRef = useRef<{ name: string; target: FocusTarget } | null>(
     null,
   );
   const actionRefs = useRef(new Map<string, HTMLButtonElement>());
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const addButtonRef = useRef<HTMLButtonElement>(null);
+  const editorReturnFocusRef = useRef<HTMLElement | null>(null);
+  const moreActionRefs = useRef(new Map<string, HTMLButtonElement>());
   const restorePageFocusAfterDeleteRef = useRef(false);
   const blockedSnapshotRef = useRef(snapshot);
 
@@ -346,8 +358,17 @@ export function ChannelsManagerPage({
         <Button
           ref={addButtonRef}
           className={styles.addButton}
-          disabled={!canManage || busyName !== null || revisionBlocked}
-          onClick={() => setEditorIntent({ mode: 'add' })}
+          disabled={
+            !canManage ||
+            !hasManageableTypes ||
+            busyName !== null ||
+            revisionBlocked
+          }
+          onClick={(event) => {
+            editorReturnFocusRef.current = event.currentTarget;
+            setQrHandoff(null);
+            setEditorIntent({ mode: 'add' });
+          }}
         >
           <PlusIcon data-icon="inline-start" />
           Add channel
@@ -385,20 +406,18 @@ export function ChannelsManagerPage({
         </Alert>
       ) : null}
 
-      {editorIntent ? (
+      {qrHandoff ? (
         <Alert>
-          <AlertTitle>
-            {editorIntent.mode === 'add'
-              ? 'Add channel'
-              : `Edit ${editorIntent.name}`}
-          </AlertTitle>
+          <QrCodeIcon />
+          <AlertTitle>QR authentication is ready</AlertTitle>
           <AlertDescription>
-            Channel setup opens here in the next step.
+            {qrHandoff.name} was saved. Continue its QR authentication in the
+            next step.
             <Button
               className="ml-2"
               variant="link"
               size="xs"
-              onClick={() => setEditorIntent(null)}
+              onClick={() => setQrHandoff(null)}
             >
               Dismiss
             </Button>
@@ -449,6 +468,14 @@ export function ChannelsManagerPage({
           {instances.map((channel) => {
             const state = channel.runtime.state;
             const disabled = !canManage || busyName !== null;
+            const configuredType =
+              typeof channel.config.type === 'string'
+                ? channel.config.type
+                : '';
+            const configManageable = catalog.some(
+              (entry) =>
+                entry.type === configuredType && entry.manageable === true,
+            );
             return (
               <Card
                 key={channel.name}
@@ -471,6 +498,11 @@ export function ChannelsManagerPage({
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <Button
+                          ref={(element) => {
+                            if (element)
+                              moreActionRefs.current.set(channel.name, element);
+                            else moreActionRefs.current.delete(channel.name);
+                          }}
                           variant="ghost"
                           size="icon-sm"
                           disabled={disabled || revisionBlocked}
@@ -482,14 +514,22 @@ export function ChannelsManagerPage({
                       <DropdownMenuContent align="end">
                         <DropdownMenuGroup>
                           <DropdownMenuItem
-                            onSelect={() =>
+                            disabled={!configManageable}
+                            onSelect={() => {
+                              if (!configManageable) return;
+                              editorReturnFocusRef.current =
+                                moreActionRefs.current.get(channel.name) ??
+                                addButtonRef.current;
+                              setQrHandoff(null);
                               setEditorIntent({
                                 mode: 'edit',
                                 name: channel.name,
-                              })
-                            }
+                              });
+                            }}
                           >
-                            Edit {channel.name}
+                            {configManageable
+                              ? `Edit ${channel.name}`
+                              : 'Configuration is read-only'}
                           </DropdownMenuItem>
                         </DropdownMenuGroup>
                         <DropdownMenuSeparator />
@@ -562,6 +602,37 @@ export function ChannelsManagerPage({
             );
           })}
         </div>
+      ) : null}
+
+      {editorIntent && snapshot ? (
+        <ChannelEditorDialog
+          open
+          catalog={catalog}
+          expectedRevision={snapshot.revision}
+          instance={
+            editorIntent.mode === 'edit'
+              ? snapshot.instances[editorIntent.name]
+              : undefined
+          }
+          error={
+            actionErrors[
+              editorIntent.mode === 'edit' ? editorIntent.name : '__create__'
+            ]
+          }
+          returnFocusRef={editorReturnFocusRef}
+          onOpenChange={(open) => {
+            if (!open) setEditorIntent(null);
+          }}
+          onQrHandoff={setQrHandoff}
+          onSubmit={(name, request) =>
+            runAction(
+              editorIntent.mode === 'edit' ? name : '__create__',
+              null,
+              () => createOrUpdate(name, request),
+              true,
+            )
+          }
+        />
       ) : null}
 
       <AlertDialog
