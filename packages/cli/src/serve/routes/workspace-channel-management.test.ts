@@ -299,6 +299,11 @@ describe('workspace Channel management routes', () => {
         ),
       ),
     );
+    const malformedUnicode = await Promise.all(
+      ['%ED%A0%80', '%ED%B0%80'].map((encodedName) =>
+        auth(request(app).post(`/workspace/channels/${encodedName}/start`)),
+      ),
+    );
     const reservedPut = await auth(
       request(app)
         .put('/workspace/channels/all')
@@ -340,6 +345,9 @@ describe('workspace Channel management routes', () => {
     expect(overlong.status).toBe(400);
     expect(portableUnsafe.map((response) => response.status)).toEqual([
       400, 400, 400, 400,
+    ]);
+    expect(malformedUnicode.map((response) => response.status)).toEqual([
+      400, 400,
     ]);
     expect(reservedPut.status).toBe(400);
     expect(reservedStart.status).toBe(400);

@@ -119,6 +119,8 @@ describe('daemonChannelStateDir', () => {
     'LPT1',
     'lpt9.json',
     '界'.repeat(86),
+    '\ud800',
+    '\udc00',
   ])('rejects unsafe channel name %j', (channelName) => {
     expect(() => daemonChannelStateDir('/a', channelName, 'qq')).toThrow(
       'Invalid channel name',
@@ -150,6 +152,8 @@ describe('daemonChannelStateDir', () => {
     'Com1.json',
     'LPT9.state',
     '界'.repeat(86),
+    '\ud800',
+    '\udc00',
   ])('rejects unsafe channel type %j', (channelType) => {
     expect(() => daemonChannelStateDir('/a', 'bot', channelType)).toThrow(
       'Invalid channel type',
@@ -163,6 +167,10 @@ describe('daemonChannelStateDir', () => {
     expect(() =>
       daemonChannelStateDir('/a', component, component),
     ).not.toThrow();
+  });
+
+  it('accepts a valid surrogate pair', () => {
+    expect(() => daemonChannelStateDir('/a', '😀', '😀')).not.toThrow();
   });
 
   it.each(['COM0', 'COM10', 'LPT0', 'LPT10', 'connection.txt'])(

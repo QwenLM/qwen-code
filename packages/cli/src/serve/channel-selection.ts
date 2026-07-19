@@ -15,6 +15,22 @@ function hasControlCharacter(value: string): boolean {
   });
 }
 
+function isWellFormedUnicode(value: string): boolean {
+  for (let index = 0; index < value.length; index++) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (index + 1 >= value.length || next < 0xdc00 || next > 0xdfff) {
+        return false;
+      }
+      index++;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function isWindowsDeviceName(value: string): boolean {
   const baseName = value.split('.', 1)[0]!.trimEnd();
   return WINDOWS_DEVICE_NAME.test(baseName);
@@ -22,6 +38,7 @@ function isWindowsDeviceName(value: string): boolean {
 
 export function isSafePathComponent(value: string): boolean {
   return (
+    isWellFormedUnicode(value) &&
     value.trim().length > 0 &&
     value !== '.' &&
     value !== '..' &&
