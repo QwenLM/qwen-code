@@ -7,6 +7,7 @@
 import { createHash } from 'node:crypto';
 import { getPlugin } from '../commands/channel/channel-registry.js';
 import { loadSettings, saveSettings } from '../config/settings.js';
+import { isAllChannelSelectionName } from './channel-selection.js';
 
 export type ChannelSecretUpdate =
   | { operation: 'preserve' }
@@ -154,12 +155,14 @@ export class WorkspaceChannelSettingsStore {
     const current = this.assertRevision(options.expectedRevision);
     const channels = { ...current.channels };
     delete channels[name];
-    const startupNames =
-      name === 'all' && current.startupNames.includes('all')
-        ? Object.keys(channels).length > 0
-          ? ['all']
-          : []
-        : current.startupNames.filter((startupName) => startupName !== name);
+    const hasAllSentinel = current.startupNames.some(isAllChannelSelectionName);
+    const startupNames = hasAllSentinel
+      ? Object.keys(channels).some(
+          (channelName) => !isAllChannelSelectionName(channelName),
+        )
+        ? ['all']
+        : []
+      : current.startupNames.filter((startupName) => startupName !== name);
     const workspaceFile = loadSettings(this.workspaceCwd, {
       skipLoadEnvironment: true,
     }).workspace;

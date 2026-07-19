@@ -14,6 +14,7 @@ import type {
   ChannelUpsertRequest,
   RevisionRequest,
 } from '../channel-management-service.js';
+import { isAllChannelSelectionName } from '../channel-selection.js';
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
@@ -60,7 +61,7 @@ function parseInstanceName(
     name.trim().length === 0 ||
     name.includes('/') ||
     name.length > MAX_CHANNEL_INSTANCE_NAME_LENGTH ||
-    (name === 'all' && !options.allowReservedAll)
+    (isAllChannelSelectionName(name) && !options.allowReservedAll)
   ) {
     res.status(400).json({
       error: `Channel instance names must be non-empty, contain no slash, differ from the reserved name "all", and be at most ${MAX_CHANNEL_INSTANCE_NAME_LENGTH} characters.`,

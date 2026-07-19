@@ -303,6 +303,19 @@ describe('workspace Channel management routes', () => {
         .put('/workspace/channels/all/startup')
         .send({ expectedRevision: 'r1', enabled: false }),
     );
+    const whitespaceReservedPut = await auth(
+      request(app)
+        .put('/workspace/channels/%20all%20')
+        .send({ expectedRevision: 'r1', config: { type: 'telegram' } }),
+    );
+    const whitespaceReservedStart = await auth(
+      request(app).post('/workspace/channels/%09all%0A/start'),
+    );
+    const whitespaceReservedStartup = await auth(
+      request(app)
+        .put('/workspace/channels/%20all%20/startup')
+        .send({ expectedRevision: 'r1', enabled: false }),
+    );
     const invalidPut = await auth(
       request(app)
         .put('/workspace/channels/bot')
@@ -319,6 +332,9 @@ describe('workspace Channel management routes', () => {
     expect(reservedPut.status).toBe(400);
     expect(reservedStart.status).toBe(400);
     expect(reservedStartup.status).toBe(400);
+    expect(whitespaceReservedPut.status).toBe(400);
+    expect(whitespaceReservedStart.status).toBe(400);
+    expect(whitespaceReservedStartup.status).toBe(400);
     expect(invalidPut.status).toBe(400);
     expect(invalidPut.body.code).toBe('invalid_channel_management_request');
     expect(primaryService.start).not.toHaveBeenCalled();
@@ -336,6 +352,16 @@ describe('workspace Channel management routes', () => {
 
     expect(primaryService.remove).toHaveBeenCalledWith('all', {
       expectedRevision: 'r1',
+    });
+
+    await auth(
+      request(app)
+        .delete('/workspace/channels/%20all%20')
+        .send({ expectedRevision: 'r2' }),
+    ).expect(200);
+
+    expect(primaryService.remove).toHaveBeenCalledWith(' all ', {
+      expectedRevision: 'r2',
     });
   });
 

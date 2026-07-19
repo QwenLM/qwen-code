@@ -14,6 +14,7 @@ import type {
   ChannelSettingsUpsertOptions,
   WorkspaceChannelSettingsStore,
 } from './channel-settings-store.js';
+import { isAllChannelSelectionName } from './channel-selection.js';
 import { normalizeWorkerDiagnostic } from './channel-worker-diagnostics.js';
 import type {
   ChannelWorkerControlState,
@@ -247,7 +248,8 @@ export function createChannelManagementService(
       config,
       secrets,
       startsWithServe:
-        startupNames.includes('all') || startupNames.includes(name),
+        startupNames.some(isAllChannelSelectionName) ||
+        startupNames.includes(name),
       runtime: runtimeFor(name),
     };
   };
@@ -301,7 +303,7 @@ export function createChannelManagementService(
   };
 
   const assertManageableInstanceName = (name: string): void => {
-    if (name === 'all') {
+    if (isAllChannelSelectionName(name)) {
       throw new ChannelManagementError(
         'invalid_channel_instance_name',
         'Channel instance name "all" is reserved for startup selection.',
@@ -331,7 +333,7 @@ export function createChannelManagementService(
       return resultFor(name, persisted);
     },
     async remove(name, request) {
-      if (name !== 'all') {
+      if (!isAllChannelSelectionName(name)) {
         const committedNames = opts.manager.committedChannelNames();
         if (committedNames.includes(name)) {
           assertOwnedRuntime(name);
@@ -351,7 +353,7 @@ export function createChannelManagementService(
           `Channel "${name}" is not configured in this workspace.`,
         );
       }
-      const startsAll = current.startupNames.includes('all');
+      const startsAll = current.startupNames.some(isAllChannelSelectionName);
       if (startsAll && request.enabled) {
         if (current.revision !== request.expectedRevision) {
           throw new ChannelManagementError(
@@ -363,7 +365,7 @@ export function createChannelManagementService(
       }
       const startupNames = startsAll
         ? Object.keys(current.channels).filter(
-            (item) => item !== 'all' && item !== name,
+            (item) => !isAllChannelSelectionName(item) && item !== name,
           )
         : request.enabled
           ? current.startupNames.includes(name)

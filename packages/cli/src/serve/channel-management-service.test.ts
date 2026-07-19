@@ -5,7 +5,10 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { normalizeServeChannelSelection } from './channel-selection.js';
+import {
+  isAllChannelSelectionName,
+  normalizeServeChannelSelection,
+} from './channel-selection.js';
 import type { ChannelSettingsSnapshot } from './channel-settings-store.js';
 import {
   createChannelManagementService,
@@ -61,16 +64,19 @@ function setup(options: {
     remove: vi.fn(async (name) => {
       const channels = { ...persisted.channels };
       delete channels[name];
-      const hasAllSentinel = persisted.startupNames.includes('all');
+      const hasAllSentinel = persisted.startupNames.some(
+        isAllChannelSelectionName,
+      );
       persisted = settingsSnapshot({
         revision: 'rev-2',
         channels,
-        startupNames:
-          name === 'all' && hasAllSentinel
-            ? Object.keys(channels).length > 0
-              ? ['all']
-              : []
-            : persisted.startupNames.filter((item) => item !== name),
+        startupNames: hasAllSentinel
+          ? Object.keys(channels).some(
+              (channelName) => !isAllChannelSelectionName(channelName),
+            )
+            ? ['all']
+            : []
+          : persisted.startupNames.filter((item) => item !== name),
       });
       return persisted;
     }),
@@ -152,7 +158,7 @@ describe('createChannelManagementService', () => {
     });
   });
 
-  it('projects the all startup sentinel onto every configured instance', async () => {
+  it('projects a whitespace all startup sentinel onto every configured instance', async () => {
     const { service } = setup({
       snapshot: settingsSnapshot({
         channels: {
@@ -160,7 +166,7 @@ describe('createChannelManagementService', () => {
           first: { type: 'telegram' },
           bot: { type: 'telegram' },
         },
-        startupNames: ['all'],
+        startupNames: [' all '],
       }),
     });
 
@@ -290,9 +296,9 @@ describe('createChannelManagementService', () => {
     expect(manager.reloadWorkspace).not.toHaveBeenCalled();
   });
 
-  it('treats enabling one instance under all as a revision-checked no-op', async () => {
+  it('treats enabling one instance under whitespace all as a revision-checked no-op', async () => {
     const { service, store, manager } = setup({
-      snapshot: settingsSnapshot({ startupNames: ['all'] }),
+      snapshot: settingsSnapshot({ startupNames: [' all '] }),
     });
 
     const result = await service.setStartup('bot', {
@@ -316,16 +322,16 @@ describe('createChannelManagementService', () => {
     expect(store.setStartupNames).not.toHaveBeenCalled();
   });
 
-  it('expands all to the other configured instances when disabling one', async () => {
+  it('expands whitespace all to the other configured instances when disabling one', async () => {
     const { service, store, manager } = setup({
       snapshot: settingsSnapshot({
         channels: {
-          all: { type: 'telegram' },
+          ' all ': { type: 'telegram' },
           first: { type: 'telegram' },
           bot: { type: 'telegram' },
           last: { type: 'telegram' },
         },
-        startupNames: ['all'],
+        startupNames: [' all '],
       }),
     });
 
@@ -379,35 +385,42 @@ describe('createChannelManagementService', () => {
     expect(manager.setSelection).not.toHaveBeenCalled();
   });
 
-  it('rejects the reserved all name for configuration and startup mutations', async () => {
-    const { service, store, manager } = setup({
-      snapshot: settingsSnapshot({
-        channels: { all: { type: 'telegram' }, bot: { type: 'telegram' } },
-        startupNames: ['all'],
-      }),
-    });
+  it.each(['all', ' all ', '\tall\n'])(
+    'rejects the reserved %j name for configuration and startup mutations',
+    async (reservedName) => {
+      const { service, store, manager } = setup({
+        snapshot: settingsSnapshot({
+          channels: { all: { type: 'telegram' }, bot: { type: 'telegram' } },
+          startupNames: ['all'],
+        }),
+      });
 
-    await expect(
-      service.upsert('all', {
-        expectedRevision: 'rev-1',
-        config: { type: 'telegram' },
-      }),
-    ).rejects.toMatchObject({ code: 'invalid_channel_instance_name' });
-    await expect(
-      service.setStartup('all', {
-        expectedRevision: 'rev-1',
-        enabled: false,
-      }),
-    ).rejects.toMatchObject({ code: 'invalid_channel_instance_name' });
+      await expect(
+        service.upsert(reservedName, {
+          expectedRevision: 'rev-1',
+          config: { type: 'telegram' },
+        }),
+      ).rejects.toMatchObject({ code: 'invalid_channel_instance_name' });
+      await expect(
+        service.setStartup(reservedName, {
+          expectedRevision: 'rev-1',
+          enabled: false,
+        }),
+      ).rejects.toMatchObject({ code: 'invalid_channel_instance_name' });
 
-    expect(store.upsert).not.toHaveBeenCalled();
-    expect(store.setStartupNames).not.toHaveBeenCalled();
-    expect(manager.setSelection).not.toHaveBeenCalled();
-  });
+      expect(store.upsert).not.toHaveBeenCalled();
+      expect(store.setStartupNames).not.toHaveBeenCalled();
+      expect(manager.setSelection).not.toHaveBeenCalled();
+    },
+  );
 
-  it.each(['start', 'stop', 'restart'] as const)(
-    'rejects the reserved all name before %s reaches the manager',
-    async (operation) => {
+  it.each(
+    (['start', 'stop', 'restart'] as const).flatMap((operation) =>
+      ['all', ' all ', '\tall\n'].map((name) => [operation, name] as const),
+    ),
+  )(
+    'rejects the reserved name before %s(%j) reaches the manager',
+    async (operation, reservedName) => {
       const { service, manager } = setup({
         snapshot: settingsSnapshot({
           channels: { all: { type: 'telegram' }, bot: { type: 'telegram' } },
@@ -415,7 +428,7 @@ describe('createChannelManagementService', () => {
         }),
       });
 
-      await expect(service[operation]('all')).rejects.toMatchObject({
+      await expect(service[operation](reservedName)).rejects.toMatchObject({
         code: 'invalid_channel_instance_name',
       });
 
@@ -443,6 +456,31 @@ describe('createChannelManagementService', () => {
       expectedRevision: 'rev-1',
     });
     expect(result.snapshot.instances).not.toHaveProperty('all');
+    expect(result.snapshot.instances['bot']?.startsWithServe).toBe(true);
+    expect(manager.stopSelection).not.toHaveBeenCalled();
+    expect(manager.setSelection).not.toHaveBeenCalled();
+  });
+
+  it('removes a whitespace legacy all config without mutating runtime selection', async () => {
+    const { service, store, manager } = setup({
+      committedNames: [' all '],
+      snapshot: settingsSnapshot({
+        channels: {
+          ' all ': { type: 'telegram' },
+          bot: { type: 'telegram' },
+        },
+        startupNames: [' all ', 'bot'],
+      }),
+    });
+
+    const result = await service.remove(' all ', {
+      expectedRevision: 'rev-1',
+    });
+
+    expect(store.remove).toHaveBeenCalledWith(' all ', {
+      expectedRevision: 'rev-1',
+    });
+    expect(result.snapshot.instances).not.toHaveProperty(' all ');
     expect(result.snapshot.instances['bot']?.startsWithServe).toBe(true);
     expect(manager.stopSelection).not.toHaveBeenCalled();
     expect(manager.setSelection).not.toHaveBeenCalled();

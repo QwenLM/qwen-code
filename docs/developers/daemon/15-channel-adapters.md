@@ -246,9 +246,9 @@ latest value as `expectedRevision`; mismatch returns
 `409 channel_settings_conflict` before writing.
 
 Instance names must be non-empty, contain no slash, be at most 256 characters,
-and differ from the reserved startup sentinel `all`. The management service
-enforces the reservation as a domain invariant for configuration, lifecycle,
-and per-instance startup mutations; routes map
+and not trim to the reserved startup sentinel `all`. The management service
+uses the channel-selection canonicalization as a domain invariant for
+configuration, lifecycle, and per-instance startup mutations; routes map
 `invalid_channel_instance_name` to 400. List may still expose a legacy
 `channels.all` entry, and DELETE alone accepts that name for cleanup.
 
@@ -280,9 +280,10 @@ The persistence/lifecycle ordering is intentional:
   bounded, credential-redacted instance diagnostic.
 - DELETE confirms Stop before removing settings and also removes the name from
   `serve.channels`. Unconfirmed exit leaves both untouched. Deleting a legacy
-  `channels.all` entry never treats the sentinel as a runtime instance. It
-  preserves `serve.channels: ['all']` while other configurations remain and
-  writes `[]` when none remain.
+  `channels.all` entry, including a key with surrounding whitespace, never
+  treats the sentinel as a runtime instance. It canonicalizes the saved
+  sentinel to `serve.channels: ['all']` while other selectable configurations
+  remain and writes `[]` when none remain.
 - PUT `.../:name/startup` requires an own configured instance, then adds its
   name once to or removes it from the ordered `serve.channels` list through
   the same revision check. It does not touch the manager or the instance
