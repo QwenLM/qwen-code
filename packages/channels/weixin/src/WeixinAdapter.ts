@@ -18,7 +18,7 @@ import type {
   ChannelAgentBridge,
   ChannelTaskLifecycleEvent,
 } from '@qwen-code/channel-base';
-import { getStateDir, loadAccount, DEFAULT_BASE_URL } from './accounts.js';
+import { resolveStateDir, loadAccount, DEFAULT_BASE_URL } from './accounts.js';
 import { startPollLoop, getContextToken } from './monitor.js';
 import type { CdnRef, FileCdnRef } from './monitor.js';
 import { sendText, sendImage, detectImageMime } from './send.js';
@@ -91,7 +91,7 @@ export class WeixinChannel extends ChannelBase {
       ? this.allowLegacyCredentialFallback
         ? loadAccount(this.stateDir, {
             allowLegacyFallback: true,
-            legacyStateDir: getStateDir(),
+            legacyStateDir: resolveStateDir(),
           })
         : loadAccount(this.stateDir)
       : loadAccount();

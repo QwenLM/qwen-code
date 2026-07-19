@@ -5,7 +5,7 @@ const apiMocks = vi.hoisted(() => ({
   sendTyping: vi.fn(),
 }));
 const accountMocks = vi.hoisted(() => ({
-  getStateDir: vi.fn(() => '/legacy/weixin'),
+  resolveStateDir: vi.fn(() => '/legacy/weixin'),
   loadAccount: vi.fn(),
 }));
 const monitorMocks = vi.hoisted(() => ({ startPollLoop: vi.fn() }));
@@ -21,7 +21,7 @@ vi.mock('./api.js', async () => {
 
 vi.mock('./accounts.js', () => ({
   DEFAULT_BASE_URL: 'https://ilinkai.weixin.qq.com',
-  getStateDir: accountMocks.getStateDir,
+  resolveStateDir: accountMocks.resolveStateDir,
   loadAccount: accountMocks.loadAccount,
 }));
 

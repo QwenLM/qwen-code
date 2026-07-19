@@ -1,4 +1,5 @@
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -11,7 +12,9 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   clearAccount,
+  getStateDir,
   loadAccount,
+  resolveStateDir,
   saveAccount,
   type AccountData,
 } from './accounts.js';
@@ -35,6 +38,45 @@ function account(token: string): AccountData {
 }
 
 describe('Weixin account storage', () => {
+  it('resolves an environment state path without creating it', () => {
+    const root = mkdtempSync(join(tmpdir(), 'weixin-resolve-env-'));
+    const absent = join(root, 'absent');
+    process.env['WEIXIN_STATE_DIR'] = absent;
+
+    expect(resolveStateDir()).toBe(absent);
+    expect(existsSync(absent)).toBe(false);
+  });
+
+  it('resolves the default global legacy path', () => {
+    delete process.env['WEIXIN_STATE_DIR'];
+
+    expect(resolveStateDir()).toMatch(/[/\\]channels[/\\]weixin$/u);
+  });
+
+  it('keeps standalone state lookup directory-creating', () => {
+    const root = mkdtempSync(join(tmpdir(), 'weixin-standalone-dir-'));
+    const absent = join(root, 'absent');
+    process.env['WEIXIN_STATE_DIR'] = absent;
+
+    expect(getStateDir()).toBe(absent);
+    expect(existsSync(absent)).toBe(true);
+  });
+
+  it('does not create an absent legacy directory during daemon fallback lookup', () => {
+    const root = mkdtempSync(join(tmpdir(), 'weixin-daemon-fallback-'));
+    const scopedDir = join(root, 'scoped');
+    const legacyDir = join(root, 'legacy-absent');
+    process.env['WEIXIN_STATE_DIR'] = legacyDir;
+
+    expect(
+      loadAccount(scopedDir, {
+        allowLegacyFallback: true,
+        legacyStateDir: resolveStateDir(),
+      }),
+    ).toBeNull();
+    expect(existsSync(legacyDir)).toBe(false);
+  });
+
   it('isolates explicitly scoped state from standalone account storage', () => {
     const root = mkdtempSync(join(tmpdir(), 'weixin-accounts-'));
     const legacyDir = join(root, 'legacy');

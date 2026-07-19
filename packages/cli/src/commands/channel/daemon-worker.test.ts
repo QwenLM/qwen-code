@@ -826,6 +826,71 @@ describe('runChannelDaemonWorker', () => {
     );
   });
 
+  it('denies legacy credentials when workspace capability metadata is absent', async () => {
+    const sdk = createSdk();
+    mockLoadChannelsConfig.mockReturnValueOnce({
+      'qq-main': { type: 'qq' },
+    });
+    mockParseConfiguredChannels.mockResolvedValueOnce([
+      {
+        name: 'qq-main',
+        config: { ...parsedTelegram.config, type: 'qq' },
+      },
+    ]);
+
+    await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['qq-main'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(mockCreateChannel).toHaveBeenCalledWith(
+      'qq-main',
+      expect.any(Object),
+      expect.any(Object),
+      expect.objectContaining({ allowLegacyCredentialFallback: false }),
+    );
+  });
+
+  it('denies legacy credentials for duplicate canonical runtime matches', async () => {
+    const sdk = createSdk();
+    sdk.client.capabilities.mockResolvedValueOnce({
+      v: 1,
+      mode: 'http-bridge',
+      features: [],
+      modelServices: [],
+      workspaceCwd: '/workspace',
+      workspaces: [
+        { id: 'primary-a', cwd: '/workspace', primary: true, trusted: true },
+        { id: 'primary-b', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    });
+    mockLoadChannelsConfig.mockReturnValueOnce({
+      'qq-main': { type: 'qq' },
+    });
+    mockParseConfiguredChannels.mockResolvedValueOnce([
+      {
+        name: 'qq-main',
+        config: { ...parsedTelegram.config, type: 'qq' },
+      },
+    ]);
+
+    await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['qq-main'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(mockCreateChannel).toHaveBeenCalledWith(
+      'qq-main',
+      expect.any(Object),
+      expect.any(Object),
+      expect.objectContaining({ allowLegacyCredentialFallback: false }),
+    );
+  });
+
   it.each([
     {
       label: 'the workspace is secondary',

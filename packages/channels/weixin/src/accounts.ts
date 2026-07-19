@@ -24,10 +24,15 @@ export interface AccountData {
   savedAt: string;
 }
 
-export function getStateDir(): string {
-  const dir =
+export function resolveStateDir(): string {
+  return (
     process.env['WEIXIN_STATE_DIR'] ||
-    join(getGlobalQwenDir(), 'channels', 'weixin');
+    join(getGlobalQwenDir(), 'channels', 'weixin')
+  );
+}
+
+export function getStateDir(): string {
+  const dir = resolveStateDir();
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
