@@ -18,7 +18,7 @@ import {
   type ChannelQrAuthActions,
   type UseChannelQrAuthResult,
 } from './useChannelQrAuth';
-import { I18nProvider } from '../../i18n';
+import { I18nProvider, type WebShellLanguage } from '../../i18n';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -65,10 +65,10 @@ function Harness() {
   return null;
 }
 
-async function render() {
+async function render(language: WebShellLanguage = 'en') {
   await act(async () => {
     root.render(
-      <I18nProvider language="en">
+      <I18nProvider language={language}>
         <Harness />
       </I18nProvider>,
     );
@@ -119,6 +119,21 @@ afterEach(() => {
 });
 
 describe('useChannelQrAuth', () => {
+  it('retranslates an existing client error without restarting the session', async () => {
+    props.actions.qr = vi
+      .fn()
+      .mockResolvedValue(new Blob(['not-an-image'], { type: 'text/plain' }));
+    await render();
+    await flush();
+    expect(latest?.error).toBe('The QR image could not be loaded.');
+
+    await render('zh-CN');
+
+    expect(latest?.error).toBe('无法加载二维码图片。');
+    expect(props.actions.begin).toHaveBeenCalledTimes(1);
+    expect(props.actions.cancel).not.toHaveBeenCalled();
+  });
+
   it('revokes the previous QR object URL after rotation and on unmount', async () => {
     await render();
     await flush();

@@ -53,6 +53,13 @@ interface ActiveOperation {
   committed: boolean;
 }
 
+type ChannelQrAuthErrorKey =
+  | 'channels.auth.error.unavailable'
+  | 'channels.auth.error.qrLoad'
+  | 'channels.auth.error.statusRefresh'
+  | 'channels.auth.error.start'
+  | 'channels.auth.error.save';
+
 export interface UseChannelQrAuthResult {
   session?: DaemonChannelAuthSession;
   qrUrl?: string;
@@ -136,7 +143,9 @@ export function useChannelQrAuth({
     undefined,
   );
   const [qrUrl, setQrUrl] = useState<string | undefined>(undefined);
-  const [error, setError] = useState<string | undefined>(undefined);
+  const [errorKey, setErrorKey] = useState<ChannelQrAuthErrorKey | undefined>(
+    undefined,
+  );
   const [unavailable, setUnavailable] = useState(false);
   const [retryableFailure, setRetryableFailure] = useState(false);
   const [busy, setBusy] = useState<UseChannelQrAuthResult['busy']>(null);
@@ -218,13 +227,13 @@ export function useChannelQrAuth({
         .catch(() => undefined);
     };
 
-    const fail = (cause: unknown, fallback: string) => {
+    const fail = (cause: unknown, fallback: ChannelQrAuthErrorKey) => {
       if (!current()) return;
       revokeQr();
       setUnavailable(isUnavailable(cause));
       setRetryableFailure(isRetryableFailure(cause));
-      setError(
-        isUnavailable(cause) ? t('channels.auth.error.unavailable') : fallback,
+      setErrorKey(
+        isUnavailable(cause) ? 'channels.auth.error.unavailable' : fallback,
       );
       setBusy(null);
     };
@@ -242,7 +251,7 @@ export function useChannelQrAuth({
         const blob = await operation.actions.qr(operation.name, next.id);
         if (!current()) return false;
         if (!blob.type.toLowerCase().startsWith('image/')) {
-          fail(undefined, t('channels.auth.error.qrLoad'));
+          fail(undefined, 'channels.auth.error.qrLoad');
           return false;
         }
         const url = URL.createObjectURL(blob);
@@ -254,7 +263,7 @@ export function useChannelQrAuth({
         setQrUrl(url);
         return true;
       } catch (cause) {
-        fail(cause, t('channels.auth.error.qrLoad'));
+        fail(cause, 'channels.auth.error.qrLoad');
         return false;
       }
     };
@@ -268,7 +277,7 @@ export function useChannelQrAuth({
       if (!current()) return;
       operation.session = next;
       setSession(next);
-      setError(undefined);
+      setErrorKey(undefined);
       setUnavailable(false);
       setRetryableFailure(false);
       setBusy(null);
@@ -284,7 +293,7 @@ export function useChannelQrAuth({
           await operation.actions.status(operation.name, activeSession.id),
         );
       } catch (cause) {
-        fail(cause, t('channels.auth.error.statusRefresh'));
+        fail(cause, 'channels.auth.error.statusRefresh');
       }
     };
 
@@ -305,14 +314,14 @@ export function useChannelQrAuth({
         }
         await accept(next);
       } catch (cause) {
-        fail(cause, t('channels.auth.error.start'));
+        fail(cause, 'channels.auth.error.start');
       }
     };
 
     if (open) {
       revokeQr();
       setSession(undefined);
-      setError(undefined);
+      setErrorKey(undefined);
       setUnavailable(false);
       setRetryableFailure(false);
       setBusy(attempt === 0 ? 'begin' : 'retry');
@@ -320,7 +329,7 @@ export function useChannelQrAuth({
     } else {
       revokeQr();
       setSession(undefined);
-      setError(undefined);
+      setErrorKey(undefined);
       setUnavailable(false);
       setRetryableFailure(false);
       setBusy(null);
@@ -332,7 +341,7 @@ export function useChannelQrAuth({
       cancel();
       revokeQr(false);
     };
-  }, [actions, attempt, channelType, identity, name, open, revokeQr, t]);
+  }, [actions, attempt, channelType, identity, name, open, revokeQr]);
 
   const close = useCallback(() => {
     const operation = operationRef.current;
@@ -405,7 +414,7 @@ export function useChannelQrAuth({
       operation.session = { ...operation.session, state: 'committed' };
       setSession(operation.session);
       revokeQr();
-      setError(undefined);
+      setErrorKey(undefined);
     } catch (cause) {
       if (
         mountedRef.current &&
@@ -414,10 +423,10 @@ export function useChannelQrAuth({
       ) {
         setUnavailable(isUnavailable(cause));
         setRetryableFailure(isRetryableFailure(cause));
-        setError(
+        setErrorKey(
           isUnavailable(cause)
-            ? t('channels.auth.error.unavailable')
-            : t('channels.auth.error.save'),
+            ? 'channels.auth.error.unavailable'
+            : 'channels.auth.error.save',
         );
       }
     } finally {
@@ -429,7 +438,7 @@ export function useChannelQrAuth({
         setBusy(null);
       }
     }
-  }, [busy, revokeQr, t]);
+  }, [busy, revokeQr]);
 
   const canRetry =
     !unavailable &&
@@ -438,6 +447,7 @@ export function useChannelQrAuth({
       session?.state === 'requesting' ||
       session?.state === 'expired' ||
       session?.state === 'error');
+  const error = errorKey ? t(errorKey) : undefined;
 
   return {
     session,

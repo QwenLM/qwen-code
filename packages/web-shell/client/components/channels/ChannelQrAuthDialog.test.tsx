@@ -91,6 +91,47 @@ afterEach(() => {
 });
 
 describe('ChannelQrAuthDialog', () => {
+  it('switches locale without restarting an active QR session', async () => {
+    const identity = {};
+    vi.mocked(actions.begin).mockResolvedValue(session('awaiting_scan'));
+    const renderLanguage = (language: WebShellLanguage) =>
+      root.render(
+        <I18nProvider language={language}>
+          <ChannelQrAuthDialog
+            open
+            identity={identity}
+            name="qq-main"
+            channelType="qq"
+            channelDisplayName="QQ"
+            actions={actions}
+            onOpenChange={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+
+    await act(async () => {
+      renderLanguage('en');
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const qrUrl = document.querySelector('img')?.src;
+    expect(document.body.textContent).toContain(
+      'Scan the QR code with your channel app.',
+    );
+    expect(button('Cancel')).toBeInstanceOf(HTMLButtonElement);
+
+    await act(async () => renderLanguage('zh-CN'));
+
+    expect(document.body.textContent).toContain('请使用频道应用扫描二维码。');
+    expect(button('取消')).toBeInstanceOf(HTMLButtonElement);
+    expect(document.querySelector('img')?.src).toBe(qrUrl);
+    expect(actions.begin).toHaveBeenCalledTimes(1);
+    expect(actions.qr).toHaveBeenCalledTimes(1);
+    expect(actions.status).not.toHaveBeenCalled();
+    expect(actions.cancel).not.toHaveBeenCalled();
+    expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+  });
+
   it('localizes representative QR labels in Simplified Chinese', async () => {
     await renderDialog('ready', 'zh-CN');
 
