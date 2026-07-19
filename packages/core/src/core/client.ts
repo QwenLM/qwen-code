@@ -351,6 +351,11 @@ export class GeminiClient {
         sessionStartSource ?? SessionStartSource.Resume,
       );
       const chat = this.getChat();
+      chat.rememberImagePayloads(
+        resumedSessionData.conversation.messages.flatMap((record) =>
+          record.message ? [record.message] : [],
+        ),
+      );
       if (resumeTokenCounts) {
         chat.seedResumeTokenCounts(
           resumeTokenCounts.promptTokenCount,
@@ -417,6 +422,10 @@ export class GeminiClient {
       throw new Error('Chat not initialized');
     }
     return this.chat;
+  }
+
+  resolveImageReferences(message: PartListUnion): PartListUnion {
+    return this.getChat().resolveImageReferences(message);
   }
 
   isInitialized(): boolean {
@@ -592,7 +601,9 @@ export class GeminiClient {
   }
 
   setHistory(history: Content[]) {
-    this.getChat().setHistory(history);
+    const chat = this.getChat();
+    chat.setHistory(history);
+    chat.reconcileImagePayloads(history);
     // Replacing history wholesale drops any prior read_file tool
     // results the FileReadCache still believes the model has seen.
     // Without clearing, a follow-up Read of an unchanged file would
@@ -1800,7 +1811,9 @@ export class GeminiClient {
       const m = mcResult.meta;
       const changed = m.tokensSaved > 0;
       if (changed) {
-        this.getChat().setHistory(mcResult.history);
+        const chat = this.getChat();
+        chat.setHistory(mcResult.history);
+        chat.reconcileImagePayloads?.(mcResult.history);
         await this.disarmFileReadCacheAfterEviction(m, 'microcompaction');
       }
       if (m.triggerReason === 'size') {
@@ -3095,6 +3108,7 @@ export class GeminiClient {
       const chat = this.getChat();
       const compressedHistory = chat.getHistoryShallow?.() ?? chat.getHistory();
       await this.startChat(compressedHistory, SessionStartSource.Compact);
+      chat.copyImagePayloadsTo(this.getChat());
       if (
         !this.lastSessionStartContext &&
         previousSessionStartContext &&

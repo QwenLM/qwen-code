@@ -43,3 +43,9 @@ LLM-based automatic chat compression remains on the primary-model path. A full-t
 Phase 1 covers the interactive TUI, ACP, and non-interactive CLI.
 
 Textual `@` paths are resolved to their canonical target before MIME detection, workspace checks, ignore filtering, and file reads. Both the user-supplied alias and canonical target must pass ignore filtering, so a symlink cannot disguise an ignored file or a non-image target.
+
+## Durable visual context
+
+Historical images are represented by deterministic `Image #<id>` references. Below the payload threshold all historical images remain attached; at or above it only the configured recent images are attached. A prompt that explicitly names one or more image IDs attaches only those images, then follows the same bridge or full-turn routing decision as a newly supplied image.
+
+Resume rebuilds the session-scoped image store from the original JSONL messages, including images older than the latest compression checkpoint. Compaction restoration headers retain the same IDs, and `/clear` drops the store. Raw bytes stay in the attachment layer and are never inserted into text sent to a text-only model.

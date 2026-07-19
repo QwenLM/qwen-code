@@ -1654,7 +1654,8 @@ export class Session implements SessionContext {
       );
     }
 
-    const chat = this.config.getGeminiClient()!.getChat();
+    const geminiClient = this.config.getGeminiClient()!;
+    const chat = geminiClient.getChat();
     const apiHistory = chat.getHistoryShallow();
     const apiTruncateIndex = this.#computeApiTruncationIndexForUserTurn(
       apiHistory,
@@ -1668,7 +1669,7 @@ export class Session implements SessionContext {
       );
     }
 
-    chat.truncateHistory(apiTruncateIndex);
+    geminiClient.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
     const preserveQueuedPromptPriority = this.todoStopGuardQueuedPromptPriority;
     const shouldDrainAutomaticQueues =
@@ -1737,10 +1738,7 @@ export class Session implements SessionContext {
       );
     }
 
-    this.config
-      .getGeminiClient()!
-      .getChat()
-      .setHistory(structuredClone(history));
+    this.config.getGeminiClient()!.setHistory(structuredClone(history));
     this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
   }
 
@@ -2226,8 +2224,9 @@ export class Session implements SessionContext {
               }
               if (recoveryPlan.continuation.mode === 'retry_user_parts') {
                 strippedOrphanEntries =
-                  this.#getCurrentChat().stripOrphanedUserEntriesFromHistory() ??
-                  null;
+                  this.config
+                    .getGeminiClient()!
+                    .stripOrphanedUserEntriesFromHistory() ?? null;
                 orphanPushCountSnapshot =
                   this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
                 continuationParts = recoveryPlan.continuation.parts;
@@ -2240,7 +2239,9 @@ export class Session implements SessionContext {
               // The orphaned content is already persisted; recording a new user
               // message would duplicate the turn in the transcript.
             } else if (isRetry) {
-              this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
+              this.config
+                .getGeminiClient()!
+                .stripOrphanedUserEntriesFromHistory();
             } else {
               // record user message for session management
               this.config
@@ -7360,6 +7361,9 @@ export class Session implements SessionContext {
     abortSignal: AbortSignal,
     onFullTurnModel?: (model: string) => boolean,
   ): Promise<Part[]> {
+    originalParts = this.#getCurrentChat().resolveImageReferences(
+      originalParts,
+    ) as Part[];
     const parts = await this.#applyVoiceBridgeIfNeeded(
       originalParts,
       abortSignal,

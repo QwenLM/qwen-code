@@ -14,6 +14,7 @@ import type {
   FunctionCall,
   SendMessageParameters,
   Part,
+  PartListUnion,
   Tool,
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
@@ -73,9 +74,10 @@ import {
 } from '../services/compactionInputSlimming.js';
 import {
   InMemoryImagePayloadStore,
-  buildReattachParts,
+  collectReferencedImageIds,
   countAllInlineImages,
-  replaceImagePayloadsInPlace,
+  prepareImagePayloadsForRequest,
+  rememberImagePayloads,
 } from '../services/image-payload-references.js';
 import {
   estimateContentTokens,
@@ -1615,33 +1617,47 @@ export class GeminiChat {
     const { maxRecentImages, imagePayloadThreshold } = resolveCompactionTuning(
       this.config.getChatCompression(),
     );
-    if (countAllInlineImages(curatedHistory) >= imagePayloadThreshold) {
-      const skipEntry = currentUserContent
-        ? curatedHistory.find(
-            (c) =>
-              c === currentUserContent ||
-              (c.role === 'user' &&
-                currentUserContent.parts?.some((p) => c.parts?.includes(p))),
-          )
-        : undefined;
-      const replaced = replaceImagePayloadsInPlace(
-        curatedHistory,
-        this.imagePayloadStore,
-        skipEntry,
-      );
-      const requestHistory = curatedHistory.map(copyContentContainer);
-      const reattachParts = buildReattachParts(replaced, maxRecentImages);
-      if (reattachParts.length > 0) {
-        const last = requestHistory.at(-1);
-        if (last?.role === 'user') {
-          last.parts = [...(last.parts ?? []), ...reattachParts];
-        } else {
-          requestHistory.push({ role: 'user', parts: reattachParts });
-        }
-      }
-      return requestHistory;
+    const imageCount = countAllInlineImages(curatedHistory);
+    const hasExplicitReferences =
+      collectReferencedImageIds(curatedHistory.at(-1)).size > 0;
+
+    return prepareImagePayloadsForRequest(curatedHistory, {
+      maxRecentImages: hasExplicitReferences
+        ? 0
+        : imageCount >= imagePayloadThreshold
+          ? maxRecentImages
+          : imageCount,
+      ...(currentUserContent?.parts
+        ? { preserveImageParts: new Set(currentUserContent.parts) }
+        : {}),
+      store: this.imagePayloadStore,
+    });
+  }
+
+  resolveImageReferences(message: PartListUnion): PartListUnion {
+    const current = createUserContent(message);
+    if (collectReferencedImageIds(current).size === 0) {
+      return message;
     }
-    return curatedHistory.map(copyContentContainer);
+    const history = extractCuratedHistory(this.history);
+    const resolved = prepareImagePayloadsForRequest([...history, current], {
+      maxRecentImages: 0,
+      preserveImageParts: new Set(current.parts ?? []),
+      store: this.imagePayloadStore,
+    }).at(-1)?.parts;
+    return resolved?.some((part) => part.inlineData) ? resolved : message;
+  }
+
+  rememberImagePayloads(contents: Content[]): void {
+    rememberImagePayloads(contents, this.imagePayloadStore);
+  }
+
+  reconcileImagePayloads(contents: Content[]): void {
+    this.imagePayloadStore.reconcile(contents);
+  }
+
+  copyImagePayloadsTo(target: GeminiChat): void {
+    this.imagePayloadStore.copyTo(target.imagePayloadStore);
   }
 
   private getRequestHistoryForRoute(
@@ -3487,6 +3503,7 @@ export class GeminiChat {
    */
   clearHistory(): void {
     this.history = [];
+    this.imagePayloadStore.clear();
     // Any pending partial-push state points into the now-empty history;
     // resetting prevents `popPartialIfPushed` from splicing whatever
     // shows up at that index in a future send (defense-in-depth — the
@@ -3534,6 +3551,7 @@ export class GeminiChat {
 
   truncateHistory(keepCount: number): void {
     this.history = this.history.slice(0, keepCount);
+    this.reconcileImagePayloads(this.history);
     // Truncation can drop the entry the partial-push marker points at,
     // or leave it valid but shift the meaning of nearby indices. Reset
     // both fields rather than try to fix them up — they're per-send and
@@ -3547,6 +3565,7 @@ export class GeminiChat {
     this.history = this.history
       .map(stripThoughtPartsFromContent)
       .filter((content): content is Content => content !== null);
+    this.reconcileImagePayloads(this.history);
     // Filter+map replaces `this.history` with a new array, so any pending
     // partial-push marker is now indexed against an array that no longer
     // exists. Clear it for the same reason setHistory does — and drop
@@ -3597,6 +3616,9 @@ export class GeminiChat {
     // happens to line up with whatever model entry is at that index
     // in the meanwhile.
     this.clearPendingPartialState();
+    if (strippedEntries.length > 0) {
+      this.reconcileImagePayloads(this.history);
+    }
     return strippedEntries;
   }
 
