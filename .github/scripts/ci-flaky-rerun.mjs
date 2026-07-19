@@ -15,6 +15,9 @@ const DEFAULT_ACTIVE_DAYS = 7;
 const DEFAULT_MAX_CANDIDATES = 5;
 const MAX_ACTIONS = 3;
 const ACTIONS = new Set(['rerun', 'comment', 'no_action']);
+const DEFLAKE_MARKER = 'qwen-deflake';
+const DEFLAKE_LABELS = ['status/ready-for-agent', 'autofix/approved'];
+const DEFLAKE_MAX_CHARS = 200;
 
 function timeMs(value) {
   const ms = Date.parse(value ?? '');
@@ -297,6 +300,22 @@ function validDecision(target, decision) {
   ) {
     return false;
   }
+  if (decision.flakyTest !== undefined) {
+    if (decision.action !== 'rerun') return false;
+    const ft = decision.flakyTest;
+    if (
+      !ft ||
+      typeof ft !== 'object' ||
+      typeof ft.file !== 'string' ||
+      !ft.file.trim() ||
+      ft.file.length > DEFLAKE_MAX_CHARS ||
+      typeof ft.name !== 'string' ||
+      !ft.name.trim() ||
+      ft.name.length > DEFLAKE_MAX_CHARS
+    ) {
+      return false;
+    }
+  }
   return (
     decision.prNumber === target.prNumber &&
     decision.headSha === target.headSha &&
@@ -304,6 +323,66 @@ function validDecision(target, decision) {
     decision.runAttempt === target.runAttempt &&
     decision.failureKey === target.failureKey
   );
+}
+
+export function deflakeKey(flakyTest) {
+  return createHash('sha256')
+    .update(`${flakyTest.file}\u0000${flakyTest.name}`)
+    .digest('hex')
+    .slice(0, 16);
+}
+
+export function deflakeMarker(flakyTest) {
+  return `<!-- ${DEFLAKE_MARKER} key=${deflakeKey(flakyTest)} -->`;
+}
+
+export function deflakeIssueBody(flakyTest, decision, target) {
+  const marker = deflakeMarker(flakyTest);
+  const runUrl = `https://github.com/${
+    target?.repo ?? 'QwenLM/qwen-code'
+  }/actions/runs/${target?.runId ?? ''}`;
+  return [
+    `A flaky test was confirmed by CI Failure Patrol: it failed then passed on a rerun of the same commit.`,
+    ``,
+    `- **Test file:** \`${flakyTest.file}\``,
+    `- **Test name:** ${flakyTest.name}`,
+    `- **Observed on:** #${target?.prNumber ?? '?'} (${runUrl})`,
+    `- **Signature:** ${safeReason(decision?.reason_en ?? 'flaky test')}`,
+    ``,
+    `Fix it with \`.qwen/skills/deflake/SKILL.md\` — a minimal, assertion-preserving stabilization. Never weaken, skip, or delete the assertion.`,
+    ``,
+    `<details>`,
+    `<summary>中文说明</summary>`,
+    ``,
+    `CI Failure Patrol 确认了一个 flaky 测试:同一 commit 上先失败、重跑通过。`,
+    ``,
+    `- **测试文件:** \`${flakyTest.file}\``,
+    `- **用例名:** ${flakyTest.name}`,
+    `- **出现于:** #${target?.prNumber ?? '?'}(${runUrl})`,
+    `- **签名:** ${safeReason(decision?.reason_zh ?? 'flaky 测试')}`,
+    ``,
+    `请依据 \`.qwen/skills/deflake/SKILL.md\` 做最小、保留断言的稳化修复,绝不弱化、跳过或删除断言。`,
+    ``,
+    `</details>`,
+    ``,
+    marker,
+  ].join('\n');
+}
+
+export async function ensureDeflakeIssue(client, target, decision) {
+  if (!decision?.flakyTest) return;
+  const marker = deflakeMarker(decision.flakyTest);
+  if (await client.hasOpenIssueWithMarker(marker)) return;
+  const title =
+    `deflake: ${decision.flakyTest.file} \u203a ${decision.flakyTest.name}`.slice(
+      0,
+      240,
+    );
+  await client.createIssue({
+    title,
+    body: deflakeIssueBody(decision.flakyTest, decision, target),
+    labels: DEFLAKE_LABELS,
+  });
 }
 
 function currentFailure(run, target) {
@@ -387,6 +466,7 @@ export async function actOnDecision(client, target, decision) {
   if (decision.action === 'rerun') {
     await client.rerunFailedJobs(target.runId);
     await client.comment(target.prNumber, marker);
+    await ensureDeflakeIssue(client, target, decision);
   } else if (decision.action === 'comment') {
     await client.comment(
       target.prNumber,
@@ -573,6 +653,39 @@ export class GhClient {
 
   async jobLog(jobId) {
     return this.gh(['api', `repos/${this.repo}/actions/jobs/${jobId}/logs`]);
+  }
+
+  async hasOpenIssueWithMarker(marker) {
+    const output = await this.gh([
+      'issue',
+      'list',
+      '--repo',
+      this.repo,
+      '--state',
+      'open',
+      '--search',
+      `${marker} in:body`,
+      '--json',
+      'number',
+      '--limit',
+      '1',
+    ]);
+    return JSON.parse(output).length > 0;
+  }
+
+  async createIssue({ title, body, labels }) {
+    await this.gh([
+      'issue',
+      'create',
+      '--repo',
+      this.repo,
+      '--title',
+      title,
+      '--body',
+      body,
+      '--label',
+      labels.join(','),
+    ]);
   }
 }
 

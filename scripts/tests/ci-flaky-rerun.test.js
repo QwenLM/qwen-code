@@ -8,6 +8,9 @@ import {
   actOnDecision,
   actOnDecisions,
   alreadyHandled,
+  deflakeIssueBody,
+  deflakeKey,
+  deflakeMarker,
   argsMap,
   currentActionCount,
   eligibleAttemptJob,
@@ -105,6 +108,13 @@ function client(overrides = {}) {
     },
     async comment(...args) {
       calls.push(['comment', ...args]);
+    },
+    async hasOpenIssueWithMarker(...args) {
+      calls.push(['hasOpenIssueWithMarker', ...args]);
+      return false;
+    },
+    async createIssue(...args) {
+      calls.push(['createIssue', ...args]);
     },
     ...overrides,
   };
@@ -326,6 +336,103 @@ describe('ci flaky rerun patrol', () => {
         'patrol-bot',
       ),
     ).toBe(0);
+  });
+
+  const flaky = () => ({
+    file: 'packages/core/src/utils/shell-ast-parser-lazy.test.ts',
+    name: 'shellAstParser lazy runtime › loads web-tree-sitter on first use',
+  });
+
+  it('keys deflake dedup on (file, name), stable and collision-free', () => {
+    expect(deflakeKey(flaky())).toBe(deflakeKey(flaky()));
+    expect(deflakeKey({ ...flaky(), name: 'other test' })).not.toBe(
+      deflakeKey(flaky()),
+    );
+    expect(deflakeKey({ ...flaky(), file: 'other.test.ts' })).not.toBe(
+      deflakeKey(flaky()),
+    );
+    expect(deflakeMarker(flaky())).toBe(
+      `<!-- qwen-deflake key=${deflakeKey(flaky())} -->`,
+    );
+    // The issue body carries the marker, the SKILL pointer, and the collapsed
+    // Chinese — everything the autofix issue flow needs to produce the fix.
+    const body = deflakeIssueBody(
+      flaky(),
+      { reason_en: 'timed out', reason_zh: '超时' },
+      { prNumber: 42, runId: 99, repo: 'QwenLM/qwen-code' },
+    );
+    expect(body).toContain(deflakeMarker(flaky()));
+    expect(body).toContain('.qwen/skills/deflake/SKILL.md');
+    expect(body).toContain(flaky().file);
+    expect(body).toContain('<summary>中文说明</summary>');
+    expect(body).toContain('/actions/runs/99');
+  });
+
+  it('opens ONE deflake issue for a confirmed flaky test, deduped', async () => {
+    const c = client();
+    await actOnDecision(c, target(), decision({ flakyTest: flaky() }));
+    // Reran, marked, checked for an existing issue, then created one.
+    expect(c.calls.map((call) => call[0])).toEqual([
+      'rerunFailedJobs',
+      'comment',
+      'hasOpenIssueWithMarker',
+      'createIssue',
+    ]);
+    const created = c.calls.find((call) => call[0] === 'createIssue')[1];
+    expect(created.title).toBe(
+      'deflake: packages/core/src/utils/shell-ast-parser-lazy.test.ts › shellAstParser lazy runtime › loads web-tree-sitter on first use',
+    );
+    expect(created.labels).toEqual([
+      'status/ready-for-agent',
+      'autofix/approved',
+    ]);
+    expect(created.body).toContain(deflakeMarker(flaky()));
+    expect(created.body).toContain('.qwen/skills/deflake/SKILL.md');
+    expect(created.body).toContain('<details>');
+    expect(created.body).toContain('中文说明');
+    // Idempotent: an already-open deflake issue for this test → no second issue.
+    const seen = client({
+      async hasOpenIssueWithMarker() {
+        return true;
+      },
+    });
+    await actOnDecision(seen, target(), decision({ flakyTest: flaky() }));
+    // Existing open issue → deduped: it reran, but created NO second issue.
+    expect(seen.calls.map((call) => call[0])).toEqual([
+      'rerunFailedJobs',
+      'comment',
+    ]);
+    expect(seen.calls.map((call) => call[0])).not.toContain('createIssue');
+  });
+
+  it('never opens a deflake issue for an infra rerun (no flakyTest)', async () => {
+    const c = client();
+    await actOnDecision(c, target(), decision());
+    expect(c.calls.map((call) => call[0])).not.toContain('createIssue');
+    expect(c.calls.map((call) => call[0])).not.toContain(
+      'hasOpenIssueWithMarker',
+    );
+  });
+
+  it('rejects a malformed flakyTest so no bogus deflake issue is opened', async () => {
+    for (const bad of [
+      { file: '', name: 'x' },
+      { file: 'a.test.ts' },
+      { file: 'a.test.ts', name: 42 },
+      { file: 'a'.repeat(201), name: 'x' },
+    ]) {
+      const c = client();
+      await actOnDecision(c, target(), decision({ flakyTest: bad }));
+      expect(c.calls).toEqual([]); // invalid decision → no action at all
+    }
+    // flakyTest is only valid with action: rerun.
+    const c = client();
+    await actOnDecision(
+      c,
+      target(),
+      decision({ action: 'no_action', confidence: 'low', flakyTest: flaky() }),
+    );
+    expect(c.calls).toEqual([]);
   });
 
   it('reruns before recording the hidden action marker', async () => {
