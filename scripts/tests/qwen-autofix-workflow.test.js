@@ -846,7 +846,7 @@ describe('qwen-autofix workflow', () => {
     // (or cancelling) review routes, and pending-slot replacement keeps
     // latest-intent semantics.
     expect(routeJob).toContain(
-      "github.event_name == 'issue_comment' && format('qwen-autofix-route-cmd-{0}', github.event.issue.number)",
+      'github.event_name == \'issue_comment\' && contains(fromJSON(\'["OWNER", "MEMBER", "COLLABORATOR"]\'), github.event.comment.author_association) && format(\'qwen-autofix-route-cmd-{0}\', github.event.issue.number)',
     );
     expect(routeJob).toContain(
       'contains(fromJSON(\'["OWNER", "MEMBER", "COLLABORATOR"]\'), github.event.review.author_association)',
@@ -2265,9 +2265,12 @@ describe('qwen-autofix workflow', () => {
     expect(pushAndReportStep).toContain(
       'git push --no-verify origin "${BRANCH}"',
     );
+    // Five sites now: both PAT pushes, the PAT-bearing prepare checkout,
+    // AND both no-secret verification checkouts (convention: every host
+    // checkout of an agent-writable branch severs hooks).
     expect(
       workflow.split('git config core.hooksPath /dev/null').length - 1,
-    ).toBe(3);
+    ).toBe(5);
     // …both pushes AND the prepare checkout (post-checkout hooks fire with
     // the PAT in env there); the agent step — no PAT, sandboxed tools —
     // re-points .husky itself so its commits still get checked.

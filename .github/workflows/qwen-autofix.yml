@@ -163,14 +163,17 @@ jobs:
       # lets triage+ apply labels, so the whole event class is trusted —
       # but ONLY the takeover label itself shares the group: an unrelated
       # label changed in the same batch operation must not cancel a queued
-      # takeover route); issue_comment → its own per-PR command group, so a
-      # burst of command comments coalesces to at most two runs (and
-      # superseding a pending older command with a newer one IS the wanted
-      # latest-intent semantics) without ever touching review routes;
+      # takeover route); issue_comment → its own per-PR command group, but
+      # ONLY when the commenter's payload association already looks trusted
+      # (same prefilter pattern as reviews — an untrusted commenter must not
+      # cancel a maintainer's queued command; untrusted payloads get a
+      # run-unique group and still face the real permission gate inside), so
+      # a burst of trusted command comments coalesces to at most two runs
+      # with latest-intent semantics, never touching review routes;
       # issues → per-issue; anything else (dispatch) → unique per run_id,
       # never cancelled.
       group: >-
-        ${{ github.event_name == 'schedule' && 'qwen-autofix-route-cron' || (github.event_name == 'pull_request_review' && (contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association) || github.event.review.user.login == 'qwen-code-ci-bot') && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)) || (github.event_name == 'pull_request' && github.event.label.name == 'autofix/takeover' && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)) || (github.event_name == 'issue_comment' && format('qwen-autofix-route-cmd-{0}', github.event.issue.number)) || (github.event_name == 'issues' && format('qwen-autofix-route-issue-{0}', github.event.issue.number)) || format('qwen-autofix-route-{0}', github.run_id) }}
+        ${{ github.event_name == 'schedule' && 'qwen-autofix-route-cron' || (github.event_name == 'pull_request_review' && (contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association) || github.event.review.user.login == 'qwen-code-ci-bot') && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)) || (github.event_name == 'pull_request' && github.event.label.name == 'autofix/takeover' && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)) || (github.event_name == 'issue_comment' && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) && format('qwen-autofix-route-cmd-{0}', github.event.issue.number)) || (github.event_name == 'issues' && format('qwen-autofix-route-issue-{0}', github.event.issue.number)) || format('qwen-autofix-route-{0}', github.run_id) }}
       cancel-in-progress: |-
         ${{ github.event_name != 'workflow_dispatch' }}
     permissions:
@@ -984,6 +987,7 @@ jobs:
             echo "❌ Expected branch ${BRANCH} does not exist"
             exit 1
           fi
+          git config core.hooksPath /dev/null
           git checkout "${BRANCH}"
 
           if git diff --quiet origin/main..."${BRANCH}"; then
@@ -2159,9 +2163,16 @@ jobs:
           fi
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
           rm -f "${WORKDIR}/failure.md"
-          # Prepare severed hooks for its PAT-bearing git ops; THIS step holds
-          # no PAT and runs agent tools in the sandbox, so the branch's own
-          # hooks may check the agent's commits again.
+          # Prepare severed hooks for its PAT-bearing git ops; THIS step
+          # holds no PAT, so the branch's own hooks may check the agent's
+          # commits again. HONEST LIMIT: the model key (OPENAI_API_KEY) IS
+          # forwarded into the docker sandbox by the CLI, and the agent's
+          # job is to build/test the branch — so on a taken-over
+          # human-authored PR, branch-controlled scripts can read that key.
+          # This is an accepted, explicit consequence of takeover
+          # (triage+-gated, in-repo branches only, whose authors are
+          # write-capable collaborators); keep AUTOFIX_OPENAI_API_KEY a
+          # low-privilege, quota-bounded, rotatable key.
           git config core.hooksPath .husky
           # Trusted staged copy — never the PR branch's version (see the
           # staging step).
@@ -2193,6 +2204,10 @@ jobs:
             exit 1
           fi
 
+          # Convention: hooks are severed at EVERY host checkout of the PR
+          # branch (no secret sits in this step's env, but a post-checkout
+          # hook still runs branch code on the host).
+          git config core.hooksPath /dev/null
           git checkout "${BRANCH}"
 
           # Settings-schema freshness is a STRUCTURAL guard, checked BEFORE the
