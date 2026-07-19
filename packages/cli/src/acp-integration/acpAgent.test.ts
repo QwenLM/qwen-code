@@ -10684,7 +10684,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
     const renameSpy = vi.fn().mockRejectedValue(
       Object.assign(new Error('Session write ownership failed.'), {
         errorKind: 'session_writer_conflict',
-        rpcCode: -32012,
+        rpcCode: -32016,
       }),
     );
     vi.mocked(SessionService).mockImplementation(
@@ -10701,7 +10701,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
         title: 'Renamed Offline',
       }),
     ).rejects.toMatchObject({
-      code: -32012,
+      code: -32016,
       data: { errorKind: 'session_writer_conflict' },
     });
 
@@ -12099,22 +12099,22 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
   it.each([
     [
       'session_writer_conflict',
-      -32012,
+      -32016,
       'This session is already open in another Qwen process.',
     ],
     [
       'session_writer_lost',
-      -32013,
+      -32017,
       'Write ownership for this session was lost.',
     ],
     [
       'session_transcript_changed',
-      -32014,
+      -32018,
       'The session transcript changed outside its active writer.',
     ],
     [
       'session_writer_unavailable',
-      -32015,
+      -32019,
       'Session write ownership could not be verified.',
     ],
   ] as const)(
@@ -12625,7 +12625,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       vi.mocked(innerConfig.assertCanStartTurn).mockRejectedValueOnce(
         Object.assign(new Error('unsafe local writer details'), {
           errorKind: 'session_writer_lost',
-          rpcCode: -32013,
+          rpcCode: -32017,
         }),
       );
 
@@ -12635,7 +12635,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         ...(method === 'loadSession' ? { mcpServers: [] } : {}),
       };
       await expect(agent[method](request)).rejects.toMatchObject({
-        code: -32013,
+        code: -32017,
         data: { errorKind: 'session_writer_lost' },
         message: 'Write ownership for this session was lost.',
       });

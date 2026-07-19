@@ -4158,10 +4158,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   });
 
   it.each([
-    ['session_writer_conflict', -32012],
-    ['session_writer_lost', -32013],
-    ['session_transcript_changed', -32014],
-    ['session_writer_unavailable', -32015],
+    ['session_writer_conflict', -32016],
+    ['session_writer_lost', -32017],
+    ['session_transcript_changed', -32018],
+    ['session_writer_unavailable', -32019],
   ] as const)(
     'session/load preserves %s as a safe structured error',
     async (errorKind, code) => {

@@ -787,7 +787,7 @@ describe('Session', () => {
         prompt: [{ type: 'text', text: 'hello' }],
       }),
     ).rejects.toMatchObject({
-      code: -32013,
+      code: -32017,
       data: { errorKind: 'session_writer_lost' },
     });
     expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
@@ -804,7 +804,7 @@ describe('Session', () => {
         prompt: [{ type: 'text', text: '/resume missing-session' }],
       }),
     ).rejects.toMatchObject({
-      code: -32013,
+      code: -32017,
       data: { errorKind: 'session_writer_lost' },
     });
     expect(nonInteractiveCliCommands.handleSlashCommand).not.toHaveBeenCalled();
@@ -822,7 +822,7 @@ describe('Session', () => {
         prompt: [{ type: 'text', text: 'hello' }],
       }),
     ).rejects.toMatchObject({
-      code: -32013,
+      code: -32017,
       data: { errorKind: 'session_writer_lost' },
     });
   });

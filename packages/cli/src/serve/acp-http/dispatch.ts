@@ -142,19 +142,19 @@ function errMsg(err: unknown): string {
 
 const SESSION_WRITER_RPC_ERRORS = {
   session_writer_conflict: {
-    code: -32012,
+    code: -32016,
     message: 'This session is already open in another Qwen process.',
   },
   session_writer_lost: {
-    code: -32013,
+    code: -32017,
     message: 'Write ownership for this session was lost.',
   },
   session_transcript_changed: {
-    code: -32014,
+    code: -32018,
     message: 'The session transcript changed outside its active writer.',
   },
   session_writer_unavailable: {
-    code: -32015,
+    code: -32019,
     message: 'Session write ownership could not be verified.',
   },
 } as const;

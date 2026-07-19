@@ -40,7 +40,7 @@ export abstract class SessionWriterError extends Error {
 
 export class SessionWriterConflictError extends SessionWriterError {
   override readonly name = 'SessionWriterConflictError';
-  readonly rpcCode = -32012;
+  readonly rpcCode = -32016;
   readonly errorKind = 'session_writer_conflict';
   readonly httpStatus = 409;
 
@@ -52,7 +52,7 @@ export class SessionWriterConflictError extends SessionWriterError {
 
 export class SessionWriterLostError extends SessionWriterError {
   override readonly name = 'SessionWriterLostError';
-  readonly rpcCode = -32013;
+  readonly rpcCode = -32017;
   readonly errorKind = 'session_writer_lost';
   readonly httpStatus = 409;
 
@@ -64,7 +64,7 @@ export class SessionWriterLostError extends SessionWriterError {
 
 export class SessionTranscriptChangedError extends SessionWriterError {
   override readonly name = 'SessionTranscriptChangedError';
-  readonly rpcCode = -32014;
+  readonly rpcCode = -32018;
   readonly errorKind = 'session_transcript_changed';
   readonly httpStatus = 409;
 
@@ -76,7 +76,7 @@ export class SessionTranscriptChangedError extends SessionWriterError {
 
 export class SessionWriterUnavailableError extends SessionWriterError {
   override readonly name = 'SessionWriterUnavailableError';
-  readonly rpcCode = -32015;
+  readonly rpcCode = -32019;
   readonly errorKind = 'session_writer_unavailable';
   readonly httpStatus = 503;
 
