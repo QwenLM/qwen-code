@@ -1585,6 +1585,25 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
     expect(r.body).toContain('**[Critical]** whole-PR blocker X');
   });
 
+  it('a mixed review keeps its Request changes — the deterministic blocker is confirmed with or without a verifier', () => {
+    // One [build] Critical (pre-confirmed) beside one non-deterministic
+    // Critical with the verifier absent: softening the whole event would
+    // un-block a confirmed build failure. The unverified sibling stays
+    // disclosed; the Request changes stands on the deterministic one.
+    const r = composeReview({
+      bodyCriticals: [
+        '[build] tsc fails on the merge commit',
+        'a real blocker that could not be anchored',
+      ],
+      planPath: coveredPlan(['reverse-audit']), // verifier absent
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.cappedBy).toContain('criticals-unverified');
+    expect(r.body).toMatch(/verification — the review posts findings/);
+  });
+
   it('a deterministic-only Request changes stands without a verifier — pre-confirmed by design', () => {
     // [build]/[test] findings are deterministic: CI ran them, nothing a
     // verifier rules on. A review whose only blocker is one must not be

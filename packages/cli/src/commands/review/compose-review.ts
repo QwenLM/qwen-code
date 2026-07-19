@@ -516,7 +516,20 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // claim nobody confirmed. Manipulation check: a run that wants an Approve
   // gains nothing here (the same flag caps Approve via `unreviewed`), and a
   // run that wants to block without verifying now cannot.
-  if (event === 'REQUEST_CHANGES' && criticalsUnverified) event = 'COMMENT';
+  // …unless a DETERMINISTIC Critical also rides the review: a `[build]`/
+  // `[test]` finding is pre-confirmed, its Request changes is earned with or
+  // without a verifier, and softening it alongside its unverified sibling
+  // would un-block a confirmed build failure. The unverified ones stay
+  // disclosed either way.
+  const deterministicBodyCriticals =
+    bodyCriticals.length - nonDeterministicBodyCriticals;
+  if (
+    event === 'REQUEST_CHANGES' &&
+    criticalsUnverified &&
+    deterministicBodyCriticals === 0
+  ) {
+    event = 'COMMENT';
+  }
 
   // Presubmit downgrades apply after the caps and only when the verdict
   // they name is the one on the table.
