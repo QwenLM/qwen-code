@@ -463,6 +463,15 @@ export interface CreateSessionRequest {
   sourceType?: string;
   /** Optional source-specific identifier. Requires `sourceType`. */
   sourceId?: string;
+  /**
+   * Create the session in an isolated git worktree. The daemon creates
+   * a worktree under `<repoRoot>/.qwen/worktrees/<slug>` and relocates
+   * the session's working directory into it. Pass `{}` for an
+   * auto-generated slug, or `{ slug: 'my-task' }` for a named one.
+   * Requires the workspace to be a git repository. Worktree sessions
+   * are always created with `sessionScope: 'thread'`.
+   */
+  worktree?: { slug?: string };
 }
 
 export interface RestoreSessionRequest {
@@ -1997,6 +2006,7 @@ export class DaemonClient {
             ? { sourceType: req.sourceType }
             : {}),
           ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
+          ...(req.worktree !== undefined ? { worktree: req.worktree } : {}),
         }),
       },
       async (res) => {
@@ -4199,10 +4209,11 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  workspaceGit(): Promise<DaemonWorkspaceGitStatus> {
+  workspaceGit(cwd?: string): Promise<DaemonWorkspaceGitStatus> {
+    const suffix = cwd ? `/git?cwd=${encodeURIComponent(cwd)}` : '/git';
     return this.client.workspaceJsonRequest<DaemonWorkspaceGitStatus>(
       this.workspaceSelector,
-      '/git',
+      suffix,
       'GET /workspaces/:workspace/git',
       { mode: 'rest' },
     );

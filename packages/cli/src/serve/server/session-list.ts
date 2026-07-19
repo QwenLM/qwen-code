@@ -7,6 +7,7 @@
 import {
   SessionService,
   SessionOrganizationError,
+  readWorktreeSession,
   type SessionArchiveState,
   type SessionGroupPresetColor,
 } from '@qwen-code/qwen-code-core';
@@ -491,6 +492,21 @@ async function listOrganizedWorkspaceSessionsForResponse(
     );
   }
 
+  // Enrich persisted sessions with worktree metadata from sidecar files.
+  for (const [sessionId, summary] of bySessionId) {
+    if (summary.worktree) continue;
+    const sidecar = await readWorktreeSession(
+      sessionService.getWorktreeSessionPath(sessionId),
+    ).catch(() => null);
+    if (sidecar) {
+      summary.worktree = {
+        slug: sidecar.slug,
+        path: sidecar.worktreePath,
+        branch: sidecar.worktreeBranch,
+      };
+    }
+  }
+
   if (
     readOptions.mergeLive !== false &&
     archiveState !== 'archived' &&
@@ -604,6 +620,21 @@ async function listWorkspaceSessionsByMetadataForResponse(
   );
   for (const session of persisted.sessions) {
     bySessionId.set(session.sessionId, session);
+  }
+
+  // Enrich persisted sessions with worktree metadata from sidecar files.
+  for (const [sessionId, summary] of bySessionId) {
+    if (summary.worktree) continue;
+    const sidecar = await readWorktreeSession(
+      sessionService.getWorktreeSessionPath(sessionId),
+    ).catch(() => null);
+    if (sidecar) {
+      summary.worktree = {
+        slug: sidecar.slug,
+        path: sidecar.worktreePath,
+        branch: sidecar.worktreeBranch,
+      };
+    }
   }
 
   let liveMergeFailed = false;
@@ -747,6 +778,22 @@ export async function listWorkspaceSessionsForResponse(
 
   for (const item of persisted.items) {
     bySessionId.set(item.sessionId, toSummary(item));
+  }
+
+  // Enrich persisted sessions with worktree metadata from sidecar files
+  // so the info survives daemon restarts.
+  for (const [sessionId, summary] of bySessionId) {
+    if (summary.worktree) continue;
+    const sidecar = await readWorktreeSession(
+      sessionService.getWorktreeSessionPath(sessionId),
+    ).catch(() => null);
+    if (sidecar) {
+      summary.worktree = {
+        slug: sidecar.slug,
+        path: sidecar.worktreePath,
+        branch: sidecar.worktreeBranch,
+      };
+    }
   }
 
   if (archiveState === 'archived' || readOptions.mergeLive === false) {

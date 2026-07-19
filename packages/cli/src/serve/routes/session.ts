@@ -10,6 +10,7 @@ import {
   APPROVAL_MODES,
   BTW_MAX_INPUT_LENGTH,
   GROUP_COLOR_OPTIONS,
+  GitWorktreeService,
   SessionService,
   SessionOrganizationError,
   SESSION_TRANSCRIPT_MAX_LIMIT,
@@ -20,6 +21,8 @@ import {
   SessionTranscriptSnapshotUnavailableError,
   addDaemonRequestAttribute,
   runWithoutDebugLogSession,
+  writeWorktreeSessionMarker,
+  writeWorktreeSession,
   type ApprovalMode,
   type SessionGroupColor,
   type SessionGroupPresetColor,
@@ -1195,6 +1198,84 @@ export function registerSessionRoutes(
     }
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
+
+    // ── Worktree isolation ──────────────────────────────────────────
+    // When `worktree` is present, create a git worktree before spawning
+    // and relocate the session into it immediately after. The workspace
+    // runtime resolution still uses the main workspace cwd; only the
+    // child process's effective working directory changes.
+    let worktreeMeta:
+      | { slug: string; path: string; branch: string }
+      | undefined;
+    const rawWorktree = body['worktree'];
+    if (rawWorktree !== undefined && rawWorktree !== null) {
+      if (typeof rawWorktree !== 'object' || Array.isArray(rawWorktree)) {
+        res.status(400).json({
+          error:
+            '`worktree` must be an object (e.g. `{}` or `{"slug":"my-task"}`)',
+          code: 'invalid_worktree',
+        });
+        return;
+      }
+      const wtReq = rawWorktree as Record<string, unknown>;
+      let wtService: GitWorktreeService;
+      try {
+        wtService = new GitWorktreeService(workspaceCwd);
+      } catch {
+        res.status(500).json({
+          error: 'Failed to initialize worktree service',
+          code: 'worktree_init_failed',
+        });
+        return;
+      }
+      if (!(await wtService.isGitRepository())) {
+        res.status(400).json({
+          error: 'Worktree isolation requires a git repository',
+          code: 'worktree_not_git_repo',
+        });
+        return;
+      }
+      const rawSlug = wtReq['slug'];
+      let slug: string;
+      if (rawSlug === undefined || rawSlug === null) {
+        slug = GitWorktreeService.generateAutoSlug();
+      } else if (typeof rawSlug !== 'string' || rawSlug.length === 0) {
+        res.status(400).json({
+          error: '`worktree.slug` must be a non-empty string when provided',
+          code: 'worktree_invalid_slug',
+        });
+        return;
+      } else {
+        slug = rawSlug;
+      }
+      const slugError = GitWorktreeService.validateUserWorktreeSlug(slug);
+      if (slugError) {
+        res
+          .status(400)
+          .json({ error: slugError, code: 'worktree_invalid_slug' });
+        return;
+      }
+      const baseBranch = await wtService
+        .getCurrentBranch()
+        .catch(() => undefined);
+      const wtResult = await wtService.createUserWorktree(slug, baseBranch);
+      if (!wtResult.success || !wtResult.worktree) {
+        res.status(500).json({
+          error: wtResult.error ?? 'Failed to create worktree',
+          code: 'worktree_create_failed',
+        });
+        return;
+      }
+      worktreeMeta = {
+        slug,
+        path: wtResult.worktree.path,
+        branch: wtResult.worktree.branch,
+      };
+      // Worktree sessions must be independent — never coalesce onto an
+      // existing single-scope session that lives in the main checkout.
+      sessionScope = 'thread';
+    }
+
     try {
       const session = await runtime.bridge.spawnOrAttach({
         workspaceCwd,
@@ -1206,6 +1287,7 @@ export function registerSessionRoutes(
           ? { sourceType: source.sourceType }
           : {}),
         ...(source.sourceId !== undefined ? { sourceId: source.sourceId } : {}),
+        ...(worktreeMeta ? { worktree: worktreeMeta } : {}),
       });
       // Client may have disconnected during the 1–3s spawn window. If
       // so, the response can't be delivered. The session is otherwise
@@ -1282,8 +1364,58 @@ export function registerSessionRoutes(
         }
         return;
       }
+
+      // Relocate the freshly spawned session into its worktree. The
+      // cd chains onto the session's promptQueue, so it completes
+      // before any subsequent prompt is processed.
+      if (worktreeMeta) {
+        try {
+          await runtime.bridge.changeSessionCwd(session.sessionId, {
+            path: worktreeMeta.path,
+          });
+          await writeWorktreeSessionMarker(
+            worktreeMeta.path,
+            session.sessionId,
+          ).catch(() => {});
+          // Write the worktree sidecar so the session list can restore
+          // worktree metadata after a daemon restart.
+          await writeWorktreeSession(
+            new SessionService(workspaceCwd).getWorktreeSessionPath(
+              session.sessionId,
+            ),
+            {
+              slug: worktreeMeta.slug,
+              worktreePath: worktreeMeta.path,
+              worktreeBranch: worktreeMeta.branch,
+              originalCwd: workspaceCwd,
+              originalBranch: '',
+              originalHeadCommit: '',
+            },
+          ).catch(() => {});
+        } catch (cdErr) {
+          // The session is usable even if the cd fails — it just stays
+          // in the main checkout. Surface the worktree metadata so the
+          // client knows what was intended.
+          if (daemonLog) {
+            daemonLog.warn('worktree cd failed after spawn', {
+              sessionId: session.sessionId,
+              worktreePath: worktreeMeta.path,
+              error: cdErr instanceof Error ? cdErr.message : String(cdErr),
+            });
+          }
+        }
+      }
+
       res.status(200).json(session);
     } catch (err) {
+      // Roll back the worktree if spawn failed — otherwise the directory
+      // and branch are orphaned (the agent-* stale cleanup won't collect
+      // user-named worktrees).
+      if (worktreeMeta) {
+        await new GitWorktreeService(workspaceCwd)
+          .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
+          .catch(() => {});
+      }
       sendBridgeError(res, err, { route: 'POST /session' });
     }
   });

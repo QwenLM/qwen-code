@@ -484,6 +484,29 @@
   overflow: visible;
 }
 
+.worktreeWelcomeBadge {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  margin-top: 12px;
+  padding: 12px 20px;
+  border-radius: 12px;
+  background: var(--color-accent-bg, rgba(139, 92, 246, 0.06));
+  border: 1px solid var(--color-accent-border, rgba(139, 92, 246, 0.15));
+  color: var(--color-accent-fg, #8b5cf6);
+}
+
+.worktreeWelcomeTitle {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.worktreeWelcomeDesc {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
 .missingSessionState {
   flex: 1 1 auto;
   min-height: 0;

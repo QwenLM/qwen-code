@@ -5,6 +5,8 @@
  */
 
 import type { Application, Request, Response } from 'express';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import type { WorkspaceGitState } from '../workspace-git-state.js';
@@ -59,12 +61,27 @@ export function registerWorkspaceQualifiedGitRoutes(
     const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;
     const route = 'GET /workspaces/:workspace/git';
+    // Optional ?cwd= override for worktree sessions whose working directory
+    // differs from the workspace root. Canonicalize both paths with realpath
+    // to prevent symlink escape, then validate containment.
+    const rawCwd = req.query['cwd'];
+    let gitCwd = runtime.workspaceCwd;
+    if (typeof rawCwd === 'string' && rawCwd.length > 0) {
+      try {
+        const resolved = fs.realpathSync(path.resolve(rawCwd));
+        const root = fs.realpathSync(runtime.workspaceCwd);
+        const rel = path.relative(root, resolved);
+        if (!rel.startsWith('..') && !path.isAbsolute(rel)) {
+          gitCwd = resolved;
+        }
+      } catch {
+        // Path doesn't exist or can't be resolved — use workspace root.
+      }
+    }
     try {
       res
         .status(200)
-        .json(
-          await deps.gitState.getStatus(runtime.workspaceCwd, runtime.bridge),
-        );
+        .json(await deps.gitState.getStatus(gitCwd, runtime.bridge));
     } catch (err) {
       deps.sendBridgeError(res, err, { route });
     }

@@ -152,6 +152,7 @@ export {
   type DaemonRestoredSession,
   type DaemonSession,
   type DaemonSessionClosedReason,
+  type DaemonWorktreeInfo,
   type DaemonSessionClientOptions,
   type DaemonSessionContextStatus,
   type DaemonLspServerStatus,
