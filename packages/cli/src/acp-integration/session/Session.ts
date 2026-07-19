@@ -1926,8 +1926,9 @@ export class Session implements SessionContext {
     await this.assertCanStartTurn();
     const todoStopGuardPreparation =
       this.#prepareTodoStopGuardForPrompt(params);
-    // Install this prompt's AbortController before awaiting the previous
-    // prompt, so that a session/cancel during the wait targets us.
+    // After writer admission, install this prompt's AbortController before
+    // awaiting the previous prompt so a session/cancel during that wait
+    // targets us. A cancel during admission cannot target this pending prompt.
     this.pendingPrompt?.abort();
     const pendingSend = new AbortController();
     this.pendingPrompt = pendingSend;

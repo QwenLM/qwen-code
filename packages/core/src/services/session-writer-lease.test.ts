@@ -14,6 +14,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import {
+  resetDebugLoggingState,
+  setDebugLogSession,
+} from '../utils/debugLogger.js';
+import {
   ChatRecordingService,
   type ChatRecord,
 } from './chatRecordingService.js';
@@ -130,6 +134,9 @@ function record(
 }
 
 afterEach(async () => {
+  setDebugLogSession(null);
+  resetDebugLoggingState();
+  Storage.setRuntimeBaseDir(null);
   for (const child of children) child.kill('SIGKILL');
   await Promise.all([...children].map((child) => waitForClose(child)));
   await Promise.all(
@@ -578,6 +585,59 @@ describe('SessionWriterLease', () => {
     await expect(
       SessionWriterLease.acquire(fixture.options),
     ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+  });
+
+  it('logs acquisition diagnostics without changing the public error', async () => {
+    const fixture = await createFixture('diagnostic-session');
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    await fs.mkdir(path.dirname(lockPath), { recursive: true });
+    await fs.writeFile(lockPath, 'not-json');
+    const previousDebugLogFile = process.env['QWEN_DEBUG_LOG_FILE'];
+    process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+    Storage.setRuntimeBaseDir(fixture.runtimeBaseDir);
+    resetDebugLoggingState();
+    setDebugLogSession({
+      getSessionId: () => fixture.options.sessionId,
+    });
+
+    try {
+      let failure: unknown;
+      try {
+        await SessionWriterLease.acquire(fixture.options);
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toMatchObject({
+        errorKind: 'session_writer_unavailable',
+        message: 'Session write ownership could not be verified.',
+      });
+
+      await vi.waitFor(async () => {
+        const log = await fs.readFile(
+          Storage.getDebugLogPath(fixture.options.sessionId),
+          'utf8',
+        );
+        expect(log).toContain(
+          'stage=acquire errorKind=session_writer_unavailable',
+        );
+        expect(log).toContain(`lockPath=${JSON.stringify(lockPath)}`);
+        expect(log).toContain(
+          'cause=Error: Existing session writer lock is malformed',
+        );
+      });
+    } finally {
+      setDebugLogSession(null);
+      resetDebugLoggingState();
+      Storage.setRuntimeBaseDir(null);
+      if (previousDebugLogFile === undefined) {
+        delete process.env['QWEN_DEBUG_LOG_FILE'];
+      } else {
+        process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFile;
+      }
+    }
   });
 
   it('fails closed on a non-regular lock', async () => {

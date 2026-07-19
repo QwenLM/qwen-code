@@ -10,11 +10,26 @@ import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { createDebugLogger } from '../utils/debugLogger.js';
 
 const LOCK_SCHEMA_VERSION = 1;
 const MALFORMED_RETRY_COUNT = 3;
 const MALFORMED_RETRY_DELAY_MS = 50;
 const ACQUIRE_ATTEMPTS = 8;
+const debugLogger = createDebugLogger('SESSION_WRITER_LEASE');
+
+function describeError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const code = (error as NodeJS.ErrnoException).code;
+  return `${error.name}: ${error.message}${code ? ` code=${code}` : ''}`;
+}
+
+function describeDiagnosticError(error: unknown): string {
+  const description = describeError(error);
+  return error instanceof Error && error.cause !== undefined
+    ? `${description} cause=${describeError(error.cause)}`
+    : description;
+}
 
 export type SessionWriterProcessKind =
   | 'interactive'
@@ -360,7 +375,9 @@ async function restoreMovedLock(
       await fs.unlink(movedPath).catch(() => {});
       return;
     }
-    throw new SessionWriterUnavailableError();
+    throw new SessionWriterUnavailableError({
+      cause: error instanceof Error ? error : undefined,
+    });
   }
   await fs.unlink(movedPath).catch(() => {});
 }
@@ -386,7 +403,9 @@ async function installLockRecord(
     }
   } catch (error) {
     if (error instanceof SessionWriterError) throw error;
-    throw new SessionWriterUnavailableError();
+    throw new SessionWriterUnavailableError({
+      cause: error instanceof Error ? error : undefined,
+    });
   } finally {
     await handle?.close().catch(() => {});
     await fs.unlink(temporaryPath).catch(() => {});
@@ -470,6 +489,28 @@ export class SessionWriterLease {
   static async acquire(
     options: AcquireSessionWriterLeaseOptions,
   ): Promise<SessionWriterLease> {
+    try {
+      return await SessionWriterLease.acquireInternal(options);
+    } catch (error) {
+      const lockPath = getSessionWriterLockPath(
+        path.resolve(options.runtimeBaseDir),
+        options.sessionId,
+      );
+      const errorKind =
+        error instanceof SessionWriterError ? error.errorKind : 'unknown';
+      debugLogger.debug(
+        `Session writer lease acquisition failed stage=acquire errorKind=${errorKind} ` +
+          `lockPath=${JSON.stringify(lockPath)} ` +
+          `transcriptPath=${JSON.stringify(path.resolve(options.transcriptPath))} ` +
+          `error=${describeDiagnosticError(error)}`,
+      );
+      throw error;
+    }
+  }
+
+  private static async acquireInternal(
+    options: AcquireSessionWriterLeaseOptions,
+  ): Promise<SessionWriterLease> {
     const normalizedOptions = {
       ...options,
       runtimeBaseDir: path.resolve(options.runtimeBaseDir),
@@ -484,11 +525,17 @@ export class SessionWriterLease {
       await fs.mkdir(lockDir, { recursive: true, mode: 0o700 });
       const lockDirStat = await fs.lstat(lockDir);
       if (!lockDirStat.isDirectory() || lockDirStat.isSymbolicLink()) {
-        throw new SessionWriterUnavailableError();
+        throw new SessionWriterUnavailableError({
+          cause: new Error(
+            'Session writer lock directory is not a regular directory',
+          ),
+        });
       }
     } catch (error) {
       if (error instanceof SessionWriterError) throw error;
-      throw new SessionWriterUnavailableError();
+      throw new SessionWriterUnavailableError({
+        cause: error instanceof Error ? error : undefined,
+      });
     }
 
     const processStartIdentity = await readProcessStartIdentity(process.pid);
@@ -522,7 +569,9 @@ export class SessionWriterLease {
       if (state.kind === 'missing') continue;
       if (state.kind === 'live') throw new SessionWriterConflictError();
       if (state.kind === 'malformed') {
-        throw new SessionWriterUnavailableError();
+        throw new SessionWriterUnavailableError({
+          cause: new Error('Existing session writer lock is malformed'),
+        });
       }
 
       const staleOwnerId = state.record.owner_id;
@@ -630,10 +679,14 @@ export class SessionWriterLease {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
           return { kind: 'missing' };
         }
-        throw new SessionWriterUnavailableError();
+        throw new SessionWriterUnavailableError({
+          cause: error instanceof Error ? error : undefined,
+        });
       }
       if (!stat.isFile() || stat.isSymbolicLink()) {
-        throw new SessionWriterUnavailableError();
+        throw new SessionWriterUnavailableError({
+          cause: new Error('Session writer lock is not a regular file'),
+        });
       }
 
       let raw: string;
@@ -643,12 +696,16 @@ export class SessionWriterLease {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
           return { kind: 'missing' };
         }
-        throw new SessionWriterUnavailableError();
+        throw new SessionWriterUnavailableError({
+          cause: error instanceof Error ? error : undefined,
+        });
       }
       const record = parseLockRecord(raw);
       if (record) {
         if (record.session_id !== expectedSessionId) {
-          throw new SessionWriterUnavailableError();
+          throw new SessionWriterUnavailableError({
+            cause: new Error('Session writer lock belongs to another session'),
+          });
         }
         return lockStateForRecord(record);
       }
