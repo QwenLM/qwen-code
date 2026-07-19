@@ -24,6 +24,12 @@ const mockDaemonObservedContactsPath = vi.hoisted(() =>
     () => '/tmp/qwen/channels/daemon/workspace-hash/observed-contacts.json',
   ),
 );
+const mockDaemonChannelStateDir = vi.hoisted(() =>
+  vi.fn(
+    (_workspace: string, channelName: string, channelType: string) =>
+      `/tmp/qwen/channels/daemon/workspace-hash/${channelName}/${channelType}`,
+  ),
+);
 const mockObserveContact = vi.hoisted(() => vi.fn());
 const mockObservedContactStore = vi.hoisted(() =>
   vi.fn(() => ({
@@ -183,6 +189,10 @@ vi.mock('./runtime.js', () => ({
 
 vi.mock('./observed-contact-store.js', () => ({
   ObservedChannelContactStore: mockObservedContactStore,
+}));
+
+vi.mock('../../serve/channel-state-dir.js', () => ({
+  daemonChannelStateDir: mockDaemonChannelStateDir,
 }));
 
 vi.mock('@qwen-code/channel-base', () => ({
@@ -696,6 +706,7 @@ describe('runChannelDaemonWorker', () => {
       expect.objectContaining({
         proxy: 'http://settings-proxy:8080',
         router: mockSessionRouter.mock.results[0]!.value,
+        stateDir: '/tmp/qwen/channels/daemon/workspace-hash/telegram/telegram',
         channelMemory: {
           readChannelMemory: mockReadChannelMemory,
           getChannelMemoryRevision: mockGetChannelMemoryRevision,
@@ -712,6 +723,11 @@ describe('runChannelDaemonWorker', () => {
           observe: expect.any(Function),
         },
       }),
+    );
+    expect(mockDaemonChannelStateDir).toHaveBeenCalledWith(
+      '/workspace',
+      'telegram',
+      'telegram',
     );
     expect(mockDaemonObservedContactsPath).toHaveBeenCalledWith('/workspace');
     expect(mockObservedContactStore).toHaveBeenCalledWith(

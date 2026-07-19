@@ -39,6 +39,7 @@ import {
   type ChannelWebhookEnqueueErrorCode,
 } from '../../serve/channel-webhook-ipc.js';
 import { sanitizeWorkerDiagnostic } from '../../serve/channel-worker-diagnostics.js';
+import { daemonChannelStateDir } from '../../serve/channel-state-dir.js';
 import {
   isChannelStartupReportAckMessage,
   MAX_CHANNEL_STARTUP_FAILURES,
@@ -492,6 +493,7 @@ export async function runChannelDaemonWorker(
           createChannel(name, config, bridgeFacade, {
             ...(proxy ? { proxy } : {}),
             router: createdRouter,
+            stateDir: daemonChannelStateDir(daemonWorkspace, name, config.type),
             channelMemory: {
               readChannelMemory,
               getChannelMemoryRevision,

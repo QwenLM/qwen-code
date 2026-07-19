@@ -323,6 +323,30 @@ export interface ChannelManagementDescriptor {
   auth?: ReadonlyArray<'credentials' | 'qr'>;
 }
 
+export interface ChannelAuthContext {
+  channelName: string;
+  stateDir: string;
+  signal: AbortSignal;
+}
+
+export interface ChannelAuthDriver<Credentials = unknown> {
+  kind: 'qr';
+  begin(
+    context: ChannelAuthContext,
+  ): Promise<ChannelAuthDriverSession<Credentials>>;
+}
+
+export interface ChannelAuthDriverSession<Credentials> {
+  snapshot(): {
+    state: string;
+    qrPayload?: string;
+    qrRevision: number;
+  };
+  ready: Promise<Credentials>;
+  cancel(): void;
+  commit(credentials: Credentials): Promise<void>;
+}
+
 /**
  * A channel plugin registers a channel type and provides a factory
  * to create adapter instances. Both built-in adapters and external

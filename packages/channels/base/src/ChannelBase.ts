@@ -166,6 +166,7 @@ interface ChannelMemoryRecallCacheEntry {
 export interface ChannelBaseOptions {
   router?: SessionRouter;
   proxy?: string;
+  stateDir?: string;
   channelMemory?: ChannelMemoryCallbacks;
   memoryIntentClassifier?: ChannelMemoryIntentClassifier;
   /**

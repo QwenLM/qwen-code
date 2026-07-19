@@ -14,7 +14,10 @@ import type {
   ChannelUpsertRequest,
   RevisionRequest,
 } from '../channel-management-service.js';
-import { isAllChannelSelectionName } from '../channel-selection.js';
+import {
+  isSafeChannelName,
+  MAX_CHANNEL_INSTANCE_NAME_LENGTH,
+} from '../channel-selection.js';
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
@@ -24,7 +27,6 @@ import type {
   WorkspaceRuntime,
 } from '../workspace-registry.js';
 
-const MAX_CHANNEL_INSTANCE_NAME_LENGTH = 256;
 const MAX_CHANNEL_MANAGEMENT_ERROR_LENGTH = 512;
 
 interface RegisterWorkspaceChannelManagementRoutesDeps {
@@ -57,14 +59,9 @@ function parseInstanceName(
   options: { allowReservedAll?: boolean } = {},
 ): string | undefined {
   const name = req.params['name'] ?? '';
-  if (
-    name.trim().length === 0 ||
-    name.includes('/') ||
-    name.length > MAX_CHANNEL_INSTANCE_NAME_LENGTH ||
-    (isAllChannelSelectionName(name) && !options.allowReservedAll)
-  ) {
+  if (!isSafeChannelName(name, options)) {
     res.status(400).json({
-      error: `Channel instance names must be non-empty, contain no slash, differ from the reserved name "all", and be at most ${MAX_CHANNEL_INSTANCE_NAME_LENGTH} characters.`,
+      error: `Channel instance names must be non-empty safe path components, differ from the reserved name "all", and be at most ${MAX_CHANNEL_INSTANCE_NAME_LENGTH} characters.`,
       code: 'invalid_channel_instance_name',
     });
     return undefined;
