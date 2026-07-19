@@ -274,11 +274,14 @@ function findSemanticLeaves(index: ConversationIndex): SemanticLeaf[] {
   );
 
   return leaves
-    .sort(
-      (left, right) =>
-        (index.physicalIndexByUuid.get(left) ?? 0) -
-        (index.physicalIndexByUuid.get(right) ?? 0),
-    )
+    .sort((left, right) => {
+      const leftPhysicalLeaf = physicalLeafBySemanticLeaf.get(left)!;
+      const rightPhysicalLeaf = physicalLeafBySemanticLeaf.get(right)!;
+      return (
+        index.physicalIndexByUuid.get(leftPhysicalLeaf)! -
+        index.physicalIndexByUuid.get(rightPhysicalLeaf)!
+      );
+    })
     .map((leafUuid) => ({
       leafUuid,
       physicalLeafUuid: physicalLeafBySemanticLeaf.get(leafUuid)!,

@@ -422,6 +422,21 @@ describe('inspectConversationBranches', () => {
     ).toEqual(['first-leaf', 'second-leaf']);
   });
 
+  it('uses collapsed physical leaf order instead of ancestor order', () => {
+    const records = [
+      record('first-root', null),
+      record('second-root', null),
+      system('second-title', 'second-root', 'custom_title'),
+      system('first-title', 'first-root', 'custom_title'),
+    ];
+
+    expect(
+      inspectConversationBranches(records).branches.map(
+        (branch) => branch.leafUuid,
+      ),
+    ).toEqual(['second-root', 'first-root']);
+  });
+
   it('normalizes the sanitized incident topology from three raw terminals to two branches', () => {
     const records = [
       record('shared', null),
