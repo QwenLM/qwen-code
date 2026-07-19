@@ -230,6 +230,29 @@ Direct registry edits: `session_rewound` SSE row in add-remote-control
 wire-protocol; `session_rewound` audit row in pairing-auth extension
 registry (per repo precedent — no partial MODIFIED delta files).
 
+## Known limitation / follow-up
+
+`packages/rc-gateway/src/server.ts` mounts `GET /session/:id/events`
+with `walDir` hardcoded to `undefined` and mounts the rewind/fork
+routes without a `walDir` wired in either — the same pre-existing
+dark-wiring condition that already governs `session_forked` (see
+`docs/superpowers/plans/2026-07-17-remote-rewind.md`). WAL
+persistence and owner-stream fan-out for the `session_rewound`
+marker are implemented and unit-tested at the route-factory level,
+but not switched on end-to-end in the shipped gateway today.
+
+Concretely: step 6 of the data flow above ("all attached clients
+receive event 51, truncate render to turn 3") is accurate for
+clients currently attached to `GET /session/:id/events` — they
+receive the daemon-emitted `{ toTurn, targetTurnIndex,
+apiTruncateIndex }` frame live, independent of `walDir`. Step 5 (the
+gateway appending the rich `session_rewound { toTurn, truncatedEventId,
+rewoundByTokenId, rewoundAt }` WAL event) and step 8 (a late client
+reconnecting with `Last-Event-ID: 40` replaying across that marker —
+user story R3) both depend on `walDir` being wired into the rewind
+route and the events route, which is not enabled in production
+today. Wiring `deps.walDir` into both is deferred follow-up work.
+
 ## Follow-ups (out of scope)
 
 - Local `/branch` gaining a from-past-turn option (this change is
