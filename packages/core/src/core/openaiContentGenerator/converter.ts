@@ -1172,7 +1172,6 @@ function throwProtocolTagLeak(requestContext: RequestContext): never {
 }
 
 /**
-/**
  * Estimate token count from text length when the provider does not return
  * reasoning_tokens in usage. Uses ~4 chars/token as a rough approximation
  * for English/mixed content.
@@ -1182,6 +1181,7 @@ function estimateTokensFromText(text: string | undefined | null): number {
   return Math.ceil(text.length / 4);
 }
 
+/**
  * Convert OpenAI response to Gemini format.
  */
 export function convertOpenAIResponseToGemini(
