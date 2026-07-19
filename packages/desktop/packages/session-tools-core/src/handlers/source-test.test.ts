@@ -24,6 +24,29 @@ interface CtxOverrides {
   validateStdioMcpConnection?: SessionToolContext['validateStdioMcpConnection'];
 }
 
+const SHARED_CONNECTION_STATUSES = new Set<NonNullable<SourceConfig['connectionStatus']>>([
+  'connected',
+  'needs_auth',
+  'failed',
+  'untested',
+]);
+
+function assertSharedSourceMetadataContract(source: SourceConfig): void {
+  if (
+    source.lastTestedAt !== undefined &&
+    (!Number.isInteger(source.lastTestedAt) || source.lastTestedAt < 0)
+  ) {
+    throw new Error('lastTestedAt must be a non-negative integer timestamp');
+  }
+
+  if (
+    source.connectionStatus !== undefined &&
+    !SHARED_CONNECTION_STATUSES.has(source.connectionStatus)
+  ) {
+    throw new Error(`unsupported connectionStatus: ${source.connectionStatus}`);
+  }
+}
+
 function createCtx(workspacePath: string, overrides: CtxOverrides = {}): SessionToolContext {
   const saved: { last?: SourceConfig } = {};
   const ctx = {
@@ -58,6 +81,7 @@ function createCtx(workspacePath: string, overrides: CtxOverrides = {}): Session
       return JSON.parse(readFileSync(configPath, 'utf-8')) as SourceConfig;
     },
     saveSourceConfig: (source: SourceConfig) => {
+      assertSharedSourceMetadataContract(source);
       saved.last = source;
       const configPath = join(workspacePath, 'sources', source.slug, 'config.json');
       writeFileSync(configPath, JSON.stringify(source, null, 2));
@@ -149,6 +173,8 @@ describe('source_test auto-enable', () => {
       readFileSync(join(tempDir, 'sources', 'craft-kb', 'config.json'), 'utf-8')
     ) as SourceConfig;
     expect(persisted.enabled).toBe(true);
+    expect(Number.isInteger(persisted.lastTestedAt)).toBe(true);
+    expect(persisted.connectionStatus).toBe('connected');
   });
 
   it('already-enabled source still calls activation callback (session may be stale)', async () => {
@@ -192,6 +218,8 @@ describe('source_test auto-enable', () => {
     ) as SourceConfig;
     // saveSourceConfig still runs (metadata update), but enabled flag must remain false.
     expect(persisted.enabled).toBe(false);
+    expect(Number.isInteger(persisted.lastTestedAt)).toBe(true);
+    expect(persisted.connectionStatus).toBe('connected');
   });
 
   it('validation errors skip auto-enable entirely (even when autoEnable is default)', async () => {
@@ -217,6 +245,34 @@ describe('source_test auto-enable', () => {
       readFileSync(join(tempDir, 'sources', 'broken', 'config.json'), 'utf-8')
     ) as SourceConfig;
     expect(persisted.enabled).toBe(false);
+    expect(Number.isInteger(persisted.lastTestedAt)).toBe(true);
+    expect(persisted.connectionStatus).toBe('failed');
+    expect(persisted.connectionError).toBe('boom');
+  });
+
+  it('persists needs_auth when connection succeeds but auth is missing', async () => {
+    writeSource(tempDir, 'oauth-source', {
+      isAuthenticated: false,
+      mcp: {
+        transport: 'stdio',
+        command: 'echo',
+        args: ['ok'],
+        authType: 'oauth',
+      },
+    });
+
+    const ctx = createCtx(tempDir, {
+      validateStdioMcpConnection: stubMcpOk(),
+    });
+
+    const result = await handleSourceTest(ctx, { sourceSlug: 'oauth-source' });
+
+    expect(result.isError).toBe(false);
+    const persisted = JSON.parse(
+      readFileSync(join(tempDir, 'sources', 'oauth-source', 'config.json'), 'utf-8')
+    ) as SourceConfig;
+    expect(Number.isInteger(persisted.lastTestedAt)).toBe(true);
+    expect(persisted.connectionStatus).toBe('needs_auth');
   });
 
   it('without activateSourceInSession, flag flip still happens with restart hint', async () => {
