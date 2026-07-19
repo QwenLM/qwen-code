@@ -628,6 +628,31 @@ describe('ToolConfirmationMessage', () => {
       expect(frame).toContain('No');
     });
 
+    it('keeps the diff placeholder visible without warnings on one-line bodies', () => {
+      const availableTerminalHeight = 8;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            ...editConfirmationDetails,
+            fileDiff: '@@ -1 +1 @@\n-a\n+b',
+            hideAlwaysAllow: true,
+            hideModify: true,
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={50}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      expect(frame).toContain('diff hidden');
+      expect(frame).toContain('Apply this change?');
+      expect(frame).toContain('Yes, allow once');
+    });
+
     it('keeps compact edit warnings and diff within the available height', () => {
       const availableTerminalHeight = 9;
       const { lastFrame } = renderWithProviders(

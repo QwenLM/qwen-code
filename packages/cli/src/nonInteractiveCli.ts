@@ -584,7 +584,9 @@ export async function runNonInteractive(
             // Surface a clear reason on stderr — otherwise the
             // failure looks like the teammate gave up for no reason.
             const reason = requiresExplicitHostApproval
-              ? `Auto-cancelling tool ${event.toolName} requested by teammate "${event.teammateName}": this request requires an explicit interactive approval surface and cannot be bypassed by YOLO mode.`
+              ? mode === ApprovalMode.YOLO
+                ? `Auto-cancelling tool ${event.toolName} requested by teammate "${event.teammateName}": this request requires an explicit interactive approval surface and cannot be bypassed by YOLO mode.`
+                : `Auto-cancelling tool ${event.toolName} requested by teammate "${event.teammateName}": this request requires an explicit interactive approval surface, which is unavailable in non-stream-json mode with the current approval mode (${mode}). Use --input-format stream-json --output-format stream-json to review it.`
               : `Auto-cancelling tool ${event.toolName} requested by teammate "${event.teammateName}": current approval mode (${mode}) cannot prompt in non-stream-json mode. Use --yolo or stream-json to allow teammate tool calls.`;
             process.stderr.write(`[team] ${reason}\n`);
             // Also surface to the leader's LLM, otherwise it just

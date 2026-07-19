@@ -513,6 +513,72 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it('describes the active mode when explicit teammate approval cannot be shown', async () => {
+    setupMetricsMock();
+    const teamEvents = new EventEmitter();
+    const respond = vi.fn().mockResolvedValue(undefined);
+    const teamManager = {
+      setLeaderMessageCallback: vi.fn(),
+      getEventEmitter: () => teamEvents,
+      hasActiveTeammates: () => false,
+      drainLeaderInbox: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.DEFAULT);
+    vi.mocked(mockConfig.getTeamManager).mockReturnValue(teamManager as never);
+    let emittedApproval = false;
+    mockGeminiClient.sendMessageStream.mockImplementation(
+      async function* (): AsyncGenerator<ServerGeminiStreamEvent> {
+        if (!emittedApproval) {
+          emittedApproval = true;
+          teamEvents.emit(TeamEventType.TEAMMATE_APPROVAL_REQUEST, {
+            teammateName: 'worker',
+            toolName: 'run_shell_command',
+            toolInput: { command: "python -c 'print(1)'" },
+            confirmationDetails: {
+              type: 'info',
+              title: 'Permission rule requires confirmation',
+              prompt: 'Allow this operation?',
+              hideAlwaysAllow: true,
+            },
+            respond,
+            timestamp: Date.now(),
+          });
+        }
+        yield {
+          type: GeminiEventType.Finished,
+          value: {
+            reason: undefined,
+            usageMetadata: { totalTokenCount: 0 },
+          },
+        };
+      },
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Test input',
+      'prompt-exact-teammate-default',
+    );
+
+    await vi.waitFor(() =>
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel),
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        `current approval mode (${ApprovalMode.DEFAULT})`,
+      ),
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Use --input-format stream-json --output-format stream-json',
+      ),
+    );
+    expect(processStderrSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('cannot be bypassed by YOLO mode'),
+    );
+  });
+
   describe('continueInterrupted', () => {
     it('re-submits an orphaned trailing user prompt with Retry semantics', async () => {
       setupMetricsMock();

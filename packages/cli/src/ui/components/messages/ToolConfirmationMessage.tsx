@@ -274,6 +274,7 @@ export const ToolConfirmationMessage: React.FC<
     }
 
     const constrainWarnings =
+      warnings.length > 0 &&
       bodyHeight !== undefined &&
       warningsHeight(warnings) + MINIMUM_MAX_HEIGHT > bodyHeight;
     let warningMaxHeight: number | undefined;
