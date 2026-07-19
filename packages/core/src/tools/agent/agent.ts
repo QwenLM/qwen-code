@@ -1060,12 +1060,11 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       if (params.run_in_background === true) {
         return 'Parameters "working_dir" and "run_in_background" are incompatible: the caller owns the worktree lifecycle and could remove it while a background agent is still running.';
       }
-      // A worktree pin and a fresh-worktree isolation are contradictory —
-      // one reuses a caller-owned directory, the other provisions and
-      // reaps its own. Reject the ambiguous combination up front.
-      if (params.isolation !== undefined) {
-        return 'Parameters "working_dir" and "isolation" are mutually exclusive.';
-      }
+      // `working_dir` is the more specific workspace instruction. Some
+      // providers require every advertised schema property and therefore send
+      // the optional `isolation: "worktree"` alongside it. Accept that
+      // redundant combination; createInvocation drops isolation so the
+      // caller-owned worktree is reused rather than provisioning another one.
       // Same rationale as isolation: a fork shares the parent's
       // conversation context and working tree, so it cannot be rebound to
       // a different directory; and the pin is only meaningful for an
@@ -1100,7 +1099,14 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
   }
 
   protected createInvocation(params: AgentParams) {
-    return new AgentToolInvocation(this.config, this.subagentManager, params);
+    const invocationParams = params.working_dir
+      ? { ...params, isolation: undefined }
+      : params;
+    return new AgentToolInvocation(
+      this.config,
+      this.subagentManager,
+      invocationParams,
+    );
   }
 
   override toAutoClassifierInput(params: AgentParams): Record<string, unknown> {

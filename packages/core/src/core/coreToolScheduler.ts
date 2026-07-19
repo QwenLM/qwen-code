@@ -2096,6 +2096,18 @@ export class CoreToolScheduler {
       }
 
       const newToolCalls: ToolCall[] = [];
+      const retryErrorsRecordedInBatch = new Set<string>();
+      const recordBatchRetryableToolError = (
+        toolName: string,
+        errorMessage: string,
+      ): number => {
+        const key = `${toolName}:${errorMessage}`;
+        if (retryErrorsRecordedInBatch.has(key)) {
+          return this.validationRetryCounts.get(key) ?? 0;
+        }
+        retryErrorsRecordedInBatch.add(key);
+        return this.recordRetryableToolError(toolName, errorMessage);
+      };
       for (const reqInfo of requestsToProcess) {
         const canonicalName = canonicalToolName(reqInfo.name);
 
@@ -2169,7 +2181,7 @@ export class CoreToolScheduler {
         // Reject file-modifying calls when truncated to prevent
         // writing incomplete content, even if params failed schema validation.
         if (reqInfo.wasOutputTruncated && toolInstance.kind === Kind.Edit) {
-          const count = this.recordRetryableToolError(
+          const count = recordBatchRetryableToolError(
             reqInfo.name,
             TRUNCATION_EDIT_REJECTION,
           );
@@ -2208,7 +2220,7 @@ export class CoreToolScheduler {
           // Track validation retry for loop detection. Counts accumulate per
           // (tool, error message) pair so a different validation mistake on
           // the same tool starts fresh rather than tripping the threshold.
-          const count = this.recordRetryableToolError(
+          const count = recordBatchRetryableToolError(
             reqInfo.name,
             invocationOrError.message,
           );
