@@ -2621,6 +2621,31 @@ describe('qwen-autofix workflow', () => {
     );
     expect(runMark({ NEWEST: '', WATERMARK: '' })).toBe(`${SENTINEL}|5`);
 
+    // The no-output-crash HEADLINE must only promise a retry when one will
+    // actually happen: at the final attempt (MARK_ROUND == MAX_ROUNDS) the
+    // scan's round cap skips the PR, so the message must say a human takes
+    // over — never "it will retry" — and it must not embed a Run log URL
+    // (the report block appends that, so embedding would duplicate it).
+    const runHeadline = (env) =>
+      execFileSync('bash', ['-c', `${markBlock}\nprintf '%s' "$HEADLINE"`], {
+        env: {
+          ...process.env,
+          MAX_ROUNDS: '5',
+          WATERMARK: '',
+          DETAIL_FILE: '',
+          NEWEST: '2026-07-16T00:00:00Z',
+          ...env,
+        },
+        encoding: 'utf8',
+      });
+    const midCrash = runHeadline({ ROUND: '2' }); // MARK_ROUND=3 < 5
+    expect(midCrash).toContain('it will retry on the next scan');
+    expect(midCrash).not.toContain('Run log:');
+    const finalCrash = runHeadline({ ROUND: '4' }); // MARK_ROUND=5 == 5
+    expect(finalCrash).toContain('last automatic attempt');
+    expect(finalCrash).not.toContain('it will retry');
+    expect(finalCrash).not.toContain('Run log:');
+
     // Behaviorally replay the pending-staleness jq filter against sample checks so
     // a flipped comparison (which would age out live checks → double-processing)
     // is caught, not just string-matched.
