@@ -259,6 +259,7 @@ const probeHostname =
 const port = hasOption('--port')
   ? String(startPort)
   : String(await findAvailablePort(probeHostname, startPort));
+const vitePort = await findAvailablePort('127.0.0.1', 5173);
 const token =
   readOption('--token') ||
   process.env.QWEN_SERVER_TOKEN ||
@@ -298,7 +299,7 @@ console.log(`qwen daemon dev`);
 console.log(`  daemon:   ${webEnv.QWEN_DAEMON_URL}`);
 console.log(`  workspace: ${workspace}`);
 console.log(
-  `  web-shell: http://localhost:5173/ (token: ${token.slice(0, 4)}...)`,
+  `  web-shell: http://localhost:${vitePort}/ (token: ${token.slice(0, 4)}...)`,
 );
 console.log('');
 
@@ -322,6 +323,8 @@ waitForDaemon(webEnv.QWEN_DAEMON_URL)
         '--',
         '--open',
         `/?token=${encodeURIComponent(token)}`,
+        '--port',
+        String(vitePort),
         '--strictPort',
       ],
       {
