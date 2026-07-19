@@ -2520,7 +2520,7 @@ export default {
     "Persistir la selecció de model a la configuració del projecte (àmbit de l'espai de treball)",
   'Persist the model selection to the user settings (global scope)':
     "Persistir la selecció de model a la configuració d'usuari (àmbit global)",
-  'Select Fast Model': 'Seleccionar el model ràpid',
+  'Select Fast Model': 'Selecciona el model ràpid',
   'Select Vision Model': 'Seleccionar el model de visió',
   'Select Voice Model': 'Seleccionar el model de veu',
   'Vision Model': 'Model de visió',
