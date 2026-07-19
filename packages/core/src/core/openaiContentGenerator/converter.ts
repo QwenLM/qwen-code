@@ -1270,9 +1270,15 @@ export function convertOpenAIResponseToGemini(
       usage.prompt_tokens_details?.cached_tokens ??
       extendedUsage.cached_tokens ??
       0;
+    // reasoningText is scoped inside if(choice), so extract it here for the fallback
+    const reasoningTextForUsage =
+      (openaiResponse.choices?.[0]?.message as ExtendedCompletionMessage | undefined)
+        ?.reasoning_content ??
+      (openaiResponse.choices?.[0]?.message as ExtendedCompletionMessage | undefined)
+        ?.reasoning;
     const thinkingTokens =
       usage.completion_tokens_details?.reasoning_tokens ||
-      estimateTokensFromText(reasoningText);
+      estimateTokensFromText(reasoningTextForUsage);
 
     // If we only have total tokens but no breakdown, estimate the split
     // Typically input is ~70% and output is ~30% for most conversations
