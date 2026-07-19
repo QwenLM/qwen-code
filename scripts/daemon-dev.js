@@ -306,7 +306,7 @@ console.log(`qwen daemon dev`);
 console.log(`  daemon:   ${webEnv.QWEN_DAEMON_URL}`);
 console.log(`  workspace: ${workspace}`);
 console.log(
-  `  web-shell: http://localhost:5173/ (auto-increments if busy, token: ${token.slice(0, 4)}...)`,
+  `  web-shell: opening in browser (auto-increments from 5173 if busy — see Vite output for the actual URL, token: ${token.slice(0, 4)}...)`,
 );
 console.log('');
 
