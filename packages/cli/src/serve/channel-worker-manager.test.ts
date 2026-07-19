@@ -417,6 +417,76 @@ describe('createChannelWorkerManager', () => {
     );
   });
 
+  it('reloads only the requested workspace worker', async () => {
+    const primary = workerSnapshot();
+    const secondary = workerSnapshot({
+      workspaceId: 'secondary',
+      workspaceCwd: '/ws/secondary',
+      primary: false,
+    });
+    const initialGroups: ChannelWorkspaceGroup[] = [
+      {
+        workspaceCwd: PRIMARY,
+        selection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        workspaceCwd: '/ws/secondary',
+        selection: { mode: 'names', names: ['feishu'] },
+      },
+    ];
+    const targetGroups: ChannelWorkspaceGroup[] = [
+      initialGroups[0]!,
+      {
+        workspaceCwd: '/ws/secondary',
+        selection: { mode: 'names', names: ['changed-elsewhere'] },
+      },
+    ];
+    const group = fakeGroup({ snapshots: vi.fn(() => [primary, secondary]) });
+    const test = setup(group);
+    test.resolveGroups
+      .mockResolvedValueOnce(initialGroups)
+      .mockResolvedValueOnce(targetGroups);
+    await test.manager.setSelection({
+      mode: 'names',
+      names: ['telegram', 'feishu'],
+    });
+
+    await expect(test.manager.reloadWorkspace(PRIMARY)).resolves.toEqual(
+      primary,
+    );
+
+    expect(group.reconcile).toHaveBeenLastCalledWith(targetGroups, {
+      forceWorkspaceCwd: PRIMARY,
+      onRollingBack: expect.any(Function),
+    });
+    expect(test.onCommittedSelection).toHaveBeenLastCalledWith(
+      { mode: 'names', names: ['telegram', 'feishu'] },
+      initialGroups,
+    );
+  });
+
+  it('rejects a required owner mismatch before reconciling selection', async () => {
+    const test = setup();
+    test.resolveGroups.mockResolvedValueOnce([
+      {
+        workspaceCwd: '/ws/secondary',
+        selection: { mode: 'names', names: ['bot'] },
+      },
+    ]);
+
+    await expect(
+      test.manager.setSelection(
+        { mode: 'names', names: ['bot'] },
+        { name: 'bot', workspaceCwd: PRIMARY },
+      ),
+    ).rejects.toMatchObject({ code: 'channel_runtime_owner_mismatch' });
+
+    expect(test.createGroup).not.toHaveBeenCalled();
+    expect(test.group.reconcile).not.toHaveBeenCalled();
+    expect(test.reserveLease).not.toHaveBeenCalled();
+    expect(test.onStateChange).not.toHaveBeenCalled();
+  });
+
   it('preserves workspace-attributed startup failures from reload', async () => {
     const test = setup();
     const selection: ServeChannelSelection = {

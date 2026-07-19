@@ -67,7 +67,11 @@ export interface ChannelWorkerGroup {
   stop(): Promise<void>;
   reconcile(
     groups: readonly ChannelWorkspaceGroup[],
-    options?: { force?: boolean; onRollingBack?: () => void },
+    options?: {
+      force?: boolean;
+      forceWorkspaceCwd?: string;
+      onRollingBack?: () => void;
+    },
   ): Promise<ChannelWorkerGroupReconcileResult>;
   isHealthy(): boolean;
   killAllSync(): void;
@@ -467,9 +471,20 @@ export function createChannelWorkerGroup(
         for (const [workspaceCwd, entry] of entries) {
           const target = targets.get(workspaceCwd);
           const healthy = entry.supervisor.snapshot().state === 'running';
+          const forceWorkspace =
+            reconcileOptions?.forceWorkspaceCwd === workspaceCwd;
+          const preserveOtherWorkspace =
+            reconcileOptions?.forceWorkspaceCwd !== undefined &&
+            !forceWorkspace;
+          if (preserveOtherWorkspace) {
+            unchanged.set(workspaceCwd, entry);
+            targets.delete(workspaceCwd);
+            continue;
+          }
           if (
             target &&
             !reconcileOptions?.force &&
+            !forceWorkspace &&
             healthy &&
             selectionsEqual(entry.selection, target.selection)
           ) {
@@ -563,16 +578,17 @@ export function createChannelWorkerGroup(
           committed.set(entry.workspaceCwd, entry);
         }
         entries = committed;
-        const targetWorkspaceCwds = new Set(
-          targetGroups.map((target) => target.workspaceCwd),
-        );
+        const targetWorkspaceCwds = new Set(committed.keys());
         for (const workspaceCwd of groupsByWorkspace.keys()) {
           if (!targetWorkspaceCwds.has(workspaceCwd)) {
             groupsByWorkspace.delete(workspaceCwd);
           }
         }
-        for (const target of targetGroups) {
-          groupsByWorkspace.set(target.workspaceCwd, target);
+        for (const entry of committed.values()) {
+          groupsByWorkspace.set(entry.workspaceCwd, {
+            workspaceCwd: entry.workspaceCwd,
+            selection: entry.selection,
+          });
         }
         return { changed: true, workers: entrySnapshots() };
       })().finally(() => {
