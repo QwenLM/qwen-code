@@ -144,10 +144,12 @@ describe('AddWorkspaceDialog', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('submits with persist=false when the switch is toggled off', async () => {
+  it('submits a display name with persist=false', async () => {
     const onAdd = vi.fn().mockResolvedValue(undefined);
     const onClose = vi.fn();
-    mount(<AddWorkspaceDialog onClose={onClose} onAdd={onAdd} />);
+    mount(
+      <AddWorkspaceDialog onClose={onClose} onAdd={onAdd} displayNameEnabled />,
+    );
 
     // Toggle the persist switch off (Radix renders it as a button[role="switch"]).
     const sw = document.querySelector<HTMLButtonElement>(
@@ -158,12 +160,17 @@ describe('AddWorkspaceDialog', () => {
     });
 
     type('/abs/project');
+    typeDisplayName('Local workspace');
     submit();
     await act(async () => {
       await Promise.resolve();
     });
 
-    expect(onAdd).toHaveBeenCalledWith('/abs/project', false);
+    expect(onAdd).toHaveBeenCalledWith(
+      '/abs/project',
+      false,
+      'Local workspace',
+    );
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 

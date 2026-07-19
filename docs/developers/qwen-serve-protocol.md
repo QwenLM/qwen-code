@@ -202,7 +202,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 
 `persistent_workspace_registration` advertises durable registration for workspaces added at runtime. `POST /workspaces` accepts `{ "cwd": "/absolute/path", "persist": true }`; success includes `persisted: true`. Registrations are scoped to the daemon's canonical primary workspace under the user's Qwen home and are restored on the next daemon start. Omitting `persist` preserves process-local registration. `GET /workspace-registrations` lists the stored desired set, and `DELETE /workspace-registrations/:id` forgets an entry for the next restart without hot-removing an active runtime.
 
-`workspace_display_name` advertises optional presentation metadata on registered workspaces. Names do not participate in lookup or routing: `id` and canonical `cwd` remain the only selectors, and duplicate names are allowed. The tag is unconditional because every registered runtime, including a single primary workspace, can carry a process-local name.
+`workspace_display_name` advertises optional `displayName` input on `POST /workspaces` and optional display-name fields in workspace projections. Names do not participate in lookup or routing: `id` and canonical `cwd` remain the only selectors, and duplicate names are allowed.
 
 `workspace_runtime_removal` advertises synchronous hot removal through `DELETE /workspaces/:workspace`. Capability workspace entries add optional `removable`; only rows with `removable: true` may be removed. Removal also forgets every persistent registration alias for the runtime, but never deletes files, settings, transcripts, or archives.
 
@@ -831,31 +831,9 @@ A newly created runtime returns `201`; promoting an already-active secondary wor
 }
 ```
 
-`displayName` must be a string no longer than 256 characters and cannot contain C0 (`U+0000`–`U+001F`) or DEL (`U+007F`) control characters. Duplicate display names are allowed. A name supplied with a process-local registration lasts only for that daemon process; `persist: true` stores it with the persistent registration so it can be restored after restart.
+`displayName` must be a string no longer than 256 characters and cannot contain C0 (`U+0000`–`U+001F`) or DEL (`U+007F`) control characters. Surrounding whitespace is trimmed; an empty result is treated as no name. Duplicate display names are allowed. A name supplied with a process-local registration lasts only for that daemon process; `persist: true` stores it with the persistent registration so it can be restored after restart. Repeating the request for an already-persistent workspace is idempotent and does not rename it.
 
 Errors include `400 invalid_path` / `invalid_persist_flag` / `invalid_persist_target` / `invalid_display_name`, `409 workspace_exists` / `workspace_nested` / `workspace_limit_reached`, `500 workspace_registration_store_error` / `runtime_creation_failed`, and `501 persistence_not_available` / `not_implemented`.
-
-### `PATCH /workspaces/:workspace`
-
-Set or clear the selected registered runtime's display name. Pre-flight `workspace_display_name`. The selector resolves as an exact workspace id first and then as a URL-encoded canonical absolute cwd; display names are never selectors.
-
-```json
-{ "displayName": "Payments Production" }
-```
-
-`displayName` accepts a string or `null`. An empty string or `null` clears the name; the response omits `displayName` after a clear. String validation and duplicate-name behavior match `POST /workspaces`. For a persistently registered secondary runtime the update is committed to the registration store before the runtime changes; other workspaces update only for the lifetime of the process.
-
-```json
-{
-  "id": "stable-workspace-id",
-  "cwd": "/canonical/path/to/secondary-workspace",
-  "displayName": "Payments Production",
-  "primary": false,
-  "trusted": true
-}
-```
-
-Errors include `400 invalid_display_name` / `workspace_mismatch`, `409 workspace_registration_in_progress` / `workspace_removal_in_progress` / `workspace_update_in_progress`, `500 workspace_registration_store_error`, and `503 daemon_shutting_down`.
 
 ### `DELETE /workspaces/:workspace`
 

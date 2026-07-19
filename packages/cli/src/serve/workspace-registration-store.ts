@@ -71,7 +71,8 @@ export function normalizeWorkspaceDisplayName(
       'Workspace display name contains control characters',
     );
   }
-  return value.length === 0 ? undefined : value;
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? undefined : trimmed;
 }
 
 export class WorkspaceRegistrationStoreError extends Error {
@@ -150,33 +151,6 @@ function validateStoredDisplayName(value: unknown, label: string): string {
     throw new WorkspaceRegistrationStoreError(`${label} must not be empty`);
   }
   return displayName;
-}
-
-function setSnapshotDisplayName(
-  snapshot: WorkspaceRegistrationSnapshot,
-  registrationId: string,
-  displayName: string | undefined,
-): boolean {
-  if (displayName === undefined) {
-    if (
-      !snapshot.displayNames ||
-      !Object.prototype.hasOwnProperty.call(
-        snapshot.displayNames,
-        registrationId,
-      )
-    ) {
-      return false;
-    }
-    delete snapshot.displayNames[registrationId];
-    if (Object.keys(snapshot.displayNames).length === 0) {
-      delete snapshot.displayNames;
-    }
-    return true;
-  }
-  if (snapshot.displayNames?.[registrationId] === displayName) return false;
-  snapshot.displayNames ??= {};
-  snapshot.displayNames[registrationId] = displayName;
-  return true;
 }
 
 function parseSnapshot(
@@ -437,20 +411,14 @@ export class WorkspaceRegistrationStore {
         'Primary workspace cannot be stored as a secondary registration',
       );
     }
-    let added = false;
-    await this.update((snapshot) => {
+    return this.update((snapshot) => {
       const normalizedWorkspace = normalizedScopePath(workspace);
-      const existing = snapshot.workspaces.find(
-        (stored) => normalizedScopePath(stored) === normalizedWorkspace,
-      );
-      if (existing) {
-        return normalizedDisplayName === undefined
-          ? false
-          : setSnapshotDisplayName(
-              snapshot,
-              workspaceRegistrationId(existing),
-              normalizedDisplayName,
-            );
+      if (
+        snapshot.workspaces.some(
+          (stored) => normalizedScopePath(stored) === normalizedWorkspace,
+        )
+      ) {
+        return false;
       }
       if (snapshot.workspaces.length >= MAX_SECONDARY_WORKSPACES) {
         throw new WorkspaceRegistrationStoreLimitError(
@@ -458,46 +426,13 @@ export class WorkspaceRegistrationStore {
         );
       }
       snapshot.workspaces.push(workspace);
-      added = true;
       if (normalizedDisplayName !== undefined) {
-        setSnapshotDisplayName(
-          snapshot,
-          workspaceRegistrationId(workspace),
-          normalizedDisplayName,
-        );
+        snapshot.displayNames ??= {};
+        snapshot.displayNames[workspaceRegistrationId(workspace)] =
+          normalizedDisplayName;
       }
       return true;
     });
-    return added;
-  }
-
-  async setDisplayNameByIds(
-    ids: readonly string[],
-    displayName: string | undefined,
-  ): Promise<boolean> {
-    const normalizedDisplayName =
-      displayName === undefined
-        ? undefined
-        : normalizeWorkspaceDisplayName(displayName);
-    const requested = new Set(ids);
-    if (requested.size === 0) return false;
-    let matched = false;
-    await this.update((snapshot) => {
-      let changed = false;
-      for (const workspace of snapshot.workspaces) {
-        const registrationId = workspaceRegistrationId(workspace);
-        if (!requested.has(registrationId)) continue;
-        matched = true;
-        changed =
-          setSnapshotDisplayName(
-            snapshot,
-            registrationId,
-            normalizedDisplayName,
-          ) || changed;
-      }
-      return changed;
-    });
-    return matched;
   }
 
   async removeById(id: string): Promise<boolean> {
@@ -519,8 +454,13 @@ export class WorkspaceRegistrationStore {
       });
       if (removed === 0) return false;
       snapshot.workspaces.splice(0, snapshot.workspaces.length, ...retained);
-      for (const registrationId of removedIds) {
-        setSnapshotDisplayName(snapshot, registrationId, undefined);
+      if (snapshot.displayNames) {
+        for (const registrationId of removedIds) {
+          delete snapshot.displayNames[registrationId];
+        }
+        if (Object.keys(snapshot.displayNames).length === 0) {
+          delete snapshot.displayNames;
+        }
       }
       return true;
     });

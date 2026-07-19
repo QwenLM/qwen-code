@@ -87,7 +87,7 @@ describe('WorkspaceRegistrationStore', () => {
     });
   });
 
-  it('adds, updates, preserves, and clears a display name', async () => {
+  it('stores a display name when adding a registration', async () => {
     const home = await tempHome();
     const store = new WorkspaceRegistrationStore('/work/primary', home);
     const id = workspaceRegistrationId('/work/secondary');
@@ -102,45 +102,8 @@ describe('WorkspaceRegistrationStore', () => {
     await expect(store.add('/work/secondary')).resolves.toBe(false);
     await expect(store.add('/work/secondary', '')).resolves.toBe(false);
     await expect(store.read()).resolves.toMatchObject({
-      displayNames: { [id]: 'Renamed' },
+      displayNames: { [id]: 'Secondary' },
     });
-
-    await expect(store.setDisplayNameByIds([id], '')).resolves.toBe(true);
-    await expect(store.read()).resolves.toEqual({
-      schemaVersion: 1,
-      primaryWorkspace: '/work/primary',
-      workspaces: ['/work/secondary'],
-    });
-    await expect(store.setDisplayNameByIds([id], 'Again')).resolves.toBe(true);
-    await expect(store.setDisplayNameByIds([id], undefined)).resolves.toBe(
-      true,
-    );
-    await expect(store.read()).resolves.not.toHaveProperty('displayNames');
-  });
-
-  it('updates every matching registration alias and reports misses', async () => {
-    const home = await tempHome();
-    const store = new WorkspaceRegistrationStore('/work/primary', home);
-    const firstId = workspaceRegistrationId('/work/raw-alias-a');
-    const secondId = workspaceRegistrationId('/work/raw-alias-b');
-    await store.add('/work/raw-alias-a', 'First');
-    await store.add('/work/raw-alias-b', 'Second');
-
-    await expect(
-      store.setDisplayNameByIds([firstId, secondId], 'Shared'),
-    ).resolves.toBe(true);
-    await expect(store.read()).resolves.toMatchObject({
-      displayNames: {
-        [firstId]: 'Shared',
-        [secondId]: 'Shared',
-      },
-    });
-    await expect(store.setDisplayNameByIds([firstId], 'Shared')).resolves.toBe(
-      true,
-    );
-    await expect(
-      store.setDisplayNameByIds(['missing'], 'Ignored'),
-    ).resolves.toBe(false);
   });
 
   it('removes display names with their registrations', async () => {
@@ -166,6 +129,8 @@ describe('WorkspaceRegistrationStore', () => {
 
   it('normalizes empty display names and rejects invalid values', () => {
     expect(normalizeWorkspaceDisplayName('')).toBeUndefined();
+    expect(normalizeWorkspaceDisplayName('   ')).toBeUndefined();
+    expect(normalizeWorkspaceDisplayName('  Workspace  ')).toBe('Workspace');
     expect(normalizeWorkspaceDisplayName('x'.repeat(256))).toBe(
       'x'.repeat(256),
     );

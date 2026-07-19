@@ -68,7 +68,6 @@ import type {
   DaemonWorkspaceFileWriteResult,
   DaemonWorkspaceAgentDetail,
   DaemonWorkspaceAgentsStatus,
-  DaemonWorkspaceCapability,
   DaemonWorkspaceEnvStatus,
   DaemonWorkspaceGitStatus,
   DaemonWorkspaceGitDiff,
@@ -4155,21 +4154,6 @@ export class WorkspaceDaemonClient {
 
   workspaceMcp(): Promise<DaemonWorkspaceMcpStatus> {
     return this.get('/mcp', 'GET /workspaces/:workspace/mcp');
-  }
-
-  setDisplayName(
-    displayName: string | null,
-  ): Promise<DaemonWorkspaceCapability> {
-    return this.client.workspaceJsonRequest<DaemonWorkspaceCapability>(
-      this.workspaceSelector,
-      '',
-      'PATCH /workspaces/:workspace',
-      {
-        method: 'PATCH',
-        body: { displayName },
-        mode: 'rest',
-      },
-    );
   }
 
   initializeWorkspaceMcp(): Promise<DaemonWorkspaceMcpInitializeResult> {

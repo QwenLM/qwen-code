@@ -6314,56 +6314,6 @@ describe('DaemonClient', () => {
       ]);
       expect(transportFetch).not.toHaveBeenCalled();
     });
-
-    it('sets and clears a workspace display name by id or cwd over REST', async () => {
-      const response = {
-        id: 'workspace/id',
-        cwd: '/tmp/work space',
-        displayName: 'Payments',
-        primary: false,
-        trusted: true,
-      };
-      const { fetch, calls } = recordingFetch(() =>
-        jsonResponse(200, response),
-      );
-      const transportFetch = vi.fn(async () =>
-        jsonResponse(404, { error: 'transport route not mapped' }),
-      );
-      const transport: DaemonTransport = {
-        type: 'acp-http',
-        supportsReplay: true,
-        connected: true,
-        fetch: transportFetch,
-        async *subscribeEvents() {},
-        dispose() {},
-      };
-      const client = new DaemonClient({
-        baseUrl: 'http://daemon',
-        fetch,
-        transport,
-      });
-
-      await expect(
-        client.workspaceById('workspace/id').setDisplayName('Payments'),
-      ).resolves.toEqual(response);
-      await expect(
-        client.workspaceByCwd('/tmp/work space').setDisplayName(null),
-      ).resolves.toEqual(response);
-
-      expect(calls.map((call) => [call.method, call.url, call.body])).toEqual([
-        [
-          'PATCH',
-          'http://daemon/workspaces/workspace%2Fid',
-          JSON.stringify({ displayName: 'Payments' }),
-        ],
-        [
-          'PATCH',
-          'http://daemon/workspaces/%2Ftmp%2Fwork%20space',
-          JSON.stringify({ displayName: null }),
-        ],
-      ]);
-      expect(transportFetch).not.toHaveBeenCalled();
-    });
   });
 
   describe('addRuntimeMcpServer (T2.8 #4514)', () => {
@@ -6677,6 +6627,26 @@ describe('DaemonClient', () => {
       await client.addWorkspace('/work/secondary');
       expect(JSON.parse(calls[0]!.body!)).toEqual({
         cwd: '/work/secondary',
+      });
+    });
+
+    it('forwards a display name without enabling persistence', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(201, {
+          id: 'workspace-id',
+          cwd: '/work/secondary',
+          displayName: 'Local workspace',
+          primary: false,
+          trusted: true,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.addWorkspace('/work/secondary', {
+        displayName: 'Local workspace',
+      });
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        cwd: '/work/secondary',
+        displayName: 'Local workspace',
       });
     });
   });
