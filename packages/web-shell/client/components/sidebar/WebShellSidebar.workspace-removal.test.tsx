@@ -166,6 +166,7 @@ function renderSidebar(
     selectedWorkspaceCwd?: string;
     onSelectWorkspace?: (cwd: string | undefined) => void;
     onError?: (error: unknown, message: string) => void;
+    onOpenGoals?: () => void;
     lockedWorkspaceCwd?: string;
     lockedWorkspace?: {
       render?: (workspace: DaemonWorkspaceCapability) => ReactNode;
@@ -181,6 +182,7 @@ function renderSidebar(
           onOpenSettings={() => {}}
           onOpenDaemonStatus={() => {}}
           onOpenScheduledTasks={() => {}}
+          onOpenGoals={overrides.onOpenGoals ?? (() => {})}
           onOpenSessions={() => {}}
           onOpenSplitView={() => {}}
           onNewSession={() => false}
@@ -964,6 +966,19 @@ describe('WebShellSidebar non-primary archive', () => {
       });
       await archiveSessionsData.mock.results.at(-1)?.value;
     });
+  });
+});
+
+describe('WebShellSidebar goals entry', () => {
+  it('renders the Goals footer button and invokes onOpenGoals', () => {
+    const onOpenGoals = vi.fn();
+    renderSidebar({ onOpenGoals });
+    const button = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Goals"]',
+    );
+    expect(button).not.toBeNull();
+    click(button!);
+    expect(onOpenGoals).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -11,7 +11,9 @@ import {
   getPlanModeSystemReminder,
   resolvePathFromEnv,
   getCompressionPrompt,
+  resolveInteractionMode,
 } from './prompts.js';
+import { InputFormat } from '../output/types.js';
 import { isGitRepository } from '../utils/gitUtils.js';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -64,7 +66,58 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).toContain(
       'genuinely safer alternative that does not accomplish the denied action',
     );
-    expect(prompt).toContain('stop and ask the user for explicit approval');
+    expect(prompt).toContain(
+      'request explicit approval only when the current interaction mode can receive it',
+    );
+  });
+
+  it.each([
+    [
+      'interactive',
+      'an interactive CLI agent',
+      "Use 'ask_user_question' when you need clarification",
+    ],
+    [
+      'headless',
+      'a non-interactive CLI agent',
+      'Never ask the user a question',
+    ],
+    [
+      'acp',
+      'a CLI agent operating through an ACP host',
+      'The ACP host can relay the question and response',
+    ],
+  ] as const)(
+    'aligns the system prompt with %s mode',
+    (mode, role, questionGuidance) => {
+      vi.stubEnv('SANDBOX', undefined);
+      const prompt = getCoreSystemPrompt(undefined, undefined, undefined, mode);
+
+      expect(prompt).toContain(`You are Qwen Code, ${role}`);
+      expect(prompt).toContain(questionGuidance);
+    },
+  );
+
+  it('does not tell headless runs to wait for user input', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    vi.mocked(isGitRepository).mockReturnValue(true);
+    const prompt = getCoreSystemPrompt(
+      undefined,
+      undefined,
+      undefined,
+      'headless',
+    );
+
+    expect(prompt).not.toContain('stop and ask the user for explicit approval');
+    expect(prompt).not.toContain('ask clarifying questions');
+    expect(prompt).not.toContain('If unsure, ask the user');
+    expect(prompt).not.toContain(
+      'ask for clarification or confirmation where needed',
+    );
+    expect(prompt).not.toMatch(/Use 'ask_user_question' when you need/);
+    expect(
+      prompt.lastIndexOf('This is a non-interactive, single-turn run'),
+    ).toBeGreaterThan(prompt.lastIndexOf('# Examples'));
   });
 
   it('instructs the model to preserve unrelated existing work', () => {
@@ -490,6 +543,40 @@ describe('Model-specific tool call formats', () => {
 
     expect(prompt).toMatchSnapshot();
   });
+
+  it('should use native Gemma 4 format for gemma4 models', () => {
+    vi.mocked(isGitRepository).mockReturnValue(false);
+
+    // Test detection via regex
+    const prompt = getCoreSystemPrompt(
+      undefined,
+      'unsloth/gemma-4-26B-A4B-it-qat',
+    );
+
+    // Should contain Gemma native token boundaries and quotes
+    expect(prompt).toContain('<|tool_call>call:run_shell_command');
+    expect(prompt).toContain(
+      '{command:<|"|>node server.js<|"|>,is_background:true}<tool_call|>',
+    );
+
+    // Should NOT contain legacy/generic formats
+    expect(prompt).not.toContain('[tool_call: run_shell_command for');
+    expect(prompt).not.toContain('<function=run_shell_command>');
+    expect(prompt).not.toContain('{"name": "run_shell_command"');
+
+    expect(prompt).toMatchSnapshot();
+  });
+
+  it('should override tool call format via QWEN_CODE_TOOL_CALL_STYLE env variable for gemma4', () => {
+    vi.stubEnv('QWEN_CODE_TOOL_CALL_STYLE', 'gemma4');
+    vi.mocked(isGitRepository).mockReturnValue(false);
+
+    // Pass a non-gemma model string to verify env var takes precedence
+    const prompt = getCoreSystemPrompt(undefined, 'gpt-4');
+
+    expect(prompt).toContain('<|tool_call>call:run_shell_command');
+    expect(prompt).not.toContain('[tool_call: run_shell_command for');
+  });
 });
 
 describe('getCustomSystemPrompt', () => {
@@ -774,5 +861,72 @@ describe('getCompressionPrompt', () => {
     expect(prompt).not.toMatch(
       /resume.*directly|continue the conversation from where it left off/i,
     );
+  });
+});
+
+describe('resolveInteractionMode', () => {
+  const makeConfig = (opts: {
+    zed?: boolean;
+    inputFormat?: string;
+    interactive?: boolean;
+  }) => ({
+    getExperimentalZedIntegration: () => opts.zed ?? false,
+    getInputFormat: () => opts.inputFormat ?? InputFormat.TEXT,
+    isInteractive: () => opts.interactive ?? false,
+  });
+
+  it("resolves the Zed integration to 'acp'", () => {
+    expect(resolveInteractionMode(makeConfig({ zed: true }))).toBe('acp');
+  });
+
+  it("resolves a stream-json session to 'acp' so the model may still ask questions", () => {
+    // Must match the runtime question/permission sites, which treat a
+    // stream-json session as ACP-capable (the host relays the question).
+    expect(
+      resolveInteractionMode(
+        makeConfig({ inputFormat: InputFormat.STREAM_JSON }),
+      ),
+    ).toBe('acp');
+  });
+
+  it("resolves an interactive text session to 'interactive'", () => {
+    expect(
+      resolveInteractionMode(
+        makeConfig({ inputFormat: InputFormat.TEXT, interactive: true }),
+      ),
+    ).toBe('interactive');
+  });
+
+  it("resolves a non-interactive text session to 'headless'", () => {
+    expect(
+      resolveInteractionMode(
+        makeConfig({ inputFormat: InputFormat.TEXT, interactive: false }),
+      ),
+    ).toBe('headless');
+  });
+
+  it("prefers 'acp' over 'interactive' for a stream-json session (ACP precedence)", () => {
+    expect(
+      resolveInteractionMode(
+        makeConfig({ inputFormat: InputFormat.STREAM_JSON, interactive: true }),
+      ),
+    ).toBe('acp');
+  });
+
+  it('treats a missing getInputFormat as a text session', () => {
+    // getInputFormat is optional on the structural type; its absence must not
+    // throw and must not resolve to 'acp'.
+    expect(
+      resolveInteractionMode({
+        getExperimentalZedIntegration: () => false,
+        isInteractive: () => true,
+      }),
+    ).toBe('interactive');
+    expect(
+      resolveInteractionMode({
+        getExperimentalZedIntegration: () => false,
+        isInteractive: () => false,
+      }),
+    ).toBe('headless');
   });
 });

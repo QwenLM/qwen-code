@@ -737,8 +737,12 @@ stdout/stderr are forwarded into the daemon log with bearer tokens, sensitive
 worker environment values, and proxy URL credentials redacted.
 
 Security: the response never includes bearer tokens, client ids, full ACP
-connection ids, device-flow user codes, or verification URLs. `summary` omits
-the daemon log path; `full` may include it for authenticated operators.
+connection ids, device-flow user codes, or verification URLs. Both detail
+levels may include additive `daemon.runId`, `daemon.logMode`, and
+`daemon.logHealth`. `summary` omits the daemon log path and loss details;
+`full` may include `logPath`, `logIssues`, `logDroppedRecords`, and
+`logDroppedBytes` for authenticated operators. Degraded file logging adds the
+path-free `daemon_log_degraded` warning to the normal status rollup.
 
 ### `GET /capabilities`
 

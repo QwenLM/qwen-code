@@ -258,6 +258,40 @@ export interface DaemonAddWorkspaceResult {
   persisted?: boolean;
 }
 
+/**
+ * One session's active `/goal`. Goals live in the owning session's memory and
+ * only advance while it is resident, so this list covers exactly the goals that
+ * are actually running — a session that isn't loaded contributes nothing.
+ */
+export interface DaemonGoal {
+  /** The session driving this goal; its transcript is the goal's history. */
+  sessionId: string;
+  /** The session's label, or null — the UI falls back to the id. */
+  displayName: string | null;
+  condition: string;
+  /** Judge turns completed; 0 before the first stop-hook evaluation. */
+  iterations: number;
+  setAt: number;
+  /** The judge's verdict on the most recent turn, when it has run. */
+  lastReason?: string;
+  /**
+   * The owning session is mid-turn. For a goal session that is almost always
+   * the loop working, but a manual prompt in the same session sets it too.
+   */
+  hasActivePrompt: boolean;
+}
+
+/** The `GET /goals` payload. */
+export interface DaemonGoalList {
+  goals: DaemonGoal[];
+  /**
+   * Sessions whose goal could not be probed (wedged or dying child). Their
+   * goals are missing from `goals`, so a non-zero count means this list is
+   * incomplete rather than empty.
+   */
+  droppedCount: number;
+}
+
 export interface DaemonWorkspacePathSuggestion {
   name: string;
   path: string;
@@ -429,6 +463,11 @@ export interface DaemonWorkspaceActions {
     workspaceId?: string,
   ): Promise<DaemonScheduledTask>;
   deleteScheduledTask(id: string, workspaceId?: string): Promise<void>;
+
+  // Goals (session-scoped Stop hooks, listed workspace-wide)
+  listGoals(): Promise<DaemonGoalList>;
+  /** Drop a session's goal hook. No-op when that session has no active goal. */
+  clearGoal(sessionId: string): Promise<{ cleared: boolean }>;
 
   // Providers / env (read-only diagnostics)
   loadProviders(): Promise<DaemonWorkspaceProvidersStatus>;

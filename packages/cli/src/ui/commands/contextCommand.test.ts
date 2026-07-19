@@ -52,6 +52,8 @@ function makeMockConfig(contextWindowSize = 32_000): Config {
     }),
     getChatCompression: vi.fn().mockReturnValue(undefined),
     getAutoCompactThreshold: vi.fn(),
+    getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
+    isInteractive: vi.fn().mockReturnValue(true),
   } as unknown as Config;
 }
 
@@ -80,6 +82,8 @@ describe('collectContextData (contextCommand)', () => {
       }),
       getChatCompression: vi.fn().mockReturnValue(undefined),
       getAutoCompactThreshold: vi.fn(),
+      getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
+      isInteractive: vi.fn().mockReturnValue(true),
     } as unknown as Config;
   });
 
@@ -173,6 +177,8 @@ describe('collectContextData (contextCommand)', () => {
       }),
       getChatCompression: vi.fn().mockReturnValue(undefined),
       getAutoCompactThreshold: vi.fn(),
+      getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
+      isInteractive: vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     const data = await collectContextData(config, true);
@@ -215,6 +221,8 @@ describe('collectContextData (contextCommand)', () => {
       }),
       getChatCompression: vi.fn().mockReturnValue(undefined),
       getAutoCompactThreshold: vi.fn(),
+      getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
+      isInteractive: vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     const data = await collectContextData(config, true);

@@ -888,6 +888,87 @@ describe('TurnBoundaryCompactionEngine', () => {
   });
 });
 
+describe('transcript record provenance compaction', () => {
+  function updateOf(event: BridgeEvent): Record<string, unknown> {
+    return (event.data as { update: Record<string, unknown> }).update;
+  }
+
+  function withSources(
+    event: BridgeEvent,
+    sourceRecordIds: string[],
+  ): BridgeEvent {
+    const update = (event.data as { update: Record<string, unknown> }).update;
+    update['_meta'] = { qwenTranscript: { sourceRecordIds } };
+    return event;
+  }
+
+  it('merges text within one record but not across record boundaries', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(withSources(makeTextChunk(1, 'one '), ['record-a']));
+    engine.ingest(withSources(makeTextChunk(2, 'two'), ['record-a']));
+    engine.ingest(withSources(makeTextChunk(3, 'three'), ['record-b']));
+    engine.ingest(makeTurnComplete(4));
+
+    const textEvents = engine
+      .snapshot()
+      .compactedTurns.filter(
+        (event) =>
+          event.type === 'session_update' &&
+          updateOf(event)['sessionUpdate'] === 'agent_message_chunk',
+      );
+    expect(
+      textEvents.map(
+        (event) => (updateOf(event)['content'] as { text: string }).text,
+      ),
+    ).toEqual(['one two', 'three']);
+  });
+
+  it('uses structured source identity for interleaved subagent chunks', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    const first = makeTextChunkWithParent(1, 'first', 'task::x');
+    const second = makeTextChunkWithParent(2, 'second', 'task::x');
+    engine.ingest(withSources(first, ['a::b', 'c']));
+    engine.ingest(withSources(second, ['a', 'b::c']));
+    engine.ingest(makeTurnComplete(3));
+
+    const textEvents = engine
+      .snapshot()
+      .compactedTurns.filter(
+        (event) =>
+          event.type === 'session_update' &&
+          updateOf(event)['sessionUpdate'] === 'agent_message_chunk',
+      );
+    expect(textEvents).toHaveLength(2);
+  });
+
+  it('unions tool start and result source ids in event order', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(
+      withSources(makeToolCall(1, '__proto__', 'running'), ['start-record']),
+    );
+    engine.ingest(
+      withSources(makeToolCallUpdate(2, '__proto__', 'completed'), [
+        'result-record',
+        'start-record',
+      ]),
+    );
+    engine.ingest(makeTurnComplete(3));
+
+    const toolEvent = engine
+      .snapshot()
+      .compactedTurns.find(
+        (event) =>
+          event.type === 'session_update' &&
+          updateOf(event)['toolCallId'] === '__proto__',
+      );
+    expect(updateOf(toolEvent!)['_meta']).toMatchObject({
+      qwenTranscript: {
+        sourceRecordIds: ['start-record', 'result-record'],
+      },
+    });
+  });
+});
+
 describe('EventBus + CompactionEngine integration', () => {
   it('seedReplayEvents advances replay state without populating the ring or liveJournal', async () => {
     const engine = new TurnBoundaryCompactionEngine();

@@ -34,6 +34,8 @@ const mocks = vi.hoisted(() => ({
   main: vi.fn(),
   tryRunServeFastPath: vi.fn(),
   initStartupProfiler: vi.fn(),
+  initializeAcpStartupProfiler: vi.fn(),
+  markAcpStartup: vi.fn(),
   initCpuProfiler: vi.fn(),
   mcpHandler: vi.fn(),
   mcpBuilder: vi.fn(),
@@ -52,6 +54,11 @@ vi.mock('./serve/fast-path.js', () => ({
 
 vi.mock('./utils/startupProfiler.js', () => ({
   initStartupProfiler: mocks.initStartupProfiler,
+}));
+
+vi.mock('./utils/acp-startup-profiler.js', () => ({
+  initializeAcpStartupProfiler: mocks.initializeAcpStartupProfiler,
+  markAcpStartup: mocks.markAcpStartup,
 }));
 
 vi.mock('./utils/cpuProfiler.js', () => ({
@@ -300,6 +307,26 @@ describe('runCliEntry', () => {
     await runCliEntry([]);
 
     expect(mocks.main).toHaveBeenCalledTimes(1);
+    expect(mocks.initializeAcpStartupProfiler).not.toHaveBeenCalled();
+  });
+
+  it('profiles the Gemini module import only on the ACP path', async () => {
+    await runCliEntry(['--acp']);
+
+    expect(mocks.initializeAcpStartupProfiler).toHaveBeenCalledTimes(1);
+    expect(mocks.markAcpStartup.mock.calls).toEqual([
+      ['geminiImportStart'],
+      ['geminiImportEnd'],
+    ]);
+    expect(mocks.main).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not profile when ACP is explicitly disabled', async () => {
+    await runCliEntry(['--acp=false']);
+
+    expect(mocks.initializeAcpStartupProfiler).not.toHaveBeenCalled();
+    expect(mocks.markAcpStartup).not.toHaveBeenCalled();
+    expect(mocks.main).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -311,6 +338,7 @@ describe('bootstrap import boundaries', () => {
     expect(source).not.toContain("from '@qwen-code/qwen-code-core'");
     expect(source).not.toContain("import './gemini.js'");
     expect(source).not.toContain("import { main } from './gemini.js'");
+    expect(source).not.toContain("from './utils/acp-startup-profiler.js'");
   });
 
   it('initializes profilers during bootstrap module evaluation', () => {

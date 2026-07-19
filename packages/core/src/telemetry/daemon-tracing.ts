@@ -362,6 +362,7 @@ export function createDaemonBridgeTelemetry(): {
     attributes: DaemonAttributes,
     fn: () => Promise<T>,
   ): Promise<T>;
+  setActiveSpanAttributes?(attributes: DaemonAttributes): void;
   event(name: string, attributes: DaemonAttributes): void;
   injectPromptContext<T extends object>(request: T): T;
   metrics?: DaemonBridgeTelemetryMetrics;
@@ -370,6 +371,14 @@ export function createDaemonBridgeTelemetry(): {
     captureContext: captureDaemonTelemetryContext,
     runWithContext: runWithDaemonTelemetryContext,
     withSpan: withDaemonBridgeSpan,
+    setActiveSpanAttributes(attributes) {
+      if (!isTelemetrySdkInitialized()) return;
+      try {
+        trace.getSpan(otelContext.active())?.setAttributes(attributes);
+      } catch {
+        // Telemetry must not affect bridge behavior.
+      }
+    },
     event(name, attributes) {
       if (!isTelemetrySdkInitialized()) return;
       try {

@@ -707,6 +707,44 @@ describe('registerGoalHook / unregisterGoalHook', () => {
     expect(goal.iterations).toBe(0);
   });
 
+  it.each([
+    ['a future timestamp', () => Date.now() + 86_400_000],
+    ['NaN', () => Number.NaN],
+    ['Infinity', () => Number.POSITIVE_INFINITY],
+    ['zero', () => 0],
+    ['a negative timestamp', () => -1],
+  ])(
+    'ignores an unusable initialSetAt (%s) and starts the clock now',
+    (_label, make) => {
+      // `setAt` arrives from a transcript, and every duration downstream is
+      // `Date.now() - setAt`. A future value would render negative elapsed times on
+      // the Goals page and in `GET /goals` rather than fail loudly, so it falls back
+      // to now along with the non-finite and non-positive cases.
+      const before = Date.now();
+      const goal = registerGoalHook({
+        config,
+        sessionId: 'sess-1',
+        condition: 'tests pass',
+        tokensAtStart: 0,
+        initialSetAt: make(),
+      });
+      expect(goal.setAt).toBeGreaterThanOrEqual(before);
+      expect(goal.setAt).toBeLessThanOrEqual(Date.now());
+    },
+  );
+
+  it('carries a usable initialSetAt so elapsed time survives resume', () => {
+    const setAt = Date.now() - 60_000;
+    const goal = registerGoalHook({
+      config,
+      sessionId: 'sess-1',
+      condition: 'tests pass',
+      tokensAtStart: 0,
+      initialSetAt: setAt,
+    });
+    expect(goal.setAt).toBe(setAt);
+  });
+
   it('honors a resumed near-cap count so MAX survives resume (no fresh budget)', async () => {
     // Simulate resume re-arming a goal that was already at the cap last session.
     registerGoalHook({

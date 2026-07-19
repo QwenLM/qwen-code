@@ -19,6 +19,7 @@ import { SubagentManager } from '../../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
 import {
+  buildChildMessage,
   FORK_AGENT,
   FORK_DEFAULT_MAX_TURNS,
   runInForkContext,
@@ -348,6 +349,35 @@ describe('AgentTool', () => {
       expect(tool.description).toContain("Don't race");
       expect(tool.description).toContain('Writing a fork prompt');
     });
+
+    it('advertises background execution as the default with a foreground opt-out', async () => {
+      const tool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      expect(tool.description).toContain('background by default');
+      expect(tool.description).toContain('run_in_background: false');
+    });
+
+    it('requires bounded delegation and verification of subagent results', async () => {
+      const tool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      expect(tool.description).toContain('concrete, bounded tasks');
+      expect(tool.description).toContain('immediate critical-path work local');
+      expect(tool.description).toContain(
+        'Do not duplicate work between the parent and subagents',
+      );
+      expect(tool.description).toContain('disjoint write scopes');
+      expect(tool.description).toContain(
+        "Treat the agent's output as evidence, not as automatically correct",
+      );
+      expect(tool.description).not.toContain(
+        "The agent's outputs should generally be trusted",
+      );
+      expect(tool.description).not.toContain(
+        'Launch multiple agents concurrently whenever possible',
+      );
+    });
   });
 
   describe('schema generation', () => {
@@ -364,6 +394,22 @@ describe('AgentTool', () => {
         'file-search',
         'code-review',
       ]);
+    });
+
+    it('declares the background default and foreground opt-out', () => {
+      const properties = agentTool.schema.parametersJsonSchema as {
+        properties: {
+          run_in_background: {
+            default?: boolean;
+            description?: string;
+          };
+        };
+      };
+
+      expect(properties.properties.run_in_background.default).toBe(true);
+      expect(properties.properties.run_in_background.description).toContain(
+        'Set to false',
+      );
     });
 
     it('does not advertise "fork" in the enum, even when interactive', async () => {
@@ -1211,6 +1257,7 @@ describe('AgentTool', () => {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
+        run_in_background: false,
       };
 
       const invocation = (
@@ -1332,6 +1379,7 @@ describe('AgentTool', () => {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
+        run_in_background: false,
       };
 
       const invocation = (
@@ -1358,6 +1406,7 @@ describe('AgentTool', () => {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
+        run_in_background: false,
       };
 
       const invocation = (
@@ -1377,6 +1426,7 @@ describe('AgentTool', () => {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
+        run_in_background: false,
       };
 
       const invocation = (
@@ -1519,6 +1569,66 @@ describe('AgentTool', () => {
           'task_prompt',
           expect.stringContaining('translate it to the corresponding path'),
         );
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
+        vi.useFakeTimers();
+      }
+    }, 20000);
+
+    it('keeps a working_dir launch in the foreground when the flag is omitted', async () => {
+      // The default-background rule excludes caller-owned worktree launches
+      // (`this.params.working_dir === undefined` in backgroundRequested). Guard
+      // the core dispatch directly so a future refactor that drops the
+      // working_dir exclusion is caught here, not only in the UI classifiers.
+      vi.useRealTimers();
+      const repo = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wd-fg-')),
+      );
+      try {
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+        execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: repo });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+        execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        fs.writeFileSync(path.join(repo, 'README.md'), 'hi\n');
+        execFileSync('git', ['add', '.'], { cwd: repo });
+        execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+          cwd: repo,
+        });
+
+        const wt = path.join(repo, '.qwen', 'tmp', 'review-pr-1');
+        fs.mkdirSync(path.dirname(wt), { recursive: true });
+        execFileSync(
+          'git',
+          ['worktree', 'add', '-b', 'review-pr-1', wt, 'HEAD'],
+          { cwd: repo },
+        );
+
+        vi.mocked(config.getProjectRoot).mockReturnValue(repo);
+        vi.mocked(config.getTargetDir).mockReturnValue(repo);
+        vi.mocked(config.getCwd).mockReturnValue(repo);
+        vi.mocked(config.getWorkingDir).mockReturnValue(repo);
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'Review',
+          prompt: 'Review the diff',
+          subagent_type: 'file-search',
+          working_dir: wt,
+          // run_in_background intentionally omitted.
+        });
+        const result = await invocation.execute();
+
+        // Foreground: the omitted flag must NOT route a caller-owned worktree
+        // launch through the background registry path.
+        expect(partToString(result.llmContent)).not.toContain(
+          'Background agent launched',
+        );
+        expect(
+          vi.mocked(mockSubagentManager.createAgentHeadless),
+        ).toHaveBeenCalled();
       } finally {
         fs.rmSync(repo, { recursive: true, force: true });
         vi.useFakeTimers();
@@ -1969,6 +2079,7 @@ describe('AgentTool', () => {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
+        run_in_background: false,
       };
 
       const invocation = (
@@ -1988,6 +2099,7 @@ describe('AgentTool', () => {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
+        run_in_background: false,
       };
 
       const invocation = (
@@ -2030,6 +2142,7 @@ describe('AgentTool', () => {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
+        run_in_background: false,
       };
 
       const invocation = (
@@ -2097,6 +2210,7 @@ describe('AgentTool', () => {
           description: 'Search files',
           prompt: 'Find all TypeScript files',
           subagent_type: 'file-search',
+          run_in_background: false,
         };
         const invocation = (
           agentTool as AgentToolWithProtectedMethods
@@ -2248,6 +2362,7 @@ describe('AgentTool', () => {
           description: 'Search files',
           prompt: 'Find all TypeScript files',
           subagent_type: 'file-search',
+          run_in_background: false,
         };
         const invocation = (
           agentTool as AgentToolWithProtectedMethods
@@ -2296,6 +2411,7 @@ describe('AgentTool', () => {
           description: 'Search files',
           prompt: 'Find all TypeScript files',
           subagent_type: 'file-search',
+          run_in_background: false,
         };
         const invocation = (
           agentTool as AgentToolWithProtectedMethods
@@ -2319,6 +2435,7 @@ describe('AgentTool', () => {
           description: 'Search files',
           prompt: 'Find all TypeScript files',
           subagent_type: 'file-search',
+          run_in_background: false,
         };
         const invocation = (
           agentTool as AgentToolWithProtectedMethods
@@ -2391,6 +2508,20 @@ describe('AgentTool', () => {
         .mockReturnValue(true);
     });
 
+    it('does not require a commit unless the directive asks for one', () => {
+      const childMessage = buildChildMessage('update the implementation');
+
+      expect(childMessage).toContain(
+        'Do NOT create a commit unless the directive explicitly asks you to',
+      );
+      expect(childMessage).toContain(
+        'Verification: <checks performed and their outcome',
+      );
+      expect(childMessage).not.toContain(
+        'commit your changes before reporting',
+      );
+    });
+
     it('forks in interactive mode', async () => {
       const mockLoadedSubagent: SubagentConfig = {
         name: 'general-purpose',
@@ -2452,8 +2583,8 @@ describe('AgentTool', () => {
     });
 
     it('omitting subagent_type uses general-purpose, not fork', async () => {
-      // Restored contract: omission resolves to the awaitable general-purpose
-      // subagent (inline result), never a fork — even in interactive mode.
+      // Omission resolves to the regular general-purpose subagent, never a
+      // context-inheriting fork — even in interactive mode.
       const mockLoadedSubagent: SubagentConfig = {
         name: 'general-purpose',
         description: 'General-purpose agent',
@@ -2875,6 +3006,7 @@ describe('AgentTool', () => {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
+        run_in_background: false,
       };
 
       const invocation = (
@@ -2907,6 +3039,7 @@ describe('AgentTool', () => {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
+        run_in_background: false,
       };
 
       const invocation = (
@@ -2932,6 +3065,7 @@ describe('AgentTool', () => {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
+        run_in_background: false,
       };
 
       const invocation = (
@@ -2957,6 +3091,7 @@ describe('AgentTool', () => {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
+        run_in_background: false,
       };
 
       const invocation = (
@@ -2980,6 +3115,7 @@ describe('AgentTool', () => {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
+        run_in_background: false,
       };
 
       const invocation = (
@@ -3066,6 +3202,7 @@ describe('AgentTool', () => {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
+        run_in_background: false,
       };
 
       const invocation = (
@@ -3106,6 +3243,7 @@ describe('AgentTool', () => {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
+        run_in_background: false,
       };
 
       const invocation = (
@@ -3146,6 +3284,7 @@ describe('AgentTool', () => {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
+        run_in_background: false,
       };
 
       const invocation = (
@@ -3176,6 +3315,7 @@ describe('AgentTool', () => {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
+        run_in_background: false,
       };
 
       const invocation = (
@@ -3199,6 +3339,7 @@ describe('AgentTool', () => {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
+        run_in_background: false,
       };
 
       const invocation = (
@@ -3221,6 +3362,7 @@ describe('AgentTool', () => {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
+        run_in_background: false,
       };
 
       const invocation = (
@@ -3256,6 +3398,7 @@ describe('AgentTool', () => {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
+        run_in_background: false,
       };
 
       const invocation = (
@@ -3287,6 +3430,7 @@ describe('AgentTool', () => {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
+        run_in_background: false,
       };
 
       const invocation = (
@@ -3302,6 +3446,7 @@ describe('AgentTool', () => {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
+        run_in_background: false,
       };
 
       const invocation = (
@@ -3388,6 +3533,7 @@ describe('AgentTool', () => {
         description: 'Edit files',
         prompt: 'Fix the bug',
         subagent_type: 'file-search',
+        run_in_background: false,
       };
 
       capturedInvocation = (
@@ -4015,6 +4161,115 @@ describe('AgentTool', () => {
       expect(mockRegistry.register).toHaveBeenCalled();
     });
 
+    it('runs a top-level subagent in the background when the flag is omitted', async () => {
+      const defaultSubagent: SubagentConfig = {
+        ...bgSubagent,
+        name: 'file-search',
+        background: undefined,
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+        defaultSubagent,
+      );
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      });
+      const result = await invocation.execute();
+
+      expect(partToString(result.llmContent)).toContain(
+        'Background agent launched',
+      );
+      expect(mockRegistry.register).toHaveBeenCalled();
+    });
+
+    it('keeps a named-teammate launch in the foreground when no team is active and the flag is omitted', async () => {
+      // A `name` passed without an active team manager falls through to a
+      // regular one-shot agent (agent.ts logs and continues), and
+      // backgroundRequested excludes `name` (`this.params.name === undefined`).
+      // Guard the core dispatch directly so a future refactor that drops the
+      // `name` exclusion is caught here, not only in the UI classifiers (both
+      // of which treat named calls as foreground).
+      vi.mocked(config.getTeamManager).mockReturnValue(null);
+      const defaultSubagent: SubagentConfig = {
+        ...bgSubagent,
+        name: 'file-search',
+        background: undefined,
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+        defaultSubagent,
+      );
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Review the diff',
+        prompt: 'Review the diff',
+        subagent_type: 'file-search',
+        name: 'reviewer',
+        // run_in_background intentionally omitted.
+      });
+      const result = await invocation.execute();
+
+      // Foreground: an omitted flag on a named launch must NOT route through
+      // the background registry path.
+      expect(partToString(result.llmContent)).not.toContain(
+        'Background agent launched',
+      );
+      expect(mockRegistry.register).toHaveBeenCalledWith(
+        expect.objectContaining({ isBackgrounded: false }),
+      );
+    });
+
+    it('runs in the foreground when run_in_background is false', async () => {
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+        run_in_background: false,
+      });
+      const result = await invocation.execute();
+
+      expect(partToString(result.llmContent)).toBe('Monitor done');
+      expect(mockRegistry.register).toHaveBeenCalledWith(
+        expect.objectContaining({ isBackgrounded: false }),
+      );
+    });
+
+    it('lets an explicit run_in_background: false override a config with background: true', async () => {
+      // Precedence contract: the explicit tool parameter wins over the
+      // subagent config's background flag (`run_in_background ?? config`).
+      // A `||` here would let background: true override the explicit false
+      // and detach the agent when the caller asked for an inline result.
+      const explicitBackgroundConfig: SubagentConfig = {
+        ...bgSubagent,
+        name: 'file-search',
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+        explicitBackgroundConfig,
+      );
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+        run_in_background: false,
+      });
+      const result = await invocation.execute();
+
+      expect(partToString(result.llmContent)).toBe('Monitor done');
+      expect(mockRegistry.register).toHaveBeenCalledWith(
+        expect.objectContaining({ isBackgrounded: false }),
+      );
+    });
+
     it('downgrades a background request from a nested sub-agent to an awaited foreground run', async () => {
       // Background delegation is top-level-only in v1: a nested launcher
       // cannot honor the background completion contract (send_message /
@@ -4042,6 +4297,27 @@ describe('AgentTool', () => {
       expect(mockRegistry.register).toHaveBeenCalledWith(
         expect.objectContaining({ isBackgrounded: false }),
       );
+    });
+
+    it('keeps an omitted background flag in the foreground for nested sub-agents', async () => {
+      vi.mocked(config.getMaxSubagentDepth).mockReturnValue(5);
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Search from a nested sub-agent',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      });
+
+      const result = await runWithAgentContext('sub-1', () =>
+        invocation.execute(),
+      );
+
+      expect(partToString(result.llmContent)).toBe('Monitor done');
+      expect(mockRegistry.register).toHaveBeenCalledWith(
+        expect.objectContaining({ isBackgrounded: false }),
+      );
+      expect(mockRegistry.tryReserveBackgroundSlot).not.toHaveBeenCalled();
     });
 
     it('returns registry registration errors to the model without launching the background body', async () => {
@@ -4228,7 +4504,7 @@ describe('AgentTool', () => {
       });
     });
 
-    it('should run in foreground when neither flag is set', async () => {
+    it('should run in foreground when run_in_background is false', async () => {
       const fgSubagent: SubagentConfig = {
         ...bgSubagent,
         name: 'file-search',
@@ -4240,6 +4516,7 @@ describe('AgentTool', () => {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
+        run_in_background: false,
       };
 
       const invocation = (
@@ -4306,6 +4583,7 @@ describe('AgentTool', () => {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
+        run_in_background: false,
       });
       await invocation.execute();
 
@@ -4335,6 +4613,7 @@ describe('AgentTool', () => {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
+        run_in_background: false,
       };
 
       const invocation = (
@@ -4413,6 +4692,7 @@ describe('AgentTool', () => {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
+        run_in_background: false,
       };
 
       const invocation = (
@@ -4498,6 +4778,7 @@ describe('AgentTool', () => {
           description: 'Search files',
           prompt: 'Find all TypeScript files',
           subagent_type: 'file-search',
+          run_in_background: false,
         };
 
         const invocation = (
@@ -4537,6 +4818,7 @@ describe('AgentTool', () => {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
+        run_in_background: false,
       };
 
       const invocation = (

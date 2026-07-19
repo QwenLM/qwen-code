@@ -10,7 +10,7 @@ import * as fs from 'node:fs';
 import { createServer } from 'node:http';
 import * as https from 'node:https';
 import type { AddressInfo } from 'node:net';
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, afterAll } from 'vitest';
 import express from 'express';
 import {
   createLazyBridgeProxy,
@@ -54,6 +54,25 @@ import {
   type WorkspaceRegistrationStore,
 } from './workspace-registration-store.js';
 import { getDeferredRuntimeRequestTiming } from './server/request-helpers.js';
+
+const originalTestRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+const isolatedTestRuntimeDir = fs.realpathSync(
+  fs.mkdtempSync(path.join(os.tmpdir(), 'qws-run-serve-tests-')),
+);
+process.env['QWEN_RUNTIME_DIR'] = isolatedTestRuntimeDir;
+
+afterEach(() => {
+  process.env['QWEN_RUNTIME_DIR'] = isolatedTestRuntimeDir;
+});
+
+afterAll(() => {
+  if (originalTestRuntimeDir === undefined) {
+    delete process.env['QWEN_RUNTIME_DIR'];
+  } else {
+    process.env['QWEN_RUNTIME_DIR'] = originalTestRuntimeDir;
+  }
+  fs.rmSync(isolatedTestRuntimeDir, { recursive: true, force: true });
+});
 
 const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
   limits: {
@@ -451,14 +470,14 @@ describe('runQwenServe daemon logger wiring', () => {
       const daemonDir = path.join(debugDir, 'daemon');
       expect(fs.existsSync(daemonDir)).toBe(true);
 
-      // Find the daemon-scoped log file.
+      // Find the stable daemon log file.
       const logFiles = fs
         .readdirSync(daemonDir)
         .filter((f) => f.endsWith('.log'));
-      expect(logFiles).toContain(`serve-${process.pid}.log`);
+      expect(logFiles).toContain('daemon.log');
 
       const logContent = fs.readFileSync(
-        path.join(daemonDir, `serve-${process.pid}.log`),
+        path.join(daemonDir, 'daemon.log'),
         'utf8',
       );
       // Should contain the "daemon started" boot line
@@ -468,22 +487,39 @@ describe('runQwenServe daemon logger wiring', () => {
         `workspace=${fs.realpathSync.native(workspace)}`,
       );
 
+      await Promise.all(
+        Array.from({ length: 70 }, (_, index) =>
+          fetch(`${handle.url}/missing-${index}`),
+        ),
+      );
+
       // Close the handle (graceful shutdown)
       await handle.close();
 
-      // The log should still be readable after shutdown
-      const finalContent = fs.readFileSync(
-        path.join(daemonDir, `serve-${process.pid}.log`),
-        'utf8',
+      // close() is intentionally bounded, so the file finalizer may still be
+      // draining when it returns under a slow filesystem.
+      const logPath = path.join(daemonDir, 'daemon.log');
+      let finalContent = '';
+      await vi.waitFor(
+        () => {
+          finalContent = fs.readFileSync(logPath, 'utf8');
+          expect(finalContent).toContain('access logs suppressed');
+          expect(finalContent).toContain('daemon stopped');
+        },
+        { timeout: 7_000, interval: 50 },
       );
       expect(finalContent).toContain('daemon started');
+      const suppressedIndex = finalContent.indexOf('access logs suppressed');
+      const stoppedIndex = finalContent.indexOf('daemon stopped');
+      expect(suppressedIndex).toBeGreaterThanOrEqual(0);
+      expect(stoppedIndex).toBeGreaterThan(suppressedIndex);
     } finally {
       delete process.env['QWEN_RUNTIME_DIR'];
       if (origEnv !== undefined) {
         process.env['QWEN_RUNTIME_DIR'] = origEnv;
       }
     }
-  });
+  }, 10_000);
 });
 
 describe('runQwenServe telemetry validation', () => {
@@ -1181,12 +1217,65 @@ describe('runQwenServe permissionResponseTimeoutMs validation', () => {
           { bridge: fakeBridge },
         ),
       ).rejects.toThrow(/permissionResponseTimeoutMs/);
+      const log = fs.readFileSync(
+        path.join(tmpDir, 'debug', 'daemon', 'daemon.log'),
+        'utf8',
+      );
+      expect(log).toContain('daemon startup failed');
+      expect(log).not.toContain('daemon stopped');
     } finally {
       delete process.env['QWEN_RUNTIME_DIR'];
       if (origEnv !== undefined) {
         process.env['QWEN_RUNTIME_DIR'] = origEnv;
       }
     }
+  });
+
+  it('preserves the startup error and releases the log lease when stderr fails', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-pt-')));
+    const fakeBridge = {
+      spawnOrAttach: vi.fn(),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+      killAllSync: vi.fn(),
+    } as unknown as HttpAcpBridge;
+    const origEnv = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        if (String(chunk).includes('daemon startup failed')) {
+          throw new Error('stderr unavailable');
+        }
+        return true;
+      });
+
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            maxSessions: 1,
+            permissionResponseTimeoutMs: Number.NaN,
+          },
+          { bridge: fakeBridge },
+        ),
+      ).rejects.toThrow(/permissionResponseTimeoutMs/);
+    } finally {
+      stderr.mockRestore();
+      delete process.env['QWEN_RUNTIME_DIR'];
+      if (origEnv !== undefined) {
+        process.env['QWEN_RUNTIME_DIR'] = origEnv;
+      }
+    }
+
+    expect(
+      fs.existsSync(
+        path.join(tmpDir, 'debug', 'daemon', '.stable-writer.lock'),
+      ),
+    ).toBe(false);
   });
 });
 
@@ -2261,11 +2350,7 @@ describe('runQwenServe runtime startup failures', () => {
 
       await handle.close();
       closed = true;
-      const logPath = path.join(
-        logBaseDir,
-        'daemon',
-        `serve-${process.pid}.log`,
-      );
+      const logPath = path.join(logBaseDir, 'daemon', 'daemon.log');
       const log = fs.readFileSync(logPath, 'utf8');
       expect(log).toContain(
         'failed to rebuild runtime env snapshot after daemon env reload; preserving previous runtime env',
@@ -3710,7 +3795,7 @@ describe('runQwenServe runtime startup failures', () => {
       closed = true;
 
       const log = fs.readFileSync(
-        path.join(logBaseDir, 'daemon', `serve-${process.pid}.log`),
+        path.join(logBaseDir, 'daemon', 'daemon.log'),
         'utf8',
       );
       expect(log).toContain('deferred webhook auth failed');
@@ -4701,6 +4786,8 @@ describe('runQwenServe runtime startup failures', () => {
     delete process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];
     delete process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'];
     const boundWorkspace = canonicalizeWorkspace(tmpDir);
+    const blockedLogBaseDir = path.join(tmpDir, 'blocked-log-base');
+    fs.writeFileSync(blockedLogBaseDir, 'not a directory');
     vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() => {
       throw new Error('runtime boom');
     });
@@ -4714,7 +4801,7 @@ describe('runQwenServe runtime startup failures', () => {
         maxSessions: 1,
         serveWebShell: false,
       },
-      { resolveOnListen: true },
+      { resolveOnListen: true, daemonLogBaseDir: blockedLogBaseDir },
     );
 
     try {
@@ -4780,6 +4867,11 @@ describe('runQwenServe runtime startup failures', () => {
       const body = (await res.json()) as {
         status?: string;
         issues?: Array<{ code?: string; severity?: string }>;
+        daemon?: {
+          runId?: string;
+          logMode?: string;
+          logHealth?: string;
+        };
         runtime?: { loading?: boolean; error?: string };
       };
       expect(body).toMatchObject({
@@ -4789,7 +4881,16 @@ describe('runQwenServe runtime startup failures', () => {
             code: 'daemon_runtime_failed',
             severity: 'error',
           }),
+          expect.objectContaining({
+            code: 'daemon_log_degraded',
+            severity: 'warning',
+          }),
         ]),
+        daemon: {
+          runId: expect.stringMatching(/^[0-9a-f]{32}$/),
+          logMode: 'stderr-only',
+          logHealth: 'degraded',
+        },
         runtime: { loading: false, error: 'runtime boom' },
       });
 
@@ -4804,6 +4905,20 @@ describe('runQwenServe runtime startup failures', () => {
       expect(sameOriginBody).toMatchObject({
         v: 1,
         detail: 'full',
+        issues: expect.arrayContaining([
+          expect.objectContaining({
+            code: 'daemon_log_degraded',
+            severity: 'warning',
+          }),
+        ]),
+        daemon: {
+          runId: body.daemon?.runId,
+          logMode: 'stderr-only',
+          logHealth: 'degraded',
+          logIssues: ['init_failed'],
+          logDroppedRecords: 0,
+          logDroppedBytes: 0,
+        },
         security: { allowOriginMode: 'none' },
         limits: {
           maxSessions: 1,
@@ -4846,6 +4961,7 @@ describe('runQwenServe runtime startup failures', () => {
           },
         },
       });
+      expect(sameOriginBody.daemon).not.toHaveProperty('logPath');
     } finally {
       if (originalClientMcpOverWs === undefined) {
         delete process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];
@@ -6697,6 +6813,7 @@ describe('runQwenServe channel worker supervisor', () => {
         bridge,
         channelWorkerSupervisorFactory: vi.fn(() => worker),
         channelServicePidfile: pidfile,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
       },
     );
 
@@ -6714,6 +6831,8 @@ describe('runQwenServe channel worker supervisor', () => {
       expect(exitSpy).not.toHaveBeenCalled();
       expect(worker.killAllSync).not.toHaveBeenCalled();
       expect(pidfile.removeServeServiceInfo).not.toHaveBeenCalled();
+      const logPath = path.join(tmpDir, 'debug', 'daemon', 'daemon.log');
+      expect(fs.readFileSync(logPath, 'utf8')).not.toContain('daemon stopped');
 
       await signalListener!('SIGTERM');
       expect(worker.stop).toHaveBeenCalledTimes(2);
@@ -6721,6 +6840,7 @@ describe('runQwenServe channel worker supervisor', () => {
       expect(bridge.killAllSync).not.toHaveBeenCalled();
       expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
       expect(exitSpy).toHaveBeenCalledWith(0);
+      expect(fs.readFileSync(logPath, 'utf8')).toContain('daemon stopped');
     } finally {
       for (const listener of process.rawListeners('SIGINT')) {
         if (!existingSigintListeners.has(listener)) {
@@ -6734,6 +6854,92 @@ describe('runQwenServe channel worker supervisor', () => {
       }
       exitSpy.mockRestore();
     }
+  });
+
+  it('bounds the logger flush before allowing a retryable close to reject', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-log-stuck-')),
+    );
+    const bridge = makeFakeBridge();
+    const worker = makeWorker({
+      enabled: true,
+      state: 'failed',
+      pid: 1234,
+      channels: ['telegram'],
+      error: 'Channel worker did not exit after SIGKILL.',
+    });
+    worker.stop
+      .mockRejectedValueOnce(
+        new Error('Channel worker did not exit after SIGKILL.'),
+      )
+      .mockResolvedValueOnce(undefined);
+    const pidfile = makePidfileDeps();
+    const logPath = path.join(tmpDir, 'debug', 'daemon', 'daemon.log');
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge,
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: pidfile,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+
+    let releaseAppend!: () => void;
+    const appendGate = new Promise<void>((resolve) => {
+      releaseAppend = resolve;
+    });
+    const originalAppendFile = fs.promises.appendFile.bind(fs.promises);
+    const appendSpy = vi
+      .spyOn(fs.promises, 'appendFile')
+      .mockImplementation(async (...args) => {
+        if (String(args[0]) === logPath) await appendGate;
+        return originalAppendFile(...args);
+      });
+    let closeOutcome:
+      | Promise<{ kind: 'resolved' } | { kind: 'rejected'; error: unknown }>
+      | undefined;
+
+    try {
+      const response = await fetch(`${handle.url}/blocked-access-log`);
+      await response.text();
+      closeOutcome = handle.close().then(
+        () => ({ kind: 'resolved' as const }),
+        (error: unknown) => ({ kind: 'rejected' as const, error }),
+      );
+      let timeout: NodeJS.Timeout | undefined;
+      const firstOutcome = await Promise.race([
+        closeOutcome,
+        new Promise<{ kind: 'timeout' }>((resolve) => {
+          timeout = setTimeout(() => resolve({ kind: 'timeout' }), 1_500);
+        }),
+      ]);
+      if (timeout) clearTimeout(timeout);
+
+      expect(firstOutcome.kind).toBe('rejected');
+      if (firstOutcome.kind === 'rejected') {
+        expect(firstOutcome.error).toEqual(
+          expect.objectContaining({
+            message: 'Channel worker did not exit after SIGKILL.',
+          }),
+        );
+      }
+    } finally {
+      releaseAppend();
+      appendSpy.mockRestore();
+      await closeOutcome;
+      await handle.close();
+    }
+
+    expect(worker.stop).toHaveBeenCalledTimes(2);
+    expect(fs.readFileSync(logPath, 'utf8')).toContain('daemon stopped');
   });
 
   it('retries bridge shutdown when channel and bridge teardown fail together', async () => {

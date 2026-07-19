@@ -10,6 +10,7 @@ import {
 } from '../../customization';
 import { I18nProvider } from '../../i18n';
 import { ThemeProvider } from '../../themeContext';
+import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
 import * as EnhancedTableModule from './EnhancedMarkdownTable';
 import {
   MAX_HIGHLIGHT_LINE_CHARS,
@@ -189,6 +190,33 @@ describe('qwen-session:// links', () => {
     expect(c.querySelector('a')!.getAttribute('href')).toBe('#');
     (c as HTMLDivElement & { __unmount: () => void }).__unmount();
     c.remove();
+  });
+
+  it('renders qwen session references as inert text in readonly mode', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const handler = vi.fn();
+    window.addEventListener('qwen:open-session', handler);
+    act(() => {
+      root.render(
+        createElement(
+          TranscriptRenderModeProvider,
+          { value: 'readonly' },
+          createElement(Markdown, {
+            content: '[child](qwen-session://child-session)',
+          }),
+        ),
+      );
+    });
+
+    expect(container.querySelector('a')).toBeNull();
+    expect(container.querySelector('span')?.textContent).toBe('child');
+    expect(handler).not.toHaveBeenCalled();
+
+    window.removeEventListener('qwen:open-session', handler);
+    act(() => root.unmount());
+    container.remove();
   });
 
   it('still sanitizes dangerous schemes', () => {

@@ -7,6 +7,7 @@
 import ReactDOM from 'react-dom/client';
 import { App } from './App.js';
 import { VSCodePlatformProvider } from './context/VSCodePlatformProvider.js';
+import { initializeWebviewLogger } from './hooks/useVSCode.js';
 
 // Import webui shared styles (CSS variables, component styles)
 import '@qwen-code/webui/styles.css';
@@ -16,6 +17,8 @@ import '@qwen-code/webui/styles.css';
 import './styles/tailwind.css';
 // eslint-disable-next-line import/no-internal-modules
 import './styles/App.css';
+
+initializeWebviewLogger();
 
 const container = document.getElementById('root');
 if (container) {

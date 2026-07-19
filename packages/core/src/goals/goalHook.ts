@@ -299,6 +299,13 @@ export function registerGoalHook(args: {
    * every resume). Defaults to 0 for a freshly set goal.
    */
   initialIterations?: number;
+  /**
+   * Wall-clock start of the goal, carried across resume so elapsed time keeps
+   * measuring from the original `/goal` rather than from the reload. A
+   * transcript is a file, so a non-finite or non-positive value is ignored
+   * rather than trusted. Defaults to now for a freshly set goal.
+   */
+  initialSetAt?: number;
 }): ActiveGoal {
   const { config, sessionId, condition, tokensAtStart } = args;
   const system = config.getHookSystem();
@@ -331,10 +338,22 @@ export function registerGoalHook(args: {
   );
   hookRef.hookId = hookId;
 
+  const now = Date.now();
+  const restoredSetAt = args.initialSetAt;
   const goal: ActiveGoal = {
     condition,
     iterations: Math.max(0, args.initialIterations ?? 0),
-    setAt: Date.now(),
+    // A future `setAt` is rejected along with a non-finite or non-positive one.
+    // Every duration downstream is `Date.now() - setAt`, so a transcript
+    // claiming the goal starts tomorrow would render negative elapsed times
+    // rather than fail loudly.
+    setAt:
+      typeof restoredSetAt === 'number' &&
+      Number.isFinite(restoredSetAt) &&
+      restoredSetAt > 0 &&
+      restoredSetAt <= now
+        ? restoredSetAt
+        : now,
     tokensAtStart,
     hookId,
   };

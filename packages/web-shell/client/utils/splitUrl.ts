@@ -53,3 +53,52 @@ export function parseSplitSessionIds(search: string): string[] {
     .map((id) => id.trim())
     .filter(Boolean);
 }
+
+const SPLIT_STORAGE_KEY = 'qwen-webshell-split-sessions';
+
+/**
+ * Persist the in-window split's session set so a refresh restores it. Uses
+ * `sessionStorage` (not `localStorage`) on purpose: it is scoped per browser
+ * tab, so a split opened in its own tab (via {@link buildSplitUrl}) and the
+ * in-window split never clobber each other, and a fresh unrelated tab restores
+ * nothing. It still survives a refresh of the same tab — the case this fixes.
+ */
+export function saveSplitSessions(sessions: readonly string[]): void {
+  const ids = Array.from(new Set(sessions.filter(Boolean))).slice(
+    0,
+    MAX_SPLIT_PANES,
+  );
+  try {
+    sessionStorage.setItem(SPLIT_STORAGE_KEY, JSON.stringify(ids));
+  } catch {
+    // Private mode / quota / SSR — persistence is best-effort.
+  }
+}
+
+/** The persisted split session set, or `[]` when absent/unavailable/malformed. */
+export function loadSplitSessions(): string[] {
+  try {
+    const raw = sessionStorage.getItem(SPLIT_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return Array.from(
+      new Set(
+        parsed.filter(
+          (id): id is string => typeof id === 'string' && id.length > 0,
+        ),
+      ),
+    ).slice(0, MAX_SPLIT_PANES);
+  } catch {
+    return [];
+  }
+}
+
+/** Forget the persisted split (e.g. when the user leaves the split view). */
+export function clearSplitSessions(): void {
+  try {
+    sessionStorage.removeItem(SPLIT_STORAGE_KEY);
+  } catch {
+    // best-effort
+  }
+}

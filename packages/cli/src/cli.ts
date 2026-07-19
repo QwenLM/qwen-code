@@ -360,7 +360,15 @@ export async function runCliEntry(
     return;
   }
 
+  const acpStartupProfiler = rawArgv.some(
+    (arg) => arg === '--acp' || arg === '--experimental-acp',
+  )
+    ? await import('./utils/acp-startup-profiler.js')
+    : undefined;
+  acpStartupProfiler?.initializeAcpStartupProfiler();
+  acpStartupProfiler?.markAcpStartup('geminiImportStart');
   const { main } = await import('./gemini.js');
+  acpStartupProfiler?.markAcpStartup('geminiImportEnd');
   await main();
 }
 
