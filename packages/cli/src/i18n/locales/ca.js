@@ -1873,7 +1873,7 @@ export default {
   Submit: 'Envia',
   'Submit answers': 'Envia les respostes',
   Cancel: 'Cancel·la',
-  'Your answers:': 'Les vostre respostes:',
+  'Your answers:': 'Les vostres respostes:',
   '(not answered)': '(sense resposta)',
   'Ready to submit your answers?':
     'Preparats per enviar les vostres respostes?',
