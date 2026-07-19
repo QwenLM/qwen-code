@@ -28,6 +28,7 @@ import {
   type InvocationContextV1,
 } from '../utils/invocation-context.js';
 import {
+  _setMcpFetchForTest,
   addMCPStatusChangeListener,
   attemptAutomaticMcpOAuth,
   connectToMcpServer,
@@ -94,6 +95,54 @@ function cfgWithResources(): Config {
 }
 
 describe('mcp-client', () => {
+  afterEach(() => {
+    _setMcpFetchForTest(undefined);
+  });
+
+  describe('dedicated undici fetch (#7147)', () => {
+    // Contract test against a real local HTTP server: the transport fetch
+    // built by createStreamableHttpCompatibilityFetch over the dedicated
+    // undici fetch performs real requests end to end. The stall this
+    // guards against only manifests with specific server/undici-version
+    // combinations (see #7147), so this pins the plumbing, not the stall.
+    it('performs real requests through the dedicated dispatcher', async () => {
+      const http = await import('node:http');
+      const srv = http.createServer((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      });
+      await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', resolve));
+      const port = (srv.address() as { port: number }).port;
+      try {
+        const transportFetch = createStreamableHttpCompatibilityFetch(
+          'undici-contract',
+          undefined,
+          { httpUrl: `http://127.0.0.1:${port}/mcp` },
+        );
+        // Default-arg path uses globalThis.fetch; the MCP transport path
+        // (createMcpStreamableHttpFetch) is private, so exercise the same
+        // wiring via a transport built for a real server.
+        const transport = await createTransport(
+          'undici-contract',
+          { httpUrl: `http://127.0.0.1:${port}/mcp` },
+          false,
+        );
+        const realFetch = (transport as unknown as { _fetch: typeof fetch })
+          ._fetch;
+        const res = await realFetch(`http://127.0.0.1:${port}/mcp`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+        });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ ok: true });
+        void transportFetch;
+      } finally {
+        await new Promise<void>((resolve) => srv.close(() => resolve()));
+      }
+    });
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -796,7 +845,9 @@ describe('mcp-client', () => {
       const serverConfig = { httpUrl: 'https://example.com/mcp' };
       const resourceMetadataUrl =
         'https://example.com/.well-known/oauth-protected-resource';
-      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      // The MCP transport uses a dedicated undici fetch (#7147); stub it via
+      // the test seam instead of globalThis.fetch.
+      const fetchSpy = vi.fn().mockResolvedValue(
         new Response(null, {
           status: 401,
           headers: {
@@ -804,6 +855,7 @@ describe('mcp-client', () => {
           },
         }),
       );
+      _setMcpFetchForTest(fetchSpy as unknown as typeof fetch);
       vi.mocked(ClientLib.Client).mockReturnValue({
         connect: vi.fn().mockImplementation(async (transport: unknown) => {
           const transportFetch = (transport as { _fetch: typeof fetch })._fetch;
@@ -2249,7 +2301,9 @@ describe('mcp-client', () => {
       });
 
       it('captures OAuth challenges from the initial HTTP handshake', async () => {
-        const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        // The MCP transport uses a dedicated undici fetch (#7147), so stub
+        // it via the test seam instead of globalThis.fetch.
+        const fetchSpy = vi.fn().mockResolvedValue(
           new Response(null, {
             status: 401,
             headers: {
@@ -2258,6 +2312,7 @@ describe('mcp-client', () => {
             },
           }),
         );
+        _setMcpFetchForTest(fetchSpy as unknown as typeof fetch);
         const serverName = 'handshake-oauth-server';
         const serverConfig = { httpUrl: 'https://test-server/mcp' };
         const transport = await createTransport(

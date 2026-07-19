@@ -26,6 +26,7 @@ import {
   ReadResourceResultSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { parse } from 'shell-quote';
+import { Agent, fetch as undiciFetch } from 'undici';
 import type { Config, MCPServerConfig } from '../config/config.js';
 import { AuthProviderType, isSdkMcpServerConfig } from '../config/config.js';
 import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
@@ -55,6 +56,7 @@ import type { OAuthCredentials } from '../mcp/token-storage/types.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { ResourceRegistry } from '../resources/resource-registry.js';
 import { getErrorMessage, getErrorStatus } from '../utils/errors.js';
+import { isTlsVerificationDisabled } from '../utils/runtimeFetchOptions.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { retryWithBackoff } from './mcp-retry.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
@@ -263,13 +265,62 @@ export function createStreamableHttpCompatibilityFetch(
   };
 }
 
+// Streamable HTTP servers hold a long-lived GET SSE stream open for the
+// lifetime of the connection (the SDK transport opens it after
+// `notifications/initialized`, per the MCP spec). Against some servers,
+// Node's built-in fetch stalls subsequent same-origin POSTs
+// (tools/resources/prompts discovery) behind that stream until the SDK's
+// request timeout fires (#7147 — reproduced by the reporter against
+// Fastmail's MCP endpoint on Node 26.4; both replacing the fetch
+// implementation with the npm `undici` build and suppressing the GET
+// stream independently resolved it). A dedicated Agent also lets us
+// disable `headersTimeout`/`bodyTimeout`, which undici defaults to 300s —
+// a standalone SSE stream legitimately sits idle longer than that
+// between server-sent events.
+let mcpFetchDispatcher: Agent | undefined;
+function getMcpFetchDispatcher(): Agent {
+  if (!mcpFetchDispatcher) {
+    mcpFetchDispatcher = new Agent({
+      headersTimeout: 0,
+      bodyTimeout: 0,
+      keepAliveTimeout: 60_000,
+      ...(isTlsVerificationDisabled()
+        ? { connect: { rejectUnauthorized: false } }
+        : {}),
+    });
+  }
+  return mcpFetchDispatcher;
+}
+
+// Bound to undici's own fetch (not Node's global fetch) so the dispatcher
+// and the fetch implementation always come from the same undici build —
+// Node's bundled undici can be a different major version than the
+// installed `undici` package, and mixing a package dispatcher into the
+// bundled fetch throws "invalid onError method".
+const mcpUndiciFetch: typeof fetch = ((
+  input: Parameters<typeof undiciFetch>[0],
+  init?: Parameters<typeof undiciFetch>[1],
+) =>
+  undiciFetch(input, {
+    ...init,
+    dispatcher: getMcpFetchDispatcher(),
+  })) as unknown as typeof fetch;
+
+// Test-only override: unit tests stub `globalThis.fetch`, which the
+// dedicated undici fetch above deliberately bypasses. Follows the
+// `_reset*ForTest` convention (see utils/cleanup.ts).
+let mcpFetchOverrideForTest: typeof fetch | undefined;
+export function _setMcpFetchForTest(fn?: typeof fetch): void {
+  mcpFetchOverrideForTest = fn;
+}
+
 function createMcpStreamableHttpFetch(
   mcpServerName: string,
   mcpServerConfig: MCPServerConfig,
 ): typeof fetch {
   return createStreamableHttpCompatibilityFetch(
     mcpServerName,
-    globalThis.fetch.bind(globalThis),
+    mcpFetchOverrideForTest ?? mcpUndiciFetch,
     mcpServerConfig,
   );
 }
