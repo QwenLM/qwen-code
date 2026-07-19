@@ -262,15 +262,15 @@ export function createChannelManagementService(
     persisted = opts.store.snapshot(),
   ): Promise<ChannelMutationResult> => {
     const snapshot = await listFrom(persisted);
-    const instance =
-      snapshot.instances[name] ??
-      ({
-        name,
-        config: {},
-        secrets: {},
-        startsWithServe: false,
-        runtime: runtimeFor(name),
-      } satisfies ChannelInstanceSnapshot);
+    const instance = Object.hasOwn(snapshot.instances, name)
+      ? snapshot.instances[name]!
+      : ({
+          name,
+          config: {},
+          secrets: {},
+          startsWithServe: false,
+          runtime: runtimeFor(name),
+        } satisfies ChannelInstanceSnapshot);
     return { snapshot, instance };
   };
 
@@ -319,7 +319,7 @@ export function createChannelManagementService(
     },
     async start(name) {
       const persisted = opts.store.snapshot();
-      if (!persisted.channels[name]) {
+      if (!Object.hasOwn(persisted.channels, name)) {
         throw new ChannelManagementError(
           'channel_instance_not_found',
           `Channel "${name}" is not configured in this workspace.`,
@@ -342,6 +342,12 @@ export function createChannelManagementService(
     },
     async stop(name) {
       const persisted = opts.store.snapshot();
+      if (!Object.hasOwn(persisted.channels, name)) {
+        throw new ChannelManagementError(
+          'channel_instance_not_found',
+          `Channel "${name}" is not configured in this workspace.`,
+        );
+      }
       const committedNames = opts.manager.committedChannelNames();
       if (committedNames.includes(name)) assertOwnedRuntime(name);
       await stopFromNames(name, committedNames);

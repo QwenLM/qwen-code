@@ -266,6 +266,9 @@ describe('workspace Channel management routes', () => {
   it.each([
     ['channel_settings_invalid_secret', 400],
     ['channel_settings_unmanageable', 400],
+    ['channel_workspace_mismatch', 400],
+    ['ambiguous_channel_workspace', 400],
+    ['untrusted_workspace', 403],
     ['channel_instance_not_found', 404],
     ['channel_runtime_owner_mismatch', 409],
     ['channel_worker_not_enabled', 409],

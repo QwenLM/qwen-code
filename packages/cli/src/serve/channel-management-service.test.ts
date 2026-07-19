@@ -245,4 +245,36 @@ describe('createChannelManagementService', () => {
     expect(manager.reload).not.toHaveBeenCalled();
     expect(manager.reloadWorkspace).not.toHaveBeenCalled();
   });
+
+  it.each(['constructor', 'toString', '__proto__'])(
+    'rejects inherited instance name %s before start reaches the manager',
+    async (name) => {
+      const { service, manager } = setup({ committedNames: [] });
+
+      await expect(service.start(name)).rejects.toMatchObject({
+        code: 'channel_instance_not_found',
+      });
+
+      expect(manager.committedChannelNames).not.toHaveBeenCalled();
+      expect(manager.setSelection).not.toHaveBeenCalled();
+      expect(manager.stopSelection).not.toHaveBeenCalled();
+      expect(manager.state).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['constructor', 'toString', '__proto__'])(
+    'rejects inherited instance name %s before stop reaches the manager',
+    async (name) => {
+      const { service, manager } = setup({ committedNames: [] });
+
+      await expect(service.stop(name)).rejects.toMatchObject({
+        code: 'channel_instance_not_found',
+      });
+
+      expect(manager.committedChannelNames).not.toHaveBeenCalled();
+      expect(manager.setSelection).not.toHaveBeenCalled();
+      expect(manager.stopSelection).not.toHaveBeenCalled();
+      expect(manager.state).not.toHaveBeenCalled();
+    },
+  );
 });
