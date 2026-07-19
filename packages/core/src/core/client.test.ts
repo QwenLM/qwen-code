@@ -2764,10 +2764,12 @@ describe('Gemini Client (client.ts)', () => {
 
       const { history } = await makeReadFileResponses(6);
       const setHistory = vi.fn();
+      const reconcileImagePayloads = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
+        reconcileImagePayloads,
       } as unknown as GeminiChat;
       client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
 
@@ -2782,6 +2784,9 @@ describe('Gemini Client (client.ts)', () => {
       }
 
       expect(setHistory).toHaveBeenCalled();
+      expect(reconcileImagePayloads).toHaveBeenCalledWith(
+        setHistory.mock.calls[0][0],
+      );
       // The blanket wipe is gone — read-before-write state is preserved.
       expect(clear).not.toHaveBeenCalled();
       // Exactly the one blanked file (oldest of 6, keepRecent=5) had its

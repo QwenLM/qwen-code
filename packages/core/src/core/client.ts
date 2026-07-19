@@ -1811,7 +1811,9 @@ export class GeminiClient {
       const m = mcResult.meta;
       const changed = m.tokensSaved > 0;
       if (changed) {
-        this.getChat().setHistory(mcResult.history);
+        const chat = this.getChat();
+        chat.setHistory(mcResult.history);
+        chat.reconcileImagePayloads?.(mcResult.history);
         await this.disarmFileReadCacheAfterEviction(m, 'microcompaction');
       }
       if (m.triggerReason === 'size') {
