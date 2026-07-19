@@ -83,6 +83,19 @@ export const isSlashCommand = (query: string): boolean => {
   return true;
 };
 
+const GOAL_COMMAND_RE = /^\/goal(?:\s|$)/;
+
+/**
+ * Checks if a query is a `/goal` slash command (set, replace, or clear).
+ * Used by the Stop-hook continuation probe (#7181): a queued /goal command
+ * must break an active /goal loop at the next turn boundary instead of
+ * waiting behind blocking continuations forever.
+ */
+export const isGoalCommand = (query: string): boolean => {
+  const trimmed = query.trim();
+  return trimmed.length > 0 && GOAL_COMMAND_RE.test(trimmed);
+};
+
 const BTW_COMMAND_RE = /^[/?]btw(?:\s|$)/;
 
 /**

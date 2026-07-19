@@ -166,6 +166,14 @@ export interface SendMessageOptions {
   type: SendMessageType;
   /** Returns user input waiting to steer the active turn at a model boundary. */
   getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
+  /**
+   * True when a `/goal` slash command (clear / replacement) is queued for the
+   * next turn boundary. A blocking Stop hook continuation (#7181) would skip
+   * that boundary indefinitely, so the loop yields back instead of continuing
+   * — the queue drain runs the command, and a still-active goal resumes on
+   * the next turn's Stop event.
+   */
+  hasQueuedGoalCommand?: () => boolean;
   /** Steer lease already appended to this request, settled after history push. */
   steerInput?: SteerInput;
   /** Track stop hook iterations to prevent infinite loops and display loop info */
@@ -2727,6 +2735,30 @@ export class GeminiClient {
 
           const continueReason = stopOutput.getEffectiveReason();
 
+          // #7181: a queued `/goal` command (clear or replacement) waits for a
+          // turn boundary that this blocking continuation would skip — with a
+          // /goal loop running, the user would otherwise lose control of the
+          // session until the goal terminates. Yield back to the boundary
+          // instead of looping: the CLI's idle queue drain executes the
+          // command, and if a goal is still (or newly) active, its Stop hook
+          // resumes the loop on the next turn.
+          if (options?.hasQueuedGoalCommand?.()) {
+            const pauseMessage =
+              'Pausing the Stop-hook continuation to run your queued /goal command.';
+            const activeGoalEvent = maybeEmitActiveGoalChange(
+              activeGoalAfterStopHook,
+            );
+            if (activeGoalEvent) {
+              yield activeGoalEvent;
+            }
+            yield {
+              type: GeminiEventType.HookSystemMessage,
+              value: pauseMessage,
+            };
+            if (isTopLevelInteraction) endInteractionSpan('ok');
+            return turn;
+          }
+
           // Track stop hook iterations
           const currentIterationCount =
             (options?.stopHookState?.iterationCount ?? 0) + 1;
@@ -2813,6 +2845,7 @@ export class GeminiClient {
                 type: SendMessageType.Hook,
                 modelOverride: options?.modelOverride,
                 getSteerInput: options?.getSteerInput,
+                hasQueuedGoalCommand: options?.hasQueuedGoalCommand,
                 stopHookState: {
                   iterationCount: currentIterationCount,
                   reasons: currentReasons,

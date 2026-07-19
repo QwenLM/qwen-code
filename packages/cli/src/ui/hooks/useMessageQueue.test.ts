@@ -85,6 +85,23 @@ describe('useMessageQueue', () => {
     );
   });
 
+  it('getQueuedMessages returns a synchronous snapshot including slash commands', () => {
+    const { result } = renderHook(() => useMessageQueue());
+    act(() => {
+      result.current.addMessage('plain steer text');
+      result.current.addMessage('/goal clear');
+    });
+    expect(result.current.getQueuedMessages()).toEqual([
+      'plain steer text',
+      '/goal clear',
+    ]);
+    // Draining plain prompts keeps the slash command in the snapshot.
+    act(() => {
+      result.current.drainQueue(true);
+    });
+    expect(result.current.getQueuedMessages()).toEqual(['/goal clear']);
+  });
+
   describe('popAllMessages (cancel and ESC/Up restore)', () => {
     it('returns null when the queue is empty', () => {
       const { result } = renderHook(() => useMessageQueue());

@@ -162,7 +162,11 @@ import {
 } from './hooks/useGeminiStream.js';
 import type { TrackedExecutingToolCall } from './hooks/useReactToolScheduler.js';
 import { useVim } from './hooks/vim.js';
-import { isBtwCommand, isSlashCommand } from './utils/commandUtils.js';
+import {
+  isBtwCommand,
+  isGoalCommand,
+  isSlashCommand,
+} from './utils/commandUtils.js';
 import {
   detectWorkflowKeyword,
   buildWorkflowSteeringNotice,
@@ -1866,6 +1870,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const cancelHandlerRef = useRef<(info?: CancelSubmitInfo) => void>(() => {});
   const midTurnDrainRef = useRef<(() => string[]) | null>(null);
   const midTurnRestoreRef = useRef<((messages: string[]) => void) | null>(null);
+  const queuedGoalCommandRef = useRef<(() => boolean) | null>(null);
 
   const {
     streamingState,
@@ -1906,6 +1911,7 @@ export const AppContainer = (props: AppContainerProps) => {
     availableTerminalHeightRef,
     terminalWidthRef,
     midTurnRestoreRef,
+    queuedGoalCommandRef,
   );
   cancelOngoingRequestRef.current = cancelOngoingRequest;
 
@@ -2020,6 +2026,7 @@ export const AppContainer = (props: AppContainerProps) => {
     restoreMessages,
     drainQueue,
     popNextSegment,
+    getQueuedMessages,
   } = useMessageQueue();
 
   // Bridge message queue to mid-turn drain via ref.
@@ -2027,6 +2034,11 @@ export const AppContainer = (props: AppContainerProps) => {
   // stays consistent with popNextSegment even before React re-renders.
   midTurnDrainRef.current = drainQueue;
   midTurnRestoreRef.current = restoreMessages;
+  // Bridge for the Stop-hook continuation (#7181): a queued `/goal` command
+  // (clear or replacement) must break the /goal loop at the next boundary
+  // instead of waiting forever behind blocking continuations.
+  queuedGoalCommandRef.current = () =>
+    getQueuedMessages().some((text) => isGoalCommand(text));
 
   // Connect remote input watcher to submitQuery for bidirectional sync.
   // When an external process writes a command to the input-file,

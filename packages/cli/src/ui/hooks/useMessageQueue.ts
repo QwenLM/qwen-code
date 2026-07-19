@@ -24,6 +24,12 @@ export interface UseMessageQueueReturn {
   drainQueue: (includeDeferred?: boolean) => string[];
   /** Pop the first item from the queue. */
   popNextSegment: () => string | null;
+  /**
+   * Synchronous snapshot of queued message texts, read from the ref mirror so
+   * mid-turn probes (e.g. the Stop-hook continuation's queued-/goal check,
+   * #7181) see the latest queue without waiting for a React re-render.
+   */
+  getQueuedMessages: () => string[];
 }
 
 interface QueuedMessage {
@@ -98,6 +104,11 @@ export function useMessageQueue(): UseMessageQueueReturn {
     return head.text;
   }, []);
 
+  const getQueuedMessages = useCallback(
+    (): string[] => queueRef.current.map(({ text }) => text),
+    [],
+  );
+
   return {
     messageQueue: queuedMessages.map(({ text }) => text),
     addMessage,
@@ -107,5 +118,6 @@ export function useMessageQueue(): UseMessageQueueReturn {
     restoreMessages,
     drainQueue,
     popNextSegment,
+    getQueuedMessages,
   };
 }

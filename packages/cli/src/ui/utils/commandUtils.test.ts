@@ -10,6 +10,7 @@ import type { spawn, SpawnOptions } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import {
   isAtCommand,
+  isGoalCommand,
   isSlashCommand,
   copyToClipboard,
   getUrlOpenCommand,
@@ -129,6 +130,22 @@ describe('commandUtils', () => {
       expect(isSlashCommand('/home/user/.qwen/settings.json')).toBe(false);
       expect(isSlashCommand('/tmp/test.txt')).toBe(false);
       expect(isSlashCommand('/tmp\\test.txt')).toBe(false);
+    });
+  });
+
+  describe('isGoalCommand', () => {
+    it('matches /goal set, replace, and clear forms', () => {
+      expect(isGoalCommand('/goal clear')).toBe(true);
+      expect(isGoalCommand('/goal write done to /tmp/x.txt')).toBe(true);
+      expect(isGoalCommand('/goal')).toBe(true);
+      expect(isGoalCommand('  /goal clear  ')).toBe(true);
+    });
+
+    it('does not match other commands or plain text', () => {
+      expect(isGoalCommand('/goals overview')).toBe(false);
+      expect(isGoalCommand('/help')).toBe(false);
+      expect(isGoalCommand('reach the goal quickly')).toBe(false);
+      expect(isGoalCommand('')).toBe(false);
     });
   });
 

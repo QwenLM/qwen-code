@@ -421,6 +421,10 @@ export const useGeminiStream = (
   // both dimensions consistently across a mid-stream resize.
   terminalWidthRef?: React.RefObject<number>,
   midTurnRestoreRef?: React.RefObject<((messages: string[]) => void) | null>,
+  // Synchronous "is a /goal slash command queued?" probe. Consulted by the
+  // core Stop-hook continuation (#7181) so a blocking /goal loop yields back
+  // to the turn boundary instead of starving the queued command forever.
+  queuedGoalCommandRef?: React.RefObject<(() => boolean) | null>,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -2806,6 +2810,12 @@ export const useGeminiStream = (
               ...(!allowConcurrentBtwDuringResponse && midTurnDrainRef
                 ? { getSteerInput: drainSteerAtBoundary }
                 : {}),
+              ...(queuedGoalCommandRef
+                ? {
+                    hasQueuedGoalCommand: () =>
+                      queuedGoalCommandRef.current?.() ?? false,
+                  }
+                : {}),
             },
           );
 
@@ -2940,6 +2950,7 @@ export const useGeminiStream = (
       dualOutput,
       drainSteerAtBoundary,
       midTurnDrainRef,
+      queuedGoalCommandRef,
     ],
   );
 
