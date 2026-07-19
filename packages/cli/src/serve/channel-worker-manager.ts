@@ -110,6 +110,7 @@ export interface ChannelWorkerManager {
   state(): ChannelWorkerControlState;
   primarySnapshot(): ChannelWorkerSnapshot;
   snapshots(): ChannelWorkerGroupSnapshot[];
+  committedChannelNames(): string[];
   enqueueWebhookTask(
     task: ChannelWebhookTask,
   ): ReturnType<ChannelWorkerGroup['enqueueWebhookTask']>;
@@ -482,6 +483,19 @@ export function createChannelWorkerManager(
     state: snapshot,
     primarySnapshot: () => group?.primarySnapshot() ?? { ...DISABLED_SNAPSHOT },
     snapshots: () => group?.snapshots() ?? [],
+    committedChannelNames() {
+      if (!committedSelection) return [];
+      if (committedSelection.mode === 'names') {
+        return [...committedSelection.names];
+      }
+      const names = new Set<string>();
+      for (const worker of group?.snapshots() ?? []) {
+        for (const name of worker.requestedChannels ?? worker.channels) {
+          names.add(name);
+        }
+      }
+      return [...names];
+    },
     enqueueWebhookTask(task) {
       if (!group || draining) {
         return Promise.reject(

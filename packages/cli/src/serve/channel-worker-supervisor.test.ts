@@ -183,6 +183,14 @@ describe('createChannelWorkerSupervisor', () => {
     await started;
 
     const first = supervisor.snapshot();
+    expect(first.adapters).toEqual([
+      {
+        name: 'telegram',
+        state: 'error',
+        error: 'connection refused',
+      },
+      { name: 'feishu', state: 'connected' },
+    ]);
     expect(first.startupFailures).toEqual([
       {
         channel: 'telegram',
