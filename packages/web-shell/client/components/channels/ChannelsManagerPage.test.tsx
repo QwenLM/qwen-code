@@ -9,7 +9,10 @@
 import { act, createRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DaemonChannelInstanceSnapshot } from '@qwen-code/sdk/daemon';
+import {
+  DaemonHttpError,
+  type DaemonChannelInstanceSnapshot,
+} from '@qwen-code/sdk/daemon';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -41,6 +44,7 @@ const { channelState, workspace, actions } = vi.hoisted(() => ({
   },
   workspace: {
     workspaceCwd: '/workspace/demo',
+    token: 'test-token' as string | undefined,
     capabilities: { features: ['channel_management'] },
   },
   actions: {
@@ -137,6 +141,7 @@ beforeEach(() => {
   channelState.error = undefined;
   channelState.snapshot = { revision: 'revision-1', instances: {} };
   workspace.workspaceCwd = '/workspace/demo';
+  workspace.token = 'test-token';
   workspace.capabilities = { features: ['channel_management'] };
   for (const mock of Object.values(actions)) {
     mock.mockReset();
@@ -163,8 +168,24 @@ describe('ChannelsManagerPage', () => {
     expect(actions.restart).toHaveBeenCalledWith('bot');
   });
 
-  it('stays read-only when channel_management is unavailable', async () => {
+  it('explains when channel management is unsupported', async () => {
     workspace.capabilities = { features: [] };
+    channelState.snapshot.instances.bot = instance('stopped');
+    await renderPage();
+
+    expect(document.body.textContent?.toLowerCase()).toContain('not supported');
+    expect(document.body.textContent?.toLowerCase()).not.toContain(
+      'bearer token',
+    );
+    expect(button('Add channel').disabled).toBe(true);
+    expect(button('Start bot').disabled).toBe(true);
+    expect(
+      document.querySelector<HTMLInputElement>('[role="switch"]')?.disabled,
+    ).toBe(true);
+  });
+
+  it('requires a bearer token even when channel management is supported', async () => {
+    workspace.token = undefined;
     channelState.snapshot.instances.bot = instance('stopped');
     await renderPage();
 
@@ -207,6 +228,18 @@ describe('ChannelsManagerPage', () => {
     await flush();
     expect(actions.stop).toHaveBeenCalledWith('bot');
   });
+
+  it.each(['starting', 'partial'] as const)(
+    'stops a %s channel',
+    async (runtimeState) => {
+      channelState.snapshot.instances.bot = instance(runtimeState);
+      await renderPage();
+
+      click(button('Stop bot'));
+      await flush();
+      expect(actions.stop).toHaveBeenCalledWith('bot');
+    },
+  );
 
   it('restarts a connected channel', async () => {
     channelState.snapshot.instances.bot = instance('connected');
@@ -303,6 +336,95 @@ describe('ChannelsManagerPage', () => {
       document.querySelector('[role="alertdialog"]')?.textContent,
     ).toContain('revision conflict');
     expect(button('Delete channel').disabled).toBe(false);
+  });
+
+  it('reloads a conflicted revision before retrying delete', async () => {
+    const pendingReload = deferred<typeof channelState>();
+    actions.remove
+      .mockRejectedValueOnce(
+        new DaemonHttpError(
+          409,
+          { code: 'channel_settings_conflict' },
+          'Channel settings changed.',
+        ),
+      )
+      .mockResolvedValue(undefined);
+    actions.reload.mockReturnValue(pendingReload.promise);
+    channelState.snapshot.instances.bot = instance('stopped');
+    await renderPage();
+
+    pointerDown(button('More actions for bot'));
+    await flush();
+    click(elementWithText('[role="menuitem"]', 'Delete bot'));
+    await flush();
+    click(button('Delete channel'));
+    await flush();
+
+    expect(actions.reload).toHaveBeenCalledOnce();
+    expect(actions.remove).toHaveBeenCalledOnce();
+    expect(document.body.textContent).toContain('Channel settings changed.');
+    expect(document.body.textContent).toContain('Delete channel?');
+    expect(button('Delete channel').disabled).toBe(true);
+
+    channelState.snapshot = {
+      ...channelState.snapshot,
+      revision: 'revision-2',
+    };
+    pendingReload.resolve(channelState);
+    await flush();
+    await renderPage();
+    click(button('Delete channel'));
+    await flush();
+
+    expect(actions.remove).toHaveBeenNthCalledWith(2, 'bot', {
+      expectedRevision: 'revision-2',
+    });
+  });
+
+  it('keeps revisioned actions blocked when conflict reload fails', async () => {
+    actions.setStartup.mockRejectedValue(
+      new DaemonHttpError(
+        409,
+        { code: 'channel_settings_conflict' },
+        'Channel settings changed.',
+      ),
+    );
+    actions.reload.mockRejectedValue(new Error('reload failed'));
+    channelState.snapshot.instances.bot = instance('stopped');
+    await renderPage();
+
+    const startupSwitch = document.querySelector('[role="switch"]');
+    if (!startupSwitch) throw new Error('Startup switch not found');
+    click(startupSwitch);
+    await flush();
+
+    expect(document.body.textContent).toContain('Channel settings changed.');
+    expect(document.body.textContent).toContain('reload failed');
+    expect(
+      document.querySelector<HTMLInputElement>('[role="switch"]')?.disabled,
+    ).toBe(true);
+  });
+
+  it('restores focus to Add after deleting the focused channel', async () => {
+    actions.remove.mockImplementation(async () => {
+      channelState.snapshot = {
+        revision: 'revision-2',
+        instances: {},
+      };
+    });
+    channelState.snapshot.instances.bot = instance('stopped');
+    await renderPage();
+
+    pointerDown(button('More actions for bot'));
+    await flush();
+    click(elementWithText('[role="menuitem"]', 'Delete bot'));
+    await flush();
+    button('Delete channel').focus();
+    click(button('Delete channel'));
+    await flush();
+
+    expect(document.body.textContent).not.toContain('bot');
+    expect(document.activeElement).toBe(button('Add channel'));
   });
 
   it('keeps channel secrets out of rendered output', async () => {

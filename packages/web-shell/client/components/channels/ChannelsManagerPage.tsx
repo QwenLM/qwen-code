@@ -19,9 +19,10 @@ import {
   PlusIcon,
   RadioTowerIcon,
 } from 'lucide-react';
-import type {
-  DaemonChannelInstanceSnapshot,
-  DaemonChannelRuntimeState,
+import {
+  DaemonHttpError,
+  type DaemonChannelInstanceSnapshot,
+  type DaemonChannelRuntimeState,
 } from '@qwen-code/sdk/daemon';
 import { useChannels, useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
 import { extractErrorDetail } from '../../utils/errorDetail';
@@ -95,6 +96,12 @@ function badgeVariant(
   return 'outline';
 }
 
+function isChannelSettingsConflict(error: unknown): boolean {
+  if (!(error instanceof DaemonHttpError) || error.status !== 409) return false;
+  const body = error.body as { code?: unknown } | undefined;
+  return body?.code === 'channel_settings_conflict';
+}
+
 export function ChannelsManagerPage({
   onClose,
   initialFocusRef,
@@ -112,8 +119,10 @@ export function ChannelsManagerPage({
     stop,
     restart,
   } = useChannels({ autoLoad: true });
-  const canManage =
+  const supportsManagement =
     workspace.capabilities?.features.includes('channel_management') === true;
+  const hasBearerToken = Boolean(workspace.token);
+  const canManage = supportsManagement && hasBearerToken;
   const instances = useMemo(
     () =>
       Object.values(snapshot?.instances ?? {}).sort((left, right) =>
@@ -124,12 +133,18 @@ export function ChannelsManagerPage({
   const [busyName, setBusyName] = useState<string | null>(null);
   const [busyTarget, setBusyTarget] = useState<FocusTarget | null>(null);
   const [actionErrors, setActionErrors] = useState<Record<string, string>>({});
+  const [revisionBlockedNames, setRevisionBlockedNames] = useState<Set<string>>(
+    new Set(),
+  );
   const [deleteName, setDeleteName] = useState<string | null>(null);
   const [editorIntent, setEditorIntent] = useState<EditorIntent | null>(null);
   const returnFocusRef = useRef<{ name: string; target: FocusTarget } | null>(
     null,
   );
   const actionRefs = useRef(new Map<string, HTMLButtonElement>());
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const addButtonRef = useRef<HTMLButtonElement>(null);
+  const restorePageFocusAfterDeleteRef = useRef(false);
 
   const setActionRef = useCallback(
     (name: string, target: FocusTarget, element: HTMLButtonElement | null) => {
@@ -147,11 +162,31 @@ export function ChannelsManagerPage({
     returnFocusRef.current = null;
   }, [busyName, snapshot]);
 
+  useEffect(() => {
+    if (deleteName || !restorePageFocusAfterDeleteRef.current) return;
+    restorePageFocusAfterDeleteRef.current = false;
+    queueMicrotask(() => {
+      const addButton = addButtonRef.current;
+      if (addButton && !addButton.disabled) addButton.focus();
+      else closeButtonRef.current?.focus();
+    });
+  }, [deleteName]);
+
+  const setRevisionBlocked = useCallback((name: string, blocked: boolean) => {
+    setRevisionBlockedNames((current) => {
+      const next = new Set(current);
+      if (blocked) next.add(name);
+      else next.delete(name);
+      return next;
+    });
+  }, []);
+
   const runAction = useCallback(
     async (
       name: string,
       target: FocusTarget | null,
       operation: () => Promise<unknown>,
+      revisioned = false,
     ) => {
       if (!canManage || busyName) return false;
       returnFocusRef.current = target ? { name, target } : null;
@@ -166,18 +201,40 @@ export function ChannelsManagerPage({
         await operation();
         return true;
       } catch (actionError) {
-        setActionErrors((current) => ({
-          ...current,
-          [name]: extractErrorDetail(actionError),
-        }));
+        const actionMessage = extractErrorDetail(actionError);
+        setActionErrors((current) => ({ ...current, [name]: actionMessage }));
+        if (revisioned && isChannelSettingsConflict(actionError)) {
+          setRevisionBlocked(name, true);
+          try {
+            const refreshed = await reload();
+            if (refreshed) {
+              setRevisionBlocked(name, false);
+            } else {
+              setActionErrors((current) => ({
+                ...current,
+                [name]: `${actionMessage} Channel settings could not be refreshed.`,
+              }));
+            }
+          } catch (reloadError) {
+            setActionErrors((current) => ({
+              ...current,
+              [name]: `${actionMessage} Refresh failed: ${extractErrorDetail(reloadError)}`,
+            }));
+          }
+        }
         return false;
       } finally {
         setBusyName(null);
         setBusyTarget(null);
       }
     },
-    [busyName, canManage],
+    [busyName, canManage, reload, setRevisionBlocked],
   );
+
+  const retryLoad = useCallback(async () => {
+    const refreshed = await reload();
+    if (refreshed) setRevisionBlockedNames(new Set());
+  }, [reload]);
 
   const channelTypeLabel = useCallback(
     (channel: DaemonChannelInstanceSnapshot) => {
@@ -231,7 +288,9 @@ export function ChannelsManagerPage({
     }
     return (
       <>
-        {state === 'connected' ? (
+        {state === 'starting' ||
+        state === 'connected' ||
+        state === 'partial' ? (
           <Button
             ref={(element) => setActionRef(channel.name, 'primary', element)}
             size="sm"
@@ -271,6 +330,7 @@ export function ChannelsManagerPage({
       <div className={styles.pageHeader}>
         <div className="flex min-w-0 items-start gap-2">
           <Button
+            ref={closeButtonRef}
             variant="ghost"
             size="icon"
             onClick={onClose}
@@ -293,6 +353,7 @@ export function ChannelsManagerPage({
           </div>
         </div>
         <Button
+          ref={addButtonRef}
           className={styles.addButton}
           disabled={!canManage || busyName !== null}
           onClick={() => setEditorIntent({ mode: 'add' })}
@@ -302,7 +363,17 @@ export function ChannelsManagerPage({
         </Button>
       </div>
 
-      {!canManage ? (
+      {!supportsManagement ? (
+        <Alert>
+          <AlertCircleIcon />
+          <AlertTitle>Channel management is not supported</AlertTitle>
+          <AlertDescription>
+            Update Qwen Code to a version that supports channel management.
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
+      {supportsManagement && !hasBearerToken ? (
         <Alert>
           <AlertCircleIcon />
           <AlertTitle>Channel management is read-only</AlertTitle>
@@ -350,7 +421,7 @@ export function ChannelsManagerPage({
             variant="outline"
             size="sm"
             aria-label="Retry loading channels"
-            onClick={() => void reload()}
+            onClick={() => void retryLoad()}
           >
             Retry
           </Button>
@@ -376,6 +447,7 @@ export function ChannelsManagerPage({
           {instances.map((channel) => {
             const state = channel.runtime.state;
             const disabled = !canManage || busyName !== null;
+            const revisionBlocked = revisionBlockedNames.has(channel.name);
             return (
               <Card
                 key={channel.name}
@@ -400,7 +472,7 @@ export function ChannelsManagerPage({
                         <Button
                           variant="ghost"
                           size="icon-sm"
-                          disabled={disabled}
+                          disabled={disabled || revisionBlocked}
                           aria-label={`More actions for ${channel.name}`}
                         >
                           <EllipsisVerticalIcon />
@@ -462,14 +534,18 @@ export function ChannelsManagerPage({
                         <Switch
                           size="sm"
                           checked={channel.startsWithServe}
-                          disabled={disabled}
+                          disabled={disabled || revisionBlocked}
                           aria-label={`Start ${channel.name} with serve`}
                           onCheckedChange={(enabled) =>
-                            void runAction(channel.name, 'startup', () =>
-                              setStartup(channel.name, {
-                                expectedRevision: snapshot?.revision ?? '',
-                                enabled,
-                              }),
+                            void runAction(
+                              channel.name,
+                              'startup',
+                              () =>
+                                setStartup(channel.name, {
+                                  expectedRevision: snapshot?.revision ?? '',
+                                  enabled,
+                                }),
+                              true,
                             )
                           }
                         />
@@ -493,7 +569,13 @@ export function ChannelsManagerPage({
           if (!open && busyName === null) setDeleteName(null);
         }}
       >
-        <AlertDialogContent>
+        <AlertDialogContent
+          onCloseAutoFocus={(event) => {
+            if (restorePageFocusAfterDeleteRef.current) {
+              event.preventDefault();
+            }
+          }}
+        >
           <AlertDialogHeader>
             <AlertDialogTitle>Delete channel?</AlertDialogTitle>
             <AlertDialogDescription>
@@ -514,18 +596,30 @@ export function ChannelsManagerPage({
             </AlertDialogCancel>
             <AlertDialogAction
               variant="destructive"
-              disabled={!deleteName || !canManage || busyName !== null}
+              disabled={
+                !deleteName ||
+                !canManage ||
+                busyName !== null ||
+                revisionBlockedNames.has(deleteName)
+              }
               aria-label="Delete channel"
               onClick={(event) => {
                 if (!deleteName) return;
                 event.preventDefault();
                 const name = deleteName;
-                void runAction(name, null, () =>
-                  remove(name, {
-                    expectedRevision: snapshot?.revision ?? '',
-                  }),
+                void runAction(
+                  name,
+                  null,
+                  () =>
+                    remove(name, {
+                      expectedRevision: snapshot?.revision ?? '',
+                    }),
+                  true,
                 ).then((removed) => {
-                  if (removed) setDeleteName(null);
+                  if (removed) {
+                    restorePageFocusAfterDeleteRef.current = true;
+                    setDeleteName(null);
+                  }
                 });
               }}
             >
