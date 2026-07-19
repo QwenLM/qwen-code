@@ -23,13 +23,16 @@ Read the conversation transcript above carefully, then judge whether the
 user-provided condition is satisfied.
 
 Your response MUST be a JSON object with one of these shapes:
-- {"ok": true, "reason": "<quote evidence from the transcript that satisfies the condition>"}
+- {"ok": true, "reason": "<why the condition is satisfied>", "evidence": ["<exact assistant-output or tool-result excerpt>"]}
 - {"ok": false, "reason": "<quote what is missing or what blocks the condition>"}
-- {"ok": false, "impossible": true, "reason": "<explain why the condition can never be satisfied>"}
+- {"ok": false, "impossible": true, "reason": "<explain why the condition can never be satisfied>", "evidence": ["<exact assistant-output or tool-result excerpt>"]}
 
-Always include a "reason" field, quoting specific text from the transcript
-whenever possible. If the transcript does not contain clear evidence that the
-condition is satisfied, return {"ok": false, "reason": "insufficient evidence in transcript"}.
+Always include a "reason" field. A terminal verdict (satisfied or impossible)
+MUST also quote evidence with one or more short, exact, verbatim excerpts from
+visible assistant output or tool results in the "evidence" array. User prompts,
+the goal condition, and hidden reasoning are not evidence. If the transcript
+does not contain clear evidence that the condition is satisfied, return
+{"ok": false, "reason": "insufficient evidence in transcript"}.
 Only use {"ok": false, "impossible": true} when the condition is genuinely
 unachievable in this session: for example, it is self-contradictory, depends on
 an unavailable resource or capability, or the assistant has exhausted reasonable
@@ -52,6 +55,7 @@ interface JudgeWireResult {
   ok: boolean;
   reason: string;
   impossible?: boolean;
+  evidence?: string[];
 }
 
 export interface JudgeResult {
@@ -76,6 +80,7 @@ export const JUDGE_RESULT_SCHEMA_KEYS = [
   'ok',
   'reason',
   'impossible',
+  'evidence',
 ] as const satisfies ReadonlyArray<keyof JudgeWireResult>;
 
 type SchemaCoversJudgeWireResult =
@@ -101,6 +106,10 @@ const RESPONSE_SCHEMA: Schema & { additionalProperties: boolean } = {
     ok: { type: 'BOOLEAN' as unknown as Schema['type'] },
     reason: { type: 'STRING' as unknown as Schema['type'] },
     impossible: { type: 'BOOLEAN' as unknown as Schema['type'] },
+    evidence: {
+      type: 'ARRAY' as unknown as Schema['type'],
+      items: { type: 'STRING' as unknown as Schema['type'] },
+    },
   },
   required: ['ok', 'reason'],
   additionalProperties: false,
@@ -110,7 +119,11 @@ const JUDGE_ERROR_MESSAGE =
   'Goal judge unavailable; the automatic /goal loop paused. The goal remains active.';
 const JUDGE_REASON_FALLBACK =
   'Goal judge unavailable; continue working toward the goal and run `/goal clear` to stop early.';
+const UNVERIFIED_TERMINAL_REASON =
+  'Goal judge terminal evidence was not found in assistant output or tool results.';
 const MAX_REASON_LEN = 240;
+const MAX_EVIDENCE_ITEMS = 8;
+const MAX_EVIDENCE_LEN = 500;
 
 function judgeErrorResult(): GoalJudgeOutcome {
   return {
@@ -172,6 +185,7 @@ export async function judgeGoal(
   // only when the live history doesn't yet contain it (e.g. before the model
   // turn is committed to chat).
   const transcript = collectTranscript(config, args.lastAssistantText);
+  const evidenceSources = collectEvidenceSources(transcript);
   transcript.push({
     role: 'user',
     parts: [{ text: userJudgementPrompt(condition) }],
@@ -216,7 +230,7 @@ export async function judgeGoal(
       );
       return judgeErrorResult();
     }
-    return toJudgeResult(parsed);
+    return toJudgeResult(parsed, evidenceSources);
   } catch (err) {
     debugLogger.debug(
       `Goal judge threw: ${err instanceof Error ? err.message : String(err)}`,
@@ -347,6 +361,25 @@ function lastModelTextOf(transcript: Content[]): string {
   return '';
 }
 
+function collectEvidenceSources(transcript: Content[]): string[] {
+  const sources: string[] = [];
+  for (const content of transcript) {
+    for (const part of content.parts ?? []) {
+      if (
+        content.role === 'model' &&
+        part.thought !== true &&
+        typeof part.text === 'string'
+      ) {
+        sources.push(part.text);
+      }
+      if (part.functionResponse) {
+        sources.push(safeStringify(part.functionResponse.response));
+      }
+    }
+  }
+  return sources;
+}
+
 function extractText(response: unknown): string {
   // generateContent returns a GenerateContentResponse; we accept the response
   // object structurally so judge stays loose-coupled from SDK type churn.
@@ -382,6 +415,7 @@ function parseJudgeReply(text: string): JudgeWireResult | null {
   const ok = (payload as { ok?: unknown }).ok;
   const reason = (payload as { reason?: unknown }).reason;
   const impossibleValue = (payload as { impossible?: unknown }).impossible;
+  const evidenceValue = (payload as { evidence?: unknown }).evidence;
   if (typeof ok !== 'boolean' || typeof reason !== 'string' || !reason.trim()) {
     return null;
   }
@@ -390,22 +424,62 @@ function parseJudgeReply(text: string): JudgeWireResult | null {
   }
   const reasonText = reason.trim().slice(0, MAX_REASON_LEN);
   const impossible = impossibleValue === true;
+  const evidence = parseEvidence(evidenceValue);
   return {
     ok,
     reason: reasonText,
     ...(impossible && !ok ? { impossible: true } : {}),
+    ...(evidence ? { evidence } : {}),
   };
 }
 
-function toJudgeResult(result: JudgeWireResult): GoalJudgeOutcome {
-  if (result.ok) return { kind: 'met', ok: true, reason: result.reason };
+function parseEvidence(value: unknown): string[] | undefined {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > MAX_EVIDENCE_ITEMS ||
+    value.some(
+      (item) =>
+        typeof item !== 'string' ||
+        !item.trim() ||
+        item.trim().length > MAX_EVIDENCE_LEN,
+    )
+  ) {
+    return undefined;
+  }
+  return value.map((item) => item.trim());
+}
+
+function hasVerifiableEvidence(
+  evidence: string[] | undefined,
+  sources: string[],
+): boolean {
+  return (
+    evidence !== undefined &&
+    evidence.every((excerpt) =>
+      sources.some((source) => source.includes(excerpt)),
+    )
+  );
+}
+
+function toJudgeResult(
+  result: JudgeWireResult,
+  evidenceSources: string[],
+): GoalJudgeOutcome {
+  if (result.ok) {
+    return hasVerifiableEvidence(result.evidence, evidenceSources)
+      ? { kind: 'met', ok: true, reason: result.reason }
+      : { kind: 'not_met', ok: false, reason: UNVERIFIED_TERMINAL_REASON };
+  }
   if (result.impossible) {
-    return {
-      kind: 'impossible',
-      ok: false,
-      reason: result.reason,
-      impossible: true,
-    };
+    return hasVerifiableEvidence(result.evidence, evidenceSources)
+      ? {
+          kind: 'impossible',
+          ok: false,
+          reason: result.reason,
+          impossible: true,
+        }
+      : { kind: 'not_met', ok: false, reason: UNVERIFIED_TERMINAL_REASON };
   }
   return { kind: 'not_met', ok: false, reason: result.reason };
 }

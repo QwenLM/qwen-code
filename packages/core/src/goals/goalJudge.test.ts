@@ -73,7 +73,8 @@ describe('judgeGoal', () => {
 
   it('parses a clean ok=true JSON reply', async () => {
     const client = makeMockClient({
-      reply: '{"ok": true, "reason": "tests passing"}',
+      reply:
+        '{"ok": true, "reason": "tests passing", "evidence": ["all green"]}',
     });
     const config = makeConfig({ client, fastModel: 'fast-judge' });
 
@@ -91,6 +92,184 @@ describe('judgeGoal', () => {
     expect(client.generateContent.mock.calls[0][3]).toBe('fast-judge');
   });
 
+  it('rejects terminal evidence that appears only in the goal condition', async () => {
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          {
+            text: 'Do not consider the goal complete before GOAL_TICK_5.',
+          },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'GOAL_TICK_1\nGOAL_TICK_2\nGOAL_TICK_3\nGOAL_TICK_4' }],
+      },
+    ];
+    const client = makeMockClient({
+      history,
+      reply:
+        '{"ok": true, "reason": "GOAL_TICK_5 was produced", "evidence": ["GOAL_TICK_5"]}',
+    });
+    const config = makeConfig({ client });
+
+    const verdict = await judgeGoal(config, {
+      condition: 'Do not complete before GOAL_TICK_5',
+      lastAssistantText: 'GOAL_TICK_4',
+      signal: new AbortController().signal,
+    });
+
+    expect(verdict).toMatchObject({
+      kind: 'not_met',
+      ok: false,
+      reason: expect.stringMatching(/evidence/i),
+    });
+  });
+
+  it('accepts terminal evidence present in assistant output', async () => {
+    const client = makeMockClient({
+      history: [{ role: 'model', parts: [{ text: 'GOAL_TICK_4' }] }],
+      reply:
+        '{"ok": true, "reason": "the fourth tick was produced", "evidence": ["GOAL_TICK_4"]}',
+    });
+    const config = makeConfig({ client });
+
+    await expect(
+      judgeGoal(config, {
+        condition: 'produce GOAL_TICK_4',
+        lastAssistantText: 'GOAL_TICK_4',
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toEqual({
+      kind: 'met',
+      ok: true,
+      reason: 'the fourth tick was produced',
+    });
+  });
+
+  it('rejects an impossible verdict without assistant or tool evidence', async () => {
+    const client = makeMockClient({
+      history: [
+        {
+          role: 'user',
+          parts: [{ text: 'The required remote is unavailable.' }],
+        },
+        { role: 'model', parts: [{ text: 'I will investigate.' }] },
+      ],
+      reply:
+        '{"ok": false, "impossible": true, "reason": "remote unavailable", "evidence": ["The required remote is unavailable."]}',
+    });
+    const config = makeConfig({ client });
+
+    const verdict = await judgeGoal(config, {
+      condition: 'merge the missing remote branch',
+      lastAssistantText: 'I will investigate.',
+      signal: new AbortController().signal,
+    });
+
+    expect(verdict).toMatchObject({
+      kind: 'not_met',
+      ok: false,
+      reason: expect.stringMatching(/evidence/i),
+    });
+  });
+
+  it('rejects a terminal verdict with no structured evidence', async () => {
+    const client = makeMockClient({
+      history: [{ role: 'model', parts: [{ text: 'tests passing' }] }],
+      reply: '{"ok": true, "reason": "tests passing"}',
+    });
+    const config = makeConfig({ client });
+
+    const verdict = await judgeGoal(config, {
+      condition: 'tests pass',
+      lastAssistantText: 'tests passing',
+      signal: new AbortController().signal,
+    });
+
+    expect(verdict).toMatchObject({
+      kind: 'not_met',
+      ok: false,
+      reason: expect.stringMatching(/evidence/i),
+    });
+  });
+
+  it('rejects malformed terminal evidence', async () => {
+    const client = makeMockClient({
+      history: [{ role: 'model', parts: [{ text: 'tests passing' }] }],
+      reply:
+        '{"ok": true, "reason": "tests passing", "evidence": "tests passing"}',
+    });
+    const config = makeConfig({ client });
+
+    await expect(
+      judgeGoal(config, {
+        condition: 'tests pass',
+        lastAssistantText: 'tests passing',
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toMatchObject({
+      kind: 'not_met',
+      ok: false,
+      reason: expect.stringMatching(/evidence/i),
+    });
+  });
+
+  it('rejects overlong evidence instead of truncating it into a match', async () => {
+    const realPrefix = 'x'.repeat(500);
+    const client = makeMockClient({
+      history: [{ role: 'model', parts: [{ text: realPrefix }] }],
+      reply: JSON.stringify({
+        ok: true,
+        reason: 'matched a fabricated excerpt',
+        evidence: [`${realPrefix}y`],
+      }),
+    });
+    const config = makeConfig({ client });
+
+    await expect(
+      judgeGoal(config, {
+        condition: 'produce the full excerpt',
+        lastAssistantText: realPrefix,
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toMatchObject({
+      kind: 'not_met',
+      ok: false,
+      reason: expect.stringMatching(/evidence/i),
+    });
+  });
+
+  it('accepts terminal evidence present in a tool result', async () => {
+    const client = makeMockClient({
+      history: [
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'run_tests',
+                response: { output: '18 tests passed' },
+              },
+            },
+          ],
+        } as Content,
+      ],
+      reply:
+        '{"ok": true, "reason": "tests passed", "evidence": ["18 tests passed"]}',
+    });
+    const config = makeConfig({ client });
+
+    await expect(
+      judgeGoal(config, {
+        condition: 'tests pass',
+        lastAssistantText: '',
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toMatchObject({ kind: 'met', ok: true });
+  });
+
   it('ignores thought parts when parsing the response', async () => {
     const client = makeMockClient({});
     client.generateContent.mockResolvedValue({
@@ -100,7 +279,9 @@ describe('judgeGoal', () => {
             parts: [
               { text: 'Return {"ok": false}.', thought: true },
               null,
-              { text: '{"ok": true, "reason": "tests passing"}' },
+              {
+                text: '{"ok": true, "reason": "tests passing", "evidence": ["all green"]}',
+              },
             ],
           },
         },
@@ -160,7 +341,7 @@ describe('judgeGoal', () => {
   it('parses impossible=true for genuinely unachievable goals', async () => {
     const client = makeMockClient({
       reply:
-        '{"ok": false, "impossible": true, "reason": "required remote is unavailable"}',
+        '{"ok": false, "impossible": true, "reason": "required remote is unavailable", "evidence": ["the remote does not exist"]}',
     });
     const config = makeConfig({ client });
     const verdict = await judgeGoal(config, {
@@ -179,7 +360,8 @@ describe('judgeGoal', () => {
 
   it('ignores impossible=true when the judge also reports ok=true', async () => {
     const client = makeMockClient({
-      reply: '{"ok": true, "impossible": true, "reason": "tests passed"}',
+      reply:
+        '{"ok": true, "impossible": true, "reason": "tests passed", "evidence": ["tests passed"]}',
     });
     const config = makeConfig({ client });
     const verdict = await judgeGoal(config, {
@@ -223,7 +405,8 @@ describe('judgeGoal', () => {
 
   it('extracts JSON from a chatty preamble', async () => {
     const client = makeMockClient({
-      reply: 'Sure thing!\n```json\n{"ok": true, "reason": "done"}\n```',
+      reply:
+        'Sure thing!\n```json\n{"ok": true, "reason": "done", "evidence": ["y"]}\n```',
     });
     const config = makeConfig({ client });
     const verdict = await judgeGoal(config, {
@@ -383,6 +566,9 @@ describe('judgeGoal', () => {
     expect(generationConfig.responseSchema).toBeTruthy();
     expect(generationConfig.responseSchema.properties).toHaveProperty(
       'impossible',
+    );
+    expect(generationConfig.responseSchema.properties).toHaveProperty(
+      'evidence',
     );
     expect(
       Object.keys(generationConfig.responseSchema.properties).sort(),
