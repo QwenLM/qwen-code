@@ -27,8 +27,9 @@ resolves a stable launcher, plus a private handoff file for the session ID.
 Container and macOS sandboxes receive the same handoff. If no stable launcher
 is available, or a conversation cannot be resumed because recording is
 disabled or failed, keep the current manual guidance. Custom or manually
-managed sandbox hosts remain manual. Windows standalone installs download in
-the background but apply after exit because the running executable is locked.
+managed sandbox hosts and sessions started with `--worktree` remain manual.
+Windows standalone installs download in the background but apply after exit
+because the running executable is locked.
 
 ## Non-goals
 

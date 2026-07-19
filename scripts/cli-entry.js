@@ -20,6 +20,8 @@
  */
 
 const relaunchArgs = process.env['QWEN_CODE_RELAUNCH_ARGS'];
+const validSessionId =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(-agent-[a-zA-Z0-9_.-]+)?$/i;
 let cliArgs = process.argv.slice(2);
 try {
   cliArgs = relaunchArgs ? JSON.parse(relaunchArgs) : cliArgs;
@@ -33,7 +35,11 @@ function hasFlag(flag, alias) {
     if (arg === '--') {
       return false;
     }
-    if (arg === flag || arg === alias) {
+    if (
+      arg === flag ||
+      arg.startsWith(`${flag}=`) ||
+      (alias && (arg === alias || arg.startsWith(`${alias}=`)))
+    ) {
       return true;
     }
   }
@@ -47,7 +53,20 @@ function withResumeSession(args, sessionId) {
     if (arg === '--') {
       return [...result, '--resume', sessionId, ...args.slice(i)];
     }
-    if (arg === '--continue' || arg === '-c' || arg.startsWith('--continue=')) {
+    const booleanSessionFlag =
+      arg === '--continue' || arg === '-c' || arg === '--fork-session';
+    if (
+      booleanSessionFlag ||
+      arg.startsWith('--continue=') ||
+      arg.startsWith('-c=') ||
+      arg.startsWith('--fork-session=')
+    ) {
+      if (
+        booleanSessionFlag &&
+        (args[i + 1] === 'true' || args[i + 1] === 'false')
+      ) {
+        i++;
+      }
       continue;
     }
     const sessionFlag =
@@ -63,6 +82,7 @@ function withResumeSession(args, sessionId) {
     }
     if (
       arg.startsWith('--resume=') ||
+      arg.startsWith('-r=') ||
       arg.startsWith('--session-id=') ||
       arg.startsWith('--sandbox-session-id=')
     ) {
@@ -70,7 +90,7 @@ function withResumeSession(args, sessionId) {
     }
     result.push(arg);
   }
-  result.push('--resume', sessionId);
+  result.push(`--resume=${sessionId}`);
   return result;
 }
 
@@ -216,9 +236,19 @@ if (isInProcessFastPath()) {
     ...process.env,
     QWEN_CODE_LAUNCHER_PID: String(process.pid),
   };
-  const relaunchStateDir = launcher
-    ? mkdtempSync(join(tmpdir(), 'qwen-code-relaunch-'))
-    : undefined;
+  const inSandbox = Boolean(process.env['SANDBOX']);
+  if (!inSandbox) {
+    delete env.QWEN_CODE_UPDATE_RELAUNCH_SUPPORTED;
+    delete env.QWEN_CODE_UPDATE_RELAUNCH_STATE_PATH;
+  }
+  let relaunchStateDir;
+  if (!inSandbox && launcher && !hasFlag('--worktree')) {
+    try {
+      relaunchStateDir = mkdtempSync(join(tmpdir(), 'qwen-code-relaunch-'));
+    } catch {
+      // Automatic updates fall back to manual instructions.
+    }
+  }
   const relaunchStatePath = relaunchStateDir
     ? join(relaunchStateDir, 'state.json')
     : undefined;
@@ -240,7 +270,10 @@ if (isInProcessFastPath()) {
   ) {
     try {
       const state = JSON.parse(readFileSync(relaunchStatePath, 'utf8'));
-      if (typeof state.sessionId === 'string') {
+      if (
+        typeof state.sessionId === 'string' &&
+        validSessionId.test(state.sessionId)
+      ) {
         relaunchSessionId = state.sessionId;
       }
       skipInitialPrompt = state.skipInitialPrompt === true;

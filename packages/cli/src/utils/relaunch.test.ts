@@ -92,7 +92,7 @@ describe('relaunchOnExitCode', () => {
       relaunchOnExitCode(runner, { onUpdateRelaunch }),
     ).rejects.toThrow('PROCESS_EXIT_CALLED');
 
-    expect(onUpdateRelaunch).toHaveBeenCalledWith(true);
+    expect(onUpdateRelaunch).toHaveBeenCalledWith();
     expect(runner).toHaveBeenCalledTimes(1);
     expect(processExitSpy).toHaveBeenCalledWith(0);
   });

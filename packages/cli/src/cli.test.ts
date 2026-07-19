@@ -15,7 +15,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { FatalError } from '@qwen-code/qwen-code-core';
@@ -411,20 +411,31 @@ describe('bootstrap import boundaries', () => {
       );
       chmodSync(path.join(wrongDir, 'qwen'), 0o755);
 
-      const output = execFileSync(binPath, ['--prompt', 'a&b'], {
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          PATH: `${wrongDir}${path.delimiter}${tempDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+      const output = execFileSync(
+        binPath,
+        [
+          '--prompt',
+          'a&b',
+          '--fork-session',
+          'false',
+          '-r=old-session',
+          '-c',
+          'false',
+        ],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${wrongDir}${path.delimiter}${tempDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+          },
         },
-      });
+      );
 
       expect(JSON.parse(output)).toEqual({
         args: [
           '--prompt',
           'a&b',
-          '--resume',
-          '123e4567-e89b-12d3-a456-426614174000',
+          '--resume=123e4567-e89b-12d3-a456-426614174000',
         ],
         skip: 'true',
         skipPrompt: 'true',
@@ -436,7 +447,7 @@ describe('bootstrap import boundaries', () => {
     }
   });
 
-  it('relaunches a fresh session without forcing resume or skipping its prompt', () => {
+  it('rejects an invalid resume session from the update handoff', () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-cli-fresh-update-'));
     const oldDir = path.join(tempDir, 'old');
     const newDir = path.join(tempDir, 'new');
@@ -454,7 +465,7 @@ describe('bootstrap import boundaries', () => {
       );
       writeFileSync(
         path.join(oldDir, 'cli.js'),
-        `import { chmodSync, writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(binPath)}, ${JSON.stringify(`#!/bin/sh\nexec "${process.execPath}" "${path.join(newDir, 'entry.mjs')}" "$@"\n`)});\nchmodSync(${JSON.stringify(binPath)}, 0o755);\nprocess.exit(44);\n`,
+        `import { chmodSync, writeFileSync } from 'node:fs';\nwriteFileSync(process.env.QWEN_CODE_UPDATE_RELAUNCH_STATE_PATH, JSON.stringify({ sessionId: '--no-sandbox' }));\nwriteFileSync(${JSON.stringify(binPath)}, ${JSON.stringify(`#!/bin/sh\nexec "${process.execPath}" "${path.join(newDir, 'entry.mjs')}" "$@"\n`)});\nchmodSync(${JSON.stringify(binPath)}, 0o755);\nprocess.exit(44);\n`,
       );
       writeFileSync(
         path.join(newDir, 'cli.js'),
@@ -551,6 +562,94 @@ describe('bootstrap import boundaries', () => {
       });
 
       expect(JSON.parse(output)).toEqual({});
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not advertise update relaunch for startup worktrees', () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-cli-worktree-'));
+    const entryPath = path.join(tempDir, 'entry.mjs');
+    const launcherPath = path.join(tempDir, 'qwen');
+    try {
+      copyFileSync('../../scripts/cli-entry.js', entryPath);
+      writeFileSync(
+        path.join(tempDir, 'cli.js'),
+        'process.stdout.write(JSON.stringify({ supported: process.env.QWEN_CODE_UPDATE_RELAUNCH_SUPPORTED, statePath: process.env.QWEN_CODE_UPDATE_RELAUNCH_STATE_PATH }));\n',
+      );
+      writeFileSync(launcherPath, '#!/bin/sh\n');
+      chmodSync(launcherPath, 0o755);
+
+      for (const worktreeArg of ['--worktree', '--worktree=feature']) {
+        const output = execFileSync(
+          process.execPath,
+          [entryPath, worktreeArg],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              QWEN_CODE_LAUNCHER_PATH: launcherPath,
+              QWEN_CODE_UPDATE_RELAUNCH_SUPPORTED: 'true',
+              QWEN_CODE_UPDATE_RELAUNCH_STATE_PATH: '/tmp/forged-state.json',
+            },
+          },
+        );
+
+        expect(JSON.parse(output)).toEqual({});
+      }
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves the host update handoff across a sandbox wrapper', () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-cli-sandbox-'));
+    const entryPath = path.join(tempDir, 'entry.mjs');
+    const statePath = path.join(tempDir, 'state.json');
+    try {
+      copyFileSync('../../scripts/cli-entry.js', entryPath);
+      writeFileSync(
+        path.join(tempDir, 'cli.js'),
+        `import { writeFileSync } from 'node:fs';\nwriteFileSync(process.env.QWEN_CODE_UPDATE_RELAUNCH_STATE_PATH, '{"skipInitialPrompt":true}');\nprocess.exit(43);\n`,
+      );
+
+      const result = spawnSync(process.execPath, [entryPath], {
+        env: {
+          ...process.env,
+          SANDBOX: 'container',
+          QWEN_CODE_UPDATE_RELAUNCH_SUPPORTED: 'true',
+          QWEN_CODE_UPDATE_RELAUNCH_STATE_PATH: statePath,
+        },
+      });
+
+      expect(result.status).toBe(43);
+      expect(readFileSync(statePath, 'utf8')).toBe(
+        '{"skipInitialPrompt":true}',
+      );
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('starts normally when the relaunch state directory is unavailable', () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-cli-no-tmp-'));
+    const entryPath = path.join(tempDir, 'entry.mjs');
+    const launcherPath = path.join(tempDir, 'qwen');
+    try {
+      copyFileSync('../../scripts/cli-entry.js', entryPath);
+      writeFileSync(path.join(tempDir, 'cli.js'), 'process.exit(0);\n');
+      writeFileSync(launcherPath, '#!/bin/sh\n');
+      chmodSync(launcherPath, 0o755);
+
+      const result = spawnSync(process.execPath, [entryPath], {
+        env: {
+          ...process.env,
+          TMPDIR: '/dev/null',
+          QWEN_CODE_LAUNCHER_PATH: launcherPath,
+        },
+      });
+
+      expect(result.status).toBe(0);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

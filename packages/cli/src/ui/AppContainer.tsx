@@ -186,6 +186,7 @@ import { useCommandMigration } from './hooks/useCommandMigration.js';
 import { migrateTomlCommands } from '../services/command-migration-tool.js';
 import { sendNotification } from '../services/notificationService.js';
 import { type UpdateObject } from './utils/updateCheck.js';
+import { hasBlockingBackgroundWork } from './utils/backgroundWorkUtils.js';
 import { setUpdateHandler } from '../utils/handleAutoUpdate.js';
 import { prepareUpdateRelaunch } from '../utils/processUtils.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
@@ -2027,13 +2028,18 @@ export const AppContainer = (props: AppContainerProps) => {
         !hasDraftRef.current &&
         !isProcessingRef.current &&
         !hasQueuedMessages() &&
-        !hasPendingAutomaticSubmission(),
+        !hasPendingAutomaticSubmission() &&
+        !hasBlockingBackgroundWork(config) &&
+        !config.getTeamManager() &&
+        !config.getArenaManager(),
       () =>
         prepareUpdateRelaunch(
           config,
           historyRef.current.some((item) => item.type === MessageType.USER),
           initialPromptSubmitted.current,
         ),
+      () => setIsProcessing(true),
+      () => setIsProcessing(false),
     );
     updateHandlerRef.current = handler;
     return () => handler?.cleanup();
@@ -2043,6 +2049,7 @@ export const AppContainer = (props: AppContainerProps) => {
     hasQueuedMessages,
     historyManager.addItem,
     isSubmittingQueryRef,
+    setIsProcessing,
   ]);
 
   useEffect(() => {
@@ -2052,7 +2059,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // indicator until the next keyword prompt re-arms it.
       setWorkflowKeywordActive(false);
     }
-  }, [isIdle, buffer.text, isProcessing, messageQueue.length]);
+  }, [isIdle, buffer.text, isProcessing, messageQueue.length, bgTaskEntries]);
 
   // Bridge message queue to mid-turn drain via ref.
   // drainQueue reads the synchronous queueRef inside the hook, so it

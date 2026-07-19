@@ -70,8 +70,14 @@ export async function prepareUpdateRelaunch(
   hasUserMessages: boolean,
   initialPromptConsumed = false,
 ): Promise<{ sessionId?: string; skipInitialPrompt: boolean } | null> {
+  const recorder = config.getChatRecordingService();
+  if (!recorder) {
+    return hasUserMessages
+      ? null
+      : { skipInitialPrompt: initialPromptConsumed };
+  }
   try {
-    await config.getChatRecordingService()?.flush();
+    await recorder.flush();
     const sessionId = config.getSessionId();
     if (await config.getSessionService().getSessionLocation(sessionId)) {
       return { sessionId, skipInitialPrompt: true };

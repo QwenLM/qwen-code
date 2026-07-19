@@ -46,7 +46,7 @@ describe('updateBeforeRelaunch', () => {
     const updateProcess = new EventEmitter();
     handleAutoUpdate.mockReturnValue(updateProcess);
 
-    const update = updateBeforeRelaunch(settings, '/repo', false);
+    const update = updateBeforeRelaunch(settings, '/repo');
     await vi.waitFor(() => expect(handleAutoUpdate).toHaveBeenCalledTimes(1));
     expect(writeStderrLine).toHaveBeenCalledWith('Update available');
     expect(writeStderrLine).not.toHaveBeenCalledWith(
@@ -70,11 +70,10 @@ describe('updateBeforeRelaunch', () => {
     updateProcess.emit('close', 1);
     await expect(update).resolves.toBe(true);
 
-      expect(writeStderrLine).toHaveBeenCalledWith(
-        'Automatic update failed. Please try updating manually.',
-      );
-    },
-  );
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      'Automatic update failed. Please try updating manually.',
+    );
+  });
 
   it('relaunches the old version when the update check fails', async () => {
     checkForUpdatesDetailed.mockResolvedValue({ status: 'error' });
@@ -97,7 +96,7 @@ describe('updateBeforeRelaunch', () => {
       }),
     );
 
-    const update = updateBeforeRelaunch(settings, '/repo', false);
+    const update = updateBeforeRelaunch(settings, '/repo');
     await vi.waitFor(() =>
       expect(performStandaloneUpdate).toHaveBeenCalledWith('/qwen', '2.0.0'),
     );
@@ -114,9 +113,7 @@ describe('updateBeforeRelaunch', () => {
     });
     performStandaloneUpdate.mockResolvedValue('deferred');
 
-    await expect(updateBeforeRelaunch(settings, '/repo', false)).resolves.toBe(
-      false,
-    );
+    await expect(updateBeforeRelaunch(settings, '/repo')).resolves.toBe(false);
     expect(writeStderrLine).toHaveBeenCalledWith(
       'Update downloaded. It will be applied after you exit this session.',
     );

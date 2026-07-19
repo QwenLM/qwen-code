@@ -154,6 +154,8 @@ export function setUpdateHandler(
     | Promise<{ sessionId?: string; skipInitialPrompt?: boolean } | null>
     | { sessionId?: string; skipInitialPrompt?: boolean }
     | null = () => ({}),
+  onRelaunchStart: () => void = () => {},
+  onRelaunchError: () => void = () => {},
 ) {
   let successfullyInstalled = false;
   let relaunchPending = false;
@@ -221,12 +223,16 @@ export function setUpdateHandler(
           });
           return;
         }
+        onRelaunchStart();
         return relaunchForUpdate(
           prepared.sessionId,
           prepared.skipInitialPrompt,
         );
       })
-      .catch(() => handleUpdateFailed());
+      .catch(() => {
+        onRelaunchError();
+        handleUpdateFailed();
+      });
   };
 
   const handleUpdateRelaunch = () => {

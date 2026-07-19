@@ -511,6 +511,8 @@ describe('setUpdateHandler', () => {
 
   it('relaunches immediately when idle', async () => {
     const isIdleRef = { current: true };
+    const onRelaunchStart = vi.fn();
+    const onRelaunchError = vi.fn();
     const { cleanup } = setUpdateHandler(
       addItem,
       setUpdateInfo,
@@ -520,6 +522,8 @@ describe('setUpdateHandler', () => {
         sessionId: '123e4567-e89b-12d3-a456-426614174000',
         skipInitialPrompt: true,
       }),
+      onRelaunchStart,
+      onRelaunchError,
     );
 
     updateEventEmitter.emit('update-relaunch');
@@ -530,6 +534,29 @@ describe('setUpdateHandler', () => {
         true,
       ),
     );
+    expect(onRelaunchStart).toHaveBeenCalledOnce();
+    expect(onRelaunchError).not.toHaveBeenCalled();
+    cleanup();
+  });
+
+  it('re-enables input when relaunch fails', async () => {
+    const onRelaunchStart = vi.fn();
+    const onRelaunchError = vi.fn();
+    mockRelaunchForUpdate.mockRejectedValueOnce(new Error('relaunch failed'));
+    const { cleanup } = setUpdateHandler(
+      addItem,
+      setUpdateInfo,
+      { current: true },
+      () => true,
+      () => ({}),
+      onRelaunchStart,
+      onRelaunchError,
+    );
+
+    updateEventEmitter.emit('update-relaunch');
+
+    await vi.waitFor(() => expect(onRelaunchError).toHaveBeenCalledOnce());
+    expect(onRelaunchStart).toHaveBeenCalledOnce();
     cleanup();
   });
 

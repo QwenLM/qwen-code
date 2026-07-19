@@ -116,6 +116,18 @@ describe('processUtils', () => {
     await expect(prepareUpdateRelaunch(config, true)).resolves.toBeNull();
   });
 
+  it('does not resume a stale transcript when recording is disabled', async () => {
+    const getSessionLocation = vi.fn().mockResolvedValue('active');
+    const config = {
+      getChatRecordingService: () => undefined,
+      getSessionId: () => '123e4567-e89b-12d3-a456-426614174000',
+      getSessionService: () => ({ getSessionLocation }),
+    } as unknown as Config;
+
+    await expect(prepareUpdateRelaunch(config, true)).resolves.toBeNull();
+    expect(getSessionLocation).not.toHaveBeenCalled();
+  });
+
   it('preserves whether a fresh initial prompt was already consumed', async () => {
     const config = {
       getChatRecordingService: () => ({ flush: vi.fn() }),
