@@ -8,6 +8,13 @@
   --font-sans:
     -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   --radius: 6px;
+  /* Theme-independent session/workspace accent palette — single source of truth
+     for the sidebar group dots, overview badges, and split-pane workspace
+     accents. Kept here (not per-theme) since the values don't vary by theme. */
+  --accent-red: #ff5a5f;
+  --accent-orange: #ff8a2a;
+  --accent-yellow: #f6c431;
+  --accent-green: #69c987;
   position: relative;
   display: flex;
   flex-direction: column;
@@ -745,6 +752,72 @@
   padding: 4px 0;
   font-size: 13px;
   color: var(--muted-foreground);
+}
+
+.composerActionTip {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 13px;
+  color: var(--muted-foreground);
+}
+
+.composerActionTipIcon {
+  color: color-mix(in srgb, var(--streaming-label-color) 78%, transparent);
+  font-size: 11px;
+  line-height: 1;
+  transform: translateY(-0.5px);
+}
+
+.composerActionTipText {
+  min-width: 0;
+  color: var(--streaming-label-color);
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+.composerActionTipActions {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 4px;
+}
+
+.composerActionTipButton {
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.15;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 3px 8px;
+  white-space: nowrap;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease,
+    color 120ms ease,
+    transform 120ms ease;
+}
+
+.composerActionTipButtonPrimary {
+  border-color: color-mix(in srgb, var(--primary) 14%, var(--border));
+  background: color-mix(in srgb, var(--primary) 5%, transparent);
+  color: color-mix(in srgb, var(--foreground) 94%, var(--primary));
+}
+
+.composerActionTipButton:hover,
+.composerActionTipButton:focus-visible {
+  outline: none;
+  transform: translateY(-0.5px);
+}
+
+.composerActionTipButtonPrimary:hover,
+.composerActionTipButtonPrimary:focus-visible {
+  border-color: color-mix(in srgb, var(--primary) 28%, var(--border));
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  color: var(--foreground);
 }
 
 .emptyWelcomeFooter {

@@ -19,7 +19,7 @@ const debugLogger = createDebugLogger('TRUNCATION');
 
 const PREVIEW_SIZE_CHARS = 2000;
 const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024; // 50MB
-const MAX_SESSION_BYTES = 500 * 1024 * 1024; // 500MB
+export const MAX_SESSION_BYTES = 500 * 1024 * 1024; // 500MB
 
 /**
  * Stable prefix every truncated tool output starts with. Used as an

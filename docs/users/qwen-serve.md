@@ -11,7 +11,7 @@ Run Qwen Code as a local HTTP daemon so multiple clients (IDE plugins, web UIs, 
 ## What it gives you
 
 - **Built-in Web Shell UI** — `qwen serve` serves the browser-based Web Shell at its root (`http://127.0.0.1:4170/`) out of the box; run `qwen serve --open` to launch it in your browser automatically. It is served on the same origin as the API, so no second port or reverse proxy is needed. Pass `--no-web` for an API-only daemon.
-- **One agent process, many clients** — under the default `sessionScope: 'single'`, every client connecting to the daemon shares one ACP session. Live cross-client collaboration on the same conversation, the same file diffs, the same permission prompts.
+- **Up to one primary ACP child plus one on-demand child per trusted secondary, many clients** — production attempts to preheat the primary bridge and retries on first use after failure; trusted secondary runtimes start their own child on demand, while untrusted secondaries never start one. Under the default `sessionScope: 'single'`, clients targeting the same workspace share one ACP session and collaborate on the same conversation, file diffs, and permission prompts.
 - **Reconnect-safe streaming** — SSE with `Last-Event-ID` reconnect lets a client drop and pick up exactly where it left off (within the ring's replay window).
 - **Paged persisted transcripts** — `GET /session/:id/transcript` returns the complete active on-disk transcript as replay pages without attaching a client or changing the live SSE replay window.
 - **First-responder permissions** — when the agent asks for permission to run a tool, every connected client sees the request; whichever client answers first wins.
@@ -51,7 +51,7 @@ The first npm release of `qwen serve` (v0.16-alpha) is intentionally narrow — 
 - ⏸️ **Prometheus metrics + load test harness** — defers to v0.17 F4 Phase-1 scale instrumentation when 30-50 active sessions becomes a real target.
 - ⏸️ **`--max-body-size` CLI flag** — daemon enforces `express.json({ limit: '10mb' })` by default which comfortably covers text-only prompts (model context windows are well under 10 MiB of chars). Tunable via flag in v0.16.x.
 
-For the deeper "what we won't fix in Stage 1" enumeration (single-host session-state mutation model + N-parallel-sessions sharing one ACP child), see [Stage 1 scope boundaries](#stage-1-scope-boundaries--what-we-wont-fix-in-stage-15) below.
+For the deeper "what we won't fix in Stage 1" enumeration (single-host session-state mutation model + N parallel sessions sharing one ACP child inside each workspace runtime), see [Stage 1 scope boundaries](#stage-1-scope-boundaries--what-we-wont-fix-in-stage-15) below.
 
 ## Quickstart
 
@@ -64,7 +64,7 @@ qwen serve
 # → qwen serve: bearer auth disabled (loopback default). Set QWEN_SERVER_TOKEN to enable.
 ```
 
-The default bind is `127.0.0.1:4170`. Bearer auth is **off** on loopback so local development "just works". The daemon binds to the current working directory; use `--workspace /path/to/dir` to override.
+The default bind is `127.0.0.1:4170`. Bearer auth is **off** on loopback so local development "just works". The daemon registers the current working directory as its primary workspace; use an absolute `--workspace /path/to/dir` to override it, and repeat the flag to register additional isolated runtimes.
 
 **Open the Web Shell UI.** Browse to `http://127.0.0.1:4170/` (or start the daemon with `qwen serve --open` to launch it automatically) for the full browser terminal — chat, diffs, tool calls, and permission prompts. The UI is served at the daemon root on the same origin as the API. The rest of this guide uses raw HTTP so you can script against the API directly.
 
@@ -81,7 +81,7 @@ curl http://127.0.0.1:4170/daemon/status
 # → {"v":1,"detail":"summary","status":"ok","runtime":{...}}
 ```
 
-The `workspaceCwd` field surfaces the bound workspace so clients can pre-flight check + omit `cwd` on `POST /session`.
+The `workspaceCwd` field surfaces the primary compatibility workspace so clients can intentionally omit `cwd` on `POST /session`. Current clients should select a trusted entry from `workspaces[]` and send that entry's `cwd` when targeting a runtime explicitly.
 The `limits.maxPendingPromptsPerSession` field advertises the active per-session prompt admission cap; `null` means the cap is disabled. `limits.maxTotalSessions` advertises the optional daemon-wide fresh-session cap; `null` means unlimited.
 
 ### Run channels from the daemon
@@ -90,7 +90,7 @@ The `limits.maxPendingPromptsPerSession` field advertises the active per-session
 # Start one configured channel under qwen serve
 qwen serve --channel telegram
 
-# Start several configured channels under one daemon-owned worker
+# Start several configured channels under daemon-owned workspace workers
 qwen serve --channel telegram --channel feishu
 
 # Start all configured channels
@@ -119,14 +119,40 @@ Each selected channel's `cwd` must resolve to a registered workspace, and channe
 
 Replacing a selection preflights configuration, ownership, and trust before stopping anything. It keeps workspace workers whose ordered selection is unchanged. If a changed worker cannot start, the daemon stops new workers and restores the old selection. If the daemon cannot confirm that an old child exited even after SIGKILL, it keeps the PID lease and refuses to create a duplicate worker. A worker is still considered ready when at least one requested adapter connects; PUT then returns `partial: true`, and `/daemon/status` reports `channel_worker_partial_connect` for the missing adapters.
 
+When an adapter rejects `connect()`, current worker snapshots may include `startupFailures` entries with the channel, `phase: "connect"`, an optional adapter code, and a credential-redacted message. `qwen channel set`, `qwen channel reload`, and remote `qwen channel status --daemon-url …` print these reasons. If every adapter fails during a dynamic set or reload, the command receives `502 channel_worker_start_failed`; the response reasons describe that attempt and its `state` describes the result after rollback. The failed attempt is not retained by later status requests. At most 64 reasons are retained per worker startup, and adapter codes should be treated as diagnostic rather than stable categories. Initial `qwen serve --channel …` startup still exits when no adapter connects.
+
 The daemon also exposes read-only runtime snapshots for client UIs and
 operators: `GET /daemon/status`, `GET /workspace/mcp`,
 `GET /workspace/skills`, `GET /workspace/providers`, `GET /workspace/env`,
 `GET /workspace/preflight`,
+`GET /workspace/:id/session-info`,
 `GET /session/:id/status`, `GET /session/:id/context`,
 `GET /session/:id/supported-commands`, and
 `GET /session/:id/tasks`, `GET /session/:id/lsp`, and
 `GET /session/:id/transcript`.
+
+`GET /workspace/:id/session-info` (and the plural
+`GET /workspaces/:workspace/session-info` twin) returns aggregate session
+counts for a workspace: persisted `active` / `archived` / `total`, plus the
+current in-memory `live` count when live state is available. Registered
+untrusted secondary workspaces omit `live` because their catalog reads do not
+query the live bridge. The paginated `GET /workspace/:id/sessions` list does
+not include a total, so this is the dedicated surface for “how many sessions
+exist?” — useful when scheduled or recurring tasks leave a large local store.
+
+> ⚠️ **Disk scan — do not poll.** This endpoint walks local session JSONL
+> files under the workspace chats directory. Responses always include
+> `expensive: true` and `cost: "disk_scan"`. Call it infrequently (manual
+> refresh, operator tooling, occasional UI load) — never on a tight timer or
+> on every sidebar render. Prefer `GET /workspace/:id/sessions` for browsing
+> pages and `GET /daemon/status` for live in-memory session counts. A response
+> with `truncated: true` means the scan hit its safety limit or could not
+> classify every candidate file, so persisted counts are lower bounds.
+
+```bash
+curl http://127.0.0.1:4170/workspace/$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.getcwd(), safe=''))")/session-info
+# → {"active":450,"archived":30,"total":480,"live":2,"expensive":true,"cost":"disk_scan"}
+```
 
 `GET /session/:id/status` returns the live bridge summary for a single session:
 `sessionId`, `workspaceCwd`, `createdAt`, optional `displayName`, `clientCount`,
@@ -215,7 +241,7 @@ curl -X POST http://127.0.0.1:4170/session \
 
 `cwd` may be omitted — the route falls back to the daemon's primary workspace. Posting a `cwd` that does not canonicalize to any registered workspace returns `400 workspace_mismatch`.
 
-A second client posting to `/session` (any matching `cwd` or none) gets `"attached": true` — they're now sharing the agent.
+A second client posting to `/session` for the same resolved workspace runtime gets `"attached": true` under the default `sessionScope: 'single'` — they are now sharing that runtime's agent session. Omitting `cwd` resolves to primary; selecting another registered workspace creates or attaches to that runtime's separate default session.
 
 ### 4. Subscribe to the event stream (in another terminal first)
 
@@ -250,6 +276,42 @@ curl -X POST http://127.0.0.1:4170/session/$SESSION_ID/prompt \
 ```
 
 The `curl -N` from step 4 will print frames as they arrive.
+
+### Optional Todo Stop Guard
+
+Long-running daemon clients can opt into a bounded continuation when the
+current work chain successfully writes a top-level Todo list and then stops
+with items still pending or in progress. Add this to `settings.json` and
+restart the daemon:
+
+```json
+{
+  "experimental": {
+    "todoStopGuard": true
+  }
+}
+```
+
+The guard adds at most two consecutive primary-model calls without new user
+input. A mid-turn user message runs first and starts a fresh two-attempt stage;
+retry/continue and related background results retain the current stage's
+budget. Every call and the final exhaustion state appear as replayable
+`session_update` events with `_meta.source: "todo_stop_guard"`; the metadata
+includes the attempt and unfinished count but never Todo text. A queued full
+prompt also runs first, and existing permission/cancellation rules are
+unchanged.
+
+While an armed chain waits on related background work, unrelated cron/loop
+fires and old-task notifications are deferred. Recurring work is bounded and
+coalesced per task until the chain yields.
+
+The option defaults to `false`, requires restart, and is forced off in safe
+mode, bare mode, and Approval `plan` mode. It is in-memory only: loading Todo
+state from disk or restarting the daemon does not arm it. A new ordinary prompt
+must successfully run its own top-level `todo_write`; retry/continue and live
+client reattach keep the current in-memory work chain. Successfully changing
+the session working directory clears it so an old Todo cannot resume in a new
+workspace.
 
 ## Authentication
 
@@ -325,21 +387,21 @@ Notes:
 | `--tls-cert <path>`                     | —               | Path to a PEM certificate file. Serve over **HTTPS** instead of HTTP. Must be paired with `--tls-key` (boot fails if only one is given). Unlocks secure-context browser APIs — voice input (`getUserMedia`), WebRTC — over a LAN IP, which browsers otherwise block on plain `http://`. TLS termination only; no auto-generation / ACME. See [HTTPS / TLS](#https--tls-for-mobile--cross-device-access) below.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `--tls-key <path>`                      | —               | Path to a PEM private key file. Must be paired with `--tls-cert`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `--max-sessions <n>`                    | `20`            | Cap on concurrent live sessions. New `POST /session` requests that would spawn a fresh child return `503` (with `Retry-After: 5`) when the cap is hit; attaches to existing sessions are NOT counted. Set to `0` to disable. Sized for single-user / small-team usage; raise it if your deployment has the RAM/FD headroom (~30–50 MB per session).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `--max-total-sessions <n>`              | derived         | Optional non-negative integer daemon-wide cap on fresh session creation across all registered workspace runtimes. It applies to new child sessions, session restore, and branch/fork-created sessions; attaching to an existing live session does not consume a slot. Set to `0` for unlimited. When omitted in multi-workspace mode, the daemon derives a cap from the per-workspace limit and workspace count.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `--max-total-sessions <n>`              | derived         | Optional non-negative integer daemon-wide cap on fresh session creation across all registered workspace runtimes. It applies to new child sessions, session restore, and branch/fork-created sessions; attaching to an existing live session does not consume a slot. Set to `0` for unlimited. When omitted with several startup/restored workspaces, the daemon derives a fixed cap from the per-workspace limit and the startup workspace count; later dynamic registration does not recompute it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `--max-pending-prompts-per-session <n>` | `5`             | Per-session cap on prompts accepted by `POST /session/:id/prompt` but not yet settled, including queued prompts and the active prompt. The bridge rejects overflow synchronously with `503`, `Retry-After: 5`, and `code: "prompt_queue_full"` before returning a `promptId`. Set to `0` to disable. `branchSession` serializes on the same FIFO but does not count against this prompt cap.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `--workspace <path>`                    | `process.cwd()` | Workspace path registered by this daemon. Repeat the flag to host multiple workspaces in one process; the first is primary and remains the default when a request omits `cwd`. Relative paths resolve from the process working directory. Session requests whose canonical `cwd` is not registered return `400 workspace_mismatch`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `--workspace <path>`                    | `process.cwd()` | Absolute workspace directory registered by this daemon. Repeat the flag to host multiple workspaces in one process; the first is primary and remains the default when a request omits `cwd`. Relative values are rejected. Session requests whose canonical `cwd` is not registered return `400 workspace_mismatch`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `--channel <name\|all>`                 | —               | Experimental daemon-managed channel worker. Repeat the flag to select multiple configured channels, or pass `all` to start every configured channel. `all` cannot be combined with named channels. Selected channel `cwd` values must resolve to a registered workspace; a multi-workspace daemon runs one worker per owning workspace. The worker is owned by `qwen serve`; stop the daemon to stop serve-managed channels.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `--max-connections <n>`                 | `256`           | Listener-level TCP connection cap (`server.maxConnections`). Bounds raw socket count irrespective of session count — slow / phantom SSE clients get rejected at accept time once full. Raise alongside `--max-sessions` if your deployment expects many SSE subscribers per session.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `--event-ring-size <n>`                 | `8000`          | Per-session SSE replay ring depth (#3803 §02 target). Sets the backlog available to `GET /session/:id/events` with `Last-Event-ID: N`. Larger = more reconnect headroom at the cost of a few hundred KB extra RAM per session. SDK clients can additionally request a larger per-subscriber backlog cap on a specific subscription via `?maxQueued=N` (range `[16, 2048]`, default 256). Daemons also emit a non-terminal `slow_client_warning` SSE frame at 75% queue fill so clients can drain / reconnect before getting evicted. Pre-flight `caps.features.slow_client_warning`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `--compacted-replay-max-bytes <n>`      | `4194304`       | Per-live-session byte cap for the retained replay events in the bounded snapshot returned by `POST /session/:id/load`. The cap applies to `compactedReplay`; the current in-flight `liveJournal` remains uncapped. Values must be positive safe integers; invalid values fail at boot, and the hard ceiling is 256 MiB. When older retained replay is dropped, the snapshot begins with `history_truncated`. This does not limit the on-disk transcript.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `--mcp-client-budget <n>`               | —               | Positive integer cap on live MCP clients **per ACP session** (issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 14 v1; PR 23 graduates this to per-workspace via the shared MCP pool). Combine with `--mcp-budget-mode`. When unset, no accounting-driven enforcement (but `GET /workspace/mcp` still reports `clientCount`). Distinct from claude-code's `MCP_SERVER_CONNECTION_BATCH_SIZE` which gates startup concurrency, not the total client count. Pre-flight `caps.features.mcp_guardrails`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `--mcp-client-budget <n>`               | —               | Positive integer cap on live MCP clients. When `mcp_workspace_pool` is advertised, the cap and transports are shared per workspace runtime; when the tag is absent, the legacy per-session manager enforces it. Combine with `--mcp-budget-mode`. When unset, no accounting-driven enforcement (but `GET /workspace/mcp` still reports `clientCount`). Distinct from claude-code's `MCP_SERVER_CONNECTION_BATCH_SIZE`, which gates startup concurrency rather than total live clients. Pre-flight `caps.features.mcp_guardrails` and `caps.features.mcp_workspace_pool`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `--mcp-budget-mode <m>`                 | `warn` / `off`  | How `--mcp-client-budget` is enforced. `warn` (default when budget set): no refusal, snapshot's `budgets[0].status` flips to `warning` at ≥75% of budget. `enforce`: connects past the cap are refused, per-server cell shows `disabledReason: 'budget'`, deterministic by `mcpServers` declaration order. `off` (default when budget unset): pure observability. Boot rejects `enforce` without a budget.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `--http-bridge`                         | `true`          | Stage 1 mode: one `qwen --acp` child per registered workspace runtime; sessions targeting that workspace multiplex onto its child via ACP `newSession()`. Stage 2 native in-process becomes available later.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `--http-bridge`                         | `true`          | Stage 1 mode: production attempts to preheat one primary `qwen --acp` child for compatibility and retries on first use after failure, while each trusted secondary can start one child on demand. Sessions targeting a runtime multiplex onto its child via ACP `newSession()`; untrusted secondaries cannot start ACP. Stage 2 native in-process becomes available later.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `--allow-origin <pat>`                  | —               | T2.4 ([#4514](https://github.com/QwenLM/qwen-code/issues/4514)). Cross-origin allowlist for browser webui clients. Repeatable. Each value is `*` (any origin — boot refuses if no bearer token is configured; `--require-auth` on loopback is recommended so `/health` and `/demo` are also bearer-gated, since both are pre-auth on loopback by default) or a canonical URL origin (`<scheme>://<host>[:<port>]`, no trailing slash / path / userinfo / query). **Subdomain wildcards (`https://*.example.com`) are intentionally unsupported** — list each subdomain explicitly, or use `*` with a configured token (and `--require-auth` for full hardening). Matched origins receive CORS response headers (`Access-Control-Allow-Origin`, `Vary: Origin`, methods, headers, max-age, and exposed `Retry-After`); unmatched origins still get a 403 with the same envelope as today's wall. `Origin: null` (sandboxed iframes, file:// docs) is always rejected, even under `*`. Pre-flight via `caps.features.allow_origin`. Loopback self-origin hits are unaffected. |
 | `--web` / `--no-web`                    | `true`          | Serve the built Web Shell SPA at the daemon root (`GET /`, `/assets/*`, and SPA deep-link fallback). The static shell is registered **before** the bearer-auth gate — a browser can't attach a token to a `<script>` subresource or an address-bar navigation, the shell carries no secrets, and every API route stays token-gated regardless. On non-loopback binds a one-line stderr warning notes the UI is reachable without auth. Use `--no-web` for an API-only daemon. No effect when the build omits the Web Shell assets (the daemon logs a breadcrumb and runs API-only).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `--open`                                | `false`         | After the listener is up, open the Web Shell in your default browser at the daemon URL (with `#token=` appended as a URL fragment when a token is configured — a fragment is never sent to the server, keeping the token out of access logs and Referer headers). No-op with `--no-web`, or in headless / CI / SSH environments where no browser is available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 
-> **Sizing the load knobs.** `--max-sessions` is the per-workspace **new-child** cap. `--max-total-sessions`, when set, is the daemon-wide fresh-session cap.
+> **Sizing the load knobs.** `--max-sessions` is the per-workspace fresh-session cap. `--max-total-sessions`, when set, is the daemon-wide fresh-session cap.
 > Three other layers also limit load — when sizing for a high-concurrency
 > deployment, tune them together:
 >
@@ -358,18 +420,20 @@ Notes:
 >   over-capacity client gets a terminal `client_evicted` frame and is
 >   closed (one slow consumer can't pin the daemon).
 >
-> These caps interact: the lower of `--max-sessions` and
-> `--max-total-sessions` bounds fresh sessions in today's single-workspace
-> daemon. `--max-sessions × 64 subscribers × 256 frames`
-> is the worst-case in-flight memory at the EventBus layer, while
-> `--max-sessions × --max-pending-prompts-per-session` bounds accepted
-> prompt work at the admission layer. Default sizing assumes single-user /
-> small-team load; raise progressively (and watch RSS) for multi-tenant
-> deployments.
+> These caps interact: each runtime is bounded by `--max-sessions`, while
+> `--max-total-sessions` bounds their aggregate. The effective session ceiling
+> is the lower of any finite daemon-wide cap and the aggregate per-runtime cap
+> (treat that aggregate as unlimited if the per-workspace cap is unlimited). If
+> neither is finite, there is no finite session ceiling. A finite ceiling × 64
+> subscribers × 256 frames is the worst-case in-flight memory at the EventBus
+> layer; multiplying it by
+> `--max-pending-prompts-per-session` bounds accepted prompt work at the
+> admission layer. Default sizing assumes single-user / small-team load; raise
+> progressively (and watch RSS) for larger deployments.
 
 > **MCP client guardrails (issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 14).** A workspace declaring 30 MCP servers in `mcpServers` will start 30 clients with no upstream cap unless you set one. `--mcp-client-budget=N` caps the live MCP client count; `--mcp-budget-mode={enforce,warn,off}` chooses the behavior. Default is `warn` when a budget is set (snapshot surfaces the warning but no client is refused — useful for measuring real-world fanout before flipping on enforcement). Refused servers under `enforce` mode get `disabledReason: 'budget'` on their per-server cell, and the `budgets[0]` cell shows `status: 'error'` + `errorKind: 'budget_exhausted'`. Slot reservation is by server name and survives reconnects / discovery timeouts — a refused server can't take a slot from a healthy one.
 >
-> ⚠️ **v1 scope: per-session, not per-workspace.** Each ACP session inside the daemon has its own `Config`/`McpClientManager` (created via `newSessionConfig` per session). The budget caps live MCP clients **per session**, not aggregated across all sessions in the workspace. Snapshot at `GET /workspace/mcp` reflects the bootstrap session's view (the cell carries `scope: 'session'` for honesty). If you run 5 concurrent ACP sessions with `--mcp-client-budget=10`, you may have up to 50 live MCP clients across the daemon — the cap holds per session. **Wave 5 PR 23 (shared MCP pool)** introduces a workspace-scoped manager and graduates this to true per-workspace enforcement.
+> **Current scope is capability-driven.** When `mcp_workspace_pool` is present, all sessions in one workspace runtime share its MCP transport pool and budget controller; `GET /workspace/mcp` emits `scope: 'workspace'`. A second workspace has an independent pool and budget. When the tag is absent (including `QWEN_SERVE_NO_MCP_POOL=1`), the daemon uses the legacy per-session `McpClientManager` and emits `scope: 'session'`; in that fallback, N sessions can each consume the configured cap.
 >
 > ```sh
 > qwen serve --mcp-client-budget=10 --mcp-budget-mode=warn
@@ -377,7 +441,7 @@ Notes:
 > qwen serve --mcp-client-budget=10 --mcp-budget-mode=enforce
 > ```
 >
-> This is **not** the same as claude-code's `MCP_SERVER_CONNECTION_BATCH_SIZE` (which gates startup concurrency); they're orthogonal. PR 23 will add a real shared MCP pool (a `scope: 'workspace'` cell in `budgets[]` alongside the per-session cell); PR 14 v1 is the in-process counter + soft enforcement on the existing per-session manager.
+> This is **not** the same as claude-code's `MCP_SERVER_CONNECTION_BATCH_SIZE` (which gates startup concurrency); they are orthogonal. Clients must branch on `mcp_workspace_pool`, not assume a scope from the protocol version alone.
 >
 > **Push events (issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 14b).** SDK clients subscribed to `GET /session/:id/events` receive typed frames when budget thresholds cross — `mcp_budget_warning` (synthetic, fires once per upward 75% crossing with hysteresis re-arm at 37.5%, advertised via `mcp_guardrail_events`) and `mcp_child_refused_batch` (coalesced once per discovery pass under `enforce` mode; length-1 from `readResource` lazy-spawn refusal). The snapshot at `GET /workspace/mcp` is still the source-of-truth for state-after-reconnect; events are change-edges. Useful when dashboarding in real-time without polling.
 
@@ -389,7 +453,7 @@ Notes:
 - **Host header allowlist** — on **loopback** binds the daemon checks `Host:` matches `localhost:port` / `127.0.0.1:port` / `[::1]:port` / `host.docker.internal:port` (case-insensitive per RFC 7230 §5.4) to defend against DNS rebinding. **Non-loopback binds (`--hostname 0.0.0.0`) intentionally bypass the Host allowlist** — the operator has chosen the surface area, so the bearer-token gate is the sole authentication layer; reverse proxies / SNI / client cert pinning are the operator's responsibility, not the daemon's. If you need Host-based isolation on a non-loopback bind, terminate TLS + check Host at a front proxy.
 - **CORS denies any browser Origin by default** — returns `403` JSON. Pass **`--allow-origin <pattern>`** (repeatable, T2.4 #4514) to opt specific browser origins through. Each value is either the literal `*` (any origin — boot refuses if no bearer token is configured; `--require-auth` on loopback is recommended for full hardening since `/health` and `/demo` remain pre-auth on loopback by default) or a canonical URL origin (`<scheme>://<host>[:<port>]`, no trailing slash / path / userinfo). Matched origins receive proper CORS response headers (`Access-Control-Allow-Origin: <echoed>`, `Vary: Origin`, plus standard methods / headers / max-age and exposed `Retry-After`); unmatched origins still get a 403 with the same envelope as the default wall. `caps.features.allow_origin` is advertised conditionally so SDK / webui clients can pre-flight whether the daemon honors cross-origin hits before issuing them. Example: `qwen serve --allow-origin http://localhost:3000 --allow-origin http://localhost:5173`. Loopback self-origin hits (e.g. the `/demo` page) are unaffected — a separate Origin-strip shim handles them regardless of `--allow-origin`. **Browser webuis without `--allow-origin` configured** still fall back to the same Stage 1 options as before: package as a native shell (Electron/Tauri) so no `Origin` header is sent, or front the daemon with a same-origin reverse proxy.
 - **Chrome extension browser automation is separate from framing.** `qwen serve --allow-origin chrome-extension://<id>` lets the extension frame the Web Shell and connect to the daemon. Console/network/screenshot/click tools require an external CDP MCP adapter command: `QWEN_CDP_MCP_COMMAND=/path/to/cdp-mcp-adapter qwen serve --allow-origin chrome-extension://<id>`. The main CLI package does not bundle a browser automation adapter; clients can check `caps.features.includes('browser_automation_mcp')` before presenting those tools as available.
-- **Spawned `qwen --acp` child inherits the daemon's environment** with one explicit scrub: `QWEN_SERVER_TOKEN` is removed before the child starts (the daemon's own bearer; the agent doesn't need it). Everything else — `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `QWEN_*` / `DASHSCOPE_API_KEY` / your custom `modelProviders[].envKey` / etc. — passes through, because the agent legitimately needs those to authenticate to the LLM. **This is intentional, not a sandbox.** The agent runs as the same UID with shell-tool access, so anything in `~/.bashrc` / `~/.aws/credentials` / `~/.npmrc` is reachable by prompt injection regardless. The env passthrough is not the security boundary; the user-as-trust-root is. Don't run `qwen serve` under an identity that has env-resident credentials you wouldn't trust the agent with.
+- **A spawned `qwen --acp` child receives its owning runtime's effective environment.** The daemon freezes a process-env base, applies that workspace's settings/env-file overlay to a runtime-local snapshot, and never writes the overlay back to `process.env`; same-named keys in another runtime do not cross over. `QWEN_SERVER_TOKEN` is scrubbed before spawn because the agent does not need the daemon bearer. Base credentials such as `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `QWEN_*`, and `DASHSCOPE_API_KEY` otherwise pass through unless the runtime overlay changes them. **This is intentional, not a sandbox.** The agent runs as the same UID with shell-tool access, so anything in `~/.bashrc`, `~/.aws/credentials`, or `~/.npmrc` is reachable by prompt injection regardless. Environment isolation between runtimes is not an operating-system security boundary; do not run `qwen serve` under an identity that has credentials you would not trust the agent with.
 - **Per-subscriber bounded SSE queues** — a slow client that overflows its queue gets a `client_evicted` terminal frame and is closed; one stuck consumer can't pin the daemon.
 - **Per-session prompt admission cap** — defaults to 5 accepted-but-unsettled prompts per session. A buggy client cannot enqueue unbounded prompt promises or temporary SSE waits for one session.
 - **Graceful shutdown** — SIGINT/SIGTERM drain the agent children before closing the listener (10s deadline per child).
@@ -433,15 +497,15 @@ Both flags accept a positive integer in milliseconds; `0`, `NaN`, non-integer, o
 
 ## Multi-session & multi-workspace deployment
 
-Pass `--workspace` more than once to register several non-overlapping workspaces in one `qwen serve` process. The first path is primary. Each registered workspace owns an isolated runtime boundary, while the daemon-wide listener, authentication policy, and total-session limit are shared. Trusted workspaces start their own `qwen --acp` child on demand. Requests may select a registered workspace by canonical `cwd`; requests that omit `cwd` use the primary workspace. Use one daemon per user or security principal; workspace trust is an execution gate, not an ACL.
+Pass `--workspace` more than once to register several non-overlapping workspaces in one `qwen serve` process. The first path is primary. Each registered workspace owns an isolated runtime boundary, while the daemon-wide listener, authentication policy, and total-session limit are shared. Production attempts to preheat the primary ACP child for compatibility and retries on first use after failure; trusted secondaries start their own child on demand, and untrusted secondaries do not start ACP. Requests may select a registered workspace by canonical `cwd`; requests that omit `cwd` use the primary workspace. Use one daemon per user or security principal; workspace trust is an execution gate, not an ACL.
 
-An untrusted secondary workspace is visible in Web Shell as `untrusted` and `read-only`. It can be expanded to inspect the persisted session catalog, but it cannot yet be selected or opened in Web Shell, resumed, used to create sessions, or fully exported. The REST API exposes its persisted session-group catalog and, when `workspace_persisted_transcript` is advertised, its active persisted transcript through the bounded workspace-qualified pager. These reads do not include live runtime state or start an ACP child. Full workspace-qualified export requires a trusted workspace and the separate `workspace_session_export` capability. Trust the workspace and restart the daemon before using execution, mutation, or export features. An untrusted primary remains disabled in Web Shell.
+An untrusted secondary workspace is visible in Web Shell as `untrusted` and `read-only`. It can be expanded to inspect the persisted session catalog, but it cannot yet be selected or opened in Web Shell, resumed, used to create sessions, or fully exported. The REST API follows the existing bounded filesystem read policy and also exposes its persisted session-group catalog and, when `workspace_persisted_transcript` is advertised, its active persisted transcript through the bounded workspace-qualified pager. These reads do not include live runtime state or start an ACP child. Full workspace-qualified export requires a trusted workspace and the separate `workspace_session_export` capability. Trust the workspace and restart the daemon before using execution, mutation, or export features. An untrusted primary remains disabled in Web Shell.
 
 Use separate daemon processes when you need a smaller fault or security boundary, independent bearer tokens, quotas, audit boundaries, operating-system isolation, or independent resource supervision. Multi-workspace mode is intended for one operator hosting several repos; it is not a multi-tenant isolation boundary. A single daemon token authorizes every route the daemon exposes, including the allowed read-only catalog for all registered workspaces.
 
 > **Subscribe BEFORE posting `modelServiceId` on attach.** When a client `POST /session` with a `modelServiceId` and the workspace already has a session running a different model, the daemon issues an internal `setSessionModel` call — failures are NOT propagated as an HTTP error (the session stays operational on its current model). The visible failure signal is a `model_switch_failed` event on the session's SSE stream. If you call `POST /session` and only THEN open `GET /session/:id/events`, you'll miss the failure event and silently keep talking to the wrong model. Open the SSE stream first, or pass `Last-Event-ID: 0` on subscribe to replay the ring's oldest available event.
 
-To handle multiple **users** (each with their own quota, audit log, sandbox) or to scale beyond one process's reach (cold-start budget, FD count, RSS), spawn one daemon per workspace per user behind an external orchestrator. That orchestrator (multi-tenancy / OIDC / Quota / Audit / k8s) is **out of scope** for the qwen-code project — see issue [#3803](https://github.com/QwenLM/qwen-code/issues/3803) "External Reference Architecture" for the design pointers.
+To handle multiple **users or security principals** (each with an independent token, quota, audit log, sandbox, or process fault boundary) or to scale beyond one process's reach (cold-start budget, FD count, RSS), spawn one daemon per principal behind an external orchestrator. Each such daemon may still host several workspaces for that principal. The orchestrator (multi-tenancy / OIDC / Quota / Audit / k8s) is **out of scope** for the qwen-code project — see issue [#3803](https://github.com/QwenLM/qwen-code/issues/3803) "External Reference Architecture" for the design pointers.
 
 ## Loading and resuming a persisted session
 
@@ -488,7 +552,7 @@ For a registered workspace, use `client.workspaceById(workspaceId).getSessionTra
 
 For a full attachment from a trusted registered workspace, pre-flight `workspace_session_export` and call `client.workspaceById(workspaceId).exportSession(sessionId, { format: 'html' })` or the raw `/workspaces/:workspace/session/:id/export` route. Do not infer support from `session_export` or `workspace_qualified_rest_core`: older daemons can advertise both while retaining primary-only export. The current Web Shell export action remains primary-only; use the SDK or REST route for another workspace.
 
-For an archived attachment, pre-flight `workspace_archived_session_export` and call `client.workspaceById(workspaceId).exportArchivedSession(sessionId, { format: 'html' })` or `/workspaces/:workspace/session/:id/archive/export`. This path reads archived storage in place and returns `409 session_not_archived` for an active-only id; it does not unarchive the session.
+For an archived attachment, pre-flight `workspace_archived_session_export` and call `client.workspaceById(workspaceId).exportArchivedSession(sessionId, { format: 'html' })` or `/workspaces/:workspace/session/:id/archive/export`. This path reads archived storage in place and returns `409 session_not_archived` for an active-only id; it does not unarchive the session. Web Shell exposes the same export for archived rows in trusted primary and secondary workspaces when the capability is present.
 
 `limit` counts active chat records, not emitted replay frames; one record can produce several `session_update` events. The first response freezes the JSONL snapshot size and returns `nextCursor` while `hasMore` is true. Later pages ignore appends after page 1, but return `409` if the file is deleted, truncated, replaced, archived, or otherwise conflicts with the frozen cursor. Very large snapshots return `413 transcript_too_large` before indexing so the daemon does not scan unbounded transcript files on the request path.
 
@@ -568,26 +632,26 @@ In this mode, TUI is a **"super-client"** — it observes the same agent convers
 
 (B) is the more ambitious answer but locks Stage 1.5 into a substantially larger wire surface that must also pass cleanly through the planned in-process refactor. We'd rather walk the smaller scope honestly. The session-state-event taxonomy work — enumerating which TUI flows are local-only by design vs. could plausibly graduate to wire under a future opt-in (B)-flavor extension — moves to [#3803](https://github.com/QwenLM/qwen-code/issues/3803), not Stage 1.5 code.
 
-### N parallel sessions share one `qwen --acp` child
+### N parallel sessions share one `qwen --acp` child per workspace runtime
 
-Multiple sessions on the same workspace **share one `qwen --acp` child process** via the agent's native multi-session support (`packages/cli/src/acp-integration/acpAgent.ts:194: private sessions: Map<string, Session>`). The bridge calls `connection.newSession({cwd, mcpServers})` for each session — the agent stores them in its sessions map and demultiplexes per-call sessionId.
+Multiple sessions on the same trusted workspace **share that runtime's `qwen --acp` child process** via the agent's native multi-session support (`packages/cli/src/acp-integration/acpAgent.ts:194: private sessions: Map<string, Session>`). The bridge calls `connection.newSession({cwd, mcpServers})` for each session — the agent stores them in its sessions map and demultiplexes per-call sessionId. Production can own up to one primary child (preheat attempted by default) plus one on-demand child per trusted secondary; untrusted secondaries own none.
 
 Concrete cost at N=5 sessions on the same workspace:
 
-| Resource                             | Per session | At N=5                       |
-| ------------------------------------ | ----------- | ---------------------------- |
-| Daemon Node process                  | one         | **30–50 MB** (one daemon)    |
-| `qwen --acp` child                   | shared      | **60–100 MB** (one child)    |
-| MCP server children                  | per-session | 3×N if configs differ        |
-| `FileReadCache` (in-child heap)      | shared      | parsed once                  |
-| `CLAUDE.md` / hierarchy memory parse | shared      | parsed once                  |
-| OAuth refresh-token state            | shared      | **one refresh path**         |
-| Auto-memory learned facts            | shared      | one knowledge base per child |
-| Cold start                           | first only  | <200 ms after first session  |
+| Resource                             | Per session                                           | At N=5                                                           |
+| ------------------------------------ | ----------------------------------------------------- | ---------------------------------------------------------------- |
+| Daemon Node process                  | one                                                   | **30–50 MB** (one daemon)                                        |
+| `qwen --acp` child                   | shared                                                | **60–100 MB** (one child)                                        |
+| MCP server children                  | workspace pool when advertised; otherwise per-session | shared by matching pool entries, or up to 3×N in legacy fallback |
+| `FileReadCache` (in-child heap)      | shared                                                | parsed once                                                      |
+| `CLAUDE.md` / hierarchy memory parse | shared                                                | parsed once                                                      |
+| OAuth refresh-token state            | shared                                                | **one refresh path**                                             |
+| Auto-memory learned facts            | shared                                                | one knowledge base per child                                     |
+| Cold start                           | first only                                            | <200 ms after first session                                      |
 
-The bridge keeps **one channel per daemon** (one daemon per workspace, per §02). The channel stays alive while at least one session is live; the last `killSession` (or a channel-level crash) kills the child.
+Each active workspace runtime keeps **one bridge boundary**. Production attempts to preheat the primary channel and retries on first use after failure; a trusted secondary opens its channel and child on demand, while an untrusted secondary never does. A channel stays alive while at least one session is live. After the last `killSession`, the runtime kills its child immediately by default or after the configured channel idle grace; a channel-level crash also tears it down without selecting another runtime.
 
-**MCP server children** are still per-session today — each session's config can specify different servers, so they're independently spawned. Stage 1.5 follow-up: refcount MCP server children by `(workspace, config-hash)` so identical configs share. Not in scope for this PR.
+**MCP server children** use the workspace-scoped transport pool when `mcp_workspace_pool` is advertised: matching `(workspace runtime, server name, config fingerprint)` entries are refcounted across sessions. If the capability is absent, the legacy per-session manager independently spawns them.
 
 **Peer agents (Cursor / Continue / Claude Code / OpenCode / Gemini CLI) all do single-process multi-session.** qwen-code matches them at the agent layer; the Stage 1 bridge in this PR makes the same architecture visible over HTTP.
 
@@ -648,15 +712,47 @@ const result = await flow.awaitCompletion({ signal: abortCtrl.signal });
 
 ## Daemon log file
 
-`qwen serve` writes a per-process diagnostic log to:
+`qwen serve` appends diagnostic records across normal restarts at the stable
+active path:
 
 ```
-${QWEN_RUNTIME_DIR or ~/.qwen}/debug/daemon/serve-<pid>-<workspaceHash>.log
+${QWEN_RUNTIME_DIR or ~/.qwen}/debug/daemon/daemon.log
 ```
 
-A `latest` symlink in the same directory always points at the current process's log, so `tail -f ~/.qwen/debug/daemon/latest` will follow whichever daemon is running.
+Every file record includes a random per-start `runId` and the daemon PID. A
+successful stable owner also updates `debug/daemon/latest` to `daemon.log` on
+platforms that support symlinks. On macOS/Linux, follow rotation with:
+
+```bash
+tail -F ~/.qwen/debug/daemon/daemon.log
+```
+
+On other platforms, configure the viewer to reopen the pathname after it is
+replaced. A viewer that keeps only the old file handle will remain on the
+archive after rotation.
 
 The log captures lifecycle messages, route errors (with `route=` and `sessionId=` context), ACP child stderr, and — when `QWEN_SERVE_DEBUG=1` is set — extra bridge breadcrumbs. Lines that go to stderr today still go to stderr; the file log is **additive**, not a replacement.
+
+The active file rotates before it would exceed 10 MiB. Each family retains
+four archives under `archive/`, and each file record is capped at 256 KiB. The
+in-memory queue accepts at most 4 MiB of unsettled file payload. Queue pressure,
+rotation failures, or filesystem failures can therefore drop file copies;
+`GET /daemon/status?detail=full` exposes logger health, issues, and dropped
+record/byte counters.
+
+Only one daemon may own the stable family in a log namespace. A concurrent
+daemon writes to `debug/daemon/runs/run-<runId>/daemon.log`; the startup banner
+and full status contain the authoritative path. `runs/recent-fallback` is a
+best-effort locator for a recent fallback family and may point to one that is
+still live. A healthy namespace converges to roughly 100 MiB: about 50 MiB for
+stable plus one inactive fallback family. Live or not-yet-stale fallback
+families are retained, so concurrent daemons or crash/restart storms can
+temporarily use more.
+
+One runtime directory is one ownership and retention namespace. Use distinct
+`QWEN_RUNTIME_DIR` values when daemons need independent history. New daemon log
+directories are private to the user (`0700`) and new files use `0600` on POSIX.
+There is no age-based expiry.
 
 ### Disabling
 
@@ -666,9 +762,14 @@ Set `QWEN_DAEMON_LOG_FILE=0` (or `false`/`off`/`no`) to skip file logging entire
 
 Session-scoped debug logs (`~/.qwen/debug/<sessionId>.txt` and the `~/.qwen/debug/latest` symlink) are independent. The daemon log lives in a sibling `daemon/` subdirectory; per-session debug semantics are unchanged by this feature.
 
-### No rotation
+### External rotation
 
-The daemon log appends indefinitely. Rotate manually if it grows large. A future enhancement may add automatic rotation; track via [#4548](https://github.com/QwenLM/qwen-code/issues/4548) follow-ups.
+Do not point an external logrotate rule at the active `daemon.log`. The daemon
+is the sole supported writer and rotator; external rename, deletion, or
+truncation invalidates its size model. Copying or shipping records without
+mutating the family is safe. Older `serve-<pid>.log` and
+`serve-<pid>-<workspaceHash>.log` files are left untouched and are not counted
+by the new retention policy.
 
 ## Runtime MCP server management (issue [#4514](https://github.com/QwenLM/qwen-code/issues/4514))
 

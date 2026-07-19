@@ -160,6 +160,7 @@ type PendingPermission = {
     response: RequestPermissionResponse & { answers?: Record<string, string> },
   ) => void;
   options: AcpPermissionOption[];
+  timeout: ReturnType<typeof setTimeout>;
 };
 
 type MiniCollector = {
@@ -188,6 +189,7 @@ type SlashCommandInvocation = {
 const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_INITIALIZE_TIMEOUT_MS = 120_000;
+const PERMISSION_REQUEST_TIMEOUT_MS = 5 * 60_000;
 const INCLUDE_CRAFT_CONTEXT_IN_QWEN_PROMPTS = false;
 const SHARED_ACP_IDLE_TTL_MS = 5 * 60_000;
 
@@ -2045,8 +2047,8 @@ export class QwenAgent extends BaseAgent {
     const pending = this.pendingPermissions.get(requestId);
     if (!pending) return;
 
-    this.pendingPermissions.delete(requestId);
-    pending.resolve(
+    this.resolvePendingPermission(
+      requestId,
       this.createPermissionResponse(
         pending.options,
         allowed,
@@ -2704,7 +2706,7 @@ export class QwenAgent extends BaseAgent {
   override destroy(): void {
     super.destroy();
     this.killSubprocess();
-    this.pendingPermissions.clear();
+    this.cancelPendingPermissions();
     this.miniCollectors.clear();
     this.historyCollectors.clear();
     this.ensureProcessPromise = null;
@@ -5053,7 +5055,10 @@ export class QwenAgent extends BaseAgent {
 
     return new Promise<RequestPermissionResponse>((resolve) => {
       const requestId = `qwen-permission-${++this.permissionRequestCounter}`;
-      this.pendingPermissions.set(requestId, { resolve, options });
+      const timeout = setTimeout(() => {
+        this.respondToPermission(requestId, false);
+      }, PERMISSION_REQUEST_TIMEOUT_MS);
+      this.pendingPermissions.set(requestId, { resolve, options, timeout });
 
       try {
         this.onPermissionRequest?.({
@@ -5073,8 +5078,7 @@ export class QwenAgent extends BaseAgent {
         this.debug(
           `Qwen permission callback failed: ${error instanceof Error ? error.message : String(error)}`,
         );
-        this.pendingPermissions.delete(requestId);
-        resolve(this.createPermissionResponse(options, false, false));
+        this.respondToPermission(requestId, false);
       }
     });
   }
@@ -5139,12 +5143,21 @@ export class QwenAgent extends BaseAgent {
   }
 
   private cancelPendingPermissions(): void {
-    for (const [, pending] of this.pendingPermissions) {
-      pending.resolve(
-        this.createPermissionResponse(pending.options, false, false),
-      );
+    for (const requestId of this.pendingPermissions.keys()) {
+      this.respondToPermission(requestId, false);
     }
-    this.pendingPermissions.clear();
+  }
+
+  private resolvePendingPermission(
+    requestId: string,
+    response: RequestPermissionResponse & { answers?: Record<string, string> },
+  ): void {
+    const pending = this.pendingPermissions.get(requestId);
+    if (!pending) return;
+
+    clearTimeout(pending.timeout);
+    this.pendingPermissions.delete(requestId);
+    pending.resolve(response);
   }
 
   protected override debug(message: string): void {

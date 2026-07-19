@@ -54,6 +54,7 @@ import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 // closure check doesn't trace create-sub-session's transitive deps through
 // the run-qwen-serve chunk. The launcher is only needed after listen().
 import { PathMutexRegistry } from './fs/path-mutex-registry.js';
+import { isDeepHealthQuery } from './health-query.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
@@ -145,6 +146,14 @@ import type {
 import { sanitizeLogText } from '@qwen-code/channel-base';
 import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
 import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.js';
+import {
+  ACCESS_LOG_CONTROLLER_LOCAL,
+  type AccessLogAppLocals,
+} from './server/access-log.js';
+import {
+  setDeferredRuntimeRequestTiming,
+  type DeferredRuntimeRequestTiming,
+} from './server/request-helpers.js';
 
 // Reverse MCP channel; enabled only by explicit option or env opt-in.
 const QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV = 'QWEN_SERVE_CLIENT_MCP_OVER_WS';
@@ -154,6 +163,33 @@ const QWEN_SERVE_PROMPT_DEADLINE_MS_ENV = 'QWEN_SERVE_PROMPT_DEADLINE_MS';
 const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
   'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS';
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
+const DAEMON_LOG_FORCED_FLUSH_BUDGET_MS = 250;
+
+async function flushDaemonLogBounded(
+  daemonLog: DaemonLogger,
+  budgetMs: number,
+): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      daemonLog.flush().catch(() => {}),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, budgetMs);
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function writeDaemonLifecycleBestEffort(write: () => void): void {
+  try {
+    write();
+  } catch {
+    // Best-effort lifecycle diagnostics must not make shutdown throw.
+  }
+}
 
 function daemonPipeDirection(
   direction: NdJsonMessageObservation['direction'],
@@ -1056,6 +1092,7 @@ function currentServeFeaturesForRunQwenServe(
     persistSettingAvailable: true,
     sessionShellCommandEnabled,
     sessionArtifactsPersistenceAvailable,
+    sessionGenerationAvailable: true,
     rateLimit: opts.rateLimit === true,
     reloadAvailable: true,
     channelReloadAvailable: opts.channelSelection !== undefined,
@@ -1302,7 +1339,7 @@ function createBootstrapServeApp(input: {
   }
   app.use(hostAllowlist(opts.hostname, getPort));
 
-  const healthHandler = (_req: Request, res: Response): void => {
+  const healthHandler = (req: Request, res: Response): void => {
     const runtimeError = getRuntimeError();
     if (runtimeError !== undefined) {
       res.status(503).json({
@@ -1314,6 +1351,11 @@ function createBootstrapServeApp(input: {
 
     if (onHealthServed) {
       res.once('finish', onHealthServed);
+    }
+    if (isDeepHealthQuery(req.query['deep'])) {
+      res.setHeader('Retry-After', '1');
+      res.status(503).json({ status: 'degraded', reason: 'bootstrap' });
+      return;
     }
     res.status(200).json({ status: 'ok' });
   };
@@ -1382,12 +1424,22 @@ function createBootstrapServeApp(input: {
           severity: 'warning',
           message: 'Daemon runtime is still starting.',
         };
+    const daemonLogStatus = daemonLog.getStatus();
+    const issues: DaemonStatusIssue[] = [issue];
+    if (daemonLogStatus.health === 'degraded') {
+      issues.push({
+        code: 'daemon_log_degraded',
+        severity: 'warning',
+        message:
+          'Daemon file logging is degraded; inspect full status for details.',
+      });
+    }
     const response: DaemonStatusResponse = {
       v: 1,
       detail: detail.detail,
       generatedAt: new Date().toISOString(),
       status: runtimeFailed ? 'error' : 'warning',
-      issues: [issue],
+      issues,
       daemon: {
         pid: process.pid,
         uptimeMs: Math.round(process.uptime() * 1000),
@@ -1401,8 +1453,18 @@ function createBootstrapServeApp(input: {
         ...(daemonLog.getDaemonId()
           ? { daemonId: daemonLog.getDaemonId() }
           : {}),
+        runId: daemonLogStatus.runId,
+        logMode: daemonLogStatus.mode,
+        logHealth: daemonLogStatus.health,
         ...(detail.detail === 'full' && daemonLog.getLogPath()
           ? { logPath: daemonLog.getLogPath() }
+          : {}),
+        ...(detail.detail === 'full'
+          ? {
+              logIssues: daemonLogStatus.issues,
+              logDroppedRecords: daemonLogStatus.droppedRecords,
+              logDroppedBytes: daemonLogStatus.droppedBytes,
+            }
           : {}),
       },
       security: {
@@ -1515,7 +1577,7 @@ function createDelegatingServeApp(
   getRuntimeApp: () => Application | undefined,
   options: {
     waitForDeferredRuntimeRoutes?: boolean;
-    startRuntime?: () => void;
+    startRuntime?: () => boolean;
     runtimeReady?: Promise<void>;
     authenticateDeferredRuntimeRequest?: RequestHandler;
     authenticateDeferredChannelWebhookRequest?: RequestHandler;
@@ -1533,6 +1595,11 @@ function createDelegatingServeApp(
         options.startRuntime &&
         options.runtimeReady
       ) {
+        const waitStartedAt = performance.now();
+        const timing: DeferredRuntimeRequestTiming = {
+          startedAt: new Date(),
+          path: 'joined',
+        };
         const webhookRequest = isChannelWebhookRequest(req);
         const authGate = webhookRequest
           ? (options.authenticateDeferredChannelWebhookRequest ??
@@ -1543,11 +1610,17 @@ function createDelegatingServeApp(
             return;
           }
         }
-        options.startRuntime();
+        setDeferredRuntimeRequestTiming(req, timing);
+        if (options.startRuntime()) {
+          timing.path = 'started_on_request';
+        }
         try {
           await options.runtimeReady;
         } catch {
           // Fall through to the bootstrap app so it can report the startup error.
+        } finally {
+          timing.waitMs =
+            Math.round((performance.now() - waitStartedAt) * 100) / 100;
         }
         target = getRuntimeApp();
       }
@@ -1712,9 +1785,49 @@ function runSynchronousRequestGate(
  * Boot refuses to start when bound beyond loopback without a token; this is a
  * hard rule, not a warning, per the threat model in the design issue.
  */
+interface DaemonLoggerLifecycleCallbacks {
+  initialized(logger: DaemonLogger): void;
+  published(): void;
+  signalOwned(): void;
+}
+
 export async function runQwenServe(
   optsIn: RunQwenServeOptions,
   deps: RunQwenServeDeps = {},
+): Promise<RunHandle> {
+  let daemonLog: DaemonLogger | undefined;
+  let owner: 'startup' | 'handle' | 'signal' = 'startup';
+  try {
+    return await runQwenServeImpl(optsIn, deps, {
+      initialized: (logger) => {
+        daemonLog = logger;
+      },
+      published: () => {
+        if (owner === 'startup') owner = 'handle';
+      },
+      signalOwned: () => {
+        if (owner === 'startup') owner = 'signal';
+      },
+    });
+  } catch (error) {
+    if (daemonLog && owner === 'startup') {
+      const startupLog = daemonLog;
+      writeDaemonLifecycleBestEffort(() =>
+        startupLog.error(
+          'daemon startup failed',
+          error instanceof Error ? error : new Error(String(error)),
+        ),
+      );
+      await startupLog.close();
+    }
+    throw error;
+  }
+}
+
+async function runQwenServeImpl(
+  optsIn: RunQwenServeOptions,
+  deps: RunQwenServeDeps,
+  loggerLifecycle: DaemonLoggerLifecycleCallbacks,
 ): Promise<RunHandle> {
   const runStartedAt = performance.now();
   const shouldPreheat = !deps.bridge && shouldPreheatBridge(deps);
@@ -2114,7 +2227,7 @@ export async function runQwenServe(
   };
 
   // Resolve the bound workspace list. The first explicit workspace remains the
-  // primary workspace for legacy APIs; later workspaces are sessions-only
+  // primary workspace for legacy APIs; later workspaces are isolated secondary
   // runtimes.
   const workspaceInputs = rawWorkspaces.map((workspace) => ({
     raw: workspace,
@@ -2295,10 +2408,13 @@ export async function runQwenServe(
     bootSettings,
     boundWorkspace,
   });
-  const daemonLog: DaemonLogger = initDaemonLogger({
+  const daemonLog: DaemonLogger = await initDaemonLogger({
     boundWorkspace,
     baseDir: daemonLogBaseDir,
   });
+  loggerLifecycle.initialized(daemonLog);
+  let loggerPublished = false;
+  let loggerSignalOwned = false;
   writeStderrLine(
     `qwen serve: daemon log → ${daemonLog.getLogPath() || '(disabled)'}`,
   );
@@ -2519,7 +2635,7 @@ export async function runQwenServe(
   let markRuntimeFailed!: (err: Error) => void;
   let runtimeStartupSettled = false;
   let startRuntimeAfterHealth: (() => void) | undefined;
-  let startRuntimeForRequest: (() => void) | undefined;
+  let startRuntimeForRequest: (() => boolean) | undefined;
   const deferRuntimeUntilFirstHealth =
     deps.resolveOnListen === true && deps.deferRuntimeUntilFirstHealth === true;
   const runtimeReady = new Promise<void>((resolve, reject) => {
@@ -3419,6 +3535,7 @@ export async function runQwenServe(
       workspaceProvidersStatusProvider,
       workspaceSkillsStatusProvider,
       credentialStore,
+      skillInstallEnv: runtimeEffectiveEnv,
       voiceEnv: runtimeEffectiveEnv,
       isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools: persistDisabledToolsFn,
@@ -3746,6 +3863,7 @@ export async function runQwenServe(
         workspaceSkillsStatusProvider:
           runtime.createWorkspaceSkillsStatusProvider(credentialStore),
         credentialStore,
+        skillInstallEnv: secondaryEnv.effectiveEnv,
         voiceEnv: secondaryEnv.effectiveEnv,
         voiceSettingsScope: WORKSPACE_SETTING_SCOPE,
         isChannelLive: () => secondaryBridge.isChannelLive(),
@@ -4131,6 +4249,7 @@ export async function runQwenServe(
           workspaceSkillsStatusProvider:
             runtime.createWorkspaceSkillsStatusProvider(credentialStore),
           credentialStore,
+          skillInstallEnv: wsEnv.effectiveEnv,
           voiceEnv: wsEnv.effectiveEnv,
           voiceSettingsScope: WORKSPACE_SETTING_SCOPE,
           isChannelLive: () => wsBridge.isChannelLive(),
@@ -4395,6 +4514,7 @@ export async function runQwenServe(
       fsFactory: routeFsFactory,
       primaryWorkspaceTrusted: trustedWorkspace,
       primaryRuntimeEnv,
+      daemonEnv: daemonRuntimeBaseEnv,
       daemonLog,
       getChannelWorkerSnapshot,
       getChannelWorkerSnapshots,
@@ -4563,7 +4683,7 @@ export async function runQwenServe(
     runtimeApp ??
     createDelegatingServeApp(bootstrapApp, () => runtimeApp, {
       waitForDeferredRuntimeRoutes: deferRuntimeUntilFirstHealth,
-      startRuntime: () => startRuntimeForRequest?.(),
+      startRuntime: () => startRuntimeForRequest?.() ?? false,
       runtimeReady,
       authenticateDeferredRuntimeRequest: bearerAuth(opts.token),
       authenticateDeferredChannelWebhookRequest: deferredChannelWebhookAuth,
@@ -5160,8 +5280,8 @@ export async function runQwenServe(
             );
           });
       };
-      const startRuntime = (): void => {
-        if (runtimeStarting) return;
+      const startRuntime = (): boolean => {
+        if (runtimeStarting) return false;
         armRuntimeStartupTimer();
         clearRuntimeStartAfterHealthTimer();
         clearRuntimeStartFallbackTimer();
@@ -5187,6 +5307,7 @@ export async function runQwenServe(
             await completeRuntimeStartup(runtime.app);
           })
           .catch((err) => failRuntimeStartup(err));
+        return true;
       };
       startRuntimeForRequest = startRuntime;
       const scheduleRuntimeStartFallback = (): void => {
@@ -5247,25 +5368,33 @@ export async function runQwenServe(
               err instanceof Error ? err : null,
             );
           }
-          await daemonLog.flush().catch(() => {});
+          await flushDaemonLogBounded(
+            daemonLog,
+            DAEMON_LOG_FORCED_FLUSH_BUDGET_MS,
+          );
           process.exit(1);
           return;
+        }
+        if (!loggerPublished) {
+          loggerSignalOwned = true;
+          loggerLifecycle.signalOwned();
         }
         daemonLog.warn(`received ${signal}, draining`);
         try {
           await handle.close();
-          await daemonLog.flush();
           process.exit(runtimeStartupError === undefined ? 0 : 1);
         } catch (err) {
           daemonLog.error('shutdown error', err instanceof Error ? err : null);
-          await daemonLog.flush().catch(() => {});
           if (channelWorkerManager?.state().enabled) {
             daemonLog.error(
               'refusing to exit while a channel worker or service lease remains; signal again to retry after the child exits (another signal during that retry forces exit)',
             );
-            await daemonLog.flush().catch(() => {});
             return;
           }
+          await flushDaemonLogBounded(
+            daemonLog,
+            DAEMON_LOG_FORCED_FLUSH_BUDGET_MS,
+          );
           process.exit(1);
         }
       };
@@ -5344,6 +5473,12 @@ export async function runQwenServe(
             const finish = (err?: Error | null) => {
               if (settled) return;
               settled = true;
+              const accessLogController = (
+                (runtimeApp ?? runtimeAppForCleanup)?.locals as
+                  | AccessLogAppLocals
+                  | undefined
+              )?.[ACCESS_LOG_CONTROLLER_LOCAL];
+              accessLogController?.sealAndFlushSuppressed();
               const preserveSignalHandlers =
                 channelWorkerShutdownError !== undefined &&
                 channelWorkerManager?.state().enabled === true;
@@ -5369,26 +5504,34 @@ export async function runQwenServe(
                     }`,
                   );
                 })
-                .finally(() => daemonLog.flush().catch(() => {}))
-                .finally(() => {
+                .finally(async () => {
                   // Server.close error takes precedence (operator-visible
                   // listener problem); fall back to the bridge error
                   // captured during shutdown if any.
                   const finalErr =
                     err ?? bridgeShutdownError ?? channelWorkerShutdownError;
-                  if (finalErr) {
-                    if (
-                      channelWorkerShutdownError &&
-                      channelWorkerManager?.state().enabled
-                    ) {
-                      closePromise = undefined;
-                      shuttingDown = false;
-                      channelControlDraining = false;
-                    }
+                  const retryableChannelClose =
+                    channelWorkerShutdownError !== undefined &&
+                    channelWorkerManager?.state().enabled === true;
+                  if (retryableChannelClose) {
+                    await flushDaemonLogBounded(
+                      daemonLog,
+                      DAEMON_LOG_FORCED_FLUSH_BUDGET_MS,
+                    );
+                    closePromise = undefined;
+                    shuttingDown = false;
+                    channelControlDraining = false;
                     rej(finalErr);
-                  } else {
-                    res();
+                    return;
                   }
+                  if (loggerPublished || loggerSignalOwned) {
+                    writeDaemonLifecycleBestEffort(() =>
+                      daemonLog.info('daemon stopped'),
+                    );
+                    await daemonLog.close();
+                  }
+                  if (finalErr) rej(finalErr);
+                  else res();
                 });
             };
 
@@ -5575,23 +5718,33 @@ export async function runQwenServe(
       }
 
       if (deps.resolveOnListen) {
+        loggerPublished = true;
+        loggerLifecycle.published();
         resolve(handle);
       } else {
         void runtimeReady.then(
-          () => resolve(handle),
+          () => {
+            loggerPublished = true;
+            loggerLifecycle.published();
+            resolve(handle);
+          },
           (err) => {
             void handle.close().then(
               () => {
                 reject(err instanceof Error ? err : new Error(String(err)));
               },
               (closeErr) => {
-                daemonLog.error(
-                  'shutdown after runtime startup error failed',
-                  closeErr instanceof Error ? closeErr : null,
+                writeDaemonLifecycleBestEffort(() =>
+                  daemonLog.error(
+                    'shutdown after runtime startup error failed',
+                    closeErr instanceof Error ? closeErr : null,
+                  ),
                 );
                 if (channelWorkerManager?.state().enabled) {
-                  daemonLog.error(
-                    'runtime startup failed, but qwen serve remains alive to retain the channel service lease until worker exit is confirmed',
+                  writeDaemonLifecycleBestEffort(() =>
+                    daemonLog.error(
+                      'runtime startup failed, but qwen serve remains alive to retain the channel service lease until worker exit is confirmed',
+                    ),
                   );
                   return;
                 }

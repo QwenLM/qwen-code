@@ -533,6 +533,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     // overhead, unless OpenAI file logging needs them.
     const shouldCollectResponses = !isInternal || !!this.openaiLogger;
     const responses: GenerateContentResponse[] = [];
+    let lastResponseForLogging: GenerateContentResponse | undefined;
 
     // Track first-seen IDs so _logApiResponse/_logApiError have accurate
     // values even when we skip collecting full responses for internal prompts.
@@ -603,13 +604,19 @@ export class LoggingContentGenerator implements ContentGenerator {
         if (!firstModelVersion && response.modelVersion) {
           firstModelVersion = response.modelVersion;
         }
+        const candidate = response.candidates?.[0];
         if (shouldCollectResponses) {
-          responses.push(response);
+          lastResponseForLogging = response;
+          if (
+            (candidate?.content?.parts?.length ?? 0) > 0 ||
+            candidate?.finishReason
+          ) {
+            responses.push(response);
+          }
         }
         if (response.usageMetadata) {
           lastUsageMetadata = response.usageMetadata;
         }
-        const candidate = response.candidates?.[0];
         if (candidate?.finishReason) {
           lastFinishReason = candidate.finishReason as string;
         }
@@ -629,9 +636,18 @@ export class LoggingContentGenerator implements ContentGenerator {
       }
       // Only log successful API response if no error occurred
       const durationMs = Date.now() - startTime;
+      if (
+        lastResponseForLogging &&
+        responses.at(-1) !== lastResponseForLogging
+      ) {
+        responses.push(lastResponseForLogging);
+      }
       const consolidatedResponse = shouldCollectResponses
         ? this.consolidateGeminiResponsesForLogging(responses)
         : undefined;
+      if (consolidatedResponse) {
+        consolidatedResponse.usageMetadata = lastUsageMetadata;
+      }
       const shouldCollectSensitiveSpanAttributes =
         !isInternal &&
         span !== undefined &&

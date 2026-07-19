@@ -44,6 +44,7 @@ import {
   convertToFunctionErrorResponse,
   convertToFunctionResponse,
   extractToolFilePaths,
+  isToolCallConcurrencySafe,
 } from './coreToolScheduler.js';
 import type { Part, PartListUnion } from '@google/genai';
 import {
@@ -63,7 +64,11 @@ import { WriteFileTool } from '../tools/write-file.js';
 import { ShellTool, ShellToolInvocation } from '../tools/shell.js';
 import type { ShellToolParams } from '../tools/shell.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
-import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import {
+  getRuntimeContentGenerator,
+  runWithAgentContext,
+  type RuntimeContentGeneratorView,
+} from '../agents/runtime/agent-context.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
 
 type ToolSpanRecord = {
@@ -793,6 +798,222 @@ describe('CoreToolScheduler', () => {
       onToolCallsUpdate,
     };
   }
+
+  it('keeps interaction-required tools awaiting approval despite YOLO and an allow hook', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'executed',
+      returnDisplay: 'executed',
+    });
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const tool = new MockTool({
+      name: ToolNames.EXIT_PLAN_MODE,
+      requiresUserInteraction: () => true,
+      getDefaultPermission: async () => 'ask',
+      getConfirmationDetails: async () => ({
+        type: 'plan',
+        title: 'Approve plan',
+        plan: 'Original plan',
+        onConfirm,
+      }),
+      execute,
+    });
+    const messageBus = {
+      request: vi.fn().mockImplementation(
+        async (request: {
+          eventName: string;
+        }): Promise<HookExecutionResponse> => ({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: `${request.eventName}-hook`,
+          success: true,
+          output:
+            request.eventName === 'PermissionRequest'
+              ? {
+                  hookSpecificOutput: {
+                    decision: {
+                      behavior: 'allow',
+                      updatedInput: { plan: 'Hook-replaced plan' },
+                    },
+                  },
+                }
+              : { decision: 'allow' },
+        }),
+      ),
+    };
+    const onToolCallsUpdate = vi.fn();
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([[ToolNames.EXIT_PLAN_MODE, tool]]),
+        approvalMode: ApprovalMode.YOLO,
+        messageBus,
+        disableHooks: false,
+        onToolCallsUpdate,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'explicit-plan-exit',
+          name: ToolNames.EXIT_PLAN_MODE,
+          args: { plan: 'Original plan' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-explicit-plan-exit',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const waiting = onToolCallsUpdate.mock.calls
+      .flatMap((call) => call[0] as ToolCall[])
+      .find((call) => call.status === 'awaiting_approval') as WaitingToolCall;
+    expect(waiting).toBeDefined();
+    expect(waiting.confirmationDetails).toMatchObject({
+      hideAlwaysAllow: true,
+    });
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+
+    await waiting.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+    expect(execute).toHaveBeenCalledWith({ plan: 'Original plan' });
+  });
+
+  it('does not let AUTO_EDIT approve an interaction-required info tool', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'executed',
+      returnDisplay: 'executed',
+    });
+    const tool = new MockTool({
+      name: 'interaction_required_info',
+      requiresUserInteraction: () => true,
+      getDefaultPermission: async () => 'ask',
+      getConfirmationDetails: async () => ({
+        type: 'info',
+        title: 'Explicit approval',
+        prompt: 'Approve?',
+        onConfirm: vi.fn(),
+      }),
+      execute,
+    });
+    const onToolCallsUpdate = vi.fn();
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName: new Map([[tool.name, tool]]),
+      approvalMode: ApprovalMode.AUTO_EDIT,
+      onToolCallsUpdate,
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'interaction-required-info',
+          name: tool.name,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-interaction-required-info',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(
+      onToolCallsUpdate.mock.calls
+        .flatMap((call) => call[0] as ToolCall[])
+        .some((call) => call.status === 'awaiting_approval'),
+    ).toBe(true);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('does not auto-approve an interaction-required sibling after ProceedAlways', async () => {
+    let siblingWouldOtherwiseAllow = false;
+    const firstExecute = vi.fn().mockResolvedValue({
+      llmContent: 'first executed',
+      returnDisplay: 'first executed',
+    });
+    const siblingPermission = vi.fn(
+      async (): Promise<PermissionDecision> =>
+        siblingWouldOtherwiseAllow ? 'allow' : 'ask',
+    );
+    const siblingExecute = vi.fn().mockResolvedValue({
+      llmContent: 'sibling executed',
+      returnDisplay: 'sibling executed',
+    });
+    const firstTool = new MockTool({
+      name: 'ordinary_confirmation',
+      getDefaultPermission: async () => 'ask',
+      getConfirmationDetails: async () => ({
+        type: 'info',
+        title: 'Ordinary approval',
+        prompt: 'Approve?',
+        onConfirm: async () => {
+          siblingWouldOtherwiseAllow = true;
+        },
+      }),
+      execute: firstExecute,
+    });
+    const siblingTool = new MockTool({
+      name: 'interaction_required_sibling',
+      requiresUserInteraction: () => true,
+      getDefaultPermission: siblingPermission,
+      getConfirmationDetails: async () => ({
+        type: 'info',
+        title: 'Explicit sibling approval',
+        prompt: 'Approve sibling?',
+        onConfirm: vi.fn(),
+      }),
+      execute: siblingExecute,
+    });
+    const onToolCallsUpdate = vi.fn();
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName: new Map([
+        [firstTool.name, firstTool],
+        [siblingTool.name, siblingTool],
+      ]),
+      approvalMode: ApprovalMode.DEFAULT,
+      onToolCallsUpdate,
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'ordinary-confirmation',
+          name: firstTool.name,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-siblings',
+        },
+        {
+          callId: 'interaction-required-sibling',
+          name: siblingTool.name,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-siblings',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const firstWaiting = onToolCallsUpdate.mock.calls
+      .flatMap((call) => call[0] as ToolCall[])
+      .find(
+        (call) =>
+          call.request.callId === 'ordinary-confirmation' &&
+          call.status === 'awaiting_approval',
+      ) as WaitingToolCall;
+    await firstWaiting.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedAlways,
+    );
+
+    expect(siblingWouldOtherwiseAllow).toBe(true);
+    expect(siblingPermission).toHaveBeenCalledTimes(2);
+    const latestCalls = onToolCallsUpdate.mock.calls.at(-1)?.[0] as ToolCall[];
+    expect(
+      latestCalls.find(
+        (call) => call.request.callId === 'interaction-required-sibling',
+      )?.status,
+    ).toBe('awaiting_approval');
+    expect(siblingExecute).not.toHaveBeenCalled();
+  });
 
   it('dispatches legacy tool names through their canonical registered tools', async () => {
     const canonicalNamesByLegacyName = new Map(
@@ -4439,7 +4660,10 @@ class MockEditToolInvocation extends BaseToolInvocation<
   Record<string, unknown>,
   ToolResult
 > {
-  constructor(params: Record<string, unknown>) {
+  constructor(
+    params: Record<string, unknown>,
+    private readonly executeFn?: () => Promise<ToolResult>,
+  ) {
     super(params);
   }
 
@@ -4468,10 +4692,12 @@ class MockEditToolInvocation extends BaseToolInvocation<
   }
 
   async execute(_abortSignal: AbortSignal): Promise<ToolResult> {
-    return {
-      llmContent: 'Edited successfully',
-      returnDisplay: 'Edited successfully',
-    };
+    return (
+      this.executeFn?.() ?? {
+        llmContent: 'Edited successfully',
+        returnDisplay: 'Edited successfully',
+      }
+    );
   }
 }
 
@@ -4479,14 +4705,14 @@ class MockEditTool extends BaseDeclarativeTool<
   Record<string, unknown>,
   ToolResult
 > {
-  constructor() {
+  constructor(private readonly executeFn?: () => Promise<ToolResult>) {
     super('mockEditTool', 'mockEditTool', 'A mock edit tool', Kind.Edit, {});
   }
 
   protected createInvocation(
     params: Record<string, unknown>,
   ): ToolInvocation<Record<string, unknown>, ToolResult> {
-    return new MockEditToolInvocation(params);
+    return new MockEditToolInvocation(params, this.executeFn);
   }
 }
 
@@ -5265,7 +5491,16 @@ describe('CoreToolScheduler request queueing', () => {
       resolveFirstCall = resolve;
     });
 
-    const executeFn = vi.fn().mockImplementation(() => firstCallPromise);
+    const runtimeView = {
+      contentGenerator: {},
+      contentGeneratorConfig: { model: 'vision-agent' },
+    } as RuntimeContentGeneratorView;
+    const executeFn = vi.fn().mockImplementation((args) => {
+      if ('b' in args) {
+        expect(getRuntimeContentGenerator()).toBe(runtimeView);
+      }
+      return firstCallPromise;
+    });
     const mockTool = new MockTool({ name: 'mockTool', execute: executeFn });
     const declarativeTool = mockTool;
 
@@ -5349,6 +5584,7 @@ describe('CoreToolScheduler request queueing', () => {
     const schedulePromise2 = scheduler.schedule(
       [request2],
       abortController.signal,
+      runtimeView,
     );
 
     // Ensure the second tool call hasn't been executed yet.
@@ -9542,20 +9778,22 @@ describe('CoreToolScheduler telemetry spans', () => {
    * Build a scheduler around a single MockEditTool that requires
    * approval. Used by the awaiting_approval-flow tests below.
    */
-  function buildApprovalScheduler(overrides: { getIdeMode?: () => boolean }): {
+  function buildApprovalScheduler(
+    overrides: { getIdeMode?: () => boolean },
+    tool: AnyDeclarativeTool = new MockEditTool(),
+  ): {
     scheduler: CoreToolScheduler;
     onToolCallsUpdate: ReturnType<typeof vi.fn>;
   } {
-    const mockEditTool = new MockEditTool();
     const mockToolRegistry = {
-      getTool: () => mockEditTool,
-      ensureTool: async () => mockEditTool,
+      getTool: () => tool,
+      ensureTool: async () => tool,
       getFunctionDeclarations: () => [],
       tools: new Map(),
       discovery: {},
       registerTool: () => {},
-      getToolByName: () => mockEditTool,
-      getToolByDisplayName: () => mockEditTool,
+      getToolByName: () => tool,
+      getToolByDisplayName: () => tool,
       getTools: () => [],
       discoverTools: async () => {},
       getAllTools: () => [],
@@ -9596,6 +9834,47 @@ describe('CoreToolScheduler telemetry spans', () => {
     });
     return { scheduler, onToolCallsUpdate };
   }
+
+  it('keeps the exact runtime through manual approval', async () => {
+    let runtimeDuringExecute: RuntimeContentGeneratorView | undefined;
+    const tool = new MockEditTool(async () => {
+      runtimeDuringExecute = getRuntimeContentGenerator();
+      return {
+        llmContent: 'Edited successfully',
+        returnDisplay: 'Edited successfully',
+      };
+    });
+    const { scheduler, onToolCallsUpdate } = buildApprovalScheduler({}, tool);
+    const runtimeView = {
+      contentGenerator: {},
+      contentGeneratorConfig: { model: 'vision-agent' },
+    } as RuntimeContentGeneratorView;
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'runtime-approval-1',
+          name: 'mockEditTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-runtime-approval',
+        },
+      ],
+      new AbortController().signal,
+      runtimeView,
+    );
+
+    const awaitingCall = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    expect(getRuntimeContentGenerator()).toBeUndefined();
+    await awaitingCall.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+
+    expect(runtimeDuringExecute).toBe(runtimeView);
+  });
 
   it('blocked_on_user span ends with decision=error when getConfirmationDetails throws (#4321)', async () => {
     // Trigger _schedule's outer catch (line ~1711) by making
@@ -11411,6 +11690,60 @@ describe('Fire hook functions integration', () => {
       }
     });
 
+    describe('isToolCallConcurrencySafe', () => {
+      it('treats agent tools as safe regardless of resolved kind', () => {
+        expect(isToolCallConcurrencySafe(ToolNames.AGENT, undefined, {})).toBe(
+          true,
+        );
+        expect(isToolCallConcurrencySafe(ToolNames.AGENT, Kind.Other, {})).toBe(
+          true,
+        );
+      });
+
+      it('treats pure-read kinds as safe', () => {
+        expect(isToolCallConcurrencySafe('read_file', Kind.Read, {})).toBe(
+          true,
+        );
+        expect(isToolCallConcurrencySafe('grep', Kind.Search, {})).toBe(true);
+        expect(isToolCallConcurrencySafe('fetch', Kind.Fetch, {})).toBe(true);
+      });
+
+      it('treats mutating kinds as unsafe', () => {
+        expect(isToolCallConcurrencySafe('edit', Kind.Edit, {})).toBe(false);
+        expect(isToolCallConcurrencySafe('rm', Kind.Delete, {})).toBe(false);
+        expect(isToolCallConcurrencySafe('mv', Kind.Move, {})).toBe(false);
+        expect(isToolCallConcurrencySafe('think', Kind.Think, {})).toBe(false);
+      });
+
+      it('treats a read-only shell command as safe and a mutating one as unsafe', () => {
+        expect(
+          isToolCallConcurrencySafe('shell', Kind.Execute, {
+            command: 'git status',
+          }),
+        ).toBe(true);
+        expect(
+          isToolCallConcurrencySafe('shell', Kind.Execute, {
+            command: 'rm -rf build',
+          }),
+        ).toBe(false);
+      });
+
+      it('treats a shell call with a non-string command as unsafe (fail-closed)', () => {
+        expect(isToolCallConcurrencySafe('shell', Kind.Execute, {})).toBe(
+          false,
+        );
+        expect(
+          isToolCallConcurrencySafe('shell', Kind.Execute, { command: 42 }),
+        ).toBe(false);
+      });
+
+      it('treats an unresolved (undefined) kind on a non-agent tool as unsafe', () => {
+        expect(isToolCallConcurrencySafe('mystery_tool', undefined, {})).toBe(
+          false,
+        );
+      });
+    });
+
     it('should run concurrency-safe tools in parallel and unsafe tools sequentially', async () => {
       const executionLog: string[] = [];
 
@@ -11749,8 +12082,8 @@ describe('Fire hook functions integration', () => {
         onToolCallsUpdate,
       );
 
-      // "git log" and "ls" are read-only → concurrent
-      // "npm install" is not read-only → sequential, breaks the batch
+      // "git log" and "ls" are read-only → concurrent.
+      // Wrappers, output-writing sort, and npm install are sequential.
       const requests = [
         {
           callId: '1',
@@ -11768,6 +12101,20 @@ describe('Fire hook functions integration', () => {
         },
         {
           callId: '3',
+          name: 'run_shell_command',
+          args: { command: "bash -c 'git status'" },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+        {
+          callId: '4',
+          name: 'run_shell_command',
+          args: { command: 'sort -o output input' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+        {
+          callId: '5',
           name: 'run_shell_command',
           args: { command: 'npm install' },
           isClientInitiated: false,
@@ -11792,14 +12139,32 @@ describe('Fire hook functions integration', () => {
       expect(gitStart).toBeLessThan(firstReadOnlyEnd);
       expect(lsStart).toBeLessThan(firstReadOnlyEnd);
 
-      // "npm install" should start after both read-only commands complete
+      // The unknown wrapper should start after both reads complete.
       const lastReadOnlyEnd = Math.max(
         executionLog.indexOf('shell:end:git log'),
         executionLog.indexOf('shell:end:ls'),
       );
+      const wrapperStart = executionLog.indexOf(
+        "shell:start:bash -c 'git status'",
+      );
+      expect(wrapperStart).not.toBe(-1);
+      expect(wrapperStart).toBeGreaterThan(lastReadOnlyEnd);
+
+      // The output-writing sort should not overlap the wrapper batch.
+      const wrapperEnd = executionLog.indexOf("shell:end:bash -c 'git status'");
+      const sortStart = executionLog.indexOf(
+        'shell:start:sort -o output input',
+      );
+      expect(wrapperEnd).not.toBe(-1);
+      expect(sortStart).not.toBe(-1);
+      expect(sortStart).toBeGreaterThan(wrapperEnd);
+
+      // npm install should not overlap the sequential sort batch.
+      const sortEnd = executionLog.indexOf('shell:end:sort -o output input');
       const npmStart = executionLog.indexOf('shell:start:npm install');
+      expect(sortEnd).not.toBe(-1);
       expect(npmStart).not.toBe(-1);
-      expect(npmStart).toBeGreaterThan(lastReadOnlyEnd);
+      expect(npmStart).toBeGreaterThan(sortEnd);
     });
   });
 });

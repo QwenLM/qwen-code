@@ -77,6 +77,7 @@ function createConfig(overrides: ConfigOverrides = {}): Config {
     getDebugMode: () => false,
     getApprovalMode: () => 'auto',
     getOutputFormat: () => 'stream-json',
+    getWarnings: () => [],
     initialize: vi.fn(),
     waitForMcpReady: vi.fn().mockResolvedValue(undefined),
     getMonitorRegistry: () => mockMonitorRegistry,
@@ -328,6 +329,30 @@ describe('runNonInteractiveStreamJson', () => {
     await runNonInteractiveStreamJson(config, '');
 
     expect(mockDispatcher.dispatch).toHaveBeenCalledWith(initRequest);
+  });
+
+  it('writes only warnings produced during deferred initialization to stderr', async () => {
+    const warnings = ['Warning: already emitted before stream-json startup'];
+    const stderrWrite = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    config = createConfig({
+      getWarnings: () => warnings,
+      initialize: vi.fn().mockImplementation(async () => {
+        warnings.push('Warning: emitted during stream-json initialization');
+      }),
+    });
+
+    mockInputReader.read = async function* () {
+      yield createControlRequest('initialize');
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(stderrWrite).toHaveBeenCalledWith(
+      'Warning: emitted during stream-json initialization\n',
+    );
+    expect(stderrWrite).not.toHaveBeenCalledWith(
+      'Warning: already emitted before stream-json startup\n',
+    );
   });
 
   it('processes user message when received as first message', async () => {

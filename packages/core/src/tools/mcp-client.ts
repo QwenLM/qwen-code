@@ -203,7 +203,8 @@ function isStreamableHttpGetSseRequest(init?: RequestInit): boolean {
 }
 
 /**
- * Wraps fetch to normalize Spring AI-style 400 responses to the SDK's
+ * Wraps fetch to preserve OAuth challenges before the SDK discards response
+ * metadata and to normalize Spring AI-style 400 responses to the SDK's
  * unsupported sentinel for the optional Streamable HTTP GET SSE request.
  *
  * SDK coupling: `StreamableHTTPClientTransport._startOrAuthSse()` treats a
@@ -213,9 +214,21 @@ function isStreamableHttpGetSseRequest(init?: RequestInit): boolean {
 export function createStreamableHttpCompatibilityFetch(
   mcpServerName: string,
   fetchFn: typeof fetch = globalThis.fetch.bind(globalThis),
+  mcpServerConfig?: MCPServerConfig,
 ): typeof fetch {
   return async (input, init) => {
     const response = await fetchFn(input, init);
+    if (
+      response.status === 401 &&
+      mcpServerConfig &&
+      supportsMcpOAuth(mcpServerConfig)
+    ) {
+      setMcpOAuthRequirement(
+        mcpServerName,
+        mcpServerConfig,
+        response.headers.get('www-authenticate') ?? '',
+      );
+    }
     if (
       !isStreamableHttpGetSseRequest(init) ||
       !STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES.has(response.status)
@@ -239,6 +252,17 @@ export function createStreamableHttpCompatibilityFetch(
       statusText: 'Method Not Allowed',
     });
   };
+}
+
+function createMcpStreamableHttpFetch(
+  mcpServerName: string,
+  mcpServerConfig: MCPServerConfig,
+): typeof fetch {
+  return createStreamableHttpCompatibilityFetch(
+    mcpServerName,
+    globalThis.fetch.bind(globalThis),
+    mcpServerConfig,
+  );
 }
 
 export type DiscoveredMCPPrompt = Prompt & {
@@ -747,7 +771,10 @@ function setMcpOAuthRequirement(
   const key = oauthRecoveryKey(mcpServerName, mcpServerConfig);
   mcpServerOAuthProbeCandidates.delete(key);
   mcpServerOAuthRequirements.add(key);
-  mcpServerOAuthChallenges.set(key, wwwAuthenticate);
+  mcpServerOAuthChallenges.set(
+    key,
+    wwwAuthenticate || mcpServerOAuthChallenges.get(key) || '',
+  );
   mcpServerRequiresOAuth.set(mcpServerName, true);
 }
 
@@ -1018,7 +1045,7 @@ async function createTransportWithOAuth(
     if (mcpServerConfig.httpUrl) {
       // Create HTTP transport with OAuth token
       const oauthTransportOptions: StreamableHTTPClientTransportOptions = {
-        fetch: createStreamableHttpCompatibilityFetch(mcpServerName),
+        fetch: createMcpStreamableHttpFetch(mcpServerName, mcpServerConfig),
         requestInit: {
           headers: {
             ...mcpServerConfig.headers,
@@ -1976,7 +2003,7 @@ export async function createTransport(
 
     if (mcpServerConfig.httpUrl) {
       (transportOptions as StreamableHTTPClientTransportOptions).fetch =
-        createStreamableHttpCompatibilityFetch(mcpServerName);
+        createMcpStreamableHttpFetch(mcpServerName, mcpServerConfig);
       return new StreamableHTTPClientTransport(
         new URL(mcpServerConfig.httpUrl),
         transportOptions,
@@ -2004,7 +2031,7 @@ export async function createTransport(
     };
     if (mcpServerConfig.httpUrl) {
       (transportOptions as StreamableHTTPClientTransportOptions).fetch =
-        createStreamableHttpCompatibilityFetch(mcpServerName);
+        createMcpStreamableHttpFetch(mcpServerName, mcpServerConfig);
       return new StreamableHTTPClientTransport(
         new URL(mcpServerConfig.httpUrl),
         transportOptions,
@@ -2067,7 +2094,7 @@ export async function createTransport(
 
   if (mcpServerConfig.httpUrl) {
     const transportOptions: StreamableHTTPClientTransportOptions = {
-      fetch: createStreamableHttpCompatibilityFetch(mcpServerName),
+      fetch: createMcpStreamableHttpFetch(mcpServerName, mcpServerConfig),
     };
 
     // Set up headers with OAuth token if available

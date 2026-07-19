@@ -16,6 +16,7 @@ import {
   CHANNEL_MEMORY_FILE_NAME,
   clearChannelMemory,
   getChannelMemoryFilePath,
+  getChannelMemoryRevision,
   getLegacyChannelMemoryFilePath,
   listChannelMemoryEntries,
   MAX_CHANNEL_MEMORY_BYTES,
@@ -194,6 +195,20 @@ describe('channel memory', () => {
     return { promise, resolve };
   }
 
+  async function expectCredentialRejection(
+    write: () => Promise<unknown>,
+  ): Promise<void> {
+    let error: unknown;
+    try {
+      await write();
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error instanceof Error ? error.message : undefined).toBe(
+      'Channel memory cannot store detected credentials',
+    );
+  }
+
   it('uses JSON for canonical storage and Markdown for legacy storage', () => {
     const filePath = getChannelMemoryFilePath(target);
     const legacyPath = getLegacyChannelMemoryFilePath(target);
@@ -257,6 +272,86 @@ describe('channel memory', () => {
     expect(
       getChannelMemoryFilePath({ ...target, threadId: 'thread-1' }),
     ).not.toBe(getChannelMemoryFilePath({ ...target, threadId: 'thread-2' }));
+  });
+
+  it('returns a stable opaque revision when channel memory is missing', async () => {
+    const first = await getChannelMemoryRevision(target);
+    const second = await getChannelMemoryRevision(target);
+
+    expect(second).toBe(first);
+    expect(first).not.toContain(qwenHome);
+    expect(first).not.toContain('CHANNEL.json');
+    expect(first).not.toContain('CHANNEL.md');
+  });
+
+  it('changes revision when canonical channel memory changes', async () => {
+    const missing = await getChannelMemoryRevision(target);
+    writeJson(
+      serializeChannelMemoryDocument({
+        version: 1,
+        entries: [{ id: 'm-111111111111', text: 'Use staging' }],
+      }),
+    );
+    const created = await getChannelMemoryRevision(target);
+    writeJson(
+      serializeChannelMemoryDocument({
+        version: 1,
+        entries: [{ id: 'm-111111111111', text: 'Use production instead' }],
+      }),
+    );
+    const replaced = await getChannelMemoryRevision(target);
+
+    expect(created).not.toBe(missing);
+    expect(replaced).not.toBe(created);
+  });
+
+  it('changes revision after an external atomic replacement', async () => {
+    const raw = serializeChannelMemoryDocument({
+      version: 1,
+      entries: [{ id: 'm-111111111111', text: 'Use staging' }],
+    });
+    const filePath = writeJson(raw);
+    const before = await getChannelMemoryRevision(target);
+    const replacementPath = path.join(path.dirname(filePath), '.external.tmp');
+    fs.writeFileSync(replacementPath, raw);
+    fs.renameSync(replacementPath, filePath);
+
+    expect(await getChannelMemoryRevision(target)).not.toBe(before);
+  });
+
+  it('changes revision after each successful structured mutation', async () => {
+    const revisions = [await getChannelMemoryRevision(target)];
+    const added = await addChannelMemoryEntries(target, ['Use staging']);
+    revisions.push(await getChannelMemoryRevision(target));
+    await updateChannelMemoryEntry(target, {
+      id: added.added[0]!.id,
+      text: 'Use production',
+    });
+    revisions.push(await getChannelMemoryRevision(target));
+    await removeChannelMemoryEntries(target, { ids: [added.added[0]!.id] });
+    revisions.push(await getChannelMemoryRevision(target));
+    await addChannelMemoryEntries(target, ['Run tests']);
+    revisions.push(await getChannelMemoryRevision(target));
+    await clearChannelMemory(target);
+    revisions.push(await getChannelMemoryRevision(target));
+
+    for (let index = 1; index < revisions.length; index += 1) {
+      expect(revisions[index]).not.toBe(revisions[index - 1]);
+    }
+  });
+
+  it('changes revision when legacy channel memory changes', async () => {
+    const missing = await getChannelMemoryRevision(target);
+    const legacyPath = writeLegacy('Use staging\n');
+    const created = await getChannelMemoryRevision(target);
+    fs.writeFileSync(legacyPath, 'Use production instead\n');
+    const replaced = await getChannelMemoryRevision(target);
+    fs.unlinkSync(legacyPath);
+    const removed = await getChannelMemoryRevision(target);
+
+    expect(created).not.toBe(missing);
+    expect(replaced).not.toBe(created);
+    expect(removed).toBe(missing);
   });
 
   it('renders JSON entries through the compatibility read API', async () => {
@@ -379,6 +474,51 @@ describe('channel memory', () => {
     });
   });
 
+  it('rejects credential-bearing batches before creating canonical storage', async () => {
+    const credentialText = `ghp_${'a'.repeat(36)}`;
+
+    await expectCredentialRejection(() =>
+      addChannelMemoryEntries(target, ['Use staging', credentialText]),
+    );
+
+    expect(fs.existsSync(getChannelMemoryFilePath(target))).toBe(false);
+  });
+
+  it('rejects credential-bearing batches without changing canonical storage', async () => {
+    await addChannelMemoryEntries(target, ['Use staging']);
+    const filePath = getChannelMemoryFilePath(target);
+    const before = fs.readFileSync(filePath);
+    const credentialText = `ghp_${'b'.repeat(36)}`;
+
+    await expectCredentialRejection(() =>
+      addChannelMemoryEntries(target, ['Run tests', credentialText]),
+    );
+
+    expect(fs.readFileSync(filePath)).toEqual(before);
+  });
+
+  it('persists the scanned add snapshot when an input getter changes', async () => {
+    const credentialText = `ghp_${'e'.repeat(36)}`;
+    const texts = ['Use staging', 'Run tests'];
+    let secondTextReads = 0;
+    Object.defineProperty(texts, '1', {
+      configurable: true,
+      enumerable: true,
+      get() {
+        secondTextReads += 1;
+        return secondTextReads === 1 ? 'Run tests' : credentialText;
+      },
+    });
+
+    await addChannelMemoryEntries(target, texts);
+
+    await expect(listChannelMemoryEntries(target)).resolves.toMatchObject([
+      { text: 'Use staging' },
+      { text: 'Run tests' },
+    ]);
+    expect(secondTextReads).toBe(1);
+  });
+
   it('keeps append as a compatibility wrapper', async () => {
     await expect(appendChannelMemory(target, 'Use staging')).resolves.toEqual({
       changed: true,
@@ -421,6 +561,66 @@ describe('channel memory', () => {
       createdBy: 'alice',
     });
     expect(result.entry?.updatedAt).not.toBe(entry.updatedAt);
+  });
+
+  it('rejects credential-bearing replacements without changing the entry', async () => {
+    const [entry] = (await addChannelMemoryEntries(target, ['Use staging']))
+      .added;
+    const filePath = getChannelMemoryFilePath(target);
+    const before = fs.readFileSync(filePath);
+    const credentialText = `ghp_${'c'.repeat(36)}`;
+
+    await expectCredentialRejection(() =>
+      updateChannelMemoryEntry(target, { id: entry.id, text: credentialText }),
+    );
+
+    expect(fs.readFileSync(filePath)).toEqual(before);
+    await expect(listChannelMemoryEntries(target)).resolves.toEqual([entry]);
+  });
+
+  it('persists one scanned update snapshot when mutation getters change', async () => {
+    const [entry] = (await addChannelMemoryEntries(target, ['Use staging']))
+      .added;
+    const credentialText = `ghp_${'f'.repeat(36)}`;
+    const reads = { id: 0, text: 0, expectedText: 0 };
+    const mutation = {
+      get id() {
+        reads.id += 1;
+        return entry.id;
+      },
+      get text() {
+        reads.text += 1;
+        return reads.text === 1 ? 'Use production' : credentialText;
+      },
+      get expectedText() {
+        reads.expectedText += 1;
+        return 'Use staging';
+      },
+    };
+
+    await updateChannelMemoryEntry(target, mutation);
+
+    await expect(listChannelMemoryEntries(target)).resolves.toMatchObject([
+      { id: entry.id, text: 'Use production' },
+    ]);
+    expect(reads).toEqual({ id: 1, text: 1, expectedText: 1 });
+  });
+
+  it('allows manually seeded credential entries to be removed and cleared', async () => {
+    const credentialText = `ghp_${'d'.repeat(36)}`;
+    const entry = { id: 'm-111111111111', text: credentialText };
+    writeJson(serializeChannelMemoryDocument({ version: 1, entries: [entry] }));
+
+    await expect(
+      removeChannelMemoryEntries(target, { ids: [entry.id] }),
+    ).resolves.toMatchObject({ changed: true, removed: [entry] });
+    await expect(listChannelMemoryEntries(target)).resolves.toEqual([]);
+
+    writeJson(serializeChannelMemoryDocument({ version: 1, entries: [entry] }));
+    await expect(clearChannelMemory(target)).resolves.toMatchObject({
+      changed: true,
+    });
+    await expect(listChannelMemoryEntries(target)).resolves.toEqual([]);
   });
 
   it('rejects updates that duplicate another entry after normalization', async () => {

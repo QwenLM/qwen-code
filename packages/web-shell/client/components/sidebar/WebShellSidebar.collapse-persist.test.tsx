@@ -160,6 +160,7 @@ function renderSidebar() {
           onOpenSettings={() => {}}
           onOpenDaemonStatus={() => {}}
           onOpenScheduledTasks={() => {}}
+          onOpenGoals={() => {}}
           onOpenSessions={() => {}}
           onOpenSplitView={() => {}}
           onNewSession={() => false}

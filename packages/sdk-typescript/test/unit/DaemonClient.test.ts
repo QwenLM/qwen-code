@@ -31,6 +31,7 @@ import type {
   DaemonWorkspaceMcpStatus,
   DaemonWorkspacePreflightStatus,
   DaemonWorkspaceProvidersStatus,
+  DaemonWorkspaceSessionInfo,
   DaemonWorkspaceSkillsStatus,
 } from '../../src/daemon/types.js';
 
@@ -683,6 +684,21 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('reloads primary and workspace-qualified MCP settings over REST', async () => {
+      const result = { accepted: true };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(202, result));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.reloadWorkspaceMcp()).resolves.toEqual(result);
+      await expect(
+        client.workspaceById('workspace/id').reloadWorkspaceMcp(),
+      ).resolves.toEqual(result);
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['POST', 'http://daemon/workspace/mcp/reload'],
+        ['POST', 'http://daemon/workspaces/workspace%2Fid/mcp/reload'],
+      ]);
+    });
+
     it('reads primary and workspace-qualified Git status over REST', async () => {
       const primary = {
         v: 1 as const,
@@ -729,6 +745,75 @@ describe('DaemonClient', () => {
         ['GET', 'http://daemon/workspaces/%2Fwork%2Fsecondary/git'],
       ]);
       expect(transportFetch).not.toHaveBeenCalled();
+    });
+
+    it('reads Git diff list and per-file hunks (incl. rename oldPath) over REST', async () => {
+      const diffList = {
+        v: 1 as const,
+        workspaceCwd: '/work/main',
+        available: true,
+        filesCount: 1,
+        linesAdded: 2,
+        linesRemoved: 1,
+        files: [
+          {
+            path: 'src/new.ts',
+            oldPath: 'src/old.ts',
+            added: 2,
+            removed: 1,
+            isBinary: false,
+            isUntracked: false,
+            isDeleted: false,
+            truncated: false,
+          },
+        ],
+        hiddenCount: 0,
+      };
+      const hunks = {
+        v: 1 as const,
+        workspaceCwd: '/work/main',
+        path: 'src/new.ts',
+        available: true,
+        hunks: [
+          {
+            oldStart: 1,
+            oldLines: 1,
+            newStart: 1,
+            newLines: 1,
+            lines: ['-a', '+b'],
+          },
+        ],
+      };
+      const { fetch, calls } = recordingFetch((req) =>
+        jsonResponse(200, req.url.includes('/diff/file') ? hunks : diffList),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.workspaceGitDiff()).resolves.toEqual(diffList);
+      // Without oldPath: no &oldPath= query segment.
+      await expect(client.workspaceGitDiffFile('src/new.ts')).resolves.toEqual(
+        hunks,
+      );
+      // With oldPath: urlEncoded into the query for rename detection.
+      await expect(
+        client.workspaceGitDiffFile('src/new.ts', 'src/old.ts'),
+      ).resolves.toEqual(hunks);
+      // Workspace-qualified variant routes through /workspaces/:cwd/git/diff/file.
+      await expect(
+        client.workspaceByCwd('/work/secondary').workspaceGitDiffFile('a.ts'),
+      ).resolves.toEqual(hunks);
+      expect(calls.map((call) => [call.method, call.url])).toEqual([
+        ['GET', 'http://daemon/workspace/git/diff'],
+        ['GET', 'http://daemon/workspace/git/diff/file?path=src%2Fnew.ts'],
+        [
+          'GET',
+          'http://daemon/workspace/git/diff/file?path=src%2Fnew.ts&oldPath=src%2Fold.ts',
+        ],
+        [
+          'GET',
+          'http://daemon/workspaces/%2Fwork%2Fsecondary/git/diff/file?path=a.ts',
+        ],
+      ]);
     });
 
     it('lets ACP preheat wait longer than the client default timeout', async () => {
@@ -2612,6 +2697,27 @@ describe('DaemonClient', () => {
   });
 
   describe('listWorkspaceSessions', () => {
+    it('gets aggregate session info for a scoped workspace', async () => {
+      const reply: DaemonWorkspaceSessionInfo = {
+        active: 4,
+        archived: 2,
+        total: 6,
+        live: 1,
+        expensive: true,
+        cost: 'disk_scan',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.workspaceById('workspace/id').getWorkspaceSessionInfo(),
+      ).resolves.toEqual(reply);
+
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/workspaces/workspace%2Fid/session-info',
+      ]);
+    });
+
     it('GETs /workspace/:id/sessions and returns the array', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, {
@@ -3138,6 +3244,90 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('generateSessionContent', () => {
+    it('POSTs the prompt and yields generation SSE events', async () => {
+      const frames = [
+        'event: started\ndata: {"v":1,"type":"started","requestId":"r-1","model":"fast","modelSource":"fast"}\n\n',
+        'event: thinking\ndata: {"v":1,"type":"thinking","requestId":"r-1"}\n\n',
+        'event: delta\ndata: {"v":1,"type":"delta","requestId":"r-1","seq":0,"text":"translated"}\n\n',
+        'event: done\ndata: {"v":1,"type":"done","requestId":"r-1","model":"fast","modelSource":"fast","inputTokens":8,"outputTokens":2}\n\n',
+      ].join('');
+      const { fetch, calls } = recordingFetch(() => sseResponse(frames));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const events = [];
+      for await (const event of client.generateSessionContent(
+        's/1',
+        'Translate this',
+        { clientId: 'client-1' },
+      )) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([
+        {
+          v: 1,
+          type: 'started',
+          requestId: 'r-1',
+          model: 'fast',
+          modelSource: 'fast',
+        },
+        {
+          v: 1,
+          type: 'thinking',
+          requestId: 'r-1',
+        },
+        {
+          v: 1,
+          type: 'delta',
+          requestId: 'r-1',
+          seq: 0,
+          text: 'translated',
+        },
+        {
+          v: 1,
+          type: 'done',
+          requestId: 'r-1',
+          model: 'fast',
+          modelSource: 'fast',
+          inputTokens: 8,
+          outputTokens: 2,
+        },
+      ]);
+      expect(calls[0]?.url).toBe('http://daemon/session/s%2F1/generate');
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.headers.accept).toBe('text/event-stream');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(JSON.parse(calls[0]?.body as string)).toEqual({
+        prompt: 'Translate this',
+      });
+    });
+
+    it('does not expose malformed generation events through the typed API', async () => {
+      const frames = [
+        'event: delta\ndata: {"v":1,"type":"delta","requestId":"r-1","seq":"0","text":"invalid"}\n\n',
+        'event: done\ndata: {"v":1,"type":"done","requestId":"r-1","modelSource":"fast"}\n\n',
+        'event: error\ndata: {"v":1,"type":"error","code":"failed","message":"Generation failed"}\n\n',
+      ].join('');
+      const { fetch } = recordingFetch(() => sseResponse(frames));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const events = [];
+      for await (const event of client.generateSessionContent('s-1', 'test')) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([
+        {
+          v: 1,
+          type: 'error',
+          code: 'failed',
+          message: 'Generation failed',
+        },
+      ]);
+    });
+  });
+
   describe('enqueueMidTurnMessage (web-shell mid-turn drain)', () => {
     it('POSTs the message and returns accepted:true', async () => {
       const { fetch, calls } = recordingFetch(() =>
@@ -3342,6 +3532,57 @@ describe('DaemonClient', () => {
       ).rejects.toMatchObject({
         status: 409,
         body: expect.objectContaining({ code: 'skill_not_toggleable' }),
+      });
+    });
+  });
+
+  describe('workspace Skill management', () => {
+    it('uploads a Skill package', async () => {
+      const response = {
+        skillName: 'demo-skill',
+        scope: 'workspace',
+        installedPath: '/workspace/.qwen/skills/demo-skill/SKILL.md',
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, response),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const request = {
+        name: 'demo-skill',
+        scope: 'workspace' as const,
+        source: {
+          type: 'folder' as const,
+          path: '/Users/example/skills/demo-skill',
+        },
+      };
+
+      await expect(client.installWorkspaceSkill(request)).resolves.toEqual(
+        response,
+      );
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/workspace/skills/install',
+        method: 'POST',
+        body: JSON.stringify(request),
+      });
+    });
+
+    it('deletes a global Skill', async () => {
+      const response = {
+        skillName: 'demo-skill',
+        scope: 'global',
+        deleted: true,
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, response),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.deleteWorkspaceSkill('demo-skill', 'global'),
+      ).resolves.toEqual(response);
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/workspace/skills/demo-skill?scope=global',
+        method: 'DELETE',
       });
     });
   });
@@ -3748,6 +3989,39 @@ describe('DaemonClient', () => {
         'content-type': 'application/json',
         'x-qwen-client-id': 'client-8',
       });
+    });
+
+    it('preserves structured startup failure bodies on 502 responses', async () => {
+      const body = {
+        error: 'Channel worker exited before ready.',
+        code: 'channel_worker_start_failed',
+        rolledBack: true,
+        state: {
+          enabled: false,
+          selection: null,
+          transition: 'idle',
+          workers: [],
+        },
+        startupFailures: [
+          {
+            workspaceCwd: '/work',
+            channel: 'telegram',
+            phase: 'connect',
+            code: 'ECONNREFUSED',
+            message: 'connection refused',
+          },
+        ],
+      };
+      const { fetch } = recordingFetch(() => jsonResponse(502, body));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const error = await client
+        .setChannelWorkerSelection({ mode: 'all' })
+        .catch((value: unknown) => value);
+
+      expect(error).toBeInstanceOf(DaemonHttpError);
+      expect((error as DaemonHttpError).status).toBe(502);
+      expect((error as DaemonHttpError).body).toEqual(body);
     });
 
     it('DELETEs idempotently and maps HTTP failures', async () => {

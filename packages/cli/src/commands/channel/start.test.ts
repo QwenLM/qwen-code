@@ -14,6 +14,7 @@ const mockStorageGetGlobalQwenDir = vi.hoisted(() =>
   vi.fn(() => '/tmp/qwen-home'),
 );
 const mockReadChannelMemory = vi.hoisted(() => vi.fn());
+const mockGetChannelMemoryRevision = vi.hoisted(() => vi.fn());
 const mockListChannelMemoryEntries = vi.hoisted(() => vi.fn());
 const mockAddChannelMemoryEntries = vi.hoisted(() => vi.fn());
 const mockUpdateChannelMemoryEntry = vi.hoisted(() => vi.fn());
@@ -106,6 +107,7 @@ vi.mock('undici', () => ({
 vi.mock('@qwen-code/qwen-code-core', () => ({
   addChannelMemoryEntries: mockAddChannelMemoryEntries,
   clearChannelMemory: mockClearChannelMemory,
+  getChannelMemoryRevision: mockGetChannelMemoryRevision,
   listChannelMemoryEntries: mockListChannelMemoryEntries,
   nextFireTime: mockNextFireTime,
   normalizeProxyUrl: mockNormalizeProxyUrl,
@@ -872,6 +874,7 @@ describe('startCommand.handler', () => {
       expect.objectContaining({
         channelMemory: {
           readChannelMemory: mockReadChannelMemory,
+          getChannelMemoryRevision: mockGetChannelMemoryRevision,
           listChannelMemoryEntries: mockListChannelMemoryEntries,
           addChannelMemoryEntries: mockAddChannelMemoryEntries,
           updateChannelMemoryEntry: mockUpdateChannelMemoryEntry,
@@ -913,6 +916,7 @@ describe('startCommand.handler', () => {
       expect.objectContaining({
         channelMemory: {
           readChannelMemory: mockReadChannelMemory,
+          getChannelMemoryRevision: mockGetChannelMemoryRevision,
           listChannelMemoryEntries: mockListChannelMemoryEntries,
           addChannelMemoryEntries: mockAddChannelMemoryEntries,
           updateChannelMemoryEntry: mockUpdateChannelMemoryEntry,
@@ -932,6 +936,7 @@ describe('startCommand.handler', () => {
       expect.objectContaining({
         channelMemory: {
           readChannelMemory: mockReadChannelMemory,
+          getChannelMemoryRevision: mockGetChannelMemoryRevision,
           listChannelMemoryEntries: mockListChannelMemoryEntries,
           addChannelMemoryEntries: mockAddChannelMemoryEntries,
           updateChannelMemoryEntry: mockUpdateChannelMemoryEntry,

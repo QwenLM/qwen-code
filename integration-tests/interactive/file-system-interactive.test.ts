@@ -76,8 +76,20 @@ describe('Interactive file system', () => {
         true,
       );
 
-      const newFileContent = rig.readFile(fileName);
-      expect(newFileContent).toBe('1.0.1');
+      // The tool call is logged once the model issues it, but the turn may
+      // still be settling (a failed edit can be retried) and the model may
+      // write more than just '1.0.1'. Poll the file until it contains the new
+      // version, matching the lenient assertion used by the non-interactive
+      // sibling test (file-system.test.ts uses .toContain('1.0.1')).
+      const updated = await rig.poll(
+        () => rig.readFile(fileName).includes('1.0.1'),
+        rig.getDefaultTimeout(),
+        200,
+      );
+      if (!updated) {
+        printDebugInfo(rig, rig._interactiveOutput, { toolCall });
+      }
+      expect(updated, 'Expected file content to contain 1.0.1').toBe(true);
     },
   );
 });

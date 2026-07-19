@@ -9,7 +9,6 @@ import {
   APPROVAL_MODES,
   createDebugLogger,
   ModelsConfig,
-  resolveProviderProtocol,
   tokenLimit,
 } from '@qwen-code/qwen-code-core';
 import type { AuthType, CredentialProvider } from '@qwen-code/qwen-code-core';
@@ -28,7 +27,8 @@ import {
 } from '../utils/modelConfigUtils.js';
 import type { CliGenerationConfigInputs } from '../utils/modelConfigUtils.js';
 import {
-  formatAcpModelId,
+  buildAcpModelOptions,
+  getCurrentAcpModelId,
   parseAcpBaseModelId,
   sanitizeProviderBaseUrl,
 } from '../utils/acpModelUtils.js';
@@ -101,12 +101,31 @@ function buildWorkspaceProvidersStatus(
       ''
     ).trim();
     const hasCurrentModel = currentModelId.length > 0;
-    const currentAcpModelId =
-      hasCurrentModel && currentAuth
-        ? formatAcpModelId(currentModelId, currentAuth)
-        : currentModelId || undefined;
-    const currentBaseUrl = resolvedCliConfig.sources['baseUrl']
-      ? resolvedCliConfig.baseUrl || undefined
+    const modelCameFromSettings =
+      !argv.model && settings.model?.name?.trim() === currentModelId;
+    const currentBaseUrl =
+      modelCameFromSettings && settings.model?.baseUrl !== undefined
+        ? settings.model.baseUrl || undefined
+        : resolvedCliConfig.sources['baseUrl']
+          ? resolvedCliConfig.baseUrl || undefined
+          : undefined;
+    const currentRegistryBaseUrl =
+      modelCameFromSettings && currentAuth
+        ? settings.model?.baseUrl !== undefined
+          ? settings.model.baseUrl || null
+          : (modelsConfig.getResolvedModel(currentAuth, currentModelId)
+              ?.registryBaseUrl ?? null)
+        : undefined;
+    const modelOptions = buildAcpModelOptions(
+      modelsConfig.getAllConfiguredModels(),
+    );
+    const currentAcpModelId = hasCurrentModel
+      ? getCurrentAcpModelId(
+          modelOptions,
+          currentModelId,
+          currentAuth,
+          currentRegistryBaseUrl,
+        )
       : undefined;
     const fastModelId =
       typeof settings.fastModel === 'string' && settings.fastModel.length > 0
@@ -119,14 +138,8 @@ function buildWorkspaceProvidersStatus(
         : undefined;
     const approvalMode = resolveApprovalMode(settings);
     const providers = new Map<string, ServeWorkspaceProviderStatus>();
-    const explicitModelBaseUrls = buildExplicitModelBaseUrls(
-      settings.modelProviders,
-      settings.providerProtocol,
-    );
-
-    for (const model of modelsConfig
-      .getAllConfiguredModels()
-      .filter(isMainSelectableModel)) {
+    for (const option of modelOptions) {
+      const { model, effectiveModelId, modelId } = option;
       if (model.isRuntimeModel) continue;
       const authType = String(model.authType);
       let provider = providers.get(authType);
@@ -141,20 +154,8 @@ function buildWorkspaceProvidersStatus(
         providers.set(authType, provider);
       }
 
-      const effectiveModelId = model.id;
-      const modelId = formatAcpModelId(effectiveModelId, model.authType);
       const isCurrent =
-        currentAuth === model.authType &&
-        hasCurrentModel &&
-        matchesCurrentModel(currentModelId, effectiveModelId, modelId) &&
-        matchesCurrentBaseUrl(
-          currentBaseUrl,
-          model.baseUrl,
-          model.baseUrl !== undefined &&
-            explicitModelBaseUrls.has(
-              modelBaseUrlKey(authType, effectiveModelId, model.baseUrl),
-            ),
-        );
+        currentAuth === model.authType && currentAcpModelId === modelId;
       const providerModel: ServeWorkspaceProviderModel = {
         modelId,
         baseModelId: parseAcpBaseModelId(effectiveModelId),
@@ -239,89 +240,6 @@ function resolveApprovalMode(settings: Settings): ApprovalMode {
     );
   }
   return ApprovalMode.AUTO;
-}
-
-function isMainSelectableModel(model: {
-  fastOnly?: boolean;
-  voiceOnly?: boolean;
-}): boolean {
-  return model.fastOnly !== true && model.voiceOnly !== true;
-}
-
-function matchesCurrentModel(
-  currentModelId: string,
-  baseModelId: string,
-  acpModelId: string,
-): boolean {
-  return currentModelId === baseModelId || currentModelId === acpModelId;
-}
-
-function matchesCurrentBaseUrl(
-  currentBaseUrl: string | undefined,
-  modelBaseUrl: string | undefined,
-  modelHasExplicitBaseUrl: boolean,
-): boolean {
-  if (!currentBaseUrl) return !modelHasExplicitBaseUrl;
-  return currentBaseUrl === modelBaseUrl;
-}
-
-function buildExplicitModelBaseUrls(
-  modelProviders: Settings['modelProviders'],
-  providerProtocol: Settings['providerProtocol'],
-): Set<string> {
-  const baseUrls = new Set<string>();
-  if (!modelProviders) return baseUrls;
-
-  for (const [providerId, providerConfig] of Object.entries(modelProviders)) {
-    const authType = resolveProviderProtocol(providerId, providerProtocol);
-    if (!authType) continue;
-    const models = readProviderModels(providerConfig);
-    for (const model of models) {
-      if (
-        typeof model.id === 'string' &&
-        typeof model.baseUrl === 'string' &&
-        model.baseUrl.length > 0
-      ) {
-        baseUrls.add(modelBaseUrlKey(authType, model.id, model.baseUrl));
-      }
-    }
-  }
-  return baseUrls;
-}
-
-type ProviderModelBaseUrlConfig = {
-  id?: unknown;
-  baseUrl?: unknown;
-};
-
-function readProviderModels(
-  providerConfig: unknown,
-): ProviderModelBaseUrlConfig[] {
-  if (Array.isArray(providerConfig)) {
-    return providerConfig.filter(isProviderModelBaseUrlConfig);
-  }
-  if (typeof providerConfig !== 'object' || providerConfig === null) {
-    return [];
-  }
-
-  const { models } = providerConfig as { models?: unknown };
-  return Array.isArray(models)
-    ? models.filter(isProviderModelBaseUrlConfig)
-    : [];
-}
-
-function isProviderModelBaseUrlConfig(
-  value: unknown,
-): value is ProviderModelBaseUrlConfig {
-  return typeof value === 'object' && value !== null;
-}
-
-function modelBaseUrlKey(
-  authType: string,
-  modelId: string,
-  baseUrl: string,
-): string {
-  return `${authType}\0${modelId}\0${baseUrl}`;
 }
 
 const URL_LIKE_PATTERN = /\b[A-Za-z][A-Za-z\d+.-]*:\/\/[^\s'"`<>]+/g;

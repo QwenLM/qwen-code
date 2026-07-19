@@ -240,6 +240,100 @@ describe('SessionService', () => {
       );
     });
 
+    it('getSessionInfoCounts aggregates active and archived membership', async () => {
+      readdirSyncSpy.mockImplementation((dir: fs.PathLike) => {
+        if (dir.toString().endsWith(`${path.sep}archive`)) {
+          return [`${sessionIdB}.jsonl`] as unknown as Array<fs.Dirent<Buffer>>;
+        }
+        return [
+          `${sessionIdA}.jsonl`,
+          'archive',
+          'not-a-session.txt',
+        ] as unknown as Array<fs.Dirent<Buffer>>;
+      });
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes(sessionIdA)) return [recordA1];
+          if (filePath.includes(sessionIdB)) return [recordB1];
+          return [];
+        },
+      );
+
+      const result = await sessionService.getSessionInfoCounts();
+
+      expect(result).toEqual({
+        active: 1,
+        archived: 1,
+        total: 2,
+        truncated: false,
+      });
+      // Membership scan only needs the first record — never a deep read.
+      for (const [, lineLimit] of vi.mocked(jsonl.readLines).mock.calls) {
+        expect(lineLimit).toBe(1);
+      }
+    });
+
+    it('getSessionInfoCounts excludes sessions from other projects', async () => {
+      readdirSyncSpy.mockImplementation((dir: fs.PathLike) =>
+        dir.toString().endsWith(`${path.sep}archive`)
+          ? ([] as unknown as Array<fs.Dirent<Buffer>>)
+          : ([`${sessionIdA}.jsonl`] as unknown as Array<fs.Dirent<Buffer>>),
+      );
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        { ...recordA1, cwd: '/different/project' },
+      ]);
+      vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
+        cwd === '/test/project/root'
+          ? 'test-project-hash'
+          : 'other-project-hash',
+      );
+
+      await expect(sessionService.getSessionInfoCounts()).resolves.toEqual({
+        active: 0,
+        archived: 0,
+        total: 0,
+        truncated: false,
+      });
+    });
+
+    it('getSessionInfoCounts returns zeros when chats dirs are missing', async () => {
+      const error = new Error('ENOENT') as NodeJS.ErrnoException;
+      error.code = 'ENOENT';
+      readdirSyncSpy.mockImplementation(() => {
+        throw error;
+      });
+
+      await expect(sessionService.getSessionInfoCounts()).resolves.toEqual({
+        active: 0,
+        archived: 0,
+        total: 0,
+        truncated: false,
+      });
+    });
+
+    it('marks counts truncated when a candidate session cannot be read', async () => {
+      readdirSyncSpy.mockImplementation((dir: fs.PathLike) =>
+        dir.toString().endsWith(`${path.sep}archive`)
+          ? ([] as unknown as Array<fs.Dirent<Buffer>>)
+          : ([`${sessionIdA}.jsonl`, `${sessionIdB}.jsonl`] as unknown as Array<
+              fs.Dirent<Buffer>
+            >),
+      );
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes(sessionIdA)) return [recordA1];
+          throw new Error('unreadable');
+        },
+      );
+
+      await expect(sessionService.getSessionInfoCounts()).resolves.toEqual({
+        active: 1,
+        archived: 0,
+        total: 1,
+        truncated: true,
+      });
+    });
+
     it('should extract prompt text from first record', async () => {
       const now = Date.now();
 

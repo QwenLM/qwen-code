@@ -68,6 +68,11 @@ export * from './output/types.js';
 
 export * from './core/client.js';
 export * from './core/contentGenerator.js';
+export {
+  getRuntimeContentGenerator,
+  runWithRuntimeContentGenerator,
+  type RuntimeContentGeneratorView,
+} from './agents/runtime/agent-context.js';
 export * from './core/reasoning-effort.js';
 export * from './core/coreToolScheduler.js';
 export * from './core/permissionFlow.js';
@@ -252,6 +257,7 @@ export {
   SESSION_TRANSCRIPT_DEFAULT_LIMIT,
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SESSION_TRANSCRIPT_MAX_LIMIT,
+  SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
   SessionTranscriptCursorCodec,
   SessionTranscriptReader,
   SessionTranscriptPageTooLargeError,

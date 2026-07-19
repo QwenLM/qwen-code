@@ -184,7 +184,11 @@ export async function classifyAction(
       maxAttempts: 2,
       config: {
         temperature: 0,
-        maxOutputTokens: 32,
+        // 32 tokens is insufficient for adaptive-thinking models (Claude
+        // 4.6+) which emit server-driven thinking that consumes output
+        // budget before any tool_use. 256 gives enough headroom for
+        // thinking + the respond_in_schema tool call without being wasteful.
+        maxOutputTokens: 256,
         thinkingConfig: { includeThoughts: false },
       },
     })) as Stage1Response;

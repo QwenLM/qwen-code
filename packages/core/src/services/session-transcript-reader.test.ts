@@ -243,6 +243,130 @@ describe('SessionTranscriptReader', () => {
     expect(second.nextCursorState).toBeUndefined();
   });
 
+  it('pages backward before an exclusive active record boundary', async () => {
+    await writeRecords([
+      record('u1', null, 'first prompt'),
+      record('a1', 'u1', 'first answer'),
+      record('u2', 'a1', 'second prompt'),
+      record('a2', 'u2', 'second answer'),
+      record('u3', 'a2', 'third prompt'),
+      record('a3', 'u3', 'third answer'),
+    ]);
+
+    const reader = new SessionTranscriptReader(workspaceDir);
+    const first = await reader.readPage(sessionId, {
+      beforeRecordId: 'u3',
+      limit: 2,
+    });
+    const second = await reader.readPage(sessionId, {
+      cursor: encodeCursor(first.nextCursorState!),
+      limit: 2,
+    });
+
+    expect(first.records.map((item) => item.uuid)).toEqual(['u2', 'a2']);
+    expect(first.direction).toBe('backward');
+    expect(first.hasMore).toBe(true);
+    expect(first.nextCursorState).toMatchObject({
+      position: 2,
+      direction: 'backward',
+    });
+    expect(second.records.map((item) => item.uuid)).toEqual(['u1', 'a1']);
+    expect(second.hasMore).toBe(false);
+  });
+
+  it('keeps backward pages within a normal user turn boundary', async () => {
+    const toolCall = record('a-tool', 'u1', 'call tool');
+    const toolResult = {
+      ...record('t1', 'a-tool', 'tool result'),
+      type: 'tool_result' as const,
+    };
+    await writeRecords([
+      record('u1', null, 'first prompt'),
+      toolCall,
+      toolResult,
+      record('a1', 't1', 'first answer'),
+      record('u2', 'a1', 'second prompt'),
+      record('a2', 'u2', 'second answer'),
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      { beforeRecordId: 'u2', limit: 4 },
+    );
+
+    expect(page.records.map((item) => item.uuid)).toEqual([
+      'u1',
+      'a-tool',
+      't1',
+      'a1',
+    ]);
+  });
+
+  it('keeps a long user turn complete when it exceeds the record limit', async () => {
+    const toolCall = record('a-tool', 'u1', 'call tool');
+    const toolResult = {
+      ...record('t1', 'a-tool', 'tool result'),
+      type: 'tool_result' as const,
+    };
+    await writeRecords([
+      record('u1', null, 'prompt'),
+      toolCall,
+      toolResult,
+      record('a-final', 't1', 'final answer'),
+      record('u2', 'a-final', 'next prompt'),
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      { beforeRecordId: 'u2', limit: 2 },
+    );
+
+    expect(page.records.map((item) => item.uuid)).toEqual([
+      'u1',
+      'a-tool',
+      't1',
+      'a-final',
+    ]);
+    expect(page.hasMore).toBe(false);
+  });
+
+  it('rejects a backward turn that exceeds maxBytes after alignment', async () => {
+    const toolCall = record('a-tool', 'u1', 'call tool');
+    const toolResult = {
+      ...record('t1', 'a-tool', 'tool result'),
+      type: 'tool_result' as const,
+    };
+    const finalAnswer = record('a-final', 't1', 'final answer');
+    await writeRecords([
+      record('u1', null, 'prompt'),
+      toolCall,
+      toolResult,
+      finalAnswer,
+      record('u2', 'a-final', 'next prompt'),
+    ]);
+
+    await expect(
+      new SessionTranscriptReader(workspaceDir).readPage(sessionId, {
+        beforeRecordId: 'u2',
+        limit: 2,
+        maxBytes: Buffer.byteLength(JSON.stringify(finalAnswer)),
+      }),
+    ).rejects.toBeInstanceOf(SessionTranscriptPageTooLargeError);
+  });
+
+  it('rejects a backward boundary outside the active chain', async () => {
+    await writeRecords([
+      record('u1', null, 'root'),
+      record('a1', 'u1', 'answer'),
+    ]);
+
+    await expect(
+      new SessionTranscriptReader(workspaceDir).readPage(sessionId, {
+        beforeRecordId: 'missing',
+      }),
+    ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+  });
+
   it('continues a frozen snapshot after new records are appended', async () => {
     const filePath = await writeRecords([
       record('u1', null, 'root'),

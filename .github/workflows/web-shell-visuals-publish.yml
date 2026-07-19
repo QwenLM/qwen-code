@@ -162,11 +162,17 @@ jobs:
           STAGE="${RUNNER_TEMP}/visuals-stage"
           rm -rf "${STAGE}"
           count="$(node .github/scripts/web-shell-visuals-publish.mjs stage "${ART}/screenshots" "${ART}/gifs" "${STAGE}")"
+          # A zero count is a MEANINGFUL "no visual change" state, not "nothing
+          # to do": still update the marker comment (so a prior preview's stale
+          # images + SHA don't linger — the comment promises to refresh on every
+          # push), just without hosting a new asset commit.
           if [ -z "${count}" ] || [ "${count}" = "0" ]; then
-            echo "::notice::No valid images in the artifact; nothing to publish."
-            exit 0
+            echo "::notice::No changed screenshots; updating the marker with a no-change note (no asset commit)."
+            HAS_IMAGES=0
+          else
+            echo "Staged ${count} image(s) for PR #${PR}."
+            HAS_IMAGES=1
           fi
-          echo "Staged ${count} image(s) for PR #${PR}."
 
           # Re-validate right before the force-push too: a close/new-head during
           # download+staging must not force-push a stale snapshot (which would
@@ -182,38 +188,45 @@ jobs:
           # (a bare `pr-assets` branch would D/F-conflict with pr-assets/*), and
           # the per-PR concurrency group serializes same-PR runs so the
           # force-push never drops a concurrent snapshot.
-          BRANCH="pr-assets/web-shell-visuals-${PR}"
-          AUTH_URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          WORK="${RUNNER_TEMP}/pr-assets"
-          rm -rf "${WORK}"
-          mkdir -p "${WORK}/imgs"
-          cp "${STAGE}"/* "${WORK}/imgs/"
-          cd "${WORK}"
-          git init -q
-          git config user.name 'qwen-code-bot'
-          git config user.email 'qwen-code-bot@users.noreply.github.com'
-          git checkout -q --orphan snapshot
-          git add imgs
-          git commit -q -m "web-shell visuals: PR #${PR} (run ${RUN_ID})"
-          # Bounded retry for transient push failures (network / brief lock).
-          # Same-PR runs are serialized by concurrency, so this never needs to
-          # reconcile a concurrent snapshot — a plain retry suffices.
-          pushed=0
-          for attempt in 1 2 3; do
-            if git push -q --force "${AUTH_URL}" "HEAD:${BRANCH}"; then
-              pushed=1
-              break
+          # Host the images ONLY when there are changed views. A no-change run
+          # skips the asset commit entirely; RAW_BASE stays empty and the
+          # comment below is image-less ("no screenshot changes").
+          RAW_BASE=''
+          if [ "${HAS_IMAGES}" = "1" ]; then
+            BRANCH="pr-assets/web-shell-visuals-${PR}"
+            AUTH_URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+            WORK="${RUNNER_TEMP}/pr-assets"
+            rm -rf "${WORK}"
+            mkdir -p "${WORK}/imgs"
+            cp "${STAGE}"/* "${WORK}/imgs/"
+            cd "${WORK}"
+            git init -q
+            git config user.name 'qwen-code-bot'
+            git config user.email 'qwen-code-bot@users.noreply.github.com'
+            git checkout -q --orphan snapshot
+            git add imgs
+            git commit -q -m "web-shell visuals: PR #${PR} (run ${RUN_ID})"
+            # Bounded retry for transient push failures (network / brief lock).
+            # Same-PR runs are serialized by concurrency, so this never needs to
+            # reconcile a concurrent snapshot — a plain retry suffices.
+            pushed=0
+            for attempt in 1 2 3; do
+              if git push -q --force "${AUTH_URL}" "HEAD:${BRANCH}"; then
+                pushed=1
+                break
+              fi
+              echo "::notice::force-push attempt ${attempt} failed; retrying."
+              sleep 2
+            done
+            if [ "${pushed}" -ne 1 ]; then
+              echo "::error::Failed to push web-shell visuals to ${BRANCH} after retries."
+              exit 1
             fi
-            echo "::notice::force-push attempt ${attempt} failed; retrying."
-            sleep 2
-          done
-          if [ "${pushed}" -ne 1 ]; then
-            echo "::error::Failed to push web-shell visuals to ${BRANCH} after retries."
-            exit 1
+            ASSET_SHA="$(git rev-parse HEAD)"
+            cd "${GITHUB_WORKSPACE}"
+            echo "web-shell visuals hosted on ${BRANCH} at ${ASSET_SHA}."
+            RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${ASSET_SHA}/imgs"
           fi
-          ASSET_SHA="$(git rev-parse HEAD)"
-          cd "${GITHUB_WORKSPACE}"
-          echo "web-shell visuals hosted on ${BRANCH} at ${ASSET_SHA}."
 
           # --- Build the comment body ---------------------------------------
           # Delegated to the same unit-tested script (light/dark pairing, flow
@@ -221,7 +234,7 @@ jobs:
           BODY_FILE="${RUNNER_TEMP}/visuals-comment.md"
           node .github/scripts/web-shell-visuals-publish.mjs comment \
             "${STAGE}" \
-            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${ASSET_SHA}/imgs" \
+            "${RAW_BASE}" \
             "${SHORT_SHA}" "${RUN_URL}" "${BODY_FILE}"
 
           # --- Post or update the PR comment --------------------------------

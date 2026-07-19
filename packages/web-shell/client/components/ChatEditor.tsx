@@ -14,6 +14,10 @@ import { Tooltip as TooltipPrimitive } from 'radix-ui';
 import { DAEMON_APPROVAL_MODES } from '@qwen-code/webui/daemon-react-sdk';
 import type { CommandInfo } from '../adapters/types';
 import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/webui/daemon-react-sdk';
+import type {
+  DaemonSessionGroupPresetColor,
+  DaemonWorkspaceGitStatus,
+} from '@qwen-code/sdk/daemon';
 import type { CommandDisplayCategoryOrder } from '../utils/commandDisplay';
 import type { SkillInfo } from '../completions/slashCompletion';
 import { useI18n } from '../i18n';
@@ -37,13 +41,16 @@ import {
 } from '../hooks/useComposerCore';
 import { AtMentionPanel } from './AtMentionPanel';
 import { cssUrlVar } from '../utils/cssUrlVar';
-import { getComposerTagIconUrl } from '../utils/composerTag';
+import {
+  getComposerTagIconUrl,
+  isBuiltinComposerTagIconUrl,
+} from '../utils/composerTag';
 import { isSafeImageSrc } from './messages/Markdown';
 import { ModeIcon } from './ModeIcon';
 import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { VoiceButton } from '../voice/VoiceButton';
-import { GitBranchIndicator } from './GitBranchIndicator';
+import { GitBranchChipContent, GitBranchIndicator } from './GitBranchIndicator';
 import { WorkspaceIndicator } from './WorkspaceIndicator';
 import { ChevronDownIcon, FolderClosedIcon } from 'lucide-react';
 import {
@@ -105,6 +112,7 @@ interface ChatEditorProps {
     commitAccepted?: import('../hooks/useComposerCore').ComposerSubmitCommit,
     metadata?: ComposerSubmitMetadata,
   ) => boolean | void;
+  onInputTextChange?: (text: string) => void;
   onCycleMode?: () => void;
   onToggleShortcuts?: () => void;
   onCancel?: () => void;
@@ -123,10 +131,19 @@ interface ChatEditorProps {
   currentMode?: string;
   currentModel?: string;
   gitBranch?: string;
+  /** Enriched working-tree summary (dirty / ahead-behind / stash / operation). */
+  gitStatus?: DaemonWorkspaceGitStatus;
+  /** Opens the working-tree Changes dialog; makes the git chip clickable. */
+  onOpenGitDiff?: () => void;
   /** Workspace name shown in the pane composer's `workspace` toolbar chip. */
   workspaceName?: string;
   /** Full workspace cwd, used as the chip's tooltip. */
   workspaceTitle?: string;
+  /**
+   * Stable per-workspace accent color for the chip, so it stays distinguishable
+   * from other panes' chips even when it collapses to an icon on a narrow split.
+   */
+  workspaceColor?: DaemonSessionGroupPresetColor;
   chatWidthMode?: '1000' | 'wide';
   showChatWidthToggle?: boolean;
   chatWidthToggleMin?: number;
@@ -1111,6 +1128,7 @@ export const ChatEditor = memo(
   forwardRef<EditorHandle, ChatEditorProps>(function ChatEditor(props, ref) {
     const {
       onSubmit,
+      onInputTextChange,
       onCycleMode,
       onToggleShortcuts,
       onCancel,
@@ -1127,8 +1145,11 @@ export const ChatEditor = memo(
       currentMode = 'default',
       currentModel = '',
       gitBranch,
+      gitStatus,
+      onOpenGitDiff,
       workspaceName,
       workspaceTitle,
+      workspaceColor,
       chatWidthMode = '1000',
       showChatWidthToggle = true,
       chatWidthToggleMin,
@@ -1166,6 +1187,7 @@ export const ChatEditor = memo(
 
     const core = useComposerCore({
       onSubmit,
+      onInputTextChange,
       onCycleMode,
       onToggleShortcuts,
       disabled,
@@ -1546,7 +1568,10 @@ export const ChatEditor = memo(
       const iconUrl =
         tag.icon ?? getComposerTagIconUrl(tag.kind, composerTagIcons);
       const safeIconUrl =
-        iconUrl && isSafeImageSrc(iconUrl) ? iconUrl : undefined;
+        iconUrl &&
+        (isBuiltinComposerTagIconUrl(iconUrl) || isSafeImageSrc(iconUrl))
+          ? iconUrl
+          : undefined;
       if (!tagLabel && !tagValue) {
         return <span className={styles.tagLabel}>{tag.id}</span>;
       }
@@ -1569,7 +1594,10 @@ export const ChatEditor = memo(
     const modeLabel = getModeLabel(currentMode, t);
 
     const currentModelLabel = currentModel
-      ? getModelDisplayName(currentModel)
+      ? (availableModels.find((model) => model.id === currentModel)?.label ??
+        (currentModel.startsWith('qwen-route:')
+          ? ''
+          : getModelDisplayName(currentModel)))
       : '';
     const { modelLabel, modelLabelReady } = resolveToolbarModelLabel({
       currentModelLabel,
@@ -1578,11 +1606,7 @@ export const ChatEditor = memo(
     const selectedWorkspace = workspaces?.find((entry) =>
       selectedWorkspaceCwd ? entry.cwd === selectedWorkspaceCwd : entry.primary,
     );
-    const selectedWorkspaceLabel = selectedWorkspace
-      ? `${selectedWorkspace.label}${
-          selectedWorkspace.primary ? ` · ${t('sidebar.workspacePrimary')}` : ''
-        }`
-      : '';
+    const selectedWorkspaceLabel = selectedWorkspace?.label ?? '';
     const workspaceSelectVisible = Boolean(
       workspaces && workspaces.length > 1 && onSelectWorkspace,
     );
@@ -2074,9 +2098,6 @@ export const ChatEditor = memo(
                             {workspaces.map((entry) => (
                               <SelectItem key={entry.id} value={entry.id}>
                                 {entry.label}
-                                {entry.primary
-                                  ? ` · ${t('sidebar.workspacePrimary')}`
-                                  : ''}
                               </SelectItem>
                             ))}
                           </SelectGroup>
@@ -2087,6 +2108,7 @@ export const ChatEditor = memo(
                     <WorkspaceIndicator
                       name={workspaceName}
                       title={workspaceTitle ?? workspaceName}
+                      color={workspaceColor}
                       compact={!showWorkspaceLabel}
                       ariaLabel={t('workspace.paneLabel', {
                         name: workspaceName,
@@ -2096,8 +2118,9 @@ export const ChatEditor = memo(
                   {gitBranchVisible && gitBranch && (
                     <GitBranchIndicator
                       branch={gitBranch}
+                      status={gitStatus}
                       compact={!showGitBranchLabel}
-                      ariaLabel={t('git.currentBranch', { branch: gitBranch })}
+                      onOpenDiff={onOpenGitDiff}
                     />
                   )}
                   {showModeAction && (
@@ -2419,15 +2442,21 @@ export const ChatEditor = memo(
                     data-toolbar-measure="gitBranch:collapsed"
                     className={`${styles.gitBranchChip} ${styles.gitBranchChipCompact}`}
                   >
-                    <span className={styles.gitBranchIcon} />
-                    <span className={styles.gitBranchText}>{gitBranch}</span>
+                    <GitBranchChipContent
+                      branch={gitBranch}
+                      status={gitStatus}
+                      compact
+                    />
                   </span>
                   <span
                     data-toolbar-measure="gitBranch:expanded"
                     className={styles.gitBranchChip}
                   >
-                    <span className={styles.gitBranchIcon} />
-                    <span className={styles.gitBranchText}>{gitBranch}</span>
+                    <GitBranchChipContent
+                      branch={gitBranch}
+                      status={gitStatus}
+                      compact={false}
+                    />
                   </span>
                 </>
               )}

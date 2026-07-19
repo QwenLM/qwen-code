@@ -46,6 +46,7 @@ describe('reviewCommand', () => {
       'pr-context',
       'load-rules',
       'agent-prompt',
+      'build-test',
       'resolve-anchors',
       'check-coverage',
       'presubmit',

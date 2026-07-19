@@ -40,6 +40,17 @@ import type { WorkspaceVoiceStatus } from '../../services/voice-service.js';
 import type { VoiceMode } from '../../services/voice-settings.js';
 import type { WorkspaceProvidersStatusProvider } from '../workspace-providers-status.js';
 import type { WorkspaceSkillsStatusProvider } from '../workspace-skills-status.js';
+import type {
+  WorkspaceSkillInstallRequest,
+  WorkspaceSkillMutationResult,
+  WorkspaceSkillScope,
+} from '../workspace-skill-management.js';
+
+export type {
+  WorkspaceSkillInstallRequest,
+  WorkspaceSkillMutationResult,
+  WorkspaceSkillScope,
+} from '../workspace-skill-management.js';
 
 // ---------------------------------------------------------------------------
 // WorkspaceRequestContext
@@ -200,6 +211,19 @@ export interface DaemonWorkspaceService {
     enabled: boolean,
   ): Promise<WorkspaceSkillToggleResult>;
 
+  /** Install a project- or user-level Skill from a bounded package. */
+  installWorkspaceSkill(
+    ctx: WorkspaceRequestContext,
+    request: WorkspaceSkillInstallRequest,
+  ): Promise<WorkspaceSkillMutationResult>;
+
+  /** Delete a managed project- or user-level Skill. */
+  deleteWorkspaceSkill(
+    ctx: WorkspaceRequestContext,
+    skillName: string,
+    scope: WorkspaceSkillScope,
+  ): Promise<WorkspaceSkillMutationResult>;
+
   /** Scaffold (init) a QWEN.md file in the workspace. */
   initWorkspace(
     ctx: WorkspaceRequestContext,
@@ -358,7 +382,11 @@ export type RestartMcpServerResult =
       serverName: string;
       restarted: false;
       skipped: true;
-      reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+      reason:
+        | 'in_flight'
+        | 'disabled'
+        | 'budget_would_exceed'
+        | 'authentication_required';
     }
   | {
       serverName: string;
@@ -448,6 +476,9 @@ export interface DaemonWorkspaceServiceDeps {
 
   /** Runtime-local environment used by workspace Voice operations. */
   voiceEnv?: Readonly<Record<string, string | undefined>>;
+
+  /** Runtime-local environment used to authenticate GitHub Skill installs. */
+  skillInstallEnv?: Readonly<Record<string, string | undefined>>;
 
   /** Force Voice settings writes into this scope for workspace-qualified ACP. */
   voiceSettingsScope?: SettingScope;

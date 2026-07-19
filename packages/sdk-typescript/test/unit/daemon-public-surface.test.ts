@@ -25,7 +25,10 @@ import type {
   DaemonChannelControlTransition,
   DaemonChannelSelection,
   DaemonChannelSetResult,
+  DaemonChannelStartupAttemptFailure,
+  DaemonChannelStartupFailure,
   DaemonChannelStopResult,
+  DaemonChannelWorkerStartErrorResponse,
   DaemonControlEvent,
   DaemonEvent,
   DaemonEventEnvelope,
@@ -70,6 +73,9 @@ import type {
   DaemonSessionUpdateData,
   DaemonSessionUpdateEvent,
   DaemonSessionViewState,
+  DaemonLogHealth,
+  DaemonLogIssue,
+  DaemonLogMode,
   DaemonStatusReport,
   DaemonStatusReportDetail,
   DaemonStatusReportIssue,
@@ -112,6 +118,11 @@ import type {
   DaemonWorkspaceVoiceUpdate,
   KnownDaemonEvent,
 } from '../../src/index.js';
+import type {
+  DaemonChannelStartupAttemptFailure as DaemonEntryChannelStartupAttemptFailure,
+  DaemonChannelStartupFailure as DaemonEntryChannelStartupFailure,
+  DaemonChannelWorkerStartErrorResponse as DaemonEntryChannelWorkerStartErrorResponse,
+} from '../../src/daemon/index.js';
 
 describe('public SDK entry — typed daemon event surface (#4217)', () => {
   it('exports the runtime narrow + reducer surface', () => {
@@ -201,7 +212,13 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonChannelControlTransition>().not.toBeNever();
     expectTypeOf<DaemonChannelControlState>().not.toBeNever();
     expectTypeOf<DaemonChannelSetResult>().not.toBeNever();
+    expectTypeOf<DaemonChannelStartupFailure>().not.toBeNever();
+    expectTypeOf<DaemonChannelStartupAttemptFailure>().not.toBeNever();
     expectTypeOf<DaemonChannelStopResult>().not.toBeNever();
+    expectTypeOf<DaemonChannelWorkerStartErrorResponse>().not.toBeNever();
+    expectTypeOf<DaemonChannelStartupFailure>().toEqualTypeOf<DaemonEntryChannelStartupFailure>();
+    expectTypeOf<DaemonChannelStartupAttemptFailure>().toEqualTypeOf<DaemonEntryChannelStartupAttemptFailure>();
+    expectTypeOf<DaemonChannelWorkerStartErrorResponse>().toEqualTypeOf<DaemonEntryChannelWorkerStartErrorResponse>();
     expectTypeOf<DaemonHistoryTruncatedData>().not.toBeNever();
     expectTypeOf<DaemonStreamErrorData>().not.toBeNever();
     expectTypeOf<DaemonPermissionOption>().not.toBeNever();
@@ -254,8 +271,19 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     // `GET /daemon/status` report surface (PR 5174 client coverage): the
     // envelope plus the sub-shapes UI dashboards need to type against.
     expectTypeOf<DaemonStatusReport>().not.toBeNever();
+    expectTypeOf<DaemonLogMode>().not.toBeNever();
+    expectTypeOf<DaemonLogHealth>().not.toBeNever();
+    expectTypeOf<DaemonLogIssue>().not.toBeNever();
     expectTypeOf<DaemonStatusReport['limits']>().toMatchTypeOf<{
       compactedReplayMaxBytes: number;
+    }>();
+    expectTypeOf<DaemonStatusReport['daemon']>().toMatchTypeOf<{
+      runId?: string;
+      logMode?: DaemonLogMode;
+      logHealth?: DaemonLogHealth;
+      logIssues?: readonly DaemonLogIssue[];
+      logDroppedRecords?: number;
+      logDroppedBytes?: number;
     }>();
     expectTypeOf<DaemonStatusReportDetail>().not.toBeNever();
     expectTypeOf<DaemonStatusReportIssue>().not.toBeNever();

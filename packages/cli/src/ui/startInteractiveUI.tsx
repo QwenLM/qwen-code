@@ -185,6 +185,13 @@ export async function startInteractiveUI(
   };
 
   const useVP = settings.merged.ui?.useTerminalBuffer ?? false;
+  const stdoutMaxListeners = process.stdout.getMaxListeners();
+  if (useVP) {
+    // Visible VP rows each subscribe to resize through Ink's useBoxMetrics.
+    // Node's default warning writes into the alternate screen and shifts mouse
+    // coordinates even though these listeners are owned and cleaned up.
+    process.stdout.setMaxListeners(0);
+  }
   const instance = render(
     process.env['DEBUG'] ? (
       <React.StrictMode>
@@ -244,11 +251,18 @@ export async function startInteractiveUI(
     }
     remoteInputWatcher?.shutdown();
     await dualOutputBridge?.shutdown();
-    // Explicitly disable the Kitty keyboard protocol before unmounting Ink so
-    // that the disable escape sequence is written while stdout is still fully
-    // operational, preventing garbled terminal output after the app exits.
-    disableKittyProtocol();
     instance.unmount();
+    // Pop the Kitty keyboard protocol only after Ink has unmounted. The
+    // protocol was enabled on the main screen before render, and the kitty
+    // spec tracks keyboard flags per screen: with alternateScreen enabled, a
+    // pop written before unmount lands on the alternate screen's (empty)
+    // stack, unmount then leaves the alternate screen, and the main screen's
+    // flags stay set — the user's shell keeps receiving kitty escape codes
+    // (e.g. "9;5u" on Ctrl-C) after exit.
+    disableKittyProtocol();
+    if (useVP) {
+      process.stdout.setMaxListeners(stdoutMaxListeners);
+    }
     restoreSynchronizedOutput();
     restoreTerminalRedrawOptimizer();
   });
