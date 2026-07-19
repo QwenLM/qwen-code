@@ -5,7 +5,10 @@
  */
 
 import * as path from 'node:path';
-import { translateWindowsWorkspaceForPosixSandbox , MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';
+import {
+  MAX_WORKSPACE_PATH_LENGTH,
+  translateWindowsWorkspaceForPosixSandbox,
+} from '@qwen-code/acp-bridge/workspacePaths';
 import type { Request, Response } from 'express';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
