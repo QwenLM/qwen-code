@@ -156,6 +156,46 @@ describe('WorkspaceChannelSettingsStore', () => {
     ).rejects.toMatchObject({ code: 'channel_settings_invalid_secret' });
   });
 
+  it.each(['secrets', 'webhookSecrets'] as const)(
+    'rejects malformed direct %s updates without writing',
+    async (mapName) => {
+      const store = new WorkspaceChannelSettingsStore(workspace);
+      const revision = store.snapshot().revision;
+      const before = fs.readFileSync(settingsPath, 'utf8');
+      const entryName = mapName === 'secrets' ? 'token' : 'github';
+      const invalidMaps: unknown[] = [
+        null,
+        [],
+        { [entryName]: { operation: 'rotate', value: 'new-secret' } },
+        { [entryName]: null },
+        { [entryName]: { operation: 'replace', value: '' } },
+        { [entryName]: [] },
+        { [entryName]: { operation: 'preserve', value: 'unexpected' } },
+        ...['__proto__', 'constructor', 'prototype'].map((key) =>
+          Object.fromEntries([[key, { operation: 'preserve' }]]),
+        ),
+      ];
+
+      for (const invalidMap of invalidMaps) {
+        const options = {
+          expectedRevision: revision,
+          config:
+            mapName === 'webhookSecrets'
+              ? {
+                  type: 'dingtalk',
+                  webhooks: { sources: { github: { targets: {} } } },
+                }
+              : { type: 'telegram' },
+          [mapName]: invalidMap,
+        };
+        await expect(
+          store.upsert('bot', options as never),
+        ).rejects.toMatchObject({ code: 'channel_settings_invalid_secret' });
+        expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+      }
+    },
+  );
+
   it('preserves and replaces webhook literals only through explicit updates', async () => {
     writeWorkspaceSettings(`{
   "$version": 4,

@@ -457,6 +457,41 @@ describe('workspace Channel management routes', () => {
     expect(primaryService.setStartup).not.toHaveBeenCalled();
   });
 
+  it.each(['secrets', 'webhookSecrets'] as const)(
+    'rejects malformed %s entries at the route boundary',
+    async (mapName) => {
+      const invalidMaps: unknown[] = [
+        null,
+        [],
+        { token: { operation: 'rotate', value: 'new-secret' } },
+        { token: null },
+        { token: { operation: 'replace', value: '' } },
+        { token: [] },
+        { token: { operation: 'preserve', value: 'unexpected' } },
+        ...['__proto__', 'constructor', 'prototype'].map((key) =>
+          Object.fromEntries([[key, { operation: 'preserve' }]]),
+        ),
+      ];
+
+      for (const invalidMap of invalidMaps) {
+        const { app, primaryService } = mount({});
+        const response = await auth(
+          request(app)
+            .put('/workspace/channels/bot')
+            .send({
+              expectedRevision: 'r1',
+              config: { type: 'telegram' },
+              [mapName]: invalidMap,
+            }),
+        );
+
+        expect(response.status).toBe(400);
+        expect(response.body.code).toBe('channel_settings_invalid_secret');
+        expect(primaryService.upsert).not.toHaveBeenCalled();
+      }
+    },
+  );
+
   it('returns 409 for stale PUT', async () => {
     const { app, primaryService } = mount({});
     vi.mocked(primaryService.upsert).mockRejectedValue(

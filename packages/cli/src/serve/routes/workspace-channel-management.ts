@@ -23,6 +23,7 @@ import {
   isSafeChannelName,
   MAX_CHANNEL_INSTANCE_NAME_BYTES,
 } from '../channel-selection.js';
+import { assertValidChannelSecretUpdates } from '../channel-settings-store.js';
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
@@ -57,6 +58,22 @@ type RuntimeResolver = (req: Request, res: Response) => WorkspaceRuntime | null;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function parseSecretUpdates(
+  value: unknown,
+  res: Response,
+): NonNullable<ChannelUpsertRequest['secrets']> | undefined {
+  try {
+    assertValidChannelSecretUpdates(value);
+    return value;
+  } catch {
+    res.status(400).json({
+      error: 'Secret updates are invalid.',
+      code: 'channel_settings_invalid_secret',
+    });
+    return undefined;
+  }
 }
 
 function parseInstanceName(
@@ -104,9 +121,7 @@ function parseUpsertRequest(
   if (
     !isRecord(config) ||
     typeof config['type'] !== 'string' ||
-    config['type'].length === 0 ||
-    (secrets !== undefined && !isRecord(secrets)) ||
-    (webhookSecrets !== undefined && !isRecord(webhookSecrets))
+    config['type'].length === 0
   ) {
     res.status(400).json({
       error:
@@ -115,19 +130,27 @@ function parseUpsertRequest(
     });
     return undefined;
   }
+  const parsedSecrets =
+    secrets === undefined ? undefined : parseSecretUpdates(secrets, res);
+  if (secrets !== undefined && parsedSecrets === undefined) return undefined;
+  const parsedWebhookSecrets =
+    webhookSecrets === undefined
+      ? undefined
+      : parseSecretUpdates(webhookSecrets, res);
+  if (webhookSecrets !== undefined && parsedWebhookSecrets === undefined) {
+    return undefined;
+  }
   return {
     expectedRevision: revision.expectedRevision,
     config: config as Record<string, unknown> & { type: string },
-    ...(secrets
+    ...(parsedSecrets
       ? {
-          secrets: secrets as NonNullable<ChannelUpsertRequest['secrets']>,
+          secrets: parsedSecrets,
         }
       : {}),
-    ...(webhookSecrets
+    ...(parsedWebhookSecrets
       ? {
-          webhookSecrets: webhookSecrets as NonNullable<
-            ChannelUpsertRequest['webhookSecrets']
-          >,
+          webhookSecrets: parsedWebhookSecrets,
         }
       : {}),
   };

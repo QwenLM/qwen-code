@@ -54,6 +54,7 @@ function applySecretUpdate(
   current: unknown,
   update: ChannelSecretUpdate,
 ): unknown {
+  validateSecretUpdate(update);
   if (update.operation === 'preserve') return current;
   if (update.operation === 'clear') return undefined;
   if (typeof update.value !== 'string' || update.value.length === 0) {
@@ -70,6 +71,43 @@ const UNSAFE_OBJECT_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function validateSecretUpdate(
+  update: unknown,
+): asserts update is ChannelSecretUpdate {
+  if (!isRecord(update)) {
+    throw invalidSecret('Secret updates must be objects.');
+  }
+  const operation = update['operation'];
+  const keys = Object.keys(update).sort();
+  const valid =
+    ((operation === 'preserve' || operation === 'clear') &&
+      keys.length === 1 &&
+      keys[0] === 'operation') ||
+    (operation === 'replace' &&
+      keys.length === 2 &&
+      keys[0] === 'operation' &&
+      keys[1] === 'value' &&
+      typeof update['value'] === 'string' &&
+      update['value'].length > 0);
+  if (!valid) {
+    throw invalidSecret('Secret updates contain an invalid operation.');
+  }
+}
+
+export function assertValidChannelSecretUpdates(
+  updates: unknown,
+): asserts updates is Record<string, ChannelSecretUpdate> {
+  if (!isRecord(updates)) {
+    throw invalidSecret('Secret updates must be objects.');
+  }
+  for (const [key, update] of Object.entries(updates)) {
+    if (UNSAFE_OBJECT_KEYS.has(key)) {
+      throw invalidSecret(`Secret update ${JSON.stringify(key)} is invalid.`);
+    }
+    validateSecretUpdate(update);
+  }
 }
 
 function webhookSources(
@@ -190,6 +228,12 @@ export class WorkspaceChannelSettingsStore {
     name: string,
     options: ChannelSettingsUpsertOptions,
   ): Promise<ChannelSettingsSnapshot> {
+    const secretUpdates: unknown =
+      options.secrets === undefined ? {} : options.secrets;
+    const webhookSecretUpdates: unknown =
+      options.webhookSecrets === undefined ? {} : options.webhookSecrets;
+    assertValidChannelSecretUpdates(secretUpdates);
+    assertValidChannelSecretUpdates(webhookSecretUpdates);
     const plugin = await getPlugin(options.config.type);
     if (!plugin?.management) {
       throw new ChannelSettingsError(
@@ -202,7 +246,6 @@ export class WorkspaceChannelSettingsStore {
         .filter((field) => field.kind === 'secret')
         .map((field) => field.key),
     );
-    const secretUpdates = options.secrets ?? {};
     for (const key of Object.keys(secretUpdates)) {
       if (!secretKeys.has(key)) {
         throw invalidSecret(
@@ -226,7 +269,7 @@ export class WorkspaceChannelSettingsStore {
       const value = applySecretUpdate(previous[key], update);
       if (value !== undefined) nextConfig[key] = value;
     }
-    mergeWebhookSecrets(previous, nextConfig, options.webhookSecrets ?? {});
+    mergeWebhookSecrets(previous, nextConfig, webhookSecretUpdates);
 
     const channels = { ...current.channels, [name]: nextConfig };
     const workspaceFile = loadSettings(this.workspaceCwd, {
