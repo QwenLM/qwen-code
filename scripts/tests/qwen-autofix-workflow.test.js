@@ -8,6 +8,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -1855,6 +1856,80 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
+  it('resolves the staged SKILL end-to-end by running the real runner (stage↔resolve contract)', () => {
+    // The string test above pins the mirrored LAYOUT, but it re-implements
+    // run-agent.mjs's `<dir>/../SKILL.md` convention. If that coupling ever
+    // moves in the RUNNER, the string test stays green while prod breaks —
+    // the same class of blind spot that let #7165 ship. This test runs the
+    // ACTUAL runner against the staged layout and asserts it reads the
+    // staged SKILL, exercising the stage↔resolve contract for real.
+    const runner = readFileSync(autofixRunnerScriptPath, 'utf8');
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-stage-'));
+    try {
+      // Mirror the workflow's staging: autofix-skill/{SKILL.md,scripts/run-agent.mjs}.
+      mkdirSync(join(dir, 'autofix-skill', 'scripts'), { recursive: true });
+      writeFileSync(
+        join(dir, 'autofix-skill', 'SKILL.md'),
+        '---\nname: autofix\n---\nSTAGED_SKILL_SENTINEL\n',
+      );
+      const stagedRunner = join(
+        dir,
+        'autofix-skill',
+        'scripts',
+        'run-agent.mjs',
+      );
+      writeFileSync(stagedRunner, runner);
+      const ok = spawnSync(
+        'node',
+        [
+          stagedRunner,
+          '--mode',
+          'address-review',
+          '--pr',
+          '1',
+          '--issue',
+          '1',
+          '--workdir',
+          dir,
+          '--print-prompt',
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(ok.status).toBe(0);
+      // The real runner resolved ../SKILL.md to the STAGED copy and inlined it.
+      expect(ok.stdout).toContain('STAGED_SKILL_SENTINEL');
+      // Skill directory ends in the mirrored dir name (basename, not the full
+      // temp path — macOS canonicalizes /var → /private/var).
+      expect(ok.stdout).toMatch(/Skill directory: \S*[/\\]autofix-skill\n/);
+
+      // And the FLAT layout #7165 shipped (runner alone, no ../SKILL.md) must
+      // crash with ENOENT — proving this test catches that regression.
+      const flatRunner = join(dir, 'run-agent.mjs');
+      writeFileSync(flatRunner, runner);
+      const flat = spawnSync(
+        'node',
+        [
+          flatRunner,
+          '--mode',
+          'address-review',
+          '--pr',
+          '1',
+          '--issue',
+          '1',
+          '--workdir',
+          dir,
+          '--print-prompt',
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(flat.status).not.toBe(0);
+      expect(flat.stderr).toContain('ENOENT');
+      expect(flat.stderr).toContain("SKILL.md'");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('runs heavy autofix jobs on hosted runners with sandbox images', () => {
     const workflowAndSkill = `${workflow}\n${readAutofixSkill()}`;
 
@@ -2304,9 +2379,17 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toMatch(
       /git config core\.hooksPath \/dev\/null\n\s+git checkout -B "\$\{BRANCH\}"/,
     );
-    expect(workflow).toMatch(
-      /git config core\.hooksPath \.husky\n[\s\S]{0,200}node "\$\{RUNNER_TEMP\}\/autofix-skill\/scripts\/run-agent\.mjs"/,
+    // The agent step re-points hooks to .husky BEFORE invoking the runner.
+    // Assert the ordering directly (not a fixed-width window) so adding a
+    // comment between the two lines can't fail the test spuriously.
+    const huskyAt = triageAndAddressStep.indexOf(
+      'git config core.hooksPath .husky',
     );
+    const stagedNodeAt = triageAndAddressStep.indexOf(
+      'node "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs"',
+    );
+    expect(huskyAt).toBeGreaterThanOrEqual(0);
+    expect(stagedNodeAt).toBeGreaterThan(huskyAt);
   });
 
   it('keeps sandbox image fallback covered by a reusable script', () => {
