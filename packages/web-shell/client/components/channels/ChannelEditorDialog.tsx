@@ -19,7 +19,7 @@ import type {
   DaemonChannelTypeDescriptor,
   DaemonChannelUpsertRequest,
 } from '@qwen-code/sdk/daemon';
-import { Alert, AlertDescription } from '../ui/alert';
+import { Alert, AlertDescription, AlertTitle } from '../ui/alert';
 import { Button } from '../ui/button';
 import { Checkbox } from '../ui/checkbox';
 import {
@@ -50,6 +50,7 @@ import {
 import { Spinner } from '../ui/spinner';
 import { Switch } from '../ui/switch';
 import { Textarea } from '../ui/textarea';
+import { useI18n } from '../../i18n';
 import {
   buildChannelUpsertRequest,
   channelEditorNeedsQrHandoff,
@@ -86,23 +87,23 @@ interface ChannelEditorDialogProps {
 
 const SECTION_FIELDS = [
   {
-    title: 'Identity',
+    key: 'identity',
     keys: ['identity.id', 'identity.displayName', 'identity.description'],
   },
   {
-    title: 'Model and workspace',
+    key: 'modelWorkspace',
     keys: ['model', 'cwd', 'approvalMode', 'instructions'],
   },
   {
-    title: 'Messaging policies',
+    key: 'messagingPolicies',
     keys: ['senderPolicy', 'allowedUsers', 'dmPolicy', 'groupPolicy'],
   },
   {
-    title: 'Routing',
+    key: 'routing',
     keys: ['sessionScope', 'dispatchMode', 'groupHistoryLimit'],
   },
   {
-    title: 'Streaming',
+    key: 'streaming',
     keys: [
       'blockStreaming',
       'blockStreamingChunk.minChars',
@@ -110,8 +111,8 @@ const SECTION_FIELDS = [
       'blockStreamingCoalesce.idleMs',
     ],
   },
-  { title: 'Memory', keys: ['memoryScope.namespace'] },
-  { title: 'Webhooks', keys: ['webhooks'] },
+  { key: 'memory', keys: ['memoryScope.namespace'] },
+  { key: 'webhooks', keys: ['webhooks'] },
 ] as const;
 
 function fieldError(
@@ -119,6 +120,45 @@ function fieldError(
   key: string,
 ): string | undefined {
   return errors.find((error) => error.field === key)?.message;
+}
+
+function localizeFieldError(
+  message: string | undefined,
+  label: string,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): string | undefined {
+  if (!message) return undefined;
+  if (message.endsWith(' is required. Enter a replacement credential.'))
+    return t('channels.editor.validation.credentialRequired', { label });
+  if (message === 'Replacement credentials cannot be empty.')
+    return t('channels.editor.validation.replacementEmpty');
+  if (message === 'Confirm that the stored credential should be cleared.')
+    return t('channels.editor.validation.confirmClear');
+  if (message.endsWith(' is required.'))
+    return t('channels.editor.validation.required', { label });
+  if (message.endsWith(' must be a number.'))
+    return t('channels.editor.validation.number', { label });
+  if (message.startsWith('Select a valid '))
+    return t('channels.editor.validation.selectValid', { label });
+  if (message === 'Webhooks must be a JSON object.')
+    return t('channels.editor.validation.webhooksObject');
+  if (message.startsWith('Webhook source ')) {
+    return t('channels.editor.validation.webhookSource', {
+      source: message.slice(
+        'Webhook source '.length,
+        -' is not allowed.'.length,
+      ),
+    });
+  }
+  if (message === 'Remove secretEnv before entering a literal secret.')
+    return t('channels.editor.validation.removeSecretEnv');
+  if (message === 'Enter a replacement webhook secret or restore secretEnv.')
+    return t('channels.editor.validation.replaceWebhook');
+  if (
+    message === 'Enter a webhook secret, remove this source, or add secretEnv.'
+  )
+    return t('channels.editor.validation.webhookRequired');
+  return message;
 }
 
 function ConfigField({
@@ -134,10 +174,16 @@ function ConfigField({
   errors: ReturnType<typeof validateChannelEditor>;
   environmentReference?: string;
 }) {
+  const { t } = useI18n();
   const id = useId();
-  const error = fieldError(errors, descriptor.key);
+  const rawError = fieldError(errors, descriptor.key);
   const descriptionId = `${id}-description`;
   const errorId = `${id}-error`;
+  const translatedLabel = t(`channels.editor.field.${descriptor.key}`);
+  const label = translatedLabel.startsWith('channels.editor.field.')
+    ? descriptor.label
+    : translatedLabel;
+  const error = localizeFieldError(rawError, label, t);
   const describedBy = [
     descriptor.description || descriptor.envResolvable ? descriptionId : '',
     error ? errorId : '',
@@ -156,10 +202,11 @@ function ConfigField({
     if (environmentReference) {
       return (
         <Field>
-          <FieldLabel>{descriptor.label}</FieldLabel>
+          <FieldLabel>{label}</FieldLabel>
           <FieldDescription>
-            Uses environment reference {environmentReference}. Any stored
-            literal secret will be removed when changes are saved.
+            {t('channels.editor.secret.environmentReference', {
+              reference: environmentReference,
+            })}
           </FieldDescription>
         </Field>
       );
@@ -167,7 +214,7 @@ function ConfigField({
     return (
       <Field data-invalid={Boolean(error)}>
         <FieldLabel htmlFor={id}>
-          {descriptor.label}
+          {label}
           {descriptor.required ? <span aria-hidden="true">*</span> : null}
         </FieldLabel>
         <div className="flex flex-wrap gap-2">
@@ -187,7 +234,7 @@ function ConfigField({
                 )
               }
             >
-              Keep stored
+              {t('channels.editor.secret.keep')}
             </Button>
           ) : null}
           <Button
@@ -203,7 +250,9 @@ function ConfigField({
               )
             }
           >
-            {secret.present ? 'Replace' : 'Enter credential'}
+            {secret.present
+              ? t('channels.editor.secret.replace')
+              : t('channels.editor.secret.enter')}
           </Button>
           {secret.present && !descriptor.required ? (
             <Button
@@ -220,7 +269,7 @@ function ConfigField({
                 )
               }
             >
-              Clear stored credential
+              {t('channels.editor.secret.clear')}
             </Button>
           ) : null}
         </div>
@@ -264,16 +313,15 @@ function ConfigField({
                 )
               }
             />
-            Permanently remove the stored {descriptor.label.toLowerCase()}.
+            {t('channels.editor.secret.confirmClear', { label })}
           </label>
         ) : null}
         {descriptor.description || descriptor.envResolvable ? (
           <FieldDescription id={descriptionId}>
             {descriptor.description}
-            {descriptor.description && descriptor.envResolvable ? ' ' : null}
-            {descriptor.envResolvable
-              ? 'Environment references are supported.'
-              : null}
+            {descriptor.envResolvable ? (
+              <span> {t('channels.editor.environmentSupported')}</span>
+            ) : null}
           </FieldDescription>
         ) : null}
         <FieldError id={errorId}>{error}</FieldError>
@@ -308,13 +356,20 @@ function ConfigField({
       >
         <SelectTrigger {...common} className="w-full">
           <SelectValue
-            placeholder={`Select ${descriptor.label.toLowerCase()}`}
+            placeholder={t('channels.editor.selectField', { label })}
           />
         </SelectTrigger>
         <SelectContent>
           {descriptor.options?.map((option) => (
             <SelectItem key={option.value} value={option.value}>
-              {option.label}
+              {(() => {
+                const translated = t(
+                  `channels.editor.option.${descriptor.key}.${option.value}`,
+                );
+                return translated.startsWith('channels.editor.option.')
+                  ? option.label
+                  : translated;
+              })()}
             </SelectItem>
           ))}
         </SelectContent>
@@ -354,17 +409,16 @@ function ConfigField({
   return (
     <Field data-invalid={Boolean(error)}>
       <FieldLabel htmlFor={id}>
-        {descriptor.label}
+        {label}
         {descriptor.required ? <span aria-hidden="true">*</span> : null}
       </FieldLabel>
       {control}
       {descriptor.description || descriptor.envResolvable ? (
         <FieldDescription id={descriptionId}>
           {descriptor.description}
-          {descriptor.description && descriptor.envResolvable ? ' ' : null}
-          {descriptor.envResolvable
-            ? 'Environment references are supported.'
-            : null}
+          {descriptor.envResolvable ? (
+            <span> {t('channels.editor.environmentSupported')}</span>
+          ) : null}
         </FieldDescription>
       ) : null}
       <FieldError id={errorId}>{error}</FieldError>
@@ -383,6 +437,7 @@ export function ChannelEditorDialog({
   onQrHandoff,
   returnFocusRef,
 }: ChannelEditorDialogProps) {
+  const { t } = useI18n();
   const manageableCatalog = useMemo(
     () => catalog.filter((descriptor) => descriptor.manageable),
     [catalog],
@@ -401,8 +456,12 @@ export function ChannelEditorDialog({
 
   const descriptor = manageableCatalog.find((item) => item.type === state.type);
   const errors = validateChannelEditor(state);
-  const nameError = fieldError(errors, 'name');
-  const typeError = fieldError(errors, 'type');
+  const nameError = fieldError(errors, 'name')
+    ? t('channels.editor.validation.name')
+    : undefined;
+  const typeError = fieldError(errors, 'type')
+    ? t('channels.editor.validation.type')
+    : undefined;
 
   const submit = async () => {
     if (errors.length > 0 || saving) return;
@@ -437,11 +496,12 @@ export function ChannelEditorDialog({
       >
         <DialogHeader>
           <DialogTitle>
-            {instance ? `Edit ${instance.name}` : 'Add channel'}
+            {instance
+              ? t('channels.editor.title.edit', { name: instance.name })
+              : t('channels.editor.title.add')}
           </DialogTitle>
           <DialogDescription>
-            Configure this workspace connection. Stored credentials are never
-            shown.
+            {t('channels.editor.description')}
           </DialogDescription>
         </DialogHeader>
 
@@ -450,14 +510,17 @@ export function ChannelEditorDialog({
             {error ? (
               <Alert variant="destructive">
                 <AlertCircleIcon />
+                <AlertTitle>{t('channels.editor.saveError')}</AlertTitle>
                 <AlertDescription>{error}</AlertDescription>
               </Alert>
             ) : null}
 
             <FieldSet>
-              <FieldLegend>Channel</FieldLegend>
+              <FieldLegend>{t('channels.editor.channel')}</FieldLegend>
               <Field data-invalid={Boolean(nameError)}>
-                <FieldLabel htmlFor="channel-editor-name">Name *</FieldLabel>
+                <FieldLabel htmlFor="channel-editor-name">
+                  {t('channels.editor.name')} *
+                </FieldLabel>
                 <Input
                   ref={nameRef}
                   id="channel-editor-name"
@@ -473,7 +536,7 @@ export function ChannelEditorDialog({
                 />
                 {state.mode === 'edit' ? (
                   <FieldDescription>
-                    The channel name cannot be changed.
+                    {t('channels.editor.nameImmutable')}
                   </FieldDescription>
                 ) : null}
                 <FieldError id="channel-editor-name-error">
@@ -481,7 +544,9 @@ export function ChannelEditorDialog({
                 </FieldError>
               </Field>
               <Field data-invalid={Boolean(typeError)}>
-                <FieldLabel htmlFor="channel-editor-type">Type *</FieldLabel>
+                <FieldLabel htmlFor="channel-editor-type">
+                  {t('channels.editor.type')} *
+                </FieldLabel>
                 <Select
                   value={state.type}
                   disabled={state.mode === 'edit'}
@@ -494,7 +559,9 @@ export function ChannelEditorDialog({
                     className="w-full"
                     aria-invalid={Boolean(typeError)}
                   >
-                    <SelectValue placeholder="Select channel type" />
+                    <SelectValue
+                      placeholder={t('channels.editor.selectType')}
+                    />
                   </SelectTrigger>
                   <SelectContent>
                     {manageableCatalog.map((item) => (
@@ -506,7 +573,7 @@ export function ChannelEditorDialog({
                 </Select>
                 {state.mode === 'edit' ? (
                   <FieldDescription>
-                    The channel type cannot be changed.
+                    {t('channels.editor.typeImmutable')}
                   </FieldDescription>
                 ) : null}
                 <FieldError>{typeError}</FieldError>
@@ -516,7 +583,7 @@ export function ChannelEditorDialog({
             {descriptor?.auth.includes('qr') &&
             descriptor.auth.includes('credentials') ? (
               <FieldSet>
-                <FieldLegend>Authentication</FieldLegend>
+                <FieldLegend>{t('channels.editor.authentication')}</FieldLegend>
                 <div className="grid gap-2 sm:grid-cols-2">
                   <Button
                     type="button"
@@ -529,7 +596,7 @@ export function ChannelEditorDialog({
                       setState({ ...state, authMethod: 'credentials' })
                     }
                   >
-                    <KeyRoundIcon /> Enter credentials
+                    <KeyRoundIcon /> {t('channels.editor.enterCredentials')}
                   </Button>
                   <Button
                     type="button"
@@ -538,12 +605,12 @@ export function ChannelEditorDialog({
                     }
                     onClick={() => setState({ ...state, authMethod: 'qr' })}
                   >
-                    <QrCodeIcon /> Continue with QR code
+                    <QrCodeIcon /> {t('channels.editor.continueQr')}
                   </Button>
                 </div>
                 {state.authMethod === 'qr' ? (
                   <FieldDescription>
-                    Save this configuration, then continue to QR authentication.
+                    {t('channels.editor.qrGuidance')}
                   </FieldDescription>
                 ) : null}
               </FieldSet>
@@ -553,7 +620,11 @@ export function ChannelEditorDialog({
             state.authMethod === 'credentials' &&
             descriptor.fields.length > 0 ? (
               <FieldSet>
-                <FieldLegend>{descriptor.displayName} settings</FieldLegend>
+                <FieldLegend>
+                  {t('channels.editor.typeSettings', {
+                    type: descriptor.displayName,
+                  })}
+                </FieldLegend>
                 {descriptor.fields.map((field) => (
                   <ConfigField
                     key={field.key}
@@ -568,11 +639,11 @@ export function ChannelEditorDialog({
 
             {SECTION_FIELDS.map((section) => (
               <details
-                key={section.title}
+                key={section.key}
                 className="group rounded-lg border p-3"
               >
                 <summary className="cursor-pointer text-sm font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring/50">
-                  {section.title}
+                  {t(`channels.editor.section.${section.key}`)}
                 </summary>
                 <FieldGroup className="mt-4">
                   {section.keys.map((key) => {
@@ -589,16 +660,19 @@ export function ChannelEditorDialog({
                       />
                     );
                   })}
-                  {section.title === 'Webhooks'
+                  {section.key === 'webhooks'
                     ? channelEditorWebhookSources(state).map((source) => (
                         <ConfigField
                           key={source.name}
                           descriptor={{
                             key: `webhook:${source.name}`,
-                            label: `Webhook secret · ${source.name}`,
+                            label: t('channels.editor.webhookSecret', {
+                              source: source.name,
+                            }),
                             kind: 'secret',
-                            description:
-                              'Literal webhook secrets are stored separately from configuration.',
+                            description: t(
+                              'channels.editor.webhookSecretDescription',
+                            ),
                           }}
                           state={state}
                           setState={setState}
@@ -620,7 +694,7 @@ export function ChannelEditorDialog({
             disabled={saving}
             onClick={() => onOpenChange(false)}
           >
-            Cancel
+            {t('channels.action.cancel')}
           </Button>
           <Button
             type="button"
@@ -629,10 +703,10 @@ export function ChannelEditorDialog({
           >
             {saving ? <Spinner /> : null}
             {instance
-              ? 'Save changes'
+              ? t('channels.action.saveChanges')
               : channelEditorNeedsQrHandoff(state)
-                ? 'Save and continue'
-                : 'Add channel'}
+                ? t('channels.action.saveAndContinue')
+                : t('channels.action.add')}
           </Button>
         </DialogFooter>
       </DialogContent>

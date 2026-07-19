@@ -27,6 +27,7 @@ import {
 } from '@qwen-code/sdk/daemon';
 import { useChannels, useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
 import { extractErrorDetail } from '../../utils/errorDetail';
+import { useI18n } from '../../i18n';
 import styles from './ChannelsManagerPage.module.css';
 import { Alert, AlertDescription, AlertTitle } from '../ui/alert';
 import {
@@ -85,19 +86,13 @@ interface QrDialogTarget {
   identity: object;
 }
 
-const STATUS_LABELS: Record<DaemonChannelRuntimeState['state'], string> = {
-  stopped: 'Stopped',
-  starting: 'Starting',
-  connected: 'Connected',
-  partial: 'Partially connected',
-  error: 'Error',
+const STATUS_KEYS: Record<DaemonChannelRuntimeState['state'], string> = {
+  stopped: 'channels.status.stopped',
+  starting: 'channels.status.starting',
+  connected: 'channels.status.connected',
+  partial: 'channels.status.partial',
+  error: 'channels.status.error',
 };
-
-function workspaceLabel(workspaceCwd: string | undefined): string {
-  if (!workspaceCwd) return 'Current workspace';
-  const parts = workspaceCwd.split(/[\\/]+/).filter(Boolean);
-  return parts.at(-1) ?? workspaceCwd;
-}
 
 function badgeVariant(
   state: DaemonChannelRuntimeState['state'],
@@ -117,6 +112,7 @@ export function ChannelsManagerPage({
   onClose,
   initialFocusRef,
 }: ChannelsManagerPageProps) {
+  const { t } = useI18n();
   const workspace = useWorkspace();
   const {
     catalog,
@@ -233,13 +229,18 @@ export function ChannelsManagerPage({
             } else {
               setActionErrors((current) => ({
                 ...current,
-                [name]: `${actionMessage} Channel settings could not be refreshed.`,
+                [name]: t('channels.error.refreshUnavailable', {
+                  error: actionMessage,
+                }),
               }));
             }
           } catch (reloadError) {
             setActionErrors((current) => ({
               ...current,
-              [name]: `${actionMessage} Refresh failed: ${extractErrorDetail(reloadError)}`,
+              [name]: t('channels.error.refreshFailed', {
+                error: actionMessage,
+                refreshError: extractErrorDetail(reloadError),
+              }),
             }));
           }
         }
@@ -249,7 +250,7 @@ export function ChannelsManagerPage({
         setBusyTarget(null);
       }
     },
-    [busyName, canManage, reload, snapshot],
+    [busyName, canManage, reload, snapshot, t],
   );
 
   const retryLoad = useCallback(async () => {
@@ -262,10 +263,10 @@ export function ChannelsManagerPage({
       const type =
         typeof channel.config.type === 'string'
           ? channel.config.type
-          : 'Unknown type';
+          : t('channels.type.unknown');
       return catalog.find((entry) => entry.type === type)?.displayName ?? type;
     },
-    [catalog],
+    [catalog, t],
   );
 
   const renderPrimaryActions = (channel: DaemonChannelInstanceSnapshot) => {
@@ -277,7 +278,7 @@ export function ChannelsManagerPage({
           ref={(element) => setActionRef(channel.name, 'primary', element)}
           size="sm"
           disabled={disabled}
-          aria-label={`Start ${channel.name}`}
+          aria-label={t('channels.action.startNamed', { name: channel.name })}
           onClick={() =>
             void runAction(channel.name, 'primary', () => start(channel.name))
           }
@@ -285,7 +286,7 @@ export function ChannelsManagerPage({
           {busyName === channel.name && busyTarget === 'primary' ? (
             <Spinner />
           ) : null}
-          Start
+          {t('channels.action.start')}
         </Button>
       );
     }
@@ -295,7 +296,7 @@ export function ChannelsManagerPage({
           ref={(element) => setActionRef(channel.name, 'primary', element)}
           size="sm"
           disabled={disabled}
-          aria-label={`Retry ${channel.name}`}
+          aria-label={t('channels.action.retryNamed', { name: channel.name })}
           onClick={() =>
             void runAction(channel.name, 'primary', () => restart(channel.name))
           }
@@ -303,7 +304,7 @@ export function ChannelsManagerPage({
           {busyName === channel.name && busyTarget === 'primary' ? (
             <Spinner />
           ) : null}
-          Retry
+          {t('channels.action.retry')}
         </Button>
       );
     }
@@ -317,7 +318,7 @@ export function ChannelsManagerPage({
             size="sm"
             variant="outline"
             disabled={disabled}
-            aria-label={`Stop ${channel.name}`}
+            aria-label={t('channels.action.stopNamed', { name: channel.name })}
             onClick={() =>
               void runAction(channel.name, 'primary', () => stop(channel.name))
             }
@@ -325,14 +326,16 @@ export function ChannelsManagerPage({
             {busyName === channel.name && busyTarget === 'primary' ? (
               <Spinner />
             ) : null}
-            Stop
+            {t('channels.action.stop')}
           </Button>
         ) : null}
         <Button
           ref={(element) => setActionRef(channel.name, 'restart', element)}
           size="sm"
           disabled={disabled}
-          aria-label={`Restart ${channel.name}`}
+          aria-label={t('channels.action.restartNamed', {
+            name: channel.name,
+          })}
           onClick={() =>
             void runAction(channel.name, 'restart', () => restart(channel.name))
           }
@@ -340,7 +343,7 @@ export function ChannelsManagerPage({
           {busyName === channel.name && busyTarget === 'restart' ? (
             <Spinner />
           ) : null}
-          Restart
+          {t('channels.action.restart')}
         </Button>
       </>
     );
@@ -355,7 +358,7 @@ export function ChannelsManagerPage({
             variant="ghost"
             size="icon"
             onClick={onClose}
-            aria-label="Close channels"
+            aria-label={t('channels.action.back')}
           >
             <ArrowLeftIcon />
           </Button>
@@ -365,11 +368,18 @@ export function ChannelsManagerPage({
               tabIndex={-1}
               className="text-2xl font-semibold outline-none"
             >
-              Channels
+              {t('channels.title')}
             </h1>
             <p className="mt-1 truncate text-sm text-muted-foreground">
-              {workspaceLabel(workspace.workspaceCwd)} · {instances.length}{' '}
-              configured
+              {t('channels.summary', {
+                workspace: workspace.workspaceCwd
+                  ? (workspace.workspaceCwd
+                      .split(/[\\/]+/)
+                      .filter(Boolean)
+                      .at(-1) ?? workspace.workspaceCwd)
+                  : t('channels.workspace.current'),
+                count: instances.length,
+              })}
             </p>
           </div>
         </div>
@@ -389,16 +399,16 @@ export function ChannelsManagerPage({
           }}
         >
           <PlusIcon data-icon="inline-start" />
-          Add channel
+          {t('channels.action.add')}
         </Button>
       </div>
 
       {!supportsManagement ? (
         <Alert>
           <AlertCircleIcon />
-          <AlertTitle>Channel management is not supported</AlertTitle>
+          <AlertTitle>{t('channels.unsupported.title')}</AlertTitle>
           <AlertDescription>
-            Update Qwen Code to a version that supports channel management.
+            {t('channels.unsupported.description')}
           </AlertDescription>
         </Alert>
       ) : null}
@@ -406,9 +416,9 @@ export function ChannelsManagerPage({
       {supportsManagement && !hasBearerToken ? (
         <Alert>
           <AlertCircleIcon />
-          <AlertTitle>Channel management is read-only</AlertTitle>
+          <AlertTitle>{t('channels.readOnly.title')}</AlertTitle>
           <AlertDescription>
-            Restart Qwen Code with a bearer token to add or change channels.
+            {t('channels.readOnly.description')}
           </AlertDescription>
         </Alert>
       ) : null}
@@ -416,11 +426,8 @@ export function ChannelsManagerPage({
       {revisionBlocked ? (
         <Alert variant="destructive">
           <AlertCircleIcon />
-          <AlertTitle>Channel settings are out of date</AlertTitle>
-          <AlertDescription>
-            Configuration changes are disabled until the workspace snapshot
-            reloads successfully. Runtime controls remain available.
-          </AlertDescription>
+          <AlertTitle>{t('channels.stale.title')}</AlertTitle>
+          <AlertDescription>{t('channels.stale.description')}</AlertDescription>
         </Alert>
       ) : null}
 
@@ -428,18 +435,18 @@ export function ChannelsManagerPage({
         !canAuthenticate ? (
           <Alert>
             <QrCodeIcon />
-            <AlertTitle>QR authentication is unavailable</AlertTitle>
+            <AlertTitle>{t('channels.authUnavailable.title')}</AlertTitle>
             <AlertDescription>
               {supportsChannelAuth
-                ? 'Restart Qwen Code with a bearer token to authenticate this channel.'
-                : 'Update Qwen Code to a version that supports channel authentication.'}
+                ? t('channels.authUnavailable.token')
+                : t('channels.authUnavailable.capability')}
               <Button
                 className="ml-2"
                 variant="link"
                 size="xs"
                 onClick={() => setQrHandoff(null)}
               >
-                Dismiss
+                {t('channels.action.dismiss')}
               </Button>
             </AlertDescription>
           </Alert>
@@ -449,23 +456,23 @@ export function ChannelsManagerPage({
       {loading && instances.length === 0 ? (
         <div className="flex min-h-32 items-center justify-center gap-2 text-sm text-muted-foreground">
           <Spinner />
-          Loading channels
+          {t('channels.loading')}
         </div>
       ) : null}
 
       {error ? (
         <Alert variant="destructive">
           <AlertCircleIcon />
-          <AlertTitle>Channels could not be loaded</AlertTitle>
+          <AlertTitle>{t('channels.loadError.title')}</AlertTitle>
           <AlertDescription>{extractErrorDetail(error)}</AlertDescription>
           <Button
             className="mt-2 w-fit"
             variant="outline"
             size="sm"
-            aria-label="Retry loading channels"
+            aria-label={t('channels.loadError.retryLabel')}
             onClick={() => void retryLoad()}
           >
-            Retry
+            {t('channels.action.retry')}
           </Button>
         </Alert>
       ) : null}
@@ -476,9 +483,9 @@ export function ChannelsManagerPage({
             <EmptyMedia variant="icon">
               <RadioTowerIcon />
             </EmptyMedia>
-            <EmptyTitle>No channels configured</EmptyTitle>
+            <EmptyTitle>{t('channels.empty.title')}</EmptyTitle>
             <EmptyDescription>
-              Add a channel to connect Qwen Code to a messaging service.
+              {t('channels.empty.description')}
             </EmptyDescription>
           </EmptyHeader>
         </Empty>
@@ -512,10 +519,12 @@ export function ChannelsManagerPage({
                   <CardTitle className="flex min-w-0 flex-wrap items-center gap-2">
                     <span className="truncate">{channel.name}</span>
                     <Badge variant={badgeVariant(state)}>
-                      {STATUS_LABELS[state]}
+                      {t(STATUS_KEYS[state])}
                     </Badge>
                     {channel.startsWithServe ? (
-                      <Badge variant="outline">Starts with serve</Badge>
+                      <Badge variant="outline">
+                        {t('channels.startsWithServe')}
+                      </Badge>
                     ) : null}
                   </CardTitle>
                   <CardDescription>{channelTypeLabel(channel)}</CardDescription>
@@ -531,7 +540,9 @@ export function ChannelsManagerPage({
                           variant="ghost"
                           size="icon-sm"
                           disabled={disabled || revisionBlocked}
-                          aria-label={`More actions for ${channel.name}`}
+                          aria-label={t('channels.action.moreNamed', {
+                            name: channel.name,
+                          })}
                         >
                           <EllipsisVerticalIcon />
                         </Button>
@@ -553,8 +564,10 @@ export function ChannelsManagerPage({
                             }}
                           >
                             {configManageable
-                              ? `Edit ${channel.name}`
-                              : 'Configuration is read-only'}
+                              ? t('channels.action.editNamed', {
+                                  name: channel.name,
+                                })
+                              : t('channels.configurationReadOnly')}
                           </DropdownMenuItem>
                         </DropdownMenuGroup>
                         <DropdownMenuSeparator />
@@ -562,7 +575,9 @@ export function ChannelsManagerPage({
                           variant="destructive"
                           onSelect={() => setDeleteName(channel.name)}
                         >
-                          Delete {channel.name}
+                          {t('channels.action.deleteNamed', {
+                            name: channel.name,
+                          })}
                         </DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
@@ -572,6 +587,7 @@ export function ChannelsManagerPage({
                   {channel.runtime.lastError ? (
                     <Alert variant="destructive" className={styles.errorAlert}>
                       <AlertCircleIcon />
+                      <AlertTitle>{t('channels.runtimeError')}</AlertTitle>
                       <AlertDescription>
                         {channel.runtime.lastError}
                       </AlertDescription>
@@ -580,6 +596,7 @@ export function ChannelsManagerPage({
                   {actionErrors[channel.name] ? (
                     <Alert variant="destructive" className={styles.errorAlert}>
                       <AlertCircleIcon />
+                      <AlertTitle>{t('channels.actionError')}</AlertTitle>
                       <AlertDescription>
                         {actionErrors[channel.name]}
                       </AlertDescription>
@@ -601,7 +618,9 @@ export function ChannelsManagerPage({
                           size="sm"
                           checked={channel.startsWithServe}
                           disabled={disabled || revisionBlocked}
-                          aria-label={`Start ${channel.name} with serve`}
+                          aria-label={t('channels.action.startWithServeNamed', {
+                            name: channel.name,
+                          })}
                           onCheckedChange={(enabled) =>
                             void runAction(
                               channel.name,
@@ -616,7 +635,7 @@ export function ChannelsManagerPage({
                           }
                         />
                       </span>
-                      Start with serve
+                      {t('channels.action.startWithServe')}
                     </label>
                     <div className="flex flex-wrap items-center gap-2">
                       {canAuthenticate && supportsQr ? (
@@ -624,7 +643,9 @@ export function ChannelsManagerPage({
                           size="sm"
                           variant="outline"
                           disabled={busyName !== null}
-                          aria-label={`Authenticate ${channel.name}`}
+                          aria-label={t('channels.action.authenticateNamed', {
+                            name: channel.name,
+                          })}
                           onClick={() =>
                             setQrHandoff({
                               name: channel.name,
@@ -634,7 +655,7 @@ export function ChannelsManagerPage({
                           }
                         >
                           <QrCodeIcon />
-                          Authenticate
+                          {t('channels.action.authenticate')}
                         </Button>
                       ) : null}
                       {renderPrimaryActions(channel)}
@@ -721,11 +742,11 @@ export function ChannelsManagerPage({
           }}
         >
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete channel?</AlertDialogTitle>
+            <AlertDialogTitle>{t('channels.delete.title')}</AlertDialogTitle>
             <AlertDialogDescription>
               {deleteName
-                ? `${deleteName} will be removed from this workspace.`
-                : 'This channel will be removed from this workspace.'}
+                ? t('channels.delete.descriptionNamed', { name: deleteName })
+                : t('channels.delete.description')}
             </AlertDialogDescription>
           </AlertDialogHeader>
           {deleteName && actionErrors[deleteName] ? (
@@ -736,7 +757,7 @@ export function ChannelsManagerPage({
           ) : null}
           <AlertDialogFooter>
             <AlertDialogCancel disabled={busyName !== null}>
-              Cancel
+              {t('channels.action.cancel')}
             </AlertDialogCancel>
             <AlertDialogAction
               variant="destructive"
@@ -746,7 +767,7 @@ export function ChannelsManagerPage({
                 busyName !== null ||
                 revisionBlocked
               }
-              aria-label="Delete channel"
+              aria-label={t('channels.action.delete')}
               onClick={(event) => {
                 if (!deleteName) return;
                 event.preventDefault();
@@ -768,7 +789,7 @@ export function ChannelsManagerPage({
               }}
             >
               {busyName === deleteName ? <Spinner /> : null}
-              Delete
+              {t('channels.action.delete')}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

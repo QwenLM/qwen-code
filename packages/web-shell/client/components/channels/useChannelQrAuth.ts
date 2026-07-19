@@ -12,6 +12,7 @@ import {
   type DaemonChannelAuthCommitRequest,
   type DaemonChannelAuthSession,
 } from '@qwen-code/sdk/daemon';
+import { useI18n } from '../../i18n';
 
 export interface ChannelQrAuthActions {
   begin: (
@@ -130,6 +131,7 @@ export function useChannelQrAuth({
   channelType,
   actions,
 }: UseChannelQrAuthOptions): UseChannelQrAuthResult {
+  const { t } = useI18n();
   const [session, setSession] = useState<DaemonChannelAuthSession | undefined>(
     undefined,
   );
@@ -222,9 +224,7 @@ export function useChannelQrAuth({
       setUnavailable(isUnavailable(cause));
       setRetryableFailure(isRetryableFailure(cause));
       setError(
-        isUnavailable(cause)
-          ? 'This authentication session is unavailable.'
-          : fallback,
+        isUnavailable(cause) ? t('channels.auth.error.unavailable') : fallback,
       );
       setBusy(null);
     };
@@ -242,7 +242,7 @@ export function useChannelQrAuth({
         const blob = await operation.actions.qr(operation.name, next.id);
         if (!current()) return false;
         if (!blob.type.toLowerCase().startsWith('image/')) {
-          fail(undefined, 'The QR image could not be loaded.');
+          fail(undefined, t('channels.auth.error.qrLoad'));
           return false;
         }
         const url = URL.createObjectURL(blob);
@@ -254,7 +254,7 @@ export function useChannelQrAuth({
         setQrUrl(url);
         return true;
       } catch (cause) {
-        fail(cause, 'The QR image could not be loaded.');
+        fail(cause, t('channels.auth.error.qrLoad'));
         return false;
       }
     };
@@ -284,7 +284,7 @@ export function useChannelQrAuth({
           await operation.actions.status(operation.name, activeSession.id),
         );
       } catch (cause) {
-        fail(cause, 'Authentication status could not be refreshed.');
+        fail(cause, t('channels.auth.error.statusRefresh'));
       }
     };
 
@@ -305,7 +305,7 @@ export function useChannelQrAuth({
         }
         await accept(next);
       } catch (cause) {
-        fail(cause, 'Authentication could not be started.');
+        fail(cause, t('channels.auth.error.start'));
       }
     };
 
@@ -332,7 +332,7 @@ export function useChannelQrAuth({
       cancel();
       revokeQr(false);
     };
-  }, [actions, attempt, channelType, identity, name, open, revokeQr]);
+  }, [actions, attempt, channelType, identity, name, open, revokeQr, t]);
 
   const close = useCallback(() => {
     const operation = operationRef.current;
@@ -416,8 +416,8 @@ export function useChannelQrAuth({
         setRetryableFailure(isRetryableFailure(cause));
         setError(
           isUnavailable(cause)
-            ? 'This authentication session is unavailable.'
-            : 'Authentication could not be saved.',
+            ? t('channels.auth.error.unavailable')
+            : t('channels.auth.error.save'),
         );
       }
     } finally {
@@ -429,7 +429,7 @@ export function useChannelQrAuth({
         setBusy(null);
       }
     }
-  }, [busy, revokeQr]);
+  }, [busy, revokeQr, t]);
 
   const canRetry =
     !unavailable &&

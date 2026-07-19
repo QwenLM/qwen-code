@@ -18,6 +18,7 @@ import {
   type ChannelQrAuthActions,
   type UseChannelQrAuthResult,
 } from './useChannelQrAuth';
+import { I18nProvider } from '../../i18n';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -66,7 +67,11 @@ function Harness() {
 
 async function render() {
   await act(async () => {
-    root.render(<Harness />);
+    root.render(
+      <I18nProvider language="en">
+        <Harness />
+      </I18nProvider>,
+    );
   });
 }
 

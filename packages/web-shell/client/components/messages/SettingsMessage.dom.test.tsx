@@ -112,6 +112,7 @@ function renderPanel(
   state: SettingsMessageSettingsState,
   overrides: Partial<{
     onSubDialog: (key: string, scope: 'workspace' | 'user') => void;
+    onOpenChannels: () => void;
     modelManagement: ModelManagementProps;
   }> = {},
 ): HTMLElement {
@@ -123,6 +124,7 @@ function renderPanel(
         onLanguageChange={noop}
         onThemeChange={noop}
         onSubDialog={overrides.onSubDialog ?? noop}
+        onOpenChannels={overrides.onOpenChannels ?? noop}
         chatWidthMode="1000"
         onChatWidthModeChange={noop}
         modelManagement={overrides.modelManagement}
@@ -156,6 +158,27 @@ function switchButton(container: HTMLElement): HTMLButtonElement {
 }
 
 describe('SettingsMessage user-scope editing', () => {
+  it('opens channel management from a local Channels row', () => {
+    const onOpenChannels = vi.fn();
+    const container = renderPanel(makeState([], vi.fn()), {
+      onOpenChannels,
+    });
+
+    const channelsCategory = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('nav button'),
+    ).find((button) => button.textContent?.includes('Channels'));
+    if (!channelsCategory) throw new Error('Channels category not found');
+    act(() => channelsCategory.click());
+
+    const manageButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'Manage channels');
+    if (!manageButton) throw new Error('Manage channels button not found');
+    act(() => manageButton.click());
+
+    expect(onOpenChannels).toHaveBeenCalledOnce();
+  });
+
   it('persists a boolean toggle to the user scope from the User tab', async () => {
     const setValue = vi.fn(
       (scope: 'workspace' | 'user', key: string, value: unknown) =>

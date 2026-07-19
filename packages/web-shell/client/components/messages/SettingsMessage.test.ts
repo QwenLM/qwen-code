@@ -71,4 +71,13 @@ describe('nextSettingIdx', () => {
     // with selectedIdx = 0.
     expect(nextSettingIdx(rowsOf('hsss'), -1, 1)).toBe(1);
   });
+
+  it('treats the local Channels row as a navigable setting', () => {
+    const rows: FlatRow[] = [
+      { type: 'header', category: 'Channels' },
+      { type: 'local', localKey: 'channels' },
+    ];
+
+    expect(nextSettingIdx(rows, 0, 1)).toBe(1);
+  });
 });

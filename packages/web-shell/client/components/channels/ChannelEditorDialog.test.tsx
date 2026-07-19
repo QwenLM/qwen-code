@@ -6,10 +6,11 @@
 
 // @vitest-environment jsdom
 
-import { act } from 'react';
+import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonChannelTypeDescriptor } from '@qwen-code/sdk/daemon';
+import { I18nProvider } from '../../i18n';
 import { ChannelEditorDialog } from './ChannelEditorDialog';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -30,6 +31,10 @@ const catalog: DaemonChannelTypeDescriptor[] = [
 let container: HTMLDivElement;
 let root: Root;
 
+function english(node: ReactNode) {
+  return <I18nProvider language="en">{node}</I18nProvider>;
+}
+
 beforeEach(() => {
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -42,16 +47,38 @@ afterEach(() => {
 });
 
 describe('ChannelEditorDialog', () => {
+  it('localizes representative editor labels in Simplified Chinese', async () => {
+    await act(async () => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <ChannelEditorDialog
+            open
+            catalog={catalog}
+            expectedRevision="revision-1"
+            onOpenChange={vi.fn()}
+            onSubmit={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(document.body.textContent).toContain('添加频道');
+    expect(document.body.textContent).toContain('输入凭据');
+    expect(document.body.textContent).toContain('取消');
+  });
+
   it('keeps save disabled until visible required credentials are valid', async () => {
     await act(async () => {
       root.render(
-        <ChannelEditorDialog
-          open
-          catalog={catalog}
-          expectedRevision="revision-1"
-          onOpenChange={vi.fn()}
-          onSubmit={vi.fn()}
-        />,
+        english(
+          <ChannelEditorDialog
+            open
+            catalog={catalog}
+            expectedRevision="revision-1"
+            onOpenChange={vi.fn()}
+            onSubmit={vi.fn()}
+          />,
+        ),
       );
     });
 
@@ -76,43 +103,45 @@ describe('ChannelEditorDialog', () => {
     const qqSecret = 'qq-secret-dom-sentinel';
     await act(async () => {
       root.render(
-        <ChannelEditorDialog
-          open
-          catalog={[
-            {
-              type: 'qq',
-              displayName: 'QQ',
-              manageable: true,
-              auth: ['credentials', 'qr'],
-              fields: [
-                { key: 'appID', label: 'App ID', kind: 'string' },
-                { key: 'appSecret', label: 'App Secret', kind: 'secret' },
-              ],
-            },
-          ]}
-          expectedRevision="revision-1"
-          instance={{
-            name: 'qq-bot',
-            config: {
-              type: 'qq',
-              appID: 'id',
-              appSecret: qqSecret,
-              webhooks: {
-                sources: {
-                  github: { secret: webhookSecret, targets: {} },
+        english(
+          <ChannelEditorDialog
+            open
+            catalog={[
+              {
+                type: 'qq',
+                displayName: 'QQ',
+                manageable: true,
+                auth: ['credentials', 'qr'],
+                fields: [
+                  { key: 'appID', label: 'App ID', kind: 'string' },
+                  { key: 'appSecret', label: 'App Secret', kind: 'secret' },
+                ],
+              },
+            ]}
+            expectedRevision="revision-1"
+            instance={{
+              name: 'qq-bot',
+              config: {
+                type: 'qq',
+                appID: 'id',
+                appSecret: qqSecret,
+                webhooks: {
+                  sources: {
+                    github: { secret: webhookSecret, targets: {} },
+                  },
                 },
               },
-            },
-            secrets: { appSecret: { present: true, source: 'literal' } },
-            webhookSecrets: {
-              github: { present: true, source: 'literal' },
-            },
-            startsWithServe: false,
-            runtime: { state: 'stopped' },
-          }}
-          onOpenChange={vi.fn()}
-          onSubmit={vi.fn()}
-        />,
+              secrets: { appSecret: { present: true, source: 'literal' } },
+              webhookSecrets: {
+                github: { present: true, source: 'literal' },
+              },
+              startsWithServe: false,
+              runtime: { state: 'stopped' },
+            }}
+            onOpenChange={vi.fn()}
+            onSubmit={vi.fn()}
+          />,
+        ),
       );
     });
 
@@ -131,30 +160,32 @@ describe('ChannelEditorDialog', () => {
   it('disables save when an environment webhook becomes literal', async () => {
     await act(async () => {
       root.render(
-        <ChannelEditorDialog
-          open
-          catalog={catalog}
-          expectedRevision="revision-1"
-          instance={{
-            name: 'bot',
-            config: {
-              type: 'custom',
-              webhooks: {
-                sources: {
-                  github: { secretEnv: 'GITHUB_WEBHOOK_SECRET', targets: {} },
+        english(
+          <ChannelEditorDialog
+            open
+            catalog={catalog}
+            expectedRevision="revision-1"
+            instance={{
+              name: 'bot',
+              config: {
+                type: 'custom',
+                webhooks: {
+                  sources: {
+                    github: { secretEnv: 'GITHUB_WEBHOOK_SECRET', targets: {} },
+                  },
                 },
               },
-            },
-            secrets: { token: { present: true, source: 'literal' } },
-            webhookSecrets: {
-              github: { present: true, source: 'environment' },
-            },
-            startsWithServe: false,
-            runtime: { state: 'stopped' },
-          }}
-          onOpenChange={vi.fn()}
-          onSubmit={vi.fn()}
-        />,
+              secrets: { token: { present: true, source: 'literal' } },
+              webhookSecrets: {
+                github: { present: true, source: 'environment' },
+              },
+              startsWithServe: false,
+              runtime: { state: 'stopped' },
+            }}
+            onOpenChange={vi.fn()}
+            onSubmit={vi.fn()}
+          />,
+        ),
       );
     });
 

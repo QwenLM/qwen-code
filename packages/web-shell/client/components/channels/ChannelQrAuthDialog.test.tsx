@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonChannelAuthSession } from '@qwen-code/sdk/daemon';
 import { ChannelQrAuthDialog } from './ChannelQrAuthDialog';
 import type { ChannelQrAuthActions } from './useChannelQrAuth';
+import { I18nProvider, type WebShellLanguage } from '../../i18n';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -36,19 +37,24 @@ function button(name: string) {
   return match as HTMLButtonElement;
 }
 
-async function renderDialog(state: DaemonChannelAuthSession['state']) {
+async function renderDialog(
+  state: DaemonChannelAuthSession['state'],
+  language: WebShellLanguage = 'en',
+) {
   vi.mocked(actions.begin).mockResolvedValue(session(state));
   await act(async () => {
     root.render(
-      <ChannelQrAuthDialog
-        open
-        identity={{}}
-        name="qq-main"
-        channelType="qq"
-        channelDisplayName="QQ"
-        actions={actions}
-        onOpenChange={vi.fn()}
-      />,
+      <I18nProvider language={language}>
+        <ChannelQrAuthDialog
+          open
+          identity={{}}
+          name="qq-main"
+          channelType="qq"
+          channelDisplayName="QQ"
+          actions={actions}
+          onOpenChange={vi.fn()}
+        />
+      </I18nProvider>,
     );
   });
   await act(async () => {
@@ -85,6 +91,14 @@ afterEach(() => {
 });
 
 describe('ChannelQrAuthDialog', () => {
+  it('localizes representative QR labels in Simplified Chinese', async () => {
+    await renderDialog('ready', 'zh-CN');
+
+    expect(document.body.textContent).toContain('认证 qq-main');
+    expect(document.body.textContent).toContain('认证已可以保存');
+    expect(document.body.textContent).toContain('保存认证');
+  });
+
   it('disables Radix content and overlay motion for reduced-motion users', async () => {
     await renderDialog('requesting');
 
@@ -139,15 +153,17 @@ describe('ChannelQrAuthDialog', () => {
     vi.mocked(actions.begin).mockResolvedValue(session('awaiting_scan'));
     await act(async () => {
       root.render(
-        <ChannelQrAuthDialog
-          open
-          identity={{}}
-          name="qq-main"
-          channelType="qq"
-          channelDisplayName="QQ"
-          actions={actions}
-          onOpenChange={onOpenChange}
-        />,
+        <I18nProvider language="en">
+          <ChannelQrAuthDialog
+            open
+            identity={{}}
+            name="qq-main"
+            channelType="qq"
+            channelDisplayName="QQ"
+            actions={actions}
+            onOpenChange={onOpenChange}
+          />
+        </I18nProvider>,
       );
     });
     await act(async () => {

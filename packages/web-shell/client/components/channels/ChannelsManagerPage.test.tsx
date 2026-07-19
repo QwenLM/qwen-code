@@ -13,6 +13,7 @@ import {
   DaemonHttpError,
   type DaemonChannelInstanceSnapshot,
 } from '@qwen-code/sdk/daemon';
+import { I18nProvider, type WebShellLanguage } from '../../i18n';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -95,9 +96,13 @@ function instance(
   };
 }
 
-async function renderPage() {
+async function renderPage(language: WebShellLanguage = 'en') {
   await act(async () => {
-    root.render(<ChannelsManagerPage onClose={vi.fn()} />);
+    root.render(
+      <I18nProvider language={language}>
+        <ChannelsManagerPage onClose={vi.fn()} />
+      </I18nProvider>,
+    );
   });
 }
 
@@ -191,6 +196,14 @@ afterEach(() => {
 });
 
 describe('ChannelsManagerPage', () => {
+  it('localizes representative manager labels in Simplified Chinese', async () => {
+    channelState.loading = true;
+    await renderPage('zh-CN');
+
+    expect(document.body.textContent).toContain('频道');
+    expect(document.body.textContent).toContain('正在加载频道');
+  });
+
   it('renders status and retries an error instance', async () => {
     channelState.snapshot.instances.bot = instance('error', {
       runtime: { state: 'error', lastError: 'invalid token' },
@@ -664,7 +677,9 @@ describe('ChannelsManagerPage', () => {
     const headingRef = createRef<HTMLHeadingElement>();
     await act(async () => {
       root.render(
-        <ChannelsManagerPage onClose={vi.fn()} initialFocusRef={headingRef} />,
+        <I18nProvider language="en">
+          <ChannelsManagerPage onClose={vi.fn()} initialFocusRef={headingRef} />
+        </I18nProvider>,
       );
     });
 

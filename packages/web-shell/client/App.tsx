@@ -113,6 +113,7 @@ import {
 import { ExtensionsManagerPage } from './components/extensions/ExtensionsManagerPage';
 import { PluginManagerPage } from './components/plugins/PluginManagerPage';
 import { SettingsMessage } from './components/messages/SettingsMessage';
+import { ChannelsManagerPage } from './components/channels/ChannelsManagerPage';
 import { isAskUserPermission } from './utils/askUserPermission';
 import { ToolApproval } from './components/messages/ToolApproval';
 import { AskUserQuestion } from './components/messages/AskUserQuestion';
@@ -2234,6 +2235,7 @@ export function App({
     | 'mcp'
     | 'skills'
     | 'plugins'
+    | 'channels'
     | null
   >(null);
   const closePanel = useCallback(() => setActivePanel(null), []);
@@ -2262,7 +2264,8 @@ export function App({
         | 'extensions'
         | 'mcp'
         | 'skills'
-        | 'plugins',
+        | 'plugins'
+        | 'channels',
     ) => {
       setMainView('chat');
       setActivePanel(panel);
@@ -2491,6 +2494,7 @@ export function App({
   const panelBackRef = useRef<HTMLButtonElement | null>(null);
   const panelHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const pluginTabRef = useRef<HTMLButtonElement | null>(null);
+  const channelsSettingsTriggerRef = useRef<HTMLButtonElement | null>(null);
   const prevActivePanelRef = useRef(activePanel);
   const prevApprovalOverlayRef = useRef(approvalOverlayActive);
   useEffect(() => {
@@ -2499,6 +2503,14 @@ export function App({
     prevActivePanelRef.current = activePanel;
     prevApprovalOverlayRef.current = approvalOverlayActive;
     if (activePanel) {
+      if (activePanel === 'channels') {
+        panelHeadingRef.current?.focus();
+        return;
+      }
+      if (prev === 'channels' && activePanel === 'settings') {
+        channelsSettingsTriggerRef.current?.focus();
+        return;
+      }
       if (activePanel === 'extensions') {
         panelHeadingRef.current?.focus();
         return;
@@ -6470,13 +6482,16 @@ export function App({
                             ? t('skills.title')
                           : activePanel === 'plugins'
                               ? t('plugins.title')
-                              : t('sessionsOverview.title')
+                              : activePanel === 'channels'
+                                ? t('channels.title')
+                                : t('sessionsOverview.title')
                   }
                 >
                   {activePanel !== 'extensions' &&
                     activePanel !== 'mcp' &&
                     activePanel !== 'skills' &&
-                    activePanel !== 'plugins' && (
+                    activePanel !== 'plugins' &&
+                    activePanel !== 'channels' && (
                     <div className={styles.panelHeader}>
                     <button
                       ref={panelBackRef}
@@ -6516,6 +6531,8 @@ export function App({
                         onThemeChange={handleThemeChange}
                         chatWidthMode={chatWidthMode}
                         onChatWidthModeChange={handleChatWidthModeChange}
+                        onOpenChannels={() => openPanel('channels')}
+                        channelsTriggerRef={channelsSettingsTriggerRef}
                         modelManagement={{
                           providers: providersState.providers,
                           currentModelId:
@@ -6609,6 +6626,11 @@ export function App({
                         onClose={closePanel}
                         onUseSkill={handleUseSkill}
                         initialFocusRef={pluginTabRef}
+                      />
+                    ) : activePanel === 'channels' ? (
+                      <ChannelsManagerPage
+                        onClose={() => setActivePanel('settings')}
+                        initialFocusRef={panelHeadingRef}
                       />
                     ) : (
                       <SessionOverviewPanel

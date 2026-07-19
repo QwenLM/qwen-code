@@ -16,6 +16,7 @@ import {
   DialogTitle,
 } from '../ui/dialog';
 import { Spinner } from '../ui/spinner';
+import { useI18n } from '../../i18n';
 import {
   useChannelQrAuth,
   type ChannelQrAuthActions,
@@ -31,16 +32,16 @@ interface ChannelQrAuthDialogProps {
   onOpenChange: (open: boolean) => void;
 }
 
-const STATUS_COPY = {
-  requesting: 'Preparing a secure QR code…',
-  awaiting_scan: 'Scan the QR code with your channel app.',
-  scanned: 'QR code scanned. Confirm in your channel app.',
-  refreshing: 'Refreshing the QR code…',
-  ready: 'Authentication is ready to save.',
-  committed: 'Authentication saved.',
-  cancelled: 'Authentication cancelled.',
-  expired: 'This QR code expired. Start again to get a new one.',
-  error: 'Authentication did not complete. Try again.',
+const STATUS_KEYS = {
+  requesting: 'channels.auth.status.requesting',
+  awaiting_scan: 'channels.auth.status.awaitingScan',
+  scanned: 'channels.auth.status.scanned',
+  refreshing: 'channels.auth.status.refreshing',
+  ready: 'channels.auth.status.ready',
+  committed: 'channels.auth.status.committed',
+  cancelled: 'channels.auth.status.cancelled',
+  expired: 'channels.auth.status.expired',
+  error: 'channels.auth.status.error',
 } as const;
 
 function countdown(seconds: number | undefined): string | undefined {
@@ -59,6 +60,7 @@ export function ChannelQrAuthDialog({
   actions,
   onOpenChange,
 }: ChannelQrAuthDialogProps) {
+  const { t } = useI18n();
   const auth = useChannelQrAuth({
     open,
     identity,
@@ -70,8 +72,8 @@ export function ChannelQrAuthDialog({
   const status = auth.error
     ? auth.error
     : state
-      ? STATUS_COPY[state]
-      : 'Starting authentication…';
+      ? t(STATUS_KEYS[state])
+      : t('channels.auth.status.starting');
   const remaining = countdown(auth.remainingSeconds);
   const close = () => {
     auth.close();
@@ -94,10 +96,9 @@ export function ChannelQrAuthDialog({
         onEscapeKeyDown={() => auth.close()}
       >
         <DialogHeader>
-          <DialogTitle>Authenticate {name}</DialogTitle>
+          <DialogTitle>{t('channels.auth.title', { name })}</DialogTitle>
           <DialogDescription>
-            Connect this {channelDisplayName} channel without exposing the QR
-            contents to the page.
+            {t('channels.auth.description', { type: channelDisplayName })}
           </DialogDescription>
         </DialogHeader>
 
@@ -106,7 +107,10 @@ export function ChannelQrAuthDialog({
             <div className="rounded-xl border bg-white p-3 shadow-sm motion-reduce:transition-none">
               <img
                 src={auth.qrUrl}
-                alt={`QR code for ${channelDisplayName} channel ${name}`}
+                alt={t('channels.auth.qrAlt', {
+                  type: channelDisplayName,
+                  name,
+                })}
                 className="size-56 max-w-full object-contain"
               />
             </div>
@@ -136,7 +140,7 @@ export function ChannelQrAuthDialog({
             state !== 'committed' &&
             state !== 'cancelled' ? (
               <p className="mt-1 text-sm text-muted-foreground">
-                QR session time remaining: {remaining}
+                {t('channels.auth.remaining', { remaining })}
               </p>
             ) : null}
           </div>
@@ -156,7 +160,9 @@ export function ChannelQrAuthDialog({
             disabled={auth.busy === 'commit'}
             onClick={close}
           >
-            {state === 'committed' ? 'Close' : 'Cancel'}
+            {state === 'committed'
+              ? t('channels.action.close')
+              : t('channels.action.cancel')}
           </Button>
           {auth.canRetry || auth.busy === 'retry' ? (
             <Button
@@ -165,7 +171,7 @@ export function ChannelQrAuthDialog({
               onClick={() => void auth.retry()}
             >
               {auth.busy === 'retry' ? <Spinner /> : null}
-              Retry
+              {t('channels.action.retry')}
             </Button>
           ) : null}
           {state === 'ready' ? (
@@ -175,7 +181,7 @@ export function ChannelQrAuthDialog({
               onClick={() => void auth.commit()}
             >
               {auth.busy === 'commit' ? <Spinner /> : null}
-              Save authentication
+              {t('channels.action.saveAuthentication')}
             </Button>
           ) : null}
         </DialogFooter>

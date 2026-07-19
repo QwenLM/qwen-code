@@ -389,6 +389,8 @@ vi.mock('./components/messages/SettingsMessage', async () => {
   return {
     SettingsMessage: (props: {
       onSubDialog?: (key: string, scope: 'user' | 'workspace') => void;
+      onOpenChannels?: () => void;
+      channelsTriggerRef?: React.Ref<HTMLButtonElement>;
       onLanguageChange?: (
         language: string,
         scope: 'user' | 'workspace',
@@ -397,6 +399,16 @@ vi.mock('./components/messages/SettingsMessage', async () => {
       React.createElement(
         'div',
         { 'data-testid': 'settings-message' },
+        React.createElement(
+          'button',
+          {
+            ref: props.channelsTriggerRef,
+            'data-testid': 'open-channels',
+            type: 'button',
+            onClick: props.onOpenChannels,
+          },
+          'channels',
+        ),
         React.createElement(
           'button',
           {
@@ -427,6 +439,23 @@ vi.mock('./components/messages/SettingsMessage', async () => {
             onClick: () => props.onLanguageChange?.('en', 'workspace'),
           },
           'language (workspace)',
+        ),
+      ),
+  };
+});
+
+vi.mock('./components/channels/ChannelsManagerPage', async () => {
+  const React = await import('react');
+  return {
+    ChannelsManagerPage: (props: { onClose: () => void }) =>
+      React.createElement(
+        'div',
+        null,
+        React.createElement('h1', null, 'Channels'),
+        React.createElement(
+          'button',
+          { type: 'button', onClick: props.onClose },
+          'Back',
         ),
       ),
   };
@@ -4126,6 +4155,48 @@ describe('App session callbacks', () => {
     ).not.toBeNull();
     expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
   });
+
+  it.each([
+    ['en', 'Channels'],
+    ['zh-CN', '频道'],
+  ] as const)(
+    'opens Channels from Settings in %s and returns focus to its exact trigger',
+    async (language, expectedRegionLabel) => {
+      const { container } = renderApp({ language });
+      await flush();
+
+      testState.prompt = '/settings';
+      await clickSubmit(container);
+      await flush();
+
+      const trigger = container.querySelector<HTMLButtonElement>(
+        '[data-testid="open-channels"]',
+      );
+      if (!trigger) throw new Error('Channels settings trigger not found');
+      await act(async () => {
+        trigger.focus();
+        trigger.click();
+        await Promise.resolve();
+      });
+
+      expect(
+        container.querySelector('[role="region"]')?.getAttribute('aria-label'),
+      ).toBe(expectedRegionLabel);
+      const back = Array.from(
+        container.querySelectorAll<HTMLButtonElement>('button'),
+      ).find((button) => button.textContent === 'Back');
+      if (!back) throw new Error('Channels back button not found');
+      await act(async () => {
+        back.click();
+        await Promise.resolve();
+      });
+
+      const restoredTrigger = container.querySelector<HTMLButtonElement>(
+        '[data-testid="open-channels"]',
+      );
+      expect(document.activeElement).toBe(restoredTrigger);
+    },
+  );
 
   it('keeps the panel open when transcript blocks carry no actionable approval', async () => {
     // Negative control: a resolved permission is not actionable, so the panel

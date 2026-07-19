@@ -3,6 +3,7 @@ import {
   useEffect,
   useMemo,
   useState,
+  type Ref,
   type ReactNode,
 } from 'react';
 import {
@@ -10,6 +11,7 @@ import {
   DatabaseIcon,
   FlaskConicalIcon,
   PaletteIcon,
+  RadioTowerIcon,
   ServerIcon,
   Settings2Icon,
   ShieldIcon,
@@ -83,6 +85,8 @@ interface SettingsMessageProps {
   onThemeChange: (theme: WebShellTheme) => void;
   chatWidthMode: ChatWidthMode;
   onChatWidthModeChange: (mode: ChatWidthMode) => void;
+  onOpenChannels: () => void;
+  channelsTriggerRef?: Ref<HTMLButtonElement>;
   /** Model list/add/delete/select, rendered inside the Model category. */
   modelManagement?: ModelManagementProps;
   embedded?: boolean;
@@ -238,7 +242,7 @@ interface CategoryGroup {
 
 type SettingsPageItem =
   | { type: 'setting'; setting: DaemonSettingDescriptor }
-  | { type: 'local'; localKey: 'chatWidth' };
+  | { type: 'local'; localKey: 'chatWidth' | 'channels' };
 
 interface SettingsPageCategory {
   id: string;
@@ -264,23 +268,25 @@ function groupByCategory(settings: DaemonSettingDescriptor[]): CategoryGroup[] {
 
 function CategoryIcon({ category }: { category: string }) {
   const normalized = category.toLowerCase();
-  const Icon = normalized.includes('ui')
-    ? PaletteIcon
-    : normalized.includes('tool')
-      ? WrenchIcon
-      : normalized.includes('context')
-        ? DatabaseIcon
-        : normalized.includes('privacy')
-          ? ShieldIcon
-          : normalized.includes('model')
-            ? BotIcon
-            : normalized.includes('daemon')
-              ? ServerIcon
-              : normalized.includes('advanced')
-                ? SlidersHorizontalIcon
-                : normalized.includes('experimental')
-                  ? FlaskConicalIcon
-                  : Settings2Icon;
+  const Icon = normalized.includes('channel')
+    ? RadioTowerIcon
+    : normalized.includes('ui')
+      ? PaletteIcon
+      : normalized.includes('tool')
+        ? WrenchIcon
+        : normalized.includes('context')
+          ? DatabaseIcon
+          : normalized.includes('privacy')
+            ? ShieldIcon
+            : normalized.includes('model')
+              ? BotIcon
+              : normalized.includes('daemon')
+                ? ServerIcon
+                : normalized.includes('advanced')
+                  ? SlidersHorizontalIcon
+                  : normalized.includes('experimental')
+                    ? FlaskConicalIcon
+                    : Settings2Icon;
   return <Icon data-icon="inline-start" aria-hidden="true" />;
 }
 
@@ -380,7 +386,7 @@ function SettingInput({
 export type FlatRow =
   | { type: 'header'; category: string }
   | { type: 'setting'; setting: DaemonSettingDescriptor }
-  | { type: 'local'; localKey: 'chatWidth' };
+  | { type: 'local'; localKey: 'chatWidth' | 'channels' };
 
 /* Wraps around at both ends (matching the native CLI) while skipping
    category-header rows. Exported for tests. */
@@ -406,6 +412,8 @@ export function SettingsMessage({
   onThemeChange,
   chatWidthMode,
   onChatWidthModeChange,
+  onOpenChannels,
+  channelsTriggerRef,
   modelManagement,
   embedded = false,
 }: SettingsMessageProps) {
@@ -456,6 +464,11 @@ export function SettingsMessage({
         items: [localItem],
       });
     }
+    groups.push({
+      id: 'Channels',
+      label: t('settings.category.Channels'),
+      items: [{ type: 'local', localKey: 'channels' }],
+    });
     return groups;
   }, [settings, t]);
 
@@ -751,6 +764,30 @@ export function SettingsMessage({
                           <Separator className="mx-5 w-auto max-md:mx-4" />
                         );
                         if (item.type === 'local') {
+                          if (item.localKey === 'channels') {
+                            return (
+                              <div key={item.localKey}>
+                                {separator}
+                                <SettingsRow
+                                  title={t('settings.channels.title')}
+                                  description={t(
+                                    'settings.channels.description',
+                                  )}
+                                  control={
+                                    <Button
+                                      ref={channelsTriggerRef}
+                                      type="button"
+                                      variant="outline"
+                                      size="sm"
+                                      onClick={onOpenChannels}
+                                    >
+                                      {t('settings.channels.action')}
+                                    </Button>
+                                  }
+                                />
+                              </div>
+                            );
+                          }
                           return (
                             <div key={item.localKey}>
                               {separator}
