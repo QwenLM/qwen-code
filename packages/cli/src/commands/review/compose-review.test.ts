@@ -660,12 +660,18 @@ describe('composeReview — not-reviewed entries that carry their own reason', (
 });
 
 describe('composeReview — input validation (the producer is a model that omits inapplicable fields)', () => {
-  it('a body-Critical-only input with every count omitted is REQUEST_CHANGES (undefined + 1 = NaN once meant APPROVE)', () => {
+  it('a body-Critical-only input with every count omitted lands on the REQUEST_CHANGES row (undefined + 1 = NaN once meant APPROVE)', () => {
+    // The NaN property pins on `baseEvent`: the arithmetic put the blocker on
+    // the Request-changes row. The EVENT is then softened — no plan means the
+    // blocker cannot be shown verified — and the blocker's body copy survives
+    // the softening.
     const r = composeReview({
       bodyCriticals: ['the only blocker'],
       modelId: MODEL,
     });
-    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('criticals-unverified');
     expect(r.body).toContain('**[Critical]** the only blocker');
   });
 
@@ -823,10 +829,16 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
       });
       const written = JSON.parse(readFileSync(outPath, 'utf8')) as {
         event: string;
+        baseEvent: string;
         verdictLine: string;
       };
-      expect(written.event).toBe('REQUEST_CHANGES');
-      expect(written.verdictLine).toContain('Request changes');
+      // The derived count reached the Request-changes row — that is the hole
+      // this test pins. With no plan beside it the blocker cannot be shown
+      // verified, so the EVENT softens and the verdict line says why.
+      expect(written.baseEvent).toBe('REQUEST_CHANGES');
+      expect(written.verdictLine).toContain(
+        'a Request changes was NOT available',
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -853,7 +865,8 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         out: outPath,
       });
       expect(
-        (JSON.parse(readFileSync(outPath, 'utf8')) as { event: string }).event,
+        (JSON.parse(readFileSync(outPath, 'utf8')) as { baseEvent: string })
+          .baseEvent,
       ).toBe('REQUEST_CHANGES');
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -1496,9 +1509,14 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
     );
   });
 
-  it('discloses that posted findings were not verified when Step 4 was skipped', () => {
-    // A confirmed Critical still blocks — a cap never softens a REQUEST_CHANGES —
-    // but the body says the posted findings were not verified.
+  it('softens an unverified Request changes to Comment — no verifier, no blocker', () => {
+    // This test used to pin the opposite: "a confirmed Critical still blocks —
+    // a cap never softens a REQUEST_CHANGES". The never-soften rule presumes
+    // CONFIRMED, and when Step 4 never ran, nothing confirmed anything: a real
+    // bot review shipped a CHANGES_REQUESTED onto an external contributor's PR
+    // (#7166) whose one Critical its own body disclosed as unverified. The
+    // module's stated principle — an unverified finding must not become a
+    // public blocker — now has the mechanics on the Request-changes row too.
     const r = composeReview({
       criticalsInline: 1,
       suggestionsInline: 0,
@@ -1506,8 +1524,84 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
       env: ENV,
       modelId: MODEL,
     });
-    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.event).toBe('COMMENT');
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(r.cappedBy).toContain('criticals-unverified');
     expect(r.body).toMatch(/verification — the review posts findings/);
+    // The opener must not certify anything over an unverified blocker.
+    expect(r.body).not.toContain('no blockers');
+    // The verdict line names what a reader would otherwise chase: a Comment
+    // over visible Critical comments reads as a contradiction until it says why.
+    expect(verdictLine(r)).toBe(
+      'Verdict: Comment — a Request changes was NOT available: its blockers ' +
+        'were never verified (they are posted, disclosed as unverified)',
+    );
+  });
+
+  it('keeps the body Criticals when the unverified cap softens the event — the only copy survives', () => {
+    // The presubmit RC→Comment carve-out learned this the hard way: a softened
+    // event must never erase the body copy of an unanchorable blocker.
+    const r = composeReview({
+      criticalsInline: 0,
+      bodyCriticals: ['whole-PR blocker X'],
+      planPath: coveredPlan(['reverse-audit']), // verifier absent
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('criticals-unverified');
+    expect(r.body).toContain('**[Critical]** whole-PR blocker X');
+  });
+
+  it('a deterministic-only Request changes stands without a verifier — pre-confirmed by design', () => {
+    // [build]/[test] findings are deterministic: CI ran them, nothing a
+    // verifier rules on. A review whose only blocker is one must not be
+    // softened for skipping a verification it never owed.
+    const r = composeReview({
+      criticalsInline: 0,
+      bodyCriticals: ['[build] tsc fails on main merge'],
+      planPath: coveredPlan(['reverse-audit']), // verifier absent, none owed
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.cappedBy).not.toContain('criticals-unverified');
+  });
+
+  it('a verified Request changes still blocks — the cap binds only when Step 4 is missing', () => {
+    const r = composeReview({
+      criticalsInline: 1,
+      planPath: coveredPlan(), // verify AND reverse audit ran
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.cappedBy).not.toContain('criticals-unverified');
+  });
+
+  it('fails closed when there is no plan to check verification against', () => {
+    // "Could not show the blockers were verified" and "they were not" read
+    // the same to the person the blocker would be posted at.
+    const r = composeReview({
+      criticalsInline: 1,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('criticals-unverified');
+  });
+
+  it('fails closed when the transcripts cannot be read at all', () => {
+    const r = composeReview({
+      criticalsInline: 1,
+      planPath: coveredPlan(),
+      env: {
+        QWEN_CODE_PROJECT_DIR: join(dir, 'nowhere'),
+        QWEN_CODE_SESSION_ID: 'S1',
+      },
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('criticals-unverified');
   });
 
   it('does not require a verifier on a review that confirmed nothing', () => {
@@ -1536,16 +1630,21 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
 
   it('requires a verifier for a body Critical that is not pre-confirmed', () => {
     // A non-deterministic Critical that could not be anchored still posts (in the
-    // body) and still had to be verified — so a missing verifier is disclosed even
-    // with no inline findings.
+    // body) and still had to be verified — so a missing verifier is disclosed,
+    // the event is softened (an unverified finding must not become a public
+    // blocker), and the body copy survives the softening.
     const r = composeReview({
       bodyCriticals: ['a real blocker that could not be anchored'],
       planPath: coveredPlan(['reverse-audit']), // verifier absent
       env: ENV,
       modelId: MODEL,
     });
-    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('criticals-unverified');
     expect(r.body).toMatch(/verification — the review posts findings/);
+    expect(r.body).toContain(
+      '**[Critical]** a real blocker that could not be anchored',
+    );
   });
 
   it('does not require a verifier for a deterministic [build]/[test] body Critical', () => {

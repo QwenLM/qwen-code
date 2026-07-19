@@ -232,6 +232,23 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // the author a false cause.
   const missingReceipts: number[] = [];
 
+  // The Criticals a verifier must have ruled on before this review may post
+  // them as blockers. Deterministic `[build]`/`[test]` body findings are
+  // pre-confirmed and skip verification by design; every other Critical —
+  // anchored or body — is a claim, and a claim is confirmed by Step 4 or it
+  // is not confirmed at all.
+  const nonDeterministicBodyCriticals = bodyCriticals.filter(
+    (x) => !/\[(?:build|test)\]/i.test(x),
+  ).length;
+  const criticalsNeedingVerify =
+    criticalsInline + nonDeterministicBodyCriticals;
+  // Fail closed at every exit: this flag softens a Request changes below, and
+  // it must end up true whenever the review posts non-deterministic Criticals
+  // and CANNOT SHOW they were verified — verifier absent, transcripts
+  // unreadable, or no plan to check against. "Could not show" and "was not"
+  // read the same to the person the blocker would be posted at.
+  let criticalsUnverified = false;
+
   // Coverage is NOT taken from the input. It is recomputed here, from the
   // harness's own per-agent transcripts.
   //
@@ -251,6 +268,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
         'no plan was given, so this run cannot show that any of the diff ' +
         'was read',
     });
+    criticalsUnverified = criticalsNeedingVerify >= 1;
   } else {
     try {
       const cov = coverageFromTranscripts(input.planPath, input.env);
@@ -395,9 +413,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     // message, and does not undo a coverage pass a line above it.
     try {
       const findingsToVerify =
-        criticalsInline +
-        suggestionsInline +
-        bodyCriticals.filter((c) => !/\[(?:build|test)\]/i.test(c)).length;
+        criticalsInline + suggestionsInline + nonDeterministicBodyCriticals;
       const verification = verificationGaps(
         input.planPath,
         { postsFindings: findingsToVerify > 0 },
@@ -417,6 +433,8 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
         );
       }
       remediation.push(...verification.remediation);
+      criticalsUnverified =
+        verification.unverifiedFindings && criticalsNeedingVerify >= 1;
     } catch (err) {
       coverageEntries.push({
         subject: 'verification',
@@ -424,6 +442,9 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
           `could not check that Step 4 and Step 5 ran ` +
           `(${(err as Error).message})`,
       });
+      // Fail closed: a verification that cannot be CHECKED is not a
+      // verification that happened.
+      criticalsUnverified = criticalsNeedingVerify >= 1;
     }
   }
   const contextUnavailable = toBool(
@@ -478,9 +499,24 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     cappedBy.push('unreviewed-dimension');
   }
   if (contextUnavailable) cappedBy.push('context-unavailable');
+  if (criticalsUnverified) cappedBy.push('criticals-unverified');
 
   let event: ReviewEvent = baseEvent;
   if (event === 'APPROVE' && cappedBy.length > 0) event = 'COMMENT';
+  // The ONE cap that reaches a Request changes — because it removes the
+  // premise the never-soften rule stands on. "A REQUEST_CHANGES earned by a
+  // confirmed Critical is never softened" presumes CONFIRMED, and this flag
+  // is precisely the statement that no verifier ever ruled on the blockers.
+  // The header's own principle — an unverified finding must not become a
+  // public blocker (the false "leaks tokens" Critical is the exact harm) —
+  // was mechanics for the Approve row only, and a real bot review shipped
+  // through the gap: a CHANGES_REQUESTED on an external contributor's PR
+  // (#7166) whose one Critical the body itself disclosed as unverified.
+  // The findings still post, disclosed; the review just may not BLOCK on a
+  // claim nobody confirmed. Manipulation check: a run that wants an Approve
+  // gains nothing here (the same flag caps Approve via `unreviewed`), and a
+  // run that wants to block without verifying now cannot.
+  if (event === 'REQUEST_CHANGES' && criticalsUnverified) event = 'COMMENT';
 
   // Presubmit downgrades apply after the caps and only when the verdict
   // they name is the one on the table.
@@ -707,10 +743,11 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // 6. Not-reviewed disclosure.
   clauses.push(...notReviewedParts);
 
-  // 7. Body Criticals — only on a COMMENT downgraded from REQUEST_CHANGES
-  //    (the carve-out); on a plain COMMENT there is no RC to have carried
-  //    them.
-  if (downgradedFrom === 'Request changes') {
+  // 7. Body Criticals — on a COMMENT that stands where a REQUEST_CHANGES
+  //    would have been: the presubmit carve-out, and the unverified-blockers
+  //    cap. Either way the body copy is the ONLY copy of an unanchorable
+  //    blocker, and softening the event must never erase it.
+  if (downgradedFrom === 'Request changes' || criticalsUnverified) {
     clauses.push(...bodyCriticalBlock);
   }
 
@@ -905,11 +942,23 @@ export function verdictLine(r: ComposeReviewResult): string {
   // a dangling colon over nothing. Collect the reasons first, and say the clause
   // only if there is a reason to say it.
   //
-  // A cap never softens a Request changes — a confirmed blocker earned that, and
-  // naming a constraint that did not bind would send the reader looking for an
-  // effect that is not there — so this clause is gated on the base having been an
-  // Approve at all.
-  if (r.baseEvent === 'APPROVE' && r.event !== 'APPROVE') {
+  // A coverage cap never softens a Request changes — a confirmed blocker earned
+  // that, and naming a constraint that did not bind would send the reader
+  // looking for an effect that is not there — so the Approve clause is gated on
+  // the base having been an Approve at all. The unverified-blockers cap is the
+  // one exception, because it says the confirmation never happened, and its
+  // sentence must name what the reader would otherwise chase: a Comment posted
+  // over visible **[Critical]** comments reads as a contradiction until the
+  // line says why.
+  if (
+    r.baseEvent === 'REQUEST_CHANGES' &&
+    r.event === 'COMMENT' &&
+    r.cappedBy.includes('criticals-unverified')
+  ) {
+    line +=
+      ' — a Request changes was NOT available: its blockers were never ' +
+      'verified (they are posted, disclosed as unverified)';
+  } else if (r.baseEvent === 'APPROVE' && r.event !== 'APPROVE') {
     const reasons = r.cappedBy.map((c) => why[c] ?? c);
     if (r.downgraded) reasons.push('a presubmit check failed');
     line += ` — an Approve was NOT available: ${reasons.join('; ')}`;
