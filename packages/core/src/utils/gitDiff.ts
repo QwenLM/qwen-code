@@ -1550,21 +1550,31 @@ export async function fetchGitCommitDetail(
   const parents = parts[7] ? parts[7].split(' ').filter(Boolean) : [];
 
   // Per-file stats via diff-tree. `--root` handles the initial commit (no
-  // parent); merge commits show the combined diff (standard `git show`
-  // behaviour).
-  const numstatRaw = await runGit(
-    [
-      '--no-optional-locks',
-      'diff-tree',
-      '--no-commit-id',
-      '--numstat',
-      '-r',
-      '-z',
-      '--root',
-      sha,
-    ],
-    gitRoot,
-  );
+  // parent). For merge commits, plain diff-tree outputs nothing; diff against
+  // the first parent to show what the merge introduced.
+  const diffTreeArgs =
+    parents.length > 1
+      ? [
+          '--no-optional-locks',
+          'diff-tree',
+          '--no-commit-id',
+          '--numstat',
+          '-r',
+          '-z',
+          `${sha}^1`,
+          sha,
+        ]
+      : [
+          '--no-optional-locks',
+          'diff-tree',
+          '--no-commit-id',
+          '--numstat',
+          '-r',
+          '-z',
+          '--root',
+          sha,
+        ];
+  const numstatRaw = await runGit(diffTreeArgs, gitRoot);
 
   const files: GitCommitFileStat[] = [];
   let filesCount = 0;

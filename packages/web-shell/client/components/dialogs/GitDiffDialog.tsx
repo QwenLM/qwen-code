@@ -361,12 +361,10 @@ export function GitDiffDialog({
   workspaceCwd,
   onClose,
   onOpenLog,
-  embedded = false,
 }: {
   workspaceCwd: string;
   onClose: () => void;
   onOpenLog?: () => void;
-  embedded?: boolean;
 }) {
   const { t } = useI18n();
   const { client } = useWorkspace();
@@ -431,27 +429,6 @@ export function GitDiffDialog({
             {t('gitDiff.hidden', { count: diff.hiddenCount })}
           </div>
         )}
-      </div>
-    );
-  }
-
-  if (embedded) {
-    return (
-      <div className={styles.content}>
-        {onOpenLog && (
-          <div className={styles.tabBar}>
-            <button
-              type="button"
-              className={`${styles.tab} ${styles.tabActive}`}
-            >
-              {t('gitDiff.title')}
-            </button>
-            <button type="button" className={styles.tab} onClick={onOpenLog}>
-              {t('gitLog.title')}
-            </button>
-          </div>
-        )}
-        {body}
       </div>
     );
   }

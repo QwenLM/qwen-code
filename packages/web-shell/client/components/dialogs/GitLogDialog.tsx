@@ -182,13 +182,7 @@ function CommitRow({
         <span className={styles.commitSha} title={entry.sha}>
           {entry.shortSha}
         </span>
-        <span
-          role="button"
-          tabIndex={-1}
-          className={styles.copyBtn}
-          onClick={copySha}
-          aria-label={`Copy ${entry.shortSha}`}
-        >
+        <span className={styles.copyBtn} onClick={copySha} aria-hidden="true">
           {copied ? <CheckIcon size={12} /> : <CopyIcon size={12} />}
         </span>
         <span className={styles.commitSubject}>{entry.subject}</span>
@@ -217,12 +211,10 @@ export function GitLogDialog({
   workspaceCwd,
   onClose,
   onOpenDiff,
-  embedded = false,
 }: {
   workspaceCwd: string;
   onClose: () => void;
   onOpenDiff?: () => void;
-  embedded?: boolean;
 }) {
   const { client } = useWorkspace();
   const { t } = useI18n();
@@ -230,7 +222,13 @@ export function GitLogDialog({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
-  const now = useRef(Date.now() / 1000);
+  const [loadMoreError, setLoadMoreError] = useState(false);
+  const [now, setNow] = useState(Date.now() / 1000);
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now() / 1000), 60_000);
+    return () => clearInterval(id);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -270,7 +268,7 @@ export function GitLogDialog({
         );
       })
       .catch(() => {
-        // Keep existing entries on failure.
+        setLoadMoreError(true);
       })
       .finally(() => {
         setLoadingMore(false);
@@ -278,7 +276,7 @@ export function GitLogDialog({
   }, [client, workspaceCwd, log, loadingMore]);
 
   const subtitle = log?.available
-    ? t('gitLog.subtitle', { branch: '', count: log.entries.length })
+    ? t('gitLog.subtitle', { count: log.entries.length })
     : undefined;
 
   let body: ReactNode;
@@ -299,42 +297,27 @@ export function GitLogDialog({
               key={entry.sha}
               entry={entry}
               workspaceCwd={workspaceCwd}
-              now={now.current}
+              now={now}
             />
           ))}
         </div>
+        {loadMoreError && (
+          <div className={styles.placeholder}>{t('gitLog.error')}</div>
+        )}
         {log.hasMore && (
           <button
             type="button"
             className={styles.loadMore}
-            onClick={loadMore}
+            onClick={() => {
+              setLoadMoreError(false);
+              loadMore();
+            }}
             disabled={loadingMore}
           >
             {loadingMore ? t('gitLog.loadingMore') : t('gitLog.loadMore')}
           </button>
         )}
       </>
-    );
-  }
-
-  if (embedded) {
-    return (
-      <div className={styles.content}>
-        {onOpenDiff && (
-          <div className={styles.tabBar}>
-            <button type="button" className={styles.tab} onClick={onOpenDiff}>
-              {t('gitDiff.title')}
-            </button>
-            <button
-              type="button"
-              className={`${styles.tab} ${styles.tabActive}`}
-            >
-              {t('gitLog.title')}
-            </button>
-          </div>
-        )}
-        {body}
-      </div>
     );
   }
 
