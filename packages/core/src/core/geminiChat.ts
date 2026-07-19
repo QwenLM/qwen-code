@@ -184,6 +184,26 @@ function syncFunctionCallsField(
  * `recordAssistantTurn` invocation below.
  */
 /**
+ * Replaces the args on a `structured_output` `functionCall` with the
+ * same `__redacted` placeholder used by `ToolCallEvent` telemetry
+ * (`packages/core/src/telemetry/types.ts`).
+ *
+ * The chat-recording JSONL (`<projectDir>/chats/<sessionId>.jsonl`)
+ * persists assistant turns to disk and re-feeds them on
+ * `--continue` / `--resume`. For `--json-schema` runs the tool args
+ * ARE the user's structured payload — already emitted on stdout via
+ * `result` / `structured_result`. Recording them verbatim here would
+ * mean the same payload (and every validation-failure retry along the
+ * way) sits on disk indefinitely, contradicting the privacy contract
+ * documented next to the telemetry redaction. Mirror the placeholder
+ * here so the chat-recording surface matches.
+ *
+ * Non-`structured_output` `functionCall`s pass through untouched.
+ *
+ * Exported for tests; callers should prefer the inline use inside
+ * `recordAssistantTurn` invocation below.
+ */
+/**
  * Single source of the pointer text that replaces an approved plan's
  * `functionCall.args.plan` (#6237). Shared by the tool scheduler's
  * post-approval rewrite and the load-side pass below so the two surfaces

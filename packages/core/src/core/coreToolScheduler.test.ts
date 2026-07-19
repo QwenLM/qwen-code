@@ -961,6 +961,57 @@ describe('CoreToolScheduler', () => {
     expect(fnCall.args!['originalRequest']).toBe('please plan this');
   });
 
+  it('redacts the plan for a leader-approved (teammate) exit_plan_mode', async () => {
+    const bigPlan = '## Plan\n\nleader path fixture';
+    const planFile = path.join(
+      os.tmpdir(),
+      `qwen-plan-leader-${process.pid}-${Math.random().toString(16).slice(2)}.md`,
+    );
+    fsSync.writeFileSync(planFile, bigPlan, 'utf-8');
+    const chat = createChatWithPlanCall('plan-call-4', bigPlan);
+    const tool = new MockTool({
+      name: ToolNames.EXIT_PLAN_MODE,
+      execute: vi.fn().mockResolvedValue({
+        llmContent:
+          'Leader approved. You can now start coding. Start with updating your todo list if applicable.',
+        returnDisplay: {
+          type: 'plan_summary',
+          message: 'Leader approved.',
+          plan: bigPlan,
+        },
+      }),
+    });
+    const onAllToolCallsComplete = vi.fn();
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName: new Map([[ToolNames.EXIT_PLAN_MODE, tool]]),
+      approvalMode: ApprovalMode.YOLO,
+      onAllToolCallsComplete,
+      getGeminiClient: () => ({ getChat: () => chat }),
+      getPlanFilePath: () => planFile,
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'plan-call-4',
+          name: ToolNames.EXIT_PLAN_MODE,
+          args: { plan: bigPlan },
+          isClientInitiated: false,
+          prompt_id: 'prompt-plan-leader-approved',
+        },
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    const fnCall = chat.getHistory()[1]!.parts![1]!.functionCall!;
+    expect(fnCall.args!['plan']).not.toContain('leader path fixture');
+    expect(fnCall.args!['plan']).toContain(
+      `Plan approved and saved to ${planFile}`,
+    );
+    fsSync.unlinkSync(planFile);
+  });
+
   it('keeps the plan argument when the plan file was never written (save failed)', async () => {
     const bigPlan = '## Plan\n\nnothing on disk backs this';
     const chat = createChatWithPlanCall('plan-call-3', bigPlan);

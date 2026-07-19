@@ -11432,6 +11432,43 @@ describe('GeminiChat', async () => {
       );
     });
 
+    it('returns false when expectedPlan differs from the in-history plan', () => {
+      const chat = chatWith([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-plan',
+                name: 'exit_plan_mode',
+                args: { plan: 'SECRET BIG PLAN' },
+              },
+            },
+          ],
+        },
+      ]);
+      // Never-lie invariant: a stale/different on-disk plan blocks the
+      // rewrite entirely.
+      expect(
+        chat.redactApprovedPlanFromHistory(
+          'call-plan',
+          REPLACEMENT,
+          'a different plan',
+        ),
+      ).toBe(false);
+      expect(chat.getHistory()[0]!.parts![0]!.functionCall!.args!['plan']).toBe(
+        'SECRET BIG PLAN',
+      );
+      // Matching expectedPlan still rewrites.
+      expect(
+        chat.redactApprovedPlanFromHistory(
+          'call-plan',
+          REPLACEMENT,
+          'SECRET BIG PLAN',
+        ),
+      ).toBe(true);
+    });
+
     it('returns false when the matching call has no string plan arg', () => {
       const chat = chatWith([
         {
