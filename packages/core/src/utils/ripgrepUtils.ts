@@ -194,6 +194,7 @@ export async function ensureRipgrepHealthy(
   )
     return;
 
+  let working = false;
   try {
     const { stdout, code } = await execCommand(
       selection.command,
@@ -202,11 +203,17 @@ export async function ensureRipgrepHealthy(
         timeout: RIPGREP_TEST_TIMEOUT_MS,
       },
     );
-    const working = code === 0 && stdout.startsWith('ripgrep');
+    working = code === 0 && stdout.startsWith('ripgrep');
     cachedHealth = { working, lastTested: Date.now(), selection };
   } catch (error) {
     cachedHealth = { working: false, lastTested: Date.now(), selection };
     throw error;
+  }
+
+  // Callers only tell healthy from unhealthy by the throw, so a probe that
+  // returns without identifying itself as ripgrep must not read as success.
+  if (!working) {
+    throw new Error(`${selection.command} is not a working ripgrep binary.`);
   }
 }
 

@@ -267,6 +267,33 @@ describe('ripgrepUtils', () => {
       await expect(runRipgrep(['--version'])).resolves.toBeDefined();
     });
 
+    it('returns false when neither bundled nor system rg is available', async () => {
+      vi.mocked(fileExists).mockResolvedValue(false);
+      vi.mocked(isCommandAvailable).mockReturnValue({
+        available: false,
+        error: undefined,
+      });
+
+      await expect(canUseRipgrep(true)).resolves.toBe(false);
+    });
+
+    it('rejects a system rg that does not identify itself as ripgrep', async () => {
+      vi.mocked(fileExists).mockResolvedValue(true);
+      vi.mocked(isCommandAvailable).mockReturnValue({
+        available: true,
+        error: undefined,
+      });
+      vi.mocked(execCommand).mockImplementation(async (command: string) => {
+        if (command !== 'rg') {
+          throw new Error('bundled rg broken');
+        }
+        // Exits cleanly, but is not ripgrep.
+        return { stdout: 'not-ripgrep 1.0', stderr: '', code: 0 };
+      });
+
+      await expect(canUseRipgrep(true)).rejects.toThrow();
+    });
+
     it('never probes the bundled binary when useBuiltin is false (#5361)', async () => {
       vi.mocked(isCommandAvailable).mockReturnValue({
         available: true,
