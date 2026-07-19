@@ -99,7 +99,8 @@
       }
     ],
     "relevantIds": ["first-tie", "second-tie"],
-    "expectedTopId": "first-tie"
+    "expectedTopId": "first-tie",
+    "expectedSelectedIds": ["first-tie", "second-tie"]
   },
   {
     "id": "zh-data-governance",
@@ -452,7 +453,8 @@
       }
     ],
     "relevantIds": ["short-fact"],
-    "expectedTopId": "short-fact"
+    "expectedTopId": "short-fact",
+    "expectedSelectedIds": ["short-fact"]
   },
   {
     "id": "fallback-order",
@@ -573,7 +575,8 @@
       }
     ],
     "relevantIds": ["two-terms-first", "two-terms-second", "one-term"],
-    "expectedTopId": "two-terms-first"
+    "expectedTopId": "two-terms-first",
+    "expectedSelectedIds": ["two-terms-first", "two-terms-second", "one-term"]
   },
   {
     "id": "ranking-document-order",
@@ -590,7 +593,8 @@
       }
     ],
     "relevantIds": ["first", "second"],
-    "expectedTopId": "first"
+    "expectedTopId": "first",
+    "expectedSelectedIds": ["first", "second"]
   },
   {
     "id": "budget-skip-middle",

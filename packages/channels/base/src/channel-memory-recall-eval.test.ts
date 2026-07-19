@@ -11,6 +11,9 @@ const fixtureUrl = new URL(
   import.meta.url,
 );
 
+const RECALL_AT = 3;
+const MAX_SELECTED_CODE_POINTS = 1_200;
+
 const categories = new Set([
   'english',
   'chinese',
@@ -51,8 +54,11 @@ interface EvalCase {
 
 interface EvalSummary {
   cases: number;
+  recallCases: number;
   recallAt3: number;
+  top1Cases: number;
   top1Accuracy: number;
+  labeledNoResultCases: number;
   noResultPrecision: number;
   maxSelectedEntries: number;
   maxSelectedCodePoints: number;
@@ -62,69 +68,148 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-function parseStringArray(value: unknown, field: string): string[] {
-  if (
-    !Array.isArray(value) ||
-    !value.every((item) => typeof item === 'string')
-  ) {
-    throw new Error(`${field} must be a string array`);
+function parseNonEmptyString(value: unknown, field: string): string {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new Error(`${field} must be a non-empty string`);
   }
   return value;
 }
 
+function assertKnownFields(
+  value: Record<string, unknown>,
+  allowedFields: readonly string[],
+  field: string,
+): void {
+  for (const key of Object.keys(value)) {
+    if (!allowedFields.includes(key)) {
+      throw new Error(`${field} contains an unknown field: ${key}`);
+    }
+  }
+}
+
+function parseStringArray(value: unknown, field: string): string[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`${field} must be a string array`);
+  }
+  const ids = value.map((item, index) =>
+    parseNonEmptyString(item, `${field}[${index}]`),
+  );
+  if (new Set(ids).size !== ids.length) {
+    throw new Error(`${field} must contain unique IDs`);
+  }
+  return ids;
+}
+
+function assertReferencesBelongToEntries(
+  references: readonly string[],
+  entryIds: ReadonlySet<string>,
+  field: string,
+): void {
+  for (const id of references) {
+    if (!entryIds.has(id)) {
+      throw new Error(`${field} references an unknown entry ID: ${id}`);
+    }
+  }
+}
+
 function parseEntry(value: unknown, caseId: string): EvalEntry {
-  if (
-    !isRecord(value) ||
-    typeof value['id'] !== 'string' ||
-    typeof value['text'] !== 'string'
-  ) {
+  if (!isRecord(value)) {
     throw new Error(`${caseId}.entries contains an invalid entry`);
   }
-  return { id: value['id'], text: value['text'] };
+  assertKnownFields(value, ['id', 'text'], `${caseId}.entries`);
+  return {
+    id: parseNonEmptyString(value['id'], `${caseId}.entries.id`),
+    text: parseNonEmptyString(value['text'], `${caseId}.entries.text`),
+  };
 }
 
 function parseCase(value: unknown): EvalCase {
-  if (
-    !isRecord(value) ||
-    typeof value['id'] !== 'string' ||
-    typeof value['category'] !== 'string' ||
-    !categories.has(value['category'] as EvalCategory) ||
-    typeof value['message'] !== 'string' ||
-    !Array.isArray(value['entries'])
-  ) {
+  if (!isRecord(value)) {
     throw new Error('invalid channel-memory recall evaluation case');
   }
-  const result: EvalCase = {
-    id: value['id'],
-    category: value['category'] as EvalCategory,
-    message: value['message'],
-    entries: value['entries'].map((entry) =>
-      parseEntry(entry, value['id'] as string),
-    ),
-    relevantIds: parseStringArray(
-      value['relevantIds'],
-      `${value['id']}.relevantIds`,
-    ),
-  };
-  if (typeof value['expectedTopId'] === 'string') {
-    result.expectedTopId = value['expectedTopId'];
-  } else if (value['expectedTopId'] !== undefined) {
-    throw new Error(`${value['id']}.expectedTopId must be a string`);
+  assertKnownFields(
+    value,
+    [
+      'id',
+      'category',
+      'message',
+      'entries',
+      'relevantIds',
+      'expectedTopId',
+      'expectedSelectedIds',
+    ],
+    'evaluation case',
+  );
+  const id = parseNonEmptyString(value['id'], 'case.id');
+  if (
+    typeof value['category'] !== 'string' ||
+    !categories.has(value['category'] as EvalCategory)
+  ) {
+    throw new Error(`${id}.category must be a known category`);
   }
-  if (value['expectedSelectedIds'] !== undefined) {
-    result.expectedSelectedIds = parseStringArray(
-      value['expectedSelectedIds'],
-      `${value['id']}.expectedSelectedIds`,
+  if (!Array.isArray(value['entries'])) {
+    throw new Error(`${id}.entries must be an array`);
+  }
+  const entries = value['entries'].map((entry) => parseEntry(entry, id));
+  const entryIds = new Set(entries.map((entry) => entry.id));
+  if (entryIds.size !== entries.length) {
+    throw new Error(`${id}.entries must contain unique IDs`);
+  }
+  const relevantIds = parseStringArray(
+    value['relevantIds'],
+    `${id}.relevantIds`,
+  );
+  assertReferencesBelongToEntries(relevantIds, entryIds, `${id}.relevantIds`);
+  const expectedSelectedIds =
+    value['expectedSelectedIds'] === undefined
+      ? undefined
+      : parseStringArray(
+          value['expectedSelectedIds'],
+          `${id}.expectedSelectedIds`,
+        );
+  if (expectedSelectedIds) {
+    assertReferencesBelongToEntries(
+      expectedSelectedIds,
+      entryIds,
+      `${id}.expectedSelectedIds`,
     );
   }
-  return result;
+  const expectedTopId =
+    value['expectedTopId'] === undefined
+      ? undefined
+      : parseNonEmptyString(value['expectedTopId'], `${id}.expectedTopId`);
+  if (relevantIds.length === 0) {
+    if (expectedTopId !== undefined) {
+      throw new Error(`${id}.expectedTopId is not allowed for no-result cases`);
+    }
+  } else {
+    if (expectedTopId === undefined) {
+      throw new Error(`${id}.expectedTopId is required for positive cases`);
+    }
+    if (!relevantIds.includes(expectedTopId)) {
+      throw new Error(`${id}.expectedTopId must be a relevant ID`);
+    }
+  }
+  return {
+    id,
+    category: value['category'] as EvalCategory,
+    message: parseNonEmptyString(value['message'], `${id}.message`),
+    entries,
+    relevantIds,
+    expectedTopId,
+    expectedSelectedIds,
+  };
 }
 
 function loadCases(): EvalCase[] {
   const parsed: unknown = JSON.parse(readFileSync(fixtureUrl, 'utf8'));
   if (!Array.isArray(parsed))
     throw new Error('evaluation fixture must be an array');
-  return parsed.map(parseCase);
+  const cases = parsed.map(parseCase);
+  if (new Set(cases.map((testCase) => testCase.id)).size !== cases.length) {
+    throw new Error('evaluation fixture must contain unique case IDs');
+  }
+  return cases;
 }
 
 function evaluate(cases: readonly EvalCase[]): {
@@ -135,8 +220,9 @@ function evaluate(cases: readonly EvalCase[]): {
   let recallCases = 0;
   let top1Hits = 0;
   let top1Cases = 0;
-  let noResultHits = 0;
-  let noResultCases = 0;
+  let correctNoResultPredictions = 0;
+  let noResultPredictions = 0;
+  let labeledNoResultCases = 0;
   let maxSelectedEntries = 0;
   let maxSelectedCodePoints = 0;
   const selectedIdsByCase: Record<string, string[]> = {};
@@ -156,7 +242,7 @@ function evaluate(cases: readonly EvalCase[]): {
 
     if (testCase.relevantIds.length > 0) {
       const hits = testCase.relevantIds.filter((id) =>
-        selectedIds.includes(id),
+        selectedIds.slice(0, RECALL_AT).includes(id),
       ).length;
       recallTotal += hits / testCase.relevantIds.length;
       recallCases += 1;
@@ -165,21 +251,27 @@ function evaluate(cases: readonly EvalCase[]): {
       top1Hits += selectedIds[0] === testCase.expectedTopId ? 1 : 0;
       top1Cases += 1;
     }
-    if (
-      testCase.category === 'no-result' ||
-      testCase.expectedSelectedIds?.length === 0
-    ) {
-      noResultHits += selected.length === 0 ? 1 : 0;
-      noResultCases += 1;
+    if (testCase.relevantIds.length === 0) {
+      labeledNoResultCases += 1;
+    }
+    if (selected.length === 0) {
+      noResultPredictions += 1;
+      correctNoResultPredictions += testCase.relevantIds.length === 0 ? 1 : 0;
     }
   }
 
   return {
     summary: {
       cases: cases.length,
+      recallCases,
       recallAt3: recallCases === 0 ? 0 : recallTotal / recallCases,
+      top1Cases,
       top1Accuracy: top1Cases === 0 ? 0 : top1Hits / top1Cases,
-      noResultPrecision: noResultCases === 0 ? 0 : noResultHits / noResultCases,
+      labeledNoResultCases,
+      noResultPrecision:
+        noResultPredictions === 0
+          ? 0
+          : correctNoResultPredictions / noResultPredictions,
       maxSelectedEntries,
       maxSelectedCodePoints,
     },
@@ -239,17 +331,53 @@ const expectedCategoryCounts: Record<EvalCategory, number> = {
 };
 
 const requiredSelectedIds = {
+  'fallback-single': ['short-fact'],
   'fallback-order': ['first', 'second', 'third'],
   'fallback-after-positive': ['positive', 'first-fallback', 'second-fallback'],
+  'en-stable-tie': ['first-tie', 'second-tie'],
   'budget-skip-middle': ['first', 'later-fit'],
   'none-long-unrelated': [],
   'none-single-cjk': [],
   'none-short-latin': [],
   'none-unsafe-separators': [],
   'zh-single-character-no-result': [],
+  'ranking-overlap-count': ['two-terms-first', 'two-terms-second', 'one-term'],
+  'ranking-document-order': ['first', 'second'],
 } as const;
 
 describe('channel memory recall evaluation', () => {
+  it('counts empty selections on positive cases against no-result precision', () => {
+    const cases: EvalCase[] = [
+      {
+        id: 'correct-no-result',
+        category: 'no-result',
+        message: 'probetoken',
+        entries: [
+          {
+            id: 'unrelated',
+            text: 'This entry contains deliberately distinct vocabulary and enough content to avoid fallback selection. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz',
+          },
+        ],
+        relevantIds: [],
+      },
+      {
+        id: 'false-no-result',
+        category: 'english',
+        message: 'probetoken',
+        entries: [
+          {
+            id: 'relevant',
+            text: 'This relevant entry contains deliberately distinct vocabulary and enough content to avoid fallback selection. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz',
+          },
+        ],
+        relevantIds: ['relevant'],
+        expectedTopId: 'relevant',
+      },
+    ];
+
+    expect(evaluate(cases).summary.noResultPrecision).toBe(0.5);
+  });
+
   it('loads the complete synthetic multilingual fixture', () => {
     const cases = loadCases();
     expect(cases).toHaveLength(36);
@@ -285,6 +413,9 @@ describe('channel memory recall evaluation', () => {
   it('holds the multilingual quality floor', () => {
     const { summary } = evaluate(loadCases());
     expect(summary.cases).toBe(36);
+    expect(summary.recallCases).toBe(31);
+    expect(summary.top1Cases).toBe(31);
+    expect(summary.labeledNoResultCases).toBe(5);
     expect(summary.recallAt3).toBeGreaterThanOrEqual(0.9);
     expect(summary.top1Accuracy).toBeGreaterThanOrEqual(0.85);
     expect(summary.noResultPrecision).toBe(1);
@@ -292,11 +423,13 @@ describe('channel memory recall evaluation', () => {
 
   it('keeps every evaluation result within the existing prompt budgets', () => {
     const { summary } = evaluate(loadCases());
-    expect(summary.maxSelectedEntries).toBeLessThanOrEqual(
-      CHANNEL_MEMORY_RECALL_MAX_ENTRIES,
+    expect(CHANNEL_MEMORY_RECALL_MAX_ENTRIES).toBe(RECALL_AT);
+    expect(CHANNEL_MEMORY_RECALL_MAX_CODE_POINTS).toBe(
+      MAX_SELECTED_CODE_POINTS,
     );
+    expect(summary.maxSelectedEntries).toBeLessThanOrEqual(RECALL_AT);
     expect(summary.maxSelectedCodePoints).toBeLessThanOrEqual(
-      CHANNEL_MEMORY_RECALL_MAX_CODE_POINTS,
+      MAX_SELECTED_CODE_POINTS,
     );
   });
 
