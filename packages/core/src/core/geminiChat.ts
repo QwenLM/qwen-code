@@ -46,7 +46,7 @@ import {
   parsePositiveIntegerEnvValue,
 } from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
-import { ToolNames } from '../tools/tool-names.js';
+import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
 import * as fs from 'node:fs';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
@@ -164,51 +164,22 @@ function syncFunctionCallsField(
 }
 
 /**
- * Replaces the args on a `structured_output` `functionCall` with the
- * same `__redacted` placeholder used by `ToolCallEvent` telemetry
- * (`packages/core/src/telemetry/types.ts`).
- *
- * The chat-recording JSONL (`<projectDir>/chats/<sessionId>.jsonl`)
- * persists assistant turns to disk and re-feeds them on
- * `--continue` / `--resume`. For `--json-schema` runs the tool args
- * ARE the user's structured payload — already emitted on stdout via
- * `result` / `structured_result`. Recording them verbatim here would
- * mean the same payload (and every validation-failure retry along the
- * way) sits on disk indefinitely, contradicting the privacy contract
- * documented next to the telemetry redaction. Mirror the placeholder
- * here so the chat-recording surface matches.
- *
- * Non-`structured_output` `functionCall`s pass through untouched.
- *
- * Exported for tests; callers should prefer the inline use inside
- * `recordAssistantTurn` invocation below.
- */
-/**
- * Replaces the args on a `structured_output` `functionCall` with the
- * same `__redacted` placeholder used by `ToolCallEvent` telemetry
- * (`packages/core/src/telemetry/types.ts`).
- *
- * The chat-recording JSONL (`<projectDir>/chats/<sessionId>.jsonl`)
- * persists assistant turns to disk and re-feeds them on
- * `--continue` / `--resume`. For `--json-schema` runs the tool args
- * ARE the user's structured payload — already emitted on stdout via
- * `result` / `structured_result`. Recording them verbatim here would
- * mean the same payload (and every validation-failure retry along the
- * way) sits on disk indefinitely, contradicting the privacy contract
- * documented next to the telemetry redaction. Mirror the placeholder
- * here so the chat-recording surface matches.
- *
- * Non-`structured_output` `functionCall`s pass through untouched.
- *
- * Exported for tests; callers should prefer the inline use inside
- * `recordAssistantTurn` invocation below.
- */
-/**
  * Single source of the pointer text that replaces an approved plan's
  * `functionCall.args.plan` (#6237). Shared by the tool scheduler's
  * post-approval rewrite and the load-side pass below so the two surfaces
  * cannot drift.
  */
+/**
+ * Local mirror of the scheduler's `canonicalToolName` (kept here to avoid a
+ * geminiChat -> coreToolScheduler import cycle): resolves legacy tool-name
+ * aliases so the load-side plan redaction keeps matching sessions recorded
+ * under a pre-migration name, in lockstep with the write-side scheduler.
+ */
+function canonicalPlanToolName(toolName: string | undefined): string {
+  if (!toolName) return '';
+  return (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
+}
+
 export function approvedPlanRedactionText(planPath: string): string {
   return (
     `[Plan approved and saved to ${planPath}. The plan text was ` +
@@ -237,7 +208,11 @@ export function redactApprovedPlansInHistory(
     if (!entry?.parts) continue;
     for (const part of entry.parts) {
       const fr = part.functionResponse;
-      if (!fr?.id || fr.name !== ToolNames.EXIT_PLAN_MODE) continue;
+      if (
+        !fr?.id ||
+        canonicalPlanToolName(fr.name) !== ToolNames.EXIT_PLAN_MODE
+      )
+        continue;
       const output = (fr.response as { output?: unknown } | undefined)?.[
         'output'
       ];
@@ -259,7 +234,11 @@ export function redactApprovedPlansInHistory(
     let entryChanged = false;
     const parts = entry.parts.map((part) => {
       const fc = part.functionCall;
-      if (!fc?.id || fc.name !== ToolNames.EXIT_PLAN_MODE) return part;
+      if (
+        !fc?.id ||
+        canonicalPlanToolName(fc.name) !== ToolNames.EXIT_PLAN_MODE
+      )
+        return part;
       if (!approved.has(fc.id)) return part;
       if ((fc.args ?? {})['plan'] !== savedPlanContent) return part;
       entryChanged = true;
@@ -278,6 +257,26 @@ export function redactApprovedPlansInHistory(
   return changed ? out : null;
 }
 
+/**
+ * Replaces the args on a `structured_output` `functionCall` with the
+ * same `__redacted` placeholder used by `ToolCallEvent` telemetry
+ * (`packages/core/src/telemetry/types.ts`).
+ *
+ * The chat-recording JSONL (`<projectDir>/chats/<sessionId>.jsonl`)
+ * persists assistant turns to disk and re-feeds them on
+ * `--continue` / `--resume`. For `--json-schema` runs the tool args
+ * ARE the user's structured payload — already emitted on stdout via
+ * `result` / `structured_result`. Recording them verbatim here would
+ * mean the same payload (and every validation-failure retry along the
+ * way) sits on disk indefinitely, contradicting the privacy contract
+ * documented next to the telemetry redaction. Mirror the placeholder
+ * here so the chat-recording surface matches.
+ *
+ * Non-`structured_output` `functionCall`s pass through untouched.
+ *
+ * Exported for tests; callers should prefer the inline use inside
+ * `recordAssistantTurn` invocation below.
+ */
 export function redactStructuredOutputArgsForRecording(
   part: Part,
 ): { functionCall: NonNullable<Part['functionCall']> } | null {
@@ -3653,7 +3652,8 @@ export class GeminiChat {
       const partIdx = entry.parts.findIndex(
         (part) =>
           part.functionCall?.id === callId &&
-          part.functionCall.name === ToolNames.EXIT_PLAN_MODE,
+          canonicalPlanToolName(part.functionCall.name) ===
+            ToolNames.EXIT_PLAN_MODE,
       );
       if (partIdx === -1) continue;
       const part = entry.parts[partIdx]!;
@@ -3695,7 +3695,9 @@ export class GeminiChat {
   private redactApprovedPlansFromLoadedHistory(): void {
     const hasPlanCall = this.history.some((entry) =>
       entry?.parts?.some(
-        (part) => part.functionCall?.name === ToolNames.EXIT_PLAN_MODE,
+        (part) =>
+          canonicalPlanToolName(part.functionCall?.name) ===
+          ToolNames.EXIT_PLAN_MODE,
       ),
     );
     if (!hasPlanCall) return;

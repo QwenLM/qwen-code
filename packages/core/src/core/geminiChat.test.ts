@@ -11542,6 +11542,74 @@ describe('GeminiChat', async () => {
       expect(JSON.stringify(out)).not.toContain('resume leak fixture');
     });
 
+    it('redacts only the approved call when a rejected call shares the plan text', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'plan it' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-rejected',
+                name: 'exit_plan_mode',
+                args: { plan: PLAN },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-rejected',
+                name: 'exit_plan_mode',
+                response: {
+                  output:
+                    'Plan execution was not approved. Remaining in plan mode.',
+                },
+              },
+            },
+          ],
+        },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-approved',
+                name: 'exit_plan_mode',
+                args: { plan: PLAN },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-approved',
+                name: 'exit_plan_mode',
+                response: {
+                  output: 'User approved. You can now start coding.',
+                },
+              },
+            },
+          ],
+        },
+      ];
+
+      const out = redactApprovedPlansInHistory(history, PLAN, PLAN_PATH);
+      expect(out).not.toBeNull();
+      // The rejected call keeps its plan text (the model needs it for
+      // revision); only the approved call is rewritten.
+      expect(out![1]!.parts![0]!.functionCall!.args!['plan']).toBe(PLAN);
+      expect(out![3]!.parts![0]!.functionCall!.args!['plan']).toBe(
+        approvedPlanRedactionText(PLAN_PATH),
+      );
+    });
+
     it('returns null when the response was not an approval', () => {
       const history = approvedHistory();
       (
