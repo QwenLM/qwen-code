@@ -32,6 +32,17 @@ const WINDOWS_ABSOLUTE_PATH_RE = /^([A-Za-z]):[\\/](.*)$/;
  *
  * The `opts` seams exist for tests; production callers use the defaults.
  */
+// Test-only override for the mount-existence probe: the translated target
+// (`/c/…`) sits at the filesystem root, which tests cannot create, and
+// cross-package node:fs mocks don't reach this module's binding. Follows
+// the `_reset*ForTest` convention.
+let sandboxMountExistsOverrideForTest: ((p: string) => boolean) | undefined;
+export function _setSandboxMountExistsForTest(
+  fn?: (p: string) => boolean,
+): void {
+  sandboxMountExistsOverrideForTest = fn;
+}
+
 export function translateWindowsWorkspaceForPosixSandbox(
   p: string,
   opts: {
@@ -43,7 +54,7 @@ export function translateWindowsWorkspaceForPosixSandbox(
   const platform = opts.platform ?? process.platform;
   const sandboxEnv =
     'sandboxEnv' in opts ? opts.sandboxEnv : process.env['SANDBOX'];
-  const exists = opts.exists ?? existsSync;
+  const exists = opts.exists ?? sandboxMountExistsOverrideForTest ?? existsSync;
   if (platform === 'win32' || !sandboxEnv || sandboxEnv === 'sandbox-exec') {
     return p;
   }

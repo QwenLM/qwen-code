@@ -5,6 +5,7 @@
  */
 
 import { readdir, stat } from 'node:fs/promises';
+import { translateWindowsWorkspaceForPosixSandbox } from '@qwen-code/acp-bridge';
 import { realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import type { Application, Request, Response } from 'express';
@@ -240,7 +241,10 @@ export function registerWorkspaceManagementRoutes(
         return;
       }
 
-      if (!isAbsolute(cwd)) {
+      // #7139: map a Windows-shaped cwd to its container bind mount before
+      // the absolute-path guard (no-op outside a POSIX container sandbox).
+      const sandboxCwd = translateWindowsWorkspaceForPosixSandbox(cwd);
+      if (!isAbsolute(sandboxCwd)) {
         res.status(400).json({
           error: '`cwd` must be an absolute path',
           code: 'invalid_path',
@@ -265,7 +269,7 @@ export function registerWorkspaceManagementRoutes(
       // two distinct canonical strings and defeat the duplicate check.
       let canonical: string;
       try {
-        canonical = realpathSync.native(resolve(cwd));
+        canonical = realpathSync.native(resolve(sandboxCwd));
       } catch {
         res.status(400).json({
           error: 'Path does not exist or is not accessible',

@@ -5,6 +5,7 @@
  */
 
 import * as path from 'node:path';
+import { translateWindowsWorkspaceForPosixSandbox } from '@qwen-code/acp-bridge';
 import type { Request, Response } from 'express';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';
@@ -143,7 +144,11 @@ export function parseOptionalWorkspaceCwd(
     });
     return undefined;
   }
-  const cwd = hasCwd ? (body['cwd'] as string) : boundWorkspace;
+  // #7139: map a Windows-shaped cwd to its container bind mount before the
+  // absolute-path guard (no-op outside a POSIX container sandbox).
+  const cwd = hasCwd
+    ? translateWindowsWorkspaceForPosixSandbox(body['cwd'] as string)
+    : boundWorkspace;
   if (!path.isAbsolute(cwd)) {
     res
       .status(400)

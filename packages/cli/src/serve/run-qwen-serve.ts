@@ -94,6 +94,7 @@ import {
   type WorkspaceRegistrationStore,
 } from './workspace-registration-store.js';
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
+import { translateWindowsWorkspaceForPosixSandbox } from '@qwen-code/acp-bridge';
 import { getCliVersion } from '../utils/version.js';
 import { getRateLimiter } from './rate-limit.js';
 import type { AcpHttpHandle } from './acp-http/index.js';
@@ -2053,7 +2054,12 @@ async function runQwenServeImpl(
     );
   }
 
-  const validateAndCanonicalizeWorkspace = (workspace: string): string => {
+  const validateAndCanonicalizeWorkspace = (rawWorkspace: string): string => {
+    // #7139: inside a Linux container sandbox a Windows host forwards
+    // `--workspace C:\…` in host shape; translate to the bind-mount
+    // location BEFORE the absolute-path guard, which would otherwise
+    // reject it (`path.isAbsolute('C:\…')` is false on POSIX).
+    const workspace = translateWindowsWorkspaceForPosixSandbox(rawWorkspace);
     if (!path.isAbsolute(workspace)) {
       throw new Error(
         `Invalid --workspace "${workspace}": must be an absolute path.`,

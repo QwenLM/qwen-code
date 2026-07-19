@@ -41,7 +41,10 @@ import {
   UpstreamDeviceFlowError,
 } from '../auth/device-flow.js';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
-import { parseSessionSource } from '@qwen-code/acp-bridge';
+import {
+  parseSessionSource,
+  translateWindowsWorkspaceForPosixSandbox,
+} from '@qwen-code/acp-bridge';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
   SessionShellClientRequiredError,
@@ -321,13 +324,16 @@ function parseOptionalWorkspaceCwd(
       `\`cwd\` exceeds the ${MAX_WORKSPACE_PATH_LENGTH}-character limit`,
     );
   }
+  // #7139: map a Windows-shaped cwd to its container bind mount before
+  // the absolute-path guard (no-op outside a POSIX container sandbox).
+  const sandboxCwd = translateWindowsWorkspaceForPosixSandbox(cwd);
   // `path.isAbsolute` (platform-aware) — same as the REST route. A bare
   // `startsWith('/')` would reject valid Windows `C:\…`/UNC paths a client
   // gets back from `/capabilities.workspaceCwd`.
-  if (!path.isAbsolute(cwd)) {
+  if (!path.isAbsolute(sandboxCwd)) {
     throw new AcpParamError('`cwd` must be an absolute path when provided');
   }
-  return cwd;
+  return sandboxCwd;
 }
 
 /** Validate a `session/prompt` body before it reaches the bridge/agent. */
