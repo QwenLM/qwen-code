@@ -127,4 +127,59 @@ describe('ChannelEditorDialog', () => {
     expect(document.body.innerHTML).not.toContain(webhookSecret);
     expect(document.body.innerHTML).not.toContain(qqSecret);
   });
+
+  it('disables save when an environment webhook becomes literal', async () => {
+    await act(async () => {
+      root.render(
+        <ChannelEditorDialog
+          open
+          catalog={catalog}
+          expectedRevision="revision-1"
+          instance={{
+            name: 'bot',
+            config: {
+              type: 'custom',
+              webhooks: {
+                sources: {
+                  github: { secretEnv: 'GITHUB_WEBHOOK_SECRET', targets: {} },
+                },
+              },
+            },
+            secrets: { token: { present: true, source: 'literal' } },
+            webhookSecrets: {
+              github: { present: true, source: 'environment' },
+            },
+            startsWithServe: false,
+            runtime: { state: 'stopped' },
+          }}
+          onOpenChange={vi.fn()}
+          onSubmit={vi.fn()}
+        />,
+      );
+    });
+
+    const textarea = Array.from(document.querySelectorAll('textarea')).find(
+      (element) => element.value.includes('GITHUB_WEBHOOK_SECRET'),
+    );
+    expect(textarea).toBeInstanceOf(HTMLTextAreaElement);
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )?.set;
+      setter?.call(
+        textarea,
+        JSON.stringify({ sources: { github: { targets: {} } } }),
+      );
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    expect(document.body.textContent).toContain(
+      'Enter a replacement webhook secret or restore secretEnv.',
+    );
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (element) => element.textContent === 'Save changes',
+    );
+    expect((save as HTMLButtonElement).disabled).toBe(true);
+  });
 });

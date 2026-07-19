@@ -313,4 +313,51 @@ describe('channel editor state', () => {
       deploy: { operation: 'replace', value: 'new-source-secret' },
     });
   });
+
+  it('requires replacement when an environment webhook becomes literal', () => {
+    const instance = existing();
+    instance.config.webhooks = {
+      sources: {
+        github: { secretEnv: 'GITHUB_WEBHOOK_SECRET', targets: {} },
+      },
+    };
+    instance.webhookSecrets = {
+      github: { present: true, source: 'environment' },
+    };
+    let state = createChannelEditorState({ catalog: [descriptor], instance });
+
+    state = updateChannelEditorField(
+      state,
+      'webhooks',
+      JSON.stringify({ sources: { github: { targets: {} } } }),
+    );
+    expect(validateChannelEditor(state)).toContainEqual({
+      field: 'webhook:github',
+      message: 'Enter a replacement webhook secret or restore secretEnv.',
+    });
+
+    state = updateSecretEditor(state, 'webhook:github', {
+      operation: 'replace',
+      value: 'literal-replacement',
+    });
+    expect(buildChannelUpsertRequest(state).webhookSecrets).toEqual({
+      github: { operation: 'replace', value: 'literal-replacement' },
+    });
+
+    state = updateChannelEditorField(
+      createChannelEditorState({ catalog: [descriptor], instance }),
+      'webhooks',
+      JSON.stringify({
+        sources: {
+          github: { secretEnv: 'RESTORED_WEBHOOK_SECRET', targets: {} },
+        },
+      }),
+    );
+    expect(validateChannelEditor(state)).not.toContainEqual(
+      expect.objectContaining({ field: 'webhook:github' }),
+    );
+    expect(buildChannelUpsertRequest(state).webhookSecrets).toEqual({
+      github: { operation: 'preserve' },
+    });
+  });
 });

@@ -424,15 +424,18 @@ export function updateChannelEditorField(
         present: false,
       };
       webhookSecrets[sourceName] =
-        typeof source.secretEnv === 'string' &&
-        (current.source === 'literal' || current.operation === 'replace')
-          ? {
-              ...current,
-              operation: 'clear',
-              value: '',
-              clearConfirmed: true,
-            }
-          : current;
+        typeof source.secretEnv === 'string'
+          ? current.source === 'literal'
+            ? {
+                ...current,
+                operation: 'clear',
+                value: '',
+                clearConfirmed: true,
+              }
+            : { ...current, operation: 'preserve', value: '' }
+          : current.source === 'environment' && current.operation === 'preserve'
+            ? { ...current, operation: 'replace', value: '' }
+            : current;
     }
     return {
       ...state,
@@ -663,6 +666,15 @@ export function validateChannelEditor(
         continue;
       }
       if (
+        secret.source === 'environment' &&
+        (secret.operation === 'preserve' ||
+          (secret.operation === 'replace' && !secret.value))
+      ) {
+        errors.push({
+          field: `webhook:${sourceName}`,
+          message: 'Enter a replacement webhook secret or restore secretEnv.',
+        });
+      } else if (
         (secret.operation === 'preserve' && !secret.present) ||
         (secret.operation === 'replace' && !secret.value) ||
         secret.operation === 'clear'
