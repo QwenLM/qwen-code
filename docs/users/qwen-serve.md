@@ -96,7 +96,7 @@ qwen serve --channel telegram --channel feishu
 # Start all configured channels
 qwen serve --channel all
 
-# Or start a token-protected daemon with no channel worker
+# Or start a token-protected daemon with no channel worker when serve.channels is absent
 QWEN_SERVER_TOKEN=secret qwen serve
 
 # Enable or replace its runtime selection later
@@ -109,9 +109,191 @@ qwen channel status --daemon-url http://127.0.0.1:4170 --token secret
 qwen channel stop --daemon-url http://127.0.0.1:4170 --token secret
 ```
 
-This mode is experimental and daemon-managed. It does not replace the standalone `qwen channel start` command: without `--daemon-url`, existing `qwen channel start`, `stop`, and `status` behavior remains standalone. With `qwen serve --channel`, the daemon reserves the channel-service lease before listening and fails startup if the initial worker cannot become ready. Without `--channel`, it loads no channel runtime and reserves no channel-service lease until the first runtime PUT. If a ready worker later crashes, the daemon keeps running, relaunches it under a bounded restart policy, and reports its state (including `channel_worker_exited` warnings) in `GET /daemon/status`.
+This mode is experimental and daemon-managed. It does not replace the standalone `qwen channel start` command: without `--daemon-url`, existing `qwen channel start`, `stop`, and `status` behavior remains standalone. With an effective startup selection from `qwen serve --channel` or the primary workspace's `serve.channels`, the daemon reserves the channel-service lease before listening and fails startup if the initial worker cannot become ready. When neither source selects a channel, it loads no channel runtime and reserves no channel-service lease until the first runtime PUT. If a ready worker later crashes, the daemon keeps running, relaunches it under a bounded restart policy, and reports its state (including `channel_worker_exited` warnings) in `GET /daemon/status`.
 
-Runtime control is exposed as `GET`, `PUT`, and `DELETE /workspace/channel`; SDK helpers are `getChannelWorkerControl()`, `setChannelWorkerSelection()`, and `stopChannelWorker()`. PUT/DELETE/reload use the strict mutation gate, so the daemon must have a bearer token configured. Runtime selections are deliberately ephemeral: PUT does not edit settings or the boot options, and a restart returns to the `qwen serve --channel` selection (or disabled when that flag is omitted). Named selections are trimmed and deduplicated in first-occurrence order; order is preserved because the first channel can affect shared model selection.
+Runtime control is exposed as `GET`, `PUT`, and `DELETE /workspace/channel`; SDK helpers are `getChannelWorkerControl()`, `setChannelWorkerSelection()`, and `stopChannelWorker()`. PUT/DELETE/reload use the strict mutation gate, so the daemon must have a bearer token configured. Runtime selections are deliberately ephemeral: PUT does not edit settings or the boot options, and a daemon process restart returns to the effective startup selection (explicit `--channel`, otherwise primary workspace `serve.channels`, otherwise disabled). Named selections are trimmed and deduplicated in first-occurrence order; order is preserved because the first channel can affect shared model selection.
+
+#### Manage configured channel instances
+
+The `channel_management` capability advertises a separate, workspace-scoped
+configuration and per-instance lifecycle surface. It does not replace the
+ephemeral `/workspace/channel` selection API above.
+
+| Primary workspace route                  | Workspace-qualified route                            | Purpose                                           |
+| ---------------------------------------- | ---------------------------------------------------- | ------------------------------------------------- |
+| `GET /workspace/channel-types`           | `GET /workspaces/:workspace/channel-types`           | List safe built-in management descriptors.        |
+| `GET /workspace/channels`                | `GET /workspaces/:workspace/channels`                | Read the revisioned, sanitized instance snapshot. |
+| `PUT /workspace/channels/:name`          | `PUT /workspaces/:workspace/channels/:name`          | Create or replace one instance configuration.     |
+| `DELETE /workspace/channels/:name`       | `DELETE /workspaces/:workspace/channels/:name`       | Stop, then delete, one instance.                  |
+| `PUT /workspace/channels/:name/startup`  | `PUT /workspaces/:workspace/channels/:name/startup`  | Toggle persisted Start with serve intent.         |
+| `POST /workspace/channels/:name/start`   | `POST /workspaces/:workspace/channels/:name/start`   | Start a configured instance for this process.     |
+| `POST /workspace/channels/:name/stop`    | `POST /workspaces/:workspace/channels/:name/stop`    | Stop an instance for this process.                |
+| `POST /workspace/channels/:name/restart` | `POST /workspaces/:workspace/channels/:name/restart` | Reload and restart a running instance.            |
+
+The singular routes always target the primary workspace. For a registered
+secondary workspace, URL-encode its canonical cwd into `:workspace`, for
+example `/workspaces/%2Fsrv%2Fproject/channels`. Both route families reject an
+unknown, ambiguous, or untrusted target instead of falling back to primary.
+All PUT, DELETE, Start with serve, Start, Stop, and Restart requests use the
+strict mutation gate: configure a daemon bearer token and send it even on
+loopback.
+
+Start by reading the catalog and current revision:
+
+```bash
+DAEMON=http://127.0.0.1:4170
+TOKEN='<daemon bearer token>'
+
+curl "$DAEMON/workspace/channel-types"
+curl "$DAEMON/workspace/channels"
+# → {"revision":"<revision>","instances":{...}}
+```
+
+Every settings mutation must use the latest `revision` as
+`expectedRevision`. Concurrent or out-of-band settings changes make an older
+revision stale; the daemon then returns `409 channel_settings_conflict` and
+does not write. Read the snapshot again before retrying.
+
+Secret fields must not appear under `config`. Each descriptor-declared secret
+uses an explicit operation under `secrets`:
+
+- `preserve` keeps the stored value. Omitting that secret's operation also
+  preserves it.
+- `replace` stores a non-empty value. An environment reference such as
+  `$TELEGRAM_BOT_TOKEN` avoids putting a credential in the request or settings
+  file.
+- `clear` removes the stored value.
+
+The following examples contain no credential values:
+
+```bash
+# Preserve the current token while editing non-secret configuration.
+curl -X PUT "$DAEMON/workspace/channels/alerts" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "expectedRevision": "<latest revision>",
+    "config": { "type": "telegram" },
+    "secrets": { "token": { "operation": "preserve" } }
+  }'
+
+# Replace it with an environment-variable reference, not the token itself.
+curl -X PUT "$DAEMON/workspace/channels/alerts" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "expectedRevision": "<latest revision>",
+    "config": { "type": "telegram" },
+    "secrets": {
+      "token": { "operation": "replace", "value": "$TELEGRAM_BOT_TOKEN" }
+    }
+  }'
+
+# Clear it. Use the revision returned by the previous successful mutation.
+curl -X PUT "$DAEMON/workspace/channels/alerts" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "expectedRevision": "<new revision>",
+    "config": { "type": "telegram" },
+    "secrets": { "token": { "operation": "clear" } }
+  }'
+```
+
+List responses never echo secrets or resolved environment variables. They
+report only `present` and, when present, `source: "literal" | "environment"`.
+Only channel types with safe plugin management metadata can be written;
+runtime-compatible unmanaged extension types are not exposed through a raw
+JSON editor.
+
+PUT persists first. If the instance is active, the daemon reloads only its
+owning workspace group; a failed replacement keeps the new configuration,
+stops that instance, and reports a sanitized `error` runtime state. DELETE
+stops an active instance before writing and preserves its configuration if
+exit cannot be confirmed. Runtime Start and Stop do not change persisted
+startup intent.
+
+Workspace settings may contain an ordered startup-intent list independent of
+the configured instance map:
+
+```json
+{
+  "channels": {
+    "alerts": { "type": "telegram", "token": "$TELEGRAM_BOT_TOKEN" }
+  },
+  "serve": { "channels": ["alerts"] }
+}
+```
+
+`GET /workspace/channels` reports membership in that list as
+`startsWithServe`, includes it in the settings revision, and removes an
+instance from the list when that instance is deleted. Existing
+`channels.<name>` entries do not imply startup.
+
+Toggle one configured instance without resubmitting its configuration:
+
+```bash
+curl -X PUT "$DAEMON/workspace/channels/alerts/startup" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{ "expectedRevision": "<latest revision>", "enabled": true }'
+```
+
+Enabling appends the name once while preserving the saved order; disabling
+removes it. The operation changes only `serve.channels`: it neither starts nor
+stops the current process's worker and does not rewrite `channels.<name>`.
+
+Daemon startup precedence is:
+
+1. Explicit `qwen serve --channel ...` for the current process.
+2. The primary workspace's own `serve.channels` when `--channel` is absent.
+3. Disabled when the saved list is absent or empty.
+
+Both explicit and saved names use the same trim, first-occurrence deduplication,
+and `all` validation. The CLI flag never rewrites persisted settings. Only the
+primary workspace list is consulted at process startup; a qualified secondary
+workspace keeps its own startup intent, which takes effect when that workspace
+is launched as primary.
+
+The TypeScript SDK exposes the same primary and qualified contract:
+
+```ts
+import { DaemonClient } from '@qwen-code/sdk';
+
+const client = new DaemonClient({
+  baseUrl: 'http://127.0.0.1:4170',
+  token: process.env['QWEN_SERVER_TOKEN'],
+});
+
+const current = await client.workspaceChannels();
+const saved = await client.upsertWorkspaceChannel('alerts', {
+  expectedRevision: current.revision,
+  config: { type: 'telegram' },
+  secrets: {
+    token: { operation: 'replace', value: '$TELEGRAM_BOT_TOKEN' },
+  },
+});
+await client.setWorkspaceChannelStartup('alerts', {
+  expectedRevision: saved.snapshot.revision,
+  enabled: true,
+});
+await client.startWorkspaceChannel(saved.instance.name);
+
+const secondary = client.workspaceByCwd('/srv/project');
+await secondary.workspaceChannels();
+```
+
+Available helpers are `workspaceChannelTypes()`, `workspaceChannels()`,
+`upsertWorkspaceChannel()`, `deleteWorkspaceChannel()`,
+`setWorkspaceChannelStartup()`, `startWorkspaceChannel()`,
+`stopWorkspaceChannel()`, and `restartWorkspaceChannel()` on both
+`DaemonClient` and the client returned by `workspaceByCwd()`.
+
+Phase 1 provides the daemon and SDK contract only. Browser QR authentication,
+the `channel_auth` capability and auth-session routes, and the Web Shell
+Channels page are later phases; QQ and WeChat catalog entries advertising
+`auth: ["qr"]` are descriptors, not a claim that browser QR authentication is
+available.
 
 The daemon reads each channel's settings (tokens, `proxy`, per-channel `model`) when its worker starts. To re-read settings without changing the committed selection, call `POST /workspace/channel/reload` (SDK `client.reloadChannelWorker()`, or `qwen channel reload`). Reload re-resolves workspace ownership and restarts selected workers through the same rollback-safe reconcile path. The `channel_control` capability is present whenever runtime control is wired; `channel_reload` is present only while the manager is enabled. Persisted threads are restored from disk.
 

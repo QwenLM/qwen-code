@@ -170,13 +170,147 @@ sequenceDiagram
 
 ### Runtime selection and settings reload
 
-The long-lived `ChannelWorkerManager` owns the committed daemon selection and workspace-grouped supervisors. A daemon may boot without `--channel`; the first strict-gated `PUT /workspace/channel` dynamically loads the channel runtime, reserves the service pidfile, resolves workspace ownership, and starts the selected workers. `GET /workspace/channel` reads the manager snapshot and `DELETE /workspace/channel` stops it idempotently. SDK helpers are `getChannelWorkerControl()`, `setChannelWorkerSelection()`, and `stopChannelWorker()`; the CLI entry is `qwen channel set` plus remote `status` and `stop` variants.
+The long-lived `ChannelWorkerManager` owns the committed daemon selection and workspace-grouped supervisors. A daemon may boot without an effective selection when neither `--channel` nor the primary workspace's `serve.channels` selects an instance; the first strict-gated `PUT /workspace/channel` then dynamically loads the channel runtime, reserves the service pidfile, resolves workspace ownership, and starts the selected workers. `GET /workspace/channel` reads the manager snapshot and `DELETE /workspace/channel` stops it idempotently. SDK helpers are `getChannelWorkerControl()`, `setChannelWorkerSelection()`, and `stopChannelWorker()`; the CLI entry is `qwen channel set` plus remote `status` and `stop` variants.
 
 The daemon reads channel settings from `settings.json` when each worker starts (`packages/cli/src/commands/channel/daemon-worker.ts` → `loadSettings` → `loadChannelsConfig`). `POST /workspace/channel/reload` re-reads those settings and force-reconciles the committed selection. All lifecycle mutations share one FIFO lane. Unchanged workspace groups survive ordinary selection replacement; changed groups stop and start sequentially while the serve-owned PID lease remains held.
 
 If a replacement fails, newly started workers are stopped and old workers are restored before the request returns. A supervisor that cannot observe exit after SIGTERM and SIGKILL retains its child reference and fails stop; the manager keeps the PID lease and never starts a second worker. Webhook configuration and routing change only when selection commit succeeds. Runtime selections are process-local and disappear on daemon restart.
 
 Adapter `connect()` failures are reported separately from worker lifecycle errors. The worker sends each bounded, credential-redacted failure over startup IPC and waits for a supervisor acknowledgement before trying the next adapter. A partially connected worker remains running and exposes `startupFailures` in its snapshot. If every adapter in a dynamic attempt fails, the `502 channel_worker_start_failed` response carries workspace-annotated attempted failures while `state` reflects the rollback result; subsequent GET responses do not retain the attempt. Daemon boot with no connected adapter remains fail-fast. The optional adapter `code` is diagnostic only, and the current `phase` is `connect`.
+
+### Phase 1 configuration management contract
+
+Configuration management is a separate projection over workspace settings and
+the existing `ChannelWorkerManager`; it is not a second lifecycle owner. The
+`channel_management` capability is advertised only when the service resolver
+is wired.
+
+Primary routes use `/workspace`; qualified routes replace that prefix with
+`/workspaces/:workspace`, where the selector is an encoded canonical cwd:
+
+```text
+GET    /workspace/channel-types
+GET    /workspace/channels
+PUT    /workspace/channels/:name
+DELETE /workspace/channels/:name
+PUT    /workspace/channels/:name/startup
+POST   /workspace/channels/:name/start
+POST   /workspace/channels/:name/stop
+POST   /workspace/channels/:name/restart
+```
+
+Both forms resolve and require a trusted `WorkspaceRuntime` before resolving
+its management service. Unknown, ambiguous, untrusted, draining, or removed
+targets fail closed; qualified routes never reuse the primary service. Every
+mutation uses the strict bearer gate and validates the client ID against the
+resolved runtime. Instance names must be non-empty, contain no slash, and be
+at most 256 characters.
+
+`GET .../channel-types` returns the serializable projection of
+`ChannelPlugin.management`: type, display name, `manageable`, safe field
+descriptors, and declared `credentials` or `qr` auth modes. It never exposes
+`createChannel`. A plugin without management metadata remains runnable through
+the existing Channel paths but cannot be written through this API because its
+secret fields cannot be identified safely.
+
+`GET .../channels` returns:
+
+```ts
+interface DaemonChannelsSnapshot {
+  revision: string;
+  instances: Record<
+    string,
+    {
+      name: string;
+      config: Record<string, unknown>; // descriptor-declared secrets removed
+      secrets: Record<
+        string,
+        {
+          present: boolean;
+          source?: 'literal' | 'environment';
+        }
+      >;
+      startsWithServe: boolean;
+      runtime: {
+        state: 'stopped' | 'starting' | 'connected' | 'partial' | 'error';
+        lastError?: string;
+      };
+    }
+  >;
+}
+```
+
+The revision is a deterministic SHA-256 digest of the workspace-scope
+`channels` map and ordered `serve.channels` list. PUT and DELETE require the
+latest value as `expectedRevision`; mismatch returns
+`409 channel_settings_conflict` before writing.
+
+PUT accepts non-secret fields under `config` and descriptor-declared secret
+fields only under `secrets`:
+
+```json
+{
+  "expectedRevision": "<latest revision>",
+  "config": { "type": "telegram" },
+  "secrets": {
+    "token": { "operation": "replace", "value": "$TELEGRAM_BOT_TOKEN" }
+  }
+}
+```
+
+Secret operations are explicit: `preserve` retains the prior value, `replace`
+requires a non-empty string, and `clear` removes it. Omitted descriptor secret
+operations default to Preserve. A secret key under `config`, or a `secrets`
+key not declared secret by the selected plugin, is rejected with
+`channel_settings_invalid_secret`. Read responses expose presence/source only;
+resolved environment values never enter the response.
+
+The persistence/lifecycle ordering is intentional:
+
+- PUT persists the workspace configuration first. If active, it calls
+  `reloadWorkspace(workspaceCwd, name)`. Failure retains the new settings,
+  removes the failed instance from committed runtime selection, and retains a
+  bounded, credential-redacted instance diagnostic.
+- DELETE confirms Stop before removing settings and also removes the name from
+  `serve.channels`. Unconfirmed exit leaves both untouched.
+- PUT `.../:name/startup` requires an own configured instance, then adds its
+  name once to or removes it from the ordered `serve.channels` list through
+  the same revision check. It does not touch the manager or the instance
+  configuration.
+- Start adds the name to the manager's ordered, process-local committed
+  selection after unique workspace ownership preflight. Stop removes it;
+  Restart performs the same targeted owning-workspace reload as an active PUT.
+  None of these runtime actions edits `serve.channels`.
+
+`WorkspaceChannelSettingsStore.setStartupNames()` persists the ordered
+workspace `serve.channels` list separately from `channels.<name>`, and the
+snapshot exposes list membership as `startsWithServe`. Merely configuring an
+instance never opts it into startup.
+
+`commands/serve.ts` resolves startup selection in this order: explicit
+`argv.channel`, the primary workspace-scope `serve.channels`, then disabled.
+It sends either source through `normalizeServeChannelSelection`, so trimming,
+first-occurrence deduplication, and `all` exclusivity are identical. An absent
+or empty saved list disables startup, and configured instances alone never
+imply startup. Resolution is read-only: an explicit CLI selection remains
+process-local and never rewrites the stored list. Only the primary workspace's
+list is consulted at process boot; qualified secondary lists remain scoped to
+their workspace and apply when that workspace is launched as primary.
+
+The TypeScript SDK mirrors both scopes. `DaemonClient` targets primary routes;
+`client.workspaceByCwd(cwd)` returns a `WorkspaceDaemonClient` for qualified
+routes. Both expose `workspaceChannelTypes`, `workspaceChannels`,
+`upsertWorkspaceChannel`, `deleteWorkspaceChannel`,
+`setWorkspaceChannelStartup`, `startWorkspaceChannel`,
+`stopWorkspaceChannel`, and `restartWorkspaceChannel`. Mutation helpers use
+the existing extended Channel control timeout and propagate stable HTTP
+failures as `DaemonHttpError`.
+
+Phase 1 stops at descriptors, sanitized configuration CRUD, revisions,
+instance lifecycle, and SDK helpers. `auth: ['qr']` on QQ and WeChat is
+forward-looking metadata only. Browser QR auth sessions, the `channel_auth`
+capability, credential commit/storage isolation, and the Web Shell Channels UI
+belong to later phases and are not implemented by this contract.
 
 ## Dependencies
 
