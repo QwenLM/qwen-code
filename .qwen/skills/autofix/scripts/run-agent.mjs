@@ -115,6 +115,13 @@ function runQwen(options, prompt) {
         ...result,
         timedOut,
         loopDetected: loopDetected || isLoopGuardOutput(outputTail),
+        // A model-side [API Error: 4xx/5xx] (access denied, quota, a 5xx)
+        // means qwen never actually evaluated the feedback — the workflow
+        // treats this as retryable rather than an evaluated handoff.
+        apiError:
+          (
+            outputTail.match(/\[API Error:\s*(?:4\d\d|5\d\d)\b[^\]]*\]/g) || []
+          ).pop() || '',
       };
       if (log.destroyed) {
         resolve(payload);
@@ -227,7 +234,9 @@ if (result.error || result.signal || result.status !== 0) {
     } else {
       writeFailure(
         options.workdir,
-        `Qwen failed during ${options.mode}: ${detail}.`,
+        `Qwen failed during ${options.mode}: ${detail}.${
+          result.apiError ? ` ${result.apiError}` : ''
+        }`,
       );
     }
   } else {
@@ -237,6 +246,14 @@ if (result.error || result.signal || result.status !== 0) {
     );
     console.error(
       `Qwen failed during ${options.mode}: ${detail}; preserving agent-written failure.md.`,
+    );
+  }
+  // Signal a model-API failure (the agent never evaluated the feedback) so the
+  // workflow retries instead of advancing the watermark and stranding the PR.
+  if (result.apiError) {
+    writeFileSync(
+      file(options.workdir, 'agent-api-error'),
+      `${result.apiError}\n`,
     );
   }
   process.exit(result.status ?? 1);

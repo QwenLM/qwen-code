@@ -2888,6 +2888,7 @@ describe('qwen-autofix workflow', () => {
             WATERMARK: '',
             DETAIL_FILE: '',
             NEWEST: '',
+            API_ERROR_DETAIL: '',
             ...env,
           },
           encoding: 'utf8',
@@ -2902,6 +2903,17 @@ describe('qwen-autofix workflow', () => {
         DETAIL_FILE: '/tmp/failure.md',
       }),
     ).toBe('2026-07-16T00:00:00Z|3');
+    // 1b. Agent DIED on a model [API Error] (access/quota/5xx) — it produced a
+    //     failure.md but evaluated NOTHING. Must be treated like a no-output
+    //     crash (sentinel ts, RETRY), not an evaluated handoff, so a model
+    //     access/quota blip does not strand the PR. This is the #7220-class fix.
+    expect(
+      runMark({
+        NEWEST: '2026-07-16T00:00:00Z',
+        DETAIL_FILE: '/tmp/failure.md',
+        API_ERROR_DETAIL: '[API Error: 403 Model access denied.]',
+      }),
+    ).toBe(`${SENTINEL}|3`);
     // 2. Crash BEFORE any verdict (no output) though prepare ran: the watermark
     //    must NOT advance (sentinel ts, excluded from EVAL_WM) so the next scan
     //    RETRIES the same feedback; round still increments to bound the retries.
@@ -2929,6 +2941,7 @@ describe('qwen-autofix workflow', () => {
           WATERMARK: '',
           DETAIL_FILE: '',
           NEWEST: '2026-07-16T00:00:00Z',
+          API_ERROR_DETAIL: '',
           ...env,
         },
         encoding: 'utf8',
@@ -2940,6 +2953,22 @@ describe('qwen-autofix workflow', () => {
     expect(finalCrash).toContain('last automatic attempt');
     expect(finalCrash).not.toContain('it will retry');
     expect(finalCrash).not.toContain('Run log:');
+    // A model-API failure names the model issue and the operator fix, not a
+    // generic crash/human-takeover — so the maintainer knows to check access.
+    const midApi = runHeadline({
+      ROUND: '2',
+      API_ERROR_DETAIL: '[API Error: 403 Model access denied.]',
+    });
+    expect(midApi).toContain('could not reach the model');
+    expect(midApi).toContain('403 Model access denied');
+    expect(midApi).toContain('it will retry on the next scan');
+    const finalApi = runHeadline({
+      ROUND: '4',
+      API_ERROR_DETAIL: '[API Error: 403 Model access denied.]',
+    });
+    expect(finalApi).toContain('could not reach the model');
+    expect(finalApi).toContain('check the autofix model key/access');
+    expect(finalApi).not.toContain('it will retry');
 
     // Behaviorally replay the pending-staleness jq filter against sample checks so
     // a flipped comparison (which would age out live checks → double-processing)
@@ -3071,6 +3100,47 @@ describe('qwen-autofix workflow', () => {
       expect(readFileSync(join(dir, 'handoff.md'), 'utf8')).toContain(
         'human should take over',
       );
+    });
+  });
+
+  it('flags a model [API Error] so the workflow retries instead of stranding the PR', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      // qwen renders a model access/quota/5xx error inline on stdout, then
+      // exits non-zero — it never evaluated the feedback.
+      const stub = writeQwenStub(dir, [
+        "process.stdout.write('[API Error: 403 Model access denied.]\\n');",
+        'process.exit(1);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      // The dedicated marker the handoff step reads to route this to a retry
+      // (sentinel ts, no watermark advance) rather than an evaluated handoff.
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(true);
+      expect(readFileSync(join(dir, 'agent-api-error'), 'utf8')).toContain(
+        '403 Model access denied',
+      );
+      // The human-visible failure names the model error, not a bare status.
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        '[API Error: 403 Model access denied.]',
+      );
+    });
+  });
+
+  it('does not flag a non-API subprocess failure for retry', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "process.stderr.write('some tool blew up\\n');",
+        'process.exit(1);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
     });
   });
 
