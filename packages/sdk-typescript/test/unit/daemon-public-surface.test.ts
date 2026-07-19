@@ -146,6 +146,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     // export could silently drop on a future barrel reshuffle (same
     // failure mode caught for PR-21 auth surface).
     expect(typeof Public.isWorkspaceScopedBudgetEvent).toBe('function');
+    expect('projectChatRecordsToDaemonTranscript' in Public).toBe(false);
   });
 
   it('round-trips a raw DaemonEvent through the public narrow helper', () => {

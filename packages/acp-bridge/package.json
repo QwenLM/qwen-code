@@ -103,6 +103,10 @@
       "types": "./dist/compactionEngine.d.ts",
       "import": "./dist/compactionEngine.js"
     },
+    "./transcriptReplay": {
+      "types": "./dist/transcript-replay.d.ts",
+      "import": "./dist/transcript-replay.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {
