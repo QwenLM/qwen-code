@@ -4,7 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
 import type {
   DaemonResourceOptions,
   ResourceResult,
@@ -12,8 +18,8 @@ import type {
 } from '../types.js';
 
 /**
- * `resourceKey` identifies the owner of the state. A key change synchronously
- * hides and invalidates the previous owner's request, even while disabled.
+ * `resourceKey` identifies the owner of the state. Render filters state by the
+ * proposed key; commit invalidates the previous owner's request.
  */
 export function useDaemonResource<T>(
   load: () => Promise<T>,
@@ -29,14 +35,18 @@ export function useDaemonResource<T>(
     value: emptyResourceState(),
   });
   const requestSeqRef = useRef(0);
-  const resourceKeyRef = useRef(resourceKey);
+  const committedResourceKeyRef = useRef(resourceKey);
 
-  if (!Object.is(resourceKeyRef.current, resourceKey)) {
-    resourceKeyRef.current = resourceKey;
+  useLayoutEffect(() => {
+    if (Object.is(committedResourceKeyRef.current, resourceKey)) return;
+    committedResourceKeyRef.current = resourceKey;
     requestSeqRef.current++;
-  }
+  }, [resourceKey]);
 
   const reload = useCallback(async (): Promise<T | undefined> => {
+    if (!Object.is(committedResourceKeyRef.current, resourceKey)) {
+      return undefined;
+    }
     if (!enabled) return undefined;
     const seq = ++requestSeqRef.current;
     setState((current) => {

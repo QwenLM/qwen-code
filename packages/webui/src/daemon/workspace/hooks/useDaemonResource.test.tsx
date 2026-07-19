@@ -6,7 +6,7 @@
 
 // @vitest-environment jsdom
 
-import { act, type ReactNode } from 'react';
+import { act, Suspense, startTransition, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useDaemonResource } from './useDaemonResource.js';
@@ -26,6 +26,9 @@ describe('useDaemonResource', () => {
   let root: Root;
 
   beforeEach(() => {
+    (
+      globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
+    ).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -190,5 +193,53 @@ describe('useDaemonResource', () => {
 
     expect(result?.data).toBe('fresh');
     expect(result?.error).toBeUndefined();
+  });
+
+  it('does not invalidate the committed request for an interrupted key render', async () => {
+    const workspaceA = createDeferred<string>();
+    const suspendedRender = createDeferred<void>();
+    const load = vi.fn(() => workspaceA.promise);
+
+    function TestComponent({
+      resourceKey,
+      suspend,
+    }: {
+      resourceKey: string;
+      suspend?: boolean;
+    }) {
+      const result = useDaemonResource(load, { autoLoad: true }, resourceKey);
+      if (suspend) throw suspendedRender.promise;
+      return (
+        <span>{result.loading ? 'loading' : (result.data ?? 'idle')}</span>
+      );
+    }
+
+    await act(async () => {
+      root.render(
+        <Suspense fallback={<span>fallback</span>}>
+          <TestComponent resourceKey="workspace-a" />
+        </Suspense>,
+      );
+    });
+    expect(container.textContent).toBe('loading');
+
+    await act(async () => {
+      startTransition(() => {
+        root.render(
+          <Suspense fallback={<span>fallback</span>}>
+            <TestComponent resourceKey="workspace-b" suspend />
+          </Suspense>,
+        );
+      });
+      await Promise.resolve();
+    });
+    expect(container.textContent).toBe('loading');
+
+    workspaceA.resolve('workspace-a-data');
+    await act(async () => {
+      await workspaceA.promise;
+    });
+
+    expect(container.textContent).toBe('workspace-a-data');
   });
 });
