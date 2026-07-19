@@ -11252,6 +11252,57 @@ describe('Session', () => {
           );
         });
 
+        it('preserves goal feedback alongside an external stop reason', async () => {
+          const messageBus = {
+            request: vi
+              .fn()
+              .mockResolvedValueOnce({
+                success: true,
+                output: {
+                  decision: 'block',
+                  continue: false,
+                  stopReason: 'External stop hook feedback',
+                  reason: 'Keep working on the active goal',
+                  hookSpecificOutput: {
+                    qwenGoalHookId: 'goal-hook',
+                  },
+                },
+              })
+              .mockResolvedValueOnce({
+                success: true,
+                output: {},
+              }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi
+            .fn()
+            .mockImplementation((eventName: string) => eventName === 'Stop');
+          mockChat.getHistory = vi
+            .fn()
+            .mockReturnValue([
+              { role: 'model', parts: [{ text: 'response text' }] },
+            ]);
+          mockChat.getLastModelMessageText = vi
+            .fn()
+            .mockReturnValue('response text');
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValue(createEmptyStream());
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+          const continuation = vi.mocked(mockChat.sendMessageStream).mock
+            .calls[1]?.[1] as { message: Part[] };
+          expect(textParts(continuation.message)).toEqual([
+            'External stop hook feedback\nKeep working on the active goal',
+          ]);
+        });
+
         it('ends Stop hook continuation when the blocking cap is reached', async () => {
           const messageBus = {
             request: vi.fn().mockImplementation(async (request) => ({
