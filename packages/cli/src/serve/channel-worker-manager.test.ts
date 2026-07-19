@@ -95,6 +95,25 @@ function setup(group = fakeGroup()) {
 }
 
 describe('createChannelWorkerManager', () => {
+  it('exposes committed channel names in selection order', async () => {
+    const test = setup();
+    const selection: ServeChannelSelection = {
+      mode: 'names',
+      names: ['telegram', 'feishu'],
+    };
+
+    expect(test.manager.committedChannelNames()).toEqual([]);
+    await test.manager.setSelection(selection);
+
+    const names = test.manager.committedChannelNames();
+    expect(names).toEqual(['telegram', 'feishu']);
+    names.reverse();
+    expect(test.manager.committedChannelNames()).toEqual([
+      'telegram',
+      'feishu',
+    ]);
+  });
+
   it('enables a disabled manager and makes an equal healthy PUT idempotent', async () => {
     const test = setup();
     const selection: ServeChannelSelection = {
