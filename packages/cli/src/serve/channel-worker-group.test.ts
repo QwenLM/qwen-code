@@ -930,6 +930,44 @@ describe('createChannelWorkerGroup', () => {
     expect(recorded[1]!.supervisor.start).toHaveBeenCalledTimes(1);
   });
 
+  it('force-reconciles only the targeted workspace', async () => {
+    const registry = fakeRegistry([
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false),
+    ]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const groups: ChannelWorkspaceGroup[] = [
+      { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+      { workspaceCwd: SECONDARY, selection: { mode: 'names', names: ['b'] } },
+    ];
+    const group = createChannelWorkerGroup({
+      groups,
+      registry,
+      createSupervisor,
+      shared,
+    });
+    await group.start();
+
+    await group.reconcile(
+      [
+        groups[0]!,
+        {
+          workspaceCwd: SECONDARY,
+          selection: { mode: 'names', names: ['changed-elsewhere'] },
+        },
+      ],
+      { forceWorkspaceCwd: PRIMARY },
+    );
+
+    expect(recorded).toHaveLength(3);
+    expect(recorded[0]!.supervisor.stop).toHaveBeenCalledOnce();
+    expect(recorded[1]!.supervisor.stop).not.toHaveBeenCalled();
+    expect(recorded[2]!.opts.workspace).toBe(PRIMARY);
+    expect(recorded[2]!.supervisor.start).toHaveBeenCalledOnce();
+  });
+
   it('coalesces concurrent reconciles onto the in-flight operation', async () => {
     const registry = fakeRegistry([fakeRuntime(PRIMARY, true)]);
     let releaseReplacement!: () => void;

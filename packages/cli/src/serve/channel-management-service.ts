@@ -18,6 +18,7 @@ import { normalizeWorkerDiagnostic } from './channel-worker-diagnostics.js';
 import type {
   ChannelWorkerControlState,
   ChannelWorkerManager,
+  ChannelWorkerRequiredOwner,
 } from './channel-worker-manager.js';
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
 import type { ServeChannelSelection } from './types.js';
@@ -88,9 +89,13 @@ interface ChannelManagementSettingsStore {
 export interface ChannelManagementWorkerManager {
   committedChannelNames(): string[];
   state(): ChannelWorkerControlState;
-  setSelection(selection: ServeChannelSelection): Promise<unknown>;
+  setSelection(
+    selection: ServeChannelSelection,
+    requiredOwner?: ChannelWorkerRequiredOwner,
+  ): Promise<unknown>;
   stopSelection(): Promise<unknown>;
   reload(): Promise<ChannelWorkerSnapshot>;
+  reloadWorkspace(workspaceCwd: string): Promise<ChannelWorkerSnapshot>;
 }
 
 export interface CreateChannelManagementServiceOptions {
@@ -291,7 +296,7 @@ export function createChannelManagementService(
       diagnostics.delete(name);
       if (active) {
         try {
-          await opts.manager.reload();
+          await opts.manager.reloadWorkspace(opts.workspaceCwd);
         } catch (error) {
           await stopFromNames(name, committedNames);
           diagnostics.set(name, diagnostic(error));
@@ -319,10 +324,13 @@ export function createChannelManagementService(
       }
       const committedNames = opts.manager.committedChannelNames();
       if (!committedNames.includes(name)) {
-        await opts.manager.setSelection({
-          mode: 'names',
-          names: [...committedNames, name],
-        });
+        await opts.manager.setSelection(
+          {
+            mode: 'names',
+            names: [...committedNames, name],
+          },
+          { name, workspaceCwd: opts.workspaceCwd },
+        );
       } else {
         assertOwnedRuntime(name);
       }
@@ -347,7 +355,7 @@ export function createChannelManagementService(
       }
       assertOwnedRuntime(name);
       try {
-        await opts.manager.reload();
+        await opts.manager.reloadWorkspace(opts.workspaceCwd);
         diagnostics.delete(name);
       } catch (error) {
         diagnostics.set(name, diagnostic(error));
