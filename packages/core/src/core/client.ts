@@ -2826,9 +2826,7 @@ export class GeminiClient {
             ? undefined
             : goalContinuationChanged &&
                 response.hasNonGoalBlockingStopHook === true
-              ? stopOutput.stopReason ||
-                stopOutput.reason ||
-                'No reason provided'
+              ? response.nonGoalBlockingStopReason || 'No reason provided'
               : continueReason;
           if (!continuationReasonAfterSteer && !pendingSteer) {
             if (isTopLevelInteraction) endInteractionSpan('ok');

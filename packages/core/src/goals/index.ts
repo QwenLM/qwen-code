@@ -25,8 +25,6 @@ export {
 } from './activeGoalStore.js';
 export {
   MAX_GOAL_ITERATIONS,
-  GOAL_HOOK_CONTINUATION_OUTPUT_KEY,
-  GOAL_HOOK_ID_OUTPUT_KEY,
   GOAL_HOOK_TIMEOUT_MS,
   GOAL_HOOK_TIMEOUT_SECONDS,
   getStopHookContinuationReason,

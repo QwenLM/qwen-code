@@ -1777,6 +1777,81 @@ describe('useGeminiStream', () => {
     );
   });
 
+  it('restores later messages when cancellation races with @ resolution', async () => {
+    const messages = [
+      'inspect @/tmp/slow.png',
+      'keep this queued message',
+      '/goal clear',
+    ];
+    const restoreSteer = vi.fn();
+    let resolveAtCommand!: (
+      value: Awaited<
+        ReturnType<typeof atCommandProcessor.resolveAtCommandQuery>
+      >,
+    ) => void;
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveAtCommand = resolve;
+        }),
+    );
+    const drainSteer = vi
+      .fn<() => string[]>()
+      .mockReturnValueOnce(messages)
+      .mockReturnValue([]);
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        { current: drainSteer },
+        undefined,
+        undefined,
+        undefined,
+        { current: restoreSteer },
+      ),
+    );
+
+    await act(async () => {
+      await result.current.submitQuery('start the analysis');
+    });
+    const sendOptions = mockSendMessageStream.mock.calls[0][3] as {
+      getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
+    };
+    const abort = new AbortController();
+    let steerInput: SteerInput | undefined;
+    await act(async () => {
+      const pending = sendOptions.getSteerInput!(abort.signal);
+      await vi.waitFor(() => expect(resolveAtCommand).toBeDefined());
+      resolveAtCommand({
+        processedQuery: [{ text: messages[0] }],
+        shouldProceed: true,
+      });
+      abort.abort();
+      steerInput = await pending;
+    });
+
+    expect(steerInput).toBeUndefined();
+    expect(restoreSteer).toHaveBeenCalledWith(messages);
+  });
+
   it('resolves mid-turn @ image messages before submitting tool results', async () => {
     const queuedPrompt = 'inspect @/tmp/screenshot.png';
     const resolvedImagePart: Part = {

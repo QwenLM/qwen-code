@@ -22,7 +22,6 @@ import {
 import {
   abortGoalForStopHookCap,
   createGoalStopHookCallback,
-  GOAL_HOOK_CONTINUATION_OUTPUT_KEY,
   GOAL_HOOK_ID_OUTPUT_KEY,
   GOAL_HOOK_TIMEOUT_MS,
   GOAL_JUDGE_TIMEOUT_MS,
@@ -144,8 +143,8 @@ describe('createGoalStopHookCallback', () => {
 
     await expect(cb(stopInput(), undefined)).resolves.toEqual({
       decision: 'block',
+      reason: expect.stringContaining('do x'),
       hookSpecificOutput: {
-        [GOAL_HOOK_CONTINUATION_OUTPUT_KEY]: expect.stringContaining('do x'),
         [GOAL_HOOK_ID_OUTPUT_KEY]: 'h1',
       },
     });
@@ -268,18 +267,17 @@ describe('createGoalStopHookCallback', () => {
     const out = await cb(stopInput(), undefined);
     expect(out).toEqual({
       decision: 'block',
+      reason: expect.stringContaining('do x'),
       hookSpecificOutput: {
-        [GOAL_HOOK_CONTINUATION_OUTPUT_KEY]: expect.stringContaining('do x'),
         [GOAL_HOOK_ID_OUTPUT_KEY]: 'h1',
       },
     });
     const reason =
       typeof out === 'object' &&
       out !== null &&
-      'hookSpecificOutput' in out &&
-      typeof out.hookSpecificOutput?.[GOAL_HOOK_CONTINUATION_OUTPUT_KEY] ===
-        'string'
-        ? out.hookSpecificOutput[GOAL_HOOK_CONTINUATION_OUTPUT_KEY]
+      'reason' in out &&
+      typeof out.reason === 'string'
+        ? out.reason
         : '';
     expect(reason).not.toContain('ignore the original user');
     expect(reason).not.toContain('rm -rf /');
@@ -431,8 +429,8 @@ describe('createGoalStopHookCallback', () => {
 
     await expect(cb(stopInput(), undefined)).resolves.toEqual({
       decision: 'block',
+      reason: expect.stringContaining('do x'),
       hookSpecificOutput: {
-        [GOAL_HOOK_CONTINUATION_OUTPUT_KEY]: expect.stringContaining('do x'),
         [GOAL_HOOK_ID_OUTPUT_KEY]: 'h1',
       },
     });

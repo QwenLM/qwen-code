@@ -41,8 +41,6 @@ export const GOAL_JUDGE_TIMEOUT_MS = 25_000;
 export const GOAL_HOOK_TIMEOUT_SECONDS = 30;
 export const GOAL_HOOK_TIMEOUT_MS = GOAL_HOOK_TIMEOUT_SECONDS * 1000;
 export const GOAL_HOOK_ID_OUTPUT_KEY = 'qwenGoalHookId';
-export const GOAL_HOOK_CONTINUATION_OUTPUT_KEY =
-  'qwenGoalHookContinuationReason';
 const GOAL_ABORTED_REASON =
   'Goal max iterations reached; cleared. Re-set with `/goal <condition>` if you still need it.';
 const GOAL_JUDGE_TIMEOUT_MESSAGE =
@@ -58,13 +56,13 @@ function continuationReasonForGoal(condition: string): string {
 export function getStopHookContinuationReason(
   output: Pick<HookOutput, 'stopReason' | 'reason' | 'hookSpecificOutput'>,
 ): string {
-  const nonGoalReason = output.stopReason || output.reason;
-  const rawGoalReason =
-    output.hookSpecificOutput?.[GOAL_HOOK_CONTINUATION_OUTPUT_KEY];
-  const goalReason =
-    typeof rawGoalReason === 'string' ? rawGoalReason : undefined;
+  const hasGoalOutput =
+    typeof output.hookSpecificOutput?.[GOAL_HOOK_ID_OUTPUT_KEY] === 'string';
+  if (!hasGoalOutput) {
+    return output.stopReason || output.reason || 'No reason provided';
+  }
   return (
-    [nonGoalReason, goalReason].filter(Boolean).join('\n') ||
+    [output.stopReason, output.reason].filter(Boolean).join('\n') ||
     'No reason provided'
   );
 }
@@ -277,10 +275,9 @@ export function createGoalStopHookCallback(args: {
     // untrusted transcript-derived judge text.
     return {
       decision: 'block',
+      reason: continuationReasonForGoal(condition),
       hookSpecificOutput: {
         [GOAL_HOOK_ID_OUTPUT_KEY]: evaluated.hookId,
-        [GOAL_HOOK_CONTINUATION_OUTPUT_KEY]:
-          continuationReasonForGoal(condition),
       },
     };
   };

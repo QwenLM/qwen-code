@@ -2338,6 +2338,7 @@ export class Config {
             let result;
             let stopHookCount: number | undefined;
             let hasNonGoalBlockingStopHook: boolean | undefined;
+            let nonGoalBlockingStopReason: string | undefined;
             const input = request.input || {};
             const signal = request.signal;
             switch (request.eventName) {
@@ -2377,7 +2378,7 @@ export class Config {
                     GOAL_HOOK_ID_OUTPUT_KEY
                   ];
                 if (typeof goalHookId === 'string') {
-                  hasNonGoalBlockingStopHook = stopResult.allOutputs.some(
+                  const nonGoalBlockingOutputs = stopResult.allOutputs.filter(
                     (output) =>
                       output.hookSpecificOutput?.[GOAL_HOOK_ID_OUTPUT_KEY] !==
                         goalHookId &&
@@ -2385,6 +2386,18 @@ export class Config {
                         output.decision === 'deny' ||
                         output.continue === false),
                   );
+                  hasNonGoalBlockingStopHook =
+                    nonGoalBlockingOutputs.length > 0;
+                  if (hasNonGoalBlockingStopHook) {
+                    nonGoalBlockingStopReason = nonGoalBlockingOutputs
+                      .map(
+                        (output) =>
+                          output.stopReason ||
+                          output.reason ||
+                          'No reason provided',
+                      )
+                      .join('\n');
+                  }
                 }
                 break;
               }
@@ -2515,6 +2528,7 @@ export class Config {
               // Include stop hook count for Stop events
               stopHookCount,
               hasNonGoalBlockingStopHook,
+              nonGoalBlockingStopReason,
             } as HookExecutionResponse);
           } catch (error) {
             this.debugLogger.warn(`Hook execution failed: ${error}`);

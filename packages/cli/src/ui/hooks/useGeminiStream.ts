@@ -2510,7 +2510,10 @@ export const useGeminiStream = (
           } finally {
             clearTimeout(timeoutId);
           }
-          if (signal.aborted) break;
+          if (signal.aborted) {
+            restoreMessages.push(...messages.slice(index + 1));
+            break;
+          }
         }
 
         const bridgeResult = await applyVisionBridgeIfNeeded(
@@ -2519,7 +2522,10 @@ export const useGeminiStream = (
           signal,
         );
         if (!bridgeResult.shouldProceed) {
-          if (signal.aborted) break;
+          if (signal.aborted) {
+            restoreMessages.push(...messages.slice(index + 1));
+            break;
+          }
           continue;
         }
 

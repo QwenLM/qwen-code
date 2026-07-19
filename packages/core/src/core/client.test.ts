@@ -97,10 +97,7 @@ import {
   clearActiveGoal,
   setActiveGoal,
 } from '../goals/activeGoalStore.js';
-import {
-  GOAL_HOOK_CONTINUATION_OUTPUT_KEY,
-  GOAL_HOOK_ID_OUTPUT_KEY,
-} from '../goals/goalHook.js';
+import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import {
@@ -8400,6 +8397,68 @@ Other open files:
         expect(getLastTurnRequestText()).toContain('also check the tests');
       });
 
+      it('preserves goal feedback alongside an external stop reason', async () => {
+        setActiveGoal('test-session-id', {
+          condition: 'finish the refactor',
+          iterations: 1,
+          setAt: 123,
+          tokensAtStart: 456,
+          hookId: 'goal-hook',
+        });
+        const mockMessageBus = {
+          request: vi
+            .fn()
+            .mockResolvedValueOnce({
+              output: {
+                decision: 'block',
+                continue: false,
+                stopReason: 'External stop hook feedback',
+                reason: 'Keep working on the active goal',
+                hookSpecificOutput: {
+                  [GOAL_HOOK_ID_OUTPUT_KEY]: 'goal-hook',
+                },
+              },
+              stopHookCount: 2,
+              hasNonGoalBlockingStopHook: true,
+              nonGoalBlockingStopReason: 'External stop hook feedback',
+            })
+            .mockResolvedValue({ output: undefined }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'Stop',
+        );
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'response' };
+          })(),
+        );
+        const getSteerInput = vi
+          .fn<() => Promise<SteerInput | undefined>>()
+          .mockResolvedValue(undefined);
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'start the goal' }],
+            new AbortController().signal,
+            'prompt-goal-with-external-stop-reason',
+            { type: SendMessageType.UserQuery, getSteerInput },
+          ),
+        );
+
+        expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+        expect(getLastTurnRequestText()).toContain(
+          'External stop hook feedback',
+        );
+        expect(getLastTurnRequestText()).toContain(
+          'Keep working on the active goal',
+        );
+      });
+
       it('stops a blocking goal when queued input clears it', async () => {
         setActiveGoal('test-session-id', {
           condition: 'finish the refactor',
@@ -8412,8 +8471,8 @@ Other open files:
           request: vi.fn().mockResolvedValue({
             output: {
               decision: 'block',
+              reason: 'Keep working',
               hookSpecificOutput: {
-                [GOAL_HOOK_CONTINUATION_OUTPUT_KEY]: 'Keep working',
                 [GOAL_HOOK_ID_OUTPUT_KEY]: 'old-goal-hook',
               },
             },
@@ -8472,8 +8531,8 @@ Other open files:
             .mockResolvedValueOnce({
               output: {
                 decision: 'block',
+                reason: 'Keep working',
                 hookSpecificOutput: {
-                  [GOAL_HOOK_CONTINUATION_OUTPUT_KEY]: 'Keep working',
                   [GOAL_HOOK_ID_OUTPUT_KEY]: 'old-goal-hook',
                 },
               },
@@ -8542,14 +8601,14 @@ Other open files:
             .mockResolvedValueOnce({
               output: {
                 decision: 'block',
-                reason: 'Policy review is still required',
+                reason: 'Keep working\nPolicy review is still required',
                 hookSpecificOutput: {
-                  [GOAL_HOOK_CONTINUATION_OUTPUT_KEY]: 'Keep working',
                   [GOAL_HOOK_ID_OUTPUT_KEY]: 'old-goal-hook',
                 },
               },
               stopHookCount: 2,
               hasNonGoalBlockingStopHook: true,
+              nonGoalBlockingStopReason: 'Policy review is still required',
             })
             .mockResolvedValue({ output: undefined }),
           response: vi.fn(),

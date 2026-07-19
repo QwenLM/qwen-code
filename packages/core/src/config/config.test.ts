@@ -74,10 +74,7 @@ import * as runtimeStatus from '../utils/runtimeStatus.js';
 import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { HookSystem } from '../hooks/index.js';
-import {
-  GOAL_HOOK_CONTINUATION_OUTPUT_KEY,
-  GOAL_HOOK_ID_OUTPUT_KEY,
-} from '../goals/goalHook.js';
+import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 import type { ChatRecordingFailureEvent } from '../services/chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
@@ -7275,6 +7272,7 @@ describe('Model Switching and Config Updates', () => {
         name: 'ignores non-blocking outputs',
         otherOutput: { continue: true },
         expected: false,
+        expectedReason: undefined,
       },
       {
         name: 'detects another blocking output',
@@ -7283,43 +7281,61 @@ describe('Model Switching and Config Updates', () => {
           reason: 'Policy review is still required',
         },
         expected: true,
+        expectedReason: 'Policy review is still required',
       },
-    ])('$name when a goal hook blocks', async ({ otherOutput, expected }) => {
-      const config = new Config({ ...baseParams });
-      await config.initialize();
-      const goalOutput = {
-        decision: 'block' as const,
-        hookSpecificOutput: {
-          [GOAL_HOOK_CONTINUATION_OUTPUT_KEY]: 'Keep working',
-          [GOAL_HOOK_ID_OUTPUT_KEY]: 'goal-hook-id',
+      {
+        name: 'preserves a stop reason',
+        otherOutput: {
+          continue: false,
+          stopReason: 'External stop hook feedback',
         },
-      };
-      const fireStopEvent = vi.fn().mockResolvedValue({
-        finalOutput: {
-          ...goalOutput,
-          ...('reason' in otherOutput ? { reason: otherOutput.reason } : {}),
-        },
-        allOutputs: [goalOutput, otherOutput],
-      });
-      // @ts-expect-error - accessing private for testing
-      config['hookSystem'] = { fireStopEvent };
-
-      const response = await config
-        .getMessageBus()!
-        .request<HookExecutionRequest, HookExecutionResponse>(
-          {
-            type: MessageBusType.HOOK_EXECUTION_REQUEST,
-            eventName: 'Stop',
-            input: {
-              stop_hook_active: true,
-              last_assistant_message: 'last response',
-            },
+        expected: true,
+        expectedReason: 'External stop hook feedback',
+      },
+    ])(
+      '$name when a goal hook blocks',
+      async ({ otherOutput, expected, expectedReason }) => {
+        const config = new Config({ ...baseParams });
+        await config.initialize();
+        const goalOutput = {
+          decision: 'block' as const,
+          reason: 'Keep working',
+          hookSpecificOutput: {
+            [GOAL_HOOK_ID_OUTPUT_KEY]: 'goal-hook-id',
           },
-          MessageBusType.HOOK_EXECUTION_RESPONSE,
-        );
+        };
+        const fireStopEvent = vi.fn().mockResolvedValue({
+          finalOutput: {
+            ...goalOutput,
+            ...otherOutput,
+          },
+          allOutputs: [goalOutput, otherOutput],
+        });
+        // @ts-expect-error - accessing private for testing
+        config['hookSystem'] = { fireStopEvent };
 
-      expect(response.hasNonGoalBlockingStopHook).toBe(expected);
-    });
+        const response = await config
+          .getMessageBus()!
+          .request<HookExecutionRequest, HookExecutionResponse>(
+            {
+              type: MessageBusType.HOOK_EXECUTION_REQUEST,
+              eventName: 'Stop',
+              input: {
+                stop_hook_active: true,
+                last_assistant_message: 'last response',
+              },
+            },
+            MessageBusType.HOOK_EXECUTION_RESPONSE,
+          );
+
+        expect(response.error).toBeUndefined();
+        expect(response).toMatchObject({
+          success: true,
+          hasNonGoalBlockingStopHook: expected,
+        });
+        expect(response.nonGoalBlockingStopReason).toBe(expectedReason);
+      },
+    );
   });
 
   describe('MessageDisplay dispatch through the hook execution bridge', () => {
