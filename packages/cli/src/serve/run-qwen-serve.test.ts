@@ -4833,6 +4833,8 @@ describe('runQwenServe runtime startup failures', () => {
           'daemon_status',
           'workspace_settings',
           'workspace_reload',
+          'workspace_acp_preheat',
+          'workspace_acp_status',
           'persistent_workspace_registration',
           'workspace_runtime_removal',
         ]),

@@ -200,6 +200,13 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain('.[0:10] | map(. + {autofixTier: 1})');
   });
 
+  it('carries no patch-artifact stray quotes on shell keywords', () => {
+    // A trailing '"' after a lone fi/done/esac balances against the NEXT
+    // quote in the script, so bash -n stays green while runtime semantics
+    // are scrambled — pin the artifact class directly.
+    expect(workflow).not.toMatch(/^\s*(fi|done|esac)"\s*$/m);
+  });
+
   it('runs scheduled autofix as a 10-minute multi-target fan-out worker', () => {
     expect(workflow).toContain("cron: '*/10 * * * *'");
     expect(workflow).not.toContain("cron: '0 0,12 * * *'");
@@ -569,7 +576,7 @@ describe('qwen-autofix workflow', () => {
       /(PR_LIVE="\$\(gh pr view[\s\S]*?exit 0\n {10}fi)/,
     )?.[1];
     expect(recheck).toBeTruthy();
-    const runRecheck = (prJson) => {
+    const runRecheck = (prJson, authorPerm = 'write') => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-elig-'));
       try {
         const gh = join(dir, 'gh');
@@ -577,7 +584,7 @@ describe('qwen-autofix workflow', () => {
           gh,
           prJson === null
             ? '#!/bin/bash\nexit 1\n'
-            : `#!/bin/bash\nprintf '%s' '${JSON.stringify(prJson)}'\n`,
+            : `#!/bin/bash\nif [[ "$*" == *"/collaborators/"* ]]; then printf '%s' '${authorPerm}'; else printf '%s' '${JSON.stringify(prJson)}'; fi\n`,
         );
         chmodSync(gh, 0o755);
         const out = join(dir, 'out.txt');
@@ -592,6 +599,7 @@ describe('qwen-autofix workflow', () => {
               PR: '7163',
               REPO: 'QwenLM/qwen-code',
               BRANCH: 'ci/some-branch',
+              HEAD_REPO: 'maint-fork/qwen-code',
               WATERMARK: '2026-07-18T08:00:00Z',
               ROUND: '2',
               AUTOFIX_BOT: 'qwen-code-dev-bot',
@@ -647,9 +655,40 @@ describe('qwen-autofix workflow', () => {
     expect(
       runRecheck(pr({ labels: [{ name: 'autofix/skip' }] })).out,
     ).toContain('stale=true');
-    // Fork head, renamed branch, and a FAILED fetch (unknown ≠ eligible)
-    // all discard.
+    // Fork heads: manageable ONLY with takeover + allow-edits + a fork
+    // author who holds write+ LIVE; anything less discards.
     expect(runRecheck(pr({ isCrossRepository: true })).passed).toBe(false);
+    const forkPr = pr({
+      isCrossRepository: true,
+      maintainerCanModify: true,
+      author: { login: 'maint-fork' },
+      labels: [{ name: 'autofix/takeover' }],
+      headRepositoryOwner: { login: 'maint-fork' },
+      headRepository: { name: 'qwen-code' },
+    });
+    expect(runRecheck(forkPr).passed).toBe(true);
+    expect(runRecheck({ ...forkPr, maintainerCanModify: false }).passed).toBe(
+      false,
+    );
+    expect(runRecheck(forkPr, 'read').passed).toBe(false);
+    // The base/branch invariants must remain REACHABLE for eligible forks:
+    // the fork elif chain ends the ladder, so a retargeted or head-renamed
+    // fork previously sailed through to a wrong-base push.
+    expect(runRecheck({ ...forkPr, baseRefName: 'develop' }).passed).toBe(
+      false,
+    );
+    expect(runRecheck({ ...forkPr, headRefName: 'renamed' }).passed).toBe(
+      false,
+    );
+    // A fork renamed/transferred since the scan must not be fetched or
+    // pushed at the stale path — moved or unresolved discards.
+    expect(
+      runRecheck({ ...forkPr, headRepositoryOwner: { login: 'somewhere' } })
+        .passed,
+    ).toBe(false);
+    expect(runRecheck({ ...forkPr, headRepository: { name: '' } }).passed).toBe(
+      false,
+    );
     expect(runRecheck(pr({ headRefName: 'renamed' })).passed).toBe(false);
     // Retargeted off main while queued → discard (previously only pinned).
     expect(runRecheck(pr({ baseRefName: 'develop' })).passed).toBe(false);
@@ -861,7 +900,9 @@ describe('qwen-autofix workflow', () => {
     // Decide gates: takeover only for open in-repo main-targeting PRs; fork
     // label events carry no secrets, so they are logged and dropped.
     expect(routeStep).toContain('→ review phase (takeover)');
-    expect(routeStep).toContain('takeover ignored: PR is a fork');
+    // Fork label events (no secrets) note the takeover for the next
+    // scheduled scan instead of dropping it.
+    expect(routeStep).toContain('fork takeover noted for #${PR_NUMBER_EVENT}');
     expect(routeStep).toContain('is not open');
     expect(routeStep).toContain('→ released');
     // Every toggle produces a visible bilingual ack via the PAT-verified bot
@@ -876,12 +917,13 @@ describe('qwen-autofix workflow', () => {
     // EVERY body proves it individually (a global count alone could balance
     // one lost Chinese section against a duplicate elsewhere): engage,
     // honest bot-PR release, skip-labeled bot-PR release, human-PR
-    // release, re-arm, fork refusal, two skip-blocked refusals, and the cap
-    // pause.
+    // release, re-arm, fork allow-edits refusal, two skip-blocked refusals,
+    // the cap pause, and the scan-side first-pickup engage ack (fork label
+    // events carry no secrets, so the scan anchors the window itself).
     const ackBodies = workflow.match(
       /printf '[^']*takeover-(?:ack|cap)[^']*'/g,
     );
-    expect(ackBodies).toHaveLength(9);
+    expect(ackBodies).toHaveLength(11);
     for (const body of ackBodies) {
       expect(body).toContain('<summary>中文说明</summary>');
     }
@@ -905,7 +947,12 @@ describe('qwen-autofix workflow', () => {
     // and the command job — which DOES have secrets — refuses forks up
     // front with an explanation instead of toggling the label.
     expect(routeStep).toContain('takeover release ignored: PR is a fork');
-    expect(workflow).toContain('takeover command refused: PR #${PR} is a fork');
+    // Fork PRs with allow-edits ARE manageable now; only a fork WITHOUT
+    // maintainer-edit access refuses (with the actionable ask).
+    expect(workflow).toContain(
+      'takeover command refused: fork PR #${PR} without maintainer-edit access',
+    );
+    expect(workflow).toContain('Allow edits from maintainers');
     expect(workflow).toContain('<!-- takeover-ack fork-refused -->');
     // Convention: every write verifies the PAT identity first — including
     // the scan's cap notice (a foreign login would defeat the dedup and
@@ -988,6 +1035,187 @@ describe('qwen-autofix workflow', () => {
     // Rotation: offset 1 starts one past the newest, wrapping — so the
     // oldest tail is reached within pool/budget scans instead of never.
     expect(pick([pr(1), pr(2)], [], 1)).toEqual(['1', '2']);
+    // Fork takeover candidates are admitted separately: allow-edits and no
+    // skip label filter in jq; the author's live write+ gate runs in bash.
+    const forkSel = reviewScanJob
+      .match(
+        /done < <\(jq -r --arg skip "\$\{SKIP_LABEL\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/takeover-prs\.json"\)/,
+      )?.[1]
+      ?.replace(/\n {14}/g, '\n');
+    expect(forkSel).toBeTruthy();
+    const forkRows = execFileSync(
+      'jq',
+      ['-r', '--arg', 'skip', 'autofix/skip', forkSel],
+      {
+        encoding: 'utf8',
+        input: JSON.stringify([
+          {
+            number: 9,
+            isCrossRepository: true,
+            maintainerCanModify: true,
+            labels: [{ name: 'autofix/takeover' }],
+            author: { login: 'maint-a' },
+          },
+          {
+            number: 8,
+            isCrossRepository: true,
+            maintainerCanModify: false,
+            labels: [{ name: 'autofix/takeover' }],
+            author: { login: 'maint-b' },
+          },
+          {
+            number: 7,
+            isCrossRepository: true,
+            maintainerCanModify: true,
+            labels: [{ name: 'autofix/takeover' }, { name: 'autofix/skip' }],
+            author: { login: 'maint-c' },
+          },
+          {
+            number: 6,
+            isCrossRepository: false,
+            maintainerCanModify: true,
+            labels: [{ name: 'autofix/takeover' }],
+            author: { login: 'maint-d' },
+          },
+        ]),
+      },
+    )
+      .trim()
+      .split('\n');
+    expect(forkRows).toEqual(['9\tmaint-a']);
+    expect(reviewScanJob).toContain('fork takeover candidate #${FPR} admitted');
+    // Fork plumbing: the target carries its head repo; prepare fetches the
+    // fork branch (origin has no copy) and the report pushes back via
+    // allow-edits.
+    expect(workflow).toContain("HEAD_REPO: '${{ matrix.target.head_repo }}'");
+    expect(reviewScanJob).toContain('head_repo: $hr');
+    expect(workflow).toContain(
+      'git fetch "https://github.com/${HEAD_REPO}.git" "refs/heads/${BRANCH}"',
+    );
+    expect(workflow).toContain(
+      'git push --no-verify "https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}"',
+    );
+    // The allow-edits grant rides the classic-PAT path only — prepare must
+    // prove push access BEFORE an agent round is spent, discarding
+    // gracefully instead of 403ing at the report step.
+    expect(workflow).toContain(
+      'git push --no-verify --dry-run "https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}"',
+    );
+    expect(workflow).toContain('fork push preflight failed');
+    // First-pickup engage ack anchors the window when the label path could
+    // not (fork events carry no secrets), author-filtered-deduped,
+    // identity-verified, with ic.json re-fetched so the same scan counts
+    // under the fresh key.
+    expect(reviewScanJob).toContain('takeover-ack engaged');
+    expect(reviewScanJob).toContain('ic re-fetch after engage ack failed');
+    // Ack dedup is author-filtered (a forged human marker must not suppress
+    // the real ack) and re-armable: a takeover-label application newer than
+    // the latest bot ack posts a fresh ack, resetting the round window.
+    const ackTsProgram = reviewScanJob
+      .match(
+        /LAST_ENGAGE_ACK_TS="\$\(jq -rs --arg ab "\$\{AUTOFIX_BOT\}" '([\s\S]*?)' "\$\{WORKDIR\}\/ic\.json"\)"/,
+      )?.[1]
+      ?.replace(/\n {16}/g, '\n');
+    expect(ackTsProgram).toBeTruthy();
+    // Two concatenated page-documents, the true latest in page 2 — proves
+    // the slurp handles gh api --paginate output past 100 comments.
+    const ackTs = execFileSync(
+      'jq',
+      ['-rs', '--arg', 'ab', 'bot', ackTsProgram],
+      {
+        encoding: 'utf8',
+        input:
+          JSON.stringify([
+            {
+              user: { login: 'bot' },
+              body: 'x <!-- takeover-ack engaged -->',
+              created_at: '2026-07-01T00:00:00Z',
+            },
+            {
+              user: { login: 'mallory' },
+              body: 'fake <!-- takeover-ack engaged -->',
+              created_at: '2026-07-05T00:00:00Z',
+            },
+          ]) +
+          JSON.stringify([
+            {
+              user: { login: 'bot' },
+              body: 'y <!-- takeover-ack engaged -->',
+              created_at: '2026-07-03T00:00:00Z',
+            },
+            {
+              user: { login: 'bot' },
+              body: 'released <!-- takeover-ack released -->',
+              created_at: '2026-07-04T00:00:00Z',
+            },
+          ]),
+      },
+    ).trim();
+    expect(ackTs).toBe('2026-07-03T00:00:00Z');
+    const labeledTsProgram = reviewScanJob
+      .match(
+        /LAST_LABELED_TS="\$\(jq -rs --arg lb "\$\{TAKEOVER_LABEL\}" '([\s\S]*?)' "\$\{WORKDIR\}\/pr-events\.json"\)"/,
+      )?.[1]
+      ?.replace(/\n {16}/g, '\n');
+    expect(labeledTsProgram).toBeTruthy();
+    const labeledTs = execFileSync(
+      'jq',
+      ['-rs', '--arg', 'lb', 'autofix/takeover', labeledTsProgram],
+      {
+        encoding: 'utf8',
+        input:
+          JSON.stringify([
+            {
+              event: 'labeled',
+              label: { name: 'autofix/takeover' },
+              created_at: '2026-07-02T00:00:00Z',
+            },
+            {
+              event: 'labeled',
+              label: { name: 'other' },
+              created_at: '2026-07-09T00:00:00Z',
+            },
+          ]) +
+          JSON.stringify([
+            {
+              event: 'unlabeled',
+              label: { name: 'autofix/takeover' },
+              created_at: '2026-07-08T00:00:00Z',
+            },
+            {
+              event: 'labeled',
+              label: { name: 'autofix/takeover' },
+              created_at: '2026-07-06T00:00:00Z',
+            },
+          ]),
+      },
+    ).trim();
+    expect(labeledTs).toBe('2026-07-06T00:00:00Z');
+    expect(reviewScanJob).toContain(
+      '"${LAST_LABELED_TS}" > "${LAST_ENGAGE_ACK_TS}"',
+    );
+    // The dedup must read the CURRENT candidate's comments: pin the per-PR
+    // ic.json fetch BEFORE the first ack-timestamp read (reading a previous
+    // candidate's file mis-dedups; a missing file kills the scan step under
+    // -eo pipefail). Same textual-order technique as the hooks-severed pins.
+    const icFetchAt = reviewScanJob.indexOf(
+      'gh api "repos/${REPO}/issues/${PR}/comments" --paginate > "${WORKDIR}/ic.json"',
+    );
+    const ackReadAt = reviewScanJob.indexOf('LAST_ENGAGE_ACK_TS=');
+    expect(icFetchAt).toBeGreaterThan(-1);
+    expect(ackReadAt).toBeGreaterThan(icFetchAt);
+    // A dry-run scan must neither comment nor advance the real window key.
+    expect(reviewScanJob).toContain(
+      'DRY-RUN: would post engage ack on #${PR} (window key untouched)',
+    );
+    // In-repo first-pickup defers to the label event's DEDICATED ack job
+    // within a short grace, so a concurrent ack job is never double-posted.
+    expect(reviewScanJob).toContain('engage ack deferred for #${PR}');
+    // A fork fetch failure (force-push/rename race) discards gracefully
+    // instead of a red run, and a fork moved since the scan is discarded at
+    // the live re-check rather than fetched/pushed at the stale path.
+    expect(workflow).toContain('fork fetch failed for ${HEAD_REPO}');
+    expect(workflow).toContain('fork head repository moved or unresolved');
     // The producers must actually REQUEST labels — the jq consumers above
     // stay green on handcrafted fixtures even if a future edit drops the
     // field and skip/takeover filtering silently dies in production.
@@ -1128,6 +1356,8 @@ describe('qwen-autofix workflow', () => {
       cmd,
       labels = [],
       fork = false,
+      canModify = true,
+      authorPerm = 'write',
       state = 'OPEN',
       base = 'main',
     }) => {
@@ -1135,6 +1365,8 @@ describe('qwen-autofix workflow', () => {
       try {
         const prJson = JSON.stringify({
           isCrossRepository: fork,
+          maintainerCanModify: canModify,
+          author: { login: 'fork-owner' },
           state,
           baseRefName: base,
           labels: labels.map((name) => ({ name })),
@@ -1143,7 +1375,8 @@ describe('qwen-autofix workflow', () => {
           join(dir, 'gh'),
           [
             '#!/bin/bash',
-            `if [[ "$1" == "pr" && "$2" == "view" ]]; then printf '%s' '${prJson}';`,
+            `if [[ "$1" == "api" && "$2" == */collaborators/*/permission ]]; then printf '%s' '${authorPerm}';`,
+            `elif [[ "$1" == "pr" && "$2" == "view" ]]; then printf '%s' '${prJson}';`,
             `elif [[ "$1" == "pr" && "$2" == "edit" ]]; then echo "EDIT $*" >> '${join(dir, 'writes.log')}';`,
             `elif [[ "$1" == "pr" && "$2" == "comment" ]]; then echo "COMMENT $4" >> '${join(dir, 'writes.log')}'; cat > /dev/null <<< "$6";`,
             'fi',
@@ -1202,10 +1435,29 @@ describe('qwen-autofix workflow', () => {
     const skipBlocked = runToggle({ cmd: 'add', labels: ['autofix/skip'] });
     expect(skipBlocked.writes).toContain('COMMENT');
     expect(skipBlocked.writes).not.toContain('EDIT');
-    // fork PRs are refused with an explanation, never toggled.
-    const forkRefused = runToggle({ cmd: 'add', fork: true });
+    // Fork WITHOUT allow-edits refuses with the actionable ask, never
+    // toggling; fork WITH allow-edits is fully manageable and toggles.
+    const forkRefused = runToggle({ cmd: 'add', fork: true, canModify: false });
     expect(forkRefused.writes).toContain('COMMENT');
     expect(forkRefused.writes).not.toContain('EDIT');
+    const forkManaged = runToggle({ cmd: 'add', fork: true });
+    expect(forkManaged.writes).toContain('--add-label');
+    expect(forkManaged.writes).not.toContain('COMMENT');
+    // A below-write fork author would be a ghost engagement (label sticks,
+    // nothing ever manages it) — the command refuses with the adoption ask.
+    const forkGhost = runToggle({ cmd: 'add', fork: true, authorPerm: 'read' });
+    expect(forkGhost.writes).toContain('COMMENT');
+    expect(forkGhost.writes).not.toContain('EDIT');
+    expect(forkGhost.log).toContain('below write');
+    // Release is NEVER blocked by engage-side fork requirements: stop on an
+    // allow-edits-revoked fork still removes the label.
+    const forkStop = runToggle({
+      cmd: 'remove',
+      fork: true,
+      canModify: false,
+      labels: ['autofix/takeover'],
+    });
+    expect(forkStop.writes).toContain('--remove-label');
   });
 
   it('behaviorally resets round counting at the latest takeover engage ack', () => {
@@ -1855,6 +2107,40 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
+  it('surfaces the running model in every autofix report for diagnosis and attribution', () => {
+    // The model is a repo variable (already the agent's OPENAI_MODEL), not a
+    // secret, so it is safe to echo into a public comment. Each reporting
+    // step must plumb it in and render a footer that names Qwen Code and the
+    // model, with an empty-variable fallback so the footer never renders a
+    // bare backtick pair.
+    const footer =
+      'echo "🧠 Handled by **Qwen Code** · model/模型 \\`${MODEL_DISPLAY}\\`"';
+    for (const step of [
+      pushAndReportStep,
+      reviewAddressReportStep,
+      publishPrStep,
+    ]) {
+      expect(step).toContain("MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'");
+      expect(step).toContain('MODEL_DISPLAY="${MODEL:-default}"');
+      expect(step).toContain(footer);
+    }
+    // Push-and-report carries BOTH the fixed and no-action bodies, so the
+    // footer appears twice there; the handoff and issue-phase reports once.
+    expect(pushAndReportStep.split(footer).length - 1).toBe(2);
+    expect(reviewAddressReportStep.split(footer).length - 1).toBe(1);
+    expect(publishPrStep.split(footer).length - 1).toBe(1);
+    // The footer is appended to the model-authored e2e report before it is
+    // posted, not injected into the model's own file mid-generation.
+    expect(publishPrStep).toContain(
+      '} >> "${WORKDIR}/e2e-report.md"\n          gh pr comment "${PR_URL}" --body-file "${WORKDIR}/e2e-report.md"',
+    );
+    // The footer sits with the report bodies (before the eval marker), never
+    // inside the model output that gets comment-token-scrubbed.
+    expect(pushAndReportStep).toMatch(
+      /echo "🧠 Handled by[^\n]*\n\s+echo\n\s+echo "<!-- autofix-eval ts=\$\{NEWEST\} acted=true/,
+    );
+  });
+
   it('runs heavy autofix jobs on hosted runners with sandbox images', () => {
     const workflowAndSkill = `${workflow}\n${readAutofixSkill()}`;
 
@@ -2301,8 +2587,17 @@ describe('qwen-autofix workflow', () => {
     // …both pushes AND the prepare checkout (post-checkout hooks fire with
     // the PAT in env there); the agent step — no PAT, sandboxed tools —
     // re-points .husky itself so its commits still get checked.
+    // Hooks are severed BEFORE either checkout form (origin branch or the
+    // fork-remote FETCH_HEAD path used by maintainer-fork takeover). The
+    // fork arm carries the fetch-failure discard before its checkout and
+    // the origin form sits in the else-branch after the push preflight,
+    // hence the wider windows — the assertions are about order, and one
+    // hooksPath site genuinely covers both arms of the if.
     expect(workflow).toMatch(
-      /git config core\.hooksPath \/dev\/null\n\s+git checkout -B "\$\{BRANCH\}"/,
+      /git config core\.hooksPath \/dev\/null\n[\s\S]{0,900}git checkout -B "\$\{BRANCH\}" FETCH_HEAD/,
+    );
+    expect(workflow).toMatch(
+      /git config core\.hooksPath \/dev\/null\n[\s\S]{0,2200}git checkout -B "\$\{BRANCH\}" "origin\/\$\{BRANCH\}"/,
     );
     expect(workflow).toMatch(
       /git config core\.hooksPath \.husky\n[\s\S]{0,200}node "\$\{RUNNER_TEMP\}\/autofix-skill\/scripts\/run-agent\.mjs"/,
