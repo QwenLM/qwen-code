@@ -47,6 +47,7 @@ export function estimateTextTokenUnits(text: string): number {
   const nonAsciiChars = countNonAsciiChars(text);
   const asciiChars = text.length - nonAsciiChars;
 
+  // 5 = 20 / 4; 22 = 20 * 1.1. Keep in sync with estimateTextTokens().
   return asciiChars * 5 + nonAsciiChars * 22;
 }
 

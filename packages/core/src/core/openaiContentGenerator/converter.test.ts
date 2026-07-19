@@ -3668,7 +3668,7 @@ describe('OpenAIContentConverter', () => {
               logprobs: null,
             },
           ],
-          usage: { prompt_tokens: 1, completion_tokens: 5, total_tokens: 6 },
+          usage: { prompt_tokens: 1, completion_tokens: 10, total_tokens: 11 },
         } as unknown as OpenAI.Chat.ChatCompletion,
         requestContext,
       );
@@ -3711,8 +3711,8 @@ describe('OpenAIContentConverter', () => {
           choices: [],
           usage: {
             prompt_tokens: 1,
-            completion_tokens: 1128,
-            total_tokens: 1129,
+            completion_tokens: 1200,
+            total_tokens: 1201,
           },
         } as unknown as OpenAI.Chat.ChatCompletionChunk,
         context,

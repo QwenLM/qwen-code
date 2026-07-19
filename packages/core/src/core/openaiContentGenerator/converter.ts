@@ -23,7 +23,6 @@ import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { createOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
 import {
-  estimateTextTokens,
   estimateTextTokenUnits,
   TOKEN_ESTIMATE_UNITS_PER_TOKEN,
 } from '../../utils/request-tokenizer/textTokenizer.js';
@@ -1264,9 +1263,18 @@ export function convertOpenAIResponseToGemini(
       usage.prompt_tokens_details?.cached_tokens ??
       extendedUsage.cached_tokens ??
       0;
-    const thinkingTokens =
-      usage.completion_tokens_details?.reasoning_tokens ||
-      estimateTextTokens(reasoningText ?? '');
+    const providerReasoningTokens =
+      usage.completion_tokens_details?.reasoning_tokens;
+    const estimatedThinkingTokens = Math.ceil(
+      estimateTextTokenUnits(reasoningText ?? '') /
+        TOKEN_ESTIMATE_UNITS_PER_TOKEN,
+    );
+    const thinkingTokens = providerReasoningTokens || estimatedThinkingTokens;
+    if (!providerReasoningTokens && estimatedThinkingTokens > 0) {
+      debugLogger.debug(
+        `convertOpenAIResponseToGemini: reasoning_tokens absent; estimated ${estimatedThinkingTokens} from text`,
+      );
+    }
 
     // If we only have total tokens but no breakdown, estimate the split
     // Typically input is ~70% and output is ~30% for most conversations
@@ -1727,12 +1735,18 @@ export function convertOpenAIChunkToGemini(
     const promptTokens = usage.prompt_tokens || 0;
     const completionTokens = usage.completion_tokens || 0;
     const totalTokens = usage.total_tokens || 0;
-    const thinkingTokens =
-      usage.completion_tokens_details?.reasoning_tokens ||
-      Math.ceil(
-        (requestContext.reasoningDeltaState?.emittedTokenUnits ?? 0) /
-          TOKEN_ESTIMATE_UNITS_PER_TOKEN,
+    const providerReasoningTokens =
+      usage.completion_tokens_details?.reasoning_tokens;
+    const estimatedThinkingTokens = Math.ceil(
+      (requestContext.reasoningDeltaState?.emittedTokenUnits ?? 0) /
+        TOKEN_ESTIMATE_UNITS_PER_TOKEN,
+    );
+    const thinkingTokens = providerReasoningTokens || estimatedThinkingTokens;
+    if (!providerReasoningTokens && estimatedThinkingTokens > 0) {
+      debugLogger.debug(
+        `convertOpenAIChunkToGemini: reasoning_tokens absent; estimated ${estimatedThinkingTokens} from streamed text`,
       );
+    }
     // Support both formats: prompt_tokens_details.cached_tokens (OpenAI standard)
     // and cached_tokens (some models return it at top level)
     const extendedUsage = usage as ExtendedCompletionUsage;
