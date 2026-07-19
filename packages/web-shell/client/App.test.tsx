@@ -43,6 +43,8 @@ type ChatEditorTestProps = {
   dialogOpen?: boolean;
   placeholderText?: string;
   workspaces?: Array<{ id: string; cwd: string }>;
+  selectedWorkspaceCwd?: string;
+  onSelectWorkspace?: (cwd: string | undefined) => void;
   atWorkspaceCwd?: string;
 };
 
@@ -4208,6 +4210,38 @@ describe('App session callbacks', () => {
       expect(document.activeElement).toBe(restoredTrigger);
     },
   );
+
+  it('opens Channels in the selected secondary workspace before a session exists', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true },
+        { id: 'secondary', cwd: '/work/secondary', primary: false },
+      ],
+    };
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSelectWorkspace?.('/work/secondary');
+      await Promise.resolve();
+    });
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-channels"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(
+      container
+        .querySelector('[data-testid="channels-manager"]')
+        ?.getAttribute('data-workspace-cwd'),
+    ).toBe('/work/secondary');
+  });
 
   it('keeps the panel open when transcript blocks carry no actionable approval', async () => {
     // Negative control: a resolved permission is not actionable, so the panel

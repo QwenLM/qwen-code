@@ -116,6 +116,7 @@ export function ChannelsManagerPage({
 }: ChannelsManagerPageProps) {
   const { t } = useI18n();
   const workspace = useWorkspace();
+  const resolvedWorkspaceCwd = workspaceCwd ?? workspace.workspaceCwd;
   const {
     catalog,
     snapshot,
@@ -129,7 +130,7 @@ export function ChannelsManagerPage({
     stop,
     restart,
     auth,
-  } = useChannels({ autoLoad: true, workspaceCwd });
+  } = useChannels({ autoLoad: true, workspaceCwd: resolvedWorkspaceCwd });
   const supportsManagement =
     workspace.capabilities?.features.includes('channel_management') === true;
   const hasBearerToken = Boolean(workspace.token);
@@ -138,8 +139,8 @@ export function ChannelsManagerPage({
     workspace.capabilities?.features.includes('channel_auth') === true;
   const canAuthenticate = supportsChannelAuth && hasBearerToken;
   const workspaceIdentity = useMemo(
-    () => ({ client: workspace.client, workspaceCwd: workspace.workspaceCwd }),
-    [workspace.client, workspace.workspaceCwd],
+    () => ({ client: workspace.client, workspaceCwd: resolvedWorkspaceCwd }),
+    [resolvedWorkspaceCwd, workspace.client],
   );
   const hasManageableTypes = catalog.some((entry) => entry.manageable);
   const instances = useMemo(
@@ -374,11 +375,11 @@ export function ChannelsManagerPage({
             </h1>
             <p className="mt-1 truncate text-sm text-muted-foreground">
               {t('channels.summary', {
-                workspace: workspace.workspaceCwd
-                  ? (workspace.workspaceCwd
+                workspace: resolvedWorkspaceCwd
+                  ? (resolvedWorkspaceCwd
                       .split(/[\\/]+/)
                       .filter(Boolean)
-                      .at(-1) ?? workspace.workspaceCwd)
+                      .at(-1) ?? resolvedWorkspaceCwd)
                   : t('channels.workspace.current'),
                 count: instances.length,
               })}

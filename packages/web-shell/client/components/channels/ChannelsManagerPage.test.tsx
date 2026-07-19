@@ -25,54 +25,59 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-const { channelState, workspace, actions, authActions } = vi.hoisted(() => {
-  const authActions = {
-    begin: vi.fn(),
-    status: vi.fn(),
-    qr: vi.fn(),
-    cancel: vi.fn(),
-    commit: vi.fn(),
-  };
-  return {
-    channelState: {
-      loading: false,
-      error: undefined as Error | undefined,
-      catalog: [
-        {
-          type: 'dingtalk',
-          displayName: 'DingTalk',
-          manageable: true,
-          fields: [],
-          auth: ['credentials'] as const,
+const { channelState, workspace, actions, authActions, channelOptions } =
+  vi.hoisted(() => {
+    const authActions = {
+      begin: vi.fn(),
+      status: vi.fn(),
+      qr: vi.fn(),
+      cancel: vi.fn(),
+      commit: vi.fn(),
+    };
+    return {
+      channelState: {
+        loading: false,
+        error: undefined as Error | undefined,
+        catalog: [
+          {
+            type: 'dingtalk',
+            displayName: 'DingTalk',
+            manageable: true,
+            fields: [],
+            auth: ['credentials'] as const,
+          },
+        ],
+        snapshot: {
+          revision: 'revision-1',
+          instances: {} as Record<string, DaemonChannelInstanceSnapshot>,
         },
-      ],
-      snapshot: {
-        revision: 'revision-1',
-        instances: {} as Record<string, DaemonChannelInstanceSnapshot>,
       },
-    },
-    workspace: {
-      client: {},
-      workspaceCwd: '/workspace/demo',
-      token: 'test-token' as string | undefined,
-      capabilities: { features: ['channel_management'] },
-    },
-    actions: {
-      reload: vi.fn(),
-      createOrUpdate: vi.fn(),
-      remove: vi.fn(),
-      setStartup: vi.fn(),
-      start: vi.fn(),
-      stop: vi.fn(),
-      restart: vi.fn(),
-      auth: authActions,
-    },
-    authActions,
-  };
-});
+      workspace: {
+        client: {},
+        workspaceCwd: '/workspace/demo',
+        token: 'test-token' as string | undefined,
+        capabilities: { features: ['channel_management'] },
+      },
+      actions: {
+        reload: vi.fn(),
+        createOrUpdate: vi.fn(),
+        remove: vi.fn(),
+        setStartup: vi.fn(),
+        start: vi.fn(),
+        stop: vi.fn(),
+        restart: vi.fn(),
+        auth: authActions,
+      },
+      authActions,
+      channelOptions: { workspaceCwd: undefined as string | undefined },
+    };
+  });
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
-  useChannels: () => ({ ...channelState, ...actions }),
+  useChannels: (options: { workspaceCwd?: string }) => {
+    channelOptions.workspaceCwd = options.workspaceCwd;
+    return { ...channelState, ...actions };
+  },
   useWorkspace: () => workspace,
 }));
 
@@ -96,11 +101,14 @@ function instance(
   };
 }
 
-async function renderPage(language: WebShellLanguage = 'en') {
+async function renderPage(
+  language: WebShellLanguage = 'en',
+  workspaceCwd?: string,
+) {
   await act(async () => {
     root.render(
       <I18nProvider language={language}>
-        <ChannelsManagerPage onClose={vi.fn()} />
+        <ChannelsManagerPage onClose={vi.fn()} workspaceCwd={workspaceCwd} />
       </I18nProvider>,
     );
   });
@@ -789,6 +797,33 @@ describe('ChannelsManagerPage', () => {
     expect(authActions.cancel).toHaveBeenCalledWith('bot', 'auth-1');
     expect(authActions.begin).toHaveBeenCalledOnce();
     expect(document.body.textContent).not.toContain('Authenticate bot');
+  });
+
+  it('binds QR identity and summary to a live workspace override', async () => {
+    channelState.catalog = [
+      {
+        type: 'qq',
+        displayName: 'QQ',
+        manageable: true,
+        fields: [],
+        auth: ['qr'] as const,
+      },
+    ];
+    channelState.snapshot.instances.bot = instance('stopped', {
+      config: { type: 'qq' },
+    });
+    await renderPage('en', '/workspace/selected-one');
+    click(button('Authenticate bot'));
+    await flush();
+
+    await renderPage('en', '/workspace/selected-two');
+    await flush();
+
+    expect(authActions.cancel).toHaveBeenCalledWith('bot', 'auth-1');
+    expect(authActions.begin).toHaveBeenCalledOnce();
+    expect(channelOptions.workspaceCwd).toBe('/workspace/selected-two');
+    expect(document.body.textContent).toContain('selected-two');
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
   });
 
   it.each([
