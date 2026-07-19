@@ -30,6 +30,8 @@ import {
   ToolErrorType,
 } from '../index.js';
 import * as path from 'node:path';
+import * as os from 'node:os';
+import * as fsSync from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { SkillTool } from '../tools/skill.js';
 import { StructuredToolError } from '../tools/priorReadEnforcement.js';
@@ -709,6 +711,7 @@ describe('CoreToolScheduler', () => {
     memoryMonitor?: { scheduleCheck: () => void };
     toolOutputBatchBudget?: number;
     getGeminiClient?: () => unknown;
+    getPlanFilePath?: () => string;
   }) {
     const ensureTool = vi.fn(
       async (name: string) =>
@@ -764,7 +767,8 @@ describe('CoreToolScheduler', () => {
         getCwd: () => '/repo',
         getUseModelRouter: () => false,
         getGeminiClient: options.getGeminiClient ?? (() => null),
-        getPlanFilePath: () => '/tmp/plans/test-session-id.md',
+        getPlanFilePath:
+          options.getPlanFilePath ?? (() => '/tmp/plans/test-session-id.md'),
         getChatRecordingService: () => undefined,
         getMemoryPressureMonitor: () => options.memoryMonitor,
         getMessageBus: vi.fn().mockReturnValue(options.messageBus),
@@ -904,6 +908,11 @@ describe('CoreToolScheduler', () => {
 
   it('redacts the plan argument from history after an approved exit_plan_mode', async () => {
     const bigPlan = '## Plan\n\n1. huge section\n2. code blocks\n3. tables';
+    const planFile = path.join(
+      os.tmpdir(),
+      `qwen-plan-${process.pid}-${Math.random().toString(16).slice(2)}.md`,
+    );
+    fsSync.writeFileSync(planFile, bigPlan, 'utf-8');
     const chat = createChatWithPlanCall('plan-call-1', bigPlan);
     const tool = new MockTool({
       name: ToolNames.EXIT_PLAN_MODE,
@@ -923,6 +932,7 @@ describe('CoreToolScheduler', () => {
       approvalMode: ApprovalMode.YOLO,
       onAllToolCallsComplete,
       getGeminiClient: () => ({ getChat: () => chat }),
+      getPlanFilePath: () => planFile,
     });
 
     await scheduler.schedule(
@@ -943,11 +953,56 @@ describe('CoreToolScheduler', () => {
     const fnCall = history[1]!.parts![1]!.functionCall!;
     expect(fnCall.args!['plan']).not.toContain('huge section');
     expect(fnCall.args!['plan']).toContain(
-      'Plan approved and saved to /tmp/plans/test-session-id.md',
+      `Plan approved and saved to ${planFile}`,
     );
+    fsSync.unlinkSync(planFile);
     // Sibling parts and other args survive untouched.
     expect(history[1]!.parts![0]).toEqual({ text: 'Here is my plan.' });
     expect(fnCall.args!['originalRequest']).toBe('please plan this');
+  });
+
+  it('keeps the plan argument when the plan file was never written (save failed)', async () => {
+    const bigPlan = '## Plan\n\nnothing on disk backs this';
+    const chat = createChatWithPlanCall('plan-call-3', bigPlan);
+    const tool = new MockTool({
+      name: ToolNames.EXIT_PLAN_MODE,
+      execute: vi.fn().mockResolvedValue({
+        llmContent:
+          'User approved. You can now start coding. Start with updating your todo list if applicable.',
+        returnDisplay: {
+          type: 'plan_summary',
+          message: 'User approved.',
+          plan: bigPlan,
+        },
+      }),
+    });
+    const onAllToolCallsComplete = vi.fn();
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName: new Map([[ToolNames.EXIT_PLAN_MODE, tool]]),
+      approvalMode: ApprovalMode.YOLO,
+      onAllToolCallsComplete,
+      getGeminiClient: () => ({ getChat: () => chat }),
+      getPlanFilePath: () =>
+        path.join(os.tmpdir(), 'qwen-plan-that-does-not-exist.md'),
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'plan-call-3',
+          name: ToolNames.EXIT_PLAN_MODE,
+          args: { plan: bigPlan },
+          isClientInitiated: false,
+          prompt_id: 'prompt-plan-save-failed',
+        },
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    // Never point the model at a file that is not there — the plan stays.
+    const fnCall = chat.getHistory()[1]!.parts![1]!.functionCall!;
+    expect(fnCall.args!['plan']).toBe(bigPlan);
   });
 
   it('keeps the plan argument in history when exit_plan_mode is not approved', async () => {

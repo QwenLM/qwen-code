@@ -17,6 +17,8 @@ import { AuthType, type ContentGenerator } from '../core/contentGenerator.js';
 import {
   GeminiChat,
   InvalidStreamError,
+  approvedPlanRedactionText,
+  redactApprovedPlansInHistory,
   redactStructuredOutputArgsForRecording,
   StreamEventType,
   type StreamEvent,
@@ -11448,6 +11450,127 @@ describe('GeminiChat', async () => {
       expect(chat.redactApprovedPlanFromHistory('call-plan', REPLACEMENT)).toBe(
         false,
       );
+    });
+  });
+
+  describe('redactApprovedPlansInHistory (load-side, #6237)', () => {
+    // The chat-recording JSONL captures the assistant turn with the full
+    // plan argument before the tool runs, so --resume re-feeds the text the
+    // in-session redaction removed. These tests pin the history-wide pass
+    // applied on every wholesale history load.
+    const PLAN = '## Plan\n\nresume leak fixture';
+    const PLAN_PATH = '/plans/session.md';
+
+    const approvedHistory = (): Content[] => [
+      { role: 'user', parts: [{ text: 'plan it' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'call-a',
+              name: 'exit_plan_mode',
+              args: { plan: PLAN, originalRequest: 'plan it' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-a',
+              name: 'exit_plan_mode',
+              response: {
+                output:
+                  'User approved. You can now start coding. Start with updating your todo list if applicable.',
+              },
+            },
+          },
+        ],
+      },
+    ];
+
+    it('rewrites approved calls whose plan matches the on-disk file', () => {
+      const out = redactApprovedPlansInHistory(
+        approvedHistory(),
+        PLAN,
+        PLAN_PATH,
+      );
+      expect(out).not.toBeNull();
+      const fnCall = out![1]!.parts![0]!.functionCall!;
+      expect(fnCall.args!['plan']).toBe(approvedPlanRedactionText(PLAN_PATH));
+      expect(fnCall.args!['originalRequest']).toBe('plan it');
+      expect(JSON.stringify(out)).not.toContain('resume leak fixture');
+    });
+
+    it('returns null when the response was not an approval', () => {
+      const history = approvedHistory();
+      (
+        history[2]!.parts![0]!.functionResponse!.response as {
+          output: string;
+        }
+      ).output = 'Plan execution was not approved. Remaining in plan mode.';
+      expect(redactApprovedPlansInHistory(history, PLAN, PLAN_PATH)).toBeNull();
+    });
+
+    it('returns null when the on-disk plan differs (stale file)', () => {
+      expect(
+        redactApprovedPlansInHistory(
+          approvedHistory(),
+          'a different, later plan',
+          PLAN_PATH,
+        ),
+      ).toBeNull();
+    });
+
+    it('is applied by setHistory when the plan file exists', () => {
+      // The module-level node:fs mock backs readFileSync with
+      // mockFileSystem, so "writing" the plan file is a Map insert.
+      const planFile = '/plans/wired-session.md';
+      mockFileSystem.set(planFile, PLAN);
+      try {
+        const chat = new GeminiChat(
+          { getPlanFilePath: () => planFile } as unknown as Config,
+          {},
+          [],
+        );
+        chat.setHistory(approvedHistory());
+        const fnCall = chat.getHistory()[1]!.parts![0]!.functionCall!;
+        expect(fnCall.args!['plan']).toBe(approvedPlanRedactionText(planFile));
+      } finally {
+        mockFileSystem.delete(planFile);
+      }
+    });
+
+    it('is applied by the constructor for rehydrated history', () => {
+      const planFile = '/plans/ctor-session.md';
+      mockFileSystem.set(planFile, PLAN);
+      try {
+        const chat = new GeminiChat(
+          { getPlanFilePath: () => planFile } as unknown as Config,
+          {},
+          approvedHistory(),
+        );
+        const fnCall = chat.getHistory()[1]!.parts![0]!.functionCall!;
+        expect(fnCall.args!['plan']).toBe(approvedPlanRedactionText(planFile));
+      } finally {
+        mockFileSystem.delete(planFile);
+      }
+    });
+
+    it('setHistory leaves history alone when no plan file exists', () => {
+      const chat = new GeminiChat(
+        {
+          getPlanFilePath: () => '/plans/never-written.md',
+        } as unknown as Config,
+        {},
+        [],
+      );
+      chat.setHistory(approvedHistory());
+      const fnCall = chat.getHistory()[1]!.parts![0]!.functionCall!;
+      expect(fnCall.args!['plan']).toBe(PLAN);
     });
   });
 

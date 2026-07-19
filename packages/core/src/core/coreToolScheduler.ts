@@ -58,6 +58,8 @@ import type {
 import { fileURLToPath } from 'node:url';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
+import { approvedPlanRedactionText } from './geminiChat.js';
+import * as fsSync from 'node:fs';
 import {
   collectAvailableSkillEntries,
   renderAvailableSkillsBlock,
@@ -4357,22 +4359,28 @@ export class CoreToolScheduler {
         ) {
           try {
             const planPath = this.config.getPlanFilePath();
+            // Gate on the on-disk plan actually matching the in-history
+            // text: savePlanBestEffort swallows filesystem errors, and the
+            // pointer must never claim a save that failed or reference a
+            // file holding a different plan. A missing/unreadable file
+            // throws here and skips the redaction entirely.
+            const savedPlan = fsSync.readFileSync(planPath, 'utf-8');
             this.config
               .getGeminiClient?.()
               ?.getChat()
               .redactApprovedPlanFromHistory(
                 callId,
-                `[Plan approved and saved to ${planPath}. The plan text was ` +
-                  `removed from the conversation after approval; read that ` +
-                  `file if you need to consult it again.]`,
+                approvedPlanRedactionText(planPath),
+                savedPlan,
               );
           } catch (redactErr) {
             debugLogger.warn(
-              `Failed to redact approved plan from history for ${callId}: ${
-                redactErr instanceof Error
-                  ? redactErr.message
-                  : String(redactErr)
-              }`,
+              `Skipping approved-plan redaction for ${callId} (plan file ` +
+                `unavailable?): ${
+                  redactErr instanceof Error
+                    ? redactErr.message
+                    : String(redactErr)
+                }`,
             );
           }
         }
