@@ -2493,7 +2493,22 @@ jobs:
             MARK_TS="${NEWEST:-${WATERMARK:-9999-12-31T23:59:59Z}}"
             if [[ -n "${NEWEST:-}" ]]; then
               MARK_ROUND="$(( ROUND + 1 ))"
-              HEADLINE="🤖 Could not address the latest feedback automatically (round ${MARK_ROUND}/${MAX_ROUNDS}). A human should take over this PR."
+              if [[ -z "${DETAIL_FILE}" ]]; then
+                # Prepare ran (NEWEST is set) but the agent produced NO output
+                # at all — it crashed before writing any verdict (e.g. a staged
+                # runner that fails to boot). It evaluated NOTHING, so the
+                # watermark must NOT advance past this feedback: an advance makes
+                # the next scan see "nothing new" and never retry, stranding the
+                # PR on a transient crash (a deploy, an infra blip, a base-image
+                # bug fixed minutes later). Stamp the sentinel ts (excluded from
+                # EVAL_WM) so the feedback stays live and the next scan retries;
+                # the incremented round still bounds retries to MAX_ROUNDS before
+                # a terminal handoff, so a PERSISTENT crash cannot loop forever.
+                MARK_TS='9999-12-31T23:59:59Z'
+                HEADLINE="🤖 AutoFix crashed before it could evaluate the feedback (attempt ${MARK_ROUND}/${MAX_ROUNDS}) — it will retry on the next scan. If it keeps failing to start through attempt ${MAX_ROUNDS}, a human should take over. Run log: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+              else
+                HEADLINE="🤖 Could not address the latest feedback automatically (round ${MARK_ROUND}/${MAX_ROUNDS}). A human should take over this PR."
+              fi
             else
               # Crashed/timed out before reading the feedback: mark terminal so the
               # scan skips (it can't advance the watermark without a read), but say
