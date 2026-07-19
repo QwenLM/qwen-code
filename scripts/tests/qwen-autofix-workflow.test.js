@@ -200,6 +200,13 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain('.[0:10] | map(. + {autofixTier: 1})');
   });
 
+  it('carries no patch-artifact stray quotes on shell keywords', () => {
+    // A trailing '"' after a lone fi/done/esac balances against the NEXT
+    // quote in the script, so bash -n stays green while runtime semantics
+    // are scrambled — pin the artifact class directly.
+    expect(workflow).not.toMatch(/^\s*(fi|done|esac)"\s*$/m);
+  });
+
   it('runs scheduled autofix as a 10-minute multi-target fan-out worker', () => {
     expect(workflow).toContain("cron: '*/10 * * * *'");
     expect(workflow).not.toContain("cron: '0 0,12 * * *'");

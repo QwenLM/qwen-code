@@ -1513,7 +1513,7 @@ jobs:
                 echo "⚠️ #${PR}: fork head repository unresolved — skipping"
                 continue
               fi
-            fi"
+            fi
             BRANCH="$(jq -r '.headRefName // ""' <<< "${PR_META}")"
             HAS_TAKEOVER="$(jq -r --arg t "${TAKEOVER_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${PR_META}")"
             # The candidate snapshot filtered skip once, but this per-PR fetch
@@ -1545,7 +1545,7 @@ jobs:
               else
                 echo "::warning::engage ack skipped: PAT authenticates as '${SCAN_BOT_ACTOR}'"
               fi
-            fi"
+            fi
             if [[ -z "${BRANCH}" ]]; then
               # Metadata fetch failed (transient API error / rate limit). Skip rather
               # than fall through with an empty branch, which would make the address
