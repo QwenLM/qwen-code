@@ -37,6 +37,10 @@ describe('canonicalizeWorkspace inside a POSIX container sandbox (#7139)', () =>
   it.skipIf(process.platform === 'win32')(
     'keeps Windows-shaped input untouched outside a sandbox',
     () => {
+      // Explicitly clear SANDBOX: when this suite itself runs inside the
+      // project's Docker sandbox the launcher sets it, and unstubAllEnvs
+      // would not remove a genuinely inherited value.
+      vi.stubEnv('SANDBOX', '');
       const result = canonicalizeWorkspace('C:\\qwen-repro');
       // Unsandboxed POSIX behavior is unchanged: the string resolves
       // relative to the cwd (and stays broken — which is what the

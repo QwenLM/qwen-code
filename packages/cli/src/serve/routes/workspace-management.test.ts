@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { _setSandboxMountExistsForTest } from '@qwen-code/acp-bridge/workspacePaths';
 import express, { type Request, type Response } from 'express';
 import request from 'supertest';
 import {
@@ -189,6 +190,48 @@ describe('POST /workspaces', () => {
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('invalid_path');
   });
+
+  // #7139 wiring: with a container sandbox active, a Windows-shaped cwd is
+  // translated to its bind mount BEFORE the absolute-path guard — the 400
+  // moves from the isAbsolute rejection to the (deeper) existence check,
+  // because the root-level translated mount cannot exist in a test.
+  it.skipIf(process.platform === 'win32')(
+    'translates a Windows-shaped cwd past the absolute-path guard in a sandbox',
+    async () => {
+      vi.stubEnv('SANDBOX', 'qwen-code-sandbox-0');
+      _setSandboxMountExistsForTest((p) => p === '/c/qwen-repro');
+      try {
+        const { app } = createApp();
+        const res = await request(app)
+          .post('/workspaces')
+          .send({ cwd: 'C:\\qwen-repro' });
+        expect(res.status).toBe(400);
+        // Past the guard: the failure is now the realpath existence check,
+        // not the absolute-path rejection.
+        expect(res.body.error).toBe('Path does not exist or is not accessible');
+      } finally {
+        vi.unstubAllEnvs();
+        _setSandboxMountExistsForTest(undefined);
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'still rejects a Windows-shaped cwd outside a sandbox',
+    async () => {
+      vi.stubEnv('SANDBOX', '');
+      try {
+        const { app } = createApp();
+        const res = await request(app)
+          .post('/workspaces')
+          .send({ cwd: 'C:\\qwen-repro' });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('`cwd` must be an absolute path');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 
   it('returns 400 when path does not exist', async () => {
     const { app } = createApp();

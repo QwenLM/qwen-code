@@ -61,7 +61,19 @@ export function translateWindowsWorkspaceForPosixSandbox(
   const match = WINDOWS_ABSOLUTE_PATH_RE.exec(p);
   if (!match) return p;
   const translated = `/${match[1]!.toLowerCase()}/${match[2]!.replace(/\\/g, '/')}`;
-  return exists(translated) ? translated : p;
+  // `..` segments would let the existence probe resolve outside the drive
+  // mount (`C:\..\..\etc` -> existsSync('/c/../../etc') === true via /etc),
+  // making the "translated candidate actually exists" contract a lie. Not a
+  // privilege escalation (downstream workspace binding still rejects it),
+  // but refuse to translate anything that escapes the drive prefix.
+  const resolvedTranslated = path.resolve(translated);
+  if (
+    resolvedTranslated !== `/${match[1]!.toLowerCase()}` &&
+    !resolvedTranslated.startsWith(`/${match[1]!.toLowerCase()}/`)
+  ) {
+    return p;
+  }
+  return exists(resolvedTranslated) ? translated : p;
 }
 
 /**

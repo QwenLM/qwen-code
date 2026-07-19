@@ -48,6 +48,7 @@ describe('parseOptionalWorkspaceCwd inside a POSIX container sandbox (#7139)', (
   it.skipIf(process.platform === 'win32')(
     'still rejects a Windows-shaped cwd outside a sandbox',
     () => {
+      vi.stubEnv('SANDBOX', '');
       const { res, status } = mockRes();
       const cwd = parseOptionalWorkspaceCwd(
         { cwd: 'C:\\qwen-repro' },

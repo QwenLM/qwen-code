@@ -91,6 +91,24 @@ describe('translateWindowsWorkspaceForPosixSandbox', () => {
     ).toBe('C:\\qwen-repro');
   });
 
+  it('refuses ..-laden input that escapes the drive mount', () => {
+    // existsSync would resolve /c/../../etc to /etc and return true — the
+    // guard must refuse before the probe can bless an out-of-mount path.
+    expect(
+      translateWindowsWorkspaceForPosixSandbox(
+        'C:\\..\\..\\etc',
+        sandboxOpts(true),
+      ),
+    ).toBe('C:\\..\\..\\etc');
+    // In-mount .. that stays under the drive prefix is still fine.
+    expect(
+      translateWindowsWorkspaceForPosixSandbox(
+        'C:\\work\\..\\proj',
+        sandboxOpts(true),
+      ),
+    ).toBe('/c/work/../proj');
+  });
+
   it('leaves non-Windows-shaped paths alone', () => {
     for (const p of ['/c/qwen-repro', 'relative/dir', 'C:', 'CC:\\x', '']) {
       expect(
