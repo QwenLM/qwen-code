@@ -2556,6 +2556,13 @@ export async function runAcpAgent(
     // client-hosted MCP server (#5626) round-trips over the parent WS.
     sendSdkMcpMessage: bootstrapClientMcpSender,
   });
+  // The ACP path exits gemini.tsx before its startup-warning printing runs,
+  // so config warnings (including initialize-time ones like the WebSearch
+  // enablement notice) would otherwise vanish. stderr lands in the client's
+  // logs without interfering with the ACP protocol on stdout.
+  for (const warning of config.getWarnings()) {
+    process.stderr.write(`${warning}\n`);
+  }
   const eventLoopMonitor = startEventLoopLagMonitor({
     onNewMaxStall: (maxMs) => {
       console.error(`[perf] acp agent event loop stall: max=${maxMs}ms`);

@@ -559,6 +559,7 @@ export class PermissionManager {
     'list_directory',
     'read_mcp_resource',
     'web_fetch',
+    'web_search',
     'todo_write',
     'save_memory',
     'lsp',

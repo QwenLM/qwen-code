@@ -164,6 +164,14 @@ class Session {
       // as missing the initialize phase entirely, which made the MCP
       // discovery timings look like they happened "before init".
       profileCheckpoint('config_initialize_start');
+      // Snapshot pre-initialize warnings: those were already printed by the
+      // startup path; only initialize-time additions are emitted below.
+      // Defensive `typeof` for tests that stub Config without getWarnings.
+      const preInitWarnings = new Set(
+        typeof this.config.getWarnings === 'function'
+          ? this.config.getWarnings()
+          : [],
+      );
       await this.config.initialize(options);
       profileCheckpoint('config_initialize_end');
       // Stream-json sessions feed prompts straight to the model after init.
@@ -187,6 +195,18 @@ class Session {
           `Warning: MCP server(s) failed to start: ${failedMcpServers.join(', ')}. ` +
             `Continuing with built-in tools and any servers that did connect.\n`,
         );
+      }
+      // Config warnings pushed during initialize() (e.g. the WebSearch
+      // enablement notice for a misconfigured opt-in) have no UI channel in
+      // stream-json mode; surface them on stderr like gemini.tsx's
+      // non-stream-json branch does, so automation can diagnose a silently
+      // missing tool.
+      if (typeof this.config.getWarnings === 'function') {
+        for (const warning of this.config.getWarnings()) {
+          if (!preInitWarnings.has(warning)) {
+            process.stderr.write(`${warning}\n`);
+          }
+        }
       }
       // Finalize the startup profile here so `config_initialize_*` and the
       // MCP discovery events captured during init/discovery make it into

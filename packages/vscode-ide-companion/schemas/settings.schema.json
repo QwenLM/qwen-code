@@ -1014,6 +1014,26 @@
           "description": "Sandbox image URI used by Docker/Podman when --sandbox-image and QWEN_SANDBOX_IMAGE are not set.",
           "type": "string"
         },
+        "webSearch": {
+          "description": "Settings for the built-in WebSearch tool (DashScope Responses API backend). Opt-in: requires enabled=true and a search model. Fully env-configurable for environments without settings.json: ENABLE_WEB_SEARCH, WEB_SEARCH_MODEL, WEB_SEARCH_BASE_URL, WEB_SEARCH_API_KEY (falls back to DASHSCOPE_API_KEY), WEB_SEARCH_EXTRACTOR.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "Enable the built-in web_search tool. Also requires tools.webSearch.model. Env override: ENABLE_WEB_SEARCH.",
+              "type": "boolean",
+              "default": false
+            },
+            "model": {
+              "description": "Model selector for the search side request, resolved against modelProviders like fastModel (\"modelId\" or \"authType:modelId\"). Must resolve to a DashScope-compatible entry with an envKey. Recommended: qwen3.6-plus. Env override: WEB_SEARCH_MODEL.",
+              "type": "string"
+            },
+            "webExtractor": {
+              "description": "Let the search agent open and read result pages (DashScope web_extractor) for better-grounded answers. Billed separately by DashScope. Env override: WEB_SEARCH_EXTRACTOR.",
+              "type": "boolean",
+              "default": true
+            }
+          }
+        },
         "toolSearch": {
           "description": "Settings for the ToolSearch discovery mechanism.",
           "type": "object",

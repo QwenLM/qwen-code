@@ -5180,6 +5180,83 @@ describe('Server Config (config.ts)', () => {
       ]);
     });
 
+    it('registers web_search when enabled with a usable env-declared backend', async () => {
+      process.env['WEB_SEARCH_GATE_TEST_KEY'] = 'sk-test';
+      try {
+        const config = new Config({
+          ...baseParams,
+          webSearch: {
+            enabled: true,
+            model: 'qwen3.6-plus',
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            apiKeyEnv: 'WEB_SEARCH_GATE_TEST_KEY',
+          },
+        });
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerFactory: Mock } };
+          }
+        ).ToolRegistry.prototype.registerFactory;
+
+        expect(
+          (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+        ).toContain(ToolNames.WEB_SEARCH);
+        expect(
+          config.getWarnings().filter((w) => w.includes('WebSearch')),
+        ).toEqual([]);
+      } finally {
+        delete process.env['WEB_SEARCH_GATE_TEST_KEY'];
+      }
+    });
+
+    it('does not register web_search or push a notice when the feature is disabled', async () => {
+      const config = new Config(baseParams);
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.WEB_SEARCH);
+      expect(
+        config.getWarnings().filter((w) => w.includes('WebSearch')),
+      ).toEqual([]);
+    });
+
+    it('pushes a one-time notice when web_search is enabled but misconfigured', async () => {
+      // Enabled without a model: the tool must stay off with a diagnostic
+      // notice, pushed exactly once across registry rebuilds.
+      const config = new Config({
+        ...baseParams,
+        webSearch: { enabled: true },
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.WEB_SEARCH);
+
+      const webSearchNotices = () =>
+        config.getWarnings().filter((w) => w.includes('WebSearch'));
+      expect(webSearchNotices()).toHaveLength(1);
+      expect(webSearchNotices()[0]).toContain('no search model');
+
+      // A registry rebuild must not duplicate the notice.
+      await config.createToolRegistry(undefined, { skipDiscovery: true });
+      expect(webSearchNotices()).toHaveLength(1);
+    });
+
     it('should register a tool if coreTools contains an argument-specific pattern', async () => {
       const params: ConfigParameters = {
         ...baseParams,
