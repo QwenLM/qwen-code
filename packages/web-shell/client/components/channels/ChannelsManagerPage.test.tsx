@@ -405,7 +405,110 @@ describe('ChannelsManagerPage', () => {
     ).toBe(true);
   });
 
-  it('restores focus to Add after deleting the focused channel', async () => {
+  it('blocks every workspace config action after a stale reload failure', async () => {
+    actions.setStartup.mockRejectedValue(
+      new DaemonHttpError(
+        409,
+        { code: 'channel_settings_conflict' },
+        'Channel settings changed.',
+      ),
+    );
+    actions.reload.mockRejectedValue(new Error('reload failed'));
+    channelState.snapshot.instances = {
+      bot: instance('stopped'),
+      other: instance('stopped', { name: 'other' }),
+    };
+    await renderPage();
+
+    const botStartup = document.querySelector(
+      '[aria-label="Start bot with serve"]',
+    );
+    if (!botStartup) throw new Error('Bot startup switch not found');
+    click(botStartup);
+    await flush();
+
+    expect(document.body.textContent).toContain(
+      'Channel settings are out of date',
+    );
+    expect(button('Add channel').disabled).toBe(true);
+    expect(button('More actions for other').disabled).toBe(true);
+    expect(
+      document.querySelector<HTMLInputElement>(
+        '[aria-label="Start other with serve"]',
+      )?.disabled,
+    ).toBe(true);
+    expect(button('Start other').disabled).toBe(false);
+  });
+
+  it('clears the workspace revision block after a runtime action reloads', async () => {
+    actions.setStartup.mockRejectedValue(
+      new DaemonHttpError(
+        409,
+        { code: 'channel_settings_conflict' },
+        'Channel settings changed.',
+      ),
+    );
+    actions.reload.mockRejectedValue(new Error('reload failed'));
+    actions.start.mockImplementation(async () => {
+      channelState.snapshot = {
+        ...channelState.snapshot,
+        instances: { ...channelState.snapshot.instances },
+      };
+    });
+    channelState.snapshot.instances = {
+      bot: instance('stopped'),
+      other: instance('stopped', { name: 'other' }),
+    };
+    await renderPage();
+
+    const botStartup = document.querySelector(
+      '[aria-label="Start bot with serve"]',
+    );
+    if (!botStartup) throw new Error('Bot startup switch not found');
+    click(botStartup);
+    await flush();
+    expect(button('Add channel').disabled).toBe(true);
+    click(button('Start other'));
+    await flush();
+
+    expect(actions.start).toHaveBeenCalledWith('other');
+    expect(button('Add channel').disabled).toBe(false);
+    expect(document.body.textContent).not.toContain(
+      'Channel settings are out of date',
+    );
+  });
+
+  it('clears the workspace revision block after manual reload', async () => {
+    actions.setStartup.mockRejectedValue(
+      new DaemonHttpError(
+        409,
+        { code: 'channel_settings_conflict' },
+        'Channel settings changed.',
+      ),
+    );
+    actions.reload
+      .mockRejectedValueOnce(new Error('reload failed'))
+      .mockResolvedValue(channelState);
+    channelState.snapshot.instances.bot = instance('stopped');
+    await renderPage();
+
+    const startupSwitch = document.querySelector('[role="switch"]');
+    if (!startupSwitch) throw new Error('Startup switch not found');
+    click(startupSwitch);
+    await flush();
+    expect(button('Add channel').disabled).toBe(true);
+    channelState.error = new Error('reload failed');
+    await renderPage();
+    click(button('Retry loading channels'));
+    await flush();
+
+    expect(button('Add channel').disabled).toBe(false);
+    expect(document.body.textContent).not.toContain(
+      'Channel settings are out of date',
+    );
+  });
+
+  it('keeps focus on Add after the deleted trigger unmounts', async () => {
     actions.remove.mockImplementation(async () => {
       channelState.snapshot = {
         revision: 'revision-2',
@@ -415,16 +518,24 @@ describe('ChannelsManagerPage', () => {
     channelState.snapshot.instances.bot = instance('stopped');
     await renderPage();
 
-    pointerDown(button('More actions for bot'));
+    const removedTrigger = button('More actions for bot');
+    removedTrigger.focus();
+    pointerDown(removedTrigger);
     await flush();
     click(elementWithText('[role="menuitem"]', 'Delete bot'));
     await flush();
     button('Delete channel').focus();
     click(button('Delete channel'));
     await flush();
+    await act(
+      async () => new Promise((resolve) => window.setTimeout(resolve, 0)),
+    );
 
     expect(document.body.textContent).not.toContain('bot');
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(removedTrigger.isConnected).toBe(false);
     expect(document.activeElement).toBe(button('Add channel'));
+    expect(document.activeElement).not.toBe(removedTrigger);
   });
 
   it('keeps channel secrets out of rendered output', async () => {

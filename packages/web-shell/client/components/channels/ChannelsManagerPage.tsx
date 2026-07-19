@@ -133,9 +133,7 @@ export function ChannelsManagerPage({
   const [busyName, setBusyName] = useState<string | null>(null);
   const [busyTarget, setBusyTarget] = useState<FocusTarget | null>(null);
   const [actionErrors, setActionErrors] = useState<Record<string, string>>({});
-  const [revisionBlockedNames, setRevisionBlockedNames] = useState<Set<string>>(
-    new Set(),
-  );
+  const [revisionBlocked, setRevisionBlocked] = useState(false);
   const [deleteName, setDeleteName] = useState<string | null>(null);
   const [editorIntent, setEditorIntent] = useState<EditorIntent | null>(null);
   const returnFocusRef = useRef<{ name: string; target: FocusTarget } | null>(
@@ -145,6 +143,7 @@ export function ChannelsManagerPage({
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const addButtonRef = useRef<HTMLButtonElement>(null);
   const restorePageFocusAfterDeleteRef = useRef(false);
+  const blockedSnapshotRef = useRef(snapshot);
 
   const setActionRef = useCallback(
     (name: string, target: FocusTarget, element: HTMLButtonElement | null) => {
@@ -163,23 +162,14 @@ export function ChannelsManagerPage({
   }, [busyName, snapshot]);
 
   useEffect(() => {
-    if (deleteName || !restorePageFocusAfterDeleteRef.current) return;
-    restorePageFocusAfterDeleteRef.current = false;
-    queueMicrotask(() => {
-      const addButton = addButtonRef.current;
-      if (addButton && !addButton.disabled) addButton.focus();
-      else closeButtonRef.current?.focus();
-    });
-  }, [deleteName]);
-
-  const setRevisionBlocked = useCallback((name: string, blocked: boolean) => {
-    setRevisionBlockedNames((current) => {
-      const next = new Set(current);
-      if (blocked) next.add(name);
-      else next.delete(name);
-      return next;
-    });
-  }, []);
+    if (
+      revisionBlocked &&
+      snapshot &&
+      snapshot !== blockedSnapshotRef.current
+    ) {
+      setRevisionBlocked(false);
+    }
+  }, [revisionBlocked, snapshot]);
 
   const runAction = useCallback(
     async (
@@ -204,11 +194,12 @@ export function ChannelsManagerPage({
         const actionMessage = extractErrorDetail(actionError);
         setActionErrors((current) => ({ ...current, [name]: actionMessage }));
         if (revisioned && isChannelSettingsConflict(actionError)) {
-          setRevisionBlocked(name, true);
+          blockedSnapshotRef.current = snapshot;
+          setRevisionBlocked(true);
           try {
             const refreshed = await reload();
             if (refreshed) {
-              setRevisionBlocked(name, false);
+              setRevisionBlocked(false);
             } else {
               setActionErrors((current) => ({
                 ...current,
@@ -228,12 +219,12 @@ export function ChannelsManagerPage({
         setBusyTarget(null);
       }
     },
-    [busyName, canManage, reload, setRevisionBlocked],
+    [busyName, canManage, reload, snapshot],
   );
 
   const retryLoad = useCallback(async () => {
     const refreshed = await reload();
-    if (refreshed) setRevisionBlockedNames(new Set());
+    if (refreshed) setRevisionBlocked(false);
   }, [reload]);
 
   const channelTypeLabel = useCallback(
@@ -355,7 +346,7 @@ export function ChannelsManagerPage({
         <Button
           ref={addButtonRef}
           className={styles.addButton}
-          disabled={!canManage || busyName !== null}
+          disabled={!canManage || busyName !== null || revisionBlocked}
           onClick={() => setEditorIntent({ mode: 'add' })}
         >
           <PlusIcon data-icon="inline-start" />
@@ -379,6 +370,17 @@ export function ChannelsManagerPage({
           <AlertTitle>Channel management is read-only</AlertTitle>
           <AlertDescription>
             Restart Qwen Code with a bearer token to add or change channels.
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
+      {revisionBlocked ? (
+        <Alert variant="destructive">
+          <AlertCircleIcon />
+          <AlertTitle>Channel settings are out of date</AlertTitle>
+          <AlertDescription>
+            Configuration changes are disabled until the workspace snapshot
+            reloads successfully. Runtime controls remain available.
           </AlertDescription>
         </Alert>
       ) : null}
@@ -447,7 +449,6 @@ export function ChannelsManagerPage({
           {instances.map((channel) => {
             const state = channel.runtime.state;
             const disabled = !canManage || busyName !== null;
-            const revisionBlocked = revisionBlockedNames.has(channel.name);
             return (
               <Card
                 key={channel.name}
@@ -573,6 +574,10 @@ export function ChannelsManagerPage({
           onCloseAutoFocus={(event) => {
             if (restorePageFocusAfterDeleteRef.current) {
               event.preventDefault();
+              const addButton = addButtonRef.current;
+              if (addButton && !addButton.disabled) addButton.focus();
+              else closeButtonRef.current?.focus();
+              restorePageFocusAfterDeleteRef.current = false;
             }
           }}
         >
@@ -600,7 +605,7 @@ export function ChannelsManagerPage({
                 !deleteName ||
                 !canManage ||
                 busyName !== null ||
-                revisionBlockedNames.has(deleteName)
+                revisionBlocked
               }
               aria-label="Delete channel"
               onClick={(event) => {
