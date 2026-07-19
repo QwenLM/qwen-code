@@ -109,7 +109,10 @@ export interface ChannelWorkerManager {
   ): Promise<ChannelWorkerSetResult>;
   stopSelection(): Promise<ChannelWorkerStopResult>;
   reload(): Promise<ChannelWorkerSnapshot>;
-  reloadWorkspace(workspaceCwd: string): Promise<ChannelWorkerSnapshot>;
+  reloadWorkspace(
+    workspaceCwd: string,
+    name: string,
+  ): Promise<ChannelWorkerSnapshot>;
   state(): ChannelWorkerControlState;
   primarySnapshot(): ChannelWorkerSnapshot;
   snapshots(): ChannelWorkerGroupSnapshot[];
@@ -530,7 +533,7 @@ export function createChannelWorkerManager(
         );
       });
     },
-    reloadWorkspace(workspaceCwd) {
+    reloadWorkspace(workspaceCwd, name) {
       if (draining) {
         return Promise.reject(drainingError());
       }
@@ -545,6 +548,7 @@ export function createChannelWorkerManager(
         let targetGroups: readonly ChannelWorkspaceGroup[];
         try {
           targetGroups = await opts.resolveGroups(committedSelection, 'reload');
+          assertRequiredOwner(targetGroups, { name, workspaceCwd });
           if (
             targetGroups.filter(
               (target) => target.workspaceCwd === workspaceCwd,

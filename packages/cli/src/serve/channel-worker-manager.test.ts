@@ -451,9 +451,9 @@ describe('createChannelWorkerManager', () => {
       names: ['telegram', 'feishu'],
     });
 
-    await expect(test.manager.reloadWorkspace(PRIMARY)).resolves.toEqual(
-      primary,
-    );
+    await expect(
+      test.manager.reloadWorkspace(PRIMARY, 'telegram'),
+    ).resolves.toEqual(primary);
 
     expect(group.reconcile).toHaveBeenLastCalledWith(targetGroups, {
       forceWorkspaceCwd: PRIMARY,
@@ -464,6 +464,68 @@ describe('createChannelWorkerManager', () => {
       initialGroups,
     );
   });
+
+  it.each([
+    {
+      label: 'moves to another workspace',
+      targetGroups: [
+        {
+          workspaceCwd: PRIMARY,
+          selection: { mode: 'names' as const, names: ['other'] },
+        },
+        {
+          workspaceCwd: '/ws/secondary',
+          selection: { mode: 'names' as const, names: ['feishu', 'bot'] },
+        },
+      ],
+    },
+    {
+      label: 'becomes ownerless',
+      targetGroups: [
+        {
+          workspaceCwd: PRIMARY,
+          selection: { mode: 'names' as const, names: ['other'] },
+        },
+        {
+          workspaceCwd: '/ws/secondary',
+          selection: { mode: 'names' as const, names: ['feishu'] },
+        },
+      ],
+    },
+  ])(
+    'rejects targeted reload when the edited channel $label',
+    async ({ targetGroups }) => {
+      const initialGroups: ChannelWorkspaceGroup[] = [
+        {
+          workspaceCwd: PRIMARY,
+          selection: { mode: 'names', names: ['bot', 'other'] },
+        },
+        {
+          workspaceCwd: '/ws/secondary',
+          selection: { mode: 'names', names: ['feishu'] },
+        },
+      ];
+      const test = setup();
+      test.resolveGroups
+        .mockResolvedValueOnce(initialGroups)
+        .mockResolvedValueOnce(targetGroups);
+      await test.manager.setSelection({
+        mode: 'names',
+        names: ['bot', 'other', 'feishu'],
+      });
+      vi.mocked(test.group.reconcile).mockClear();
+
+      await expect(
+        test.manager.reloadWorkspace(PRIMARY, 'bot'),
+      ).rejects.toMatchObject({ code: 'channel_runtime_owner_mismatch' });
+
+      expect(test.group.reconcile).not.toHaveBeenCalled();
+      expect(test.onCommittedSelection).toHaveBeenLastCalledWith(
+        { mode: 'names', names: ['bot', 'other', 'feishu'] },
+        initialGroups,
+      );
+    },
+  );
 
   it('rejects a required owner mismatch before reconciling selection', async () => {
     const test = setup();

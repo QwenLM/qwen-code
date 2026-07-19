@@ -931,9 +931,11 @@ describe('createChannelWorkerGroup', () => {
   });
 
   it('force-reconciles only the targeted workspace', async () => {
+    const third = '/ws/third';
     const registry = fakeRegistry([
       fakeRuntime(PRIMARY, true),
       fakeRuntime(SECONDARY, false),
+      fakeRuntime(third, false),
     ]);
     const { createSupervisor, recorded } = makeCreateSupervisor(() =>
       snapshot({}),
@@ -957,6 +959,10 @@ describe('createChannelWorkerGroup', () => {
           workspaceCwd: SECONDARY,
           selection: { mode: 'names', names: ['changed-elsewhere'] },
         },
+        {
+          workspaceCwd: third,
+          selection: { mode: 'names', names: ['new-elsewhere'] },
+        },
       ],
       { forceWorkspaceCwd: PRIMARY },
     );
@@ -966,6 +972,10 @@ describe('createChannelWorkerGroup', () => {
     expect(recorded[1]!.supervisor.stop).not.toHaveBeenCalled();
     expect(recorded[2]!.opts.workspace).toBe(PRIMARY);
     expect(recorded[2]!.supervisor.start).toHaveBeenCalledOnce();
+
+    await group.restoreWorkspace(third);
+    expect(recorded).toHaveLength(3);
+    expect(group.snapshots()).toHaveLength(2);
   });
 
   it('coalesces concurrent reconciles onto the in-flight operation', async () => {
