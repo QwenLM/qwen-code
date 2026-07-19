@@ -1967,7 +1967,7 @@ export default {
   'Save a durable memory to the memory system.':
     'Desa una memòria duradora al sistema de memòria.',
   'Ask a quick side question without affecting the main conversation':
-    'Fa una pregunta ràpida sense afectar la conversa principal',
+    'Fes una pregunta ràpida sense afectar la conversa principal',
   'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
     'Autenticació basada en navegador amb proveïdors de tercers (p. ex. OpenRouter, ModelScope)',
   'Manage Arena sessions': "Gestiona les sessions de l'Arena",
