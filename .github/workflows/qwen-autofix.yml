@@ -138,7 +138,7 @@ jobs:
     # Nuance: a body with LEADING whitespace dies here even though the decide
     # branch would trim it — fail closed, command must start the comment.
     if: |-
-      ${{ github.repository == 'QwenLM/qwen-code' && (github.event_name != 'issue_comment' || (github.event.issue.pull_request && startsWith(github.event.comment.body, '@qwen-code /takeover'))) }}
+      ${{ github.repository == 'QwenLM/qwen-code' && (github.event_name != 'issue_comment' || (github.event.issue.pull_request && startsWith(github.event.comment.body, '@qwen-code /takeover'))) && (github.event_name != 'pull_request' || github.event.label.name == 'autofix/takeover') }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     concurrency:
@@ -161,9 +161,10 @@ jobs:
       # inside; the association literal mirrors TRUSTED_ASSOC and the login
       # mirrors REVIEW_BOT); pull_request label events → per-PR (GitHub only
       # lets triage+ apply labels, so the whole event class is trusted —
-      # but ONLY the takeover label itself shares the group: an unrelated
-      # label changed in the same batch operation must not cancel a queued
-      # takeover route); issue_comment → its own per-PR command group, but
+      # in their OWN per-PR group (label-{N}), distinct from the review
+      # group so a simultaneous review and label toggle on the same PR can
+      # never cancel each other, and only the takeover label routes at all
+      # (unrelated labels are filtered at the job gate); issue_comment → its own per-PR command group, but
       # ONLY when the commenter's payload association already looks trusted
       # (same prefilter pattern as reviews — an untrusted commenter must not
       # cancel a maintainer's queued command; untrusted payloads get a
@@ -173,7 +174,7 @@ jobs:
       # issues → per-issue; anything else (dispatch) → unique per run_id,
       # never cancelled.
       group: >-
-        ${{ github.event_name == 'schedule' && 'qwen-autofix-route-cron' || (github.event_name == 'pull_request_review' && (contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association) || github.event.review.user.login == 'qwen-code-ci-bot') && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)) || (github.event_name == 'pull_request' && github.event.label.name == 'autofix/takeover' && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)) || (github.event_name == 'issue_comment' && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) && format('qwen-autofix-route-cmd-{0}', github.event.issue.number)) || (github.event_name == 'issues' && format('qwen-autofix-route-issue-{0}', github.event.issue.number)) || format('qwen-autofix-route-{0}', github.run_id) }}
+        ${{ github.event_name == 'schedule' && 'qwen-autofix-route-cron' || (github.event_name == 'pull_request_review' && (contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association) || github.event.review.user.login == 'qwen-code-ci-bot') && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)) || (github.event_name == 'pull_request' && github.event.label.name == 'autofix/takeover' && format('qwen-autofix-route-label-{0}', github.event.pull_request.number)) || (github.event_name == 'issue_comment' && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) && format('qwen-autofix-route-cmd-{0}', github.event.issue.number)) || (github.event_name == 'issues' && format('qwen-autofix-route-issue-{0}', github.event.issue.number)) || format('qwen-autofix-route-{0}', github.run_id) }}
       cancel-in-progress: |-
         ${{ github.event_name != 'workflow_dispatch' }}
     permissions:

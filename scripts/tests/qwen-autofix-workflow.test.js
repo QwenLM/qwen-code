@@ -839,8 +839,15 @@ describe('qwen-autofix workflow', () => {
     // Only the takeover label itself shares the per-PR group — an
     // unrelated label changed in the same batch must not cancel a queued
     // takeover route.
+    // Label events live in their OWN per-PR group (label-{N}) — a review
+    // and a label toggle on the same PR must never cancel each other — and
+    // non-takeover label events are filtered at the JOB gate so a triage
+    // labeling session burns no runner slots at all.
     expect(routeJob).toContain(
-      "github.event_name == 'pull_request' && github.event.label.name == 'autofix/takeover' && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)",
+      "github.event_name == 'pull_request' && github.event.label.name == 'autofix/takeover' && format('qwen-autofix-route-label-{0}', github.event.pull_request.number)",
+    );
+    expect(routeJob).toContain(
+      "(github.event_name != 'pull_request' || github.event.label.name == 'autofix/takeover')",
     );
     // Command bursts coalesce in their own per-PR group — never sharing
     // (or cancelling) review routes, and pending-slot replacement keeps
