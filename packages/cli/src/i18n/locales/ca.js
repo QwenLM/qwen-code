@@ -2208,7 +2208,7 @@ export default {
   'Add Marketplace': 'Afegeix un mercat',
   'Add a marketplace in the Sources tab to discover extensions.':
     'Afegiu un mercat a la pestanya Fonts per descobrir extensions.',
-  'Add new': 'Afegeix de nou',
+  'Add new': 'Afegeix un element nou',
   'Add to Favorites': 'Afegeix als preferits',
   'Added "{{name}}" to favorites.': "S'ha afegit «{{name}}» als preferits.",
   'Added marketplace "{{name}}".': "S'ha afegit el mercat «{{name}}».",
