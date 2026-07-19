@@ -23,6 +23,7 @@ import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { createOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
 import {
+  estimateTextTokens,
   estimateTextTokenUnits,
   TOKEN_ESTIMATE_UNITS_PER_TOKEN,
 } from '../../utils/request-tokenizer/textTokenizer.js';
@@ -1265,10 +1266,7 @@ export function convertOpenAIResponseToGemini(
       0;
     const providerReasoningTokens =
       usage.completion_tokens_details?.reasoning_tokens;
-    const estimatedThinkingTokens = Math.ceil(
-      estimateTextTokenUnits(reasoningText ?? '') /
-        TOKEN_ESTIMATE_UNITS_PER_TOKEN,
-    );
+    const estimatedThinkingTokens = estimateTextTokens(reasoningText ?? '');
     const thinkingTokens = providerReasoningTokens ?? estimatedThinkingTokens;
     if (providerReasoningTokens == null && estimatedThinkingTokens > 0) {
       debugLogger.debug(

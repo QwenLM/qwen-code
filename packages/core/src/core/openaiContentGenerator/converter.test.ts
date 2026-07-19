@@ -3676,6 +3676,33 @@ describe('OpenAIContentConverter', () => {
       expect(response.usageMetadata?.thoughtsTokenCount).toBe(5);
     });
 
+    it('estimates missing reasoning tokens from non-streaming reasoning field', () => {
+      const response = converter.convertOpenAIResponseToGemini(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-reasoning-field-usage',
+          created: 123,
+          model: 'test-model',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: 'answer',
+                reasoning: '先仔细想',
+              },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+          usage: { prompt_tokens: 1, completion_tokens: 10, total_tokens: 11 },
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+
+      expect(response.usageMetadata?.thoughtsTokenCount).toBe(5);
+    });
+
     it.each([0, 42])(
       'preserves provider reasoning tokens for non-streaming content: %s',
       (reasoningTokens) => {
