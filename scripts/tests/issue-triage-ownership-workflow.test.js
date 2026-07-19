@@ -9,6 +9,10 @@ import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
 
 const workflowsDir = '.github/workflows';
+const issueWorkflow = readFileSync(
+  '.qwen/skills/triage/references/issue-workflow.md',
+  'utf8',
+);
 const legacyWorkflows = [
   'check-issue-completeness.yml',
   'qwen-automated-issue-triage.yml',
@@ -39,6 +43,13 @@ describe('issue triage workflow ownership', () => {
 
   it('keeps one immediate owner for reopened issues', () => {
     expect(issueEventOwners('reopened')).toEqual(['qwen-triage.yml']);
+  });
+
+  it('keeps edited issues under full triage for need-information cleanup', () => {
+    expect(issueEventOwners('edited')).toEqual(['qwen-triage.yml']);
+    expect(issueWorkflow).toContain(
+      'gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "status/need-information"',
+    );
   });
 
   it('removes disabled legacy issue triage workflows', () => {
