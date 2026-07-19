@@ -1,0 +1,58 @@
+name: 'Update ECS Runner Qwen'
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Optional. Empty means latest from npm.'
+        required: false
+        default: ''
+        type: 'string'
+
+permissions:
+  contents: 'read'
+
+concurrency:
+  group: 'update-ecs-runner-qwen-sg'
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: 'Update Qwen on Singapore ECS runner'
+    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen-runner-sg']
+    timeout-minutes: 10
+    steps:
+      - name: 'Resolve version'
+        id: 'version'
+        env:
+          INPUT_VERSION: '${{ inputs.version }}'
+        run: |-
+          version="${INPUT_VERSION#v}"
+          if [[ -z "${version}" ]]; then
+            version="$(npm view @qwen-code/qwen-code version)"
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "Resolved qwen version: ${version}"
+
+      - name: 'Update qwen'
+        env:
+          VERSION: '${{ steps.version.outputs.version }}'
+        run: |-
+          prefix="$(npm prefix -g)"
+          if [[ -w "${prefix}" ]]; then
+            npm install -g "@qwen-code/qwen-code@${VERSION}"
+          elif command -v sudo >/dev/null 2>&1 && sudo -n true; then
+            sudo npm install -g "@qwen-code/qwen-code@${VERSION}"
+          else
+            echo "::error::Global npm prefix ${prefix} is not writable and passwordless sudo is unavailable."
+            exit 1
+          fi
+
+      - name: 'Verify version'
+        env:
+          VERSION: '${{ steps.version.outputs.version }}'
+        run: |-
+          actual="$(qwen --version)"
+          echo "qwen version: ${actual}"
+          test "${actual}" = "${VERSION}"
