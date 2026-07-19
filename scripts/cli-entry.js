@@ -40,6 +40,40 @@ function hasFlag(flag, alias) {
   return false;
 }
 
+function withResumeSession(args, sessionId) {
+  const result = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--') {
+      return [...result, '--resume', sessionId, ...args.slice(i)];
+    }
+    if (arg === '--continue' || arg === '-c' || arg.startsWith('--continue=')) {
+      continue;
+    }
+    const sessionFlag =
+      arg === '--resume' ||
+      arg === '-r' ||
+      arg === '--session-id' ||
+      arg === '--sandbox-session-id';
+    if (sessionFlag) {
+      if (args[i + 1] && args[i + 1] !== '--' && !args[i + 1].startsWith('-')) {
+        i++;
+      }
+      continue;
+    }
+    if (
+      arg.startsWith('--resume=') ||
+      arg.startsWith('--session-id=') ||
+      arg.startsWith('--sandbox-session-id=')
+    ) {
+      continue;
+    }
+    result.push(arg);
+  }
+  result.push('--resume', sessionId);
+  return result;
+}
+
 function isInProcessFastPath() {
   const first = cliArgs[0];
   if (first === 'serve' || first === 'mcp') {
@@ -60,7 +94,9 @@ if (isTopLevelVersion && process.env['CLI_VERSION']) {
   process.exit(0);
 }
 
-const { existsSync, realpathSync } = await import('node:fs');
+const { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } =
+  await import('node:fs');
+const { tmpdir } = await import('node:os');
 const { fileURLToPath, pathToFileURL } = await import('node:url');
 const { delimiter, dirname, join, parse, resolve, sep } = await import(
   'node:path'
@@ -180,11 +216,41 @@ if (isInProcessFastPath()) {
     ...process.env,
     QWEN_CODE_LAUNCHER_PID: String(process.pid),
   };
+  const relaunchStateDir = launcher
+    ? mkdtempSync(join(tmpdir(), 'qwen-code-relaunch-'))
+    : undefined;
+  const relaunchStatePath = relaunchStateDir
+    ? join(relaunchStateDir, 'state.json')
+    : undefined;
+  if (relaunchStatePath) {
+    env.QWEN_CODE_UPDATE_RELAUNCH_SUPPORTED = 'true';
+    env.QWEN_CODE_UPDATE_RELAUNCH_STATE_PATH = relaunchStatePath;
+  }
   const result = spawnSync(
     process.execPath,
     ['--expose-gc', cliPath, ...cliArgs],
     { stdio: 'inherit', env },
   );
+  let relaunchSessionId;
+  let skipInitialPrompt = false;
+  if (
+    result.status === UPDATE_COMPLETE_EXIT_CODE &&
+    relaunchStatePath &&
+    existsSync(relaunchStatePath)
+  ) {
+    try {
+      const state = JSON.parse(readFileSync(relaunchStatePath, 'utf8'));
+      if (typeof state.sessionId === 'string') {
+        relaunchSessionId = state.sessionId;
+      }
+      skipInitialPrompt = state.skipInitialPrompt === true;
+    } catch {
+      // Relaunch with the original arguments if the handoff state is invalid.
+    }
+  }
+  if (relaunchStateDir) {
+    rmSync(relaunchStateDir, { recursive: true, force: true });
+  }
 
   if (result.signal) {
     process.kill(process.pid, result.signal);
@@ -199,7 +265,14 @@ if (isInProcessFastPath()) {
     }
     const relaunchEnv = {
       ...process.env,
-      QWEN_CODE_RELAUNCH_ARGS: JSON.stringify(cliArgs),
+      QWEN_CODE_RELAUNCH_ARGS: JSON.stringify(
+        relaunchSessionId
+          ? withResumeSession(cliArgs, relaunchSessionId)
+          : cliArgs,
+      ),
+      ...(relaunchSessionId || skipInitialPrompt
+        ? { QWEN_CODE_SKIP_INITIAL_PROMPT_ONCE: 'true' }
+        : {}),
       QWEN_CODE_SKIP_UPDATE_CHECK_ONCE: 'true',
     };
     const relaunchResult =

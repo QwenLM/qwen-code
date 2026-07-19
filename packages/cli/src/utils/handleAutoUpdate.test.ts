@@ -16,6 +16,8 @@ import { performStandaloneUpdate } from './standalone-update.js';
 import { MessageType } from '../ui/types.js';
 import os from 'node:os';
 
+const mockRelaunchForUpdate = vi.hoisted(() => vi.fn());
+
 vi.mock('./installationInfo.js', async () => {
   const actual = await vi.importActual('./installationInfo.js');
   return {
@@ -34,6 +36,10 @@ vi.mock('./updateEventEmitter.js', async () => {
     updateEventEmitter: new EventEmitter(),
   };
 });
+
+vi.mock('./processUtils.js', () => ({
+  relaunchForUpdate: (...args: unknown[]) => mockRelaunchForUpdate(...args),
+}));
 
 interface MockChildProcess extends EventEmitter {
   stdin: EventEmitter & {
@@ -440,6 +446,7 @@ describe('setUpdateHandler', () => {
   beforeEach(() => {
     addItem = vi.fn();
     setUpdateInfo = vi.fn();
+    mockRelaunchForUpdate.mockReset().mockResolvedValue(undefined);
     updateEventEmitter.removeAllListeners();
   });
 
@@ -500,6 +507,151 @@ describe('setUpdateHandler', () => {
     );
 
     cleanup();
+  });
+
+  it('relaunches immediately when idle', async () => {
+    const isIdleRef = { current: true };
+    const { cleanup } = setUpdateHandler(
+      addItem,
+      setUpdateInfo,
+      isIdleRef,
+      () => true,
+      () => ({
+        sessionId: '123e4567-e89b-12d3-a456-426614174000',
+        skipInitialPrompt: true,
+      }),
+    );
+
+    updateEventEmitter.emit('update-relaunch');
+
+    await vi.waitFor(() =>
+      expect(mockRelaunchForUpdate).toHaveBeenCalledWith(
+        '123e4567-e89b-12d3-a456-426614174000',
+        true,
+      ),
+    );
+    cleanup();
+  });
+
+  it('waits for an unsent draft to be cleared before relaunching', async () => {
+    const isIdleRef = { current: true };
+    const canRelaunchRef = { current: false };
+    const { cleanup, flush } = setUpdateHandler(
+      addItem,
+      setUpdateInfo,
+      isIdleRef,
+      () => canRelaunchRef.current,
+      () => ({
+        sessionId: '123e4567-e89b-12d3-a456-426614174000',
+        skipInitialPrompt: true,
+      }),
+    );
+
+    updateEventEmitter.emit('update-relaunch');
+    expect(mockRelaunchForUpdate).not.toHaveBeenCalled();
+
+    canRelaunchRef.current = true;
+    flush();
+
+    await vi.waitFor(() =>
+      expect(mockRelaunchForUpdate).toHaveBeenCalledWith(
+        '123e4567-e89b-12d3-a456-426614174000',
+        true,
+      ),
+    );
+    cleanup();
+  });
+
+  it('keeps a non-resumable session open', async () => {
+    const isIdleRef = { current: true };
+    const { cleanup } = setUpdateHandler(
+      addItem,
+      setUpdateInfo,
+      isIdleRef,
+      () => true,
+      () => null,
+    );
+
+    updateEventEmitter.emit('update-relaunch');
+
+    await vi.waitFor(() =>
+      expect(addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: 'Run /update to install the update.',
+        },
+        expect.any(Number),
+      ),
+    );
+    expect(mockRelaunchForUpdate).not.toHaveBeenCalled();
+    cleanup();
+  });
+
+  it('rechecks safety after preparing the relaunch', async () => {
+    let resolvePreparation!: (value: { sessionId: string }) => void;
+    const preparation = new Promise<{ sessionId: string }>((resolve) => {
+      resolvePreparation = resolve;
+    });
+    let safe = true;
+    const { cleanup, flush } = setUpdateHandler(
+      addItem,
+      setUpdateInfo,
+      { current: true },
+      () => safe,
+      () => preparation,
+    );
+
+    updateEventEmitter.emit('update-relaunch');
+    safe = false;
+    resolvePreparation({
+      sessionId: '123e4567-e89b-12d3-a456-426614174000',
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(mockRelaunchForUpdate).not.toHaveBeenCalled();
+
+    safe = true;
+    flush();
+    await vi.waitFor(() =>
+      expect(mockRelaunchForUpdate).toHaveBeenCalledOnce(),
+    );
+    cleanup();
+  });
+
+  it('defers relaunch until the active turn becomes idle', async () => {
+    const isIdleRef = { current: false };
+    const { cleanup, flush } = setUpdateHandler(
+      addItem,
+      setUpdateInfo,
+      isIdleRef,
+    );
+
+    updateEventEmitter.emit('update-relaunch');
+    expect(mockRelaunchForUpdate).not.toHaveBeenCalled();
+
+    isIdleRef.current = true;
+    flush();
+
+    await vi.waitFor(() =>
+      expect(mockRelaunchForUpdate).toHaveBeenCalledOnce(),
+    );
+    cleanup();
+  });
+
+  it('cancels a deferred relaunch during cleanup', () => {
+    const isIdleRef = { current: false };
+    const { cleanup, flush } = setUpdateHandler(
+      addItem,
+      setUpdateInfo,
+      isIdleRef,
+    );
+
+    updateEventEmitter.emit('update-relaunch');
+    cleanup();
+    isIdleRef.current = true;
+    flush();
+
+    expect(mockRelaunchForUpdate).not.toHaveBeenCalled();
   });
 
   it('should defer addItem when not idle (update-success)', () => {

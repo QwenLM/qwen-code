@@ -61,19 +61,14 @@ describe('updateBeforeRelaunch', () => {
     );
   });
 
-  it.each([
-    ['explicit update', true, true],
-    ['background update-on-exit', false, false],
-  ] as const)(
-    'reports %s failure and returns %s',
-    async (_source, relaunchOnFailure, expected) => {
-      const updateProcess = new EventEmitter();
-      handleAutoUpdate.mockReturnValue(updateProcess);
+  it('reports update failure and relaunches the old version', async () => {
+    const updateProcess = new EventEmitter();
+    handleAutoUpdate.mockReturnValue(updateProcess);
 
-      const update = updateBeforeRelaunch(settings, '/repo', relaunchOnFailure);
-      await vi.waitFor(() => expect(handleAutoUpdate).toHaveBeenCalledTimes(1));
-      updateProcess.emit('close', 1);
-      await expect(update).resolves.toBe(expected);
+    const update = updateBeforeRelaunch(settings, '/repo');
+    await vi.waitFor(() => expect(handleAutoUpdate).toHaveBeenCalledTimes(1));
+    updateProcess.emit('close', 1);
+    await expect(update).resolves.toBe(true);
 
       expect(writeStderrLine).toHaveBeenCalledWith(
         'Automatic update failed. Please try updating manually.',
@@ -84,9 +79,7 @@ describe('updateBeforeRelaunch', () => {
   it('relaunches the old version when the update check fails', async () => {
     checkForUpdatesDetailed.mockResolvedValue({ status: 'error' });
 
-    await expect(updateBeforeRelaunch(settings, '/repo', true)).resolves.toBe(
-      true,
-    );
+    await expect(updateBeforeRelaunch(settings, '/repo')).resolves.toBe(true);
     expect(writeStderrLine).toHaveBeenCalledWith(
       'Failed to check for updates. Please check your network or registry configuration.',
     );

@@ -2237,10 +2237,6 @@ export default {
     '此工作階段使用自訂沙箱映像 {{image}}。請更新該映像並重新啟動 Qwen Code。',
   'Update Qwen Code on the host, then restart the sandbox.':
     '請在主機上更新 Qwen Code，然後重新啟動沙箱。',
-  'The update will be installed after you exit this session.':
-    '結束目前工作階段後將自動安裝更新。',
-  'Run /update to install the update on the host.':
-    '執行 /update 在主機上安裝更新。',
   'Run /update to install the update.': '執行 /update 安裝更新。',
   '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
     '⚠️ 歷史記錄缺口：此處之前的會話記錄已遺失（儲存中斷），且無法找回。',

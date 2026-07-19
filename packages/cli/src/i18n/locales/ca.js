@@ -2145,10 +2145,6 @@ export default {
     'Aquesta sessió utilitza la imatge de sandbox personalitzada {{image}}. Actualitzeu la imatge i reinicieu Qwen Code.',
   'Update Qwen Code on the host, then restart the sandbox.':
     "Actualitzeu Qwen Code a l'amfitrió i reinicieu l'entorn aïllat.",
-  'The update will be installed after you exit this session.':
-    "L'actualització s'instal·larà després de sortir d'aquesta sessió.",
-  'Run /update to install the update on the host.':
-    "Executeu /update per instal·lar l'actualització a l'amfitrió.",
   'Run /update to install the update.':
     "Executeu /update per instal·lar l'actualització.",
 

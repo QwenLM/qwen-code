@@ -7,6 +7,7 @@
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
+import os from 'node:os';
 
 export const updateCommand: SlashCommand = {
   name: 'update',
@@ -21,6 +22,8 @@ export const updateCommand: SlashCommand = {
       {
         CUSTOM_SANDBOX_IMAGE_ENV_VAR,
         HOST_UPDATE_RELAUNCH_ENV_VAR,
+        canRelaunchForUpdate,
+        prepareUpdateRelaunch,
         relaunchForUpdate,
       },
       { performStandaloneUpdate },
@@ -34,7 +37,8 @@ export const updateCommand: SlashCommand = {
     const { formatUpdateInstructions, getInstallationInfo } = installationInfo;
 
     const settings = context.services.settings;
-    const projectRoot = context.services.config?.getProjectRoot();
+    const config = context.services.config;
+    const projectRoot = config?.getProjectRoot();
 
     const updateCheck = await checkForUpdatesDetailed();
 
@@ -84,49 +88,10 @@ export const updateCommand: SlashCommand = {
         content: lines.join('\n'),
       };
     };
-
-    if (context.executionMode === 'interactive' && projectRoot) {
-      const customSandboxImage = process.env[CUSTOM_SANDBOX_IMAGE_ENV_VAR];
-      if (customSandboxImage) {
-        return {
-          type: 'message' as const,
-          messageType: 'info' as const,
-          content: `${info.message}\n${t(
-            'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.',
-            { image: customSandboxImage },
-          )}`,
-        };
-      }
-      const hostUpdateRelaunch = process.env[HOST_UPDATE_RELAUNCH_ENV_VAR];
-      const isAutoUpdateEnabled =
-        settings.merged.general?.enableAutoUpdate !== false;
-      if (hostUpdateRelaunch === 'true' && isAutoUpdateEnabled) {
-        await relaunchForUpdate();
-        return;
-      }
-      if (hostUpdateRelaunch !== undefined) {
-        return {
-          type: 'message' as const,
-          messageType: 'info' as const,
-          content: `${info.message}\n${t(
-            'Update Qwen Code on the host, then restart the sandbox.',
-          )}`,
-        };
-      }
-      const canAutoUpdate =
-        installInfo.updateCommand ||
-        (installInfo.isStandalone && installInfo.standaloneDir);
-      if (isAutoUpdateEnabled && canAutoUpdate) {
-        await relaunchForUpdate();
-        return;
-      }
-      return manualInstructions();
-    }
-
-    if (installInfo.isStandalone && installInfo.standaloneDir) {
+    const updateStandalone = async () => {
       try {
         const result = await performStandaloneUpdate(
-          installInfo.standaloneDir,
+          installInfo.standaloneDir!,
           info.update.latest,
         );
         const message =
@@ -152,6 +117,67 @@ export const updateCommand: SlashCommand = {
           content: `${info.message}\n${message}`,
         };
       }
+    };
+
+    if (context.executionMode === 'interactive' && projectRoot && config) {
+      const customSandboxImage = process.env[CUSTOM_SANDBOX_IMAGE_ENV_VAR];
+      if (customSandboxImage) {
+        return {
+          type: 'message' as const,
+          messageType: 'info' as const,
+          content: `${info.message}\n${t(
+            'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.',
+            { image: customSandboxImage },
+          )}`,
+        };
+      }
+      const hostUpdateRelaunch = process.env[HOST_UPDATE_RELAUNCH_ENV_VAR];
+      const isAutoUpdateEnabled =
+        settings.merged.general?.enableAutoUpdate !== false;
+      if (hostUpdateRelaunch === 'true' && isAutoUpdateEnabled) {
+        const prepared = await prepareUpdateRelaunch(
+          config,
+          context.ui.history.some((item) => item.type === 'user'),
+          Boolean(config.getQuestion()),
+        );
+        if (!prepared) return manualInstructions();
+        await relaunchForUpdate(prepared.sessionId, prepared.skipInitialPrompt);
+        return;
+      }
+      if (hostUpdateRelaunch !== undefined) {
+        return {
+          type: 'message' as const,
+          messageType: 'info' as const,
+          content: `${info.message}\n${t(
+            'Update Qwen Code on the host, then restart the sandbox.',
+          )}`,
+        };
+      }
+      const canAutoUpdate =
+        installInfo.updateCommand ||
+        (installInfo.isStandalone && installInfo.standaloneDir);
+      if (
+        installInfo.isStandalone &&
+        installInfo.standaloneDir &&
+        os.platform() === 'win32'
+      ) {
+        return updateStandalone();
+      }
+      if (isAutoUpdateEnabled && canAutoUpdate && canRelaunchForUpdate()) {
+        const prepared = await prepareUpdateRelaunch(
+          config,
+          context.ui.history.some((item) => item.type === 'user'),
+          Boolean(config.getQuestion()),
+        );
+        if (!prepared) return manualInstructions();
+        await relaunchForUpdate(prepared.sessionId, prepared.skipInitialPrompt);
+        return;
+      }
+      return manualInstructions();
+    }
+
+    if (installInfo.isStandalone && installInfo.standaloneDir) {
+      return updateStandalone();
     }
 
     // Non-interactive / ACP mode: report the available update and manual command.

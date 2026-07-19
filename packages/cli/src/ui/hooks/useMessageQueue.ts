@@ -24,6 +24,7 @@ export interface UseMessageQueueReturn {
   drainQueue: (includeDeferred?: boolean) => string[];
   /** Pop the first item from the queue. */
   popNextSegment: () => string | null;
+  hasQueuedMessages: () => boolean;
 }
 
 interface QueuedMessage {
@@ -100,6 +101,7 @@ export function useMessageQueue(): UseMessageQueueReturn {
     setQueuedMessages(rest);
     return head.text;
   }, []);
+  const hasQueuedMessages = useCallback(() => queueRef.current.length > 0, []);
 
   return {
     messageQueue: queuedMessages.map(({ text }) => text),
@@ -110,5 +112,6 @@ export function useMessageQueue(): UseMessageQueueReturn {
     restoreMessages,
     drainQueue,
     popNextSegment,
+    hasQueuedMessages,
   };
 }
