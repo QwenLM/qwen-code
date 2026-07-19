@@ -11,15 +11,18 @@ const INTERNAL_LABELS = new Set([
   'scope/github-actions',
   'scope/testing',
 ]);
+const AUTO_LABEL = 'skip-changelog-auto';
 const RELEASE_AUTOMATION_RE =
   /^\.github\/.*(?:changelog|release|publish|deploy|sync|prebuild|package|installer|artifact|image|cd-)/i;
 const TEST_FILE_RE =
   /(?:^|\/)(?:__tests__\/|[^/]+\.(?:test|spec)\.[^/]+$|(?:vitest|playwright)(?:\.[^/]+)?\.config\.[^/]+$)/;
 
 export function shouldAutoSkipChangelog({ title, labels = [], files = [] }) {
-  const names = labels.map((label) =>
-    (typeof label === 'string' ? label : label.name).toLowerCase(),
-  );
+  const names = labels
+    .map((label) =>
+      (typeof label === 'string' ? label : label.name).toLowerCase(),
+    )
+    .filter((name) => name !== AUTO_LABEL);
   if (names.includes('skip-changelog')) return false;
 
   const subject = /^(\w+)(?:\([^)]*\))?(!)?:/.exec(title.trim());
