@@ -61,24 +61,24 @@ describe('updateBeforeRelaunch', () => {
     );
   });
 
-  it('reports update failure and returns so the old version can relaunch', async () => {
+  it('reports update failure and relaunches the old version', async () => {
     const updateProcess = new EventEmitter();
     handleAutoUpdate.mockReturnValue(updateProcess);
 
     const update = updateBeforeRelaunch(settings, '/repo');
     await vi.waitFor(() => expect(handleAutoUpdate).toHaveBeenCalledTimes(1));
     updateProcess.emit('close', 1);
-    await expect(update).resolves.toBe(false);
+    await expect(update).resolves.toBe(true);
 
     expect(writeStderrLine).toHaveBeenCalledWith(
       'Automatic update failed. Please try updating manually.',
     );
   });
 
-  it('does not relaunch when the update check fails', async () => {
+  it('relaunches the old version when the update check fails', async () => {
     checkForUpdatesDetailed.mockResolvedValue({ status: 'error' });
 
-    await expect(updateBeforeRelaunch(settings, '/repo')).resolves.toBe(false);
+    await expect(updateBeforeRelaunch(settings, '/repo')).resolves.toBe(true);
     expect(writeStderrLine).toHaveBeenCalledWith(
       'Failed to check for updates. Please check your network or registry configuration.',
     );

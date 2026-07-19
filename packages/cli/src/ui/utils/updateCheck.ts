@@ -7,7 +7,12 @@
 import type { UpdateInfo } from 'update-notifier';
 import updateNotifier from 'update-notifier';
 import semver from 'semver';
+import { execFile } from 'node:child_process';
+import { realpath } from 'node:fs/promises';
+import path from 'node:path';
+import { promisify } from 'node:util';
 import { getPackageJson } from '../../utils/package.js';
+import { getWindowsNpmCliPath } from '../../utils/installationInfo.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 
@@ -59,6 +64,81 @@ async function fetchInfoWithTimeout(
   }
 }
 
+const execFileAsync = promisify(execFile);
+
+export async function runGlobalNpm(
+  args: string[],
+  run: typeof execFileAsync = execFileAsync,
+  platform = process.platform,
+  nodePath = process.execPath,
+  resolveNpmCliPath = getWindowsNpmCliPath,
+): Promise<string> {
+  const isWindows = platform === 'win32';
+  const command = isWindows ? nodePath : 'npm';
+  const commandArgs = isWindows ? [resolveNpmCliPath(nodePath), ...args] : args;
+  const { stdout } = await run(command, commandArgs, {
+    encoding: 'utf8',
+    timeout: FETCH_TIMEOUT_MS,
+  });
+  return String(stdout).trim();
+}
+
+function looksLikeNpmPackagePath(cliPath: string): boolean {
+  const normalized = cliPath.replace(/\\/g, '/');
+  return (
+    normalized.includes('/node_modules/@qwen-code/qwen-code/') &&
+    !normalized.includes('/.pnpm/')
+  );
+}
+
+export async function isGlobalNpmInstallation(
+  cliPath = process.argv[1],
+  run: typeof execFileAsync = execFileAsync,
+  canonicalize: typeof realpath = realpath,
+): Promise<boolean> {
+  if (!cliPath || !looksLikeNpmPackagePath(cliPath)) return false;
+  const [resolvedCliPath, unresolvedGlobalRoot] = await Promise.all([
+    canonicalize(cliPath),
+    runGlobalNpm(['root', '--global'], run),
+  ]);
+  let globalRoot: string;
+  try {
+    globalRoot = await canonicalize(unresolvedGlobalRoot);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+  const relative = path.relative(globalRoot, resolvedCliPath);
+  return (
+    relative !== '' &&
+    relative !== '..' &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  );
+}
+
+export async function fetchGlobalNpmUpdateInfo(
+  packageName: string,
+  currentVersion: string,
+  distTag: 'latest' | 'nightly',
+  run: typeof execFileAsync = execFileAsync,
+): Promise<UpdateInfo> {
+  const output = await runGlobalNpm(
+    ['view', packageName, `dist-tags.${distTag}`, '--json', '--global'],
+    run,
+  );
+  const latest: unknown = JSON.parse(output);
+  if (typeof latest !== 'string') {
+    throw new Error(`Invalid npm ${distTag} version response`);
+  }
+  return {
+    latest,
+    current: currentVersion,
+    type: 'latest',
+    name: packageName,
+  };
+}
+
 export interface UpdateObject {
   message: string;
   update: UpdateInfo;
@@ -106,18 +186,23 @@ export async function checkForUpdatesDetailed(): Promise<UpdateCheckResult> {
     }
 
     const { name, version } = packageJson;
+    const isGlobalNpm = await isGlobalNpmInstallation();
     currentVersion = version;
     const isNightly = version.includes('nightly');
     const createNotifier = (distTag: 'latest' | 'nightly') =>
-      updateNotifier({
-        pkg: {
-          name,
-          version,
-        },
-        updateCheckInterval: 0,
-        shouldNotifyInNpmScript: true,
-        distTag,
-      });
+      isGlobalNpm
+        ? {
+            fetchInfo: () => fetchGlobalNpmUpdateInfo(name, version, distTag),
+          }
+        : updateNotifier({
+            pkg: {
+              name,
+              version,
+            },
+            updateCheckInterval: 0,
+            shouldNotifyInNpmScript: true,
+            distTag,
+          });
 
     if (isNightly) {
       const [nightlyUpdateInfo, latestUpdateInfo] = await Promise.all([

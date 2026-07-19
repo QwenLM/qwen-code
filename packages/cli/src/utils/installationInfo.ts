@@ -22,6 +22,16 @@ export enum PackageManager {
   UNKNOWN = 'unknown',
 }
 
+export function getWindowsNpmCliPath(nodePath = process.execPath): string {
+  return path.win32.join(
+    path.win32.dirname(nodePath),
+    'node_modules',
+    'npm',
+    'bin',
+    'npm-cli.js',
+  );
+}
+
 const debugLogger = createDebugLogger('INSTALLATION_INFO');
 const STANDALONE_UNIX_INSTALLER =
   'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh';
