@@ -168,7 +168,8 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'slow_client_warning', 'typed_event_schema',
  'session_set_model', 'client_identity', 'client_heartbeat',
  'session_permission_vote', 'permission_vote', 'workspace_mcp', 'workspace_skills',
- 'workspace_providers', 'auth_provider_install', 'workspace_memory',
+ 'workspace_providers', 'workspace_acp_preheat', 'workspace_acp_status',
+ 'auth_provider_install', 'workspace_memory',
  'workspace_agents', 'workspace_agent_generate', 'workspace_env',
  'workspace_preflight', 'session_context', 'session_context_usage',
  'session_supported_commands', 'session_tasks', 'session_stats',
@@ -893,6 +894,7 @@ Capability tags:
 - `workspace_mcp` → `GET /workspace/mcp`
 - `workspace_skills` → `GET /workspace/skills`
 - `workspace_providers` → `GET /workspace/providers`
+- `workspace_acp_status` → `GET /workspace/acp/status`
 - `workspace_env` → `GET /workspace/env`
 - `workspace_preflight` → `GET /workspace/preflight`
 - `session_context` → `GET /session/:id/context`
@@ -904,6 +906,44 @@ Capability tags:
 - `workspace_persisted_transcript` → `GET /workspaces/:workspace/session/:id/transcript`
 - `workspace_session_export` → `GET /workspaces/:workspace/session/:id/export`
 - `workspace_archived_session_export` → `GET /workspaces/:workspace/session/:id/archive/export`
+
+`workspace_acp_status` reports the primary workspace ACP channel's
+point-in-time liveness as `{ channelLive: boolean }`. The handler does not
+create a channel, but reaching a runtime route can first start a deferred daemon
+runtime, whose configured startup policy may independently preheat ACP. The
+snapshot is not a lease: clients must let Session creation revalidate or start
+the channel.
+
+### ACP preheat
+
+Capability tag: `workspace_acp_preheat`.
+
+`POST /workspace/acp/preheat?timeoutMs=N` best-effort initializes the primary
+workspace ACP channel. `timeoutMs` defaults to 5000 and must be a positive
+integer no greater than 60000. Concurrent callers and Session creation share
+the same bridge initialization. A request timeout ends only that HTTP wait; it
+does not cancel the shared initialization.
+
+```ts
+interface WorkspaceAcpPreheatResult {
+  ready: boolean;
+  channelLive: boolean;
+  durationMs: number;
+  reason?: 'timeout' | 'error';
+  error?: string;
+}
+```
+
+`ready` always equals `channelLive`. A live response omits `reason` and
+`error`; otherwise `reason` is `timeout` or `error`. `durationMs` measures the
+current HTTP call, not the full lifetime of an initialization the call joined.
+Operational timeout or failure returns HTTP 200. Invalid `timeoutMs` returns
+400, while authentication, rate limiting, and deferred-runtime failures retain
+their normal responses.
+
+Both ACP workspace routes are singular and primary-workspace-only. Clients
+must not use them for a secondary workspace or interpret either response as a
+durable readiness guarantee.
 
 Common status cell:
 

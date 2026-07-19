@@ -57,7 +57,10 @@ import {
   WorkspaceVoiceError,
   type WorkspaceVoiceSettingsWrite,
 } from '../../services/voice-service.js';
-import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStderrLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
 import {
   deleteWorkspaceSkill,
   installWorkspaceSkill,
@@ -337,13 +340,13 @@ export function createDaemonWorkspaceService(
       _ctx: WorkspaceRequestContext,
       opts?: { timeoutMs?: number },
     ): Promise<WorkspaceAcpPreheatResult> {
-      const startedAt = Date.now();
+      const startedAt = performance.now();
       const channelLive = () => isChannelLive?.() ?? false;
       const finish = (
         result: Omit<WorkspaceAcpPreheatResult, 'durationMs'>,
       ): WorkspaceAcpPreheatResult => ({
         ...result,
-        durationMs: Date.now() - startedAt,
+        durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
       });
 
       if (channelLive()) {
@@ -354,46 +357,70 @@ export function createDaemonWorkspaceService(
           ready: false,
           channelLive: false,
           reason: 'error',
-          error: 'ACP preheat is not wired',
+          error: 'ACP preheat is unavailable',
         });
       }
 
       if (!inFlightAcpPreheat) {
-        inFlightAcpPreheat = preheatAcpChildOnBridge().finally(() => {
-          inFlightAcpPreheat = undefined;
-        });
-        void inFlightAcpPreheat.catch((err) => {
-          writeStderrLine(
-            `qwen serve: ACP preheat failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        });
+        const promise = Promise.resolve().then(preheatAcpChildOnBridge);
+        inFlightAcpPreheat = promise;
+        void promise.then(
+          () => {
+            if (inFlightAcpPreheat === promise) {
+              inFlightAcpPreheat = undefined;
+            }
+          },
+          (err) => {
+            try {
+              writeStderrLineSafe(
+                `qwen serve: ACP preheat failed: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            } finally {
+              if (inFlightAcpPreheat === promise) {
+                inFlightAcpPreheat = undefined;
+              }
+            }
+          },
+        );
       }
 
+      const sharedPreheat = inFlightAcpPreheat;
       try {
         await withTimeout(
-          inFlightAcpPreheat,
+          sharedPreheat,
           opts?.timeoutMs ?? 5_000,
           'ACP preheat',
         );
       } catch (err) {
         if (err instanceof TimeoutError) {
-          inFlightAcpPreheat = undefined;
-          writeStderrLine(
+          writeStderrLineSafe(
             `qwen serve: ACP preheat timed out after ${opts?.timeoutMs ?? 5_000}ms`,
           );
         }
         const live = channelLive();
-        const message = err instanceof Error ? err.message : String(err);
+        if (live) {
+          return finish({ ready: true, channelLive: true });
+        }
         return finish({
-          ready: live,
-          channelLive: live,
+          ready: false,
+          channelLive: false,
           reason: err instanceof TimeoutError ? 'timeout' : 'error',
-          error: message,
+          error:
+            err instanceof TimeoutError
+              ? 'ACP preheat did not complete before the timeout'
+              : 'ACP preheat failed',
         });
       }
 
       const live = channelLive();
-      return finish({ ready: live, channelLive: live });
+      return live
+        ? finish({ ready: true, channelLive: true })
+        : finish({
+            ready: false,
+            channelLive: false,
+            reason: 'error',
+            error: 'ACP preheat did not produce a live channel',
+          });
     },
 
     async getWorkspaceAcpStatus(
