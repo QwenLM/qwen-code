@@ -556,12 +556,20 @@ describe('readManyFiles', () => {
       const absolutePath = path.join(tempRootDir, relativePath);
       // 10MB + 1 byte to cross the 9.9MB threshold.
       await fs.writeFile(absolutePath, Buffer.alloc(10 * 1024 * 1024 + 1));
+      const stats = await fs.stat(absolutePath);
 
       const mockConfig = createMockConfig(tempRootDir);
-      const result = await readManyFiles(mockConfig, { paths: [relativePath] });
+      const result = await readManyFiles(mockConfig, {
+        paths: [relativePath],
+        validatedPathIdentities: new Map([
+          [absolutePath, { dev: stats.dev, ino: stats.ino }],
+        ]),
+      });
 
       const content = contentToString(result.contentParts);
       expect(content).toContain('File size exceeds the 10MB limit');
+      expect(content).toContain('huge.bin');
+      expect(content).not.toContain('qwen-validated-read-');
       expect(content).not.toContain(
         'No files matching the criteria were found',
       );

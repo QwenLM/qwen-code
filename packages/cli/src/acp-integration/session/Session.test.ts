@@ -3859,6 +3859,16 @@ describe('Session', () => {
     });
 
     it('preserves unsupported image @ files for the vision bridge', async () => {
+      const tempDir = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-resource-')),
+      );
+      const imagePath = path.join(tempDir, 'image.png');
+      await fs.writeFile(imagePath, 'image');
+      mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
+      mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+        isPathWithinWorkspace: (pathSpec: string) =>
+          path.resolve(tempDir, pathSpec).startsWith(`${tempDir}${path.sep}`),
+      });
       mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
       mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
         id: 'qwen3.7-plus',
@@ -3890,25 +3900,29 @@ describe('Session', () => {
             { type: 'text', text: 'look at this' },
             {
               type: 'resource_link',
-              uri: 'file:///tmp/image.png',
+              uri: `file://${imagePath}`,
               mimeType: 'image/png',
               name: 'image.png',
             },
           ],
         });
 
-        expect(readManyFilesSpy).toHaveBeenCalledWith(
-          mockConfig,
+        const readOptions = readManyFilesSpy.mock.calls[0]?.[1];
+        expect(readOptions).toEqual(
           expect.objectContaining({
+            paths: [imagePath],
             preserveUnsupportedImageForBridge: true,
+            validatedPathIdentities: expect.any(Map),
           }),
         );
+        expect(readOptions?.validatedPathIdentities?.has(imagePath)).toBe(true);
         const bridgeParts = runVisionBridgeSpy.mock.calls[0]?.[0]
           ?.parts as Part[];
         expect(bridgeParts.some((part) => 'inlineData' in part)).toBe(true);
         expect(textParts(firstSentMessage())).toContain('[file image]');
       } finally {
         readManyFilesSpy.mockRestore();
+        await fs.rm(tempDir, { recursive: true, force: true });
       }
     });
 
