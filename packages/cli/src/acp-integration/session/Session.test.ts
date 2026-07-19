@@ -11696,6 +11696,99 @@ describe('Session', () => {
         );
       });
 
+      it.each([
+        {
+          label: 'fresh retry',
+          resetEvent: {
+            type: core.StreamEventType.RETRY,
+            value: {},
+            isContinuation: false,
+          },
+          partialText: 'daily ',
+          resumedText: 'daily result',
+          expectedText: 'daily result',
+        },
+        {
+          label: 'model fallback',
+          resetEvent: {
+            type: core.StreamEventType.MODEL_FALLBACK,
+            value: {},
+          },
+          partialText: 'partial ',
+          resumedText: 'final answer',
+          expectedText: 'final answer',
+        },
+        {
+          label: 'continuation retry',
+          resetEvent: {
+            type: core.StreamEventType.RETRY,
+            value: {},
+            isContinuation: true,
+          },
+          partialText: 'daily ',
+          resumedText: 'result',
+          expectedText: 'daily result',
+        },
+      ])(
+        'keeps only valid cron answer text after a $label',
+        async ({ resetEvent, partialText, resumedText, expectedText }) => {
+          const firedAt = 1_718_000_000_000;
+          const taskWorkspace = '/workspace/task-owner';
+          const delivery: core.CronTaskDelivery = {
+            kind: 'channel',
+            channelName: 'dingtalk',
+            target: { type: 'chat', id: 'group-42' },
+          };
+          const scheduler = schedulerFiring({
+            id: 'task-retry',
+            prompt: 'nightly report',
+            cronExpr: '0 9 * * *',
+            lastFiredAt: firedAt,
+            workspaceCwd: taskWorkspace,
+            delivery,
+          });
+          mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+          mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(createEmptyStream())
+            .mockResolvedValueOnce(
+              createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    candidates: [
+                      { content: { parts: [{ text: partialText }] } },
+                    ],
+                  },
+                },
+                resetEvent,
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    candidates: [
+                      { content: { parts: [{ text: resumedText }] } },
+                    ],
+                  },
+                },
+              ]),
+            );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          await vi.waitFor(() =>
+            expect(enqueueScheduledDeliverySpy).toHaveBeenCalledWith(
+              taskWorkspace,
+              expect.objectContaining({ text: expectedText }),
+            ),
+          );
+        },
+      );
+
       it('does not enqueue Channel delivery when the cron model stream fails', async () => {
         const scheduler = schedulerFiring({
           id: 'task-1',

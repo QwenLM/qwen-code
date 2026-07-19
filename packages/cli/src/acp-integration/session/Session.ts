@@ -4528,6 +4528,14 @@ export class Session implements SessionContext {
                         `cron/loop tick ${resp.type}`,
                       );
                       functionCalls.length = 0;
+                      // Fresh retries and model fallbacks replay the answer;
+                      // continuation retries resume the existing stream.
+                      const isContinuation =
+                        resp.type === StreamEventType.RETRY &&
+                        resp.isContinuation === true;
+                      if (!isContinuation) {
+                        turnAnswer = '';
+                      }
                     }
                   }
                 } catch (error) {
