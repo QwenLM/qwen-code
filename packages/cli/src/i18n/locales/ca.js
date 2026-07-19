@@ -15,7 +15,7 @@ export default {
     '← → seleccionar, Delete per eliminar, ↓ per sortir',
   'Attachments: ': 'Adjunts: ',
   'Basics:': 'Bàsic:',
-  'Add context': 'Afegir context',
+  'Add context': 'Afegeix context',
   'Use {{symbol}} to specify files for context (e.g., {{example}}) to target specific files or folders.':
     'Useu {{symbol}} per especificar fitxers de context (p. ex., {{example}}) per seleccionar fitxers o carpetes específics.',
   '@': '@',
@@ -40,11 +40,11 @@ export default {
   'Model Context Protocol command (from external servers)':
     'Ordre del protocol de context del model (des de servidors externs)',
   'Keyboard Shortcuts:': 'Dreceres de teclat:',
-  'Toggle this help display': 'Mostrar/amagar aquesta ajuda',
-  'Toggle shell mode': 'Canviar el mode shell',
-  'Open command menu': "Obrir el menú d'ordres",
-  'Add file context': 'Afegir context de fitxer',
-  'Accept suggestion / Autocomplete': 'Acceptar suggeriment / Autocompleció',
+  'Toggle this help display': 'Mostra/amaga aquesta ajuda',
+  'Toggle shell mode': 'Commuta el mode shell',
+  'Open command menu': "Obre el menú d'ordres",
+  'Add file context': 'Afegeix context de fitxer',
+  'Accept suggestion / Autocomplete': 'Accepta el suggeriment / autocompleta',
   'Reverse search history': "Cerca inversa a l'historial",
   'Press ? again to close': 'Premeu ? de nou per tancar',
   'for shell mode': 'per al mode shell',
@@ -59,15 +59,15 @@ export default {
   'to paste images': 'per enganxar imatges',
   'for external editor': 'per a editor extern',
   'to view transcript': 'per veure la transcripció',
-  'Jump through words in the input': "Saltar entre paraules a l'entrada",
+  'Jump through words in the input': "Salta entre paraules a l'entrada",
   'Close dialogs, cancel requests, or quit application':
-    "Tancar diàlegs, cancel·lar peticions o sortir de l'aplicació",
+    "Tanca els diàlegs, cancel·la les peticions o surt de l'aplicació",
   'New line': 'Nova línia',
   'New line (Alt+Enter works for certain linux distros)':
     'Nova línia (Alt+Enter funciona en certes distribucions de Linux)',
-  'Clear the screen': 'Netejar la pantalla',
-  'Open input in external editor': "Obrir l'entrada en un editor extern",
-  'Send message': 'Enviar missatge',
+  'Clear the screen': 'Neteja la pantalla',
+  'Open input in external editor': "Obre l'entrada en un editor extern",
+  'Send message': 'Envia el missatge',
   'Initializing...': 'Inicialitzant...',
   'Connecting to MCP servers... ({{connected}}/{{total}})':
     'Connectant a MCP servers... ({{connected}}/{{total}})',
@@ -78,14 +78,14 @@ export default {
     "Premeu 'i' per al mode INSERCIÓ i 'Esc' per al mode NORMAL.",
   'Cancel operation / Clear input (double press)':
     'Cancel·lar operació / Esborrar entrada (doble premuda)',
-  'Cycle approval modes': "Canviar els modes d'aprovació",
-  'Cycle through your prompt history': "Navegar per l'historial de missatges",
+  'Cycle approval modes': "Commuta els modes d'aprovació",
+  'Cycle through your prompt history': "Navega per l'historial de missatges",
   'For a full list of shortcuts, see {{docPath}}':
     'Per a una llista completa de dreceres, vegeu {{docPath}}',
   'docs/keyboard-shortcuts.md': 'docs/keyboard-shortcuts.md',
   'for help on Qwen Code': 'per a ajuda sobre Qwen Code',
-  'show version info': 'mostrar informació de la versió',
-  'submit a bug report': "enviar un informe d'error",
+  'show version info': 'mostra la informació de la versió',
+  'submit a bug report': "envia un informe d'error",
   Status: 'Estat',
 
   // ============================================================================
@@ -110,10 +110,10 @@ export default {
   'Analyzes the project and creates a tailored QWEN.md file.':
     'Analitza el projecte i crea un fitxer QWEN.md personalitzat.',
   'List available Qwen Code tools. Usage: /tools [desc]':
-    'Llistar les eines disponibles de Qwen Code. Ús: /tools [desc]',
+    'Llista les eines disponibles de Qwen Code. Ús: /tools [desc]',
   'Open the skills panel (browse, search, toggle, pick).':
-    "Obrir el panell d'habilitats (explorar, cercar, activar, triar).",
-  'Manage Skills': 'Gestionar habilitats',
+    "Obre el panell d'habilitats (explorar, cercar, activar, triar).",
+  'Manage Skills': 'Gestiona les habilitats',
   'Skills configuration saved.': "Configuració d'habilitats desada.",
   'Skills configuration saved, but refresh failed: {{error}}. Restart to ensure the new state is applied.':
     "Configuració d'habilitats desada, però l'actualització ha fallat: {{error}}. Reinicia per assegurar-te que el nou estat s'apliqui.",
@@ -127,13 +127,13 @@ export default {
     "No s'ha pogut desar la configuració d'habilitats: {{error}}",
   'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.':
     'Totes les habilitats disponibles estan desactivades. Edita ~/.qwen/settings.json o .qwen/settings.json (skills.disabled) per tornar-les a activar.',
-  'Press esc to close.': 'Prem Esc per tancar.',
+  'Press esc to close.': 'Premeu Esc per tancar.',
   '{{count}} skills · ': '{{count}} habilitats · ',
   '{{matched}} / {{total}} skills · ': '{{matched}} / {{total}} habilitats · ',
   'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope':
     "Espai alternar · Enter triar (omple l'entrada) · Esc desar i sortir · àmbit d'espai de treball",
   'Search:': 'Cerca:',
-  'type to filter…': 'escriu per filtrar…',
+  'type to filter…': 'escriviu per filtrar…',
   'No skills are currently available.':
     'No hi ha habilitats disponibles actualment.',
   'All available skills are locked at a higher scope (see below).':
@@ -150,28 +150,28 @@ export default {
   'Available Qwen Code CLI tools:': 'Eines del CLI de Qwen Code disponibles:',
   'No tools available': 'No hi ha eines disponibles',
   'View or change the approval mode for tool usage':
-    "Veure o canviar el mode d'aprovació per a l'ús d'eines",
+    "Mostra o canvia el mode d'aprovació per a l'ús d'eines",
   'Invalid approval mode "{{arg}}". Valid modes: {{modes}}':
     'Mode d\'aprovació no vàlid "{{arg}}". Modes vàlids: {{modes}}',
   'Approval mode set to "{{mode}}"': 'Mode d\'aprovació establert a "{{mode}}"',
   'View or change the language setting':
-    "Veure o canviar la configuració d'idioma",
+    "Mostra o canvia la configuració d'idioma",
   'List background tasks (text dump — interactive dialog opens via the footer pill)':
-    "Llistar les tasques en segon pla (sortida de text; el diàleg interactiu es pot obrir des de l'indicador del peu de pàgina)",
-  'Delete a previous session': 'Suprimir una sessió anterior',
+    "Llista les tasques en segon pla (sortida de text; el diàleg interactiu es pot obrir des de l'indicador del peu de pàgina)",
+  'Delete a previous session': 'Suprimeix una sessió anterior',
   'Run installation and environment diagnostics':
-    "Executar diagnòstics d'instal·lació i d'entorn",
+    "Executa els diagnòstics d'instal·lació i d'entorn",
   'Browse dynamic model catalogs and choose which models stay enabled locally':
-    'Explorar els catàlegs dinàmics de models i triar quins models continuen activats localment',
+    'Explora els catàlegs dinàmics de models i permet triar quins models continuen activats localment',
   'Generate a one-line session recap now':
-    'Generar ara un resum de la sessió en una sola línia',
+    'Genera ara un resum de la sessió en una sola línia',
   'Rename the current conversation. --auto lets the fast model pick a title.':
-    'Canviar el nom de la conversa actual. --auto permet que el model ràpid triï un títol.',
+    'Canvia el nom de la conversa actual. --auto permet que el model ràpid triï un títol.',
   'Rewind conversation to a previous turn':
-    'Rebobinar la conversa fins a un torn anterior',
-  'Rewind Conversation': 'Rebobinar la conversa',
+    'Rebobina la conversa fins a un torn anterior',
+  'Rewind Conversation': 'Rebobina la conversa',
   'No user turns to rewind to.': "No hi ha torns d'usuari per rebobinar.",
-  'Rewind to: ': 'Rebobinar a: ',
+  'Rewind to: ': 'Rebobina a: ',
   'Restore code and conversation': 'Restaura el codi i la conversa',
   'Restore conversation only': 'Restaura només la conversa',
   'Restore code only': 'Restaura només el codi',
@@ -187,9 +187,9 @@ export default {
   'Code restored, but conversation could not be rewound (no active client).':
     'Codi restaurat, però la conversa no s’ha pogut retrocedir (cap client actiu).',
   'Conversation rewound. Edit your prompt and press Enter to continue.':
-    'Conversa retrocedida. Edita la teva indicació i prem Retorn per continuar.',
+    'Conversa retrocedida. Editeu la vostra indicació i premeu Retorn per continuar.',
   'Rewinding does not affect files edited manually or via shell commands.':
-    'El retrocés no afecta els fitxers editats manualment o mitjançant comandes de shell.',
+    'El retrocés no afecta els fitxers editats manualment o mitjançant ordres de shell.',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     'No es pot retrocedir a un torn que ha estat comprimit. Prova amb un torn més recent.',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
@@ -209,8 +209,8 @@ export default {
     '↑↓ per navegar · Enter per seleccionar · Esc per cancel·lar',
   'Enter/Y to confirm · Esc/N to go back':
     'Enter/Y per confirmar · Esc/N per tornar',
-  'change the theme': 'canviar el tema',
-  'Select Theme': 'Seleccionar tema',
+  'change the theme': 'canvia el tema',
+  'Select Theme': 'Selecciona el tema',
   Preview: 'Previsualització',
   '(Use Enter to select, Tab to configure scope)':
     "(Useu Enter per seleccionar, Tab per configurar l'àmbit)",
@@ -222,32 +222,32 @@ export default {
   'Theme "{{themeName}}" not found in selected scope.':
     'Tema "{{themeName}}" no trobat en l\'àmbit seleccionat.',
   'Clear conversation history and free up context':
-    "Esborrar l'historial de la conversa i alliberar context",
+    "Esborra l'historial de la conversa i allibera context",
   'Compresses the context by replacing it with a summary.':
     'Comprimeix el context substituint-lo per un resum.',
   'open full Qwen Code documentation in your browser':
-    'obrir la documentació completa de Qwen Code al navegador',
+    'obre la documentació completa de Qwen Code al navegador',
   'Configuration not available.': 'Configuració no disponible.',
-  'Connect an LLM provider': 'Connectar un proveïdor LLM',
+  'Connect an LLM provider': "Connecta un proveïdor d'LLM",
   // ============================================================================
   // Ordres - Agents
   // ============================================================================
   'Manage subagents for specialized task delegation.':
-    'Gestionar subagents per a la delegació de tasques especialitzades.',
+    'Gestiona els subagents per a la delegació de tasques especialitzades.',
   'Manage existing subagents (view, edit, delete).':
-    'Gestionar subagents existents (veure, editar, eliminar).',
+    'Gestiona els subagents existents (visualització, edició, supressió).',
   'Create a new subagent with guided setup.':
-    'Crear un nou subagent amb configuració guiada.',
+    'Crea un nou subagent amb configuració guiada.',
 
   // ============================================================================
   // Agents - Diàleg de gestió
   // ============================================================================
   Agents: 'Agents',
-  'Choose Action': 'Triar acció',
-  'Edit {{name}}': 'Editar {{name}}',
-  'Edit Tools: {{name}}': 'Editar eines: {{name}}',
-  'Edit Color: {{name}}': 'Editar color: {{name}}',
-  'Delete {{name}}': 'Eliminar {{name}}',
+  'Choose Action': 'Trieu una acció',
+  'Edit {{name}}': 'Edita {{name}}',
+  'Edit Tools: {{name}}': 'Edita les eines: {{name}}',
+  'Edit Color: {{name}}': 'Edita el color: {{name}}',
+  'Delete {{name}}': 'Suprimeix {{name}}',
   'Unknown Step': 'Pas desconegut',
   'Esc to close': 'Esc per tancar',
   Transcript: 'Transcripció',
@@ -305,9 +305,9 @@ export default {
   'Built-in Agents': 'Agents integrats',
   'Extension Agents': "Agents d'extensió",
   'Using: {{count}} agents': 'En ús: {{count}} agents',
-  'View Agent': 'Veure agent',
-  'Edit Agent': 'Editar agent',
-  'Delete Agent': 'Eliminar agent',
+  'View Agent': "Visualitza l'agent",
+  'Edit Agent': "Edita l'agent",
+  'Delete Agent': "Suprimeix l'agent",
   Back: 'Enrere',
   'No agent selected': 'Cap agent seleccionat',
   'File Path: ': 'Camí del fitxer: ',
@@ -315,12 +315,12 @@ export default {
   'Color: ': 'Color: ',
   'Description:': 'Descripció:',
   'System Prompt:': 'Missatge del sistema:',
-  'Open in editor': "Obrir a l'editor",
-  'Edit tools': 'Editar eines',
-  'Edit color': 'Editar color',
+  'Open in editor': "Obre a l'editor",
+  'Edit tools': 'Edita les eines',
+  'Edit color': 'Edita el color',
   '✗ Error:': '✗ Error:',
   'Are you sure you want to delete agent "{{name}}"?':
-    'Esteu segur que voleu eliminar l\'agent "{{name}}"?',
+    'Esteu segur que voleu suprimir l\'agent "{{name}}"?',
 
   // ============================================================================
   // Agents - Assistent de creació
@@ -407,14 +407,14 @@ export default {
   // ============================================================================
   // Extensions - Diàleg de gestió
   // ============================================================================
-  'Manage Extensions': 'Gestionar extensions',
+  'Manage Extensions': 'Gestiona les extensions',
   'Extension Details': "Detalls de l'extensió",
-  'View Extension': "Veure l'extensió",
-  'Update Extension': "Actualitzar l'extensió",
-  'Disable Extension': "Desactivar l'extensió",
-  'Enable Extension': "Activar l'extensió",
-  'Uninstall Extension': "Desinstal·lar l'extensió",
-  'Select Scope': "Seleccionar l'àmbit",
+  'View Extension': "Visualitza l'extensió",
+  'Update Extension': "Actualitza l'extensió",
+  'Disable Extension': "Desactiva l'extensió",
+  'Enable Extension': "Activa l'extensió",
+  'Uninstall Extension': "Desinstal·la l'extensió",
+  'Select Scope': "Selecciona l'àmbit",
   'User Scope': "Àmbit d'usuari",
   'Workspace Scope': "Àmbit de l'espai de treball",
   'No extensions found.': "No s'han trobat extensions.",
@@ -435,15 +435,15 @@ export default {
   active: 'activa',
   disabled: 'desactivada',
   enabled: 'activada',
-  'View Details': 'Veure detalls',
+  'View Details': 'Visualitza els detalls',
   'Update failed:': "Error en l'actualització:",
   'Updating {{name}}...': 'Actualitzant {{name}}...',
   'Update complete!': 'Actualització completada!',
   'User (global)': 'Usuari (global)',
   'Workspace (project-specific)': 'Espai de treball (específic del projecte)',
   'Disable "{{name}}" - Select Scope':
-    'Desactivar "{{name}}" - Seleccionar àmbit',
-  'Enable "{{name}}" - Select Scope': 'Activar "{{name}}" - Seleccionar àmbit',
+    'Desactiva "{{name}}" - Selecciona l\'àmbit',
+  'Enable "{{name}}" - Select Scope': 'Activa "{{name}}" - Selecciona l\'àmbit',
   'No extension selected': 'Cap extensió seleccionada',
   '{{count}} extensions installed': '{{count}} extensions instal·lades',
   "Use '/extensions install' to install your first extension.":
@@ -468,7 +468,7 @@ export default {
   'Vim Mode': 'Mode Vim',
   'Attribution: commit': 'Atribució: commit',
   'Terminal Bell Notification': 'Notificació de campana del terminal',
-  'Enable Usage Statistics': "Activar estadístiques d'ús",
+  'Enable Usage Statistics': "Activa les estadístiques d'ús",
   Theme: 'Tema',
   'Preferred Editor': 'Editor preferit',
   'Auto-connect to IDE': 'Connexió automàtica a IDE',
@@ -476,36 +476,36 @@ export default {
   'Language: UI': 'Idioma: Interfície',
   'Language: Model': 'Idioma: Model',
   'Output Format': 'Format de sortida',
-  'Hide Window Title': 'Amagar el títol de la finestra',
-  'Show Status in Title': "Mostrar l'estat al títol",
-  'Hide Tips': 'Amagar consells',
-  'Show Line Numbers in Code': 'Mostrar números de línia al codi',
-  'Show Citations': 'Mostrar cites',
+  'Hide Window Title': 'Amaga el títol de la finestra',
+  'Show Status in Title': "Mostra l'estat al títol",
+  'Hide Tips': 'Amaga els consells',
+  'Show Line Numbers in Code': 'Mostra els números de línia al codi',
+  'Show Citations': 'Mostra les cites',
   'Custom Witty Phrases': 'Frases enginyoses personalitzades',
-  'Show Welcome Back Dialog': 'Mostrar el diàleg de benvinguda',
-  'Enable User Feedback': 'Activar les valoracions dels usuaris',
+  'Show Welcome Back Dialog': 'Mostra el diàleg de benvinguda',
+  'Enable User Feedback': 'Activa les valoracions dels usuaris',
   'How is Qwen doing this session? (optional)':
     'Com va Qwen en aquesta sessió? (opcional)',
   Bad: 'Malament',
   Fine: 'Bé',
   Good: 'Molt bé',
-  Dismiss: 'Descartar',
+  Dismiss: 'Descarta',
   'Screen Reader Mode': 'Mode de lector de pantalla',
   'Max Session Turns': 'Torns màxims de sessió',
-  'Skip Next Speaker Check': 'Ometre la comprovació del proper parlant',
-  'Skip Loop Detection': 'Ometre la detecció de bucles',
-  'Skip Startup Context': "Ometre el context d'inici",
-  'Enable OpenAI Logging': "Activar el registre d'OpenAI",
+  'Skip Next Speaker Check': 'Omet la comprovació del proper parlant',
+  'Skip Loop Detection': 'Omet la detecció de bucles',
+  'Skip Startup Context': "Omet el context d'inici",
+  'Enable OpenAI Logging': "Activa el registre d'OpenAI",
   'OpenAI Logging Directory': "Directori de registres d'OpenAI",
   Timeout: "Temps d'espera",
   'Max Retries': 'Reintents màxims',
   'Load Memory From Include Directories':
-    'Carregar memòria des dels directoris inclosos',
-  'Respect .gitignore': 'Respectar .gitignore',
-  'Respect .qwenignore': 'Respectar .qwenignore',
-  'Enable Recursive File Search': 'Activar la cerca recursiva de fitxers',
+    'Carrega la memòria des dels directoris inclosos',
+  'Respect .gitignore': 'Respecta el .gitignore',
+  'Respect .qwenignore': 'Respecta el .qwenignore',
+  'Enable Recursive File Search': 'Activa la cerca recursiva de fitxers',
   'Interactive Shell (PTY)': 'Shell interactiva (PTY)',
-  'Show Color': 'Mostrar color',
+  'Show Color': 'Mostra el color',
   'Auto Accept': 'Acceptació automàtica',
   'Use Ripgrep': 'Usar Ripgrep',
   'Use Builtin Ripgrep': 'Usar Ripgrep integrat',
@@ -524,17 +524,17 @@ export default {
   'Ask permissions': 'Demanar permisos',
   'Auto Edit': 'Edició automàtica',
   YOLO: 'YOLO',
-  'toggle vim mode on/off': 'activar/desactivar el mode Vim',
+  'toggle vim mode on/off': 'activa/desactiva el mode Vim',
   'Show model-specific usage statistics.':
-    "Mostrar les estadístiques d'ús específiques del model.",
+    "Mostra les estadístiques d'ús específiques del model.",
   'Show tool-specific usage statistics.':
-    "Mostrar les estadístiques d'ús específiques de les eines.",
+    "Mostra les estadístiques d'ús específiques de les eines.",
   'Show daily token usage statistics.':
-    "Mostrar les estadístiques diàries d'ús de tokens.",
+    "Mostra les estadístiques diàries d'ús de tokens.",
   'Show monthly token usage statistics.':
-    "Mostrar les estadístiques mensuals d'ús de tokens.",
+    "Mostra les estadístiques mensuals d'ús de tokens.",
   'Export token usage statistics to CSV or JSON.':
-    "Exportar les estadístiques d'ús de tokens a CSV o JSON.",
+    "Exporta les estadístiques d'ús de tokens a CSV o JSON.",
   'No usage data.': "No hi ha dades d'ús.",
   '{{label}}: {{tokens}} tokens ({{requests}} requests)':
     '{{label}}: {{tokens}} tokens ({{requests}} sol·licituds)',
@@ -578,24 +578,24 @@ export default {
     'Nota: el temps de generació (TTFT/TPS) pertany a les mètriques de generació.',
   'exit the cli': 'sortir del CLI',
   'Manage workspace directories':
-    "Gestionar els directoris de l'espai de treball",
+    "Gestiona els directoris de l'espai de treball",
   'Add directories to the workspace. Use comma to separate multiple paths':
-    "Afegir directoris a l'espai de treball. Useu comes per separar múltiples camins",
+    "Afegeix directoris a l'espai de treball. Useu comes per separar múltiples camins",
   'Show all directories in the workspace':
-    "Mostrar tots els directoris de l'espai de treball",
-  'set external editor preference': "establir la preferència d'editor extern",
-  'Select Editor': 'Seleccionar editor',
+    "Mostra tots els directoris de l'espai de treball",
+  'set external editor preference': "estableix la preferència d'editor extern",
+  'Select Editor': "Selecciona l'editor",
   'Editor Preference': "Preferència d'editor",
   'These editors are currently supported. Please note that some editors cannot be used in sandbox mode.':
     'Aquests editors estan suportats. Cal tenir en compte que alguns editors no es poden usar en mode aïllat.',
   'Your preferred editor is:': 'El vostre editor preferit és:',
-  'Manage extensions': 'Gestionar extensions',
-  'Manage installed extensions': 'Gestionar les extensions instal·lades',
-  'Disable an extension': 'Desactivar una extensió',
-  'Enable an extension': 'Activar una extensió',
+  'Manage extensions': 'Gestiona les extensions',
+  'Manage installed extensions': 'Gestiona les extensions instal·lades',
+  'Disable an extension': 'Desactiva una extensió',
+  'Enable an extension': 'Activa una extensió',
   'Install an extension from a git repo or local path':
-    "Instal·lar una extensió des d'un repositori git o camí local",
-  'Uninstall an extension': 'Desinstal·lar una extensió',
+    "Instal·la una extensió des d'un dipòsit de Git o un camí local",
+  'Uninstall an extension': 'Desinstal·la una extensió',
   'No extensions installed.': 'No hi ha extensions instal·lades.',
   'Extension "{{name}}" not found.': 'Extensió "{{name}}" no trobada.',
   'No extensions to update.': 'No hi ha extensions per actualitzar.',
@@ -673,7 +673,7 @@ export default {
     'L\'extensió "{{name}}" ja és al dia.',
   'Updates all extensions or a named extension to the latest version.':
     "Actualitza totes les extensions o una extensió específica a l'última versió.",
-  'Update all extensions.': 'Actualitzar totes les extensions.',
+  'Update all extensions.': 'Actualitza totes les extensions.',
   'The name of the extension to update.': "El nom de l'extensió a actualitzar.",
   'Either an extension name or --all must be provided':
     "Cal proporcionar un nom d'extensió o --all",
@@ -712,7 +712,7 @@ export default {
   '[not set]': '[no establert]',
   '[value stored in keychain]': '[valor emmagatzemat al clauer]',
   'Value:': 'Valor:',
-  'Manage extension settings.': 'Gestionar la configuració de les extensions.',
+  'Manage extension settings.': 'Gestiona la configuració de les extensions.',
   'You need to specify a command (set or list).':
     'Cal especificar una ordre (set o list).',
 
@@ -724,23 +724,23 @@ export default {
   'Select a plugin to install from marketplace "{{name}}":':
     'Seleccioneu un connector per instal·lar des del mercat "{{name}}":',
   'Plugin selection cancelled.': 'Selecció de connector cancel·lada.',
-  'Select a plugin from "{{name}}"': 'Seleccionar un connector de "{{name}}"',
+  'Select a plugin from "{{name}}"': 'Selecciona un connector de "{{name}}"',
   'Use ↑↓ or j/k to navigate, Enter to select, Escape to cancel':
     'Useu ↑↓ o j/k per navegar, Enter per seleccionar, Escape per cancel·lar',
   '{{count}} more above': '{{count}} més amunt',
   '{{count}} more below': '{{count}} més avall',
-  'manage IDE integration': "gestionar la integració de l'IDE",
+  'manage IDE integration': "gestiona la integració de l'IDE",
   'check status of IDE integration':
-    "comprovar l'estat de la integració de l'IDE",
+    "comprova l'estat de la integració de l'IDE",
   'install required IDE companion for {{ideName}}':
-    'instal·lar el complement IDE necessari per a {{ideName}}',
-  'enable IDE integration': "activar la integració de l'IDE",
-  'disable IDE integration': "desactivar la integració de l'IDE",
+    "instal·la el complement d'IDE necessari per a {{ideName}}",
+  'enable IDE integration': "activa la integració de l'IDE",
+  'disable IDE integration': "desactiva la integració de l'IDE",
   'IDE integration is not supported in your current environment. To use this feature, run Qwen Code in one of these supported IDEs: VS Code or VS Code forks.':
     "La integració de l'IDE no és compatible en el vostre entorn actual. Per usar aquesta funció, executeu Qwen Code en un dels IDEs compatibles: VS Code o bifurcacions de VS Code.",
-  'Set up GitHub Actions': 'Configurar GitHub Actions',
+  'Set up GitHub Actions': 'Configura GitHub Actions',
   'Configure terminal keybindings for multiline input (VS Code, Cursor, Windsurf, Trae)':
-    'Configurar les dreceres del terminal per a entrada multilínia (VS Code, Cursor, Windsurf, Trae)',
+    'Configura les dreceres del terminal per a entrada multilínia (VS Code, Cursor, Windsurf, Trae)',
   'Please restart your terminal for the changes to take effect.':
     'Reinicieu el terminal perquè els canvis tinguin efecte.',
   'Failed to configure terminal: {{error}}':
@@ -772,8 +772,8 @@ export default {
   // ============================================================================
   // Ordres - Hooks
   // ============================================================================
-  'Manage Qwen Code hooks': 'Gestionar els hooks de Qwen Code',
-  'List all configured hooks': 'Llistar tots els hooks configurats',
+  'Manage Qwen Code hooks': 'Gestiona els hooks de Qwen Code',
+  'List all configured hooks': 'Llista tots els hooks configurats',
   Hooks: 'Hooks',
   'Loading hooks...': 'Carregant hooks...',
   'Error loading hooks:': 'Error en carregar els hooks:',
@@ -870,29 +870,29 @@ export default {
     "L'entrada a l'ordre és JSON amb tool_name, tool_input i tool_use_id. La sortida JSON amb hookSpecificOutput conté la decisió de permetre o denegar.",
   'stdout/stderr not shown': 'stdout/stderr no es mostra',
   'show stderr to model and continue conversation':
-    'mostrar stderr al model i continuar la conversa',
-  'show stderr to user only': "mostrar stderr només a l'usuari",
+    "mostra l'stderr al model i continua la conversa",
+  'show stderr to user only': "mostra l'stderr només a l'usuari",
   'stdout shown in transcript mode (ctrl+o)':
     'stdout mostrat en mode transcripció (ctrl+o)',
-  'show stderr to model immediately': 'mostrar stderr al model immediatament',
+  'show stderr to model immediately': "mostra l'stderr al model immediatament",
   'show stderr to user only but continue with tool call':
-    "mostrar stderr només a l'usuari però continuar amb la crida a l'eina",
+    "mostra l'stderr només a l'usuari, però continua amb la crida a l'eina",
   'block processing, erase original prompt, and show stderr to user only':
-    "blocar el processament, esborrar el missatge original i mostrar stderr només a l'usuari",
+    "bloca el processament, esborra el missatge original i mostra l'stderr només a l'usuari",
   'block expanded prompt submission and show stderr to user only':
-    "blocar l'enviament del missatge expandit i mostrar stderr només a l'usuari",
+    "bloca l'enviament del missatge expandit i mostra l'stderr només a l'usuari",
   'stdout shown to Qwen': 'stdout mostrat a Qwen',
   'show stderr to user only (blocking errors ignored)':
-    "mostrar stderr només a l'usuari (errors de bloqueig ignorats)",
+    "mostra l'stderr només a l'usuari (s'ignoren els errors de blocatge)",
   'command completes successfully': "l'ordre es completa correctament",
   'stdout shown to subagent': 'stdout mostrat al subagent',
   'show stderr to subagent and continue having it run':
-    'mostrar stderr al subagent i continuar la seva execució',
+    "mostra l'stderr al subagent i en continua l'execució",
   'stdout appended as custom compact instructions':
     'stdout afegit com a instruccions compactes personalitzades',
-  'block compaction': 'blocar la compactació',
+  'block compaction': 'bloca la compactació',
   'show stderr to user only but continue with compaction':
-    "mostrar stderr només a l'usuari però continuar amb la compactació",
+    "mostra l'stderr només a l'usuari, però continua amb la compactació",
   'use hook decision if provided': 'usar la decisió del hook si es proporciona',
   'Config not loaded.': 'Configuració no carregada.',
   'Hooks are not enabled. Enable hooks in settings to use this feature.':
@@ -997,7 +997,7 @@ export default {
     "Existeix un mode d'aprovació de l'espai de treball i té prioritat. El canvi a nivell d'usuari no tindrà cap efecte.",
   'Apply To': 'Aplicar a',
   'Workspace Settings': "Configuració de l'espai de treball",
-  'Open auto-memory folder': 'Obrir la carpeta de memòria automàtica',
+  'Open auto-memory folder': 'Obre la carpeta de memòria automàtica',
   'Auto-memory: {{status}}': 'Memòria automàtica: {{status}}',
   'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
     'Auto-dream: {{status}} · {{lastDream}} · /dream per executar',
@@ -1006,14 +1006,14 @@ export default {
   on: 'activada',
   off: 'desactivada',
   'Remove matching entries from managed auto-memory.':
-    'Eliminar les entrades coincidents de la memòria automàtica gestionada.',
+    'Suprimeix les entrades coincidents de la memòria automàtica gestionada.',
   'Usage: /forget <memory text to remove>':
     'Ús: /forget <text de memòria a eliminar>',
   'No managed auto-memory entries matched: {{query}}':
     'Cap entrada de memòria automàtica gestionada coincideix: {{query}}',
   'Consolidate managed auto-memory topic files.':
-    'Consolidar els fitxers de temes de memòria automàtica gestionada.',
-  'Open MCP management dialog': 'Obrir el diàleg de gestió MCP',
+    'Consolida els fitxers de temes de memòria automàtica gestionada.',
+  'Open MCP management dialog': 'Obre el diàleg de gestió MCP',
   'Could not retrieve tool registry.':
     "No s'ha pogut recuperar el registre d'eines.",
   "Successfully authenticated and refreshed tools for '{{name}}'.":
@@ -1028,7 +1028,7 @@ export default {
   // ============================================================================
   // Diàleg de gestió MCP
   // ============================================================================
-  'Manage MCP servers': 'Gestionar MCP servers',
+  'Manage MCP servers': 'Gestiona els servidors de MCP',
   'Server Detail': 'Detalls del servidor',
   Tools: 'Eines',
   'Tool Detail': "Detalls de l'eina",
@@ -1044,18 +1044,18 @@ export default {
   'User Settings (global)': "Configuració d'usuari (global)",
   'Workspace Settings (project-specific)':
     "Configuració de l'espai de treball (específica del projecte)",
-  'Disable server:': 'Desactivar el servidor:',
+  'Disable server:': 'Desactiva el servidor:',
   'Select where to add the server to the exclude list:':
     "Seleccioneu on afegir el servidor a la llista d'exclusió:",
   'Press Enter to confirm, Esc to cancel':
     'Premeu Enter per confirmar, Esc per cancel·lar',
-  'View tools': 'Veure eines',
-  Reconnect: 'Reconnectar',
-  Enable: 'Activar',
-  Disable: 'Desactivar',
-  Authenticate: 'Autenticar',
-  'Re-authenticate': 'Tornar a autenticar',
-  'Clear Authentication': "Esborrar l'autenticació",
+  'View tools': 'Visualitza les eines',
+  Reconnect: 'Reconnecta',
+  Enable: 'Activa',
+  Disable: 'Desactiva',
+  Authenticate: 'Autentica',
+  'Re-authenticate': 'Torna a autenticar',
+  'Clear Authentication': "Esborra l'autenticació",
   'Server:': 'Servidor:',
   'Command:': 'Ordre:',
   'Working Directory:': 'Directori de treball:',
@@ -1332,11 +1332,11 @@ export default {
   // Diàlegs - Permisos
   // ============================================================================
   'Manage folder trust settings':
-    'Gestionar la configuració de confiança de carpetes',
-  'Manage permission rules': 'Gestionar permission rules',
-  Allow: 'Permetre',
-  Ask: 'Preguntar',
-  Deny: 'Denegar',
+    'Gestiona la configuració de confiança de carpetes',
+  'Manage permission rules': 'Gestiona les regles de permís',
+  Allow: 'Permet',
+  Ask: 'Pregunta',
+  Deny: 'Denega',
   Workspace: 'Espai de treball',
   "Qwen Code won't ask before using allowed tools.":
     "Qwen Code no preguntarà abans d'usar les eines permeses.",
@@ -1345,7 +1345,7 @@ export default {
   'Qwen Code is not allowed to use denied tools.':
     'Qwen Code no té permís per usar les eines denegades.',
   'Manage trusted directories for this workspace.':
-    "Gestionar els directoris de confiança d'aquest espai de treball.",
+    "Gestiona els directoris de confiança d'aquest espai de treball.",
   'Any use of the {{tool}} tool': "Qualsevol ús de l'eina {{tool}}",
   "{{tool}} commands matching '{{pattern}}'":
     "Ordres de {{tool}} que coincideixen amb '{{pattern}}'",
@@ -1356,27 +1356,27 @@ export default {
   'Checked in at .qwen/settings.json': 'Registrat a .qwen/settings.json',
   'User settings': "Configuració d'usuari",
   'Saved in at ~/.qwen/settings.json': 'Desat a ~/.qwen/settings.json',
-  'Add a new rule…': 'Afegir una nova regla…',
-  'Add {{type}} permission rule': 'Afegir {{type}} permission rule',
+  'Add a new rule…': 'Afegeix una nova regla…',
+  'Add {{type}} permission rule': 'Afegeix la regla de permís {{type}}',
   'Permission rules are a tool name, optionally followed by a specifier in parentheses.':
-    "permission rules són un nom d'eina, seguit opcionalment d'un especificador entre parèntesis.",
+    "Les regles de permís són un nom d'eina, seguit opcionalment d'un especificador entre parèntesis.",
   'e.g.,': 'p. ex.,',
   or: 'o',
-  'Enter permission rule…': 'Introduïu permission rule…',
+  'Enter permission rule…': 'Introduïu la regla de permís…',
   'Enter to submit · Esc to cancel': 'Enter per enviar · Esc per cancel·lar',
   'Where should this rule be saved?': "On s'ha de desar aquesta regla?",
   'Enter to confirm · Esc to cancel':
     'Enter per confirmar · Esc per cancel·lar',
-  'Delete {{type}} rule?': 'Eliminar la regla {{type}}?',
+  'Delete {{type}} rule?': 'Voleu suprimir la regla {{type}}?',
   'Are you sure you want to delete this permission rule?':
-    'Esteu segur que voleu eliminar aquesta permission rule?',
+    'Esteu segur que voleu suprimir aquesta regla de permís?',
   'Permissions:': 'Permisos:',
   '(←/→ or tab to cycle)': '(←/→ o Tab per canviar)',
   'Press ↑↓ to navigate · Enter to select · Type to search · Esc to cancel':
     'Premeu ↑↓ per navegar · Enter per seleccionar · Escriviu per cercar · Esc per cancel·lar',
-  'Search…': 'Cercar…',
-  'Add directory…': 'Afegir directori…',
-  'Add directory to workspace': "Afegir directori a l'espai de treball",
+  'Search…': 'Cerca…',
+  'Add directory…': 'Afegeix un directori…',
+  'Add directory to workspace': "Afegeix el directori a l'espai de treball",
   'Qwen Code can read files in the workspace, and make edits when auto-accept edits is on.':
     "Qwen Code pot llegir fitxers a l'espai de treball i fer canvis quan l'acceptació automàtica de canvis està activada.",
   'Qwen Code will be able to read files in this directory and make edits when auto-accept edits is on.':
