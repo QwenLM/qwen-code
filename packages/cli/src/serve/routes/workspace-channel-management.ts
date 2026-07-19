@@ -9,6 +9,11 @@ import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
 import { sanitizeLogText } from '@qwen-code/channel-base';
 import { supportedChannelCatalog } from '../../commands/channel/channel-registry.js';
 import type {
+  ChannelAuthSessionKey,
+  ChannelAuthSessionManager,
+} from '../channel-auth-session-manager.js';
+import { renderChannelQrImage } from '../channel-qr-image.js';
+import type {
   ChannelManagementService,
   ChannelStartupRequest,
   ChannelUpsertRequest,
@@ -45,6 +50,7 @@ interface RegisterWorkspaceChannelManagementRoutesDeps {
     res: Response,
     runtime: WorkspaceRuntime,
   ) => string | undefined | null;
+  authManager?: ChannelAuthSessionManager;
 }
 
 type RuntimeResolver = (req: Request, res: Response) => WorkspaceRuntime | null;
@@ -163,10 +169,31 @@ const ERROR_STATUS = new Map<string, number>([
   ['channel_worker_stop_failed', 500],
   ['daemon_draining', 503],
   ['channel_worker_unavailable', 503],
+  ['channel_auth_instance_mismatch', 400],
+  ['channel_auth_unsupported', 400],
+  ['channel_auth_qr_payload_too_large', 400],
+  ['channel_auth_session_not_found', 404],
+  ['channel_auth_in_progress', 409],
+  ['channel_auth_commit_in_progress', 409],
+  ['channel_auth_not_ready', 409],
+  ['channel_auth_already_committed', 409],
+  ['channel_auth_cancelled', 410],
+  ['channel_auth_expired', 410],
+  ['channel_auth_qr_unavailable', 409],
+  ['channel_auth_commit_failed', 500],
+  ['channel_auth_failed', 500],
+  ['channel_auth_unavailable', 503],
 ]);
 
 function sendManagementError(res: Response, error: unknown): void {
   const code = errorCode(error);
+  if (code === 'channel_auth_session_not_found') {
+    res.status(404).json({
+      error: 'Channel authentication session was not found.',
+      code,
+    });
+    return;
+  }
   const status = code ? ERROR_STATUS.get(code) : undefined;
   if (status !== undefined && code) {
     const rawMessage = error instanceof Error ? error.message : String(error);
@@ -183,6 +210,66 @@ function sendManagementError(res: Response, error: unknown): void {
     error: 'Channel management operation failed.',
     code: 'channel_management_failed',
   });
+}
+
+function parseChannelType(
+  body: Record<string, unknown>,
+  res: Response,
+): string | undefined {
+  const channelType = body['channelType'];
+  if (
+    typeof channelType !== 'string' ||
+    channelType.length === 0 ||
+    channelType.length > 128 ||
+    !/^[A-Za-z0-9._-]+$/u.test(channelType)
+  ) {
+    res.status(400).json({
+      error: '`channelType` must be a safe non-empty token.',
+      code: 'invalid_channel_auth_request',
+    });
+    return undefined;
+  }
+  return channelType;
+}
+
+function parseAuthSessionId(req: Request, res: Response): string | undefined {
+  const sessionId = req.params['id'] ?? '';
+  if (
+    sessionId.length === 0 ||
+    sessionId.length > 128 ||
+    !/^[A-Za-z0-9-]+$/u.test(sessionId)
+  ) {
+    res.status(400).json({
+      error: 'Channel authentication session id is invalid.',
+      code: 'invalid_channel_auth_session_id',
+    });
+    return undefined;
+  }
+  return sessionId;
+}
+
+async function configuredChannelType(
+  service: ChannelManagementService,
+  name: string,
+): Promise<string | undefined> {
+  const instance = (await service.list()).instances[name];
+  const channelType = instance?.config['type'];
+  return typeof channelType === 'string' ? channelType : undefined;
+}
+
+function authKey(
+  runtime: WorkspaceRuntime,
+  name: string,
+  channelType: string,
+  clientId: string,
+): ChannelAuthSessionKey {
+  return {
+    workspaceCwd: runtime.workspaceCwd,
+    runtimeId: runtime.workspaceId,
+    instanceName: name,
+    channelType,
+    clientId,
+  };
 }
 
 async function resolveTarget(
@@ -225,8 +312,183 @@ export function registerWorkspaceChannelManagementRoutes(
   const startMutation = deps.mutate({ strict: true });
   const stopMutation = deps.mutate({ strict: true });
   const restartMutation = deps.mutate({ strict: true });
+  const beginAuth = deps.authManager
+    ? deps.mutate({ strict: true })
+    : undefined;
+  const readAuth = deps.authManager ? deps.mutate() : undefined;
+  const cancelAuth = deps.authManager
+    ? deps.mutate({ strict: true })
+    : undefined;
+  const readAuthQr = deps.authManager ? deps.mutate() : undefined;
+  const commitAuth = deps.authManager
+    ? deps.mutate({ strict: true })
+    : undefined;
 
   const register = (prefix: string, resolveRuntime: RuntimeResolver) => {
+    if (
+      deps.authManager &&
+      beginAuth &&
+      readAuth &&
+      cancelAuth &&
+      readAuthQr &&
+      commitAuth
+    ) {
+      const resolveAuthKey = async (
+        req: Request,
+        res: Response,
+        bodyChannelType?: string,
+      ): Promise<
+        | {
+            key: ChannelAuthSessionKey;
+            sessionId?: string;
+            service: ChannelManagementService;
+            name: string;
+          }
+        | undefined
+      > => {
+        const target = await resolveTarget(
+          req,
+          res,
+          resolveRuntime,
+          deps.resolveService,
+        );
+        if (!target) return;
+        const clientId = deps.parseAndValidateClientId(
+          req,
+          res,
+          target.runtime,
+        );
+        if (clientId === null) return;
+        if (!clientId) {
+          res.status(400).json({
+            error: '`X-Qwen-Client-Id` is required for Channel authentication.',
+            code: 'channel_auth_client_required',
+          });
+          return;
+        }
+        const name = parseInstanceName(req, res);
+        if (!name) return;
+        let configuredType: string | undefined;
+        try {
+          configuredType = await configuredChannelType(target.service, name);
+        } catch (error) {
+          sendManagementError(res, error);
+          return;
+        }
+        if (
+          !configuredType ||
+          (bodyChannelType && configuredType !== bodyChannelType)
+        ) {
+          res.status(404).json({
+            error: 'Channel authentication session was not found.',
+            code: 'channel_auth_session_not_found',
+          });
+          return;
+        }
+        const sessionId = req.params['id']
+          ? parseAuthSessionId(req, res)
+          : undefined;
+        if (req.params['id'] && !sessionId) return;
+        return {
+          key: authKey(target.runtime, name, configuredType, clientId),
+          service: target.service,
+          name,
+          ...(sessionId ? { sessionId } : {}),
+        };
+      };
+
+      app.post(
+        `${prefix}/channels/:name/auth-sessions`,
+        beginAuth,
+        async (req, res) => {
+          const channelType = parseChannelType(deps.safeBody(req), res);
+          if (!channelType) return;
+          const target = await resolveAuthKey(req, res, channelType);
+          if (!target) return;
+          try {
+            res.status(201).json(await deps.authManager!.begin(target.key));
+          } catch (error) {
+            sendManagementError(res, error);
+          }
+        },
+      );
+
+      app.get(
+        `${prefix}/channels/:name/auth-sessions/:id`,
+        readAuth,
+        async (req, res) => {
+          const target = await resolveAuthKey(req, res);
+          if (!target?.sessionId) return;
+          try {
+            res
+              .status(200)
+              .json(deps.authManager!.get(target.key, target.sessionId));
+          } catch (error) {
+            sendManagementError(res, error);
+          }
+        },
+      );
+
+      app.delete(
+        `${prefix}/channels/:name/auth-sessions/:id`,
+        cancelAuth,
+        async (req, res) => {
+          const target = await resolveAuthKey(req, res);
+          if (!target?.sessionId) return;
+          try {
+            deps.authManager!.cancel(target.key, target.sessionId);
+            res.status(200).json({ cancelled: true });
+          } catch (error) {
+            sendManagementError(res, error);
+          }
+        },
+      );
+
+      app.get(
+        `${prefix}/channels/:name/auth-sessions/:id/qr`,
+        readAuthQr,
+        async (req, res) => {
+          const target = await resolveAuthKey(req, res);
+          if (!target?.sessionId) return;
+          try {
+            const qr = deps.authManager!.getQr(target.key, target.sessionId);
+            const image = await renderChannelQrImage(qr.payload);
+            res.set('Cache-Control', 'no-store');
+            res.set('X-Content-Type-Options', 'nosniff');
+            res.type(image.contentType).status(200).send(image.bytes);
+          } catch (error) {
+            sendManagementError(res, error);
+          }
+        },
+      );
+
+      app.post(
+        `${prefix}/channels/:name/auth-sessions/:id/commit`,
+        commitAuth,
+        async (req, res) => {
+          const channelType = parseChannelType(deps.safeBody(req), res);
+          if (!channelType) return;
+          const target = await resolveAuthKey(req, res, channelType);
+          if (!target?.sessionId) return;
+          try {
+            await deps.authManager!.commit(target.key, target.sessionId);
+            const snapshot = await target.service.list();
+            const instance = snapshot.instances[target.name];
+            if (!instance) {
+              res.status(404).json({
+                error: 'Channel authentication session was not found.',
+                code: 'channel_auth_session_not_found',
+              });
+              return;
+            }
+            res.status(200).json({ snapshot, instance });
+          } catch (error) {
+            sendManagementError(res, error);
+          }
+        },
+      );
+    }
+
     app.get(`${prefix}/channel-types`, async (req, res) => {
       const target = await resolveTarget(
         req,

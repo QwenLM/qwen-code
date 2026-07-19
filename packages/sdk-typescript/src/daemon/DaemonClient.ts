@@ -108,6 +108,10 @@ import type {
   DaemonReloadResponse,
   DaemonChannelReloadResult,
   DaemonChannelManagementOptions,
+  DaemonChannelAuthBeginRequest,
+  DaemonChannelAuthCancelResult,
+  DaemonChannelAuthCommitRequest,
+  DaemonChannelAuthSession,
   DaemonChannelMutationResult,
   DaemonChannelsSnapshot,
   DaemonChannelTypeCatalog,
@@ -799,6 +803,31 @@ export class DaemonClient {
     );
   }
 
+  private async blobRequest(
+    path: string,
+    label: string,
+    opts: { clientId?: string; timeoutMs?: number } = {},
+  ): Promise<Blob> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}${path}`,
+      { headers: this.headers({}, opts.clientId) },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, label);
+        const contentType = res.headers.get('content-type')?.split(';', 1)[0];
+        if (!contentType?.startsWith('image/')) {
+          throw new DaemonHttpError(
+            res.status,
+            { code: 'invalid_channel_auth_qr_response' },
+            `${label}: daemon returned a non-image response`,
+          );
+        }
+        return new Blob([await res.arrayBuffer()], { type: contentType });
+      },
+      opts.timeoutMs,
+      'rest',
+    );
+  }
+
   /** @internal */
   async workspaceJsonRequest<T>(
     workspaceSelector: string,
@@ -814,6 +843,20 @@ export class DaemonClient {
     } = {},
   ): Promise<T> {
     return await this.jsonRequest<T>(
+      `/workspaces/${workspaceSelector}${path}`,
+      label,
+      opts,
+    );
+  }
+
+  /** @internal */
+  workspaceBlobRequest(
+    workspaceSelector: string,
+    path: string,
+    label: string,
+    opts: { clientId?: string; timeoutMs?: number } = {},
+  ): Promise<Blob> {
+    return this.blobRequest(
       `/workspaces/${workspaceSelector}${path}`,
       label,
       opts,
@@ -3288,6 +3331,84 @@ export class DaemonClient {
     );
   }
 
+  beginWorkspaceChannelAuth(
+    name: string,
+    request: DaemonChannelAuthBeginRequest,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelAuthSession> {
+    return this.jsonRequest<DaemonChannelAuthSession>(
+      `/workspace/channels/${urlEncode(name)}/auth-sessions`,
+      'POST /workspace/channels/:name/auth-sessions',
+      {
+        method: 'POST',
+        body: request,
+        clientId: opts?.clientId,
+        timeoutMs: opts?.timeoutMs ?? CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS,
+        mode: 'rest',
+      },
+    );
+  }
+
+  workspaceChannelAuth(
+    name: string,
+    sessionId: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelAuthSession> {
+    return this.jsonRequest<DaemonChannelAuthSession>(
+      `/workspace/channels/${urlEncode(name)}/auth-sessions/${urlEncode(sessionId)}`,
+      'GET /workspace/channels/:name/auth-sessions/:id',
+      { clientId: opts?.clientId, timeoutMs: opts?.timeoutMs, mode: 'rest' },
+    );
+  }
+
+  workspaceChannelAuthQr(
+    name: string,
+    sessionId: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<Blob> {
+    return this.blobRequest(
+      `/workspace/channels/${urlEncode(name)}/auth-sessions/${urlEncode(sessionId)}/qr`,
+      'GET /workspace/channels/:name/auth-sessions/:id/qr',
+      opts,
+    );
+  }
+
+  cancelWorkspaceChannelAuth(
+    name: string,
+    sessionId: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelAuthCancelResult> {
+    return this.jsonRequest<DaemonChannelAuthCancelResult>(
+      `/workspace/channels/${urlEncode(name)}/auth-sessions/${urlEncode(sessionId)}`,
+      'DELETE /workspace/channels/:name/auth-sessions/:id',
+      {
+        method: 'DELETE',
+        clientId: opts?.clientId,
+        timeoutMs: opts?.timeoutMs ?? CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS,
+        mode: 'rest',
+      },
+    );
+  }
+
+  commitWorkspaceChannelAuth(
+    name: string,
+    sessionId: string,
+    request: DaemonChannelAuthCommitRequest,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelMutationResult> {
+    return this.jsonRequest<DaemonChannelMutationResult>(
+      `/workspace/channels/${urlEncode(name)}/auth-sessions/${urlEncode(sessionId)}/commit`,
+      'POST /workspace/channels/:name/auth-sessions/:id/commit',
+      {
+        method: 'POST',
+        body: request,
+        clientId: opts?.clientId,
+        timeoutMs: opts?.timeoutMs ?? CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS,
+        mode: 'rest',
+      },
+    );
+  }
+
   upsertWorkspaceChannel(
     name: string,
     request: DaemonChannelUpsertRequest,
@@ -4290,6 +4411,107 @@ export class WorkspaceDaemonClient {
       '/channels',
       'GET /workspaces/:workspace/channels',
       { clientId: opts?.clientId, timeoutMs: opts?.timeoutMs, mode: 'rest' },
+    );
+  }
+
+  beginWorkspaceChannelAuth(
+    name: string,
+    request: DaemonChannelAuthBeginRequest,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelAuthSession> {
+    return this.authJsonRequest<DaemonChannelAuthSession>(
+      name,
+      '',
+      'POST',
+      request,
+      opts,
+    );
+  }
+
+  workspaceChannelAuth(
+    name: string,
+    sessionId: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelAuthSession> {
+    return this.authJsonRequest<DaemonChannelAuthSession>(
+      name,
+      `/${urlEncode(sessionId)}`,
+      'GET',
+      undefined,
+      opts,
+    );
+  }
+
+  workspaceChannelAuthQr(
+    name: string,
+    sessionId: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<Blob> {
+    return this.client.workspaceBlobRequest(
+      this.workspaceSelector,
+      `/channels/${urlEncode(name)}/auth-sessions/${urlEncode(sessionId)}/qr`,
+      'GET /workspaces/:workspace/channels/:name/auth-sessions/:id/qr',
+      opts,
+    );
+  }
+
+  cancelWorkspaceChannelAuth(
+    name: string,
+    sessionId: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelAuthCancelResult> {
+    return this.authJsonRequest<DaemonChannelAuthCancelResult>(
+      name,
+      `/${urlEncode(sessionId)}`,
+      'DELETE',
+      undefined,
+      opts,
+    );
+  }
+
+  commitWorkspaceChannelAuth(
+    name: string,
+    sessionId: string,
+    request: DaemonChannelAuthCommitRequest,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelMutationResult> {
+    return this.authJsonRequest<DaemonChannelMutationResult>(
+      name,
+      `/${urlEncode(sessionId)}/commit`,
+      'POST',
+      request,
+      opts,
+    );
+  }
+
+  private authJsonRequest<T>(
+    name: string,
+    suffix: string,
+    method: 'GET' | 'POST' | 'DELETE',
+    body:
+      | DaemonChannelAuthBeginRequest
+      | DaemonChannelAuthCommitRequest
+      | undefined,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<T> {
+    const labelSuffix = suffix.endsWith('/commit')
+      ? '/:id/commit'
+      : suffix
+        ? '/:id'
+        : '';
+    return this.client.workspaceJsonRequest<T>(
+      this.workspaceSelector,
+      `/channels/${urlEncode(name)}/auth-sessions${suffix}`,
+      `${method} /workspaces/:workspace/channels/:name/auth-sessions${labelSuffix}`,
+      {
+        method,
+        ...(body ? { body } : {}),
+        clientId: opts?.clientId,
+        timeoutMs:
+          opts?.timeoutMs ??
+          (method === 'GET' ? undefined : CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS),
+        mode: 'rest',
+      },
     );
   }
 

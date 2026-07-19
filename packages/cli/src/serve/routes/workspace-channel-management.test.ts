@@ -12,6 +12,7 @@ import type {
   ChannelMutationResult,
   ChannelRuntimeState,
 } from '../channel-management-service.js';
+import type { ChannelAuthSessionManager } from '../channel-auth-session-manager.js';
 import {
   createWorkspaceRegistry,
   type WorkspaceRuntime,
@@ -73,6 +74,7 @@ function mount(opts: {
   resolveService?: (
     target: WorkspaceRuntime,
   ) => ChannelManagementService | Promise<ChannelManagementService> | undefined;
+  authManager?: ChannelAuthSessionManager;
 }) {
   const primary = runtime('primary', '/work/primary', opts.primaryTrusted);
   const secondary = runtime(
@@ -99,7 +101,9 @@ function mount(opts: {
       next();
     };
   };
-  const parseAndValidateClientId = vi.fn((_req, _res) => 'client-1');
+  const parseAndValidateClientId = vi.fn((req, _res) =>
+    req.header('x-qwen-client-id'),
+  );
   const app = express();
   app.use(express.json());
   registerWorkspaceChannelManagementRoutes(app, {
@@ -110,6 +114,7 @@ function mount(opts: {
     mutate,
     safeBody: (req) => (req.body ?? {}) as Record<string, unknown>,
     parseAndValidateClientId,
+    authManager: opts.authManager,
   });
   return {
     app,
@@ -122,12 +127,231 @@ function mount(opts: {
   };
 }
 
+function authManager(): ChannelAuthSessionManager {
+  return {
+    begin: vi.fn(async () => ({
+      id: 'session-1',
+      state: 'awaiting_scan' as const,
+      expiresAt: '2026-07-19T01:00:00.000Z',
+      qrRevision: 1,
+    })),
+    get: vi.fn(() => ({
+      id: 'session-1',
+      state: 'awaiting_scan' as const,
+      expiresAt: '2026-07-19T01:00:00.000Z',
+      qrRevision: 1,
+    })),
+    getQr: vi.fn((sessionKey) => {
+      if (sessionKey.clientId !== 'client-1') {
+        throw Object.assign(new Error('not found'), {
+          code: 'channel_auth_session_not_found',
+        });
+      }
+      return { payload: 'https://example.test/secret', revision: 1 };
+    }),
+    cancel: vi.fn(() => ({
+      id: 'session-1',
+      state: 'cancelled' as const,
+      expiresAt: '2026-07-19T01:00:00.000Z',
+      qrRevision: 1,
+    })),
+    commit: vi.fn(async () => ({
+      id: 'session-1',
+      state: 'committed' as const,
+      expiresAt: '2026-07-19T01:00:00.000Z',
+      qrRevision: 1,
+    })),
+    removeWorkspace: vi.fn(),
+    shutdown: vi.fn(),
+  };
+}
+
+function authService(): ChannelManagementService {
+  const value = service();
+  vi.mocked(value.list).mockResolvedValue({
+    revision: 'r1',
+    instances: {
+      bot: {
+        name: 'bot',
+        config: { type: 'weixin' },
+        secrets: {},
+        startsWithServe: false,
+        runtime: { state: 'stopped' },
+      },
+    },
+  });
+  return value;
+}
+
 const auth = (value: request.Test) =>
   value
     .set('Authorization', 'Bearer secret')
     .set('X-Qwen-Client-Id', 'client-1');
 
 describe('workspace Channel management routes', () => {
+  it('serves a non-cacheable QR only to the creating client', async () => {
+    const manager = authManager();
+    const configured = authService();
+    const { app } = mount({
+      authManager: manager,
+      services: new Map([
+        ['/work/primary', configured],
+        ['/work/secondary', authService()],
+      ]),
+    });
+
+    const begin = await auth(
+      request(app)
+        .post('/workspace/channels/bot/auth-sessions')
+        .send({ channelType: 'weixin' }),
+    );
+    const qrPath = `/workspace/channels/bot/auth-sessions/${begin.body.id}/qr`;
+    const wrong = await request(app)
+      .get(qrPath)
+      .set('Authorization', 'Bearer secret')
+      .set('X-Qwen-Client-Id', 'client-b');
+    const right = await auth(request(app).get(qrPath));
+
+    expect(begin.status).toBe(201);
+    expect(wrong.status).toBe(404);
+    expect(right.status).toBe(200);
+    expect(right.headers['cache-control']).toBe('no-store');
+    expect(right.headers['x-content-type-options']).toBe('nosniff');
+    expect(right.headers['content-type']).toMatch(/^image\/svg\+xml/u);
+    expect(right.body.toString('utf8')).not.toContain(
+      'https://example.test/secret',
+    );
+  });
+
+  it('uses strict auth for begin, cancel, and commit and normal auth for status and QR', async () => {
+    const manager = authManager();
+    const configured = authService();
+    const { app, strictOptions } = mount({
+      authManager: manager,
+      services: new Map([
+        ['/work/primary', configured],
+        ['/work/secondary', authService()],
+      ]),
+    });
+    const root = '/workspace/channels/bot/auth-sessions';
+
+    await auth(request(app).post(root).send({ channelType: 'weixin' })).expect(
+      201,
+    );
+    await auth(request(app).get(`${root}/session-1`)).expect(200);
+    await auth(request(app).delete(`${root}/session-1`)).expect(200);
+    await auth(
+      request(app)
+        .post(`${root}/session-1/commit`)
+        .send({ channelType: 'weixin' }),
+    )
+      .expect(200)
+      .expect(({ body }) => {
+        expect(body).toMatchObject({
+          snapshot: { revision: 'r1' },
+          instance: { name: 'bot', config: { type: 'weixin' } },
+        });
+      });
+
+    expect(strictOptions.slice(-5)).toEqual([
+      { strict: true },
+      undefined,
+      { strict: true },
+      undefined,
+      { strict: true },
+    ]);
+  });
+
+  it('fails closed for qualified auth and hides key ownership mismatches as 404', async () => {
+    const manager = authManager();
+    vi.mocked(manager.get).mockImplementation(() => {
+      throw Object.assign(new Error('private mismatch'), {
+        code: 'channel_auth_session_not_found',
+      });
+    });
+    const { app } = mount({
+      authManager: manager,
+      secondaryTrusted: false,
+      services: new Map([
+        ['/work/primary', authService()],
+        ['/work/secondary', authService()],
+      ]),
+    });
+
+    const untrusted = await auth(
+      request(app)
+        .post('/workspaces/secondary/channels/bot/auth-sessions')
+        .send({ channelType: 'weixin' }),
+    );
+    const mismatch = await auth(
+      request(app).get(
+        '/workspace/channels/bot/auth-sessions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      ),
+    );
+
+    expect(untrusted.status).toBe(403);
+    expect(mismatch.status).toBe(404);
+    expect(mismatch.body).toEqual({
+      error: 'Channel authentication session was not found.',
+      code: 'channel_auth_session_not_found',
+    });
+  });
+
+  it('bounds auth inputs and requires bearer auth plus a client id', async () => {
+    const manager = authManager();
+    const { app } = mount({
+      authManager: manager,
+      services: new Map([
+        ['/work/primary', authService()],
+        ['/work/secondary', authService()],
+      ]),
+    });
+    const root = '/workspace/channels/bot/auth-sessions';
+
+    await request(app).get(`${root}/session-1`).expect(401);
+    const missingClient = await request(app)
+      .get(`${root}/session-1`)
+      .set('Authorization', 'Bearer secret');
+    const invalidType = await auth(
+      request(app).post(root).send({ channelType: 'weixin/unsafe' }),
+    );
+    const invalidSession = await auth(
+      request(app).get(`${root}/${'a'.repeat(129)}`),
+    );
+
+    expect(missingClient.body.code).toBe('channel_auth_client_required');
+    expect(invalidType.body.code).toBe('invalid_channel_auth_request');
+    expect(invalidSession.body.code).toBe('invalid_channel_auth_session_id');
+    expect(manager.begin).not.toHaveBeenCalled();
+    expect(manager.get).not.toHaveBeenCalled();
+  });
+
+  it('returns stable sanitized auth errors without credential text', async () => {
+    const manager = authManager();
+    vi.mocked(manager.begin).mockRejectedValue(
+      Object.assign(new Error('Authorization: Bearer private-token\nfailed'), {
+        code: 'channel_auth_failed',
+      }),
+    );
+    const { app } = mount({
+      authManager: manager,
+      services: new Map([
+        ['/work/primary', authService()],
+        ['/work/secondary', authService()],
+      ]),
+    });
+
+    const response = await auth(
+      request(app)
+        .post('/workspace/channels/bot/auth-sessions')
+        .send({ channelType: 'weixin' }),
+    );
+
+    expect(response.status).toBe(500);
+    expect(response.body.code).toBe('channel_auth_failed');
+    expect(response.body.error).not.toContain('private-token');
+    expect(response.body.error.length).toBeLessThanOrEqual(512);
+  });
   it('lists the catalog and configured instances for a trusted workspace', async () => {
     const { app, primaryService } = mount({});
 

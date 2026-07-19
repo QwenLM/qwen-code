@@ -101,6 +101,11 @@ import type { WorkspaceRuntimeRemovalController } from './routes/workspace-manag
 import { createChannelManagementService } from './channel-management-service.js';
 import { WorkspaceChannelSettingsStore } from './channel-settings-store.js';
 import {
+  ChannelAuthSessionError,
+  createChannelAuthSessionManager,
+} from './channel-auth-session-manager.js';
+import { getPlugin } from '../commands/channel/channel-registry.js';
+import {
   allowOriginMode,
   listenerMaxConnections,
   parseDaemonStatusDetail,
@@ -3816,6 +3821,34 @@ async function runQwenServeImpl(
       });
       return pending;
     };
+    const channelAuthSessionManager = createChannelAuthSessionManager({
+      resolve: async (key) => {
+        const targetRuntime = workspaceRegistry.getByWorkspaceCwd(
+          key.workspaceCwd,
+        );
+        if (
+          !targetRuntime ||
+          targetRuntime.workspaceId !== key.runtimeId ||
+          !targetRuntime.trusted
+        ) {
+          throw new ChannelAuthSessionError(
+            'channel_auth_unavailable',
+            'Channel authentication is unavailable.',
+          );
+        }
+        const plugin = await getPlugin(key.channelType);
+        if (!plugin?.authDriver) {
+          throw new ChannelAuthSessionError(
+            'channel_auth_unsupported',
+            'The Channel type does not support QR authentication.',
+          );
+        }
+        return {
+          driver: plugin.authDriver,
+          managementService: await channelManagementService(targetRuntime),
+        };
+      },
+    });
 
     core.registerDaemonGaugeCallbacks({
       sessionCount: () =>
@@ -4263,6 +4296,10 @@ async function runQwenServeImpl(
         const existing = runtimeCleanupPromises.get(runtimeToDrain);
         if (existing) return existing;
         const cleanup = (async () => {
+          channelAuthSessionManager.removeWorkspace(
+            runtimeToDrain.workspaceCwd,
+            runtimeToDrain.workspaceId,
+          );
           await workspaceVoiceCoordinator.disposeRuntime(
             runtimeToDrain,
             reason,
@@ -4390,6 +4427,7 @@ async function runQwenServeImpl(
       },
       reloadChannelWorker,
       channelManagementService,
+      channelAuthSessionManager,
       getPerfSnapshot: () => ({
         eventLoop: currentDaemonEventLoopMonitor.snapshot(),
         promptQueueWait: {
@@ -5406,6 +5444,12 @@ async function runQwenServeImpl(
                 }
                 disposeRuntimeAppResources(appForCleanup);
                 disposeDaemonEventLoopMonitor();
+                const authSessionManager = appForCleanup?.locals?.[
+                  'channelAuthSessionManager'
+                ] as
+                  | ReturnType<typeof createChannelAuthSessionManager>
+                  | undefined;
+                authSessionManager?.shutdown();
                 // The worker owns daemon-backed sessions; disconnect it before
                 // tearing down the ACP bridge it is attached to.
                 if (channelWorkerManager) {

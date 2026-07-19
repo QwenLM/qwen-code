@@ -4129,6 +4129,161 @@ describe('DaemonClient', () => {
       },
     };
     const mutation = { snapshot, instance: snapshot.instances.bot };
+    const authSession = {
+      id: 'session-1',
+      state: 'awaiting_scan' as const,
+      expiresAt: '2026-07-19T01:00:00.000Z',
+      qrRevision: 1,
+    };
+
+    it('uses exact auth-session routes, methods, headers, bodies, and binary QR handling', async () => {
+      const { fetch, calls } = recordingFetch((request) =>
+        request.url.endsWith('/qr')
+          ? textResponse(200, '<svg/>', {
+              'content-type': 'image/svg+xml; charset=utf-8',
+            })
+          : jsonResponse(
+              200,
+              request.url.endsWith('/commit')
+                ? mutation
+                : request.method === 'DELETE'
+                  ? { cancelled: true }
+                  : authSession,
+            ),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        token: 'daemon-token',
+        fetch,
+      });
+      const opts = { clientId: 'client-1', timeoutMs: 1234 };
+
+      await expect(
+        client.beginWorkspaceChannelAuth(
+          'bot/name',
+          { channelType: 'weixin' },
+          opts,
+        ),
+      ).resolves.toEqual(authSession);
+      await expect(
+        client.workspaceChannelAuth('bot/name', 'session-1', opts),
+      ).resolves.toEqual(authSession);
+      const qr = await client.workspaceChannelAuthQr(
+        'bot/name',
+        'session-1',
+        opts,
+      );
+      expect(qr).toBeInstanceOf(Blob);
+      expect(qr.type).toBe('image/svg+xml');
+      expect(await qr.text()).toBe('<svg/>');
+      await expect(
+        client.cancelWorkspaceChannelAuth('bot/name', 'session-1', opts),
+      ).resolves.toEqual({ cancelled: true });
+      await expect(
+        client.commitWorkspaceChannelAuth(
+          'bot/name',
+          'session-1',
+          { channelType: 'weixin' },
+          opts,
+        ),
+      ).resolves.toEqual(mutation);
+
+      expect(calls.map(({ method, url }) => [method, url])).toEqual([
+        ['POST', 'http://daemon/workspace/channels/bot%2Fname/auth-sessions'],
+        [
+          'GET',
+          'http://daemon/workspace/channels/bot%2Fname/auth-sessions/session-1',
+        ],
+        [
+          'GET',
+          'http://daemon/workspace/channels/bot%2Fname/auth-sessions/session-1/qr',
+        ],
+        [
+          'DELETE',
+          'http://daemon/workspace/channels/bot%2Fname/auth-sessions/session-1',
+        ],
+        [
+          'POST',
+          'http://daemon/workspace/channels/bot%2Fname/auth-sessions/session-1/commit',
+        ],
+      ]);
+      expect(
+        calls.every(
+          (call) => call.headers.authorization === 'Bearer daemon-token',
+        ),
+      ).toBe(true);
+      expect(
+        calls.every((call) => call.headers['x-qwen-client-id'] === 'client-1'),
+      ).toBe(true);
+      expect(calls[0]?.body).toBe(JSON.stringify({ channelType: 'weixin' }));
+      expect(calls[4]?.body).toBe(JSON.stringify({ channelType: 'weixin' }));
+    });
+
+    it('targets qualified workspace auth-session routes with the same options', async () => {
+      const { fetch, calls } = recordingFetch((request) =>
+        request.url.endsWith('/qr')
+          ? textResponse(200, '<svg/>', { 'content-type': 'image/svg+xml' })
+          : jsonResponse(
+              200,
+              request.url.endsWith('/commit')
+                ? mutation
+                : request.method === 'DELETE'
+                  ? { cancelled: true }
+                  : authSession,
+            ),
+      );
+      const workspace = new DaemonClient({
+        baseUrl: 'http://daemon',
+        token: 'daemon-token',
+        fetch,
+      }).workspaceByCwd('/tmp/work space');
+      const opts = { clientId: 'client-1', timeoutMs: 1234 };
+
+      await workspace.beginWorkspaceChannelAuth(
+        'bot/name',
+        { channelType: 'weixin' },
+        opts,
+      );
+      await workspace.workspaceChannelAuth('bot/name', 'session-1', opts);
+      await workspace.workspaceChannelAuthQr('bot/name', 'session-1', opts);
+      await workspace.cancelWorkspaceChannelAuth('bot/name', 'session-1', opts);
+      await workspace.commitWorkspaceChannelAuth(
+        'bot/name',
+        'session-1',
+        { channelType: 'weixin' },
+        opts,
+      );
+
+      expect(calls.map(({ method, url }) => [method, url])).toEqual([
+        [
+          'POST',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot%2Fname/auth-sessions',
+        ],
+        [
+          'GET',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot%2Fname/auth-sessions/session-1',
+        ],
+        [
+          'GET',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot%2Fname/auth-sessions/session-1/qr',
+        ],
+        [
+          'DELETE',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot%2Fname/auth-sessions/session-1',
+        ],
+        [
+          'POST',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot%2Fname/auth-sessions/session-1/commit',
+        ],
+      ]);
+      expect(
+        calls.every(
+          (call) =>
+            call.headers.authorization === 'Bearer daemon-token' &&
+            call.headers['x-qwen-client-id'] === 'client-1',
+        ),
+      ).toBe(true);
+    });
 
     it('reads the primary channel type catalog and sanitized snapshot', async () => {
       const catalog = [

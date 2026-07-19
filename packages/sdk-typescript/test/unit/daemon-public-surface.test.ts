@@ -22,6 +22,11 @@ import type {
   DaemonClientEvictedData,
   DaemonClientEvictedEvent,
   DaemonChannelControlState,
+  DaemonChannelAuthBeginRequest,
+  DaemonChannelAuthCommitRequest,
+  DaemonChannelAuthSession,
+  DaemonChannelAuthState,
+  DaemonChannelAuthCancelResult,
   DaemonChannelControlTransition,
   DaemonChannelConfigFieldDescriptor,
   DaemonChannelInstanceSnapshot,
@@ -359,6 +364,28 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
       clientId?: string;
       timeoutMs?: number;
     }>();
+    expectTypeOf<DaemonChannelAuthState>().toEqualTypeOf<
+      | 'requesting'
+      | 'awaiting_scan'
+      | 'scanned'
+      | 'refreshing'
+      | 'ready'
+      | 'committed'
+      | 'cancelled'
+      | 'expired'
+      | 'error'
+    >();
+    expectTypeOf<DaemonChannelAuthBeginRequest>().toEqualTypeOf<{
+      channelType: string;
+    }>();
+    expectTypeOf<DaemonChannelAuthCommitRequest>().toEqualTypeOf<{
+      channelType: string;
+    }>();
+    expectTypeOf<DaemonChannelAuthSession>().not.toHaveProperty('qrPayload');
+    expectTypeOf<DaemonChannelAuthSession>().not.toHaveProperty('credentials');
+    expectTypeOf<DaemonChannelAuthCancelResult>().toEqualTypeOf<{
+      cancelled: true;
+    }>();
 
     expectTypeOf<DaemonChannelSecretState>().not.toHaveProperty('value');
     expectTypeOf<
@@ -375,6 +402,33 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     ).toBeFunction();
     expectTypeOf(
       Public.WorkspaceDaemonClient.prototype.setWorkspaceChannelStartup,
+    ).toBeFunction();
+    expectTypeOf(
+      Public.DaemonClient.prototype.beginWorkspaceChannelAuth,
+    ).toBeFunction();
+    expectTypeOf(
+      Public.WorkspaceDaemonClient.prototype.workspaceChannelAuthQr,
+    ).toBeFunction();
+    expectTypeOf(
+      Public.DaemonClient.prototype.workspaceChannelAuth,
+    ).toBeFunction();
+    expectTypeOf(
+      Public.DaemonClient.prototype.cancelWorkspaceChannelAuth,
+    ).toBeFunction();
+    expectTypeOf(
+      Public.DaemonClient.prototype.commitWorkspaceChannelAuth,
+    ).toBeFunction();
+    expectTypeOf(
+      Public.WorkspaceDaemonClient.prototype.beginWorkspaceChannelAuth,
+    ).toBeFunction();
+    expectTypeOf(
+      Public.WorkspaceDaemonClient.prototype.workspaceChannelAuth,
+    ).toBeFunction();
+    expectTypeOf(
+      Public.WorkspaceDaemonClient.prototype.cancelWorkspaceChannelAuth,
+    ).toBeFunction();
+    expectTypeOf(
+      Public.WorkspaceDaemonClient.prototype.commitWorkspaceChannelAuth,
     ).toBeFunction();
   });
 });

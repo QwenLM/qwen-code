@@ -287,6 +287,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Sanitized workspace Channel configuration and lifecycle management.
   // Advertised only when the workspace-scoped service is wired.
   channel_management: { since: 'v1' },
+  // Short-lived workspace-scoped Channel QR authentication sessions.
+  // Advertised only when the daemon owns and wires the session manager.
+  channel_auth: { since: 'v1' },
   // Read-only workspace graph of recently observed channel contacts.
   workspace_channel_observed_contacts: { since: 'v1' },
   // Multi-workspace session routing. Advertised only when one daemon hosts
@@ -395,6 +398,7 @@ export interface AdvertiseFeatureToggles {
   channelReloadAvailable?: boolean;
   channelControlAvailable?: boolean;
   channelManagementAvailable?: boolean;
+  channelAuthAvailable?: boolean;
   /**
    * Whether the daemon will accept client-hosted MCP servers over the WS
    * (`client_mcp_over_ws`, issue #5626).
@@ -499,6 +503,7 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     'channel_management',
     (toggles) => toggles.channelManagementAvailable === true,
   ],
+  ['channel_auth', (toggles) => toggles.channelAuthAvailable === true],
   [
     'multi_workspace_sessions',
     (toggles) => toggles.multiWorkspaceSessionsEnabled === true,

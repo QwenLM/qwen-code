@@ -202,6 +202,7 @@ import {
 } from './routes/workspace-mcp-control.js';
 import { registerWorkspaceChannelControlRoutes } from './routes/workspace-channel-control.js';
 import { registerWorkspaceChannelManagementRoutes } from './routes/workspace-channel-management.js';
+import type { ChannelAuthSessionManager } from './channel-auth-session-manager.js';
 import { registerWorkspaceChannelObservedContactRoutes } from './routes/workspace-channel-observed-contacts.js';
 import type { ChannelManagementService } from './channel-management-service.js';
 import {
@@ -437,6 +438,7 @@ export interface ServeAppDeps {
     | ChannelManagementService
     | undefined
     | Promise<ChannelManagementService | undefined>;
+  channelAuthSessionManager?: ChannelAuthSessionManager;
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   /** Rolling metrics series for the Daemon Status charts (oldest→newest). */
   getMetricsSeries?: () => DaemonMetricsBucket[];
@@ -712,6 +714,9 @@ export function createServeApp(
         deps.setChannelWorkerSelection !== undefined &&
         deps.stopChannelWorker !== undefined,
       channelManagementAvailable: deps.channelManagementService !== undefined,
+      channelAuthAvailable:
+        deps.channelManagementService !== undefined &&
+        deps.channelAuthSessionManager !== undefined,
       channelReloadAvailable: () => {
         if (deps.reloadChannelWorker === undefined) return false;
         const control = deps.getChannelWorkerControl?.();
@@ -908,6 +913,11 @@ export function createServeApp(
     );
   (app.locals as { workspaceRegistry?: WorkspaceRegistry }).workspaceRegistry =
     workspaceRegistry;
+  (
+    app.locals as {
+      channelAuthSessionManager?: ChannelAuthSessionManager;
+    }
+  ).channelAuthSessionManager = deps.channelAuthSessionManager;
   const primaryRuntime = workspaceRegistry.primary;
   const daemonEnv = deps.daemonEnv ?? process.env;
   const primaryRuntimeEffectiveEnv =
@@ -1505,6 +1515,7 @@ export function createServeApp(
       safeBody,
       parseAndValidateClientId: (req, res, runtime) =>
         parseAndValidateWorkspaceClientId(req, res, runtime.bridge),
+      authManager: deps.channelAuthSessionManager,
     });
   }
   registerWorkspaceChannelObservedContactRoutes(app, {

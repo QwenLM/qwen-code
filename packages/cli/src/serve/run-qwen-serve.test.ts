@@ -725,6 +725,14 @@ describe('runQwenServe telemetry validation', () => {
     const secondary = path.join(tmpDir, 'secondary');
     fs.mkdirSync(primary);
     fs.mkdirSync(secondary);
+    const originalCreateServeApp = serverModule.createServeApp;
+    let capturedDeps:
+      | Parameters<typeof serverModule.createServeApp>[2]
+      | undefined;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      capturedDeps = args[2];
+      return originalCreateServeApp(...args);
+    });
     vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
       enabled: false,
       sensitiveSpanAttributeMaxLength: 1024 * 1024,
@@ -769,6 +777,11 @@ describe('runQwenServe telemetry validation', () => {
     };
 
     try {
+      await handle.runtimeReady;
+      const authManager = capturedDeps?.channelAuthSessionManager;
+      expect(authManager).toBeDefined();
+      const removeAuthWorkspace = vi.spyOn(authManager!, 'removeWorkspace');
+      const shutdownAuth = vi.spyOn(authManager!, 'shutdown');
       const added = await fetch(`${handle.url}/workspaces`, {
         method: 'POST',
         headers,
@@ -815,6 +828,10 @@ describe('runQwenServe telemetry validation', () => {
       expect(dynamicBridge?.shutdown).toHaveBeenCalledWith({
         reason: 'workspace_removed',
       });
+      expect(removeAuthWorkspace).toHaveBeenCalledWith(
+        canonicalizeWorkspace(secondary),
+        removable!.id,
+      );
 
       const afterResponse = await fetch(`${handle.url}/capabilities`, {
         headers,
@@ -863,6 +880,7 @@ describe('runQwenServe telemetry validation', () => {
       expect((await pendingRemoval).status).toBe(200);
       await closing;
       expect(closeSettled).toBe(true);
+      expect(shutdownAuth).toHaveBeenCalledOnce();
     } finally {
       await handle.close();
     }
@@ -5543,6 +5561,7 @@ describe('runQwenServe channel worker supervisor', () => {
         features: expect.arrayContaining([
           'channel_control',
           'channel_management',
+          'channel_auth',
         ]),
       });
 

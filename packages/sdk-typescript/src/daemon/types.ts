@@ -2670,6 +2670,37 @@ export interface DaemonChannelManagementOptions {
   timeoutMs?: number;
 }
 
+export type DaemonChannelAuthState =
+  | 'requesting'
+  | 'awaiting_scan'
+  | 'scanned'
+  | 'refreshing'
+  | 'ready'
+  | 'committed'
+  | 'cancelled'
+  | 'expired'
+  | 'error';
+
+export interface DaemonChannelAuthSession {
+  id: string;
+  state: DaemonChannelAuthState;
+  expiresAt: string;
+  qrRevision: number;
+  error?: string;
+}
+
+export interface DaemonChannelAuthBeginRequest {
+  channelType: string;
+}
+
+export interface DaemonChannelAuthCommitRequest {
+  channelType: string;
+}
+
+export interface DaemonChannelAuthCancelResult {
+  cancelled: true;
+}
+
 export type DaemonMcpRestartResult =
   | {
       serverName: string;
