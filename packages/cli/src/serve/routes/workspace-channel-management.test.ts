@@ -12,6 +12,7 @@ import type {
   ChannelMutationResult,
   ChannelRuntimeState,
 } from '../channel-management-service.js';
+import { createChannelManagementService } from '../channel-management-service.js';
 import type { ChannelAuthSessionManager } from '../channel-auth-session-manager.js';
 import {
   createWorkspaceRegistry,
@@ -371,6 +372,56 @@ describe('workspace Channel management routes', () => {
     expect(primaryService.list).toHaveBeenCalledOnce();
   });
 
+  it('does not serialize unmanaged raw config through the route', async () => {
+    const sentinel = 'route-unmanaged-secret-sentinel';
+    const unmanagedService = createChannelManagementService({
+      workspaceCwd: '/work/primary',
+      store: {
+        snapshot: () => ({
+          revision: 'r1',
+          channels: {
+            legacy: {
+              type: 'unmanaged-extension',
+              token: sentinel,
+              nested: { secret: sentinel },
+            },
+          },
+          startupNames: ['legacy'],
+        }),
+        upsert: vi.fn(),
+        remove: vi.fn(),
+        setStartupNames: vi.fn(),
+      },
+      manager: {
+        committedChannelNames: () => [],
+        state: () => ({
+          enabled: false,
+          selection: null,
+          transition: 'idle',
+          workers: [],
+        }),
+        setSelection: vi.fn(),
+        stopSelection: vi.fn(),
+        reload: vi.fn(),
+        reloadWorkspace: vi.fn(),
+      },
+    });
+    const { app } = mount({
+      services: new Map([
+        ['/work/primary', unmanagedService],
+        ['/work/secondary', service()],
+      ]),
+    });
+
+    const response = await request(app).get('/workspace/channels');
+
+    expect(response.status).toBe(200);
+    expect(response.body.instances.legacy.config).toEqual({
+      type: 'unmanaged-extension',
+    });
+    expect(response.text).not.toContain(sentinel);
+  });
+
   it('routes CRUD and lifecycle mutations through strict auth and client validation', async () => {
     const { app, primaryService, strictOptions, parseAndValidateClientId } =
       mount({});
@@ -650,6 +701,7 @@ describe('workspace Channel management routes', () => {
 
   it.each([
     ['invalid_channel_instance_name', 400],
+    ['channel_settings_invalid_config', 400],
     ['channel_settings_invalid_secret', 400],
     ['channel_settings_unmanageable', 400],
     ['channel_workspace_mismatch', 400],

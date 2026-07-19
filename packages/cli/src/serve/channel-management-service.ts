@@ -150,6 +150,16 @@ export function createChannelManagementService(
   opts: CreateChannelManagementServiceOptions,
 ): ChannelManagementService {
   const diagnostics = new Map<string, string>();
+  let mutationTail = Promise.resolve();
+
+  const inMutationLane = <T>(mutation: () => Promise<T>): Promise<T> => {
+    const result = mutationTail.then(mutation, mutation);
+    mutationTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  };
 
   const workerFor = (name: string) => {
     const matches = opts.manager
@@ -223,8 +233,20 @@ export function createChannelManagementService(
   ): Promise<ChannelInstanceSnapshot> => {
     const type = typeof rawConfig['type'] === 'string' ? rawConfig['type'] : '';
     const plugin = type ? await getPlugin(type) : undefined;
+    if (!plugin?.management) {
+      return {
+        name,
+        config: type ? { type } : {},
+        secrets: {},
+        webhookSecrets: {},
+        startsWithServe:
+          startupNames.some(isAllChannelSelectionName) ||
+          startupNames.includes(name),
+        runtime: runtimeFor(name),
+      };
+    }
     const secretKeys = new Set(
-      plugin?.management?.fields
+      plugin.management.fields
         .filter((field) => field.kind === 'secret')
         .map((field) => field.key) ?? [],
     );
@@ -352,124 +374,143 @@ export function createChannelManagementService(
       return listFrom(opts.store.snapshot());
     },
     async upsert(name, request) {
-      assertManageableInstanceName(name);
-      const committedNames = opts.manager.committedChannelNames();
-      const active = committedNames.includes(name);
-      if (active) assertOwnedRuntime(name);
-      const persisted = await opts.store.upsert(name, request);
-      diagnostics.delete(name);
-      if (active) {
-        try {
-          await opts.manager.reloadWorkspace(opts.workspaceCwd, name);
-        } catch (error) {
-          await stopFromNames(name, committedNames);
-          diagnostics.set(name, diagnostic(error));
+      return inMutationLane(async () => {
+        assertManageableInstanceName(name);
+        const committedNames = opts.manager.committedChannelNames();
+        const active = committedNames.includes(name);
+        if (active) assertOwnedRuntime(name);
+        const persisted = await opts.store.upsert(name, request);
+        diagnostics.delete(name);
+        if (active) {
+          try {
+            await opts.manager.reloadWorkspace(opts.workspaceCwd, name);
+          } catch (error) {
+            await stopFromNames(name, committedNames);
+            diagnostics.set(name, diagnostic(error));
+          }
         }
-      }
-      return resultFor(name, persisted);
+        return resultFor(name, persisted);
+      });
     },
     async remove(name, request) {
-      if (!isAllChannelSelectionName(name)) {
-        const committedNames = opts.manager.committedChannelNames();
-        if (committedNames.includes(name)) {
-          assertOwnedRuntime(name);
-          await stopFromNames(name, committedNames);
-        }
-      }
-      const persisted = await opts.store.remove(name, request);
-      diagnostics.delete(name);
-      return resultFor(name, persisted);
-    },
-    async setStartup(name, request) {
-      assertManageableInstanceName(name);
-      const current = opts.store.snapshot();
-      if (!Object.hasOwn(current.channels, name)) {
-        throw new ChannelManagementError(
-          'channel_instance_not_found',
-          `Channel "${name}" is not configured in this workspace.`,
-        );
-      }
-      const startsAll = current.startupNames.some(isAllChannelSelectionName);
-      if (startsAll && request.enabled) {
+      return inMutationLane(async () => {
+        const current = opts.store.snapshot();
         if (current.revision !== request.expectedRevision) {
           throw new ChannelManagementError(
             'channel_settings_conflict',
             'Channel settings changed; reload before trying again.',
           );
         }
-        return resultFor(name, current);
-      }
-      const startupNames = startsAll
-        ? Object.keys(current.channels).filter(
-            (item) => !isAllChannelSelectionName(item) && item !== name,
-          )
-        : request.enabled
-          ? current.startupNames.includes(name)
-            ? current.startupNames
-            : [...current.startupNames, name]
-          : current.startupNames.filter((item) => item !== name);
-      const persisted = await opts.store.setStartupNames(startupNames, {
-        expectedRevision: request.expectedRevision,
+        if (!isAllChannelSelectionName(name)) {
+          const committedNames = opts.manager.committedChannelNames();
+          if (committedNames.includes(name)) {
+            assertOwnedRuntime(name);
+            await stopFromNames(name, committedNames);
+          }
+        }
+        const persisted = await opts.store.remove(name, request);
+        diagnostics.delete(name);
+        return resultFor(name, persisted);
       });
-      return resultFor(name, persisted);
+    },
+    async setStartup(name, request) {
+      return inMutationLane(async () => {
+        assertManageableInstanceName(name);
+        const current = opts.store.snapshot();
+        if (!Object.hasOwn(current.channels, name)) {
+          throw new ChannelManagementError(
+            'channel_instance_not_found',
+            `Channel "${name}" is not configured in this workspace.`,
+          );
+        }
+        const startsAll = current.startupNames.some(isAllChannelSelectionName);
+        if (startsAll && request.enabled) {
+          if (current.revision !== request.expectedRevision) {
+            throw new ChannelManagementError(
+              'channel_settings_conflict',
+              'Channel settings changed; reload before trying again.',
+            );
+          }
+          return resultFor(name, current);
+        }
+        const startupNames = startsAll
+          ? Object.keys(current.channels).filter(
+              (item) => !isAllChannelSelectionName(item) && item !== name,
+            )
+          : request.enabled
+            ? current.startupNames.includes(name)
+              ? current.startupNames
+              : [...current.startupNames, name]
+            : current.startupNames.filter((item) => item !== name);
+        const persisted = await opts.store.setStartupNames(startupNames, {
+          expectedRevision: request.expectedRevision,
+        });
+        return resultFor(name, persisted);
+      });
     },
     async start(name) {
-      assertManageableInstanceName(name);
-      const persisted = opts.store.snapshot();
-      if (!Object.hasOwn(persisted.channels, name)) {
-        throw new ChannelManagementError(
-          'channel_instance_not_found',
-          `Channel "${name}" is not configured in this workspace.`,
-        );
-      }
-      const committedNames = opts.manager.committedChannelNames();
-      if (!committedNames.includes(name)) {
-        await opts.manager.setSelection(
-          {
-            mode: 'names',
-            names: [...committedNames, name],
-          },
-          { name, workspaceCwd: opts.workspaceCwd },
-        );
-      } else {
-        assertOwnedRuntime(name);
-      }
-      diagnostics.delete(name);
-      return resultFor(name, persisted);
+      return inMutationLane(async () => {
+        assertManageableInstanceName(name);
+        const persisted = opts.store.snapshot();
+        if (!Object.hasOwn(persisted.channels, name)) {
+          throw new ChannelManagementError(
+            'channel_instance_not_found',
+            `Channel "${name}" is not configured in this workspace.`,
+          );
+        }
+        const committedNames = opts.manager.committedChannelNames();
+        if (!committedNames.includes(name)) {
+          await opts.manager.setSelection(
+            {
+              mode: 'names',
+              names: [...committedNames, name],
+            },
+            { name, workspaceCwd: opts.workspaceCwd },
+          );
+        } else {
+          assertOwnedRuntime(name);
+        }
+        diagnostics.delete(name);
+        return resultFor(name, persisted);
+      });
     },
     async stop(name) {
-      assertManageableInstanceName(name);
-      const persisted = opts.store.snapshot();
-      if (!Object.hasOwn(persisted.channels, name)) {
-        throw new ChannelManagementError(
-          'channel_instance_not_found',
-          `Channel "${name}" is not configured in this workspace.`,
-        );
-      }
-      const committedNames = opts.manager.committedChannelNames();
-      if (committedNames.includes(name)) assertOwnedRuntime(name);
-      await stopFromNames(name, committedNames);
-      diagnostics.delete(name);
-      return resultFor(name, persisted);
+      return inMutationLane(async () => {
+        assertManageableInstanceName(name);
+        const persisted = opts.store.snapshot();
+        if (!Object.hasOwn(persisted.channels, name)) {
+          throw new ChannelManagementError(
+            'channel_instance_not_found',
+            `Channel "${name}" is not configured in this workspace.`,
+          );
+        }
+        const committedNames = opts.manager.committedChannelNames();
+        if (committedNames.includes(name)) assertOwnedRuntime(name);
+        await stopFromNames(name, committedNames);
+        diagnostics.delete(name);
+        return resultFor(name, persisted);
+      });
     },
     async restart(name) {
-      assertManageableInstanceName(name);
-      const persisted = opts.store.snapshot();
-      if (!opts.manager.committedChannelNames().includes(name)) {
-        throw new ChannelManagementError(
-          'channel_worker_not_enabled',
-          `Channel "${name}" is not running.`,
-        );
-      }
-      assertOwnedRuntime(name);
-      try {
-        await opts.manager.reloadWorkspace(opts.workspaceCwd, name);
-        diagnostics.delete(name);
-      } catch (error) {
-        diagnostics.set(name, diagnostic(error));
-        throw error;
-      }
-      return resultFor(name, persisted);
+      return inMutationLane(async () => {
+        assertManageableInstanceName(name);
+        const persisted = opts.store.snapshot();
+        if (!opts.manager.committedChannelNames().includes(name)) {
+          throw new ChannelManagementError(
+            'channel_worker_not_enabled',
+            `Channel "${name}" is not running.`,
+          );
+        }
+        assertOwnedRuntime(name);
+        try {
+          await opts.manager.reloadWorkspace(opts.workspaceCwd, name);
+          diagnostics.delete(name);
+        } catch (error) {
+          diagnostics.set(name, diagnostic(error));
+          throw error;
+        }
+        return resultFor(name, persisted);
+      });
     },
   };
   return service;

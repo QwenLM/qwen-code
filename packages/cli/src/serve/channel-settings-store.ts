@@ -5,6 +5,8 @@
  */
 
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
+import type { ChannelConfigFieldDescriptor } from '@qwen-code/channel-base';
 import { getPlugin } from '../commands/channel/channel-registry.js';
 import { loadSettings, saveSettings } from '../config/settings.js';
 import { isAllChannelSelectionName } from './channel-selection.js';
@@ -67,10 +69,186 @@ function invalidSecret(message: string): ChannelSettingsError {
   return new ChannelSettingsError('channel_settings_invalid_secret', message);
 }
 
+function invalidConfig(message: string): ChannelSettingsError {
+  return new ChannelSettingsError('channel_settings_invalid_config', message);
+}
+
 const UNSAFE_OBJECT_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isEnvironmentReference(value: string): boolean {
+  return /^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(value);
+}
+
+function assertStringRecord(
+  key: string,
+  value: unknown,
+  allowedKeys: ReadonlySet<string>,
+): void {
+  if (!isRecord(value)) {
+    throw invalidConfig(`Channel field "${key}" must be an object.`);
+  }
+  for (const [nestedKey, nestedValue] of Object.entries(value)) {
+    if (!allowedKeys.has(nestedKey) || typeof nestedValue !== 'string') {
+      throw invalidConfig(`Channel field "${key}.${nestedKey}" is invalid.`);
+    }
+  }
+}
+
+function assertNumberRecord(
+  key: string,
+  value: unknown,
+  allowedKeys: ReadonlySet<string>,
+): void {
+  if (!isRecord(value)) {
+    throw invalidConfig(`Channel field "${key}" must be an object.`);
+  }
+  for (const [nestedKey, nestedValue] of Object.entries(value)) {
+    if (
+      !allowedKeys.has(nestedKey) ||
+      typeof nestedValue !== 'number' ||
+      !Number.isFinite(nestedValue)
+    ) {
+      throw invalidConfig(`Channel field "${key}.${nestedKey}" is invalid.`);
+    }
+  }
+}
+
+function assertSharedField(key: string, value: unknown): boolean {
+  const enumValues: Record<string, ReadonlySet<string>> = {
+    senderPolicy: new Set(['allowlist', 'pairing', 'open']),
+    dmPolicy: new Set(['open', 'disabled']),
+    groupPolicy: new Set(['disabled', 'allowlist', 'open']),
+    sessionScope: new Set(['user', 'thread', 'single']),
+    dispatchMode: new Set(['steer', 'followup', 'collect']),
+    blockStreaming: new Set(['on', 'off']),
+  };
+  if (Object.hasOwn(enumValues, key)) {
+    if (typeof value !== 'string' || !enumValues[key]!.has(value)) {
+      throw invalidConfig(`Channel field "${key}" has an invalid value.`);
+    }
+    return true;
+  }
+  if (['model', 'cwd', 'approvalMode', 'instructions'].includes(key)) {
+    if (typeof value !== 'string') {
+      throw invalidConfig(`Channel field "${key}" must be a string.`);
+    }
+    return true;
+  }
+  if (key === 'allowedUsers') {
+    if (
+      !Array.isArray(value) ||
+      value.some((item) => typeof item !== 'string')
+    ) {
+      throw invalidConfig(`Channel field "${key}" must be a string array.`);
+    }
+    return true;
+  }
+  if (key === 'groupHistoryLimit') {
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      throw invalidConfig(`Channel field "${key}" must be a number.`);
+    }
+    return true;
+  }
+  if (key === 'identity') {
+    assertStringRecord(
+      key,
+      value,
+      new Set(['id', 'displayName', 'description']),
+    );
+    return true;
+  }
+  if (key === 'blockStreamingChunk') {
+    assertNumberRecord(key, value, new Set(['minChars', 'maxChars']));
+    return true;
+  }
+  if (key === 'blockStreamingCoalesce') {
+    assertNumberRecord(key, value, new Set(['idleMs']));
+    return true;
+  }
+  if (key === 'memoryScope') {
+    if (!isRecord(value)) {
+      throw invalidConfig(`Channel field "${key}" must be an object.`);
+    }
+    for (const [nestedKey, nestedValue] of Object.entries(value)) {
+      const valid =
+        (nestedKey === 'namespace' && typeof nestedValue === 'string') ||
+        (nestedKey === 'mode' && nestedValue === 'metadata-only');
+      if (!valid) {
+        throw invalidConfig(`Channel field "${key}.${nestedKey}" is invalid.`);
+      }
+    }
+    return true;
+  }
+  if (key === 'webhooks' || key === 'groups') {
+    if (!isRecord(value)) {
+      throw invalidConfig(`Channel field "${key}" must be an object.`);
+    }
+    return true;
+  }
+  return false;
+}
+
+function assertDescriptorValue(
+  field: ChannelConfigFieldDescriptor,
+  value: unknown,
+): void {
+  const invalidEnvironment =
+    typeof value === 'string' &&
+    isEnvironmentReference(value) &&
+    field.envResolvable !== true;
+  if (invalidEnvironment) {
+    throw invalidConfig(
+      `Channel field "${field.key}" does not support environment references.`,
+    );
+  }
+  const valid =
+    ((field.kind === 'string' || field.kind === 'secret') &&
+      typeof value === 'string' &&
+      value.length > 0) ||
+    (field.kind === 'boolean' && typeof value === 'boolean') ||
+    (field.kind === 'number' &&
+      typeof value === 'number' &&
+      Number.isFinite(value)) ||
+    (field.kind === 'enum' &&
+      typeof value === 'string' &&
+      field.options?.some((option) => option.value === value) === true);
+  if (!valid) {
+    throw invalidConfig(`Channel field "${field.key}" has an invalid value.`);
+  }
+}
+
+function assertManagedConfig(
+  config: Record<string, unknown>,
+  previous: Record<string, unknown>,
+  fields: readonly ChannelConfigFieldDescriptor[],
+): void {
+  const descriptorFields = new Map(fields.map((field) => [field.key, field]));
+  for (const [key, value] of Object.entries(config)) {
+    if (key === 'type') continue;
+    const field = descriptorFields.get(key);
+    if (field) {
+      assertDescriptorValue(field, value);
+      continue;
+    }
+    if (assertSharedField(key, value)) continue;
+    if (
+      !Object.hasOwn(previous, key) ||
+      !isDeepStrictEqual(previous[key], value)
+    ) {
+      throw invalidConfig(`Channel field "${key}" is not manageable.`);
+    }
+  }
+  for (const field of fields) {
+    if (!field.required) continue;
+    const value = config[field.key];
+    if (value === undefined || value === null || value === '') {
+      throw invalidConfig(`Channel field "${field.key}" is required.`);
+    }
+  }
 }
 
 function validateSecretUpdate(
@@ -262,7 +440,9 @@ export class WorkspaceChannelSettingsStore {
     }
 
     const current = this.assertRevision(options.expectedRevision);
-    const previous = current.channels[name] ?? {};
+    const storedPrevious = current.channels[name] ?? {};
+    const previous =
+      storedPrevious['type'] === options.config.type ? storedPrevious : {};
     const nextConfig: Record<string, unknown> = { ...options.config };
     for (const key of secretKeys) {
       const update = secretUpdates[key] ?? { operation: 'preserve' };
@@ -270,6 +450,7 @@ export class WorkspaceChannelSettingsStore {
       if (value !== undefined) nextConfig[key] = value;
     }
     mergeWebhookSecrets(previous, nextConfig, webhookSecretUpdates);
+    assertManagedConfig(nextConfig, previous, plugin.management.fields);
 
     const channels = { ...current.channels, [name]: nextConfig };
     const workspaceFile = loadSettings(this.workspaceCwd, {

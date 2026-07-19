@@ -43,6 +43,11 @@ function setup(options: {
   const store = {
     snapshot: vi.fn(() => persisted),
     upsert: vi.fn(async (name, request) => {
+      if (request.expectedRevision !== persisted.revision) {
+        throw Object.assign(new Error('stale'), {
+          code: 'channel_settings_conflict',
+        });
+      }
       const previous = persisted.channels[name] ?? {};
       const token =
         request.secrets?.token?.operation === 'clear'
@@ -61,7 +66,12 @@ function setup(options: {
       });
       return persisted;
     }),
-    remove: vi.fn(async (name) => {
+    remove: vi.fn(async (name, request) => {
+      if (request.expectedRevision !== persisted.revision) {
+        throw Object.assign(new Error('stale'), {
+          code: 'channel_settings_conflict',
+        });
+      }
       const channels = { ...persisted.channels };
       delete channels[name];
       const hasAllSentinel = persisted.startupNames.some(
@@ -80,7 +90,12 @@ function setup(options: {
       });
       return persisted;
     }),
-    setStartupNames: vi.fn(async (startupNames) => {
+    setStartupNames: vi.fn(async (startupNames, request) => {
+      if (request.expectedRevision !== persisted.revision) {
+        throw Object.assign(new Error('stale'), {
+          code: 'channel_settings_conflict',
+        });
+      }
       persisted = settingsSnapshot({
         revision: 'rev-2',
         channels: persisted.channels,
@@ -208,6 +223,33 @@ describe('createChannelManagementService', () => {
     });
   });
 
+  it('never exposes raw config from an unmanaged channel type', async () => {
+    const sentinel = 'unmanaged-secret-sentinel';
+    const { service } = setup({
+      snapshot: settingsSnapshot({
+        channels: {
+          legacy: {
+            type: 'unmanaged-extension',
+            token: sentinel,
+            secret: sentinel,
+            nested: { credential: sentinel },
+          },
+        },
+        startupNames: ['legacy'],
+      }),
+      committedNames: ['legacy'],
+    });
+
+    const snapshot = await service.list();
+
+    expect(snapshot.instances['legacy']).toMatchObject({
+      config: { type: 'unmanaged-extension' },
+      startsWithServe: true,
+      runtime: { state: 'connected' },
+    });
+    expect(JSON.stringify(snapshot)).not.toContain(sentinel);
+  });
+
   it('projects a whitespace all startup sentinel onto every configured instance', async () => {
     const { service } = setup({
       snapshot: settingsSnapshot({
@@ -271,6 +313,55 @@ describe('createChannelManagementService', () => {
 
     expect(store.remove).not.toHaveBeenCalled();
     expect(persisted().channels['bot']).toBeDefined();
+  });
+
+  it('rejects a stale active delete before any worker side effect', async () => {
+    const { service, store, manager, persisted } = setup({
+      committedNames: ['bot'],
+      snapshot: settingsSnapshot({ startupNames: ['bot'] }),
+    });
+
+    await expect(
+      service.remove('bot', { expectedRevision: 'stale' }),
+    ).rejects.toMatchObject({ code: 'channel_settings_conflict' });
+
+    expect(manager.stopSelection).not.toHaveBeenCalled();
+    expect(manager.setSelection).not.toHaveBeenCalled();
+    expect(store.remove).not.toHaveBeenCalled();
+    expect(persisted()).toEqual(settingsSnapshot({ startupNames: ['bot'] }));
+    expect(manager.committedChannelNames()).toEqual(['bot']);
+  });
+
+  it('serializes concurrent deletes so a losing revision cannot stop twice', async () => {
+    const { service, manager, persisted } = setup({
+      committedNames: ['bot'],
+      snapshot: settingsSnapshot({ startupNames: ['bot'] }),
+    });
+    let releaseStop!: () => void;
+    const stopPending = new Promise<void>((resolve) => {
+      releaseStop = resolve;
+    });
+    vi.mocked(manager.stopSelection).mockImplementationOnce(async () => {
+      await stopPending;
+    });
+
+    const winner = service.remove('bot', { expectedRevision: 'rev-1' });
+    await vi.waitFor(() =>
+      expect(manager.stopSelection).toHaveBeenCalledOnce(),
+    );
+    const loser = service.remove('bot', { expectedRevision: 'rev-1' });
+    await Promise.resolve();
+    expect(manager.stopSelection).toHaveBeenCalledOnce();
+
+    releaseStop();
+    await winner;
+    await expect(loser).rejects.toMatchObject({
+      code: 'channel_settings_conflict',
+    });
+
+    expect(manager.stopSelection).toHaveBeenCalledOnce();
+    expect(persisted().channels).not.toHaveProperty('bot');
+    expect(persisted().startupNames).toEqual([]);
   });
 
   it('starts and stops from the manager committed order without persisting startup names', async () => {

@@ -7,8 +7,9 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import stripJsonComments from 'strip-json-comments';
+import { registerPlugin } from '../commands/channel/channel-registry.js';
 import { resetHomeEnvBootstrapForTesting } from '../config/settings.js';
 import { WorkspaceChannelSettingsStore } from './channel-settings-store.js';
 
@@ -27,6 +28,46 @@ describe('WorkspaceChannelSettingsStore', () => {
     JSON.parse(
       stripJsonComments(fs.readFileSync(settingsPath, 'utf8')),
     ) as Record<string, unknown>;
+
+  beforeAll(() => {
+    registerPlugin({
+      channelType: 'management-validation-test',
+      displayName: 'Management validation test',
+      management: {
+        fields: [
+          {
+            key: 'clientId',
+            label: 'Client ID',
+            kind: 'string',
+            required: true,
+            envResolvable: true,
+          },
+          {
+            key: 'clientSecret',
+            label: 'Client Secret',
+            kind: 'secret',
+            required: true,
+            envResolvable: true,
+          },
+          { key: 'enabled', label: 'Enabled', kind: 'boolean' },
+          { key: 'retries', label: 'Retries', kind: 'number' },
+          {
+            key: 'mode',
+            label: 'Mode',
+            kind: 'enum',
+            options: [
+              { value: 'safe', label: 'Safe' },
+              { value: 'fast', label: 'Fast' },
+            ],
+          },
+          { key: 'literalOnly', label: 'Literal only', kind: 'string' },
+        ],
+      },
+      createChannel() {
+        throw new Error('not used');
+      },
+    });
+  });
 
   beforeEach(() => {
     originalQwenHome = process.env['QWEN_HOME'];
@@ -104,11 +145,15 @@ describe('WorkspaceChannelSettingsStore', () => {
   });
 
   it('replaces and clears secrets only through explicit operations', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": { "type": "qq", "appSecret": "old-secret" } }
+}\n`);
     const store = new WorkspaceChannelSettingsStore(workspace);
     const replaced = await store.upsert('bot', {
       expectedRevision: store.snapshot().revision,
-      config: { type: 'telegram' },
-      secrets: { token: { operation: 'replace', value: 'new-token' } },
+      config: { type: 'qq' },
+      secrets: { appSecret: { operation: 'replace', value: 'new-secret' } },
     });
 
     expect(
@@ -117,13 +162,13 @@ describe('WorkspaceChannelSettingsStore', () => {
           string,
           Record<string, unknown>
         >
-      )['bot']?.['token'],
-    ).toBe('new-token');
+      )['bot']?.['appSecret'],
+    ).toBe('new-secret');
 
     await store.upsert('bot', {
       expectedRevision: replaced.revision,
-      config: { type: 'telegram' },
-      secrets: { token: { operation: 'clear' } },
+      config: { type: 'qq' },
+      secrets: { appSecret: { operation: 'clear' } },
     });
 
     expect(
@@ -133,7 +178,7 @@ describe('WorkspaceChannelSettingsStore', () => {
           Record<string, unknown>
         >
       )['bot'],
-    ).not.toHaveProperty('token');
+    ).not.toHaveProperty('appSecret');
   });
 
   it('rejects blank replacements and secret keys not declared by the plugin', async () => {
@@ -202,6 +247,8 @@ describe('WorkspaceChannelSettingsStore', () => {
   "channels": {
     "bot": {
       "type": "dingtalk",
+      "clientId": "client-id",
+      "clientSecret": "$CLIENT_SECRET",
       "webhooks": { "sources": { "github": {
         "secret": "webhook-literal-sentinel",
         "targets": { "main": { "chatId": "chat-1" } }
@@ -212,6 +259,7 @@ describe('WorkspaceChannelSettingsStore', () => {
     const store = new WorkspaceChannelSettingsStore(workspace);
     const sanitized = {
       type: 'dingtalk',
+      clientId: 'client-id',
       webhooks: {
         sources: {
           github: { targets: { main: { chatId: 'chat-1' } } },
@@ -257,7 +305,7 @@ describe('WorkspaceChannelSettingsStore', () => {
   it('switches webhook literals to environment references without retaining literals', async () => {
     writeWorkspaceSettings(`{
   "$version": 4,
-  "channels": { "bot": { "type": "dingtalk", "webhooks": {
+  "channels": { "bot": { "type": "dingtalk", "clientId": "client-id", "clientSecret": "$CLIENT_SECRET", "webhooks": {
     "sources": { "github": { "secret": "literal-sentinel", "targets": {} } }
   } } }
 }\n`);
@@ -267,6 +315,7 @@ describe('WorkspaceChannelSettingsStore', () => {
       expectedRevision: store.snapshot().revision,
       config: {
         type: 'dingtalk',
+        clientId: 'client-id',
         webhooks: {
           sources: {
             github: { secretEnv: 'GITHUB_WEBHOOK_SECRET', targets: {} },
@@ -339,6 +388,190 @@ describe('WorkspaceChannelSettingsStore', () => {
         config: { type: 'unmanaged-extension' },
       }),
     ).rejects.toMatchObject({ code: 'channel_settings_unmanageable' });
+  });
+
+  it.each([
+    {
+      label: 'missing required DingTalk client ID',
+      config: { type: 'dingtalk' },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    },
+    {
+      label: 'missing required DingTalk client secret',
+      config: { type: 'dingtalk', clientId: 'client-id' },
+      secrets: { clientSecret: { operation: 'preserve' } as const },
+    },
+    {
+      label: 'cleared required DingTalk client secret',
+      config: { type: 'dingtalk', clientId: 'client-id' },
+      secrets: { clientSecret: { operation: 'clear' } as const },
+    },
+    {
+      label: 'wrong string kind',
+      config: { type: 'management-validation-test', clientId: 42 },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    },
+    {
+      label: 'wrong boolean kind',
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        enabled: 'yes',
+      },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    },
+    {
+      label: 'wrong number kind',
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        retries: '3',
+      },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    },
+    {
+      label: 'invalid enum option',
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        mode: 'turbo',
+      },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    },
+    {
+      label: 'environment reference on a non-resolvable field',
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        literalOnly: '$LITERAL_ONLY',
+      },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    },
+    {
+      label: 'unknown config field',
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        unexpected: true,
+      },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    },
+    {
+      label: 'wrong shared field kind',
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        allowedUsers: 'user-1',
+      },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    },
+  ])('rejects $label without writing', async ({ config, secrets }) => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const before = fs.readFileSync(settingsPath, 'utf8');
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: config as Record<string, unknown> & { type: string },
+        secrets,
+      }),
+    ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+  });
+
+  it('accepts env-resolvable descriptor fields and typed shared fields', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'management-validation-test',
+        clientId: '$CLIENT_ID',
+        enabled: true,
+        retries: 3,
+        mode: 'safe',
+        senderPolicy: 'open',
+        allowedUsers: ['user-1'],
+        groupHistoryLimit: 25,
+        blockStreaming: 'on',
+        identity: { id: 'ops', displayName: 'Ops' },
+      },
+      secrets: {
+        clientSecret: {
+          operation: 'replace',
+          value: '$CLIENT_SECRET',
+        },
+      },
+    });
+
+    expect(next.channels['bot']).toMatchObject({
+      clientId: '$CLIENT_ID',
+      clientSecret: '$CLIENT_SECRET',
+      enabled: true,
+      retries: 3,
+      mode: 'safe',
+      senderPolicy: 'open',
+      allowedUsers: ['user-1'],
+      groupHistoryLimit: 25,
+      blockStreaming: 'on',
+      identity: { id: 'ops', displayName: 'Ops' },
+    });
+  });
+
+  it('rejects clearing an existing required secret without writing', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "dingtalk",
+    "clientId": "client-id",
+    "clientSecret": "existing-secret"
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const before = fs.readFileSync(settingsPath, 'utf8');
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: { type: 'dingtalk', clientId: 'client-id' },
+        secrets: { clientSecret: { operation: 'clear' } },
+      }),
+    ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+  });
+
+  it('allows unknown legacy fields only when preserved unchanged', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'telegram',
+        senderPolicy: 'pairing',
+        legacyField: true,
+      },
+      secrets: { token: { operation: 'preserve' } },
+    });
+
+    expect(next.channels['bot']?.['legacyField']).toBe(true);
   });
 
   it('rejects a stale revision without writing', async () => {

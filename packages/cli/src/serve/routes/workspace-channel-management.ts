@@ -187,6 +187,7 @@ function errorCode(error: unknown): string | undefined {
 
 const ERROR_STATUS = new Map<string, number>([
   ['invalid_channel_instance_name', 400],
+  ['channel_settings_invalid_config', 400],
   ['channel_settings_invalid_secret', 400],
   ['channel_settings_unmanageable', 400],
   ['channel_workspace_mismatch', 400],
