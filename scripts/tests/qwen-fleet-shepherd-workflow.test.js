@@ -105,11 +105,18 @@ describe('fleet shepherd workflow', () => {
     // before a dispatch or branch sync.
     expect(workflow).toContain('live_skip() {');
     expect(workflow).toContain('return 0');
-    expect(
-      workflow.split('present (live) — consent withdrawn').length - 1,
-    ).toBe(2);
-    expect(workflow).toMatch(/elif live_skip "\$\{PR\}"; then/);
-    expect(workflow).toMatch(/if live_skip "\$\{PR\}"; then/);
+    // Reason-aware notes: an API outage (fail closed) is never reported as
+    // a maintainer decision, and the per-tick budget is checked BEFORE the
+    // PAT-backed live read so an exhausted tick stops spending API calls.
+    expect(workflow).toContain("LIVE_SKIP_REASON='unreadable'");
+    expect(workflow).toContain('consent withdrawn, no %s');
+    expect(workflow).toContain('fail closed, no %s');
+    expect(workflow).toMatch(
+      /DISPATCHES\}" -ge "\$\{MAX_CONFLICT_DISPATCHES_PER_TICK\}" \]\]; then[\s\S]{0,220}elif live_skip "\$\{PR\}"; then/,
+    );
+    expect(workflow).toMatch(
+      /SYNCS\}" -ge "\$\{MAX_SYNCS_PER_TICK\}" \]\]; then[\s\S]{0,160}elif live_skip "\$\{PR\}"; then/,
+    );
     // PAT identity is verified before any write.
     expect(workflow).toContain(
       "::error::CI_DEV_BOT_PAT authenticates as '${bot_actor:-unknown}'",

@@ -163,11 +163,14 @@ jobs:
       # lets triage+ apply labels, so the whole event class is trusted —
       # but ONLY the takeover label itself shares the group: an unrelated
       # label changed in the same batch operation must not cancel a queued
-      # takeover route);
+      # takeover route); issue_comment → its own per-PR command group, so a
+      # burst of command comments coalesces to at most two runs (and
+      # superseding a pending older command with a newer one IS the wanted
+      # latest-intent semantics) without ever touching review routes;
       # issues → per-issue; anything else (dispatch) → unique per run_id,
       # never cancelled.
       group: >-
-        ${{ github.event_name == 'schedule' && 'qwen-autofix-route-cron' || (github.event_name == 'pull_request_review' && (contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association) || github.event.review.user.login == 'qwen-code-ci-bot') && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)) || (github.event_name == 'pull_request' && github.event.label.name == 'autofix/takeover' && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)) || (github.event_name == 'issues' && format('qwen-autofix-route-issue-{0}', github.event.issue.number)) || format('qwen-autofix-route-{0}', github.run_id) }}
+        ${{ github.event_name == 'schedule' && 'qwen-autofix-route-cron' || (github.event_name == 'pull_request_review' && (contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association) || github.event.review.user.login == 'qwen-code-ci-bot') && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)) || (github.event_name == 'pull_request' && github.event.label.name == 'autofix/takeover' && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)) || (github.event_name == 'issue_comment' && format('qwen-autofix-route-cmd-{0}', github.event.issue.number)) || (github.event_name == 'issues' && format('qwen-autofix-route-issue-{0}', github.event.issue.number)) || format('qwen-autofix-route-{0}', github.run_id) }}
       cancel-in-progress: |-
         ${{ github.event_name != 'workflow_dispatch' }}
     permissions:
@@ -324,8 +327,22 @@ jobs:
                   # will. Fork authors without write+ are dropped silently.
                   CMD_HEAD_REPO="$(gh api "repos/${REPO}/pulls/${ISSUE_NUMBER}" --jq '.head.repo.full_name // ""' 2> /dev/null || echo '')"
                   if [[ "${SENDER_LOGIN}" == "${COMMENT_PR_AUTHOR}" && "${CMD_HEAD_REPO}" == "${REPO}" ]]; then
-                    sender_is_authorized=true
-                    sender_permission='pr-author'
+                    # Author privilege is LIVE, not durable: an author removed
+                    # from the repo keeps their PR/head-repo match forever, so
+                    # authorship alone must not keep summoning secret-bearing
+                    # runs. Authors qualify at triage+ (the sugar exists for
+                    # members below write who cannot apply labels).
+                    api_error_file="$(mktemp)"
+                    if sender_permission="$(gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission" --jq '.permission // ""' 2>"${api_error_file}")"; then
+                      case "${sender_permission}" in
+                        admin|maintain|write|triage) sender_is_authorized=true; sender_permission="pr-author/${sender_permission}" ;;
+                      esac
+                    else
+                      api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
+                      echo "::warning::Permission API call failed for author ${SENDER_LOGIN}: ${api_error:-unknown error}"
+                      sender_permission=''
+                    fi
+                    rm -f "${api_error_file}"
                   else
                     api_error_file="$(mktemp)"
                     if sender_permission="$(gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission" --jq '.permission // ""' 2>"${api_error_file}")"; then
@@ -1194,9 +1211,16 @@ jobs:
           # FRONT — unlike the label path this job runs in issue_comment
           # context WITH secrets, so it can explain itself, and refusing here
           # keeps the label from ever sticking to a fork PR via the command.
-          if ! PR_INFO="$(gh pr view "${PR}" --repo "${REPO}" --json labels,isCrossRepository 2> /dev/null)"; then
+          if ! PR_INFO="$(gh pr view "${PR}" --repo "${REPO}" --json labels,isCrossRepository,state,baseRefName 2> /dev/null)"; then
             echo "::error::could not read PR #${PR}"
             exit 1
+          fi
+          # State/base can change while this job sits in its per-PR queue —
+          # re-verify what the route checked so a stale command cannot label
+          # a closed or non-main PR.
+          if [[ "$(jq -r '.state // ""' <<< "${PR_INFO}")" != "OPEN" || "$(jq -r '.baseRefName // ""' <<< "${PR_INFO}")" != "main" ]]; then
+            echo "🧭 takeover command dropped: PR #${PR} is no longer an open main-targeting PR"
+            exit 0
           fi
           # Skip wins over takeover EVERYWHERE — including here: engaging or
           # re-arming a skip-labeled PR would post an 'engaged' window anchor
@@ -1291,6 +1315,8 @@ jobs:
             BODY="$(printf '🚫 Takeover label applied but NOT engaged: this PR carries `%s`, which wins over takeover — the loop will not manage it. Remove `%s` to engage.\n\n<details>\n<summary>中文说明</summary>\n\n🚫 已打接管标签但未生效：本 PR 带有 `%s`，其优先级高于接管，循环不会介入。移除 `%s` 后才会接管。\n\n</details>\n\n<!-- takeover-ack skip-blocked -->' "${SKIP_LABEL}" "${SKIP_LABEL}" "${SKIP_LABEL}" "${SKIP_LABEL}")"
           elif [[ "${ACK}" == 'engaged' ]]; then
             BODY="$(printf '🤝 Takeover engaged: the autofix loop now manages this PR — it will address new review feedback and resolve base conflicts until the label is removed or the round cap is reached. Remove the `%s` label (or comment `%s stop`) to release.\n\n<details>\n<summary>中文说明</summary>\n\n🤝 已接管：autofix 循环现在管理此 PR —— 将持续处理新的评审反馈与 base 冲突，直到移除标签或达到轮次上限。移除 `%s` 标签（或评论 `%s stop`）即可释放。\n\n</details>\n\n<!-- takeover-ack engaged -->' "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}")"
+          elif [[ "${PR_AUTHOR_LIVE}" == "${AUTOFIX_BOT}" && "${HAS_SKIP}" == "true" ]]; then
+            BODY="$(printf '👋 Takeover mode ended. This bot-authored PR also carries `%s`, which opts it out of standard bot management entirely — nothing will engage it until that label is removed.\n\n<details>\n<summary>中文说明</summary>\n\n👋 接管模式结束。本 bot 创建的 PR 同时带有 `%s`，已完全退出常规 bot 管理 —— 移除该标签前不会有任何介入。\n\n</details>\n\n<!-- takeover-ack released -->' "${SKIP_LABEL}" "${SKIP_LABEL}")"
           elif [[ "${PR_AUTHOR_LIVE}" == "${AUTOFIX_BOT}" ]]; then
             BODY="$(printf '👋 Takeover mode ended: the raised round cap no longer applies. This is a bot-authored PR, so STANDARD bot management continues under the strict cap (apply `%s` to opt it out entirely). Re-apply `%s` (or comment `%s`) for the raised cap again.\n\n<details>\n<summary>中文说明</summary>\n\n👋 接管模式结束：提升的轮次上限不再适用。这是 bot 创建的 PR，常规 bot 管理仍将继续（严格上限；如需完全退出请打 `%s`）。重新打上 `%s` 标签（或评论 `%s`）可恢复提升上限。\n\n</details>\n\n<!-- takeover-ack released -->' "${SKIP_LABEL}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${SKIP_LABEL}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}")"
           else
@@ -1320,6 +1346,7 @@ jobs:
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           FORCED_PR: '${{ needs.route.outputs.pr_number }}'
+          DRY_RUN: '${{ needs.route.outputs.dry_run }}'
         run: |-
           WORKDIR="$(mktemp -d)"
 
@@ -1358,13 +1385,19 @@ jobs:
             # gate: that gate discards without writing a marker, so the
             # watermark never advances and an unfiltered scan would re-emit
             # the PR (checkout, npm ci, build) every tick forever.
-            CANDIDATES="$(jq -rs --arg skip "${SKIP_LABEL}" \
+            # Rotating start offset (changes every ~10 minutes): a fixed
+            # newest-first order plus the inspection budget would starve the
+            # oldest tail FOREVER once the pool exceeds the budget; rotation
+            # guarantees every candidate is reached within pool/budget scans.
+            ROT_OFF="$(( ($(date -u +%s) / 600) % 97 ))"
+            CANDIDATES="$(jq -rs --arg skip "${SKIP_LABEL}" --argjson off "${ROT_OFF}" \
               'add
                | unique_by(.number)
                | sort_by(-.number)
+               | map(select(.isCrossRepository == false))
+               | map(select([.labels[]?.name] | index($skip) | not))
+               | (if length == 0 then . else (($off % length) as $o | .[$o:] + .[:$o]) end)
                | .[]
-               | select(.isCrossRepository == false)
-               | select([.labels[]?.name] | index($skip) | not)
                | .number' \
               "${WORKDIR}/bot-prs.json" "${WORKDIR}/takeover-prs.json")"
           fi
@@ -1496,7 +1529,12 @@ jobs:
                 | {ts: .[0], round: (.[2] | tonumber), win: (.[3] // "none")} ]' "${WORKDIR}/ic.json")"
             # The watermark is GLOBAL across all markers — feedback already
             # evaluated stays evaluated, no matter how counting windows move.
-            EVAL_WM="$(jq -r 'map(.ts) | max // ""' <<< "${MARKERS}")"
+            # The terminal-handoff SENTINEL ts is excluded: it is a flag, not
+            # an evaluation time, and letting it into the watermark would
+            # filter all future feedback forever — making a re-arm after a
+            # terminal handoff dead on arrival (terminal skipping itself is
+            # round-based and window-scoped, so re-arm properly clears it).
+            EVAL_WM="$(jq -r 'map(.ts) | map(select(. != "9999-12-31T23:59:59Z")) | max // ""' <<< "${MARKERS}")"
             # ROUND counting is windowed by KEY EQUALITY, not timestamps: the
             # current window key is the created_at of the latest
             # '<!-- takeover-ack engaged -->' comment ('none' before any
@@ -1545,7 +1583,17 @@ jobs:
                   [ .[] | select((.user.login // "") == $ab)
                     | select((.body // "") | contains("<!-- takeover-cap-reached -->"))
                     | select((.created_at // "") > $rt) ] | length' "${WORKDIR}/ic.json")"
-                if [[ "${CAP_NOTICED}" == "0" ]]; then
+                if [[ "${DRY_RUN}" == "true" ]]; then
+                  echo "🧪 DRY-RUN: would post cap-paused notice on #${PR}"
+                elif [[ "${CAP_NOTICED}" == "0" ]]; then
+                  # Consent may have moved since PR_META: a takeover label
+                  # removed (or skip added) moments ago must not receive a
+                  # stale 'paused' notice.
+                  LIVE_LABELS="$(gh pr view "${PR}" --repo "${REPO}" --json labels 2> /dev/null | jq -r '[.labels[]?.name] | join(" ")' || echo '')"
+                  if [[ " ${LIVE_LABELS} " != *" ${TAKEOVER_LABEL} "* || " ${LIVE_LABELS} " == *" ${SKIP_LABEL} "* ]]; then
+                    echo "🧭 cap notice skipped: consent changed since the snapshot (labels: ${LIVE_LABELS:-unreadable})"
+                    continue
+                  fi
                   # Convention: verify the PAT identity before ANY write. A
                   # rotated PAT would post under a foreign login the dedup
                   # (which counts AUTOFIX_BOT comments only) can never see —
@@ -1718,9 +1766,15 @@ jobs:
       # predates this script does not contain it (bash exits 127 and the gate
       # dies without an outcome), and an in-branch copy would let branch code
       # define its own gate.
-      - name: 'Stage trusted schema gate'
+      - name: 'Stage trusted schema gate and agent runner'
         run: |-
           cp .github/scripts/check-settings-schema.sh "${RUNNER_TEMP}/check-settings-schema.sh"
+          # The agent step runs AFTER prepare checks out the PR branch, so
+          # invoking the runner from the working tree would execute
+          # branch-controlled code on the host with the model key in env
+          # (takeover targets human-authored branches). Stage it from the
+          # trusted base and invoke the staged copy.
+          cp .qwen/skills/autofix/scripts/run-agent.mjs "${RUNNER_TEMP}/run-agent.mjs"
 
       - name: 'Check runner environment'
         env:
@@ -1917,7 +1971,7 @@ jobs:
             [ .[] | select((.user.login // "") == $ab) | (.body // "")
               | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+)(?: win=([^ ]+))? -->") ] | .[]
               | {ts: .[0], round: (.[2] | tonumber), win: (.[3] // "none")} ]' "${WORKDIR}/ic.json")"
-          LIVE_EVAL_WM="$(jq -r 'map(.ts) | max // ""' <<< "${LIVE_MARKS}")"
+          LIVE_EVAL_WM="$(jq -r 'map(.ts) | map(select(. != "9999-12-31T23:59:59Z")) | max // ""' <<< "${LIVE_MARKS}")"
           # Round counting mirrors the scan: keyed to the CURRENT window (the
           # latest engage ack's created_at, 'none' before any takeover), so
           # pre-re-arm markers can neither trip the cap nor inflate the live
@@ -2109,7 +2163,9 @@ jobs:
           # no PAT and runs agent tools in the sandbox, so the branch's own
           # hooks may check the agent's commits again.
           git config core.hooksPath .husky
-          node .qwen/skills/autofix/scripts/run-agent.mjs \
+          # Trusted staged copy — never the PR branch's version (see the
+          # staging step).
+          node "${RUNNER_TEMP}/run-agent.mjs" \
             --mode address-review \
             --pr "${PR}" \
             --issue "${ISSUE}" \

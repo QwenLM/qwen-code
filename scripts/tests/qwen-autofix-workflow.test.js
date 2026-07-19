@@ -335,7 +335,7 @@ describe('qwen-autofix workflow', () => {
           JSON.stringify([
             ...marks.map((m) => ({
               user: { login: 'qwen-code-dev-bot' },
-              created_at: '2026-07-18T09:00:00Z',
+              created_at: m.at ?? '2026-07-18T09:00:00Z',
               body: `eval <!-- autofix-eval ts=${m.ts} acted=${m.acted ?? 'true'} round=${m.round}${m.win ? ` win=${m.win}` : ''} -->`,
             })),
             ...acks.map((at) => ({
@@ -511,10 +511,13 @@ describe('qwen-autofix workflow', () => {
     ).toBe(false);
     // The other half of the race: a job still carrying the OLD window key
     // after a re-arm superseded it must discard — finishing would stamp an
-    // old-sequence marker into the fresh window.
+    // old-sequence marker into the fresh window. The fixture is
+    // DISCRIMINATING: the old-window marker's comment lands AFTER the ack
+    // (created_at 11:00 > ack 10:00), so a timestamp-windowed
+    // implementation would have counted it — only key equality excludes it.
     expect(
       runStaleGate({
-        marks: [{ ts: W, round: 3 }],
+        marks: [{ ts: W, round: 3, at: '2026-07-18T11:00:00Z' }],
         acks: ['2026-07-18T10:00:00Z'],
         conflict: 'false',
         round: 3,
@@ -812,7 +815,7 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).not.toContain('github.event.sender.author_association');
   });
 
-  it('engages and releases PRs through maintainer labels — comment surface stays closed', () => {
+  it('engages and releases PRs through maintainer labels driving the takeover lifecycle', () => {
     // Applying autofix/takeover (GitHub triage+ only — the permission gate
     // is GitHub's own) summons the loop onto a PR, human-authored included;
     // removing it releases the PR. autofix/skip opts any PR out everywhere
@@ -830,6 +833,12 @@ describe('qwen-autofix workflow', () => {
     // takeover route.
     expect(routeJob).toContain(
       "github.event_name == 'pull_request' && github.event.label.name == 'autofix/takeover' && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)",
+    );
+    // Command bursts coalesce in their own per-PR group — never sharing
+    // (or cancelling) review routes, and pending-slot replacement keeps
+    // latest-intent semantics.
+    expect(routeJob).toContain(
+      "github.event_name == 'issue_comment' && format('qwen-autofix-route-cmd-{0}', github.event.issue.number)",
     );
     expect(routeJob).toContain(
       'contains(fromJSON(\'["OWNER", "MEMBER", "COLLABORATOR"]\'), github.event.review.author_association)',
@@ -851,12 +860,13 @@ describe('qwen-autofix workflow', () => {
     // Every takeover-flow comment is bilingual with COLLAPSED Chinese, and
     // EVERY body proves it individually (a global count alone could balance
     // one lost Chinese section against a duplicate elsewhere): engage,
-    // honest bot-PR release, human-PR release, re-arm, fork refusal, two
-    // skip-blocked refusals, and the cap pause.
+    // honest bot-PR release, skip-labeled bot-PR release, human-PR
+    // release, re-arm, fork refusal, two skip-blocked refusals, and the cap
+    // pause.
     const ackBodies = workflow.match(
       /printf '[^']*takeover-(?:ack|cap)[^']*'/g,
     );
-    expect(ackBodies).toHaveLength(8);
+    expect(ackBodies).toHaveLength(9);
     for (const body of ackBodies) {
       expect(body).toContain('<summary>中文说明</summary>');
     }
@@ -910,11 +920,11 @@ describe('qwen-autofix workflow', () => {
     // heads never qualify.
     const candProgram = reviewScanJob
       .match(
-        /CANDIDATES="\$\(jq -rs --arg skip "\$\{SKIP_LABEL\}" \\\n\s+'([\s\S]*?)' \\\n/,
+        /CANDIDATES="\$\(jq -rs --arg skip "\$\{SKIP_LABEL\}" --argjson off "\$\{ROT_OFF\}" \\\n\s+'([\s\S]*?)' \\\n/,
       )?.[1]
       ?.replace(/\n {15}/g, '\n');
     expect(candProgram).toBeTruthy();
-    const pick = (bots, takeovers) => {
+    const pick = (bots, takeovers, off = 0) => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-cand-'));
       try {
         writeFileSync(join(dir, 'bots.json'), JSON.stringify(bots));
@@ -926,6 +936,9 @@ describe('qwen-autofix workflow', () => {
             '--arg',
             'skip',
             'autofix/skip',
+            '--argjson',
+            'off',
+            String(off),
             candProgram,
             join(dir, 'bots.json'),
             join(dir, 'takeovers.json'),
@@ -957,6 +970,9 @@ describe('qwen-autofix workflow', () => {
       ),
     ).toEqual(['3', '1']);
     expect(pick([], [])).toEqual([]);
+    // Rotation: offset 1 starts one past the newest, wrapping — so the
+    // oldest tail is reached within pool/budget scans instead of never.
+    expect(pick([pr(1), pr(2)], [], 1)).toEqual(['1', '2']);
     // The producers must actually REQUEST labels — the jq consumers above
     // stay green on handcrafted fixtures even if a future edit drops the
     // field and skip/takeover filtering silently dies in production.
@@ -994,6 +1010,16 @@ describe('qwen-autofix workflow', () => {
       /CAP_NOTICED=[\s\S]*?contains\("<!-- takeover-cap-reached -->"\)[\s\S]*?> \$rt/,
     );
     expect(reviewScanJob).toContain('"${CAP_NOTICED}" == "0"');
+    // The notice honors dry-run and re-verifies live consent right before
+    // posting (a takeover label pulled moments ago gets no stale notice).
+    expect(reviewScanJob).toContain('DRY-RUN: would post cap-paused notice');
+    expect(reviewScanJob).toContain(
+      'cap notice skipped: consent changed since the snapshot',
+    );
+    // The queued toggle re-verifies state and base, and author privilege is
+    // LIVE (triage+ today), never durable authorship alone.
+    expect(workflow).toContain('no longer an open main-targeting PR');
+    expect(routeStep).toContain('admin|maintain|write|triage)');
     expect(reviewScanJob).toContain('"${ROUND}" -ge "${EFF_MAX_ROUNDS}"');
     // The effective cap travels in the matrix target and SHADOWS the
     // workflow-level MAX_ROUNDS inside the address job, so every round
@@ -1063,6 +1089,10 @@ describe('qwen-autofix workflow', () => {
     // Candidates drain newest-first, and the free busy skip never consumes
     // inspection budget.
     expect(reviewScanJob).toContain('sort_by(-.number)');
+    // …with a ROTATING start offset: a fixed order plus the budget would
+    // starve the oldest tail forever once the pool exceeds the budget.
+    expect(reviewScanJob).toContain('ROT_OFF=');
+    expect(reviewScanJob).toContain('.[$o:] + .[:$o]');
     expect(reviewScanJob).toMatch(
       /BUSY_PRS[\s\S]{0,240}INSPECTED=\$\(\( INSPECTED \+ 1 \)\)/,
     );
@@ -1079,11 +1109,19 @@ describe('qwen-autofix workflow', () => {
       /(if ! PR_INFO="\$\(gh pr view[\s\S]*?— nothing to do"\n {12}else\n {14}gh pr edit "\$\{PR\}" --repo "\$\{REPO\}" --remove-label "\$\{TAKEOVER_LABEL\}"\n[\s\S]*?\n {10}fi)/,
     )?.[1];
     expect(toggle).toBeTruthy();
-    const runToggle = ({ cmd, labels = [], fork = false }) => {
+    const runToggle = ({
+      cmd,
+      labels = [],
+      fork = false,
+      state = 'OPEN',
+      base = 'main',
+    }) => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-toggle-'));
       try {
         const prJson = JSON.stringify({
           isCrossRepository: fork,
+          state,
+          baseRefName: base,
           labels: labels.map((name) => ({ name })),
         });
         writeFileSync(
@@ -1230,6 +1268,15 @@ describe('qwen-autofix workflow', () => {
         engageAck('2026-07-18T12:00:00Z'),
       ]).round,
     ).toBe('0');
+    // A TERMINAL handoff's sentinel ts is a flag, not an evaluation time:
+    // it must never become the watermark, or a re-arm after a terminal
+    // handoff would filter all future feedback forever.
+    const terminal = roundOf([
+      marker(5, '9999-12-31T23:59:59Z'),
+      engageAck(K1),
+    ]);
+    expect(terminal.round).toBe('0');
+    expect(terminal.wm).not.toBe('9999-12-31T23:59:59Z');
     // The command job posts the re-arm ack when the label is already
     // present, and the prepare-side live counting is keyed identically.
     expect(workflow).toContain('re-armed ${TAKEOVER_LABEL} window');
@@ -1396,13 +1443,30 @@ describe('qwen-autofix workflow', () => {
         rmSync(dir, { recursive: true, force: true });
       }
     };
-    // PR author engages and releases without any label permission.
-    expect(runCmd({ body: '@qwen-code /takeover', sender: 'human-a' })).toBe(
-      'add|7165',
-    );
+    // PR author engages and releases without LABEL permission — but the
+    // privilege is LIVE: the author must still hold triage+ today (an
+    // ex-member's durable authorship no longer summons the bot).
     expect(
-      runCmd({ body: '  @qwen-code /takeover stop  ', sender: 'human-a' }),
+      runCmd({
+        body: '@qwen-code /takeover',
+        sender: 'human-a',
+        ghPermission: 'triage',
+      }),
+    ).toBe('add|7165');
+    expect(
+      runCmd({
+        body: '  @qwen-code /takeover stop  ',
+        sender: 'human-a',
+        ghPermission: 'triage',
+      }),
     ).toBe('remove|7165');
+    expect(
+      runCmd({
+        body: '@qwen-code /takeover',
+        sender: 'human-a',
+        ghPermission: 'read',
+      }),
+    ).toBe('|');
     // A write+ collaborator may command someone else's PR.
     expect(
       runCmd({
@@ -1929,7 +1993,12 @@ describe('qwen-autofix workflow', () => {
     ];
     for (const step of qwenSteps) {
       expect(step.length).toBeGreaterThan(0);
-      expect(step).toContain('node .qwen/skills/autofix/scripts/run-agent.mjs');
+      // Issue-phase steps run before any untrusted checkout and invoke the
+      // repo copy; the review address step runs AFTER the PR branch is
+      // checked out and must invoke the TRUSTED STAGED copy instead.
+      expect(step).toMatch(
+        /node (?:"\$\{RUNNER_TEMP\}\/run-agent\.mjs"|\.qwen\/skills\/autofix\/scripts\/run-agent\.mjs)/,
+      );
       expect(step).not.toContain('qwen --yolo --prompt "${PROMPT}"');
       expect(step).not.toContain('AUTOFIX_INVOCATION:');
       expect(step).not.toContain('qwen_status=$?');
@@ -1977,7 +2046,10 @@ describe('qwen-autofix workflow', () => {
       'run-agent.mjs \\\n            --mode develop-issue',
     );
     expect(triageAndAddressStep).toContain(
-      'run-agent.mjs \\\n            --mode address-review',
+      'node "${RUNNER_TEMP}/run-agent.mjs" \\\n            --mode address-review',
+    );
+    expect(workflow).toContain(
+      `cp .qwen/skills/autofix/scripts/run-agent.mjs "\${RUNNER_TEMP}/run-agent.mjs"`,
     );
     expect(workflow).not.toContain('.github/scripts/build-autofix-prompt.mjs');
 
@@ -2177,7 +2249,9 @@ describe('qwen-autofix workflow', () => {
     // No bare -f / +refspec force forms either. (--no-verify is NOT a force
     // flag: it severs PR-controlled pre-push hooks from the PAT-bearing
     // step, paired with hooksPath=/dev/null right above each push.)
-    expect(workflow).not.toMatch(/\bgit push\b[^\n]* -f\b/);
+    // Any short-option CLUSTER containing f (-f, -uf, -qf …) counts as a
+    // force flag; long options (--no-verify) start with -- and are exempt.
+    expect(workflow).not.toMatch(/\bgit push\b[^\n]* -[a-zA-Z]*f\b/);
     expect(workflow).not.toMatch(/\bgit push\b[^\n]* \+\S/);
     expect(publishPrStep).toContain('git push --no-verify origin "${BRANCH}"');
     expect(pushAndReportStep).toContain(
@@ -2193,7 +2267,7 @@ describe('qwen-autofix workflow', () => {
       /git config core\.hooksPath \/dev\/null\n\s+git checkout -B "\$\{BRANCH\}"/,
     );
     expect(workflow).toMatch(
-      /git config core\.hooksPath \.husky\n\s+node \.qwen\/skills\/autofix\/scripts\/run-agent\.mjs/,
+      /git config core\.hooksPath \.husky\n[\s\S]{0,200}node "\$\{RUNNER_TEMP\}\/run-agent\.mjs"/,
     );
   });
 

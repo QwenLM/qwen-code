@@ -256,12 +256,30 @@ jobs:
           # maintainer adding autofix/skip mid-tick must still win before a
           # dispatch or branch sync. Fail closed: an unreadable label state
           # counts as skipped.
+          # Returns 0 when the mutation must NOT proceed, with the reason in
+          # LIVE_SKIP_REASON: 'label' (consent withdrawn) vs 'unreadable'
+          # (fail closed on an API failure) — callers word their notes
+          # accordingly so an outage is never reported as a maintainer
+          # decision.
           live_skip() {
             local pr="$1" labels
+            LIVE_SKIP_REASON=''
             if ! labels="$(gh pr view "${pr}" --repo "${REPO}" --json labels 2> /dev/null)"; then
+              LIVE_SKIP_REASON='unreadable'
               return 0
             fi
-            [[ "$(jq -r --arg t "${SKIP_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${labels}")" == "true" ]]
+            if [[ "$(jq -r --arg t "${SKIP_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${labels}")" == "true" ]]; then
+              LIVE_SKIP_REASON='label'
+              return 0
+            fi
+            return 1
+          }
+          skip_note() {
+            if [[ "${LIVE_SKIP_REASON}" == 'label' ]]; then
+              printf '%s present (live) — consent withdrawn, no %s' "${SKIP_LABEL}" "$1"
+            else
+              printf 'label state unreadable — fail closed, no %s' "$1"
+            fi
           }
 
           # ---- walk the bot fleet (one list call carries all per-PR meta) --
@@ -340,9 +358,13 @@ jobs:
                 ACTION_NOTE="checks in flight (${PENDING}) — deferring conflict dispatch"
               elif [[ "${MY_MARKS}" == *"<!-- fleet-shepherd conflict-dispatch sha=${HEAD} -->"* ]]; then
                 ACTION_NOTE='conflict dispatch already sent for this head'
+              elif [[ "${DISPATCHES}" -ge "${MAX_CONFLICT_DISPATCHES_PER_TICK}" ]]; then
+                ACTION_NOTE='conflict-dispatch budget reached this tick'
               elif live_skip "${PR}"; then
-                ACTION_NOTE="${SKIP_LABEL} present (live) — consent withdrawn, no dispatch"
-              elif [[ "${DISPATCHES}" -lt "${MAX_CONFLICT_DISPATCHES_PER_TICK}" ]]; then
+                # Budget first: once it is exhausted no mutation is possible,
+                # so the PAT-backed live label read would be pure waste.
+                ACTION_NOTE="$(skip_note dispatch)"
+              else
                 if act "#${PR}: dispatch autofix for conflict resolution" \
                   env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh workflow run qwen-autofix.yml --repo "${REPO}" -f pr_number="${PR}"; then
                   # The dispatch HAPPENED, so it counts against the per-tick
@@ -363,8 +385,6 @@ jobs:
                 else
                   ACTION_NOTE='conflict dispatch FAILED — will retry next tick'
                 fi
-              else
-                ACTION_NOTE='dispatch cap reached this tick'
               fi
 
             # 2) stale base → sync. Self-limiting: behind_by resets on sync.
@@ -373,9 +393,11 @@ jobs:
             # next tick re-evaluates the fresh head.
             elif [[ "${MERGEABLE}" == "MERGEABLE" && "${BEHIND}" -ge "${BEHIND_SYNC_THRESHOLD}" && "${PENDING}" == "0" ]]; then
               STATUS_NOTE="behind by ${BEHIND}"
-              if live_skip "${PR}"; then
-                ACTION_NOTE="${SKIP_LABEL} present (live) — consent withdrawn, no sync"
-              elif [[ "${SYNCS}" -lt "${MAX_SYNCS_PER_TICK}" ]]; then
+              if [[ "${SYNCS}" -ge "${MAX_SYNCS_PER_TICK}" ]]; then
+                ACTION_NOTE='sync budget reached this tick'
+              elif live_skip "${PR}"; then
+                ACTION_NOTE="$(skip_note sync)"
+              else
                 if act "#${PR}: update-branch (behind by ${BEHIND})" \
                   gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" -f expected_head_sha="${HEAD}" --silent; then
                   SYNCS=$(( SYNCS + 1 ))
@@ -383,8 +405,6 @@ jobs:
                 else
                   ACTION_NOTE='sync rejected (head moved?) — will retry next tick'
                 fi
-              else
-                ACTION_NOTE='sync cap reached this tick'
               fi
 
             # 3) red CI → reruns are owned by the CI Failure Patrol
