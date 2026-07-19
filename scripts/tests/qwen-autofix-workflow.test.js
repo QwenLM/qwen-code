@@ -1876,6 +1876,7 @@ describe('qwen-autofix workflow', () => {
     // footer appears twice there; the handoff and issue-phase reports once.
     expect(pushAndReportStep.split(footer).length - 1).toBe(2);
     expect(reviewAddressReportStep.split(footer).length - 1).toBe(1);
+    expect(publishPrStep.split(footer).length - 1).toBe(1);
     // The footer is appended to the model-authored e2e report before it is
     // posted, not injected into the model's own file mid-generation.
     expect(publishPrStep).toContain(
