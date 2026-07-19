@@ -54,7 +54,11 @@ describe('fleet shepherd workflow', () => {
       'AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || \'qwen-code-dev-bot\' }}"',
     );
     expect(workflow).toContain('--author "${AUTOFIX_BOT}" --base main');
-    expect(workflow).toContain('.isCrossRepository != true');
+    // Fail CLOSED on the fork field, matching the autofix workflow's
+    // convention (jq's // treats false as empty; == false rejects a
+    // missing field instead of passing it through).
+    expect(workflow).toContain('.isCrossRepository == false');
+    expect(workflow).not.toContain('.isCrossRepository != true');
     // One list call carries all per-PR metadata — no N+1 gh pr view loop.
     expect(workflow).toContain(
       '--json number,headRefName,headRefOid,mergeable,isCrossRepository,statusCheckRollup',
@@ -84,6 +88,7 @@ describe('fleet shepherd workflow', () => {
             labels: [{ name: 'autofix/skip' }],
           },
           { number: 3, isCrossRepository: true, labels: [] },
+          { number: 4, labels: [] },
         ]),
       }),
     ).map((r) => r.number);

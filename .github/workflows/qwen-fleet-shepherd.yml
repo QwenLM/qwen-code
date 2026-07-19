@@ -279,7 +279,7 @@ jobs:
             exit 0
           fi
           jq --arg skip "${SKIP_LABEL}" \
-            '[.[] | select(.isCrossRepository != true) | select([.labels[]?.name] | index($skip) | not)]' \
+            '[.[] | select(.isCrossRepository == false) | select([.labels[]?.name] | index($skip) | not)]' \
             /tmp/fleet-raw.json > /tmp/fleet.json
 
           while IFS= read -r ROW; do
