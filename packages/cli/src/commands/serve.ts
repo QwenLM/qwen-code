@@ -238,6 +238,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('channel', {
         type: 'string',
         array: true,
+        requiresArg: true,
         description:
           'Experimental: start a daemon-managed channel worker for the named channel. Repeat to select multiple channels, or use --channel all.',
       })

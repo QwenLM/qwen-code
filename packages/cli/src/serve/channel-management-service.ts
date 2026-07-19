@@ -300,11 +300,21 @@ export function createChannelManagementService(
     }
   };
 
+  const assertManageableInstanceName = (name: string): void => {
+    if (name === 'all') {
+      throw new ChannelManagementError(
+        'invalid_channel_instance_name',
+        'Channel instance name "all" is reserved for startup selection.',
+      );
+    }
+  };
+
   const service: ChannelManagementService = {
     async list() {
       return listFrom(opts.store.snapshot());
     },
     async upsert(name, request) {
+      assertManageableInstanceName(name);
       const committedNames = opts.manager.committedChannelNames();
       const active = committedNames.includes(name);
       if (active) assertOwnedRuntime(name);
@@ -321,16 +331,19 @@ export function createChannelManagementService(
       return resultFor(name, persisted);
     },
     async remove(name, request) {
-      const committedNames = opts.manager.committedChannelNames();
-      if (committedNames.includes(name)) {
-        assertOwnedRuntime(name);
-        await stopFromNames(name, committedNames);
+      if (name !== 'all') {
+        const committedNames = opts.manager.committedChannelNames();
+        if (committedNames.includes(name)) {
+          assertOwnedRuntime(name);
+          await stopFromNames(name, committedNames);
+        }
       }
       const persisted = await opts.store.remove(name, request);
       diagnostics.delete(name);
       return resultFor(name, persisted);
     },
     async setStartup(name, request) {
+      assertManageableInstanceName(name);
       const current = opts.store.snapshot();
       if (!Object.hasOwn(current.channels, name)) {
         throw new ChannelManagementError(
@@ -363,6 +376,7 @@ export function createChannelManagementService(
       return resultFor(name, persisted);
     },
     async start(name) {
+      assertManageableInstanceName(name);
       const persisted = opts.store.snapshot();
       if (!Object.hasOwn(persisted.channels, name)) {
         throw new ChannelManagementError(
@@ -386,6 +400,7 @@ export function createChannelManagementService(
       return resultFor(name, persisted);
     },
     async stop(name) {
+      assertManageableInstanceName(name);
       const persisted = opts.store.snapshot();
       if (!Object.hasOwn(persisted.channels, name)) {
         throw new ChannelManagementError(
@@ -400,6 +415,7 @@ export function createChannelManagementService(
       return resultFor(name, persisted);
     },
     async restart(name) {
+      assertManageableInstanceName(name);
       const persisted = opts.store.snapshot();
       if (!opts.manager.committedChannelNames().includes(name)) {
         throw new ChannelManagementError(

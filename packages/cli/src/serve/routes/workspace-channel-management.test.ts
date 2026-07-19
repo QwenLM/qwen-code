@@ -290,6 +290,19 @@ describe('workspace Channel management routes', () => {
     const overlong = await auth(
       request(app).post(`/workspace/channels/${'a'.repeat(257)}/start`),
     );
+    const reservedPut = await auth(
+      request(app)
+        .put('/workspace/channels/all')
+        .send({ expectedRevision: 'r1', config: { type: 'telegram' } }),
+    );
+    const reservedStart = await auth(
+      request(app).post('/workspace/channels/all/start'),
+    );
+    const reservedStartup = await auth(
+      request(app)
+        .put('/workspace/channels/all/startup')
+        .send({ expectedRevision: 'r1', enabled: false }),
+    );
     const invalidPut = await auth(
       request(app)
         .put('/workspace/channels/bot')
@@ -303,13 +316,31 @@ describe('workspace Channel management routes', () => {
     expect(encodedSlash.status).toBe(400);
     expect(encodedSlash.body.code).toBe('invalid_channel_instance_name');
     expect(overlong.status).toBe(400);
+    expect(reservedPut.status).toBe(400);
+    expect(reservedStart.status).toBe(400);
+    expect(reservedStartup.status).toBe(400);
     expect(invalidPut.status).toBe(400);
     expect(invalidPut.body.code).toBe('invalid_channel_management_request');
     expect(primaryService.start).not.toHaveBeenCalled();
     expect(primaryService.upsert).not.toHaveBeenCalled();
   });
 
+  it('allows deleting a legacy all config through the management route', async () => {
+    const { app, primaryService } = mount({});
+
+    await auth(
+      request(app)
+        .delete('/workspace/channels/all')
+        .send({ expectedRevision: 'r1' }),
+    ).expect(200);
+
+    expect(primaryService.remove).toHaveBeenCalledWith('all', {
+      expectedRevision: 'r1',
+    });
+  });
+
   it.each([
+    ['invalid_channel_instance_name', 400],
     ['channel_settings_invalid_secret', 400],
     ['channel_settings_unmanageable', 400],
     ['channel_workspace_mismatch', 400],

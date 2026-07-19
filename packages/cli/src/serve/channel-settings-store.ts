@@ -154,9 +154,12 @@ export class WorkspaceChannelSettingsStore {
     const current = this.assertRevision(options.expectedRevision);
     const channels = { ...current.channels };
     delete channels[name];
-    const startupNames = current.startupNames.filter(
-      (startupName) => startupName !== name,
-    );
+    const startupNames =
+      name === 'all' && current.startupNames.includes('all')
+        ? Object.keys(channels).length > 0
+          ? ['all']
+          : []
+        : current.startupNames.filter((startupName) => startupName !== name);
     const workspaceFile = loadSettings(this.workspaceCwd, {
       skipLoadEnvironment: true,
     }).workspace;

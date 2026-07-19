@@ -61,10 +61,16 @@ function setup(options: {
     remove: vi.fn(async (name) => {
       const channels = { ...persisted.channels };
       delete channels[name];
+      const hasAllSentinel = persisted.startupNames.includes('all');
       persisted = settingsSnapshot({
         revision: 'rev-2',
         channels,
-        startupNames: persisted.startupNames.filter((item) => item !== name),
+        startupNames:
+          name === 'all' && hasAllSentinel
+            ? Object.keys(channels).length > 0
+              ? ['all']
+              : []
+            : persisted.startupNames.filter((item) => item !== name),
       });
       return persisted;
     }),
@@ -370,6 +376,75 @@ describe('createChannelManagementService', () => {
     ).rejects.toMatchObject({ code: 'channel_instance_not_found' });
 
     expect(store.setStartupNames).not.toHaveBeenCalled();
+    expect(manager.setSelection).not.toHaveBeenCalled();
+  });
+
+  it('rejects the reserved all name for configuration and startup mutations', async () => {
+    const { service, store, manager } = setup({
+      snapshot: settingsSnapshot({
+        channels: { all: { type: 'telegram' }, bot: { type: 'telegram' } },
+        startupNames: ['all'],
+      }),
+    });
+
+    await expect(
+      service.upsert('all', {
+        expectedRevision: 'rev-1',
+        config: { type: 'telegram' },
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_channel_instance_name' });
+    await expect(
+      service.setStartup('all', {
+        expectedRevision: 'rev-1',
+        enabled: false,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_channel_instance_name' });
+
+    expect(store.upsert).not.toHaveBeenCalled();
+    expect(store.setStartupNames).not.toHaveBeenCalled();
+    expect(manager.setSelection).not.toHaveBeenCalled();
+  });
+
+  it.each(['start', 'stop', 'restart'] as const)(
+    'rejects the reserved all name before %s reaches the manager',
+    async (operation) => {
+      const { service, manager } = setup({
+        snapshot: settingsSnapshot({
+          channels: { all: { type: 'telegram' }, bot: { type: 'telegram' } },
+          startupNames: ['all'],
+        }),
+      });
+
+      await expect(service[operation]('all')).rejects.toMatchObject({
+        code: 'invalid_channel_instance_name',
+      });
+
+      expect(manager.committedChannelNames).not.toHaveBeenCalled();
+      expect(manager.setSelection).not.toHaveBeenCalled();
+      expect(manager.stopSelection).not.toHaveBeenCalled();
+      expect(manager.reloadWorkspace).not.toHaveBeenCalled();
+    },
+  );
+
+  it('removes a legacy all config without treating the sentinel as a runtime instance', async () => {
+    const { service, store, manager } = setup({
+      committedNames: ['all'],
+      snapshot: settingsSnapshot({
+        channels: { all: { type: 'telegram' }, bot: { type: 'telegram' } },
+        startupNames: ['all'],
+      }),
+    });
+
+    const result = await service.remove('all', {
+      expectedRevision: 'rev-1',
+    });
+
+    expect(store.remove).toHaveBeenCalledWith('all', {
+      expectedRevision: 'rev-1',
+    });
+    expect(result.snapshot.instances).not.toHaveProperty('all');
+    expect(result.snapshot.instances['bot']?.startsWithServe).toBe(true);
+    expect(manager.stopSelection).not.toHaveBeenCalled();
     expect(manager.setSelection).not.toHaveBeenCalled();
   });
 

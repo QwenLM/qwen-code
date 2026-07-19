@@ -138,6 +138,14 @@ All PUT, DELETE, Start with serve, Start, Stop, and Restart requests use the
 strict mutation gate: configure a daemon bearer token and send it even on
 loopback.
 
+The literal instance name `all` is reserved for startup selection. Create,
+replace, Start with serve, Start, Stop, and Restart reject it with
+`400 invalid_channel_instance_name`. A legacy `channels.all` entry remains
+visible in list responses and may be removed with DELETE only. Deleting that
+entry does not target a runtime instance; if other configurations remain, a
+saved `["all"]` startup selection is preserved, and if none remain it becomes
+`[]`.
+
 Start by reading the catalog and current revision:
 
 ```bash

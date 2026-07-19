@@ -50,15 +50,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function parseInstanceName(req: Request, res: Response): string | undefined {
+function parseInstanceName(
+  req: Request,
+  res: Response,
+  options: { allowReservedAll?: boolean } = {},
+): string | undefined {
   const name = req.params['name'] ?? '';
   if (
     name.trim().length === 0 ||
     name.includes('/') ||
-    name.length > MAX_CHANNEL_INSTANCE_NAME_LENGTH
+    name.length > MAX_CHANNEL_INSTANCE_NAME_LENGTH ||
+    (name === 'all' && !options.allowReservedAll)
   ) {
     res.status(400).json({
-      error: `Channel instance names must be non-empty, contain no slash, and be at most ${MAX_CHANNEL_INSTANCE_NAME_LENGTH} characters.`,
+      error: `Channel instance names must be non-empty, contain no slash, differ from the reserved name "all", and be at most ${MAX_CHANNEL_INSTANCE_NAME_LENGTH} characters.`,
       code: 'invalid_channel_instance_name',
     });
     return undefined;
@@ -145,6 +150,7 @@ function errorCode(error: unknown): string | undefined {
 }
 
 const ERROR_STATUS = new Map<string, number>([
+  ['invalid_channel_instance_name', 400],
   ['channel_settings_invalid_secret', 400],
   ['channel_settings_unmanageable', 400],
   ['channel_workspace_mismatch', 400],
@@ -284,7 +290,7 @@ export function registerWorkspaceChannelManagementRoutes(
       if (!target) return;
       if (deps.parseAndValidateClientId(req, res, target.runtime) === null)
         return;
-      const name = parseInstanceName(req, res);
+      const name = parseInstanceName(req, res, { allowReservedAll: true });
       if (!name) return;
       const body = parseRevisionRequest(deps.safeBody(req), res);
       if (!body) return;

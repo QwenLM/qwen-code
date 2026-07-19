@@ -107,6 +107,15 @@ describe('serve command args', () => {
     expect(parsed['channel']).toEqual(['telegram', 'feishu']);
   });
 
+  it('rejects bare channel flags', () => {
+    expect(() => buildParser().parseSync('--channel')).toThrow(
+      /Not enough arguments following: channel/,
+    );
+    expect(() => buildParser().parseSync('--channel=')).toThrow(
+      /Not enough arguments following: channel/,
+    );
+  });
+
   it('parses a single --workspace value as a single-element array', () => {
     const parsed = buildParser().parseSync('--workspace /tmp/primary');
 

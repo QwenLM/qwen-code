@@ -232,6 +232,45 @@ describe('WorkspaceChannelSettingsStore', () => {
     });
   });
 
+  it('preserves the all sentinel when removing a legacy all config beside other instances', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": {
+    "all": { "type": "telegram", "token": "$ALL_TOKEN" },
+    "bot": { "type": "telegram", "token": "$BOT_TOKEN" }
+  },
+  "serve": { "channels": ["all"] }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.remove('all', {
+      expectedRevision: store.snapshot().revision,
+    });
+
+    expect(next.channels).toEqual({
+      bot: { type: 'telegram', token: '$BOT_TOKEN' },
+    });
+    expect(next.startupNames).toEqual(['all']);
+  });
+
+  it('clears the all sentinel when removing the only legacy all config', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": {
+    "all": { "type": "telegram", "token": "$ALL_TOKEN" }
+  },
+  "serve": { "channels": ["all"] }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.remove('all', {
+      expectedRevision: store.snapshot().revision,
+    });
+
+    expect(next.channels).toEqual({});
+    expect(next.startupNames).toEqual([]);
+  });
+
   it('produces the same revision for unchanged persisted values', () => {
     const store = new WorkspaceChannelSettingsStore(workspace);
 
