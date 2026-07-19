@@ -80,26 +80,20 @@ export function prepareImagePayloadsForRequest(
   contents: Content[],
   options: {
     maxRecentImages: number;
-    preserveImagePartsForContentIndex?: number;
+    preserveImageParts?: ReadonlySet<Part>;
     store: InMemoryImagePayloadStore;
   },
 ): Content[] {
   const referencedIds = collectReferencedImageIds(contents.at(-1));
   const collected: StoredImagePayload[] = [];
-  const transformed = contents.map((content, index) => {
-    if (index === options.preserveImagePartsForContentIndex) {
-      return {
-        ...content,
-        parts: content.parts ? [...content.parts] : content.parts,
-      };
-    }
-    return {
-      ...content,
-      parts: content.parts?.map((part) =>
-        transformPart(part, options.store, collected),
-      ),
-    };
-  });
+  const transformed = contents.map((content) => ({
+    ...content,
+    parts: content.parts?.map((part) =>
+      options.preserveImageParts?.has(part)
+        ? part
+        : transformPart(part, options.store, collected),
+    ),
+  }));
 
   const reattachById = new Map<string, StoredImagePayload>();
   const recent = recentUniqueImages(collected, options.maxRecentImages);

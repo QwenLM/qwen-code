@@ -196,7 +196,7 @@ describe('prepareImagePayloadsForRequest', () => {
       [toolImageTurn('old-shot'), current],
       {
         maxRecentImages: 1,
-        preserveImagePartsForContentIndex: 1,
+        preserveImageParts: new Set(current.parts),
         store,
       },
     );

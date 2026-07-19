@@ -1618,16 +1618,6 @@ export class GeminiChat {
       this.config.getChatCompression(),
     );
     const imageCount = countAllInlineImages(curatedHistory);
-    const currentIndex = currentUserContent
-      ? curatedHistory.findIndex(
-          (content) =>
-            content === currentUserContent ||
-            (content.role === 'user' &&
-              currentUserContent.parts?.some((part) =>
-                content.parts?.includes(part),
-              )),
-        )
-      : -1;
     const hasExplicitReferences =
       collectReferencedImageIds(curatedHistory.at(-1)).size > 0;
 
@@ -1637,8 +1627,8 @@ export class GeminiChat {
         : imageCount >= imagePayloadThreshold
           ? maxRecentImages
           : imageCount,
-      ...(currentIndex >= 0
-        ? { preserveImagePartsForContentIndex: currentIndex }
+      ...(currentUserContent?.parts
+        ? { preserveImageParts: new Set(currentUserContent.parts) }
         : {}),
       store: this.imagePayloadStore,
     });
@@ -1652,7 +1642,7 @@ export class GeminiChat {
     const history = extractCuratedHistory(this.history);
     const resolved = prepareImagePayloadsForRequest([...history, current], {
       maxRecentImages: 0,
-      preserveImagePartsForContentIndex: history.length,
+      preserveImageParts: new Set(current.parts ?? []),
       store: this.imagePayloadStore,
     }).at(-1)?.parts;
     return resolved?.some((part) => part.inlineData) ? resolved : message;

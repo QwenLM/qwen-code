@@ -2219,10 +2219,19 @@ describe('GeminiChat', async () => {
         inlineData: { mimeType: 'image/png', data },
       }));
       const ids = images.map((image) => imagePartToStoredPayload(image).id);
-      const history: Content[] = images.flatMap((image, index) => [
-        { role: 'user', parts: [image] },
-        { role: 'model', parts: [{ text: `seen ${index}` }] },
-      ]);
+      const history: Content[] = [
+        { role: 'user', parts: [images[0]] },
+        { role: 'model', parts: [{ text: 'seen 0' }] },
+        { role: 'user', parts: [images[1]] },
+        { role: 'model', parts: [{ text: 'seen 1' }] },
+        {
+          role: 'user',
+          parts: [
+            { text: `Recent image restored: Image #${ids[2]}` },
+            images[2],
+          ],
+        },
+      ];
       chat.setHistory(history);
       chat.rememberImagePayloads(history);
       const resolved = chat.resolveImageReferences(
