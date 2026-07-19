@@ -60,10 +60,10 @@ export class CraftMcpClient {
       this.transport = new StdioClientTransport({
         command: config.command,
         args: config.args,
-        env: createSanitizedChildEnv(process.env, config.env) as Record<
-          string,
-          string
-        >,
+        env: {
+          ...createSanitizedChildEnv(process.env),
+          ...config.env,
+        } as Record<string, string>,
       });
     } else {
       // HTTP transport for remote MCP servers

@@ -105,6 +105,7 @@ describe('LspServerManager', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllEnvs();
   });
 
   describe('reconcileServerConfigs', () => {

@@ -334,6 +334,10 @@ export async function openDiff(
       try {
         const result = spawnSync(diffCommand.command, diffCommand.args, {
           stdio: 'inherit',
+          env: scrubChildEnv(
+            process.env,
+            collectSensitiveShellEnvKeys(process.env),
+          ),
         });
         if (result.error) {
           throw result.error;

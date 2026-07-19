@@ -115,6 +115,7 @@ export interface WorkspaceQualifiedVoiceRouteDeps {
     runtime: WorkspaceRuntime,
   ) => string | undefined | null;
   invalidateServeFeaturesCache: () => void;
+  credentialStore?: CredentialStore;
 }
 
 function sendVoiceError(res: Response, err: unknown): boolean {
@@ -694,7 +695,8 @@ function createRuntimeVoiceDeps(
     persistSetting: deps.persistSetting,
     persistSettings: deps.persistSettings,
     transcribe: deps.transcribe,
-    ...(env ? { env } : {}),
+    ...(env ? { env: { ...env, ...deps.credentialStore?.snapshot() } } : {}),
+    credentialStore: deps.credentialStore,
     scopeOverride: SettingScope.Workspace,
     acquireVoiceLease: () => deps.acquireVoiceLease(runtime),
     broadcastSettingsChanged: (key, value, scope, clientId) => {

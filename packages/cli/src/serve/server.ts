@@ -1384,6 +1384,7 @@ export function createServeApp(
     parseAndValidateClientId: (req, res, runtime) =>
       parseAndValidateWorkspaceClientId(req, res, runtime.bridge),
     invalidateServeFeaturesCache,
+    credentialStore: deps.credentialStore,
   });
   if (deps.persistSettings) {
     registerWorkspaceModelsRoutes(app, {
@@ -1757,7 +1758,11 @@ export function createServeApp(
     ],
     workspaceVoiceConnection: (runtime, ws, req) =>
       createVoiceWsConnectionHandler(runtime.workspaceCwd, {
-        env: getRuntimeEffectiveEnv(runtime.env),
+        env: mergeCredentialStore(
+          getRuntimeEffectiveEnv(runtime.env),
+          deps.credentialStore,
+        ),
+        credentialStore: deps.credentialStore,
         acquireVoiceLease: () => voiceCoordinator.acquire(runtime),
       })(ws, req),
   });

@@ -93,6 +93,7 @@ describe('validateStdioMcpConnection', () => {
       env: {
         QWEN_SERVER_TOKEN: 'override-server-token',
         LLM_API_KEY: 'override-llm-key',
+        GITHUB_TOKEN: 'configured-github-token',
         CUSTOM_MCP_ENV: 'custom',
       },
       timeout: 1000,
@@ -106,12 +107,13 @@ describe('validateStdioMcpConnection', () => {
     const transportEnv = transportOptions[0]?.env;
 
     expect(probeEnv).toBe(transportEnv);
-    expect(probeEnv?.QWEN_SERVER_TOKEN).toBeUndefined();
-    expect(probeEnv?.LLM_API_KEY).toBeUndefined();
-    expect(transportEnv?.QWEN_SERVER_TOKEN).toBeUndefined();
-    expect(transportEnv?.LLM_API_KEY).toBeUndefined();
+    expect(probeEnv?.QWEN_SERVER_TOKEN).toBe('override-server-token');
+    expect(probeEnv?.LLM_API_KEY).toBe('override-llm-key');
+    expect(transportEnv?.QWEN_SERVER_TOKEN).toBe('override-server-token');
+    expect(transportEnv?.LLM_API_KEY).toBe('override-llm-key');
     expect(probeEnv?.SAFE_BASE_VAR).toBe('safe-base');
     expect(probeEnv?.CUSTOM_MCP_ENV).toBe('custom');
+    expect(probeEnv?.GITHUB_TOKEN).toBe('configured-github-token');
   });
 
   it('scrubs sensitive environment keys case-insensitively on Windows', async () => {
@@ -137,10 +139,10 @@ describe('validateStdioMcpConnection', () => {
     expect(probeEnv).toBe(transportEnv);
     expect(probeEnv?.qwen_server_token).toBeUndefined();
     expect(probeEnv?.Github_Token).toBeUndefined();
-    expect(probeEnv?.Qwen_Api_Key).toBeUndefined();
+    expect(probeEnv?.Qwen_Api_Key).toBe('qwen-key');
     expect(transportEnv?.qwen_server_token).toBeUndefined();
     expect(transportEnv?.Github_Token).toBeUndefined();
-    expect(transportEnv?.Qwen_Api_Key).toBeUndefined();
+    expect(transportEnv?.Qwen_Api_Key).toBe('qwen-key');
     expect(probeEnv?.Safe_Base_Var).toBe('safe-base');
     expect(probeEnv?.Custom_Mcp_Env).toBe('custom');
   });

@@ -269,7 +269,7 @@ export async function validateStdioMcpConnection(
     const spawnPromise = (async () => {
       // MCP child processes must not inherit daemon credentials. Reuse this
       // exact env for both the probe spawn and the production stdio transport.
-      const sanitizedEnv = createSanitizedChildEnv(process.env, env);
+      const sanitizedEnv = { ...createSanitizedChildEnv(process.env), ...env };
       childProcess = spawn(command, args, {
         env: sanitizedEnv,
         stdio: ['pipe', 'pipe', 'pipe'],

@@ -563,7 +563,11 @@ export function createDaemonWorkspaceService(
         credentialStore,
         ...(voiceEnv ? { skipLoadEnvironment: true } : {}),
       });
-      validateWorkspaceVoiceState(settings, request, { env: voiceEnv });
+      validateWorkspaceVoiceState(settings, request, {
+        env: credentialStore
+          ? { ...(voiceEnv ?? {}), ...credentialStore.snapshot() }
+          : voiceEnv,
+      });
       const workspaceTrusted =
         getWorkspaceTrustStatus(settings.merged, boundWorkspace).effective
           .state === 'trusted';
@@ -671,7 +675,9 @@ export function createDaemonWorkspaceService(
         );
       }
 
-      const disabled = loadSettings(boundWorkspace).merged.skills?.disabled;
+      const disabled = loadSettings(boundWorkspace, {
+        credentialStore,
+      }).merged.skills?.disabled;
       const disabledNames = new Set(
         (Array.isArray(disabled) ? disabled : [])
           .filter((name): name is string => typeof name === 'string')
