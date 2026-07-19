@@ -80,6 +80,25 @@ it('falls back when a goal hook omits both continuation reasons', () => {
   ).toBe('No reason provided');
 });
 
+it('joins stopReason and reason for goal outputs', () => {
+  expect(
+    getStopHookContinuationReason({
+      stopReason: 'External feedback',
+      reason: 'Keep working',
+      hookSpecificOutput: { [GOAL_HOOK_ID_OUTPUT_KEY]: 'h1' },
+    }),
+  ).toBe('External feedback\nKeep working');
+});
+
+it('uses stopReason alone for goal outputs when reason is absent', () => {
+  expect(
+    getStopHookContinuationReason({
+      stopReason: 'External feedback',
+      hookSpecificOutput: { [GOAL_HOOK_ID_OUTPUT_KEY]: 'h1' },
+    }),
+  ).toBe('External feedback');
+});
+
 describe('createGoalStopHookCallback', () => {
   beforeEach(() => {
     __resetActiveGoalStoreForTests();
