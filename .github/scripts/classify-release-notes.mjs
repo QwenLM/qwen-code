@@ -48,10 +48,9 @@ export function shouldAutoSkipChangelog({ title, labels = [], files = [] }) {
     files.length > 0 &&
     files.every(
       (file) =>
-        !RELEASE_AUTOMATION_RE.test(file) &&
-        (file.startsWith('.github/') ||
-          file.startsWith('.qwen/') ||
-          TEST_FILE_RE.test(file)),
+        TEST_FILE_RE.test(file) ||
+        (!RELEASE_AUTOMATION_RE.test(file) &&
+          (file.startsWith('.github/') || file.startsWith('.qwen/'))),
     )
   );
 }

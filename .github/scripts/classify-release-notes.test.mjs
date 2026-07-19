@@ -31,6 +31,21 @@ describe('release note classification', () => {
         expected: true,
       },
       {
+        title: 'ci: update test helpers',
+        files: ['packages/core/src/__tests__/utils.ts'],
+        expected: true,
+      },
+      {
+        title: 'ci: update vitest config',
+        files: ['packages/cli/vitest.config.ts'],
+        expected: true,
+      },
+      {
+        title: 'ci: update release classifier tests',
+        files: ['.github/scripts/classify-release-notes.test.mjs'],
+        expected: true,
+      },
+      {
         title: 'Fix flaky CI routing',
         labels: [{ name: 'scope/ci-cd' }],
         files: ['.github/workflows/ci.yml'],
@@ -89,6 +104,51 @@ describe('release note classification', () => {
       {
         title: 'ci: update release helper',
         files: ['.github/scripts/publish-release.mjs'],
+        expected: false,
+      },
+      {
+        title: 'ci: update changelog helper',
+        files: ['.github/workflows/update-changelog.yml'],
+        expected: false,
+      },
+      {
+        title: 'ci: update deploy pipeline',
+        files: ['.github/workflows/deploy-app.yml'],
+        expected: false,
+      },
+      {
+        title: 'ci: bump sync action',
+        files: ['.github/workflows/sync-labels.yml'],
+        expected: false,
+      },
+      {
+        title: 'ci: update prebuild pipeline',
+        files: ['.github/workflows/prebuild.yml'],
+        expected: false,
+      },
+      {
+        title: 'ci: update package pipeline',
+        files: ['.github/workflows/package-cli.yml'],
+        expected: false,
+      },
+      {
+        title: 'ci: update installer pipeline',
+        files: ['.github/workflows/build-installer.yml'],
+        expected: false,
+      },
+      {
+        title: 'ci: update artifact upload',
+        files: ['.github/workflows/upload-artifact.yml'],
+        expected: false,
+      },
+      {
+        title: 'ci: update image build',
+        files: ['.github/scripts/build-image.mjs'],
+        expected: false,
+      },
+      {
+        title: 'ci: update cd pipeline',
+        files: ['.github/workflows/cd-pages.yml'],
         expected: false,
       },
       {
