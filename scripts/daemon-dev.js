@@ -256,10 +256,24 @@ const probeHostname =
   hostname.startsWith('[') && hostname.endsWith(']')
     ? hostname.slice(1, -1)
     : hostname;
-const port = hasOption('--port')
-  ? String(startPort)
-  : String(await findAvailablePort(probeHostname, startPort));
-const vitePort = await findAvailablePort('127.0.0.1', 5173);
+let port;
+let vitePort;
+try {
+  port = hasOption('--port')
+    ? String(startPort)
+    : String(await findAvailablePort(probeHostname, startPort));
+  // Unlike the daemon --port, the Vite dev server has no CLI escape hatch, so it
+  // always probes. When 5173–5182 are all taken (e.g. several dev:daemon
+  // instances already running), findAvailablePort rejects — surface that as a
+  // clean, actionable message and exit rather than an unhandled rejection with a
+  // raw stack, matching the validateLauncherArgs handling above.
+  vitePort = await findAvailablePort('127.0.0.1', 5173);
+} catch (err) {
+  console.error(
+    `[daemon-dev] ${err instanceof Error ? err.message : String(err)}`,
+  );
+  process.exit(1);
+}
 const token =
   readOption('--token') ||
   process.env.QWEN_SERVER_TOKEN ||
