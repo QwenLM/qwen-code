@@ -367,7 +367,15 @@ describe('inspectConversationBranches', () => {
         subtype: 'notification',
         message: { role: 'user', parts: [{ text: 'synthetic prompt' }] },
       }),
-      record('external-notification', 'notification', {
+      record('cron', 'notification', {
+        subtype: 'cron',
+        message: { role: 'user', parts: [{ text: 'cron prompt' }] },
+      }),
+      record('mid-turn', 'cron', {
+        subtype: 'mid_turn_user_message',
+        message: { role: 'user', parts: [{ text: 'mid-turn prompt' }] },
+      }),
+      record('external-notification', 'mid-turn', {
         externalInputKind: 'notification',
         message: {
           role: 'user',
@@ -401,7 +409,7 @@ describe('inspectConversationBranches', () => {
     expect(branch).toMatchObject({
       firstUserTextAfterBranchPoint: 'real request',
       lastUserText: 'real request',
-      recordCounts: { user: 3, assistant: 2, toolResult: 0, system: 0 },
+      recordCounts: { user: 5, assistant: 2, toolResult: 0, system: 0 },
     });
     expect(branch?.lastAssistantText).toBe(`${'x'.repeat(200)}...`);
   });
