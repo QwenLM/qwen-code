@@ -64,7 +64,7 @@ export default {
     "Tanca els diàlegs, cancel·la les peticions o surt de l'aplicació",
   'New line': 'Nova línia',
   'New line (Alt+Enter works for certain linux distros)':
-    'Nova línia (Alt+Enter funciona en certes distribucions de Linux)',
+    'Nova línia (Alt+Return funciona en certes distribucions de Linux)',
   'Clear the screen': 'Neteja la pantalla',
   'Open input in external editor': "Obre l'entrada en un editor extern",
   'Send message': 'Envia el missatge',
@@ -131,7 +131,7 @@ export default {
   '{{count}} skills · ': '{{count}} habilitats · ',
   '{{matched}} / {{total}} skills · ': '{{matched}} / {{total}} habilitats · ',
   'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope':
-    "Espai alternar · Enter triar (omple l'entrada) · Esc desar i sortir · àmbit d'espai de treball",
+    "Espai alterna · Return tria (omple l'entrada) · Esc desa i surt · àmbit d'espai de treball",
   'Search:': 'Cerca:',
   'type to filter…': 'escriviu per filtrar…',
   'No skills are currently available.':
@@ -187,7 +187,7 @@ export default {
   'Code restored, but conversation could not be rewound (no active client).':
     'Codi restaurat, però la conversa no s’ha pogut retrocedir (cap client actiu).',
   'Conversation rewound. Edit your prompt and press Enter to continue.':
-    'Conversa retrocedida. Editeu la vostra indicació i premeu Retorn per continuar.',
+    'Conversa retrocedida. Editeu la vostra indicació i premeu Return per continuar.',
   'Rewinding does not affect files edited manually or via shell commands.':
     'El retrocés no afecta els fitxers editats manualment o mitjançant ordres de shell.',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
@@ -204,18 +204,18 @@ export default {
     'No es poden restaurar els fitxers: aquest torn es va crear abans que el punt de control de fitxers estigués habilitat.',
   'No files needed to be restored.': 'Cap fitxer necessitava restauració.',
   '↑↓ to navigate · Enter to select · Esc to go back':
-    '↑↓ per navegar · Enter per seleccionar · Esc per tornar',
+    '↑↓ per navegar · Return per seleccionar · Esc per tornar',
   '↑↓ to navigate · Enter to select · Esc to cancel':
-    '↑↓ per navegar · Enter per seleccionar · Esc per cancel·lar',
+    '↑↓ per navegar · Return per seleccionar · Esc per cancel·lar',
   'Enter/Y to confirm · Esc/N to go back':
-    'Enter/Y per confirmar · Esc/N per tornar',
+    'Return/Y per confirmar · Esc/N per tornar',
   'change the theme': 'canvia el tema',
   'Select Theme': 'Selecciona el tema',
   Preview: 'Previsualització',
   '(Use Enter to select, Tab to configure scope)':
-    "(Useu Enter per seleccionar, Tab per configurar l'àmbit)",
+    "(Useu Return per seleccionar, Tab per configurar l'àmbit)",
   '(Use Enter to apply scope, Tab to go back)':
-    "(Useu Enter per aplicar l'àmbit, Tab per tornar enrere)",
+    "(Useu Return per aplicar l'àmbit, Tab per tornar enrere)",
   'Theme configuration unavailable due to NO_COLOR env variable.':
     "La configuració del tema no està disponible degut a la variable d'entorn NO_COLOR.",
   'Theme "{{themeName}}" not found.': 'Tema "{{themeName}}" no trobat.',
@@ -287,12 +287,12 @@ export default {
   'Using {{count}} tool': 'Utilitzant {{count}} eina',
   'Using {{count}} tools': 'Utilitzant {{count}} eines',
   'Enter to select, ↑↓ to navigate, Esc to close':
-    'Enter per seleccionar, ↑↓ per navegar, Esc per tancar',
+    'Return per seleccionar, ↑↓ per navegar, Esc per tancar',
   'Esc to go back': 'Esc per tornar enrere',
-  'Enter to confirm, Esc to cancel': 'Enter per confirmar, Esc per cancel·lar',
+  'Enter to confirm, Esc to cancel': 'Return per confirmar, Esc per cancel·lar',
   'Enter to select, ↑↓ to navigate, Esc to go back':
-    'Enter per seleccionar, ↑↓ per navegar, Esc per tornar enrere',
-  'Enter to submit, Esc to go back': 'Enter per enviar, Esc per tornar enrere',
+    'Return per seleccionar, ↑↓ per navegar, Esc per tornar enrere',
+  'Enter to submit, Esc to go back': 'Return per enviar, Esc per tornar enrere',
   'Invalid step: {{step}}': 'Pas no vàlid: {{step}}',
   'No subagents found.': "No s'han trobat subagents.",
   "Use '/agents create' to create your first subagent.":
@@ -379,9 +379,9 @@ export default {
   'Step {{n}}: Confirm and Save': 'Pas {{n}}: Confirmar i desar',
   'Esc to cancel': 'Esc per cancel·lar',
   'Press Enter to save, e to save and edit, Esc to go back':
-    'Premeu Enter per desar, e per desar i editar, Esc per tornar enrere',
+    'Premeu Return per desar, e per desar i editar, Esc per tornar enrere',
   'Press Enter to continue, {{navigation}}Esc to {{action}}':
-    'Premeu Enter per continuar, {{navigation}}Esc per {{action}}',
+    'Premeu Return per continuar, {{navigation}}Esc per {{action}}',
   cancel: 'cancel·lar',
   'go back': 'tornar enrere',
   '↑↓ to navigate, ': '↑↓ per navegar, ',
@@ -726,7 +726,7 @@ export default {
   'Plugin selection cancelled.': 'Selecció de connector cancel·lada.',
   'Select a plugin from "{{name}}"': 'Selecciona un connector de "{{name}}"',
   'Use ↑↓ or j/k to navigate, Enter to select, Escape to cancel':
-    'Useu ↑↓ o j/k per navegar, Enter per seleccionar, Escape per cancel·lar',
+    'Useu ↑↓ o j/k per navegar, Return per seleccionar, Escape per cancel·lar',
   '{{count}} more above': '{{count}} més amunt',
   '{{count}} more below': '{{count}} més avall',
   'manage IDE integration': "gestiona la integració de l'IDE",
@@ -753,21 +753,21 @@ export default {
   'Failed to parse {{terminalName}} keybindings.json. The file contains invalid JSON. Please fix the file manually or delete it to allow automatic configuration.':
     'Error en analitzar {{terminalName}} keybindings.json. El fitxer conté JSON no vàlid. Corregiu el fitxer manualment o elimineu-lo per permetre la configuració automàtica.',
   'Error: {{error}}': 'Error: {{error}}',
-  'Shift+Enter binding already exists': 'La drecera Shift+Enter ja existeix',
-  'Ctrl+Enter binding already exists': 'La drecera Ctrl+Enter ja existeix',
+  'Shift+Enter binding already exists': 'La drecera Shift+Return ja existeix',
+  'Ctrl+Enter binding already exists': 'La drecera Ctrl+Return ja existeix',
   'Existing keybindings detected. Will not modify to avoid conflicts.':
     "S'han detectat dreceres existents. No es modificaran per evitar conflictes.",
   'Please check and modify manually if needed: {{file}}':
     'Comproveu i modifiqueu manualment si cal: {{file}}',
   'Added Shift+Enter and Ctrl+Enter keybindings to {{terminalName}}.':
-    "S'han afegit les dreceres Shift+Enter i Ctrl+Enter a {{terminalName}}.",
+    "S'han afegit les dreceres Shift+Return i Ctrl+Return a {{terminalName}}.",
   'Modified: {{file}}': 'Modificat: {{file}}',
   '{{terminalName}} keybindings already configured.':
     'Les dreceres de {{terminalName}} ja estan configurades.',
   'Failed to configure {{terminalName}}.':
     'Error en configurar {{terminalName}}.',
   'Your terminal is already configured for an optimal experience with multiline input (Shift+Enter and Ctrl+Enter).':
-    'El vostre terminal ja està configurat per a una experiència òptima amb entrada multilínia (Shift+Enter i Ctrl+Enter).',
+    'El vostre terminal ja està configurat per a una experiència òptima amb entrada multilínia (Shift+Return i Ctrl+Return).',
 
   // ============================================================================
   // Ordres - Hooks
@@ -781,7 +781,7 @@ export default {
   'Press Escape, Ctrl+C, or Ctrl+D to cancel':
     'Premeu Escape, Ctrl+C o Ctrl+D per cancel·lar',
   'Press Space, Enter, or Escape to dismiss':
-    'Premeu Space, Enter o Escape per descartar',
+    'Premeu Space, Return o Escape per descartar',
   'No hook selected': 'Cap hook seleccionat',
   'No hook events found.': "No s'han trobat esdeveniments de hook.",
   '{{count}} hook configured': '{{count}} hook configurat',
@@ -789,7 +789,7 @@ export default {
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'Aquest menú és de només lectura. Per afegir o modificar hooks, editeu settings.json directament o demaneu-ho a Qwen Code.',
   'Enter to select · Esc to cancel':
-    'Enter per seleccionar · Esc per cancel·lar',
+    'Return per seleccionar · Esc per cancel·lar',
   'Exit codes:': 'Codis de sortida:',
   'Configured hooks:': 'Hooks configurats:',
   'No hooks configured for this event.':
@@ -797,7 +797,7 @@ export default {
   'To add hooks, edit settings.json directly or ask Qwen.':
     'Per afegir hooks, editeu settings.json directament o demaneu-ho a Qwen.',
   'Enter to select · Esc to go back':
-    'Enter per seleccionar · Esc per tornar enrere',
+    'Return per seleccionar · Esc per tornar enrere',
   'Hook details': 'Detalls del hook',
   'Event:': 'Esdeveniment:',
   'Extension:': 'Extensió:',
@@ -1036,11 +1036,11 @@ export default {
   'Unknown step': 'Pas desconegut',
   'Esc to back': 'Esc per tornar',
   '↑↓ to navigate · Enter to select · Esc to close':
-    '↑↓ per navegar · Enter per seleccionar · Esc per tancar',
+    '↑↓ per navegar · Return per seleccionar · Esc per tancar',
   '↑↓ to navigate · Enter to select · Esc to back':
-    '↑↓ per navegar · Enter per seleccionar · Esc per tornar',
+    '↑↓ per navegar · Return per seleccionar · Esc per tornar',
   '↑↓ to navigate · Enter to confirm · Esc to back':
-    '↑↓ per navegar · Enter per confirmar · Esc per tornar',
+    '↑↓ per navegar · Return per confirmar · Esc per tornar',
   'User Settings (global)': "Configuració d'usuari (global)",
   'Workspace Settings (project-specific)':
     "Configuració de l'espai de treball (específica del projecte)",
@@ -1048,7 +1048,7 @@ export default {
   'Select where to add the server to the exclude list:':
     "Seleccioneu on afegir el servidor a la llista d'exclusió:",
   'Press Enter to confirm, Esc to cancel':
-    'Premeu Enter per confirmar, Esc per cancel·lar',
+    'Premeu Return per confirmar, Esc per cancel·lar',
   'View tools': 'Visualitza les eines',
   Reconnect: 'Reconnecta',
   Enable: 'Activa',
@@ -1363,17 +1363,17 @@ export default {
   'e.g.,': 'p. ex.,',
   or: 'o',
   'Enter permission rule…': 'Introduïu la regla de permís…',
-  'Enter to submit · Esc to cancel': 'Enter per enviar · Esc per cancel·lar',
+  'Enter to submit · Esc to cancel': 'Return per enviar · Esc per cancel·lar',
   'Where should this rule be saved?': "On s'ha de desar aquesta regla?",
   'Enter to confirm · Esc to cancel':
-    'Enter per confirmar · Esc per cancel·lar',
+    'Return per confirmar · Esc per cancel·lar',
   'Delete {{type}} rule?': 'Voleu suprimir la regla {{type}}?',
   'Are you sure you want to delete this permission rule?':
     'Esteu segur que voleu suprimir aquesta regla de permís?',
   'Permissions:': 'Permisos:',
   '(←/→ or tab to cycle)': '(←/→ o Tab per canviar)',
   'Press ↑↓ to navigate · Enter to select · Type to search · Esc to cancel':
-    'Premeu ↑↓ per navegar · Enter per seleccionar · Escriviu per cercar · Esc per cancel·lar',
+    'Premeu ↑↓ per navegar · Return per seleccionar · Escriviu per cercar · Esc per cancel·lar',
   'Search…': 'Cerca…',
   'Add directory…': 'Afegeix un directori…',
   'Add directory to workspace': "Afegeix el directori a l'espai de treball",
@@ -1384,7 +1384,7 @@ export default {
   'Enter the path to the directory:': 'Introduïu el camí del directori:',
   'Enter directory path…': 'Introduïu el camí del directori…',
   'Tab to complete · Enter to add · Esc to cancel':
-    'Tab per completar · Enter per afegir · Esc per cancel·lar',
+    'Tab per completar · Return per afegir · Esc per cancel·lar',
   'Remove directory?': 'Eliminar el directori?',
   'Are you sure you want to remove this directory from the workspace?':
     "Esteu segur que voleu eliminar aquest directori de l'espai de treball?",
@@ -1642,7 +1642,7 @@ export default {
     'Emmagatzemant en memòria cau el necessari (principalment mems de gats)...',
     'Optimitzant per a velocitat ridícula',
     'Intercanviant bits... que no ho sàpiguen els bytes...',
-    'Recollint brossa... torno de seguida...',
+    'Recollint la brossa... torno de seguida...',
     'Assemblant les internets...',
     'Convertint cafè en codi...',
     'Actualitzant la sintaxi de la realitat...',
@@ -1744,7 +1744,7 @@ export default {
   'Enter value...': 'Introduïu el valor...',
   'Enter sensitive value...': 'Introduïu el valor sensible...',
   'Press Enter to submit, Escape to cancel':
-    'Premeu Enter per enviar, Escape per cancel·lar',
+    'Premeu Return per enviar, Escape per cancel·lar',
 
   // ============================================================================
   // Eina de migració d'ordres
@@ -1878,9 +1878,9 @@ export default {
   'Ready to submit your answers?':
     'Preparats per enviar les vostres respostes?',
   '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select':
-    '↑/↓: Navegar | ←/→: Canviar de pestanya | Enter: Seleccionar',
+    '↑/↓: Navegar | ←/→: Canviar de pestanya | Return: Seleccionar',
   '↑/↓: Navigate | Enter: Select | Esc: Cancel':
-    '↑/↓: Navegar | Enter: Seleccionar | Esc: Cancel·lar',
+    '↑/↓: Navegar | Return: Seleccionar | Esc: Cancel·lar',
   'Authenticate using Qwen OAuth': "Autentica't amb Qwen OAuth",
   'Authenticate using Alibaba Cloud Coding Plan':
     "Autentica't amb el Coding Plan d'Alibaba Cloud",
@@ -1946,7 +1946,7 @@ export default {
   'Raw mode not available. Please run in an interactive terminal.':
     'El mode raw no està disponible. Executeu en un terminal interactiu.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
-    '(Useu les fletxes ↑ ↓ per navegar, Enter per seleccionar, Ctrl+C per sortir)\n',
+    '(Useu les fletxes ↑ ↓ per navegar, Return per seleccionar, Ctrl+C per sortir)\n',
   'Switch to plan mode or exit plan mode':
     'Canviar al mode de planificació o sortir del mode de planificació',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
@@ -2304,7 +2304,7 @@ export default {
     "S'ha establert l'àmbit de «{{name}}» a {{scope}}.",
   Sources: 'Fonts',
   'Type to search · Space to toggle · Enter to view · Ctrl+R refresh · Esc to go back':
-    'Escriviu per cercar · Espai per commutar · Retorn per veure · Ctrl+R per refrescar · Esc per tornar',
+    'Escriviu per cercar · Espai per commutar · Return per veure · Ctrl+R per refrescar · Esc per tornar',
   Uninstall: 'Desinstal·la',
   'Uninstalled "{{name}}".': "S'ha desinstal·lat «{{name}}».",
   'Update Now': 'Actualitza ara',
@@ -2321,11 +2321,11 @@ export default {
   'Will install:': 'Instal·larà:',
   'Would open: {{url}}': 'Obriria: {{url}}',
   'Y/Enter to confirm · N/Esc to cancel':
-    'Y/Retorn per confirmar · N/Esc per cancel·lar',
+    'Y/Return per confirmar · N/Esc per cancel·lar',
   'Press R to retry · Esc to go back':
     'Premeu R per tornar-ho a provar · Esc per tornar',
   'Enter to select · R refresh · Esc to go back':
-    'Retorn per seleccionar · R per refrescar · Esc per tornar',
+    'Return per seleccionar · R per refrescar · Esc per tornar',
   'from {{marketplace}}': 'de {{marketplace}}',
   installed: 'instal·lada',
   '{{count}} Agents': '{{count}} agents',
@@ -2335,13 +2335,13 @@ export default {
   '{{count}} available extensions': '{{count}} extensions disponibles',
   '↑ more above': '↑ més amunt',
   '↑↓ navigate · Enter open · d remove marketplace · Esc close':
-    '↑↓ navegar · Retorn per obrir · d treure el mercat · Esc per tancar',
+    '↑↓ navegar · Return per obrir · d treure el mercat · Esc per tancar',
   '↑↓ navigate · Enter select · Esc close':
-    '↑↓ navegar · Retorn per seleccionar · Esc per tancar',
+    '↑↓ navegar · Return per seleccionar · Esc per tancar',
   '↑↓ navigate · Enter select · d remove marketplace · Esc close':
-    '↑↓ navegar · Retorn per seleccionar · d treure el mercat · Esc per tancar',
+    '↑↓ navegar · Return per seleccionar · d treure el mercat · Esc per tancar',
   '↑↓ navigate · Space enable/disable · f favorite · Enter details · Esc close':
-    '↑↓ navegar · Espai per activar/desactivar · f preferit · Retorn per veure els detalls · Esc per tancar',
+    '↑↓ navegar · Espai per activar/desactivar · f preferit · Return per veure els detalls · Esc per tancar',
   '↓ more below': '↓ més avall',
   '⚠ Make sure you trust an extension before installing, updating, or using it. We cannot verify what MCP servers, files, or other software an extension includes, or that it works as intended. See the extension homepage for more information.':
     "⚠ Assegureu-vos que confieu en una extensió abans d'instal·lar-la, actualitzar-la o usar-la. No podem verificar quins MCP servers, fitxers o altres programaris inclou una extensió, ni que funcioni tal com es pretén. Consulteu la pàgina principal de l'extensió per a més informació.",
@@ -2602,7 +2602,7 @@ export default {
   'Ctrl+Q to queue · ↑ to edit queued messages':
     'Ctrl+Q per posar a la cua · ↑ per editar els missatges en cua',
   'Enter to steer · Ctrl+Q to queue':
-    'Retorn per redirigir · Ctrl+Q per posar a la cua',
+    'Return per redirigir · Ctrl+Q per posar a la cua',
   'Queue message for the next turn':
     'Posar el missatge a la cua per al torn següent',
   '{{count}} session': '{{count}} sessió',
