@@ -28,6 +28,7 @@ import {
   type InvocationContextV1,
 } from '../utils/invocation-context.js';
 import {
+  _resetMcpFetchDispatcherForTest,
   _setMcpFetchForTest,
   addMCPStatusChangeListener,
   attemptAutomaticMcpOAuth,
@@ -97,6 +98,8 @@ function cfgWithResources(): Config {
 describe('mcp-client', () => {
   afterEach(() => {
     _setMcpFetchForTest(undefined);
+    _resetMcpFetchDispatcherForTest();
+    vi.unstubAllEnvs();
   });
 
   describe('dedicated undici fetch (#7147)', () => {
@@ -114,14 +117,9 @@ describe('mcp-client', () => {
       await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', resolve));
       const port = (srv.address() as { port: number }).port;
       try {
-        const transportFetch = createStreamableHttpCompatibilityFetch(
-          'undici-contract',
-          undefined,
-          { httpUrl: `http://127.0.0.1:${port}/mcp` },
-        );
-        // Default-arg path uses globalThis.fetch; the MCP transport path
-        // (createMcpStreamableHttpFetch) is private, so exercise the same
-        // wiring via a transport built for a real server.
+        // The MCP transport path (createMcpStreamableHttpFetch) is private,
+        // so exercise the same wiring via a transport built for a real
+        // server.
         const transport = await createTransport(
           'undici-contract',
           { httpUrl: `http://127.0.0.1:${port}/mcp` },
@@ -136,7 +134,102 @@ describe('mcp-client', () => {
         });
         expect(res.status).toBe(200);
         expect(await res.json()).toEqual({ ok: true });
-        void transportFetch;
+      } finally {
+        await new Promise<void>((resolve) => srv.close(() => resolve()));
+      }
+    });
+
+    // Self-signed pair generated for this test (CN/SAN 127.0.0.1, 100-year
+    // validity) — it never leaves the local loopback server below.
+    const SELF_SIGNED_KEY = `-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDQgVXO0KxbNqR8
+QpXVihSXYn/q9CkzT74dLRtDzYZnhD89XhICg9vW6KhRbB7L6MTKQ0Lg501AC74f
+hkPrxEjgR6EHmUPiRizGZcb0h165OoQEuQfkceNGmOnH4R+EZbrWdDeVkdtjuQdI
+dG0jM4ZWs1ibqfCxScO2QWcovEmxRO/ZvISNWfzJCIIwr0SC3uC6dmgvj34ZSMNY
+kJww3G0de8wGG01QPUYBFol9e0iQok5DmPrbnped4Ms1TWe+L4ws+EcFm9CNVPoX
+05POJqTVKbVNy8/sU/5zTiRS8E5r28pTfUiijIFEyK5qQyE1T6C0kdB0PAGMhDPR
+ZXMijfkhAgMBAAECggEAD8giVw+bZCIMLC2cCrgzW8wEU6PcdHpOMQYngKfPSwmL
+Admbcl5JpwggKV2OLS/2qTqTFtPbGIRrBRbUEEXgoD07togGx9s462FrwDl41XtU
+38ijjMqEAeV0GIF1Mb/DdxT/2g3atb8dCoJpelcdjXVwuQORaNHlAugLZ11tFII4
+yEp+FQgkc5YIJwQWTvyqdZ1qJ4l31FhRvB7GhVDnYRHv1y27jCJiB6vPrv0AQzgh
+jVPXS03dswlkMI+ur2Lt3s8qVtdMD2M7Q5dmjHHuKuQvA2rg6iAf2raXOE9oAXQy
+MQTgi3bF4s/8uuzgm8hmM+/Gz91sTKJCSQ2742okGQKBgQDvTgxXm+xxLk1DqHGZ
+DEtplyl9fQ2qNSpzCgUtIdL3UyWFDRBDS2g9o+8Z8SSWUTiKlcrVU88vepVLduTk
+g5cNF2W/qKg+ycRR76E+t6+ApnF13atEr2DCIrLq8nqwbG3ZsU/XD04MWI496/ov
+4ZXpvTcyxxW/TRb259qJWWSE/QKBgQDfDTWWh/tWngkBOEMs0GaLLElkwIMmjOtm
+CWplylna1vBUsct/lozTNIVrvVSlE41VeQq6TtpSVrEGhQ2KlFXow7iBHkRQkujl
+8MmJJF/wF/6EQGvfvtg+7e9s8CD22P9Cf35cec+PPQA5Rw8j644OKnjyy8Q4sojg
+xsIPHcVv9QKBgQCUO/CBRGDOKzRJOMpFV8xO+AgHZ7NTP+OvpwFV16Hq+mI/bLwq
+M0e7BxVRKILVajJwBiHCy0uHyZM5T8ixlKG4xkmM01iErE8jwiBLzVS1iGS38jvp
+LAnvt7bEurctGb1iH+eo/B4In8JcsRQlHMPUKhVLKu9ZtNMI1s4UTn9psQKBgBCj
+sqC1KjnO9ksCAHjiXxP4zMzYU7BXiOQGxcosK0HZEPqwfMba20ySOXXNHPhnmf6L
+VhKJ+V11HCWpXVY+NJ51o1j2ghAktX0Z1l8FuKZ3k8QX7jQ1z3n6VAcjbsIbdAdo
+7WtGpwY/fbnIJEgAtYs2/ejW7J9yKiXije2EwgrVAoGBAIiZcGSxIs4biak00HmY
+XXncJp8jBl9HdqrBH7wn9IuCRU4G2a1gLi0LTHcuIo4HMpMqXmrsuCMh8a9teCpP
+ZEyVOb7bwmXfTJrL0iFThl/nXzvUyQ5J0/jXqBwIdQu4DbORAtjwRlZRxe05yrza
+N8JEixv6MDQEx9NiIqpn+V6Y
+-----END PRIVATE KEY-----`;
+    const SELF_SIGNED_CERT = `-----BEGIN CERTIFICATE-----
+MIIDHDCCAgSgAwIBAgIUCjr0jOOpgv0drL4OfEIp85UQ6mwwDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMCAXDTI2MDcxOTA0NDAxNloYDzIxMjYw
+NjI1MDQ0MDE2WjAUMRIwEAYDVQQDDAkxMjcuMC4wLjEwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQDQgVXO0KxbNqR8QpXVihSXYn/q9CkzT74dLRtDzYZn
+hD89XhICg9vW6KhRbB7L6MTKQ0Lg501AC74fhkPrxEjgR6EHmUPiRizGZcb0h165
+OoQEuQfkceNGmOnH4R+EZbrWdDeVkdtjuQdIdG0jM4ZWs1ibqfCxScO2QWcovEmx
+RO/ZvISNWfzJCIIwr0SC3uC6dmgvj34ZSMNYkJww3G0de8wGG01QPUYBFol9e0iQ
+ok5DmPrbnped4Ms1TWe+L4ws+EcFm9CNVPoX05POJqTVKbVNy8/sU/5zTiRS8E5r
+28pTfUiijIFEyK5qQyE1T6C0kdB0PAGMhDPRZXMijfkhAgMBAAGjZDBiMB0GA1Ud
+DgQWBBSYkNfOElpRlCq/zavOPLU9fIFgbzAfBgNVHSMEGDAWgBSYkNfOElpRlCq/
+zavOPLU9fIFgbzAPBgNVHRMBAf8EBTADAQH/MA8GA1UdEQQIMAaHBH8AAAEwDQYJ
+KoZIhvcNAQELBQADggEBAGKk+sZgU1OnjK/NObfqVcpdRdA4gP15Nn3kUvsU8H6m
+A+gMgFwr20G+0uMsvxrWCBJwm/Q16XT/ctCIClRf98t3reu685h/fD/akLv0g/qo
+FIgZqCVyMgOBWGLSdDIyNBQHs16ZcV178/WyHfobnMcmtNOQpVg6vDKawBGyopmI
+nV5F0SDrn4lpQexUfJqikDj8VDgKEovDsSPdXJv9J2aJChqkeQHAexbbj3P+SDyr
+MxT7pKQh7HN5ulX1fgCsf+VCiF/Sbd5QCkn4i4obIC95CU3MCOCQCiPo1B43HpHc
+lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
+-----END CERTIFICATE-----`;
+
+    // Pins the isTlsVerificationDisabled() branch of the dispatcher: the
+    // env probe uses QWEN_TLS_INSECURE (read only by that helper) rather
+    // than NODE_TLS_REJECT_UNAUTHORIZED, which Node's own TLS layer also
+    // honors and would make the positive phase pass without our branch.
+    it('honors the TLS-insecure switch for self-signed MCP endpoints', async () => {
+      const https = await import('node:https');
+      const srv = https.createServer(
+        { key: SELF_SIGNED_KEY, cert: SELF_SIGNED_CERT },
+        (_req, res) => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        },
+      );
+      await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', resolve));
+      const port = (srv.address() as { port: number }).port;
+      try {
+        const transport = await createTransport(
+          'undici-tls-contract',
+          { httpUrl: `https://127.0.0.1:${port}/mcp` },
+          false,
+        );
+        const realFetch = (transport as unknown as { _fetch: typeof fetch })
+          ._fetch;
+        const request = () =>
+          realFetch(`https://127.0.0.1:${port}/mcp`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: '{}',
+          });
+
+        // Default dispatcher: certificate verification stays ON.
+        _resetMcpFetchDispatcherForTest();
+        await expect(request()).rejects.toThrow();
+
+        // TLS-insecure switch set when the dispatcher is (re)built: the
+        // self-signed endpoint connects.
+        vi.stubEnv('QWEN_TLS_INSECURE', '1');
+        _resetMcpFetchDispatcherForTest();
+        const res = await request();
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ ok: true });
       } finally {
         await new Promise<void>((resolve) => srv.close(() => resolve()));
       }

@@ -314,6 +314,15 @@ export function _setMcpFetchForTest(fn?: typeof fetch): void {
   mcpFetchOverrideForTest = fn;
 }
 
+// Test-only: drops the lazily-created singleton so a test can re-evaluate
+// `isTlsVerificationDisabled()` under a different environment. The old
+// Agent is closed asynchronously; in-flight test requests on it complete.
+export function _resetMcpFetchDispatcherForTest(): void {
+  const old = mcpFetchDispatcher;
+  mcpFetchDispatcher = undefined;
+  void old?.close().catch(() => {});
+}
+
 function createMcpStreamableHttpFetch(
   mcpServerName: string,
   mcpServerConfig: MCPServerConfig,
