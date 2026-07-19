@@ -14,6 +14,7 @@ import {
   type MockInstance,
 } from 'vitest';
 import { readFileSync } from 'node:fs';
+import os from 'node:os';
 import {
   createNonInteractivePromptId,
   main,
@@ -885,9 +886,22 @@ describe('gemini.tsx main function', () => {
     argv: string[],
     sessionId = '123e4567-e89b-12d3-a456-426614174000',
     command: 'docker' | 'podman' | 'sandbox-exec' = 'sandbox-exec',
+    hasUpdateSupervisor = true,
   ): Promise<string[]> => {
     const originalArgv = process.argv;
+    const originalUpdateSupported =
+      process.env['QWEN_CODE_UPDATE_RELAUNCH_SUPPORTED'];
+    const originalUpdateStatePath =
+      process.env['QWEN_CODE_UPDATE_RELAUNCH_STATE_PATH'];
     process.argv = argv;
+    if (hasUpdateSupervisor) {
+      process.env['QWEN_CODE_UPDATE_RELAUNCH_SUPPORTED'] = 'true';
+      process.env['QWEN_CODE_UPDATE_RELAUNCH_STATE_PATH'] =
+        '/tmp/qwen-update-state.json';
+    } else {
+      delete process.env['QWEN_CODE_UPDATE_RELAUNCH_SUPPORTED'];
+      delete process.env['QWEN_CODE_UPDATE_RELAUNCH_STATE_PATH'];
+    }
     const processExitSpy = vi
       .spyOn(process, 'exit')
       .mockImplementation((code) => {
@@ -939,6 +953,18 @@ describe('gemini.tsx main function', () => {
       }
     } finally {
       process.argv = originalArgv;
+      if (originalUpdateSupported === undefined) {
+        delete process.env['QWEN_CODE_UPDATE_RELAUNCH_SUPPORTED'];
+      } else {
+        process.env['QWEN_CODE_UPDATE_RELAUNCH_SUPPORTED'] =
+          originalUpdateSupported;
+      }
+      if (originalUpdateStatePath === undefined) {
+        delete process.env['QWEN_CODE_UPDATE_RELAUNCH_STATE_PATH'];
+      } else {
+        process.env['QWEN_CODE_UPDATE_RELAUNCH_STATE_PATH'] =
+          originalUpdateStatePath;
+      }
       processExitSpy.mockRestore();
     }
 
@@ -967,12 +993,11 @@ describe('gemini.tsx main function', () => {
     const { relaunchOnExitCode } = await import('./utils/relaunch.js');
     const [, options] = vi.mocked(relaunchOnExitCode).mock.calls[0]!;
 
-    await expect(options?.onUpdateRelaunch?.(true)).resolves.toBe(44);
+    await expect(options?.onUpdateRelaunch?.()).resolves.toBe(44);
 
     expect(mockUpdateBeforeRelaunch).toHaveBeenCalledWith(
       expect.anything(),
       expect.any(String),
-      true,
     );
   });
 
@@ -992,6 +1017,53 @@ describe('gemini.tsx main function', () => {
       );
       expect(process.env['QWEN_CODE_HOST_UPDATE_RELAUNCH']).toBe('true');
     } finally {
+      if (originalCapability === undefined) {
+        delete process.env['QWEN_CODE_HOST_UPDATE_RELAUNCH'];
+      } else {
+        process.env['QWEN_CODE_HOST_UPDATE_RELAUNCH'] = originalCapability;
+      }
+    }
+  });
+
+  it('does not advertise host update relaunch without a stable launcher', async () => {
+    const originalCapability = process.env['QWEN_CODE_HOST_UPDATE_RELAUNCH'];
+
+    try {
+      await runSandboxRelaunch(
+        ['node', 'script.js', '--debug', '-p', 'hello'],
+        '',
+        'docker',
+        false,
+      );
+
+      expect(process.env['QWEN_CODE_HOST_UPDATE_RELAUNCH']).toBe('false');
+    } finally {
+      if (originalCapability === undefined) {
+        delete process.env['QWEN_CODE_HOST_UPDATE_RELAUNCH'];
+      } else {
+        process.env['QWEN_CODE_HOST_UPDATE_RELAUNCH'] = originalCapability;
+      }
+    }
+  });
+
+  it('keeps Windows standalone host updates deferred', async () => {
+    const originalCapability = process.env['QWEN_CODE_HOST_UPDATE_RELAUNCH'];
+    const platformSpy = vi.spyOn(os, 'platform').mockReturnValue('win32');
+    mockGetInstallationInfo.mockReturnValue({
+      isStandalone: true,
+      standaloneDir: 'C:\\qwen-code',
+    });
+
+    try {
+      await runSandboxRelaunch(
+        ['node', 'script.js', '--debug', '-p', 'hello'],
+        '',
+        'docker',
+      );
+
+      expect(process.env['QWEN_CODE_HOST_UPDATE_RELAUNCH']).toBe('false');
+    } finally {
+      platformSpy.mockRestore();
       if (originalCapability === undefined) {
         delete process.env['QWEN_CODE_HOST_UPDATE_RELAUNCH'];
       } else {

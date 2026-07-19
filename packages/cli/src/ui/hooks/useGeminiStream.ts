@@ -3893,6 +3893,13 @@ export const useGeminiStream = (
     }
   }, [streamingState, submitQuery, teammateTrigger, addItem]);
 
+  const hasPendingAutomaticSubmission = useCallback(
+    () =>
+      notificationQueueRef.current.length > 0 ||
+      teammateQueueRef.current.length > 0,
+    [],
+  );
+
   return {
     streamingState,
     submitQuery,
@@ -3907,5 +3914,7 @@ export const useGeminiStream = (
     loopDetectionConfirmationRequest,
     streamingResponseLengthRef,
     isReceivingContent,
+    isSubmittingQueryRef,
+    hasPendingAutomaticSubmission,
   };
 };

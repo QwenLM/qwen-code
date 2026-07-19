@@ -135,16 +135,25 @@ describe('getSandboxPassthroughEnvArgs', () => {
     expect(
       getSandboxPassthroughEnvArgs({
         QWEN_CODE_SKIP_UPDATE_CHECK_ONCE: 'true',
+        QWEN_CODE_SKIP_INITIAL_PROMPT_ONCE: 'true',
         QWEN_CODE_CUSTOM_SANDBOX_IMAGE: 'example.com/qwen:1.0.0',
         QWEN_CODE_HOST_UPDATE_RELAUNCH: 'false',
+        QWEN_CODE_UPDATE_RELAUNCH_SUPPORTED: 'true',
+        QWEN_CODE_UPDATE_RELAUNCH_STATE_PATH: '/tmp/relaunch/state.json',
       }),
     ).toEqual([
+      '--env',
+      'QWEN_CODE_SKIP_INITIAL_PROMPT_ONCE=true',
       '--env',
       'QWEN_CODE_SKIP_UPDATE_CHECK_ONCE=true',
       '--env',
       'QWEN_CODE_CUSTOM_SANDBOX_IMAGE=example.com/qwen:1.0.0',
       '--env',
       'QWEN_CODE_HOST_UPDATE_RELAUNCH=false',
+      '--env',
+      'QWEN_CODE_UPDATE_RELAUNCH_SUPPORTED=true',
+      '--env',
+      'QWEN_CODE_UPDATE_RELAUNCH_STATE_PATH=/tmp/relaunch/state.json',
     ]);
   });
 });

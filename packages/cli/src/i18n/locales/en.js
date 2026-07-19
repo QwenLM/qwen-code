@@ -2646,10 +2646,6 @@ export default {
     'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.',
   'Update Qwen Code on the host, then restart the sandbox.':
     'Update Qwen Code on the host, then restart the sandbox.',
-  'The update will be installed after you exit this session.':
-    'The update will be installed after you exit this session.',
-  'Run /update to install the update on the host.':
-    'Run /update to install the update on the host.',
   'Run /update to install the update.': 'Run /update to install the update.',
   '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
     '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.',
