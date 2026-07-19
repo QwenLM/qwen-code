@@ -4,8 +4,54 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import * as path from 'node:path';
+
+const WINDOWS_ABSOLUTE_PATH_RE = /^([A-Za-z]):[\\/](.*)$/;
+
+/**
+ * Maps a Windows-shaped absolute path to the container mount produced by the
+ * host-side sandbox launcher (`C:\work\proj` → `/c/work/proj`, mirroring
+ * `getContainerPath` in `cli/src/utils/sandbox.ts`).
+ *
+ * A Windows host relaunching `qwen serve` into a Linux Docker/Podman sandbox
+ * translates the bind mount and `--workdir`, but path-valued CLI arguments
+ * (`--workspace C:\…`), client-registered workspaces, and persisted
+ * registrations reach the in-container daemon in host shape. Left alone,
+ * `path.resolve` on Linux mangles them further (prepends the cwd) and every
+ * ACP child spawn fails with `chdir(2) ENOENT` before running anything
+ * (#7139).
+ *
+ * Deliberately conservative — the input is returned unchanged unless ALL of:
+ * - the daemon is running on POSIX inside a container sandbox (`SANDBOX` env
+ *   set by the launcher; macOS `sandbox-exec` does not remap paths and is
+ *   excluded),
+ * - the path is Windows-absolute (`<drive>:\…` or `<drive>:/…`),
+ * - the translated candidate actually exists (i.e. the drive really is
+ *   mounted the way the launcher mounts workspaces).
+ *
+ * The `opts` seams exist for tests; production callers use the defaults.
+ */
+export function translateWindowsWorkspaceForPosixSandbox(
+  p: string,
+  opts: {
+    platform?: NodeJS.Platform;
+    sandboxEnv?: string | undefined;
+    exists?: (candidate: string) => boolean;
+  } = {},
+): string {
+  const platform = opts.platform ?? process.platform;
+  const sandboxEnv =
+    'sandboxEnv' in opts ? opts.sandboxEnv : process.env['SANDBOX'];
+  const exists = opts.exists ?? existsSync;
+  if (platform === 'win32' || !sandboxEnv || sandboxEnv === 'sandbox-exec') {
+    return p;
+  }
+  const match = WINDOWS_ABSOLUTE_PATH_RE.exec(p);
+  if (!match) return p;
+  const translated = `/${match[1]!.toLowerCase()}/${match[2]!.replace(/\\/g, '/')}`;
+  return exists(translated) ? translated : p;
+}
 
 /**
  * Canonicalize a workspace path so the boot-time bound path and every
@@ -40,7 +86,11 @@ import * as path from 'node:path';
  * at the original location.
  */
 export function canonicalizeWorkspace(p: string): string {
-  const resolved = path.resolve(p);
+  // #7139: inside a Linux container sandbox, host-shaped Windows workspace
+  // paths must be mapped to their bind-mount location BEFORE resolution —
+  // `path.resolve('C:\\x')` on POSIX treats the whole string as relative
+  // and prepends the cwd.
+  const resolved = path.resolve(translateWindowsWorkspaceForPosixSandbox(p));
   try {
     // FIXME(stage-2): switch to `fs.promises.realpath` once the
     // bridge call sites become async-friendly. This sync syscall

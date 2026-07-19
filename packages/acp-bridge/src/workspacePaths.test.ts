@@ -8,7 +8,10 @@ import { promises as fsp, realpathSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { canonicalizeWorkspaces } from './workspacePaths.js';
+import {
+  canonicalizeWorkspaces,
+  translateWindowsWorkspaceForPosixSandbox,
+} from './workspacePaths.js';
 
 const scratches: string[] = [];
 
@@ -44,5 +47,79 @@ describe('canonicalizeWorkspaces', () => {
 
   it('returns an empty array for empty input', () => {
     expect(canonicalizeWorkspaces([])).toEqual([]);
+  });
+});
+
+// Regression for #7139: a Windows host relaunching `qwen serve` into a Linux
+// Docker sandbox forwards `--workspace C:\…` (and client/persisted workspace
+// registrations) in host shape; every ACP child then failed with
+// `chdir(2) ENOENT`. These tests pin the container-side translation.
+describe('translateWindowsWorkspaceForPosixSandbox', () => {
+  const sandboxOpts = (exists: boolean) => ({
+    platform: 'linux' as NodeJS.Platform,
+    sandboxEnv: 'qwen-code-sandbox-0',
+    exists: () => exists,
+  });
+
+  it('maps a Windows-absolute path to its bind-mount location', () => {
+    expect(
+      translateWindowsWorkspaceForPosixSandbox(
+        'C:\\qwen-repro',
+        sandboxOpts(true),
+      ),
+    ).toBe('/c/qwen-repro');
+    expect(
+      translateWindowsWorkspaceForPosixSandbox(
+        'D:/Work/proj sub',
+        sandboxOpts(true),
+      ),
+    ).toBe('/d/Work/proj sub');
+    expect(
+      translateWindowsWorkspaceForPosixSandbox(
+        'C:\\nested\\dir\\leaf',
+        sandboxOpts(true),
+      ),
+    ).toBe('/c/nested/dir/leaf');
+  });
+
+  it('leaves the path alone when the translated mount does not exist', () => {
+    expect(
+      translateWindowsWorkspaceForPosixSandbox(
+        'C:\\qwen-repro',
+        sandboxOpts(false),
+      ),
+    ).toBe('C:\\qwen-repro');
+  });
+
+  it('leaves non-Windows-shaped paths alone', () => {
+    for (const p of ['/c/qwen-repro', 'relative/dir', 'C:', 'CC:\\x', '']) {
+      expect(
+        translateWindowsWorkspaceForPosixSandbox(p, sandboxOpts(true)),
+      ).toBe(p);
+    }
+  });
+
+  it('is inert on Windows hosts, outside sandboxes, and under seatbelt', () => {
+    expect(
+      translateWindowsWorkspaceForPosixSandbox('C:\\qwen-repro', {
+        platform: 'win32',
+        sandboxEnv: 'qwen-code-sandbox-0',
+        exists: () => true,
+      }),
+    ).toBe('C:\\qwen-repro');
+    expect(
+      translateWindowsWorkspaceForPosixSandbox('C:\\qwen-repro', {
+        platform: 'linux',
+        sandboxEnv: undefined,
+        exists: () => true,
+      }),
+    ).toBe('C:\\qwen-repro');
+    expect(
+      translateWindowsWorkspaceForPosixSandbox('C:\\qwen-repro', {
+        platform: 'darwin',
+        sandboxEnv: 'sandbox-exec',
+        exists: () => true,
+      }),
+    ).toBe('C:\\qwen-repro');
   });
 });
