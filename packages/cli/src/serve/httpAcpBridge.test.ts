@@ -4858,6 +4858,7 @@ describe('createHttpAcpBridge', () => {
       expect(next.value?.type).toBe('session_rewound');
       expect(next.value?.data).toEqual({
         sessionId: session.sessionId,
+        toTurn: 1,
         targetTurnIndex: 1,
         apiTruncateIndex: 3,
       });

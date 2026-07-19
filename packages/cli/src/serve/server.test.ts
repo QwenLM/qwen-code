@@ -4609,6 +4609,89 @@ describe('GET /session/:id/events (SSE)', () => {
     // None of these should pass through as a parsed lastEventId.
     expect(seen).toEqual([undefined, undefined, undefined]);
   });
+
+  // Final-review must-fix (add-remote-rewind): the per-session
+  // `session_rewound` SSE frame that reaches an attached client over
+  // `GET /session/:id/events` must carry `data.toTurn` — the field the
+  // wire-protocol spec promises. httpAcpBridge.test.ts already asserts
+  // the bridge-level publish call includes `toTurn`; this test drives
+  // the real HTTP round trip: open the SSE stream, POST the rewind, and
+  // read the frame the client actually receives. It fails if `toTurn`
+  // is dropped anywhere between the bridge event and the wire frame.
+  it('delivers data.toTurn on the session_rewound frame after POST /session/:id/rewind', async () => {
+    let deliverRewoundEvent:
+      | ((ev: { id: number; v: number; type: string; data: unknown }) => void)
+      | undefined;
+    const rewoundEventDelivered = new Promise<{
+      id: number;
+      v: number;
+      type: string;
+      data: unknown;
+    }>((resolve) => {
+      deliverRewoundEvent = resolve;
+    });
+    const bridge = fakeBridge({
+      async *subscribeImpl(_sessionId, _opts) {
+        yield await rewoundEventDelivered;
+        await new Promise(() => {});
+      },
+      rewindImpl: async (sessionId, req) => {
+        const targetTurnIndex = req.toTurn;
+        const apiTruncateIndex = targetTurnIndex + 1;
+        deliverRewoundEvent?.({
+          id: 1,
+          v: 1,
+          type: 'session_rewound',
+          data: {
+            sessionId,
+            toTurn: targetTurnIndex,
+            targetTurnIndex,
+            apiTruncateIndex,
+          },
+        });
+        return { targetTurnIndex, apiTruncateIndex };
+      },
+    });
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        token: 'secret',
+      },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const authHeaders = { Authorization: 'Bearer secret' };
+
+    const sseRes = await fetch(
+      `http://127.0.0.1:${port}/session/sess-A/events`,
+      { headers: authHeaders },
+    );
+    expect(sseRes.status).toBe(200);
+
+    const rewindRes = await fetch(
+      `http://127.0.0.1:${port}/session/sess-A/rewind`,
+      {
+        method: 'POST',
+        headers: { ...authHeaders, 'content-type': 'application/json' },
+        body: JSON.stringify({ toTurn: 3 }),
+      },
+    );
+    expect(rewindRes.status).toBe(200);
+
+    const frames = await readSseFrames(sseRes.body!, 1);
+    expect(frames).toHaveLength(1);
+    expect(frames[0]?.event).toBe('session_rewound');
+    const parsed = JSON.parse(frames[0]!.data!);
+    expect(parsed.data.toTurn).toBe(3);
+    expect(parsed.data).toEqual({
+      sessionId: 'sess-A',
+      toTurn: 3,
+      targetTurnIndex: 3,
+      apiTruncateIndex: 4,
+    });
+  });
 });
 
 describe('GET /demo', () => {

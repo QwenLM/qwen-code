@@ -3635,6 +3635,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           type: 'session_rewound',
           data: {
             sessionId: entry.sessionId,
+            toTurn: targetTurnIndex,
             targetTurnIndex,
             apiTruncateIndex,
           },
