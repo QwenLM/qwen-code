@@ -261,6 +261,7 @@ export type {
 } from './services/session-transcript-reader.js';
 export * from './utils/conversation-chain.js';
 export * from './utils/transcript-records.js';
+export * from './utils/conversation-branches.js';
 export * from './services/sessionTitle.js';
 export * from './services/sleepInhibitor.js';
 // Named exports keep @internal test helpers out of the barrel.
