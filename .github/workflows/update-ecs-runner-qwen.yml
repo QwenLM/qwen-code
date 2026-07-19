@@ -32,7 +32,8 @@ jobs:
           if [[ "${specifier}" == '@qwen-code/qwen-code@' ]]; then
             specifier='@qwen-code/qwen-code@latest'
           fi
-          if ! version="$(npm view "${specifier}" version | tail -n 1)"; then
+          version="$(npm view "${specifier}" version | tail -n 1)"
+          if [[ -z "${version}" ]]; then
             echo "::error::No published qwen version matches '${INPUT_VERSION:-latest}'."
             exit 1
           fi
