@@ -1870,28 +1870,28 @@ export default {
   'Tip: Use /model to switch between available Coding Plan models.':
     'Consell: Useu /model per canviar entre els models de Coding Plan disponibles.',
   'Type something...': 'Escriviu alguna cosa...',
-  Submit: 'Enviar',
-  'Submit answers': 'Enviar respostes',
-  Cancel: 'Cancel·lar',
-  'Your answers:': 'Les vostres respostes:',
+  Submit: 'Envia',
+  'Submit answers': 'Envia les respostes',
+  Cancel: 'Cancel·la',
+  'Your answers:': 'Les vostre respostes:',
   '(not answered)': '(sense resposta)',
   'Ready to submit your answers?':
     'Preparats per enviar les vostres respostes?',
   '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select':
-    '↑/↓: Navegar | ←/→: Canviar pestanyes | Enter: Seleccionar',
+    '↑/↓: Navegar | ←/→: Canviar de pestanya | Enter: Seleccionar',
   '↑/↓: Navigate | Enter: Select | Esc: Cancel':
     '↑/↓: Navegar | Enter: Seleccionar | Esc: Cancel·lar',
-  'Authenticate using Qwen OAuth': 'Autenticar-se usant Qwen OAuth',
+  'Authenticate using Qwen OAuth': "Autentica't amb Qwen OAuth",
   'Authenticate using Alibaba Cloud Coding Plan':
-    "Autenticar-se usant el Coding Plan d'Alibaba Cloud",
+    "Autentica't amb el Coding Plan d'Alibaba Cloud",
   'Region for Coding Plan (china/global)':
     'Regió per a Coding Plan (china/global)',
   'API key for Coding Plan': 'API Key per a Coding Plan',
-  'Show current authentication status': "Mostrar l'estat d'autenticació actual",
+  'Show current authentication status': "Mostra l'estat d'autenticació actual",
   'Authentication completed successfully.':
     "L'autenticació s'ha completat correctament.",
   'Starting Qwen OAuth authentication...':
-    "Iniciant l'autenticació Qwen OAuth...",
+    "S'està iniciant l'autenticació de Qwen OAuth...",
   'Successfully authenticated with Qwen OAuth.':
     "S'ha autenticat correctament amb Qwen OAuth.",
   'Failed to authenticate with Qwen OAuth: {{error}}':
@@ -1960,24 +1960,24 @@ export default {
   'Not in plan mode. Use "/plan" to enter plan mode first.':
     'No esteu en mode de planificació. Useu "/plan" per entrar al mode de planificació primer.',
   "Set up Qwen Code's status line UI":
-    "Configurar la interfície de la barra d'estat de Qwen Code",
+    "Configura la interfície de la barra d'estat de Qwen Code",
 
   // === Core: added from PR #3328 ===
-  'Open the memory manager.': 'Obrir el gestor de memòria.',
+  'Open the memory manager.': 'Obre el gestor de memòria.',
   'Save a durable memory to the memory system.':
-    'Desar una memòria duradora al sistema de memòria.',
+    'Desa una memòria duradora al sistema de memòria.',
   'Ask a quick side question without affecting the main conversation':
-    'Fer una pregunta ràpida sense afectar la conversa principal',
+    'Fa una pregunta ràpida sense afectar la conversa principal',
   'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
     'Autenticació basada en navegador amb proveïdors de tercers (p. ex. OpenRouter, ModelScope)',
-  'Manage Arena sessions': "Gestionar sessions d'Arena",
+  'Manage Arena sessions': "Gestiona les sessions de l'Arena",
   'Start an Arena session with multiple models competing on the same task':
-    "Iniciar una sessió d'Arena amb múltiples models competint en la mateixa tasca",
-  'Stop the current Arena session': "Aturar la sessió d'Arena actual",
+    "Inicia una sessió de l'Arena amb múltiples models competint en la mateixa tasca",
+  'Stop the current Arena session': "Atura la sessió de l'Arena actual",
   'Show the current Arena session status':
-    "Mostrar l'estat de la sessió d'Arena actual",
+    "Mostra l'estat de la sessió de l'Arena actual",
   'Select a model result and merge its diff into the current workspace':
-    "Seleccionar un resultat de model i fusionar-ne el diff a l'espai de treball actual",
+    "Selecciona un resultat de model i en fusiona les diferències a l'espai de treball actual",
   'No running Arena session found.':
     "No s'ha trobat cap sessió d'Arena en execució.",
   'No Arena session found. Start one with /arena start.':
@@ -2028,7 +2028,7 @@ export default {
     'Els dreams posteriors es poden ometre com a bloquejats fins que la propera neteja de sessions obsoletes elimini el fitxer.',
   "The scheduler gate did not see this dream's timestamp; the next dream cycle may re-fire sooner than usual.":
     "La porta del planificador no ha vist la marca de temps d'aquest dream; el proper cicle de dream es pot tornar a executar abans del normal.",
-  'Manage extension settings': 'Gestionar la configuració de les extensions',
+  'Manage extension settings': 'Gestiona la configuració de les extensions',
   'Desc:': 'Descripció:',
   'Ref:': 'Referència:',
   '中国 (China)': 'Xina',
@@ -2202,22 +2202,22 @@ export default {
   ' · {{marketplace}} (Tab to clear)': ' · {{marketplace}} (Tab per netejar)',
   '"{{name}}" {{state}}.': '«{{name}}» {{state}}.',
   '(Tab / ←→ to switch)': '(Tab / ←→ per canviar)',
-  '+ Add new marketplace': '+ Afegir un mercat nou',
-  '+ Install a new extension': '+ Instal·lar una extensió nova',
+  '+ Add new marketplace': '+ Afegeix un mercat nou',
+  '+ Install a new extension': '+ Instal·la una extensió nova',
   Actions: 'Accions',
-  'Add Marketplace': 'Afegir un mercat',
+  'Add Marketplace': 'Afegeix un mercat',
   'Add a marketplace in the Sources tab to discover extensions.':
     'Afegiu un mercat a la pestanya Fonts per descobrir extensions.',
-  'Add new': 'Afegir de nou',
-  'Add to Favorites': 'Afegir als preferits',
+  'Add new': 'Afegeix de nou',
+  'Add to Favorites': 'Afegeix als preferits',
   'Added "{{name}}" to favorites.': "S'ha afegit «{{name}}» als preferits.",
   'Added marketplace "{{name}}".': "S'ha afegit el mercat «{{name}}».",
   'Adding...': 'Afegint...',
-  'Back to extension list': "Tornar a la llista d'extensions",
-  'Browse extensions ({{count}})': 'Explorar extensions ({{count}})',
+  'Back to extension list': "Torna a la llista d'extensions",
+  'Browse extensions ({{count}})': 'Explora les extensions ({{count}})',
   'By: {{a}}': 'Per: {{a}}',
-  'Change scope': "Canviar l'àmbit",
-  'Change scope for "{{name}}":': "Canviar l'àmbit de «{{name}}»:",
+  'Change scope': "Canvia l'àmbit",
+  'Change scope for "{{name}}":': "Canvia l'àmbit de «{{name}}»:",
   'Changing scope...': "Canviant l'àmbit...",
   'Uninstalling "{{name}}"...': 'Desinstal·lant «{{name}}»...',
   'Update available for "{{name}}".':
@@ -2255,10 +2255,10 @@ export default {
   'Failed to open {{url}}': "No s'ha pogut obrir {{url}}",
   Favorites: 'Preferits',
   'Global (User Scope)': "Global (àmbit d'usuari)",
-  'Install Extension': 'Instal·lar extensió',
+  'Install Extension': "Instal·la l'extensió",
   'Install for the current workspace (project scope)':
-    "Instal·lar per a l'espai de treball actual (àmbit del projecte)",
-  'Install for you (user scope)': "Instal·lar per a vós (àmbit d'usuari)",
+    "Instal·la per a l'espai de treball actual (àmbit del projecte)",
+  'Install for you (user scope)': "Instal·la per a vós (àmbit d'usuari)",
   'Install {{count}} extension(s) to which scope?':
     'En quin àmbit voleu instal·lar {{count}} extensió/ns?',
   Installed: 'Instal·lades',
@@ -2276,7 +2276,7 @@ export default {
   MCP: 'MCP',
   'MCP "{{name}}" {{state}}.': 'MCP «{{name}}» {{state}}.',
   'MCP servers': 'MCP servers',
-  'Mark for Update': 'Marcar per actualitzar',
+  'Mark for Update': 'Marca per actualitzar',
   Marketplaces: 'Mercats',
   'No extensions discovered.': "No s'ha descobert cap extensió.",
   'No extensions match your search.':
@@ -2290,12 +2290,12 @@ export default {
     'No hi ha connectors ni MCP servers instal·lats.',
   None: 'Cap',
   'Note: Uninstall permanently removes this extension.':
-    'Nota: Desinstal·lar elimina aquesta extensió permanentment.',
-  'Open homepage': 'Obrir la pàgina principal',
+    'Nota: En desinstal·lar-la, s’eliminarà aquesta extensió permanentment.',
+  'Open homepage': 'Obre la pàgina principal',
   'Project (Workspace)': 'Projecte (espai de treball)',
   'Refreshed {{count}} extension(s).': "S'han refrescat {{count}} extensió/ns.",
-  'Remove from Favorites': 'Treure dels preferits',
-  'Remove marketplace': 'Treure el mercat',
+  'Remove from Favorites': 'Treu dels preferits',
+  'Remove marketplace': 'Treu el mercat',
   'Remove marketplace "{{name}}"?': 'Voleu treure el mercat «{{name}}»?',
   'Removed "{{name}}" from favorites.': "S'ha tret «{{name}}» dels preferits.",
   'Removed marketplace "{{name}}".': "S'ha tret el mercat «{{name}}».",
@@ -2304,13 +2304,13 @@ export default {
     "S'ha establert l'àmbit de «{{name}}» a {{scope}}.",
   Sources: 'Fonts',
   'Type to search · Space to toggle · Enter to view · Ctrl+R refresh · Esc to go back':
-    'Escriviu per cercar · Espai per canviar · Retorn per veure · Ctrl+R refrescar · Esc per tornar',
-  Uninstall: 'Desinstal·lar',
+    'Escriviu per cercar · Espai per commutar · Retorn per veure · Ctrl+R per refrescar · Esc per tornar',
+  Uninstall: 'Desinstal·la',
   'Uninstalled "{{name}}".': "S'ha desinstal·lat «{{name}}».",
-  'Update Now': 'Actualitzar ara',
-  'Update marketplace': 'Actualitzar el mercat',
+  'Update Now': 'Actualitza ara',
+  'Update marketplace': 'Actualitza el mercat',
   'Update marketplace (last updated {{date}})':
-    'Actualitzar el mercat (darrera actualització {{date}})',
+    'Actualitza el mercat (darrera actualització {{date}})',
   'Could not update marketplace "{{name}}".':
     "No s'ha pogut actualitzar el mercat «{{name}}».",
   'Updated "{{name}}".': "S'ha actualitzat «{{name}}».",
