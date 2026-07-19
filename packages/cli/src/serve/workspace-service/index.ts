@@ -413,6 +413,11 @@ export function createDaemonWorkspaceService(
       }
 
       const live = channelLive();
+      if (!live) {
+        writeStderrLineSafe(
+          'qwen serve: ACP preheat resolved without a live channel',
+        );
+      }
       return live
         ? finish({ ready: true, channelLive: true })
         : finish({

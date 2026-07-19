@@ -1863,6 +1863,9 @@ describe('createDaemonWorkspaceService', () => {
         reason: 'error',
         error: 'ACP preheat did not produce a live channel',
       });
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        'qwen serve: ACP preheat resolved without a live channel',
+      );
     });
 
     it('returns error when preheat fails before the deadline', async () => {
