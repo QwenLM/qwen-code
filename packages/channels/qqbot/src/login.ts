@@ -66,29 +66,40 @@ export const authDriver: ChannelAuthDriver<QQCredentials> = {
       resolveReady = resolve;
       rejectReady = reject;
     });
+    let cleanupContextAbort = () => {};
 
     const succeed = (credentials: QrConnectCredentials | undefined) => {
       if (settled) return;
       try {
         const required = requireCredentials(credentials);
         settled = true;
+        cleanupContextAbort();
         state = 'confirmed';
         resolveReady(required);
       } catch (error) {
-        settled = true;
-        state = 'failed';
-        rejectReady(error);
+        fail(error);
       }
     };
     const fail = (error: unknown) => {
       if (settled) return;
       settled = true;
-      const cancelled = signal.aborted;
+      cleanupContextAbort();
+      const cancelled = signal.aborted || context.signal.aborted;
       state = cancelled ? 'cancelled' : 'failed';
       rejectReady(
         cancelled ? new DOMException('Aborted', 'AbortError') : error,
       );
     };
+    const onContextAbort = () => {
+      fail(new DOMException('Aborted', 'AbortError'));
+    };
+    context.signal.addEventListener('abort', onContextAbort, { once: true });
+    cleanupContextAbort = () => {
+      context.signal.removeEventListener('abort', onContextAbort);
+    };
+    if (context.signal.aborted) {
+      onContextAbort();
+    }
 
     const stop = startQrConnect(
       {

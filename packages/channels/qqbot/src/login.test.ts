@@ -178,6 +178,61 @@ describe('QQ QR auth driver', () => {
     expect(session.snapshot().state).toBe('cancelled');
   });
 
+  it('settles immediately on caller abort and ignores late connector callbacks', async () => {
+    const controller = new AbortController();
+    const authContext = context(controller.signal);
+    const session = await authDriver.begin(authContext);
+    const ready = session.ready.catch((error: unknown) => error);
+
+    controller.abort();
+
+    expect(session.snapshot()).toEqual({
+      state: 'cancelled',
+      qrPayload: undefined,
+      qrRevision: 0,
+    });
+    connector.callbacks?.onQrDisplayed?.('https://qq.example/late');
+    connector.callbacks?.onQrExpired?.();
+    connector.callbacks?.onSuccess([
+      { appId: 'late-id', appSecret: 'late-secret' },
+    ]);
+
+    await expect(ready).resolves.toMatchObject({ name: 'AbortError' });
+    expect(session.snapshot()).toEqual({
+      state: 'cancelled',
+      qrPayload: undefined,
+      qrRevision: 0,
+    });
+    await expect(session.commit()).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+    expect(
+      loadCredentials(join(authContext.stateDir, 'credentials.json')),
+    ).toBeNull();
+  });
+
+  it('removes the context abort listener after successful settlement', async () => {
+    const controller = new AbortController();
+    const removeEventListener = vi.spyOn(
+      controller.signal,
+      'removeEventListener',
+    );
+    const session = await authDriver.begin(context(controller.signal));
+
+    connector.callbacks?.onSuccess([{ appId: 'id', appSecret: 'secret' }]);
+
+    await expect(session.ready).resolves.toEqual({
+      appId: 'id',
+      appSecret: 'secret',
+    });
+    expect(removeEventListener).toHaveBeenCalledWith(
+      'abort',
+      expect.any(Function),
+    );
+    controller.abort();
+    expect(session.snapshot().state).toBe('confirmed');
+  });
+
   it('propagates connector failures without persisting credentials', async () => {
     const authContext = context();
     const session = await authDriver.begin(authContext);
