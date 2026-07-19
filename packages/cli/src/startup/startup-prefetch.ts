@@ -11,7 +11,6 @@ import {
   type Config,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
-import os from 'node:os';
 import { preconnectApi } from '../utils/apiPreconnect.js';
 import { AppEvent, appEvents } from '../utils/events.js';
 import { recordStartupEvent } from '../utils/startupProfiler.js';
@@ -19,7 +18,7 @@ import {
   CUSTOM_SANDBOX_IMAGE_ENV_VAR,
   HOST_UPDATE_RELAUNCH_ENV_VAR,
   SKIP_UPDATE_CHECK_ENV_VAR,
-  canRelaunchForUpdate,
+  requestUpdateOnExit,
 } from '../utils/processUtils.js';
 
 const debugLogger = createDebugLogger('STARTUP_PREFETCH');
@@ -181,7 +180,11 @@ export function startPostRenderPrefetches(
           const projectRoot = config.getProjectRoot();
           const hostUpdateRelaunch = process.env[HOST_UPDATE_RELAUNCH_ENV_VAR];
           if (hostUpdateRelaunch === 'true') {
-            updateEventEmitter.emit('update-relaunch');
+            updateEventEmitter.emit('update-info', {
+              message: `${result.info.message}\n${t(
+                'Run /update to install the update on the host.',
+              )}`,
+            });
             return;
           }
           if (hostUpdateRelaunch === 'false') {
@@ -194,19 +197,15 @@ export function startPostRenderPrefetches(
           }
           const installationInfo = getInstallationInfo(projectRoot, true);
           if (
-            installationInfo.isStandalone &&
-            installationInfo.standaloneDir &&
-            os.platform() === 'win32'
-          ) {
-            void handleAutoUpdate(result.info, settings, projectRoot);
-            return;
-          }
-          if (
             installationInfo.updateCommand ||
             (installationInfo.isStandalone && installationInfo.standaloneDir)
           ) {
-            if (canRelaunchForUpdate()) {
-              updateEventEmitter.emit('update-relaunch');
+            if (requestUpdateOnExit()) {
+              updateEventEmitter.emit('update-info', {
+                message: `${result.info.message}\n${t(
+                  'The update will be installed after you exit this session.',
+                )}`,
+              });
             } else {
               updateEventEmitter.emit('update-info', {
                 message: `${result.info.message}\n${t(

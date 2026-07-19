@@ -2189,6 +2189,10 @@ export default {
     'Diese Sitzung verwendet das benutzerdefinierte Sandbox-Image {{image}}. Aktualisieren Sie das Image und starten Sie Qwen Code neu.',
   'Update Qwen Code on the host, then restart the sandbox.':
     'Aktualisieren Sie Qwen Code auf dem Host und starten Sie anschließend die Sandbox neu.',
+  'The update will be installed after you exit this session.':
+    'Das Update wird nach dem Beenden dieser Sitzung installiert.',
+  'Run /update to install the update on the host.':
+    'Führen Sie /update aus, um das Update auf dem Host zu installieren.',
   'Run /update to install the update.':
     'Führen Sie /update aus, um das Update zu installieren.',
 

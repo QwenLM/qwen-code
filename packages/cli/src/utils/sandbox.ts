@@ -29,10 +29,7 @@ import { parseSandboxMountSpec } from './sandboxMounts.js';
 import {
   CUSTOM_SANDBOX_IMAGE_ENV_VAR,
   HOST_UPDATE_RELAUNCH_ENV_VAR,
-  SKIP_INITIAL_PROMPT_ENV_VAR,
   SKIP_UPDATE_CHECK_ENV_VAR,
-  UPDATE_RELAUNCH_STATE_PATH_ENV_VAR,
-  UPDATE_RELAUNCH_SUPPORTED_ENV_VAR,
 } from './processUtils.js';
 
 const execAsync = promisify(exec);
@@ -72,25 +69,15 @@ const BUILTIN_SEATBELT_PROFILES = [
 export function getSandboxPassthroughEnvArgs(
   env: NodeJS.ProcessEnv = process.env,
 ): string[] {
-  const args = [
+  return [
     'QWEN_DEBUG_LOG_FILE',
     'QWEN_CODE_LEGACY_MCP_BLOCKING',
-    SKIP_INITIAL_PROMPT_ENV_VAR,
     SKIP_UPDATE_CHECK_ENV_VAR,
     CUSTOM_SANDBOX_IMAGE_ENV_VAR,
     HOST_UPDATE_RELAUNCH_ENV_VAR,
-    UPDATE_RELAUNCH_SUPPORTED_ENV_VAR,
   ].flatMap((envVar) =>
     env[envVar] === undefined ? [] : ['--env', `${envVar}=${env[envVar]}`],
   );
-  const statePath = env[UPDATE_RELAUNCH_STATE_PATH_ENV_VAR];
-  if (statePath) {
-    args.push(
-      '--env',
-      `${UPDATE_RELAUNCH_STATE_PATH_ENV_VAR}=${getContainerPath(statePath)}`,
-    );
-  }
-  return args;
 }
 
 export function resolveSeatbeltProfileFile(

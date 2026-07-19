@@ -86,9 +86,7 @@ import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
 import {
   CUSTOM_SANDBOX_IMAGE_ENV_VAR,
   HOST_UPDATE_RELAUNCH_ENV_VAR,
-  SKIP_INITIAL_PROMPT_ENV_VAR,
   UPDATE_COMPLETE_EXIT_CODE,
-  canRelaunchForUpdate,
 } from './utils/processUtils.js';
 import { getInstallationInfo } from './utils/installationInfo.js';
 
@@ -297,17 +295,6 @@ export async function main() {
 
   markAcpStartup('argsParseStart');
   let argv = await parseArguments();
-  if (process.env[SKIP_INITIAL_PROMPT_ENV_VAR] === 'true') {
-    if (process.env['QWEN_CODE_NO_RELAUNCH'] || process.env['SANDBOX']) {
-      delete process.env[SKIP_INITIAL_PROMPT_ENV_VAR];
-    }
-    argv = {
-      ...argv,
-      prompt: undefined,
-      promptInteractive: undefined,
-      query: undefined,
-    };
-  }
   markAcpStartup('argsParseEnd');
   profileCheckpoint('after_parse_arguments');
 
@@ -413,7 +400,7 @@ export async function main() {
       ? getNodeMemoryArgs(isDebugMode)
       : [];
     const updateProjectRoot = process.cwd();
-    const onUpdateRelaunch = async () => {
+    const onUpdateRelaunch = async (relaunchOnFailure: boolean) => {
       await initializeI18n(
         resolveLanguageSetting(settings.merged.general?.language as string),
       );
@@ -423,6 +410,7 @@ export async function main() {
       const shouldRelaunch = await updateBeforeRelaunch(
         settings,
         updateProjectRoot,
+        relaunchOnFailure,
       );
       return shouldRelaunch ? UPDATE_COMPLETE_EXIT_CODE : 0;
     };
@@ -443,11 +431,9 @@ export async function main() {
       const hostInstallationInfo = getInstallationInfo(updateProjectRoot, true);
       process.env[HOST_UPDATE_RELAUNCH_ENV_VAR] = String(
         Boolean(
-          canRelaunchForUpdate() &&
-            (hostInstallationInfo.updateCommand ||
-              (hostInstallationInfo.isStandalone &&
-                hostInstallationInfo.standaloneDir &&
-                os.platform() !== 'win32')),
+          hostInstallationInfo.updateCommand ||
+            (hostInstallationInfo.isStandalone &&
+              hostInstallationInfo.standaloneDir),
         ),
       );
     }

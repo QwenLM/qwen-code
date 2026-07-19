@@ -23,7 +23,6 @@ describe('useMessageQueue', () => {
 
     expect(result.current.messageQueue).toEqual([]);
     expect(result.current.getQueuedMessagesText()).toBe('');
-    expect(result.current.hasQueuedMessages()).toBe(false);
   });
 
   it('should add messages to queue', () => {
@@ -38,7 +37,6 @@ describe('useMessageQueue', () => {
       'Test message 1',
       'Test message 2',
     ]);
-    expect(result.current.hasQueuedMessages()).toBe(true);
   });
 
   it('should filter out empty messages', () => {
@@ -71,7 +69,6 @@ describe('useMessageQueue', () => {
     });
 
     expect(result.current.messageQueue).toEqual([]);
-    expect(result.current.hasQueuedMessages()).toBe(false);
   });
 
   it('should return queued messages as text with double newlines', () => {

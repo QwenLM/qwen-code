@@ -2163,6 +2163,10 @@ export default {
     'В этом сеансе используется пользовательский образ песочницы {{image}}. Обновите образ и перезапустите Qwen Code.',
   'Update Qwen Code on the host, then restart the sandbox.':
     'Обновите Qwen Code на хосте, затем перезапустите песочницу.',
+  'The update will be installed after you exit this session.':
+    'Обновление будет установлено после выхода из этого сеанса.',
+  'Run /update to install the update on the host.':
+    'Запустите /update, чтобы установить обновление на хосте.',
   'Run /update to install the update.':
     'Запустите /update, чтобы установить обновление.',
 

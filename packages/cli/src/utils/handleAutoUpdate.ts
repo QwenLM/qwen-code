@@ -21,7 +21,6 @@ import { t } from '../i18n/index.js';
 import type { spawn } from 'node:child_process';
 import os from 'node:os';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
-import { relaunchForUpdate } from './processUtils.js';
 
 const debugLogger = createDebugLogger('AUTO_UPDATE');
 
@@ -149,15 +148,8 @@ export function setUpdateHandler(
   addItem: (item: HistoryItemWithoutId, timestamp: number) => void,
   setUpdateInfo: (info: UpdateObject | null) => void,
   isIdleRef: { current: boolean } = { current: true },
-  canRelaunch: () => boolean = () => isIdleRef.current,
-  prepareRelaunch: () =>
-    | Promise<{ sessionId?: string; skipInitialPrompt?: boolean } | null>
-    | { sessionId?: string; skipInitialPrompt?: boolean }
-    | null = () => ({}),
 ) {
   let successfullyInstalled = false;
-  let relaunchPending = false;
-  let disposed = false;
   const pendingNotifications: HistoryItemWithoutId[] = [];
 
   const addItemOrDefer = (item: HistoryItemWithoutId) => {
@@ -206,61 +198,23 @@ export function setUpdateHandler(
     });
   };
 
-  const runUpdateRelaunch = () => {
-    relaunchPending = false;
-    void Promise.resolve(prepareRelaunch())
-      .then((prepared) => {
-        if (disposed) return;
-        if (!canRelaunch()) {
-          relaunchPending = true;
-          return;
-        }
-        if (!prepared) {
-          handleUpdateInfo({
-            message: t('Run /update to install the update.'),
-          });
-          return;
-        }
-        return relaunchForUpdate(
-          prepared.sessionId,
-          prepared.skipInitialPrompt,
-        );
-      })
-      .catch(() => handleUpdateFailed());
-  };
-
-  const handleUpdateRelaunch = () => {
-    if (canRelaunch()) {
-      runUpdateRelaunch();
-    } else {
-      relaunchPending = true;
-    }
-  };
-
   updateEventEmitter.on('update-received', handleUpdateReceived);
   updateEventEmitter.on('update-failed', handleUpdateFailed);
   updateEventEmitter.on('update-success', handleUpdateSuccess);
   updateEventEmitter.on('update-info', handleUpdateInfo);
-  updateEventEmitter.on('update-relaunch', handleUpdateRelaunch);
 
   const cleanup = () => {
-    disposed = true;
     updateEventEmitter.off('update-received', handleUpdateReceived);
     updateEventEmitter.off('update-failed', handleUpdateFailed);
     updateEventEmitter.off('update-success', handleUpdateSuccess);
     updateEventEmitter.off('update-info', handleUpdateInfo);
-    updateEventEmitter.off('update-relaunch', handleUpdateRelaunch);
     pendingNotifications.length = 0;
-    relaunchPending = false;
   };
 
   const flush = () => {
     while (pendingNotifications.length > 0) {
       const item = pendingNotifications.shift()!;
       addItem(item, Date.now());
-    }
-    if (relaunchPending && canRelaunch()) {
-      runUpdateRelaunch();
     }
   };
 

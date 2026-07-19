@@ -23,7 +23,7 @@ const mockPreconnectApi = vi.hoisted(() => vi.fn());
 const mockRecordStartupEvent = vi.hoisted(() => vi.fn());
 const mockCheckForUpdatesDetailed = vi.hoisted(() => vi.fn());
 const mockHandleAutoUpdate = vi.hoisted(() => vi.fn());
-const mockCanRelaunchForUpdate = vi.hoisted(() => vi.fn());
+const mockRequestUpdateOnExit = vi.hoisted(() => vi.fn());
 const mockGetInstallationInfo = vi.hoisted(() => vi.fn());
 const mockUpdateEventEmit = vi.hoisted(() => vi.fn());
 const mockConnectIdeForStartup = vi.hoisted(() => vi.fn());
@@ -33,11 +33,6 @@ const mockGetIdeClientInstance = vi.hoisted(() =>
 );
 const mockInitializeTelemetry = vi.hoisted(() => vi.fn());
 const mockStartBackgroundHousekeeping = vi.hoisted(() => vi.fn());
-const mockPlatform = vi.hoisted(() => vi.fn());
-
-vi.mock('node:os', () => ({
-  default: { platform: mockPlatform },
-}));
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
   createDebugLogger: () => ({
@@ -65,8 +60,7 @@ vi.mock('../utils/processUtils.js', () => ({
   CUSTOM_SANDBOX_IMAGE_ENV_VAR: 'QWEN_CODE_CUSTOM_SANDBOX_IMAGE',
   HOST_UPDATE_RELAUNCH_ENV_VAR: 'QWEN_CODE_HOST_UPDATE_RELAUNCH',
   SKIP_UPDATE_CHECK_ENV_VAR: 'QWEN_CODE_SKIP_UPDATE_CHECK_ONCE',
-  canRelaunchForUpdate: (...args: unknown[]) =>
-    mockCanRelaunchForUpdate(...args),
+  requestUpdateOnExit: (...args: unknown[]) => mockRequestUpdateOnExit(...args),
 }));
 
 vi.mock('../utils/handleAutoUpdate.js', () => ({
@@ -136,8 +130,7 @@ describe('startupPrefetch', () => {
       updateCommand: 'npm install -g @qwen-code/qwen-code@latest',
       isStandalone: false,
     });
-    mockCanRelaunchForUpdate.mockReturnValue(true);
-    mockPlatform.mockReturnValue('darwin');
+    mockRequestUpdateOnExit.mockReturnValue(true);
     mockConnectIdeForStartup.mockResolvedValue(undefined);
     mockDisconnectIde.mockResolvedValue(undefined);
     mockGetIdeClientInstance.mockResolvedValue({
@@ -216,7 +209,7 @@ describe('startupPrefetch', () => {
     await vi.dynamicImportSettled();
 
     expect(mockCheckForUpdatesDetailed).toHaveBeenCalledTimes(1);
-    expect(mockCanRelaunchForUpdate).not.toHaveBeenCalled();
+    expect(mockRequestUpdateOnExit).not.toHaveBeenCalled();
     expect(mockRecordStartupEvent).toHaveBeenCalledWith(
       'startup_prefetch_started',
       { name: 'update_check' },
@@ -227,7 +220,7 @@ describe('startupPrefetch', () => {
     );
   });
 
-  it('relaunches immediately when an automatic update is available', async () => {
+  it('defers an available update until the session exits', async () => {
     const config = makeConfig();
     mockCheckForUpdatesDetailed.mockResolvedValue({
       status: 'update',
@@ -241,13 +234,15 @@ describe('startupPrefetch', () => {
 
     await vi.dynamicImportSettled();
 
-    expect(mockCanRelaunchForUpdate).toHaveBeenCalledOnce();
-    expect(mockUpdateEventEmit).toHaveBeenCalledWith('update-relaunch');
-    expect(mockHandleAutoUpdate).not.toHaveBeenCalled();
+    expect(mockRequestUpdateOnExit).toHaveBeenCalledTimes(1);
+    expect(mockUpdateEventEmit).toHaveBeenCalledWith('update-info', {
+      message:
+        'Update available\nThe update will be installed after you exit this session.',
+    });
   });
 
   it('prompts for an explicit update when no parent supervisor is available', async () => {
-    mockCanRelaunchForUpdate.mockReturnValue(false);
+    mockRequestUpdateOnExit.mockReturnValue(false);
     mockCheckForUpdatesDetailed.mockResolvedValue({
       status: 'update',
       info: {
@@ -264,7 +259,7 @@ describe('startupPrefetch', () => {
     });
   });
 
-  it('relaunches immediately for standalone updates', async () => {
+  it('defers standalone updates until the session exits', async () => {
     const config = makeConfig();
     mockCheckForUpdatesDetailed.mockResolvedValue({
       status: 'update',
@@ -283,11 +278,11 @@ describe('startupPrefetch', () => {
 
     await vi.dynamicImportSettled();
 
-    expect(mockUpdateEventEmit).toHaveBeenCalledWith('update-relaunch');
+    expect(mockRequestUpdateOnExit).toHaveBeenCalledTimes(1);
     expect(mockHandleAutoUpdate).not.toHaveBeenCalled();
   });
 
-  it('relaunches a container immediately when the host can update', async () => {
+  it('keeps a container running until the user updates the host', async () => {
     process.env['QWEN_CODE_HOST_UPDATE_RELAUNCH'] = 'true';
     mockCheckForUpdatesDetailed.mockResolvedValue({
       status: 'update',
@@ -300,34 +295,12 @@ describe('startupPrefetch', () => {
     startPostRenderPrefetches(makeConfig(), makeSettings());
     await vi.dynamicImportSettled();
 
-    expect(mockCanRelaunchForUpdate).not.toHaveBeenCalled();
+    expect(mockRequestUpdateOnExit).not.toHaveBeenCalled();
     expect(mockGetInstallationInfo).not.toHaveBeenCalled();
-    expect(mockUpdateEventEmit).toHaveBeenCalledWith('update-relaunch');
-  });
-
-  it('stages Windows standalone updates without relaunching', async () => {
-    mockPlatform.mockReturnValue('win32');
-    mockGetInstallationInfo.mockReturnValue({
-      isStandalone: true,
-      standaloneDir: 'C:\\qwen-code',
+    expect(mockUpdateEventEmit).toHaveBeenCalledWith('update-info', {
+      message:
+        'Update available\nRun /update to install the update on the host.',
     });
-    mockCheckForUpdatesDetailed.mockResolvedValue({
-      status: 'update',
-      info: {
-        message: 'Update available',
-        update: { latest: '2.0.0' },
-      },
-    });
-
-    startPostRenderPrefetches(makeConfig(), makeSettings());
-    await vi.dynamicImportSettled();
-
-    expect(mockHandleAutoUpdate).toHaveBeenCalledWith(
-      expect.objectContaining({ message: 'Update available' }),
-      expect.anything(),
-      '/repo',
-    );
-    expect(mockUpdateEventEmit).not.toHaveBeenCalledWith('update-relaunch');
   });
 
   it('keeps a container running when the host requires manual updates', async () => {
@@ -343,8 +316,7 @@ describe('startupPrefetch', () => {
     startPostRenderPrefetches(makeConfig(), makeSettings());
     await vi.dynamicImportSettled();
 
-    expect(mockCanRelaunchForUpdate).not.toHaveBeenCalled();
-    expect(mockUpdateEventEmit).not.toHaveBeenCalledWith('update-relaunch');
+    expect(mockRequestUpdateOnExit).not.toHaveBeenCalled();
     expect(mockHandleAutoUpdate).not.toHaveBeenCalled();
     expect(mockUpdateEventEmit).toHaveBeenCalledWith('update-info', {
       message:
@@ -374,8 +346,7 @@ describe('startupPrefetch', () => {
       await vi.dynamicImportSettled();
 
       expect(mockCheckForUpdatesDetailed).not.toHaveBeenCalled();
-      expect(mockCanRelaunchForUpdate).not.toHaveBeenCalled();
-      expect(mockUpdateEventEmit).not.toHaveBeenCalledWith('update-relaunch');
+      expect(mockRequestUpdateOnExit).not.toHaveBeenCalled();
     } finally {
       delete process.env['QWEN_CODE_CUSTOM_SANDBOX_IMAGE'];
     }
@@ -426,7 +397,7 @@ describe('startupPrefetch', () => {
       message:
         'Failed to check for updates. Please check your network or registry configuration.',
     });
-    expect(mockCanRelaunchForUpdate).not.toHaveBeenCalled();
+    expect(mockRequestUpdateOnExit).not.toHaveBeenCalled();
   });
 
   it('requires connectIde option before connecting IDE', async () => {

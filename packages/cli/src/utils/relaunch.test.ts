@@ -16,6 +16,7 @@ import {
 import { EventEmitter } from 'node:events';
 import {
   RELAUNCH_EXIT_CODE,
+  UPDATE_ON_EXIT_MESSAGE,
   UPDATE_RELAUNCH_EXIT_CODE,
 } from './processUtils.js';
 import type { ChildProcess } from 'node:child_process';
@@ -92,7 +93,7 @@ describe('relaunchOnExitCode', () => {
       relaunchOnExitCode(runner, { onUpdateRelaunch }),
     ).rejects.toThrow('PROCESS_EXIT_CALLED');
 
-    expect(onUpdateRelaunch).toHaveBeenCalledOnce();
+    expect(onUpdateRelaunch).toHaveBeenCalledWith(true);
     expect(runner).toHaveBeenCalledTimes(1);
     expect(processExitSpy).toHaveBeenCalledWith(0);
   });
@@ -336,7 +337,7 @@ describe('relaunchAppInChildProcess', () => {
       expect(afterSpawn).toHaveBeenCalledTimes(1);
     });
 
-    it('does not update or relaunch after a clean child exit', async () => {
+    it('installs a requested automatic update only after a clean child exit', async () => {
       process.argv = ['/usr/bin/node', '/app/cli.js'];
 
       const onUpdateRelaunch = vi.fn().mockResolvedValue(44);
@@ -347,7 +348,35 @@ describe('relaunchAppInChildProcess', () => {
         onUpdateRelaunch,
       });
 
+      mockChild.emit('message', { type: UPDATE_ON_EXIT_MESSAGE });
+      expect(onUpdateRelaunch).not.toHaveBeenCalled();
+
       mockChild.emit('close', 0);
+      await expect(promise).rejects.toThrow('PROCESS_EXIT_CALLED');
+
+      expect(onUpdateRelaunch).toHaveBeenCalledWith(false);
+      expect(processExitSpy).toHaveBeenCalledWith(44);
+    });
+
+    it('does not carry an update request across relaunches', async () => {
+      process.argv = ['/usr/bin/node', '/app/cli.js'];
+
+      const onUpdateRelaunch = vi.fn().mockResolvedValue(44);
+      const firstChild = createMockChildProcess(0, false);
+      const secondChild = createMockChildProcess(0, false);
+      mockedSpawn
+        .mockReturnValueOnce(firstChild)
+        .mockReturnValueOnce(secondChild);
+
+      const promise = relaunchAppInChildProcess([], [], {
+        onUpdateRelaunch,
+      });
+
+      firstChild.emit('message', { type: UPDATE_ON_EXIT_MESSAGE });
+      firstChild.emit('close', RELAUNCH_EXIT_CODE);
+      await vi.waitFor(() => expect(mockedSpawn).toHaveBeenCalledTimes(2));
+
+      secondChild.emit('close', 0);
       await expect(promise).rejects.toThrow('PROCESS_EXIT_CALLED');
 
       expect(onUpdateRelaunch).not.toHaveBeenCalled();

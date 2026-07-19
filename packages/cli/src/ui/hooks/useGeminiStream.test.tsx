@@ -396,7 +396,7 @@ describe('useGeminiStream', () => {
   };
 
   it('queues background shell terminal notifications for the model loop', async () => {
-    const { mockSendMessageStream, result } = renderTestHook();
+    const { mockSendMessageStream } = renderTestHook();
     const displayText = 'Background shell "npm test" completed.';
     const modelText =
       '<task-notification>\n<kind>shell</kind>\n<status>completed</status>\n</task-notification>';
@@ -412,7 +412,6 @@ describe('useGeminiStream', () => {
 
     act(() => {
       callback(displayText, modelText);
-      expect(result.current.hasPendingAutomaticSubmission()).toBe(true);
     });
 
     await waitFor(() => {
@@ -432,7 +431,6 @@ describe('useGeminiStream', () => {
         }),
       );
     });
-    expect(result.current.hasPendingAutomaticSubmission()).toBe(false);
   });
 
   describe('vision bridge gate', () => {

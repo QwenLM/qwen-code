@@ -4,14 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import os from 'node:os';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 
 const checkForUpdatesDetailed = vi.fn();
 const relaunchForUpdate = vi.fn();
-const canRelaunchForUpdate = vi.fn();
-const prepareUpdateRelaunch = vi.fn();
 const performStandaloneUpdate = vi.fn();
 const getInstallationInfo = vi.fn();
 const resolveUpdateCommand = vi.fn(
@@ -43,8 +40,6 @@ vi.mock('../utils/updateCheck.js', () => ({ checkForUpdatesDetailed }));
 vi.mock('../../utils/processUtils.js', () => ({
   CUSTOM_SANDBOX_IMAGE_ENV_VAR: 'QWEN_CODE_CUSTOM_SANDBOX_IMAGE',
   HOST_UPDATE_RELAUNCH_ENV_VAR: 'QWEN_CODE_HOST_UPDATE_RELAUNCH',
-  canRelaunchForUpdate,
-  prepareUpdateRelaunch,
   relaunchForUpdate,
 }));
 vi.mock('../../utils/standalone-update.js', () => ({
@@ -69,25 +64,15 @@ function context(
       },
       config: {
         getProjectRoot: () => '/repo',
-        getSessionId: () => '123e4567-e89b-12d3-a456-426614174000',
-        getQuestion: () => '',
       },
     },
   });
 }
 
 describe('updateCommand', () => {
-  let platformSpy: ReturnType<typeof vi.spyOn>;
-
   beforeEach(() => {
     vi.clearAllMocks();
     relaunchForUpdate.mockReset();
-    canRelaunchForUpdate.mockReturnValue(true);
-    prepareUpdateRelaunch.mockResolvedValue({
-      sessionId: '123e4567-e89b-12d3-a456-426614174000',
-      skipInitialPrompt: true,
-    });
-    platformSpy = vi.spyOn(os, 'platform').mockReturnValue('darwin');
     delete process.env['QWEN_CODE_CUSTOM_SANDBOX_IMAGE'];
     delete process.env['QWEN_CODE_HOST_UPDATE_RELAUNCH'];
     checkForUpdatesDetailed.mockResolvedValue({
@@ -103,20 +88,13 @@ describe('updateCommand', () => {
     });
   });
 
-  afterEach(() => {
-    platformSpy.mockRestore();
-  });
-
   it('hands an interactive update off to the parent process', async () => {
     const commandContext = context('interactive');
 
     const result = await updateCommand.action!(commandContext, '');
 
     expect(result).toBeUndefined();
-    expect(relaunchForUpdate).toHaveBeenCalledWith(
-      '123e4567-e89b-12d3-a456-426614174000',
-      true,
-    );
+    expect(relaunchForUpdate).toHaveBeenCalledTimes(1);
     expect(
       commandContext.services.settings.merged.general?.enableAutoUpdate,
     ).toBeUndefined();
@@ -186,25 +164,6 @@ describe('updateCommand', () => {
     expect(relaunchForUpdate).toHaveBeenCalledTimes(1);
   });
 
-  it('stages a Windows standalone update without closing the session', async () => {
-    platformSpy.mockReturnValue('win32');
-    getInstallationInfo.mockReturnValue({
-      isStandalone: true,
-      standaloneDir: 'C:\\qwen-code',
-    });
-    performStandaloneUpdate.mockResolvedValue('deferred');
-
-    const result = await updateCommand.action!(context('interactive'), '');
-
-    expect(result).toEqual({
-      type: 'message',
-      messageType: 'info',
-      content:
-        'Update available: 1.2.3\nDownloading update...\nUpdate downloaded. It will be applied after you exit this session.',
-    });
-    expect(relaunchForUpdate).not.toHaveBeenCalled();
-  });
-
   it('does not mutate enableAutoUpdate when relaunching throws', async () => {
     const commandContext = context('interactive');
     relaunchForUpdate.mockImplementation(() => {
@@ -231,34 +190,6 @@ describe('updateCommand', () => {
       messageType: 'info',
       content:
         'Update available: 1.2.3\nManual update required. Please reinstall Qwen Code.',
-    });
-    expect(relaunchForUpdate).not.toHaveBeenCalled();
-  });
-
-  it('falls back to manual guidance without a stable launcher', async () => {
-    canRelaunchForUpdate.mockReturnValue(false);
-
-    const result = await updateCommand.action!(context('interactive'), '');
-
-    expect(result).toEqual({
-      type: 'message',
-      messageType: 'info',
-      content:
-        'Update available: 1.2.3\nRun the following to update:\n  npm install -g @qwen-code/qwen-code@1.2.3',
-    });
-    expect(relaunchForUpdate).not.toHaveBeenCalled();
-  });
-
-  it('keeps a non-resumable interactive session open', async () => {
-    prepareUpdateRelaunch.mockResolvedValue(null);
-
-    const result = await updateCommand.action!(context('interactive'), '');
-
-    expect(result).toEqual({
-      type: 'message',
-      messageType: 'info',
-      content:
-        'Update available: 1.2.3\nRun the following to update:\n  npm install -g @qwen-code/qwen-code@1.2.3',
     });
     expect(relaunchForUpdate).not.toHaveBeenCalled();
   });

@@ -1956,6 +1956,10 @@ export default {
     'このセッションではカスタムサンドボックスイメージ {{image}} を使用しています。イメージを更新して Qwen Code を再起動してください。',
   'Update Qwen Code on the host, then restart the sandbox.':
     'ホスト上の Qwen Code を更新してから、サンドボックスを再起動してください。',
+  'The update will be installed after you exit this session.':
+    'このセッションを終了すると、更新が自動的にインストールされます。',
+  'Run /update to install the update on the host.':
+    '/update を実行してホストに更新をインストールしてください。',
   'Run /update to install the update.':
     '/update を実行して更新をインストールしてください。',
 

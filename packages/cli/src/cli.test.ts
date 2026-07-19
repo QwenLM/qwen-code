@@ -394,11 +394,11 @@ describe('bootstrap import boundaries', () => {
       );
       writeFileSync(
         path.join(oldDir, 'cli.js'),
-        `import { chmodSync, rmSync, writeFileSync } from 'node:fs';\nwriteFileSync(process.env.QWEN_CODE_UPDATE_RELAUNCH_STATE_PATH, JSON.stringify({ sessionId: '123e4567-e89b-12d3-a456-426614174000' }));\nwriteFileSync(${JSON.stringify(binPath)}, ${JSON.stringify(`#!/bin/sh\nexec "${process.execPath}" "${path.join(newDir, 'entry.mjs')}" "$@"\n`)});\nchmodSync(${JSON.stringify(binPath)}, 0o755);\nrmSync(${JSON.stringify(oldDir)}, { recursive: true, force: true });\nprocess.exit(44);\n`,
+        `import { chmodSync, rmSync, writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(binPath)}, ${JSON.stringify(`#!/bin/sh\nexec "${process.execPath}" "${path.join(newDir, 'entry.mjs')}" "$@"\n`)});\nchmodSync(${JSON.stringify(binPath)}, 0o755);\nrmSync(${JSON.stringify(oldDir)}, { recursive: true, force: true });\nprocess.exit(44);\n`,
       );
       writeFileSync(
         path.join(newDir, 'cli.js'),
-        "process.stdout.write(`${JSON.stringify({ args: process.argv.slice(2), skip: process.env.QWEN_CODE_SKIP_UPDATE_CHECK_ONCE, skipPrompt: process.env.QWEN_CODE_SKIP_INITIAL_PROMPT_ONCE, hasLauncherPid: /^\\d+$/.test(process.env.QWEN_CODE_LAUNCHER_PID ?? ''), launcherPath: process.env.QWEN_CODE_LAUNCHER_PATH })}\\n`);\n",
+        "process.stdout.write(`${JSON.stringify({ args: process.argv.slice(2), skip: process.env.QWEN_CODE_SKIP_UPDATE_CHECK_ONCE, hasLauncherPid: /^\\d+$/.test(process.env.QWEN_CODE_LAUNCHER_PID ?? ''), launcherPath: process.env.QWEN_CODE_LAUNCHER_PATH })}\\n`);\n",
       );
       writeFileSync(
         binPath,
@@ -420,139 +420,13 @@ describe('bootstrap import boundaries', () => {
       });
 
       expect(JSON.parse(output)).toEqual({
-        args: [
-          '--prompt',
-          'a&b',
-          '--resume',
-          '123e4567-e89b-12d3-a456-426614174000',
-        ],
+        args: ['--prompt', 'a&b'],
         skip: 'true',
-        skipPrompt: 'true',
         hasLauncherPid: true,
       });
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
       rmSync(wrongDir, { recursive: true, force: true });
-    }
-  });
-
-  it('relaunches a fresh session without forcing resume or skipping its prompt', () => {
-    const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-cli-fresh-update-'));
-    const oldDir = path.join(tempDir, 'old');
-    const newDir = path.join(tempDir, 'new');
-    const binPath = path.join(tempDir, 'qwen');
-    try {
-      mkdirSync(oldDir);
-      mkdirSync(newDir);
-      copyFileSync(
-        '../../scripts/cli-entry.js',
-        path.join(oldDir, 'entry.mjs'),
-      );
-      copyFileSync(
-        '../../scripts/cli-entry.js',
-        path.join(newDir, 'entry.mjs'),
-      );
-      writeFileSync(
-        path.join(oldDir, 'cli.js'),
-        `import { chmodSync, writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(binPath)}, ${JSON.stringify(`#!/bin/sh\nexec "${process.execPath}" "${path.join(newDir, 'entry.mjs')}" "$@"\n`)});\nchmodSync(${JSON.stringify(binPath)}, 0o755);\nprocess.exit(44);\n`,
-      );
-      writeFileSync(
-        path.join(newDir, 'cli.js'),
-        'process.stdout.write(JSON.stringify({ args: process.argv.slice(2), skipPrompt: process.env.QWEN_CODE_SKIP_INITIAL_PROMPT_ONCE }));\n',
-      );
-      writeFileSync(
-        binPath,
-        `#!/bin/sh\nexec "${process.execPath}" "${path.join(oldDir, 'entry.mjs')}" "$@"\n`,
-      );
-      chmodSync(binPath, 0o755);
-
-      const output = execFileSync(binPath, ['--prompt-interactive', 'hello'], {
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          PATH: `${tempDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
-        },
-      });
-
-      expect(JSON.parse(output)).toEqual({
-        args: ['--prompt-interactive', 'hello'],
-      });
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
-
-  it('does not replay a consumed initial command in a fresh session', () => {
-    const tempDir = mkdtempSync(
-      path.join(tmpdir(), 'qwen-cli-command-update-'),
-    );
-    const oldDir = path.join(tempDir, 'old');
-    const newDir = path.join(tempDir, 'new');
-    const binPath = path.join(tempDir, 'qwen');
-    try {
-      mkdirSync(oldDir);
-      mkdirSync(newDir);
-      copyFileSync(
-        '../../scripts/cli-entry.js',
-        path.join(oldDir, 'entry.mjs'),
-      );
-      copyFileSync(
-        '../../scripts/cli-entry.js',
-        path.join(newDir, 'entry.mjs'),
-      );
-      writeFileSync(
-        path.join(oldDir, 'cli.js'),
-        `import { chmodSync, writeFileSync } from 'node:fs';\nwriteFileSync(process.env.QWEN_CODE_UPDATE_RELAUNCH_STATE_PATH, JSON.stringify({ skipInitialPrompt: true }));\nwriteFileSync(${JSON.stringify(binPath)}, ${JSON.stringify(`#!/bin/sh\nexec "${process.execPath}" "${path.join(newDir, 'entry.mjs')}" "$@"\n`)});\nchmodSync(${JSON.stringify(binPath)}, 0o755);\nprocess.exit(44);\n`,
-      );
-      writeFileSync(
-        path.join(newDir, 'cli.js'),
-        'process.stdout.write(JSON.stringify({ args: process.argv.slice(2), skipPrompt: process.env.QWEN_CODE_SKIP_INITIAL_PROMPT_ONCE }));\n',
-      );
-      writeFileSync(
-        binPath,
-        `#!/bin/sh\nexec "${process.execPath}" "${path.join(oldDir, 'entry.mjs')}" "$@"\n`,
-      );
-      chmodSync(binPath, 0o755);
-
-      const output = execFileSync(
-        binPath,
-        ['--prompt-interactive', '/update'],
-        {
-          encoding: 'utf8',
-          env: {
-            ...process.env,
-            PATH: `${tempDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
-          },
-        },
-      );
-
-      expect(JSON.parse(output)).toEqual({
-        args: ['--prompt-interactive', '/update'],
-        skipPrompt: 'true',
-      });
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
-
-  it('does not advertise update relaunch without a stable launcher', () => {
-    const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-cli-no-launcher-'));
-    const entryPath = path.join(tempDir, 'entry.mjs');
-    try {
-      copyFileSync('../../scripts/cli-entry.js', entryPath);
-      writeFileSync(
-        path.join(tempDir, 'cli.js'),
-        'process.stdout.write(JSON.stringify({ supported: process.env.QWEN_CODE_UPDATE_RELAUNCH_SUPPORTED, statePath: process.env.QWEN_CODE_UPDATE_RELAUNCH_STATE_PATH }));\n',
-      );
-
-      const output = execFileSync(process.execPath, [entryPath], {
-        encoding: 'utf8',
-        env: { ...process.env, PATH: '' },
-      });
-
-      expect(JSON.parse(output)).toEqual({});
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
     }
   });
 

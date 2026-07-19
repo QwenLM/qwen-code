@@ -187,7 +187,6 @@ import { migrateTomlCommands } from '../services/command-migration-tool.js';
 import { sendNotification } from '../services/notificationService.js';
 import { type UpdateObject } from './utils/updateCheck.js';
 import { setUpdateHandler } from '../utils/handleAutoUpdate.js';
-import { prepareUpdateRelaunch } from '../utils/processUtils.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { useMessageQueue } from './hooks/useMessageQueue.js';
 import { useAutoAcceptIndicator } from './hooks/useAutoAcceptIndicator.js';
@@ -488,12 +487,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const [themeError, setThemeError] = useState<string | null>(
     initializationResult.themeError,
   );
-  const [isProcessing, setIsProcessingState] = useState<boolean>(false);
-  const isProcessingRef = useRef(false);
-  const setIsProcessing = useCallback((value: boolean) => {
-    isProcessingRef.current = value;
-    setIsProcessingState(value);
-  }, []);
+  const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [embeddedShellFocused, setEmbeddedShellFocused] = useState(false);
 
   const [geminiMdFileCount, setGeminiMdFileCount] = useState<number>(
@@ -1018,7 +1012,6 @@ export const AppContainer = (props: AppContainerProps) => {
   // Note: isIdleRef.current is assigned after streamingState becomes available
   // (see the assignment below useGeminiStream).
   const isIdleRef = useRef(true);
-  const hasDraftRef = useRef(false);
   // Live content-area height, kept in a ref so useGeminiStream (called above the
   // point where availableTerminalHeight is computed) can read the current value
   // when bounding the pending item's rendered height. terminalWidthRef pairs
@@ -1029,6 +1022,16 @@ export const AppContainer = (props: AppContainerProps) => {
     cleanup: () => void;
     flush: () => void;
   } | null>(null);
+
+  useEffect(() => {
+    const handler = setUpdateHandler(
+      historyManager.addItem,
+      setUpdateInfo,
+      isIdleRef,
+    );
+    updateHandlerRef.current = handler;
+    return () => handler?.cleanup();
+  }, [historyManager.addItem]);
 
   // Derive widths for InputPrompt using shared helper
   const { inputWidth, suggestionsWidth } = useMemo(() => {
@@ -1059,7 +1062,6 @@ export const AppContainer = (props: AppContainerProps) => {
     shellModeActive,
     preferredEditor,
   });
-  hasDraftRef.current = buffer.text.length > 0;
   const restoredPromptStashTargetsRef = useRef(new Set<string>());
   const promptStashTargetDir = config.getTargetDir();
   useEffect(() => {
@@ -1879,8 +1881,6 @@ export const AppContainer = (props: AppContainerProps) => {
     pendingToolCalls,
     streamingResponseLengthRef,
     isReceivingContent,
-    isSubmittingQueryRef,
-    hasPendingAutomaticSubmission,
   } = useGeminiStream(
     config.getGeminiClient(),
     historyManager.history,
@@ -1911,8 +1911,16 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Now that streamingState is available, keep isIdleRef in sync and
   // flush any deferred update notifications when the model finishes responding.
-  const isIdle = streamingState === StreamingState.Idle;
-  isIdleRef.current = isIdle;
+  isIdleRef.current = streamingState === StreamingState.Idle;
+
+  useEffect(() => {
+    if (streamingState === StreamingState.Idle) {
+      updateHandlerRef.current?.flush();
+      // P7-trigger: a steered turn has finished — drop the `workflow active`
+      // indicator until the next keyword prompt re-arms it.
+      setWorkflowKeywordActive(false);
+    }
+  }, [streamingState]);
 
   // Auto-open the skill-review dialog when idle and there are pending skills.
   // Gated on the live auto-skill flag: after the dialog's turn-off option
@@ -2012,46 +2020,7 @@ export const AppContainer = (props: AppContainerProps) => {
     restoreMessages,
     drainQueue,
     popNextSegment,
-    hasQueuedMessages,
   } = useMessageQueue();
-
-  useEffect(() => {
-    const handler = setUpdateHandler(
-      historyManager.addItem,
-      setUpdateInfo,
-      isIdleRef,
-      () =>
-        isIdleRef.current &&
-        !isSubmittingQueryRef.current &&
-        !hasDraftRef.current &&
-        !isProcessingRef.current &&
-        !hasQueuedMessages() &&
-        !hasPendingAutomaticSubmission(),
-      () =>
-        prepareUpdateRelaunch(
-          config,
-          historyRef.current.some((item) => item.type === MessageType.USER),
-          initialPromptSubmitted.current,
-        ),
-    );
-    updateHandlerRef.current = handler;
-    return () => handler?.cleanup();
-  }, [
-    config,
-    hasPendingAutomaticSubmission,
-    hasQueuedMessages,
-    historyManager.addItem,
-    isSubmittingQueryRef,
-  ]);
-
-  useEffect(() => {
-    if (isIdle) {
-      updateHandlerRef.current?.flush();
-      // P7-trigger: a steered turn has finished — drop the `workflow active`
-      // indicator until the next keyword prompt re-arms it.
-      setWorkflowKeywordActive(false);
-    }
-  }, [isIdle, buffer.text, isProcessing, messageQueue.length]);
 
   // Bridge message queue to mid-turn drain via ref.
   // drainQueue reads the synchronous queueRef inside the hook, so it
