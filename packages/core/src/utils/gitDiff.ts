@@ -1385,3 +1385,233 @@ async function countStashEntries(gitRoot: string): Promise<number> {
     return 0;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Git log
+// ---------------------------------------------------------------------------
+
+/** Maximum entries per `fetchGitLog` page. */
+export const MAX_LOG_LIMIT = 200;
+/** Default page size for `fetchGitLog`. */
+export const DEFAULT_LOG_LIMIT = 50;
+
+export interface GitLogEntry {
+  sha: string;
+  shortSha: string;
+  authorName: string;
+  authorEmail: string;
+  /** Unix timestamp in seconds. */
+  authorDate: number;
+  subject: string;
+  /** `%D` output, e.g. `"HEAD -> main, origin/main, v1.2.0"`. */
+  refs: string;
+  /** Parent SHAs (length > 1 ⇒ merge commit). */
+  parents: string[];
+}
+
+export interface GitLogResult {
+  entries: GitLogEntry[];
+  hasMore: boolean;
+}
+
+export interface GitCommitFileStat {
+  path: string;
+  added: number;
+  removed: number;
+  isBinary: boolean;
+}
+
+export interface GitCommitDetail {
+  sha: string;
+  shortSha: string;
+  authorName: string;
+  authorEmail: string;
+  authorDate: number;
+  subject: string;
+  body: string;
+  refs: string;
+  parents: string[];
+  files: GitCommitFileStat[];
+  filesCount: number;
+  linesAdded: number;
+  linesRemoved: number;
+  hiddenCount: number;
+}
+
+const LOG_FORMAT = '%H%x1f%h%x1f%an%x1f%ae%x1f%at%x1f%s%x1f%D%x1f%P';
+const LOG_DETAIL_FORMAT =
+  '%H%x1f%h%x1f%an%x1f%ae%x1f%at%x1f%s%x1f%D%x1f%P%x1f%b';
+const FIELD_SEP = '\x1f';
+
+function parseLogFields(raw: string): GitLogEntry | null {
+  const parts = raw.split(FIELD_SEP);
+  if (parts.length < 8) return null;
+  return {
+    sha: parts[0],
+    shortSha: parts[1],
+    authorName: parts[2],
+    authorEmail: parts[3],
+    authorDate: parseInt(parts[4], 10) || 0,
+    subject: parts[5],
+    refs: parts[6],
+    parents: parts[7] ? parts[7].split(' ').filter(Boolean) : [],
+  };
+}
+
+/**
+ * Fetch a page of commit log entries (newest first).
+ *
+ * Returns `null` when not inside a git repo or when git fails. An empty
+ * repo (no commits) returns `{ entries: [], hasMore: false }`.
+ */
+export async function fetchGitLog(
+  cwd: string,
+  options?: { limit?: number; skip?: number },
+): Promise<GitLogResult | null> {
+  const gitRoot = findGitRoot(cwd);
+  if (!gitRoot) return null;
+
+  const limit = Math.min(
+    Math.max(options?.limit ?? DEFAULT_LOG_LIMIT, 1),
+    MAX_LOG_LIMIT,
+  );
+  const skip = Math.max(options?.skip ?? 0, 0);
+
+  const stdout = await runGit(
+    [
+      '--no-optional-locks',
+      'log',
+      `--format=${LOG_FORMAT}%x00`,
+      '-n',
+      String(limit + 1),
+      ...(skip > 0 ? ['--skip', String(skip)] : []),
+    ],
+    gitRoot,
+  );
+  if (stdout === null) {
+    // git log fails on an empty repo (no commits yet). Distinguish that from
+    // a real failure by probing HEAD: if HEAD doesn't resolve either, the
+    // repo simply has no commits.
+    const head = await runGit(['rev-parse', '--verify', 'HEAD'], gitRoot);
+    return head === null ? { entries: [], hasMore: false } : null;
+  }
+
+  const records = stdout
+    .split('\0')
+    .map((r) => r.replace(/^\n/, ''))
+    .filter((r) => r.length > 0);
+  const hasMore = records.length > limit;
+  const page = hasMore ? records.slice(0, limit) : records;
+
+  const entries: GitLogEntry[] = [];
+  for (const record of page) {
+    const entry = parseLogFields(record);
+    if (entry) entries.push(entry);
+  }
+  return { entries, hasMore };
+}
+
+/**
+ * Fetch full detail for a single commit: metadata (including body) plus
+ * per-file numstat.
+ *
+ * Returns `null` when not inside a git repo, the sha is invalid / not found,
+ * or git fails.
+ */
+export async function fetchGitCommitDetail(
+  cwd: string,
+  sha: string,
+): Promise<GitCommitDetail | null> {
+  if (!/^[0-9a-f]{7,40}$/i.test(sha)) return null;
+
+  const gitRoot = findGitRoot(cwd);
+  if (!gitRoot) return null;
+
+  const metaRaw = await runGit(
+    ['--no-optional-locks', 'log', '-1', `--format=${LOG_DETAIL_FORMAT}`, sha],
+    gitRoot,
+  );
+  if (metaRaw === null) return null;
+
+  // Body is the last field and may contain the field separator; split only
+  // the first 8 separators so the remainder is the intact body.
+  const trimmed = metaRaw.replace(/\n$/, '');
+  const parts: string[] = [];
+  let rest = trimmed;
+  for (let i = 0; i < 8; i++) {
+    const idx = rest.indexOf(FIELD_SEP);
+    if (idx < 0) break;
+    parts.push(rest.slice(0, idx));
+    rest = rest.slice(idx + 1);
+  }
+  parts.push(rest);
+  if (parts.length < 9) return null;
+
+  const parents = parts[7] ? parts[7].split(' ').filter(Boolean) : [];
+
+  // Per-file stats via diff-tree. `--root` handles the initial commit (no
+  // parent); merge commits show the combined diff (standard `git show`
+  // behaviour).
+  const numstatRaw = await runGit(
+    [
+      '--no-optional-locks',
+      'diff-tree',
+      '--no-commit-id',
+      '--numstat',
+      '-r',
+      '-z',
+      '--root',
+      sha,
+    ],
+    gitRoot,
+  );
+
+  const files: GitCommitFileStat[] = [];
+  let filesCount = 0;
+  let linesAdded = 0;
+  let linesRemoved = 0;
+
+  if (numstatRaw) {
+    const tokens = numstatRaw.split('\0').filter((t) => t.length > 0);
+    for (const token of tokens) {
+      const firstTab = token.indexOf('\t');
+      if (firstTab < 0) continue;
+      const secondTab = token.indexOf('\t', firstTab + 1);
+      if (secondTab < 0) continue;
+      const addStr = token.slice(0, firstTab);
+      const remStr = token.slice(firstTab + 1, secondTab);
+      const filePath = token.slice(secondTab + 1);
+      const isBinary = addStr === '-' || remStr === '-';
+      const fileAdded = isBinary ? 0 : parseInt(addStr, 10) || 0;
+      const fileRemoved = isBinary ? 0 : parseInt(remStr, 10) || 0;
+      filesCount++;
+      linesAdded += fileAdded;
+      linesRemoved += fileRemoved;
+      if (files.length < MAX_FILES) {
+        files.push({
+          path: filePath,
+          added: fileAdded,
+          removed: fileRemoved,
+          isBinary,
+        });
+      }
+    }
+  }
+
+  return {
+    sha: parts[0],
+    shortSha: parts[1],
+    authorName: parts[2],
+    authorEmail: parts[3],
+    authorDate: parseInt(parts[4], 10) || 0,
+    subject: parts[5],
+    refs: parts[6],
+    parents,
+    body: parts[8],
+    files,
+    filesCount,
+    linesAdded,
+    linesRemoved,
+    hiddenCount: Math.max(filesCount - files.length, 0),
+  };
+}

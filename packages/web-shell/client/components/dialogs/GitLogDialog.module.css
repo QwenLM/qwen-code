@@ -1,0 +1,231 @@
+.content {
+  display: flex;
+  flex-direction: column;
+  min-height: 50vh;
+}
+
+.tabBar {
+  display: flex;
+  gap: 2px;
+  padding: 0 0 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 8px;
+}
+
+.tab {
+  padding: 4px 12px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+.tab:hover {
+  background: var(--subtle-bg);
+}
+
+.tabActive {
+  color: inherit;
+  font-weight: 500;
+  background: var(--subtle-bg);
+}
+
+.placeholder {
+  padding: 24px 12px;
+  text-align: center;
+  color: var(--muted-foreground);
+}
+
+.commitList {
+  display: flex;
+  flex-direction: column;
+}
+
+.commitRow {
+  border-bottom: 1px solid var(--border);
+}
+
+.commitHeader {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  color: inherit;
+}
+
+.commitHeader:hover {
+  background: var(--subtle-bg);
+}
+
+.commitSha {
+  flex-shrink: 0;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+.copyBtn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  padding: 1px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.commitHeader:hover .copyBtn {
+  opacity: 1;
+}
+
+.copyBtn:hover {
+  background: var(--muted);
+}
+
+.commitSubject {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.commitMeta {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--muted-foreground);
+  white-space: nowrap;
+}
+
+.commitRefs {
+  display: inline-flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.refTag {
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: 10px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.refHead {
+  background: var(--success-bg);
+  color: var(--success-color);
+}
+
+.mergeIcon {
+  flex-shrink: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.commitDetail {
+  padding: 8px 10px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--subtle-bg);
+}
+
+.commitBody {
+  margin: 0 0 8px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--muted-foreground);
+}
+
+.fileStats {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.fileStatHeader {
+  font-size: 11px;
+  color: var(--muted-foreground);
+  margin-bottom: 4px;
+}
+
+.fileStatRow {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  padding: 1px 0;
+}
+
+.statNums {
+  display: inline-flex;
+  gap: 6px;
+  flex-shrink: 0;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.statAdd {
+  color: var(--success-color);
+}
+
+.statDel {
+  color: var(--error-color);
+}
+
+.fileStatPath {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileBinary {
+  color: var(--muted-foreground);
+}
+
+.hiddenNote {
+  padding: 4px 0;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.detailError {
+  padding: 8px 0;
+  color: var(--error-color);
+  font-size: 12px;
+}
+
+.loadMore {
+  display: block;
+  width: 100%;
+  padding: 10px;
+  margin-top: 4px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  color: var(--muted-foreground);
+  text-align: center;
+}
+
+.loadMore:hover {
+  background: var(--subtle-bg);
+}

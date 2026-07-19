@@ -76,6 +76,7 @@ import { MemoryMessage } from './components/messages/MemoryMessage';
 import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
 import { GitDiffDialog } from './components/dialogs/GitDiffDialog';
+import { GitLogDialog } from './components/dialogs/GitLogDialog';
 import { SkillsManagerPage } from './components/skills/SkillsManagerPage';
 import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
@@ -2238,10 +2239,13 @@ export function App({
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [showThemeDialog, setShowThemeDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
-  // The workspace the Changes dialog reads. Set by whichever entry point opened
+  // The workspace the Git dialog reads. Set by whichever entry point opened
   // it — the composer git chip / `/diff` (current workspace) or a sidebar
   // folder's git chip (that workspace) — so each can target its own repo.
   const [diffWorkspaceCwd, setDiffWorkspaceCwd] = useState<string | undefined>(
+    undefined,
+  );
+  const [logWorkspaceCwd, setLogWorkspaceCwd] = useState<string | undefined>(
     undefined,
   );
   // Main content view. The scheduled-tasks page replaces the chat pane inline
@@ -2988,6 +2992,7 @@ export function App({
     showThemeDialog ||
     showToolsDialog ||
     diffWorkspaceCwd !== undefined ||
+    logWorkspaceCwd !== undefined ||
     modelDialogMode !== null ||
     showApprovalModeDialog ||
     tasksDialogMessage !== null ||
@@ -4565,13 +4570,19 @@ export function App({
             return true;
           }
           if (cmd === 'diff') {
-            // Local intercept: open the working-tree Changes dialog instead of
-            // forwarding `/diff` to the agent. Targets the current workspace.
             if (!gitDiffWorkspaceCwd) {
               pushToast('info', t('localCommand.diffNoWorkspace'));
               return true;
             }
             setDiffWorkspaceCwd(gitDiffWorkspaceCwd);
+            return true;
+          }
+          if (cmd === 'log') {
+            if (!gitDiffWorkspaceCwd) {
+              pushToast('info', t('localCommand.logNoWorkspace'));
+              return true;
+            }
+            setLogWorkspaceCwd(gitDiffWorkspaceCwd);
             return true;
           }
           if (cmd === 'tasks') {
@@ -6202,6 +6213,22 @@ export function App({
             <GitDiffDialog
               workspaceCwd={diffWorkspaceCwd}
               onClose={() => setDiffWorkspaceCwd(undefined)}
+              onOpenLog={() => {
+                const cwd = diffWorkspaceCwd;
+                setDiffWorkspaceCwd(undefined);
+                window.setTimeout(() => setLogWorkspaceCwd(cwd), 300);
+              }}
+            />
+          )}
+          {logWorkspaceCwd && (
+            <GitLogDialog
+              workspaceCwd={logWorkspaceCwd}
+              onClose={() => setLogWorkspaceCwd(undefined)}
+              onOpenDiff={() => {
+                const cwd = logWorkspaceCwd;
+                setLogWorkspaceCwd(undefined);
+                window.setTimeout(() => setDiffWorkspaceCwd(cwd), 300);
+              }}
             />
           )}
           {tasksDialogMessage && (

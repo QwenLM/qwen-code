@@ -360,9 +360,13 @@ function DiffFileRow({
 export function GitDiffDialog({
   workspaceCwd,
   onClose,
+  onOpenLog,
+  embedded = false,
 }: {
   workspaceCwd: string;
   onClose: () => void;
+  onOpenLog?: () => void;
+  embedded?: boolean;
 }) {
   const { t } = useI18n();
   const { client } = useWorkspace();
@@ -431,6 +435,27 @@ export function GitDiffDialog({
     );
   }
 
+  if (embedded) {
+    return (
+      <div className={styles.content}>
+        {onOpenLog && (
+          <div className={styles.tabBar}>
+            <button
+              type="button"
+              className={`${styles.tab} ${styles.tabActive}`}
+            >
+              {t('gitDiff.title')}
+            </button>
+            <button type="button" className={styles.tab} onClick={onOpenLog}>
+              {t('gitLog.title')}
+            </button>
+          </div>
+        )}
+        {body}
+      </div>
+    );
+  }
+
   return (
     <DialogShell
       title={t('gitDiff.title')}
@@ -439,7 +464,22 @@ export function GitDiffDialog({
       allowFullscreen
       onClose={onClose}
     >
-      {body}
+      <div className={styles.content}>
+        {onOpenLog && (
+          <div className={styles.tabBar}>
+            <button
+              type="button"
+              className={`${styles.tab} ${styles.tabActive}`}
+            >
+              {t('gitDiff.title')}
+            </button>
+            <button type="button" className={styles.tab} onClick={onOpenLog}>
+              {t('gitLog.title')}
+            </button>
+          </div>
+        )}
+        {body}
+      </div>
     </DialogShell>
   );
 }
