@@ -218,10 +218,11 @@ async function readFullStructure(
 }
 
 /**
- * Reads the directory structure using BFS, respecting maxItems.
+ * Formats an already-built folder structure into indented text lines.
  * @param node The current node in the reduced structure.
- * @param indent The current indentation string.
- * @param isLast Sibling indicator.
+ * @param currentIndent The current indentation string.
+ * @param isLastChildOfParent Whether this node is the last child of its parent.
+ * @param isProcessingRootNode Whether this node is the root node originally passed to getFolderStructure.
  * @param builder Array to build the string lines.
  */
 function formatStructure(

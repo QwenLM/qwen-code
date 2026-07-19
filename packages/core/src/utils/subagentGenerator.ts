@@ -109,7 +109,7 @@ export interface SubagentGeneratedContent {
  * Generates subagent configuration content using LLM.
  *
  * @param userDescription - The user's description of what the subagent should do
- * @param geminiClient - Initialized GeminiClient instance
+ * @param config - The Config instance used to run the LLM query
  * @param abortSignal - AbortSignal for cancelling the request
  * @returns Promise resolving to generated subagent content
  */
