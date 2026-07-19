@@ -240,6 +240,51 @@ export async function ensureMacBinarySigned(
 }
 
 /**
+ * Resolves ripgrep and verifies it actually runs.
+ *
+ * The bundled binary is selected by file existence alone, so a binary that
+ * exists but cannot execute — e.g. arm64 kernels with 64K pages (#2676) —
+ * would otherwise fail the whole session instead of using system rg.
+ */
+async function resolveHealthyRipgrep(
+  useBuiltin: boolean,
+): Promise<RipgrepSelection | null> {
+  const selection = await resolveRipgrep(useBuiltin);
+  if (!selection) {
+    return null;
+  }
+
+  try {
+    await ensureRipgrepHealthy(selection);
+    return selection;
+  } catch (error) {
+    if (selection.mode !== 'builtin') {
+      throw error;
+    }
+    debugLogger.warn(
+      `Bundled ripgrep at ${selection.command} is unusable (${error}); trying system rg.`,
+    );
+
+    let fallback: RipgrepSelection | null = null;
+    try {
+      fallback = await resolveRipgrep(false);
+      if (fallback) {
+        await ensureRipgrepHealthy(fallback);
+      }
+    } catch {
+      // System rg is unusable too; report the bundled failure as the root cause.
+      throw error;
+    }
+    if (!fallback) {
+      throw error;
+    }
+
+    cachedSelections.set(true, fallback);
+    return fallback;
+  }
+}
+
+/**
  * Checks if ripgrep binary is available
  * @param useBuiltin If true, tries bundled ripgrep first, then falls back to system ripgrep.
  *                   If false, only checks for system ripgrep.
@@ -249,12 +294,8 @@ export async function ensureMacBinarySigned(
 export async function canUseRipgrep(
   useBuiltin: boolean = true,
 ): Promise<boolean> {
-  const selection = await resolveRipgrep(useBuiltin);
-  if (!selection) {
-    return false;
-  }
-  await ensureRipgrepHealthy(selection);
-  return true;
+  const selection = await resolveHealthyRipgrep(useBuiltin);
+  return selection !== null;
 }
 
 /**
@@ -270,11 +311,10 @@ export async function runRipgrep(
   signal?: AbortSignal,
   useBuiltin: boolean = true,
 ): Promise<RipgrepRunResult> {
-  const selection = await resolveRipgrep(useBuiltin);
+  const selection = await resolveHealthyRipgrep(useBuiltin);
   if (!selection) {
     throw new Error('ripgrep not found.');
   }
-  await ensureRipgrepHealthy(selection);
 
   return new Promise<RipgrepRunResult>((resolve) => {
     const child = execFile(
