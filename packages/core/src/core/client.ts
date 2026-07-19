@@ -1843,6 +1843,14 @@ export class GeminiClient {
     turns: number = MAX_TURNS,
   ): AsyncGenerator<ServerGeminiStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
+    if (
+      messageType === SendMessageType.UserQuery ||
+      messageType === SendMessageType.Cron ||
+      messageType === SendMessageType.Notification ||
+      messageType === SendMessageType.Teammate
+    ) {
+      await this.config.assertCanStartTurn();
+    }
     let strippedRetryEntries: Content[] = [];
     // Snapshot of GeminiChat's user-content push counter, taken right after the
     // strip. The Retry's re-submitted content is the first thing the send

@@ -247,6 +247,7 @@ export * from './services/visionBridge/image-capability.js';
 export * from './services/sessionRecap.js';
 export * from './services/session-artifact-persistence.js';
 export * from './services/sessionService.js';
+export * from './services/session-writer-lease.js';
 export {
   decodeSessionTranscriptCursor,
   encodeSessionTranscriptCursor,

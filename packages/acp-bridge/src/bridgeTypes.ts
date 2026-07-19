@@ -439,7 +439,7 @@ export interface SessionMetadataUpdate {
 export interface CloseSessionOpts {
   /** Override the default `'client_close'` reason in the `session_closed` event. */
   reason?: string;
-  /** Require the ACP child to acknowledge session close before resolving. */
+  /** Require pending recorder writes to flush successfully. All closes await the ACP child acknowledgement. */
   requireAgentClose?: boolean;
 }
 

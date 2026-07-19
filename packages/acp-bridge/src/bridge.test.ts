@@ -12737,7 +12737,11 @@ describe('createAcpSessionBridge', () => {
       expect(handle.agent.extMethodCalls).toHaveLength(1);
       expect(handle.agent.extMethodCalls[0]).toEqual({
         method: 'qwen/control/session/close',
-        params: { sessionId: session.sessionId, requireFlush: true },
+        params: {
+          sessionId: session.sessionId,
+          drainTimeoutMs: 8_000,
+          requireFlush: true,
+        },
       });
       expect(bridge.sessionCount).toBe(1);
       expect(() =>
@@ -12823,6 +12827,125 @@ describe('createAcpSessionBridge', () => {
       expect(events[resolvedIndex]?.data).toMatchObject({
         outcome: { outcome: 'cancelled' },
       });
+
+      await bridge.shutdown();
+    });
+
+    it('resolves pending permissions before waiting for agent close during kill', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const permissionResponse: { current?: Promise<unknown> } = {};
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent({
+          extMethodImpl: async (method) => {
+            if (method !== 'qwen/control/session/close') return {};
+            const result = (await permissionResponse.current) as {
+              outcome: { outcome: string };
+            };
+            expect(result.outcome.outcome).toBe('cancelled');
+            return {};
+          },
+        });
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | {
+                exitCode: number | null;
+                signalCode: NodeJS.Signals | null;
+              }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      permissionResponse.current = (
+        capturedConn as unknown as {
+          requestPermission(p: unknown): Promise<unknown>;
+        }
+      ).requestPermission({
+        sessionId: session.sessionId,
+        toolCall: { toolCallId: 'tc-kill', title: 'dangerous command' },
+        options: [
+          { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+          { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+        ],
+      });
+
+      await vi.waitFor(() => expect(bridge.pendingPermissionCount).toBe(1));
+      await expect(bridge.killSession(session.sessionId)).resolves.toBe(true);
+      await expect(permissionResponse.current).resolves.toMatchObject({
+        outcome: { outcome: 'cancelled' },
+      });
+      expect(bridge.pendingPermissionCount).toBe(0);
+      expect(bridge.sessionCount).toBe(0);
+
+      await bridge.shutdown();
+    });
+
+    it('force-kills the channel when kill follows a stuck acknowledged close', async () => {
+      const closeStarted = deferred<void>();
+      const closeGate = deferred<Record<string, unknown>>();
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method !== 'qwen/control/session/close') return {};
+          closeStarted.resolve();
+          return closeGate.promise;
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const closeResult = bridge.closeSession(session.sessionId).then(
+        () => 'resolved' as const,
+        () => 'rejected' as const,
+      );
+      await closeStarted.promise;
+
+      await expect(bridge.killSession(session.sessionId)).resolves.toBe(true);
+      await expect(closeResult).resolves.toBe('rejected');
+      await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
+      expect(handle.killed).toBe(true);
+
+      await bridge.shutdown();
+    });
+
+    it('reaps the channel when an acknowledged close times out', async () => {
+      const firstCloseGate = deferred<Record<string, unknown>>();
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method !== 'qwen/control/session/close') return {};
+          return firstCloseGate.promise;
+        },
+      });
+      const replacement = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: vi
+          .fn()
+          .mockResolvedValueOnce(handle.channel)
+          .mockResolvedValueOnce(replacement.channel),
+        initializeTimeoutMs: 20,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.closeSession(session.sessionId),
+      ).rejects.toBeInstanceOf(BridgeTimeoutError);
+      await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
+      expect(handle.killed).toBe(true);
+      await expect(
+        bridge.loadSession({
+          sessionId: session.sessionId,
+          workspaceCwd: WS_A,
+        }),
+      ).resolves.toMatchObject({ sessionId: session.sessionId });
+      expect(bridge.sessionCount).toBe(1);
 
       await bridge.shutdown();
     });
