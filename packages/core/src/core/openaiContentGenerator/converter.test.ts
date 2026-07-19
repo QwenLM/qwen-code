@@ -1215,6 +1215,48 @@ describe('OpenAIContentConverter', () => {
       };
     };
 
+    it('normalizes legacy dotted MCP names before sending history', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_legacy_mcp',
+                  name: 'mcp__zybio__literature.search_pubmed',
+                  args: { query: 'IVD' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_legacy_mcp',
+                  name: 'mcp__zybio__literature.search_pubmed',
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+      const assistant = messages.find(hasOpenAIToolCalls);
+      const name = assistant?.tool_calls[0]?.function.name;
+
+      expect(name).toMatch(/^[A-Za-z][A-Za-z0-9_-]*$/);
+      expect(name).not.toContain('.');
+    });
+
     it('preserves ordered multi-part startup reminder user content', () => {
       const request: GenerateContentParameters = {
         model: 'models/test',

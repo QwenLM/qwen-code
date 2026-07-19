@@ -311,7 +311,7 @@ describe('qwen-autofix workflow', () => {
     // a ts-only comparison misses it. The gate must also treat
     // same-ts-but-newer-round (with the conflict now cleared) as stale.
     const staleGate = prepareBranchAndFeedbackStep.match(
-      /(STALE='false'\n[\s\S]*?echo "stale=\$\{STALE\}" >> "\$\{GITHUB_OUTPUT\}")/,
+      /(STALE='false'\n[\s\S]*?echo "effective_round=\$\{ROUND\}" >> "\$\{GITHUB_OUTPUT\}")/,
     )?.[1];
     expect(staleGate).toBeTruthy();
     const W = '2026-07-18T08:00:00Z';
@@ -321,6 +321,7 @@ describe('qwen-autofix workflow', () => {
       round,
       reviews = [],
       acks = [],
+      commands = [],
       // Default: the job was selected under the CURRENT window (the latest
       // ack, or 'none' before any takeover) — the normal, non-raced case.
       window = undefined,
@@ -334,13 +335,19 @@ describe('qwen-autofix workflow', () => {
           JSON.stringify([
             ...marks.map((m) => ({
               user: { login: 'qwen-code-dev-bot' },
-              created_at: m.at ?? '2026-07-18T09:00:00Z',
+              created_at: '2026-07-18T09:00:00Z',
               body: `eval <!-- autofix-eval ts=${m.ts} acted=${m.acted ?? 'true'} round=${m.round}${m.win ? ` win=${m.win}` : ''} -->`,
             })),
             ...acks.map((at) => ({
               user: { login: 'qwen-code-dev-bot' },
               created_at: at,
               body: '🤝 … <!-- takeover-ack engaged -->',
+            })),
+            ...commands.map((at) => ({
+              user: { login: 'wenshao' },
+              author_association: 'OWNER',
+              created_at: at,
+              body: '@qwen-code /takeover',
             })),
           ]),
         );
@@ -349,25 +356,46 @@ describe('qwen-autofix workflow', () => {
         writeFileSync(join(dir, 'checks.json'), '[]');
         const out = join(dir, 'out.txt');
         writeFileSync(out, '');
-        execFileSync('bash', ['-c', staleGate.replace(/\n {10}/g, '\n')], {
-          env: {
-            ...process.env,
-            WORKDIR: dir,
-            GITHUB_OUTPUT: out,
-            WATERMARK: W,
-            ROUND: String(round),
-            CONFLICT: conflict,
-            WINDOW: effWindow,
-            AUTOFIX_BOT: 'qwen-code-dev-bot',
-            REVIEW_BOT: 'qwen-code-ci-bot',
-            TRUSTED_ASSOC: '["OWNER","MEMBER","COLLABORATOR"]',
+        const stdout = execFileSync(
+          'bash',
+          [
+            '-c',
+            `${staleGate.replace(/\n {10}/g, '\n')}\nprintf '\\nADOPTED %s %s' "$WATERMARK" "$ROUND"`,
+          ],
+          {
+            env: {
+              ...process.env,
+              WORKDIR: dir,
+              GITHUB_OUTPUT: out,
+              WATERMARK: W,
+              ROUND: String(round),
+              CONFLICT: conflict,
+              MAX_ROUNDS: '5',
+              WINDOW: effWindow,
+              AUTOFIX_BOT: 'qwen-code-dev-bot',
+              REVIEW_BOT: 'qwen-code-ci-bot',
+              TRUSTED_ASSOC: '["OWNER","MEMBER","COLLABORATOR"]',
+            },
+            encoding: 'utf8',
           },
-          encoding: 'utf8',
-        });
-        return readFileSync(out, 'utf8').includes('stale=true');
+        );
+        const adopted = stdout.match(/ADOPTED (\S+) (\S+)$/);
+        const outputs = readFileSync(out, 'utf8');
+        return {
+          stale: outputs.includes('stale=true'),
+          effectiveRound: outputs.match(/effective_round=(\d+)/)?.[1],
+          wm: adopted?.[1],
+          round: adopted?.[2],
+        };
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
+    };
+    const F2 = {
+      submitted_at: '2026-07-18T08:45:00Z',
+      user: { login: 'doudouOUC' },
+      author_association: 'MEMBER',
+      state: 'CHANGES_REQUESTED',
     };
     // Conflict-only duplicate: sibling resolved and marked round 3 at ts=W;
     // our matrix says round 2, the conflict is now cleared → stale.
@@ -379,7 +407,7 @@ describe('qwen-autofix workflow', () => {
         ],
         conflict: 'false',
         round: 2,
-      }),
+      }).stale,
     ).toBe(true);
     // First job of a conflict round: round has not advanced → proceeds.
     expect(
@@ -387,7 +415,7 @@ describe('qwen-autofix workflow', () => {
         marks: [{ ts: W, round: 2 }],
         conflict: 'false',
         round: 2,
-      }),
+      }).stale,
     ).toBe(false);
     // A live conflict is always actionable, even past a sibling's marker.
     expect(
@@ -398,7 +426,7 @@ describe('qwen-autofix workflow', () => {
         ],
         conflict: 'true',
         round: 2,
-      }),
+      }).stale,
     ).toBe(false);
     // ts-advanced duplicate (the original case): sibling evaluated through a
     // newer live watermark and nothing newer exists → stale.
@@ -407,28 +435,68 @@ describe('qwen-autofix workflow', () => {
         marks: [{ ts: '2026-07-18T08:30:00Z', round: 3 }],
         conflict: 'false',
         round: 2,
-      }),
+      }).stale,
     ).toBe(true);
     // Round advanced BUT trusted feedback arrived after the live watermark —
-    // the queued job has real work and must NOT discard itself.
+    // the queued job has real work and must NOT discard itself. It must ALSO
+    // adopt the live round so its marker continues the sequence instead of
+    // double-writing round 3.
+    const advanced = runStaleGate({
+      marks: [
+        { ts: W, round: 2 },
+        { ts: W, round: 3 },
+      ],
+      conflict: 'false',
+      round: 2,
+      reviews: [F2],
+    });
+    expect(advanced.stale).toBe(false);
+    expect(advanced.round).toBe('3');
+    expect(advanced.effectiveRound).toBe('3');
+    // W/T1/T2: the sibling evaluated F1 through T1; F2 arrived after T1. The
+    // duplicate proceeds for F2 but must adopt T1 as its effective watermark
+    // so the renderers below list ONLY F2 — never the already-addressed F1.
+    const T1 = '2026-07-18T08:30:00Z';
+    const adopted = runStaleGate({
+      marks: [{ ts: T1, round: 3 }],
+      conflict: 'false',
+      round: 2,
+      reviews: [F2],
+    });
+    expect(adopted.stale).toBe(false);
+    expect(adopted.wm).toBe(T1);
+    expect(adopted.round).toBe('3');
+    // Live round already at the hard cap: even with new feedback, running
+    // would produce round MAX+1 work and a second capped marker, concealing
+    // the cap the scan enforces — discard.
     expect(
       runStaleGate({
-        marks: [
-          { ts: W, round: 2 },
-          { ts: W, round: 3 },
-        ],
+        marks: [{ ts: W, round: 5 }],
         conflict: 'false',
-        round: 2,
-        reviews: [
-          {
-            submitted_at: '2026-07-18T08:45:00Z',
-            user: { login: 'doudouOUC' },
-            author_association: 'MEMBER',
-            state: 'CHANGES_REQUESTED',
-          },
-        ],
-      }),
-    ).toBe(false);
+        round: 4,
+        reviews: [F2],
+      }).stale,
+    ).toBe(true);
+    // The terminal-handoff sentinel ts must never be adopted as a feedback
+    // watermark (it would filter ALL future feedback out of the renderers).
+    const sentinel = runStaleGate({
+      marks: [{ ts: '9999-12-31T23:59:59Z', round: 3 }],
+      conflict: 'false',
+      round: 2,
+      reviews: [F2],
+    });
+    expect(sentinel.wm).toBe(W);
+    // …and the != sentinel guard itself, on a path that actually reaches
+    // the adoption block: a live conflict skips the stale gate, so without
+    // the guard the terminal ts would be adopted as the feedback watermark
+    // and filter ALL future feedback out of the renderers.
+    const sentinelConflict = runStaleGate({
+      marks: [{ ts: '9999-12-31T23:59:59Z', round: 3 }],
+      conflict: 'true',
+      round: 2,
+    });
+    expect(sentinelConflict.stale).toBe(false);
+    expect(sentinelConflict.wm).toBe(W);
     // Re-armed window: a pre-reset capped marker (window 'none') plus a
     // later engage ack — a job selected under the NEW key sees windowed live
     // round 0 and proceeds; the old marker can neither cap it nor make it
@@ -439,7 +507,7 @@ describe('qwen-autofix workflow', () => {
         acks: ['2026-07-18T10:00:00Z'],
         conflict: 'false',
         round: 0,
-      }),
+      }).stale,
     ).toBe(false);
     // The other half of the race: a job still carrying the OLD window key
     // after a re-arm superseded it must discard — finishing would stamp an
@@ -451,7 +519,7 @@ describe('qwen-autofix workflow', () => {
         conflict: 'false',
         round: 3,
         window: 'none',
-      }),
+      }).stale,
     ).toBe(true);
     // …unless it is resolving a live conflict, which stays actionable.
     expect(
@@ -461,8 +529,124 @@ describe('qwen-autofix workflow', () => {
         conflict: 'true',
         round: 3,
         window: 'none',
-      }),
+      }).stale,
     ).toBe(false);
+    // A trusted command comment (@qwen-code /…) newer than the live
+    // watermark is an INSTRUCTION, not feedback: without the command filter
+    // it would count in LIVE_NEW and rescue this duplicate into a full
+    // agent round about the command itself.
+    expect(
+      runStaleGate({
+        marks: [
+          { ts: W, round: 2 },
+          { ts: W, round: 3 },
+        ],
+        conflict: 'false',
+        round: 2,
+        commands: ['2026-07-18T08:45:00Z'],
+      }).stale,
+    ).toBe(true);
+  });
+
+  it('behaviorally replays the eligibility recheck across lifecycle and label states', () => {
+    // Extract the recheck VERBATIM (drift fails the test) and run it with a
+    // PATH-stubbed gh: the discard path must actually WRITE stale=true (and
+    // the outputs later gates read) — string pins alone would stay green if
+    // a future edit dropped the echo, leaving STALE empty and letting a
+    // late always() failure post a spurious handoff for a discarded job.
+    const recheck = prepareBranchAndFeedbackStep.match(
+      /(PR_LIVE="\$\(gh pr view[\s\S]*?exit 0\n {10}fi)/,
+    )?.[1];
+    expect(recheck).toBeTruthy();
+    const runRecheck = (prJson) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-elig-'));
+      try {
+        const gh = join(dir, 'gh');
+        writeFileSync(
+          gh,
+          prJson === null
+            ? '#!/bin/bash\nexit 1\n'
+            : `#!/bin/bash\nprintf '%s' '${JSON.stringify(prJson)}'\n`,
+        );
+        chmodSync(gh, 0o755);
+        const out = join(dir, 'out.txt');
+        writeFileSync(out, '');
+        const stdout = execFileSync(
+          'bash',
+          ['-c', `${recheck.replace(/\n {10}/g, '\n')}\nprintf 'PASSED'`],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              PR: '7163',
+              REPO: 'QwenLM/qwen-code',
+              BRANCH: 'ci/some-branch',
+              WATERMARK: '2026-07-18T08:00:00Z',
+              ROUND: '2',
+              AUTOFIX_BOT: 'qwen-code-dev-bot',
+              TAKEOVER_LABEL: 'autofix/takeover',
+              SKIP_LABEL: 'autofix/skip',
+              GITHUB_OUTPUT: out,
+              GITHUB_TOKEN: 'x',
+            },
+            encoding: 'utf8',
+          },
+        );
+        return {
+          passed: stdout.endsWith('PASSED'),
+          log: stdout,
+          out: readFileSync(out, 'utf8'),
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const pr = (over = {}) => ({
+      state: 'OPEN',
+      author: { login: 'qwen-code-dev-bot' },
+      isCrossRepository: false,
+      baseRefName: 'main',
+      headRefName: 'ci/some-branch',
+      labels: [],
+      ...over,
+    });
+    // Healthy bot PR → proceeds, nothing written.
+    const ok = runRecheck(pr());
+    expect(ok.passed).toBe(true);
+    expect(ok.out).not.toContain('stale=true');
+    // Closed while queued → discards AND writes every output later gates
+    // read (this is the assertion string pins cannot make).
+    const closed = runRecheck(pr({ state: 'CLOSED' }));
+    expect(closed.passed).toBe(false);
+    expect(closed.out).toContain('stale=true');
+    expect(closed.out).toContain('conflict=false');
+    expect(closed.out).toContain('newest=2026-07-18T08:00:00Z');
+    expect(closed.out).toContain('effective_round=2');
+    // Live engagement labels: takeover exempts a human author, skip
+    // withdraws consent even for the bot's own PR.
+    expect(
+      runRecheck(
+        pr({
+          author: { login: 'human' },
+          labels: [{ name: 'autofix/takeover' }],
+        }),
+      ).passed,
+    ).toBe(true);
+    expect(runRecheck(pr({ author: { login: 'human' } })).passed).toBe(false);
+    expect(
+      runRecheck(pr({ labels: [{ name: 'autofix/skip' }] })).out,
+    ).toContain('stale=true');
+    // Fork head, renamed branch, and a FAILED fetch (unknown ≠ eligible)
+    // all discard.
+    expect(runRecheck(pr({ isCrossRepository: true })).passed).toBe(false);
+    expect(runRecheck(pr({ headRefName: 'renamed' })).passed).toBe(false);
+    // Retargeted off main while queued → discard (previously only pinned).
+    expect(runRecheck(pr({ baseRefName: 'develop' })).passed).toBe(false);
+    // A FAILED fetch discards too, but with an infra-distinct message so an
+    // API outage is never misread as a PR-state change.
+    const failed = runRecheck(null);
+    expect(failed.passed).toBe(false);
+    expect(failed.log).toContain('metadata fetch failed (API error)');
   });
 
   it('falls back to existing issue backlog only when review has no target', () => {
@@ -532,6 +716,30 @@ describe('qwen-autofix workflow', () => {
       "cancel-in-progress: |-\n        ${{ github.event_name != 'workflow_dispatch' }}",
     );
     expect(routeJob).not.toContain("group: 'qwen-autofix-route'");
+    // The per-PR group is entered BEFORE any step runs, so only reviews whose
+    // payload already looks trusted may share it — an arbitrary commenter's
+    // review would otherwise cancel a queued legitimate route and then die in
+    // 'Decide phases'. Untrusted payloads get a run-unique group; the real
+    // permission gate stays inside the job. The literal association list must
+    // mirror TRUSTED_ASSOC and the login must mirror REVIEW_BOT.
+    expect(routeJob).toContain(
+      'contains(fromJSON(\'["OWNER", "MEMBER", "COLLABORATOR"]\'), github.event.review.author_association)',
+    );
+    expect(routeJob).toContain(
+      "github.event.review.user.login == 'qwen-code-ci-bot'",
+    );
+    // The load-bearing STRUCTURE, not just substrings: the trust || is
+    // parenthesized and the whole clause gates the per-PR format. Without
+    // the parens, Actions' && binding tighter than || would hand every
+    // OWNER/MEMBER/COLLABORATOR review the run-unique group and the
+    // review-bot the per-PR group unconditionally.
+    expect(routeJob).toContain(
+      "(github.event_name == 'pull_request_review' && (contains(fromJSON('[\"OWNER\", \"MEMBER\", \"COLLABORATOR\"]'), github.event.review.author_association) || github.event.review.user.login == 'qwen-code-ci-bot') && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number))",
+    );
+    expect(workflow).toContain(
+      'TRUSTED_ASSOC: \'["OWNER", "MEMBER", "COLLABORATOR"]\'',
+    );
+    expect(workflow).toContain("REVIEW_BOT: 'qwen-code-ci-bot'");
     expect(workflow).toContain(
       'gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission"',
     );
@@ -2229,6 +2437,20 @@ describe('qwen-autofix workflow', () => {
     expect(
       runPostHandoff({ ...base, OUTCOME: '', JOB_STATUS: 'success' }),
     ).toBe('false');
+    // A stale-discarded run did no work: even if a later always() step fails
+    // the job (empty OUTCOME + failure), the deliberate no-comment/no-marker
+    // discard must NOT turn into a handoff that consumes a round.
+    expect(
+      runPostHandoff({
+        ...base,
+        STALE: 'true',
+        OUTCOME: '',
+        JOB_STATUS: 'failure',
+      }),
+    ).toBe('false');
+    expect(reviewAddressReportStep).toContain(
+      "STALE: '${{ steps.prepare.outputs.stale }}'",
+    );
 
     // Terminal-round transition: feedback read (NEWEST set) → normal increment;
     // feedback never read (empty) → MAX_ROUNDS so the scan skips instead of

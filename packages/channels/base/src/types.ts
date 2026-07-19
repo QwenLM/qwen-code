@@ -242,6 +242,7 @@ export interface ChannelMemoryEntry {
 
 export interface ChannelMemoryCallbacks {
   readChannelMemory(target: ChannelMemoryTarget): Promise<string>;
+  getChannelMemoryRevision?(target: ChannelMemoryTarget): Promise<string>;
   listChannelMemoryEntries(
     target: ChannelMemoryTarget,
   ): Promise<ChannelMemoryEntry[]>;

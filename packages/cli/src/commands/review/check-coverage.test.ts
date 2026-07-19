@@ -1465,7 +1465,11 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
         `--plan '${p}' --role reverse-audit --findings <file>`,
     );
     expect(fix).not.toContain('<plan>');
-    expect(fix).toMatch(/no round number/);
+    // The repair command carries --round, and the ban names the alternative:
+    // the dogfooded failure was the orchestrator hand-appending `(round N)` to
+    // the identity line because the CLI gave it nowhere else to put it.
+    expect(fix).toMatch(/no hand-added round number/);
+    expect(fix).toContain('[--round <k>]');
   });
 
   it('names a rewritten verifier launch as itself too', () => {
@@ -1478,7 +1482,13 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     expect(gap).toMatch(/no agent was launched with the prompt the CLI built/);
     expect(gap).not.toMatch(/no verifier ran/);
     expect(gap).not.toMatch(/agent-prompt|--findings|--role/);
-    expect(r.remediation.join(' ')).toContain('--role verify');
+    const fix = r.remediation.join(' ');
+    expect(fix).toContain('--role verify');
+    // The verify fix bans a hand-added SHARD number, and must not claim
+    // --round bakes one in — --round bakes in a round number, and shards are
+    // told apart by their findings digest, not by that flag.
+    expect(fix).toMatch(/no hand-added shard number,/);
+    expect(fix).not.toContain('shard number (--round bakes it in)');
   });
 
   it('flags a reverse audit built but whose agent never opened its brief', () => {
