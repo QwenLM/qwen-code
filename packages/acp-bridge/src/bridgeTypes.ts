@@ -724,6 +724,17 @@ export interface AcpSessionBridge {
   ): Promise<ChangeSessionCwdResult>;
 
   /**
+   * Set worktree metadata on an existing session entry. Used when
+   * restoring a worktree session after daemon restart — the sidecar
+   * file provides the metadata, and this populates the in-memory entry
+   * so `getSessionSummary` returns it.
+   */
+  setSessionWorktree(
+    sessionId: string,
+    worktree: { slug: string; path: string; branch: string },
+  ): void;
+
+  /**
    * Forward a prompt to the agent. Concurrent prompts against the same
    * session FIFO-serialize through a per-session queue.
    *

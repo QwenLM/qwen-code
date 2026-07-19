@@ -5624,6 +5624,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return { sessionId, ...result };
     },
 
+    setSessionWorktree(sessionId, worktree) {
+      const entry = byId.get(sessionId);
+      if (entry) {
+        entry.worktree = worktree;
+      }
+    },
+
     async closeSession(sessionId, context, closeOpts) {
       return closeSessionImpl(sessionId, context, closeOpts);
     },

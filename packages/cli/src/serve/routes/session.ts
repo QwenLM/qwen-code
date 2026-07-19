@@ -23,6 +23,7 @@ import {
   runWithoutDebugLogSession,
   writeWorktreeSessionMarker,
   writeWorktreeSession,
+  readWorktreeSession,
   type ApprovalMode,
   type SessionGroupColor,
   type SessionGroupPresetColor,
@@ -1550,6 +1551,32 @@ export function registerSessionRoutes(
               });
           }
           return;
+        }
+        // Restore worktree isolation for sessions that were created in a
+        // worktree. After daemon restart the bridge entry has no worktree
+        // metadata and the session cwd is the main workspace root. Read the
+        // sidecar, relocate the session, and populate the bridge entry.
+        if (!session.worktree) {
+          const sidecar = await readWorktreeSession(
+            new SessionService(workspaceCwd).getWorktreeSessionPath(sessionId),
+          ).catch(() => null);
+          if (sidecar) {
+            const wt = {
+              slug: sidecar.slug,
+              path: sidecar.worktreePath,
+              branch: sidecar.worktreeBranch,
+            };
+            try {
+              await runtime.bridge.changeSessionCwd(sessionId, {
+                path: wt.path,
+              });
+              runtime.bridge.setSessionWorktree(sessionId, wt);
+              Object.assign(session, { worktree: wt });
+            } catch {
+              // Worktree directory may have been removed; the session
+              // continues in the main workspace without isolation.
+            }
+          }
         }
         res.status(200).json(session);
       } catch (err) {

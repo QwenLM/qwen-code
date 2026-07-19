@@ -6,6 +6,7 @@
 
 import { Storage } from '../config/storage.js';
 import { getProjectHash } from '../utils/paths.js';
+import { readWorktreeSession } from './worktreeSessionService.js';
 import path from 'node:path';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -384,9 +385,21 @@ export class SessionService {
     const status = await readRuntimeStatus(
       this.storage.getRuntimeStatusPath(sessionId),
     );
-    return (
+    if (
       status?.sessionId === sessionId &&
       getProjectHash(status.workDir) === this.projectHash
+    ) {
+      return true;
+    }
+
+    // Worktree sessions record cwd as the worktree path (different project
+    // hash). Check the sidecar's originalCwd to recover membership.
+    const sidecar = await readWorktreeSession(
+      this.getWorktreeSessionPath(sessionId),
+    ).catch(() => null);
+    return (
+      sidecar != null &&
+      getProjectHash(sidecar.originalCwd) === this.projectHash
     );
   }
 
