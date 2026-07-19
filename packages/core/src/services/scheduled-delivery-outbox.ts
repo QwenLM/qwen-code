@@ -79,6 +79,8 @@ const OUTBOX_FILENAME = 'scheduled_deliveries.json';
 const OUTBOX_GUARD_FILENAME = 'scheduled_deliveries.guard';
 const MAX_RECORDS = 200;
 const MAX_TEXT_LENGTH = 100_000;
+const TRUNCATED_TEXT_SUFFIX =
+  '\n\n[Channel delivery truncated because the result exceeded the outbox size limit.]';
 const MAX_ID_LENGTH = 256;
 const MAX_ERROR_CODE_LENGTH = 128;
 const MAX_ERROR_MESSAGE_LENGTH = 1000;
@@ -255,6 +257,17 @@ async function mutateOutbox<T>(
   });
 }
 
+function normalizeDeliveryText(text: string): string {
+  if (text.length <= MAX_TEXT_LENGTH) return text;
+  const prefixLimit = MAX_TEXT_LENGTH - TRUNCATED_TEXT_SUFFIX.length;
+  let prefix = text.slice(0, prefixLimit);
+  const lastCodeUnit = prefix.charCodeAt(prefix.length - 1);
+  if (lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff) {
+    prefix = prefix.slice(0, -1);
+  }
+  return `${prefix}${TRUNCATED_TEXT_SUFFIX}`;
+}
+
 function sameEnqueue(
   record: ScheduledDeliveryRecord,
   input: EnqueueScheduledDeliveryInput,
@@ -272,14 +285,18 @@ export async function enqueueScheduledDelivery(
   projectRoot: string,
   input: EnqueueScheduledDeliveryInput,
 ): Promise<ScheduledDeliveryRecord> {
-  const createdAt = input.createdAt ?? Date.now();
+  const normalizedInput: EnqueueScheduledDeliveryInput = {
+    ...input,
+    text: normalizeDeliveryText(input.text),
+  };
+  const createdAt = normalizedInput.createdAt ?? Date.now();
   const candidate: ScheduledDeliveryRecord = {
-    deliveryId: input.deliveryId,
-    taskId: input.taskId,
-    firedAt: input.firedAt,
-    channelName: input.channelName,
-    target: { ...input.target },
-    text: input.text,
+    deliveryId: normalizedInput.deliveryId,
+    taskId: normalizedInput.taskId,
+    firedAt: normalizedInput.firedAt,
+    channelName: normalizedInput.channelName,
+    target: { ...normalizedInput.target },
+    text: normalizedInput.text,
     status: 'pending',
     attempts: 0,
     createdAt,
@@ -290,12 +307,12 @@ export async function enqueueScheduledDelivery(
   }
   return mutateOutbox(projectRoot, (records) => {
     const existing = records.find(
-      (record) => record.deliveryId === input.deliveryId,
+      (record) => record.deliveryId === normalizedInput.deliveryId,
     );
     if (existing) {
-      if (!sameEnqueue(existing, input)) {
+      if (!sameEnqueue(existing, normalizedInput)) {
         throw new Error(
-          `Refusing conflicting delivery id ${JSON.stringify(input.deliveryId)}.`,
+          `Refusing conflicting delivery id ${JSON.stringify(normalizedInput.deliveryId)}.`,
         );
       }
       return { records, result: existing };

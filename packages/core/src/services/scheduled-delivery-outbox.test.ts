@@ -39,6 +39,9 @@ describe('scheduledDeliveryOutbox', () => {
       ...overrides,
     });
 
+  const truncationMarker =
+    '\n\n[Channel delivery truncated because the result exceeded the outbox size limit.]';
+
   it('enqueues an idempotent pending record', async () => {
     const first = await enqueue();
     const second = await enqueue();
@@ -52,6 +55,38 @@ describe('scheduledDeliveryOutbox', () => {
       attempts: 0,
       updatedAt: 1718000001000,
     });
+  });
+
+  it('preserves delivery text exactly at the outbox limit', async () => {
+    const text = 'x'.repeat(100_000);
+
+    const record = await enqueue({ text });
+
+    expect(record.text).toBe(text);
+  });
+
+  it('truncates oversized delivery text without splitting a surrogate pair', async () => {
+    const prefixLimit = 100_000 - truncationMarker.length;
+    const text = `${'x'.repeat(prefixLimit - 1)}😀${'y'.repeat(
+      truncationMarker.length + 1,
+    )}`;
+
+    const record = await enqueue({ text });
+
+    expect(record.text.length).toBeLessThanOrEqual(100_000);
+    expect(record.text).toBe(
+      `${'x'.repeat(prefixLimit - 1)}${truncationMarker}`,
+    );
+  });
+
+  it('keeps repeated oversized enqueue idempotent', async () => {
+    const text = 'x'.repeat(100_001);
+
+    const first = await enqueue({ text });
+    const second = await enqueue({ text });
+
+    expect(second).toEqual(first);
+    expect(await readScheduledDeliveryOutbox(workspace)).toEqual([first]);
   });
 
   it.skipIf(process.platform === 'win32')(
