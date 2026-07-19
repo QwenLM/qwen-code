@@ -1,4 +1,10 @@
-import { mkdtempSync, readFileSync, statSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -63,5 +69,14 @@ describe('Weixin account storage', () => {
 
     expect(loadAccount(first)).toBeNull();
     expect(loadAccount(second)).toMatchObject({ token: 'second' });
+  });
+
+  it('cleans up the temporary credential file when rename fails', () => {
+    const stateDir = mkdtempSync(join(tmpdir(), 'weixin-rename-failure-'));
+    mkdirSync(join(stateDir, 'account.json'));
+
+    expect(() => saveAccount(account('token-1'), stateDir)).toThrow();
+
+    expect(readdirSync(stateDir)).toEqual(['account.json']);
   });
 });

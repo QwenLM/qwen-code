@@ -16,8 +16,33 @@ export interface LoginResult {
 
 interface LoginQrCode {
   id: string;
-  payload: string;
+  payload?: string;
 }
+
+export type WeixinAuthErrorCode =
+  | 'weixin_auth_qr_payload_missing'
+  | 'weixin_auth_qr_payload_invalid'
+  | 'weixin_auth_redirect_missing'
+  | 'weixin_auth_redirect_invalid'
+  | 'weixin_auth_verification_required'
+  | 'weixin_auth_verification_blocked'
+  | 'weixin_auth_already_connected'
+  | 'weixin_auth_unexpected_status';
+
+export class WeixinAuthError extends Error {
+  override readonly name = 'WeixinAuthError';
+
+  constructor(
+    readonly code: WeixinAuthErrorCode,
+    readonly authState: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+const REDIRECT_HOST_PATTERN =
+  /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/iu;
 
 function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -37,7 +62,7 @@ function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-async function requestLoginQr(
+async function fetchLoginQr(
   apiBaseUrl: string,
   signal?: AbortSignal,
 ): Promise<LoginQrCode> {
@@ -57,17 +82,71 @@ async function requestLoginQr(
     throw new Error('No qrcode in response');
   }
 
-  if (data.qrcode_img_content) {
+  return {
+    id: data.qrcode,
+    payload: data.qrcode_img_content,
+  };
+}
+
+function renderLoginQr(qrCode: LoginQrCode): void {
+  if (qrCode.payload) {
     process.stderr.write(
-      `QR code URL: ${data.qrcode_img_content}\nScan this URL with WeChat.\n`,
+      `QR code URL: ${qrCode.payload}\nScan this URL with WeChat.\n`,
     );
   }
 
   process.stderr.write('Scan the QR code with WeChat to connect.\n');
-  return {
-    id: data.qrcode,
-    payload: data.qrcode_img_content ?? data.qrcode,
-  };
+}
+
+function requireRenderableQrPayload(qrCode: LoginQrCode): string {
+  const payload = qrCode.payload?.trim();
+  if (!payload) {
+    throw new WeixinAuthError(
+      'weixin_auth_qr_payload_missing',
+      'qr_payload_missing',
+      'WeChat did not provide a QR image URL.',
+    );
+  }
+  try {
+    const url = new URL(payload);
+    if (
+      (url.protocol !== 'https:' && url.protocol !== 'http:') ||
+      !url.hostname ||
+      url.username ||
+      url.password
+    ) {
+      throw new Error('invalid QR URL');
+    }
+  } catch {
+    throw new WeixinAuthError(
+      'weixin_auth_qr_payload_invalid',
+      'qr_payload_invalid',
+      'WeChat provided an invalid QR image URL.',
+    );
+  }
+  return payload;
+}
+
+function redirectBaseUrl(redirectHost: unknown): string {
+  if (typeof redirectHost !== 'string' || redirectHost.trim().length === 0) {
+    throw new WeixinAuthError(
+      'weixin_auth_redirect_missing',
+      'redirect_error',
+      'WeChat login redirect host is missing.',
+    );
+  }
+  if (
+    redirectHost !== redirectHost.trim() ||
+    !REDIRECT_HOST_PATTERN.test(redirectHost) ||
+    !redirectHost.toLowerCase().endsWith('.weixin.qq.com')
+  ) {
+    throw new WeixinAuthError(
+      'weixin_auth_redirect_invalid',
+      'redirect_error',
+      'WeChat login redirect host is invalid.',
+    );
+  }
+  return `https://${redirectHost}`;
 }
 
 /** Step 1: Get QR code from server and display in terminal */
@@ -75,7 +154,9 @@ export async function startLogin(
   apiBaseUrl: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  return (await requestLoginQr(apiBaseUrl, signal)).id;
+  const qrCode = await fetchLoginQr(apiBaseUrl, signal);
+  renderLoginQr(qrCode);
+  return qrCode.id;
 }
 
 /** Step 2: Poll for scan result */
@@ -85,9 +166,17 @@ export async function waitForLogin(params: {
   timeoutMs?: number;
   signal?: AbortSignal;
   onQrCode?: (qrCode: LoginQrCode) => void;
+  silent?: boolean;
 }): Promise<LoginResult> {
-  const { apiBaseUrl, timeoutMs = 480000, signal, onQrCode } = params;
+  const {
+    apiBaseUrl,
+    timeoutMs = 480000,
+    signal,
+    onQrCode,
+    silent = false,
+  } = params;
   let currentQrcodeId = params.qrcodeId;
+  let currentApiBaseUrl = apiBaseUrl;
   const deadline = Date.now() + timeoutMs;
   let retryCount = 0;
 
@@ -101,7 +190,7 @@ export async function waitForLogin(params: {
       let resp: Response;
       try {
         resp = await fetch(
-          `${apiBaseUrl}/ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(currentQrcodeId)}`,
+          `${currentApiBaseUrl}/ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(currentQrcodeId)}`,
           {
             headers: buildHeaders(),
             signal: requestSignal,
@@ -119,9 +208,12 @@ export async function waitForLogin(params: {
         ilink_bot_id?: string;
         baseurl?: string;
         ilink_user_id?: string;
+        redirect_host?: unknown;
       };
 
       switch (data.status) {
+        case 'wait':
+          break;
         case 'confirmed':
           return {
             connected: true,
@@ -131,9 +223,32 @@ export async function waitForLogin(params: {
             message: 'Connected to WeChat successfully!',
           };
         case 'scaned':
-          process.stderr.write(
-            'QR code scanned, waiting for confirmation...\n',
+          if (!silent) {
+            process.stderr.write(
+              'QR code scanned, waiting for confirmation...\n',
+            );
+          }
+          break;
+        case 'need_verifycode':
+          throw new WeixinAuthError(
+            'weixin_auth_verification_required',
+            'verification_required',
+            'WeChat requires pair-code verification, which is not supported by this login flow.',
           );
+        case 'verify_code_blocked':
+          throw new WeixinAuthError(
+            'weixin_auth_verification_blocked',
+            'verification_blocked',
+            'WeChat pair-code verification is temporarily blocked.',
+          );
+        case 'binded_redirect':
+          throw new WeixinAuthError(
+            'weixin_auth_already_connected',
+            'already_connected',
+            'This WeChat bot is already connected and no new credentials were issued.',
+          );
+        case 'scaned_but_redirect':
+          currentApiBaseUrl = redirectBaseUrl(data.redirect_host);
           break;
         case 'expired': {
           retryCount++;
@@ -143,14 +258,23 @@ export async function waitForLogin(params: {
               message: 'QR code expired after maximum retries.',
             };
           }
-          process.stderr.write('QR code expired, refreshing...\n');
-          const qrCode = await requestLoginQr(apiBaseUrl, signal);
+          if (!silent) {
+            process.stderr.write('QR code expired, refreshing...\n');
+          }
+          const qrCode = await fetchLoginQr(apiBaseUrl, signal);
           currentQrcodeId = qrCode.id;
           onQrCode?.(qrCode);
+          if (!silent) {
+            renderLoginQr(qrCode);
+          }
           break;
         }
         default:
-          break;
+          throw new WeixinAuthError(
+            'weixin_auth_unexpected_status',
+            'unexpected_status',
+            'WeChat returned an unsupported login status.',
+          );
       }
     } catch (err: unknown) {
       if (err instanceof Error && err.name === 'AbortError') {
@@ -173,17 +297,18 @@ export const authDriver: ChannelAuthDriver<AccountData> = {
   async begin(context) {
     const controller = new AbortController();
     const signal = AbortSignal.any([context.signal, controller.signal]);
-    const initialQrCode = await requestLoginQr(DEFAULT_BASE_URL, signal);
+    const initialQrCode = await fetchLoginQr(DEFAULT_BASE_URL, signal);
     let state = 'pending';
-    let qrPayload = initialQrCode.payload;
+    let qrPayload = requireRenderableQrPayload(initialQrCode);
     let qrRevision = 1;
 
     const ready = waitForLogin({
       qrcodeId: initialQrCode.id,
       apiBaseUrl: DEFAULT_BASE_URL,
       signal,
+      silent: true,
       onQrCode(qrCode) {
-        qrPayload = qrCode.payload;
+        qrPayload = requireRenderableQrPayload(qrCode);
         qrRevision++;
       },
     })
@@ -200,7 +325,11 @@ export const authDriver: ChannelAuthDriver<AccountData> = {
         };
       })
       .catch((error: unknown) => {
-        state = signal.aborted ? 'cancelled' : 'failed';
+        state = signal.aborted
+          ? 'cancelled'
+          : error instanceof WeixinAuthError
+            ? error.authState
+            : 'failed';
         throw error;
       });
 
