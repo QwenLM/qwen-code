@@ -5,7 +5,7 @@
  */
 
 import { Buffer } from 'node:buffer';
-import { existsSync, statSync } from 'node:fs';
+import { realpathSync, statSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type {
@@ -750,15 +750,16 @@ interface CronQueueItem {
 const MAX_NOTIFICATION_QUEUE = 20;
 const MAX_DEFERRED_UNRELATED_CRON_QUEUE = 20;
 
-export function isExistingFile(
+export function resolveExistingFile(
   resolved: string,
-  fileExists: (path: string) => boolean = existsSync,
+  resolveRealPath: (path: string) => string = realpathSync,
   statFile: (path: string) => { isFile(): boolean } = statSync,
-): boolean {
+): string | undefined {
   try {
-    return fileExists(resolved) && statFile(resolved).isFile();
+    const canonicalPath = resolveRealPath(resolved);
+    return statFile(canonicalPath).isFile() ? canonicalPath : undefined;
   } catch {
-    return false;
+    return undefined;
   }
 }
 
@@ -7117,23 +7118,27 @@ export class Session implements SessionContext {
           collectExtensionMentionRefs(part.text, extensionMentions);
           collectMcpServerMentionRefs(part.text, mcpServerMentions);
           for (const pathSpec of extractAtPathCommands(part.text)) {
+            if (!path.isAbsolute(pathSpec)) continue;
             const resolved = path.resolve(
               this.config.getProjectRoot(),
               pathSpec,
             );
+            const canonicalPath = resolveExistingFile(resolved);
+            if (!canonicalPath) continue;
             const filteringOptions = this.config.getFileFilteringOptions();
             if (
-              path.isAbsolute(pathSpec) &&
-              getSpecificMimeType(resolved)?.startsWith('image/') &&
-              isExistingFile(resolved) &&
+              getSpecificMimeType(canonicalPath)?.startsWith('image/') &&
               this.config
                 .getWorkspaceContext()
-                .isPathWithinWorkspace(pathSpec) &&
+                .isPathWithinWorkspace(canonicalPath) &&
               !this.config
                 .getFileService()
-                .shouldIgnoreFile(pathSpec, filteringOptions)
+                .shouldIgnoreFile(pathSpec, filteringOptions) &&
+              !this.config
+                .getFileService()
+                .shouldIgnoreFile(canonicalPath, filteringOptions)
             ) {
-              textPathSpecsToRead.add(pathSpec);
+              textPathSpecsToRead.add(canonicalPath);
             }
           }
           return { text: part.text };
@@ -7184,18 +7189,45 @@ export class Session implements SessionContext {
     });
 
     const atPathCommandParts = parts.filter((part) => 'fileData' in part);
-    const pathSpecsToRead = [
-      ...new Set([
-        ...textPathSpecsToRead,
-        ...atPathCommandParts.map((part) => part.fileData!.fileUri!),
-      ]),
-    ];
     const extensionParts = await this.#resolveExtensionMentionParts(
       extensionMentions,
       abortSignal,
     );
     const mcpServerParts =
       this.#resolveMcpServerMentionParts(mcpServerMentions);
+    const filteringOptions = this.config.getFileFilteringOptions();
+    const revalidatedTextPaths: string[] = [];
+    const validatedPathIdentities = new Map<
+      string,
+      { dev: number; ino: number }
+    >();
+    for (const textPath of textPathSpecsToRead) {
+      try {
+        if (
+          resolveExistingFile(textPath) !== textPath ||
+          !this.config.getWorkspaceContext().isPathWithinWorkspace(textPath) ||
+          this.config
+            .getFileService()
+            .shouldIgnoreFile(textPath, filteringOptions)
+        ) {
+          continue;
+        }
+        const stats = statSync(textPath);
+        revalidatedTextPaths.push(textPath);
+        validatedPathIdentities.set(textPath, {
+          dev: stats.dev,
+          ino: stats.ino,
+        });
+      } catch {
+        // The path changed between validation steps; skip it fail-closed.
+      }
+    }
+    const pathSpecsToRead = [
+      ...new Set([
+        ...revalidatedTextPaths,
+        ...atPathCommandParts.map((part) => part.fileData!.fileUri!),
+      ]),
+    ];
 
     if (
       pathSpecsToRead.length === 0 &&
@@ -7258,6 +7290,9 @@ export class Session implements SessionContext {
         signal: abortSignal,
         ...(preserveUnsupportedImageForBridge
           ? { preserveUnsupportedImageForBridge }
+          : {}),
+        ...(validatedPathIdentities.size > 0
+          ? { validatedPathIdentities }
           : {}),
       });
 

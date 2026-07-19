@@ -12,12 +12,14 @@ import type {
   ToolCallRequestInfo,
   ToolResult,
   Config,
+  RuntimeContentGeneratorView,
 } from '../index.js';
 import {
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
   ToolErrorType,
   ApprovalMode,
+  getRuntimeContentGenerator,
 } from '../index.js';
 import type { Part } from '@google/genai';
 import { MockTool } from '../test-utils/mock-tool.js';
@@ -120,6 +122,38 @@ describe('executeToolCall', () => {
         },
       ],
     });
+  });
+
+  it('runs the tool with the requested runtime content generator', async () => {
+    const request: ToolCallRequestInfo = {
+      callId: 'runtime-call',
+      name: 'testTool',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'runtime-prompt',
+    };
+    const runtimeView = {
+      contentGenerator: {},
+      contentGeneratorConfig: {
+        model: 'vision-agent',
+        authType: 'openai',
+      },
+    } as unknown as RuntimeContentGeneratorView;
+    let observedRuntime: RuntimeContentGeneratorView | undefined;
+    vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
+    executeFn.mockImplementation(() => {
+      observedRuntime = getRuntimeContentGenerator();
+      return Promise.resolve({
+        llmContent: 'done',
+        returnDisplay: 'done',
+      });
+    });
+
+    await executeToolCall(mockConfig, request, abortController.signal, {
+      runtimeView,
+    });
+
+    expect(observedRuntime).toBe(runtimeView);
   });
 
   it('should return an error if tool is not found', async () => {
