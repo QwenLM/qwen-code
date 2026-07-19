@@ -312,6 +312,27 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(ghMock).not.toHaveBeenCalled();
   });
 
+  it('refuses an inline comment with no severity marker — it would weigh nothing', () => {
+    // Step 6 refuses unmarked drafts, but the skill's re-compose instruction
+    // expects the comment set to churn after Step 6 — and a marker lost in
+    // that churn reaches exactly this boundary, the one that posts. The
+    // verdict is counted from the markers, so an unmarked blocker weighs
+    // zero: beside a clean state it composes an APPROVE that posts the very
+    // comment it never weighed.
+    const review = file('c3.json', {
+      ...REVIEW,
+      comments: [
+        { path: 'a.ts', line: 12, body: '**[Critical]** boom' },
+        { path: 'b.ts', line: 3, body: 'this blocker lost its marker' },
+      ],
+    });
+
+    expect(() => runSubmit(authorized({ review }))).toThrow(
+      /comments\[1\] opens with neither/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
   it('writes the body as JSON, so a finding that quotes `\\n` survives intact', () => {
     // Finding text quotes code: `/\n/` in a regex, an escaped string in a snippet.
     // The body used to be built by the caller — sometimes with `-f body=`, which

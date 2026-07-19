@@ -2,6 +2,7 @@ import type { CommandModule } from 'yargs';
 import {
   addChannelMemoryEntries,
   clearChannelMemory,
+  getChannelMemoryRevision,
   listChannelMemoryEntries,
   nextFireTime,
   parseCron,
@@ -65,6 +66,7 @@ function channelMemoryOptions(
   return {
     channelMemory: {
       readChannelMemory,
+      getChannelMemoryRevision,
       listChannelMemoryEntries,
       addChannelMemoryEntries,
       updateChannelMemoryEntry,

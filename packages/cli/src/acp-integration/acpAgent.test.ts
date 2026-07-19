@@ -604,13 +604,32 @@ const { mockHistoryPendingToolCalls } = vi.hoisted(() => ({
   mockHistoryPendingToolCalls: vi.fn((): MockPendingToolCall[] => []),
 }));
 vi.mock('./session/history-replayer.js', () => ({
-  HistoryReplayer: vi.fn().mockImplementation((context: unknown) => ({
-    replay: (messages: unknown, gaps: unknown) =>
-      mockHistoryReplay(context, messages, gaps),
-    replayPage: (messages: unknown, options: unknown) =>
-      mockHistoryReplayPage(context, messages, options),
-    getPendingToolCalls: () => mockHistoryPendingToolCalls(),
-  })),
+  HistoryReplayer: vi.fn().mockImplementation(
+    (context: {
+      cumulativeUsage: {
+        promptTokens: number;
+        cachedTokens: number;
+        candidateTokens: number;
+        apiTimeMs: number;
+      };
+    }) => ({
+      replay: (messages: unknown, gaps: unknown) =>
+        mockHistoryReplay(context, messages, gaps),
+      replayPage: (messages: unknown, options: unknown) =>
+        mockHistoryReplayPage(context, messages, options),
+      getPendingToolCalls: () => mockHistoryPendingToolCalls(),
+      getReplayState: () => ({
+        v: 1,
+        pendingToolCalls: mockHistoryPendingToolCalls().map((call) => ({
+          callId: call.callId,
+          toolName: call.toolName,
+          sourceRecordId: call.recordId,
+          ...(call.timestamp ? { sourceTimestamp: call.timestamp } : {}),
+        })),
+        cumulativeUsage: { ...context.cumulativeUsage },
+      }),
+    }),
+  ),
 }));
 
 vi.mock('./runtimeOutputDirContext.js', () => ({
@@ -8385,7 +8404,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockHistoryReplayPage.mockImplementation(
       async (context: { cumulativeUsage: { promptTokens: number } }) => {
         context.cumulativeUsage.promptTokens += 100;
-        return { pendingToolCalls: [] };
+        return {
+          pendingToolCalls: [],
+          replay: {
+            v: 1,
+            pendingToolCalls: [],
+            cumulativeUsage: { ...context.cumulativeUsage },
+          },
+        };
       },
     );
     const { agent, agentPromise } = await bootCoreSettingsAgent(settings);

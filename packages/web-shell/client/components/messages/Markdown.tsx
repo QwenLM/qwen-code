@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from 'react';
 import { useTheme } from '../../themeContext';
+import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import type { Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -687,7 +688,11 @@ function MarkdownLink({
   href?: string;
   children?: ReactNode;
 }) {
+  const renderMode = useTranscriptRenderMode();
   if (href && QWEN_SESSION_SCHEME.test(href.trim())) {
+    if (renderMode === 'readonly') {
+      return <span className={styles.link}>{children}</span>;
+    }
     const sessionId = href.trim().replace(QWEN_SESSION_SCHEME, '');
     return (
       <a

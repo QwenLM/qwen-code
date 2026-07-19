@@ -10,12 +10,20 @@ const CHANNEL_MEMORY_RECALL_TRUNCATION_SUFFIX = ' [truncated]';
 const TERM_RUN_PATTERN =
   /\p{Script=Latin}+|\p{Decimal_Number}+|\p{Script_Extensions=Han}+|\p{Script_Extensions=Hiragana}+|\p{Script_Extensions=Katakana}+|\p{Script_Extensions=Hangul}+/gu;
 
-type Candidate = {
+type IndexedCandidate = {
   entry: ChannelMemoryEntry;
   index: number;
-  score: number;
+  entryTerms: Set<string>;
   normalizedLength: number;
 };
+
+type Candidate = IndexedCandidate & {
+  score: number;
+};
+
+export interface ChannelMemoryRecallIndex {
+  readonly candidates: readonly IndexedCandidate[];
+}
 
 function normalize(text: string): string {
   return text
@@ -80,16 +88,37 @@ export function selectRelevantChannelMemory(
   message: string,
   entries: readonly ChannelMemoryEntry[],
 ): ChannelMemoryEntry[] {
+  return selectRelevantChannelMemoryFromIndex(
+    message,
+    createChannelMemoryRecallIndex(entries),
+  );
+}
+
+export function createChannelMemoryRecallIndex(
+  entries: readonly ChannelMemoryEntry[],
+): ChannelMemoryRecallIndex {
+  return {
+    candidates: entries.map((entry, index) => {
+      const normalized = normalize(entry.text);
+      return {
+        entry: { ...entry },
+        index,
+        entryTerms: terms(normalized),
+        normalizedLength: Array.from(normalized).length,
+      };
+    }),
+  };
+}
+
+export function selectRelevantChannelMemoryFromIndex(
+  message: string,
+  recallIndex: ChannelMemoryRecallIndex,
+): ChannelMemoryEntry[] {
   const messageTerms = terms(normalize(message));
-  const candidates: Candidate[] = entries.map((entry, index) => {
-    const normalized = normalize(entry.text);
-    return {
-      entry,
-      index,
-      score: overlapSize(messageTerms, terms(normalized)),
-      normalizedLength: Array.from(normalized).length,
-    };
-  });
+  const candidates: Candidate[] = recallIndex.candidates.map((candidate) => ({
+    ...candidate,
+    score: overlapSize(messageTerms, candidate.entryTerms),
+  }));
   const positive = candidates
     .filter(({ score }) => score > 0)
     .sort(
