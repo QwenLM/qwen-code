@@ -86,7 +86,10 @@ export function ChannelQrAuthDialog({
       }}
     >
       <DialogContent
-        className="sm:max-w-md"
+        className="motion-reduce:animate-none motion-reduce:transition-none sm:max-w-md"
+        overlayProps={{
+          className: 'motion-reduce:animate-none motion-reduce:transition-none',
+        }}
         showCloseButton={false}
         onEscapeKeyDown={() => auth.close()}
       >

@@ -20,7 +20,21 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-const { context, actions } = vi.hoisted(() => {
+const { context, actions, client, workspaceA, workspaceB } = vi.hoisted(() => {
+  const createWorkspace = () => ({
+    beginWorkspaceChannelAuth: vi.fn(),
+    workspaceChannelAuth: vi.fn(),
+    workspaceChannelAuthQr: vi.fn(),
+    cancelWorkspaceChannelAuth: vi.fn(),
+    commitWorkspaceChannelAuth: vi.fn(),
+  });
+  const workspaceA = createWorkspace();
+  const workspaceB = createWorkspace();
+  const client = {
+    workspaceByCwd: vi.fn((cwd: string) =>
+      cwd === '/workspace-a' ? workspaceA : workspaceB,
+    ),
+  };
   const actions = {
     loadChannels: vi.fn(),
     upsertChannel: vi.fn(),
@@ -41,11 +55,14 @@ const { context, actions } = vi.hoisted(() => {
     actions,
     context: {
       current: {
-        client: {},
+        client,
         workspaceCwd: '/workspace-a',
         actions,
       },
     },
+    client,
+    workspaceA,
+    workspaceB,
   };
 });
 
@@ -92,7 +109,7 @@ describe('useDaemonChannels', () => {
     document.body.appendChild(container);
     root = createRoot(container);
     context.current = {
-      client: {},
+      client,
       workspaceCwd: '/workspace-a',
       actions,
     };
@@ -109,9 +126,15 @@ describe('useDaemonChannels', () => {
       actions.channelAuth.qr,
       actions.channelAuth.cancel,
       actions.channelAuth.commit,
+      client.workspaceByCwd,
+      ...Object.values(workspaceA),
+      ...Object.values(workspaceB),
     ]) {
       mock.mockReset();
     }
+    client.workspaceByCwd.mockImplementation((cwd: string) =>
+      cwd === '/workspace-a' ? workspaceA : workspaceB,
+    );
   });
 
   afterEach(() => {
@@ -181,7 +204,7 @@ describe('useDaemonChannels', () => {
     await act(async () => root.render((<TestComponent />) as ReactNode));
     context.current = {
       ...context.current,
-      client: {},
+      client: { workspaceByCwd: client.workspaceByCwd },
       workspaceCwd: '/workspace-b',
     };
     await act(async () => root.render((<TestComponent />) as ReactNode));
@@ -272,7 +295,10 @@ describe('useDaemonChannels', () => {
     await act(async () => root.render((<TestComponent />) as ReactNode));
     expect(result?.channels.bot.config.cwd).toBe('client-a');
 
-    context.current = { ...context.current, client: {} };
+    context.current = {
+      ...context.current,
+      client: { workspaceByCwd: client.workspaceByCwd },
+    };
     await act(async () => root.render((<TestComponent />) as ReactNode));
 
     expect(actions.loadChannels).toHaveBeenCalledTimes(2);
@@ -332,6 +358,8 @@ describe('useDaemonChannels', () => {
     const qr = new Blob(['png'], { type: 'image/png' });
     actions.channelAuth.qr.mockResolvedValue(qr);
     actions.channelAuth.commit.mockResolvedValue({});
+    workspaceA.workspaceChannelAuthQr.mockResolvedValue(qr);
+    workspaceA.commitWorkspaceChannelAuth.mockResolvedValue({});
     actions.loadChannels.mockResolvedValue(channelData('/workspace-a'));
     let result: ReturnType<typeof useDaemonChannels> | undefined;
 
@@ -350,5 +378,60 @@ describe('useDaemonChannels', () => {
 
     expect(result?.auth).toBe(auth);
     expect(actions.loadChannels).toHaveBeenCalledOnce();
+  });
+
+  it('binds captured auth operations to the exact workspace snapshot', async () => {
+    const authSession = {
+      id: 'auth-a',
+      state: 'awaiting_scan',
+      expiresAt: '2026-07-20T01:00:00.000Z',
+      qrRevision: 1,
+    };
+    const qr = new Blob(['qr'], { type: 'image/svg+xml' });
+    workspaceA.beginWorkspaceChannelAuth.mockResolvedValue(authSession);
+    workspaceA.workspaceChannelAuth.mockResolvedValue(authSession);
+    workspaceA.workspaceChannelAuthQr.mockResolvedValue(qr);
+    workspaceA.cancelWorkspaceChannelAuth.mockResolvedValue({
+      cancelled: true,
+    });
+    workspaceA.commitWorkspaceChannelAuth.mockResolvedValue({
+      committed: true,
+    });
+    let result: ReturnType<typeof useDaemonChannels> | undefined;
+
+    function TestComponent() {
+      result = useDaemonChannels();
+      return null;
+    }
+
+    await act(async () => root.render((<TestComponent />) as ReactNode));
+    const authA = result!.auth;
+    context.current = {
+      ...context.current,
+      workspaceCwd: '/workspace-b',
+    };
+    await act(async () => root.render((<TestComponent />) as ReactNode));
+
+    await expect(authA.begin('bot', { channelType: 'qq' })).resolves.toEqual(
+      authSession,
+    );
+    await expect(authA.status('bot', 'auth-a')).resolves.toEqual(authSession);
+    await expect(authA.qr('bot', 'auth-a')).resolves.toBe(qr);
+    await expect(
+      authA.commit('bot', 'auth-a', { channelType: 'qq' }),
+    ).resolves.toEqual({ committed: true });
+    await expect(authA.cancel('bot', 'auth-a')).resolves.toEqual({
+      cancelled: true,
+    });
+
+    expect(workspaceA.beginWorkspaceChannelAuth).toHaveBeenCalledOnce();
+    expect(workspaceA.workspaceChannelAuth).toHaveBeenCalledOnce();
+    expect(workspaceA.workspaceChannelAuthQr).toHaveBeenCalledOnce();
+    expect(workspaceA.commitWorkspaceChannelAuth).toHaveBeenCalledOnce();
+    expect(workspaceA.cancelWorkspaceChannelAuth).toHaveBeenCalledOnce();
+    expect(
+      Object.values(workspaceB).every((mock) => mock.mock.calls.length === 0),
+    ).toBe(true);
+    expect(actions.loadChannels).not.toHaveBeenCalled();
   });
 });

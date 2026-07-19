@@ -13,6 +13,7 @@ import type {
   DaemonChannelsResource,
   DaemonResourceOptions,
 } from '../types.js';
+import { withActionTimeout } from '../../timing.js';
 import { useDaemonResource } from './useDaemonResource.js';
 
 export function useDaemonChannels(options: DaemonResourceOptions = {}) {
@@ -37,6 +38,12 @@ export function useDaemonChannels(options: DaemonResourceOptions = {}) {
   const reloadResource = resource.reload;
   const requestedRef = useRef(false);
   const previousIdentityRef = useRef(identity);
+  const identityRef = useRef(identity);
+  identityRef.current = identity;
+  const authWorkspace = useMemo(
+    () => (workspaceCwd ? client.workspaceByCwd(workspaceCwd) : undefined),
+    [client, workspaceCwd],
+  );
 
   const reload = useCallback(async () => {
     requestedRef.current = true;
@@ -99,20 +106,66 @@ export function useDaemonChannels(options: DaemonResourceOptions = {}) {
     (name: string) => mutate(() => actions.restartChannel(name)),
     [actions, mutate],
   );
-  const auth = useMemo(
-    () => ({
-      begin: actions.channelAuth.begin,
-      status: actions.channelAuth.status,
-      qr: actions.channelAuth.qr,
-      cancel: actions.channelAuth.cancel,
-      commit: (
+  const auth = useMemo(() => {
+    const requireWorkspace = () => {
+      if (!authWorkspace) {
+        throw new Error('Channel authentication requires a workspace.');
+      }
+      return authWorkspace;
+    };
+    return {
+      begin: async (
+        name: Parameters<typeof actions.channelAuth.begin>[0],
+        request: Parameters<typeof actions.channelAuth.begin>[1],
+      ) =>
+        withActionTimeout(
+          requireWorkspace().beginWorkspaceChannelAuth(name, request),
+          'Begin channel auth timed out',
+        ),
+      status: async (
+        name: Parameters<typeof actions.channelAuth.status>[0],
+        sessionId: Parameters<typeof actions.channelAuth.status>[1],
+      ) =>
+        withActionTimeout(
+          requireWorkspace().workspaceChannelAuth(name, sessionId),
+          'Load channel auth timed out',
+        ),
+      qr: async (
+        name: Parameters<typeof actions.channelAuth.qr>[0],
+        sessionId: Parameters<typeof actions.channelAuth.qr>[1],
+      ) =>
+        withActionTimeout(
+          requireWorkspace().workspaceChannelAuthQr(name, sessionId),
+          'Load channel auth QR timed out',
+        ),
+      cancel: async (
+        name: Parameters<typeof actions.channelAuth.cancel>[0],
+        sessionId: Parameters<typeof actions.channelAuth.cancel>[1],
+      ) =>
+        withActionTimeout(
+          requireWorkspace().cancelWorkspaceChannelAuth(name, sessionId),
+          'Cancel channel auth timed out',
+        ),
+      commit: async (
         name: Parameters<typeof actions.channelAuth.commit>[0],
         sessionId: Parameters<typeof actions.channelAuth.commit>[1],
         request: Parameters<typeof actions.channelAuth.commit>[2],
-      ) => mutate(() => actions.channelAuth.commit(name, sessionId, request)),
-    }),
-    [actions, mutate],
-  );
+      ) => {
+        const result = await withActionTimeout(
+          requireWorkspace().commitWorkspaceChannelAuth(
+            name,
+            sessionId,
+            request,
+          ),
+          'Commit channel auth timed out',
+        );
+        if (identityRef.current === identity) {
+          await reloadRef.current();
+        }
+        return result;
+      },
+    };
+  }, [actions, authWorkspace, identity]);
 
   const current = resource.data;
   return {

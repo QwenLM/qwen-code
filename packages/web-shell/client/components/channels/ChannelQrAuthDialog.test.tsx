@@ -85,6 +85,21 @@ afterEach(() => {
 });
 
 describe('ChannelQrAuthDialog', () => {
+  it('disables Radix content and overlay motion for reduced-motion users', async () => {
+    await renderDialog('requesting');
+
+    const contentClasses = document.querySelector(
+      '[data-slot="dialog-content"]',
+    )?.className;
+    const overlayClasses = document.querySelector(
+      '[data-slot="dialog-overlay"]',
+    )?.className;
+    expect(contentClasses).toContain('motion-reduce:animate-none');
+    expect(contentClasses).toContain('motion-reduce:transition-none');
+    expect(overlayClasses).toContain('motion-reduce:animate-none');
+    expect(overlayClasses).toContain('motion-reduce:transition-none');
+  });
+
   it('names the QR image and announces status without moving focus on rotation', async () => {
     vi.useFakeTimers();
     vi.mocked(actions.status).mockResolvedValue(session('awaiting_scan', 2));
