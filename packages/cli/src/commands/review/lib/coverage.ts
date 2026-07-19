@@ -140,6 +140,17 @@ export interface CoverageFromTranscripts {
   uncoverableChunks: number[];
   /** Chunk ids a working agent actually reviewed. */
   coveredChunks: number[];
+  /**
+   * The pre-formed disclosure entries (`rewrittenPrompts`, `missingRoles`,
+   * `unreadBriefs`), as `{subject, reason}` pairs in push order — for
+   * `compose-review`, which dedupes caller echoes by subject and groups
+   * same-reason subjects into one sentence. The prose twins above remain for
+   * the stderr formatting; REPARSING them was the bug: a reason is free-form
+   * text (labels carry ` — ` for an invariant's file, error interpolations
+   * can carry anything), so a subject/reason boundary recovered from rendered
+   * prose garbles exactly the entries it matters for.
+   */
+  disclosures: Array<{ subject: string; reason: string }>;
 }
 
 /** The plan, as far as coverage needs it. The roster reads more of it — see RosterPlan. */
@@ -285,6 +296,10 @@ export function coverageFromTranscripts(
   const idleAgents: string[] = [];
   const unopenedAgents: string[] = [];
   const rewrittenPrompts: string[] = [];
+  const disclosures: Array<{ subject: string; reason: string }> = [];
+  const disclose = (subject: string, reason: string): void => {
+    disclosures.push({ subject, reason });
+  };
   const covered = new Set<number>();
   const uncoverable = new Set<number>();
 
@@ -395,12 +410,21 @@ export function coverageFromTranscripts(
             `${name} — ran on a prompt the run wrote itself (none was built for ` +
               `this chunk), so the brief with its method and rules never reached it`,
           );
+          disclose(
+            name,
+            'ran on a prompt the run wrote itself (none was built for this ' +
+              'chunk), so the brief with its method and rules never reached it',
+          );
         }
       } else if (!wasDeliveredVerbatim(rec.launchPrompt, b)) {
         rewrittenThisRecord = true;
         if (!superseded(rec, chunk)) {
           rewrittenPrompts.push(
             `${name} — launched with a prompt that is not the one the CLI built`,
+          );
+          disclose(
+            name,
+            'launched with a prompt that is not the one the CLI built',
           );
         }
       }
@@ -489,6 +513,14 @@ export function coverageFromTranscripts(
         `shows the severity bar, the finding format or this project's own rules ` +
         `reaching an agent`,
     );
+    disclose(
+      'every dimension',
+      `none of the ${roster.length} required agents is on record as launched ` +
+        `with a prompt this skill built, so this diff was reviewed, if at ` +
+        `all, from prompts the run wrote for itself: no record shows the ` +
+        `severity bar, the finding format or this project's own rules ` +
+        `reaching an agent`,
+    );
   }
 
   // Injective: one transcript may satisfy ONE roster requirement. Without this,
@@ -541,25 +573,6 @@ export function coverageFromTranscripts(
   const assignment = new Map<number, AgentRecord>();
   for (const [rec, i] of matchedRec) assignment.set(i, rec);
 
-  // The launched-side twin of `nobodyBuiltAnything`: every prompt was built and
-  // not one of them reached any agent on record. Said once per dimension it
-  // becomes N identical lines burying the single fact that explains all of
-  // them — the run stopped at the builder — and on #7188 a public review body
-  // was exactly that wall, eleven roles' worth. One line, same as the
-  // never-built collapse; the per-role selectors below survive for the repair.
-  const nobodyLaunchedAnything =
-    roster.length > 1 &&
-    buildable.length === roster.length &&
-    candidatesOf.every((c) => c.length === 0);
-  if (nobodyLaunchedAnything) {
-    missingRoles.push(
-      `every dimension — all ${roster.length} required prompts were built, ` +
-        `and no agent on record was launched with any of them: the run ` +
-        `stopped at the prompt builder, so this diff was reviewed, if at ` +
-        `all, from prompts the run wrote for itself`,
-    );
-  }
-
   let buildableIdx = -1;
   for (const req of roster) {
     const b = builtOf(req.key);
@@ -569,6 +582,11 @@ export function coverageFromTranscripts(
           `${roleLabel(req)} — no record shows its brief reaching an agent, so ` +
             `this dimension was reviewed, if at all, from a prompt the run ` +
             `wrote for itself`,
+        );
+        disclose(
+          roleLabel(req),
+          'no record shows its brief reaching an agent, so this dimension ' +
+            'was reviewed, if at all, from a prompt the run wrote for itself',
         );
       }
       missingRoleSelectors.push(selectorOf(req));
@@ -580,16 +598,22 @@ export function coverageFromTranscripts(
       // Not assignable even under a MAXIMUM matching — so this is provably a
       // shortage of transcripts, not an artifact of claim order.
       const anyMatch = candidatesOf[buildableIdx].length > 0;
-      if (!nobodyLaunchedAnything) {
-        missingRoles.push(
-          anyMatch
-            ? `${roleLabel(req)} — its prompt reached only an agent already ` +
-                `credited with another block; one agent was given several blocks, ` +
-                `and one transcript cannot certify two dimensions`
-            : `${roleLabel(req)} — its prompt was built, but no agent on record ` +
-                `was launched with it`,
-        );
-      }
+      missingRoles.push(
+        anyMatch
+          ? `${roleLabel(req)} — its prompt reached only an agent already ` +
+              `credited with another block; one agent was given several blocks, ` +
+              `and one transcript cannot certify two dimensions`
+          : `${roleLabel(req)} — its prompt was built, but no agent on record ` +
+              `was launched with it`,
+      );
+      disclose(
+        roleLabel(req),
+        anyMatch
+          ? 'its prompt reached only an agent already credited with another ' +
+              'block; one agent was given several blocks, and one transcript ' +
+              'cannot certify two dimensions'
+          : 'its prompt was built, but no agent on record was launched with it',
+      );
       missingRoleSelectors.push(selectorOf(req));
       continue;
     }
@@ -621,6 +645,11 @@ export function coverageFromTranscripts(
         `${roleLabel(req)} — never opened its brief (${brief}), so it reviewed ` +
           'without the instructions it was launched to follow',
       );
+      disclose(
+        roleLabel(req),
+        `never opened its brief (${brief}), so it reviewed without the ` +
+          'instructions it was launched to follow',
+      );
     }
   }
 
@@ -649,6 +678,7 @@ export function coverageFromTranscripts(
     rewrittenPrompts,
     missingRoles,
     missingRoleSelectors,
+    disclosures,
     unreadBriefs,
     missingChunks,
     uncoverableChunks: [...uncoverable].sort((a, b) => a - b),

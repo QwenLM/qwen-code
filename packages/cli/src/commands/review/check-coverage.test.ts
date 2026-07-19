@@ -818,41 +818,38 @@ describe('the roster — who should have been here', () => {
     expect(r.missingRoles[0]).not.toMatch(/--role/);
   });
 
-  it('says one thing once when every prompt was built and none was launched', () => {
-    // The launched-side twin of the collapse above, and it shipped: on #7188
-    // the run built all eleven roster prompts, launched not one agent, and
-    // the posted body was eleven identical "its prompt was built, but no
-    // agent on record was launched with it" lines — burying the single fact
-    // that the run stopped at the builder.
+  it("keeps per-role entries when every prompt was built and none was launched — the collapse is compose's job", () => {
+    // The first cut collapsed this shape HERE, into one "the run stopped at
+    // the prompt builder" line — and misfired: candidatesOf is also all-empty
+    // when every agent ran on a REWRITTEN prompt, so the aggregate claimed
+    // nothing launched beside forty-three rewritten-launch disclosures that
+    // said otherwise. Coverage now reports per role, structurally
+    // (`disclosures`), and compose-review groups same-reason subjects into
+    // the one sentence — after the caller's echoes have been deduped against
+    // the very subjects a coverage-side collapse would have discarded.
     const p = planPr();
-    // satisfyRoster wrote a matching transcript per role; remove every
-    // transcript — the records and briefs stay, so every requirement is
-    // BUILT, and nothing on record was launched.
     for (const f of readdirSync(join(dir, 'subagents', 'S1'))) {
       rmSync(join(dir, 'subagents', 'S1', f), { force: true });
     }
-    // An agent DID run — on a prompt matching no record — so the transcript
-    // store is not empty and the chunks are covered; only the roles gap.
     transcript('stray', wholeDiff(), { calls: 8 });
 
     const r = coverageFromTranscripts(p, ENV);
     expect(r.ok).toBe(false);
-    expect(r.missingRoles).toHaveLength(1);
-    expect(r.missingRoles[0]).toMatch(
-      /^every dimension — all \d+ required prompts were built/,
-    );
-    expect(r.missingRoles[0]).toContain(
-      'no agent on record was launched with any of them',
-    );
-    // The collapse is a body-side mercy, not a repair-side one: the operator
-    // still gets one selector per requirement.
     const roster = requiredAgents(
       JSON.parse(readFileSync(p, 'utf8')) as RosterPlan,
     );
     expect(roster.length).toBeGreaterThan(1);
+    expect(r.missingRoles).toHaveLength(roster.length);
     expect(r.missingRoleSelectors).toHaveLength(roster.length);
-    // Author-facing register: no internal command in the posted line.
-    expect(r.missingRoles[0]).not.toContain('agent-prompt');
+    // Structural twins, one per role, all sharing the one reason — what the
+    // compose-side grouping turns into a single sentence.
+    const notLaunched = r.disclosures.filter(
+      (d) =>
+        d.reason ===
+        'its prompt was built, but no agent on record was launched with it',
+    );
+    expect(notLaunched).toHaveLength(roster.length);
+    expect(new Set(notLaunched.map((d) => d.subject)).size).toBe(roster.length);
   });
 
   it('keeps the per-role not-launched text when only SOME launches are missing', () => {

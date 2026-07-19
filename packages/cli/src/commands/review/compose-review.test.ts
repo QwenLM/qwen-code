@@ -1139,6 +1139,92 @@ describe('coverage is recomputed, never accepted', () => {
     );
   });
 
+  it('an all-rewritten roster never claims nothing launched — precise cause, no contradicting aggregate', () => {
+    // The first cut collapsed all-empty verbatim matches into "the run
+    // stopped at the prompt builder" — but candidatesOf is also all-empty
+    // when every agent RAN on a rewritten prompt, and the aggregate then
+    // contradicted the rewritten-launch disclosures beside it. Reproduced
+    // and refused: both chunks rewritten, the whole-diff role unlaunched —
+    // each cause its own sentence, no "every dimension" claim anywhere.
+    const p = plan();
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    transcript(
+      'a1',
+      `You are reviewing chunk 1 of 2.\nread_file(file_path="${DIFF}", offset=0, limit=100)`,
+      { toolCalls: 2 },
+    );
+    transcript(
+      'a2',
+      `You are reviewing chunk 2 of 2.\nread_file(file_path="${DIFF}", offset=100, limit=100)`,
+      { toolCalls: 2 },
+    );
+    const r = composeReview({ planPath: p, env: ENV, modelId: MODEL });
+    expect(r.body).toMatch(
+      /Not reviewed: [^.]*chunk 1[^.]*chunk 2[^.]*— launched with a prompt that is not the one the CLI built\./,
+    );
+    expect(r.body).not.toContain('every dimension');
+    expect(r.body).not.toContain('stopped at the prompt builder');
+    // And the chunks appear under their PRECISE cause only — to the roster
+    // they are also requirements with no verbatim launch, and repeating them
+    // under that vaguer cause would claim nothing launched about agents that
+    // demonstrably ran.
+    expect(r.body).not.toContain('no agent on record was launched with it');
+  });
+
+  it('a reason carrying its own em-dash neither garbles the subject nor duplicates the line', () => {
+    // Reasons are free-form — internal failures interpolate raw error
+    // messages — so a subject/reason boundary reparsed from rendered prose
+    // regroups exactly the entries it garbles. The entries are structural
+    // now; the caller's echo of a dashed line still dedupes, by prefix
+    // against the known subject.
+    const p = plan();
+    const r = composeReview({
+      planPath: p,
+      // Transcripts unreadable: the coverage AND verification reasons both
+      // interpolate an error message — with an em-dash of their own.
+      env: {
+        QWEN_CODE_PROJECT_DIR: join(dir, 'nowhere — missing'),
+        QWEN_CODE_SESSION_ID: 'S1',
+      },
+      unreviewedDimensions: [
+        'coverage — could not read the transcripts — echoed back by the caller',
+      ],
+      modelId: MODEL,
+    });
+    // One coverage clause — the caller's dashed echo deduped by subject
+    // prefix, the machine's own text rendered once, subject intact.
+    expect(r.body.match(/Not reviewed: coverage/g)).toHaveLength(1);
+    expect(r.body).not.toContain('echoed back by the caller');
+  });
+
+  it('caller echoes of per-role gaps fold into the one grouped sentence — the #7188 shape end to end', () => {
+    // The coverage-side collapse discarded the per-role subjects before the
+    // caller's echoes could collide with them, so the body carried the
+    // caller's per-role sentences PLUS an overlapping aggregate. Per-role
+    // subjects now survive to the dedup, and the grouping makes the one
+    // sentence afterwards.
+    const p = plan();
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    // Chunks reviewed properly; the whole-diff role built but never launched.
+    transcript('a1', goodPrompt(1), { toolCalls: 3 });
+    transcript('a2', goodPrompt(2), { toolCalls: 2 });
+    const label = 'Test coverage matrix (whole-diff)';
+    const r = composeReview({
+      planPath: p,
+      env: ENV,
+      unreviewedDimensions: [
+        `${label} — its prompt was built, but no agent on record was launched with it`,
+      ],
+      modelId: MODEL,
+    });
+    expect(r.body.split(label)).toHaveLength(2);
+    expect(
+      r.body.match(/no record shows its brief reaching an agent/g) ?? [],
+    ).toHaveLength(1);
+  });
+
   it('does not merge two invariant files under one label — the em-dash is part of the subject', () => {
     // An invariant agent's label legitimately carries an em-dash segment
     // (`Invariant agent A … — src/foo.ts`). A first-dash dedup key would
