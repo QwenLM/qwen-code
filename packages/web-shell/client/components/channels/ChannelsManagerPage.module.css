@@ -1,0 +1,70 @@
+.pageHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-block-end: 16px;
+  border-block-end: 1px solid var(--border);
+}
+
+.addButton {
+  flex-shrink: 0;
+}
+
+.channelGrid {
+  display: grid;
+  align-items: start;
+  gap: 12px;
+}
+
+.channelCard {
+  position: relative;
+  border-inline-start: 3px solid var(--muted-foreground);
+}
+
+.channelCard[data-runtime-state='connected'] {
+  border-inline-start-color: var(--success-color);
+}
+
+.channelCard[data-runtime-state='starting'],
+.channelCard[data-runtime-state='partial'] {
+  border-inline-start-color: var(--warning-color);
+}
+
+.channelCard[data-runtime-state='error'] {
+  border-inline-start-color: var(--destructive);
+}
+
+.errorAlert [data-slot='alert-description'] {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow-wrap: anywhere;
+}
+
+@container panel-body (min-width: 680px) {
+  .channelGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@container panel-body (max-width: 440px) {
+  .pageHeader {
+    flex-direction: column;
+  }
+
+  .addButton {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .channelCard,
+  .channelCard * {
+    scroll-behavior: auto;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
