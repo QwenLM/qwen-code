@@ -12,10 +12,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => {
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((done, fail) => {
     resolve = done;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 const { context, actions } = vi.hoisted(() => {
@@ -191,6 +193,98 @@ describe('useDaemonChannels', () => {
     });
     expect(result?.snapshot?.revision).toBe('2');
     expect(result?.channels.bot.config.cwd).toBe('/workspace-b');
+  });
+
+  it('resets pending state when switching to a disabled workspace', async () => {
+    const workspaceA = deferred<ReturnType<typeof channelData>>();
+    actions.loadChannels.mockReturnValue(workspaceA.promise);
+    let result: ReturnType<typeof useDaemonChannels> | undefined;
+
+    function TestComponent({ enabled }: { enabled: boolean }) {
+      result = useDaemonChannels({ autoLoad: true, enabled });
+      return null;
+    }
+
+    await act(async () =>
+      root.render((<TestComponent enabled={true} />) as ReactNode),
+    );
+    expect(result?.loading).toBe(true);
+
+    context.current = {
+      ...context.current,
+      workspaceCwd: '/workspace-b',
+    };
+    await act(async () =>
+      root.render((<TestComponent enabled={false} />) as ReactNode),
+    );
+
+    expect(result?.data).toBeUndefined();
+    expect(result?.loading).toBe(false);
+    expect(result?.error).toBeUndefined();
+    expect(actions.loadChannels).toHaveBeenCalledOnce();
+  });
+
+  it('ignores an old workspace rejection after switching while disabled', async () => {
+    const workspaceA = deferred<ReturnType<typeof channelData>>();
+    actions.loadChannels.mockReturnValue(workspaceA.promise);
+    let result: ReturnType<typeof useDaemonChannels> | undefined;
+
+    function TestComponent({ enabled }: { enabled: boolean }) {
+      result = useDaemonChannels({ autoLoad: true, enabled });
+      return null;
+    }
+
+    await act(async () =>
+      root.render((<TestComponent enabled={true} />) as ReactNode),
+    );
+    context.current = {
+      ...context.current,
+      workspaceCwd: '/workspace-b',
+    };
+    await act(async () =>
+      root.render((<TestComponent enabled={false} />) as ReactNode),
+    );
+
+    workspaceA.reject(new Error('workspace-a failed'));
+    await act(async () => {
+      await workspaceA.promise.catch(() => undefined);
+    });
+
+    expect(result?.loading).toBe(false);
+    expect(result?.error).toBeUndefined();
+  });
+
+  it('resets and reloads when only the daemon client identity changes', async () => {
+    const firstClient = context.current.client;
+    const clientB = deferred<ReturnType<typeof channelData>>();
+    actions.loadChannels.mockImplementation(() =>
+      context.current.client === firstClient
+        ? Promise.resolve(channelData('client-a'))
+        : clientB.promise,
+    );
+    let result: ReturnType<typeof useDaemonChannels> | undefined;
+
+    function TestComponent() {
+      result = useDaemonChannels({ autoLoad: true });
+      return null;
+    }
+
+    await act(async () => root.render((<TestComponent />) as ReactNode));
+    expect(result?.channels.bot.config.cwd).toBe('client-a');
+
+    context.current = { ...context.current, client: {} };
+    await act(async () => root.render((<TestComponent />) as ReactNode));
+
+    expect(actions.loadChannels).toHaveBeenCalledTimes(2);
+    expect(result?.data).toBeUndefined();
+    expect(result?.loading).toBe(true);
+    expect(result?.error).toBeUndefined();
+
+    clientB.resolve(channelData('client-b'));
+    await act(async () => {
+      await clientB.promise;
+    });
+    expect(result?.channels.bot.config.cwd).toBe('client-b');
   });
 
   it('reloads a manually loaded resource when the workspace changes', async () => {

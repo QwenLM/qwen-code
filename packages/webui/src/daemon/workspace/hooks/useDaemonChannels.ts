@@ -15,10 +15,6 @@ import type {
 } from '../types.js';
 import { useDaemonResource } from './useDaemonResource.js';
 
-interface KeyedChannelsResource extends DaemonChannelsResource {
-  identity: object;
-}
-
 export function useDaemonChannels(options: DaemonResourceOptions = {}) {
   const { client, workspaceCwd } = useDaemonWorkspace();
   const actions = useDaemonWorkspaceActions();
@@ -26,25 +22,26 @@ export function useDaemonChannels(options: DaemonResourceOptions = {}) {
     () => ({ client, workspaceCwd }),
     [client, workspaceCwd],
   );
-  const load = useCallback(async (): Promise<KeyedChannelsResource> => {
-    const result = await actions.loadChannels();
-    return { ...result, identity };
-  }, [actions, identity]);
-  const resource = useDaemonResource(load, {
-    ...options,
-    autoLoad: false,
-  });
+  const load = useCallback(
+    (): Promise<DaemonChannelsResource> => actions.loadChannels(),
+    [actions],
+  );
+  const resource = useDaemonResource(
+    load,
+    {
+      ...options,
+      autoLoad: false,
+    },
+    identity,
+  );
   const reloadResource = resource.reload;
   const requestedRef = useRef(false);
   const previousIdentityRef = useRef(identity);
 
   const reload = useCallback(async () => {
     requestedRef.current = true;
-    const result = await reloadResource();
-    return result?.identity === identity
-      ? { catalog: result.catalog, snapshot: result.snapshot }
-      : undefined;
-  }, [identity, reloadResource]);
+    return reloadResource();
+  }, [reloadResource]);
   const reloadRef = useRef(reload);
   reloadRef.current = reload;
 
@@ -117,8 +114,7 @@ export function useDaemonChannels(options: DaemonResourceOptions = {}) {
     [actions, mutate],
   );
 
-  const current =
-    resource.data?.identity === identity ? resource.data : undefined;
+  const current = resource.data;
   return {
     data: current
       ? { catalog: current.catalog, snapshot: current.snapshot }

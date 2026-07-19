@@ -11,51 +11,79 @@ import type {
   ResourceState,
 } from '../types.js';
 
+/**
+ * `resourceKey` identifies the owner of the state. A key change synchronously
+ * hides and invalidates the previous owner's request, even while disabled.
+ */
 export function useDaemonResource<T>(
   load: () => Promise<T>,
   options: DaemonResourceOptions,
+  resourceKey?: unknown,
 ): ResourceResult<T> {
   const { autoLoad = false, enabled = true } = options;
-  const [state, setState] = useState<ResourceState<T>>({
-    data: undefined,
-    loading: false,
-    error: undefined,
+  const [state, setState] = useState<{
+    key: unknown;
+    value: ResourceState<T>;
+  }>({
+    key: resourceKey,
+    value: emptyResourceState(),
   });
   const requestSeqRef = useRef(0);
+  const resourceKeyRef = useRef(resourceKey);
+
+  if (!Object.is(resourceKeyRef.current, resourceKey)) {
+    resourceKeyRef.current = resourceKey;
+    requestSeqRef.current++;
+  }
 
   const reload = useCallback(async (): Promise<T | undefined> => {
     if (!enabled) return undefined;
     const seq = ++requestSeqRef.current;
-    setState((current) => ({
-      ...current,
-      loading: true,
-      error: undefined,
-    }));
+    setState((current) => {
+      const value = Object.is(current.key, resourceKey)
+        ? current.value
+        : emptyResourceState<T>();
+      return {
+        key: resourceKey,
+        value: { ...value, loading: true, error: undefined },
+      };
+    });
     try {
       const data = await load();
       if (seq !== requestSeqRef.current) return undefined;
-      setState({ data, loading: false, error: undefined });
+      setState({
+        key: resourceKey,
+        value: { data, loading: false, error: undefined },
+      });
       return data;
     } catch (error) {
       if (seq !== requestSeqRef.current) return undefined;
       const normalized =
         error instanceof Error ? error : new Error(String(error));
-      setState((current) => ({
-        ...current,
-        loading: false,
-        error: normalized,
-      }));
+      setState((current) => {
+        const value = Object.is(current.key, resourceKey)
+          ? current.value
+          : emptyResourceState<T>();
+        return {
+          key: resourceKey,
+          value: { ...value, loading: false, error: normalized },
+        };
+      });
       return undefined;
     }
-  }, [enabled, load]);
+  }, [enabled, load, resourceKey]);
 
   useEffect(() => {
     if (!autoLoad || !enabled) return;
     void reload();
   }, [autoLoad, enabled, reload]);
 
-  return {
-    ...state,
-    reload,
-  };
+  const value = Object.is(state.key, resourceKey)
+    ? state.value
+    : emptyResourceState<T>();
+  return { ...value, reload };
+}
+
+function emptyResourceState<T>(): ResourceState<T> {
+  return { data: undefined, loading: false, error: undefined };
 }
