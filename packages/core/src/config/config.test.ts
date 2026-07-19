@@ -77,6 +77,10 @@ import { HookSystem } from '../hooks/index.js';
 import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 import type { ChatRecordingFailureEvent } from '../services/chatRecordingService.js';
+import {
+  SessionTranscriptChangedError,
+  SessionWriterLease,
+} from '../services/session-writer-lease.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 
 function createToolMock(toolName: string) {
@@ -2127,6 +2131,34 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('startNewSession', () => {
+    it('rejects a session switch while the current recorder owns the writer lease', () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const originalSessionId = config.getSessionId();
+      const finalize = vi.fn();
+      const flush = vi.fn().mockResolvedValue(undefined);
+      const recorder = {
+        finalize,
+        flush,
+        hasWriteOwnership: () => true,
+      };
+      (
+        config as unknown as {
+          chatRecordingService: typeof recorder;
+        }
+      ).chatRecordingService = recorder;
+
+      expect(() => config.startNewSession('replacement-session')).toThrow(
+        expect.objectContaining({
+          name: 'SessionWriterUnavailableError',
+          errorKind: 'session_writer_unavailable',
+        }),
+      );
+      expect(config.getSessionId()).toBe(originalSessionId);
+      expect(config.getChatRecordingService()).toBe(recorder);
+      expect(finalize).not.toHaveBeenCalled();
+      expect(flush).not.toHaveBeenCalled();
+    });
+
     it('clears the FileReadCache so a new session does not inherit prior reads', () => {
       // Regression guard: the file-read cache backs ReadFile's
       // file_unchanged placeholder, whose correctness depends on the
@@ -2563,6 +2595,46 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('initialize', () => {
+    it('preserves activation and lease release failures', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+      });
+      const activationError = new SessionTranscriptChangedError();
+      const releaseError = new Error('lease release failed');
+      const release = vi.fn().mockRejectedValue(releaseError);
+      const acquire = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockResolvedValue({
+          transcriptExistedAtAcquire: false,
+          release,
+        } as unknown as SessionWriterLease);
+      vi.spyOn(
+        config.getSessionService(),
+        'getSessionLocation',
+      ).mockRejectedValue(activationError);
+
+      const result = await (
+        config as unknown as { activateChatRecording(): Promise<void> }
+      )
+        .activateChatRecording()
+        .catch((error: unknown) => error);
+
+      expect(result).toMatchObject({
+        name: 'SessionWriterUnavailableError',
+        errorKind: 'session_writer_unavailable',
+        rpcCode: -32023,
+        httpStatus: 503,
+        cause: expect.any(AggregateError),
+      });
+      expect(
+        (result as Error & { cause: AggregateError }).cause.errors,
+      ).toEqual([activationError, releaseError]);
+      expect(release).toHaveBeenCalledOnce();
+      acquire.mockRestore();
+    });
+
     it('preserves initialization and recording close failures', async () => {
       const config = new Config(baseParams);
       const initializationError = new Error('initialization failed');

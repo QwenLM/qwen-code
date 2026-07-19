@@ -2831,7 +2831,12 @@ export class Config {
         if (releaseError instanceof SessionWriterLostError) {
           this.pendingSessionWriterLease = undefined;
         } else {
-          failure = new SessionWriterUnavailableError({ cause: releaseError });
+          failure = new SessionWriterUnavailableError({
+            cause: new AggregateError(
+              [failure, releaseError],
+              'Session writer lease release failed during activation cleanup',
+            ),
+          });
         }
       }
       throw failure;

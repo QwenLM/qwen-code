@@ -11504,6 +11504,31 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agentPromise;
   });
 
+  it('loadSession preserves initialization failure and retries deferred cleanup', async () => {
+    const initializationError = new Error('initialize boom');
+    const cleanupError = new Error('shutdown boom');
+    const innerConfig = bindRestoreMocks({ sessionExists: true });
+    innerConfig.initialize.mockRejectedValue(initializationError);
+    innerConfig.shutdown.mockRejectedValue(cleanupError);
+    const { agent, agentPromise } = await spawnAgent();
+
+    const result = await agent
+      .loadSession({
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+      })
+      .catch((error: unknown) => error);
+
+    expect(result).toBe(initializationError);
+    expect(innerConfig.shutdown).toHaveBeenCalledOnce();
+
+    innerConfig.shutdown.mockResolvedValue(undefined);
+    mockConnectionState.resolve();
+    await agentPromise;
+    expect(innerConfig.shutdown).toHaveBeenCalledTimes(2);
+  });
+
   /**
    * A persisted `system` / `slash_command` record carrying goal cards — the only
    * place a daemon transcript stores them.
@@ -12218,6 +12243,57 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  it('loadSession preserves a bulk replay setup error when cleanup also fails', async () => {
+    const setupError = new Error('prime boom');
+    const cleanupError = new Error('cleanup boom');
+    const innerConfig = bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: {
+        messages: [{ role: 'user', parts: [{ text: 'hi' }] }],
+      },
+      primeTurnFromHistoryImpl: () => {
+        throw setupError;
+      },
+    });
+    const recording = innerConfig.getChatRecordingService();
+    recording.close.mockRejectedValue(cleanupError);
+    recording.hasWriteOwnership.mockReturnValue(true);
+    mockHistoryReplay.mockReset();
+    const { agent, agentPromise } = await spawnAgent();
+
+    const result = await agent
+      .loadSession({
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+        _meta: { 'qwen.session.loadReplayMode': 'bulk' },
+      })
+      .catch((error: unknown) => error);
+
+    expect(result).toBe(setupError);
+    expect(recording.close).toHaveBeenCalledOnce();
+    expect(innerConfig.shutdown).toHaveBeenCalledOnce();
+    expect(recording.hasWriteOwnership()).toBe(true);
+    expect(lastSessionMock?.dispose).toHaveBeenCalledOnce();
+    expect(
+      (
+        agent as unknown as {
+          getActiveSessions: () => Array<{ getId: () => string }>;
+        }
+      )
+        .getActiveSessions()
+        .map((session) => session.getId()),
+    ).not.toContain('persisted-1');
+
+    innerConfig.shutdown.mockImplementation(async () => {
+      recording.hasWriteOwnership.mockReturnValue(false);
+    });
+    mockConnectionState.resolve();
+    await agentPromise;
+    expect(innerConfig.shutdown).toHaveBeenCalledTimes(2);
+    expect(recording.hasWriteOwnership()).toBe(false);
   });
 
   it('loadSession skips history replay when getResumedSessionData() returns undefined', async () => {

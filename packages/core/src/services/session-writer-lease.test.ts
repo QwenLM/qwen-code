@@ -704,6 +704,24 @@ describe('SessionWriterLease', () => {
     ).resolves.toEqual([undefined, undefined]);
   });
 
+  it.runIf(process.platform !== 'win32')(
+    'creates the transcript directory with owner-only permissions',
+    async () => {
+      const fixture = await createFixture();
+      const lease = await SessionWriterLease.acquire(fixture.options);
+
+      await lease.appendJsonLine({ text: 'private' });
+
+      const [directoryStat, transcriptStat] = await Promise.all([
+        fs.stat(path.dirname(fixture.transcriptPath)),
+        fs.stat(fixture.transcriptPath),
+      ]);
+      expect(directoryStat.mode & 0o777).toBe(0o700);
+      expect(transcriptStat.mode & 0o777).toBe(0o600);
+      await lease.release();
+    },
+  );
+
   it.runIf(process.platform !== 'freebsd')(
     'retries release after a transient filesystem failure',
     async () => {

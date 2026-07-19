@@ -3337,6 +3337,20 @@ class QwenAgent implements Agent {
     }
   }
 
+  private async cleanupAfterRequestFailure(
+    error: unknown,
+    cleanup: () => Promise<void>,
+  ): Promise<never> {
+    try {
+      await cleanup();
+    } catch (cleanupError) {
+      debugLogger.warn(
+        `Session cleanup failed while preserving the original request error: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+      );
+    }
+    throw error;
+  }
+
   private pendingConfigCleanupKey(
     runtimeBaseDir: string,
     sessionId: string,
@@ -3714,12 +3728,13 @@ class QwenAgent implements Agent {
             this.createAndStoreSession(config, settings),
           );
         } catch (error) {
-          if (
-            this.sessions.get(config.getSessionId())?.getConfig() !== config
-          ) {
-            await this.cleanupUnstoredConfig(config);
-          }
-          throw error;
+          return this.cleanupAfterRequestFailure(error, async () => {
+            if (
+              this.sessions.get(config.getSessionId())?.getConfig() !== config
+            ) {
+              await this.cleanupUnstoredConfig(config);
+            }
+          });
         }
         profiler.setSessionId(session.getId());
         return profiler.timeSync('response_build', () => ({
@@ -3840,10 +3855,11 @@ class QwenAgent implements Agent {
           : {},
       );
     } catch (error) {
-      if (this.sessions.get(config.getSessionId())?.getConfig() !== config) {
-        await this.cleanupUnstoredConfig(config);
-      }
-      throw error;
+      return this.cleanupAfterRequestFailure(error, async () => {
+        if (this.sessions.get(config.getSessionId())?.getConfig() !== config) {
+          await this.cleanupUnstoredConfig(config);
+        }
+      });
     }
     let replayEnvelope: BridgeLoadReplayEnvelope | undefined;
     if (bulkReplay) {
@@ -3891,8 +3907,21 @@ class QwenAgent implements Agent {
         session.installRewriter();
         session.startCronScheduler();
       } catch (err) {
-        await this.discardStoredSessionIfCurrent(params.sessionId, session);
-        throw err;
+        return this.cleanupAfterRequestFailure(err, async () => {
+          try {
+            await this.discardStoredSessionIfCurrent(params.sessionId, session);
+          } catch (cleanupError) {
+            await this.removeStoredSessionEntry(
+              params.sessionId,
+              session,
+              [cleanupError],
+              {
+                shutdownConfig: false,
+              },
+            );
+            await this.cleanupUnstoredConfig(config);
+          }
+        });
       }
     }
 
@@ -3976,10 +4005,11 @@ class QwenAgent implements Agent {
         { replayHistory: false },
       );
     } catch (error) {
-      if (this.sessions.get(config.getSessionId())?.getConfig() !== config) {
-        await this.cleanupUnstoredConfig(config);
-      }
-      throw error;
+      return this.cleanupAfterRequestFailure(error, async () => {
+        if (this.sessions.get(config.getSessionId())?.getConfig() !== config) {
+          await this.cleanupUnstoredConfig(config);
+        }
+      });
     }
 
     await this.#restoreWorktreeOnResume(config, session);
@@ -10007,8 +10037,9 @@ class QwenAgent implements Agent {
         sendSdkMcpMessage: this.buildClientMcpSender(wiredSessionId),
       });
     } catch (error) {
-      await this.cleanupUnstoredConfig(config);
-      throw error;
+      return this.cleanupAfterRequestFailure(error, () =>
+        this.cleanupUnstoredConfig(config),
+      );
     }
     // ACP sessions served to WebUI clients are interactive: MCP tools can
     // arrive progressively, but session creation/loading must not wait for a

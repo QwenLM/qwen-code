@@ -774,7 +774,10 @@ export class SessionWriterLease {
     const nextByteLength = expectedBefore.byteLength + bytes.byteLength;
     let handle: fs.FileHandle | undefined;
     try {
-      await fs.mkdir(path.dirname(this.transcriptPath), { recursive: true });
+      await fs.mkdir(path.dirname(this.transcriptPath), {
+        recursive: true,
+        mode: 0o700,
+      });
       handle = await fs.open(
         this.transcriptPath,
         expectedBefore.exists ? 'a+' : 'ax+',
