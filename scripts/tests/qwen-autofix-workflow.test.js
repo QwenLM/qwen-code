@@ -1855,6 +1855,39 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
+  it('surfaces the running model in every autofix report for diagnosis and attribution', () => {
+    // The model is a repo variable (already the agent's OPENAI_MODEL), not a
+    // secret, so it is safe to echo into a public comment. Each reporting
+    // step must plumb it in and render a footer that names Qwen Code and the
+    // model, with an empty-variable fallback so the footer never renders a
+    // bare backtick pair.
+    const footer =
+      'echo "🧠 Handled by **Qwen Code** · model/模型 \\`${MODEL_DISPLAY}\\`"';
+    for (const step of [
+      pushAndReportStep,
+      reviewAddressReportStep,
+      publishPrStep,
+    ]) {
+      expect(step).toContain("MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'");
+      expect(step).toContain('MODEL_DISPLAY="${MODEL:-default}"');
+      expect(step).toContain(footer);
+    }
+    // Push-and-report carries BOTH the fixed and no-action bodies, so the
+    // footer appears twice there; the handoff and issue-phase reports once.
+    expect(pushAndReportStep.split(footer).length - 1).toBe(2);
+    expect(reviewAddressReportStep.split(footer).length - 1).toBe(1);
+    // The footer is appended to the model-authored e2e report before it is
+    // posted, not injected into the model's own file mid-generation.
+    expect(publishPrStep).toContain(
+      '} >> "${WORKDIR}/e2e-report.md"\n          gh pr comment "${PR_URL}" --body-file "${WORKDIR}/e2e-report.md"',
+    );
+    // The footer sits with the report bodies (before the eval marker), never
+    // inside the model output that gets comment-token-scrubbed.
+    expect(pushAndReportStep).toMatch(
+      /echo "🧠 Handled by[^\n]*\n\s+echo\n\s+echo "<!-- autofix-eval ts=\$\{NEWEST\} acted=true/,
+    );
+  });
+
   it('runs heavy autofix jobs on hosted runners with sandbox images', () => {
     const workflowAndSkill = `${workflow}\n${readAutofixSkill()}`;
 
