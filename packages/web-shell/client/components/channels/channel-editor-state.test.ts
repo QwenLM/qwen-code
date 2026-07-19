@@ -59,6 +59,7 @@ function existing(): DaemonChannelInstanceSnapshot {
       token: 'must-not-enter-the-editor',
     },
     secrets: { token: { present: true, source: 'environment' } },
+    webhookSecrets: {},
     startsWithServe: false,
     runtime: { state: 'stopped' },
   };
@@ -179,5 +180,137 @@ describe('channel editor state', () => {
     expect(validateChannelEditor(state)).not.toContainEqual(
       expect.objectContaining({ field: 'token' }),
     );
+  });
+
+  it('sanitizes webhook literals and preserves them through explicit intent', () => {
+    const webhookSecret = 'webhook-secret-sentinel';
+    const instance = existing();
+    instance.config.webhooks = {
+      sources: {
+        github: {
+          secret: webhookSecret,
+          targets: { main: { chatId: 'chat-1' } },
+        },
+      },
+    };
+    instance.webhookSecrets = {
+      github: { present: true, source: 'literal' },
+    };
+
+    const state = createChannelEditorState({
+      catalog: [descriptor],
+      instance,
+      expectedRevision: 'revision-8',
+    });
+    const request = buildChannelUpsertRequest(state);
+
+    expect(JSON.stringify(state)).not.toContain(webhookSecret);
+    expect(state.values.webhooks).not.toContain(webhookSecret);
+    expect(JSON.stringify(request.config)).not.toContain(webhookSecret);
+    expect(request.webhookSecrets).toEqual({
+      github: { operation: 'preserve' },
+    });
+  });
+
+  it('shapes webhook replace, invalid clear, and environment switch intents', () => {
+    const instance = existing();
+    instance.config.webhooks = {
+      sources: { github: { targets: {} } },
+    };
+    instance.webhookSecrets = {
+      github: { present: true, source: 'literal' },
+    };
+    let state = createChannelEditorState({
+      catalog: [descriptor],
+      instance,
+    });
+    state = updateSecretEditor(state, 'webhook:github', {
+      operation: 'replace',
+      value: 'replacement-secret',
+    });
+    expect(buildChannelUpsertRequest(state).webhookSecrets).toEqual({
+      github: { operation: 'replace', value: 'replacement-secret' },
+    });
+
+    state = updateSecretEditor(state, 'webhook:github', {
+      operation: 'clear',
+      value: '',
+      clearConfirmed: true,
+    });
+    expect(validateChannelEditor(state)).toContainEqual(
+      expect.objectContaining({ field: 'webhook:github' }),
+    );
+
+    state = updateChannelEditorField(
+      state,
+      'webhooks',
+      JSON.stringify({
+        sources: {
+          github: { secretEnv: 'GITHUB_WEBHOOK_SECRET', targets: {} },
+        },
+      }),
+    );
+    expect(validateChannelEditor(state)).not.toContainEqual(
+      expect.objectContaining({ field: 'webhook:github' }),
+    );
+    expect(buildChannelUpsertRequest(state).webhookSecrets).toEqual({
+      github: { operation: 'clear' },
+    });
+  });
+
+  it('treats QQ appSecret as an explicit secret intent', () => {
+    const qqDescriptor: DaemonChannelTypeDescriptor = {
+      type: 'qq',
+      displayName: 'QQ',
+      manageable: true,
+      auth: ['credentials', 'qr'],
+      fields: [
+        { key: 'appID', label: 'App ID', kind: 'string' },
+        { key: 'appSecret', label: 'App Secret', kind: 'secret' },
+      ],
+    };
+    const secret = 'qq-app-secret-sentinel';
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'qq-bot',
+      config: { type: 'qq', appID: 'id', appSecret: secret },
+      secrets: { appSecret: { present: true, source: 'literal' } },
+      webhookSecrets: {},
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+
+    const state = createChannelEditorState({
+      catalog: [qqDescriptor],
+      instance,
+    });
+
+    expect(JSON.stringify(state)).not.toContain(secret);
+    expect(buildChannelUpsertRequest(state)).toMatchObject({
+      config: { type: 'qq', appID: 'id' },
+      secrets: { appSecret: { operation: 'preserve' } },
+    });
+  });
+
+  it('requires explicit replacement for a new literal webhook source', () => {
+    let state = createChannelEditorState({
+      catalog: [descriptor],
+      instance: existing(),
+    });
+    state = updateChannelEditorField(
+      state,
+      'webhooks',
+      JSON.stringify({ sources: { deploy: { targets: {} } } }),
+    );
+    expect(validateChannelEditor(state)).toContainEqual(
+      expect.objectContaining({ field: 'webhook:deploy' }),
+    );
+
+    state = updateSecretEditor(state, 'webhook:deploy', {
+      operation: 'replace',
+      value: 'new-source-secret',
+    });
+    expect(buildChannelUpsertRequest(state).webhookSecrets).toEqual({
+      deploy: { operation: 'replace', value: 'new-source-secret' },
+    });
   });
 });

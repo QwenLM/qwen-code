@@ -76,6 +76,7 @@ function instance(
     name: 'bot',
     config: { type: 'dingtalk', appKey: 'visible-config' },
     secrets: { appSecret: { present: true, source: 'literal' } },
+    webhookSecrets: {},
     startsWithServe: false,
     runtime: { state },
     ...overrides,

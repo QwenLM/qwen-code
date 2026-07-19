@@ -70,4 +70,61 @@ describe('ChannelEditorDialog', () => {
       document.querySelector<HTMLInputElement>('input[type="password"]')?.value,
     ).toBe('');
   });
+
+  it('never mounts webhook or QQ secret sentinels in form controls', async () => {
+    const webhookSecret = 'webhook-secret-dom-sentinel';
+    const qqSecret = 'qq-secret-dom-sentinel';
+    await act(async () => {
+      root.render(
+        <ChannelEditorDialog
+          open
+          catalog={[
+            {
+              type: 'qq',
+              displayName: 'QQ',
+              manageable: true,
+              auth: ['credentials', 'qr'],
+              fields: [
+                { key: 'appID', label: 'App ID', kind: 'string' },
+                { key: 'appSecret', label: 'App Secret', kind: 'secret' },
+              ],
+            },
+          ]}
+          expectedRevision="revision-1"
+          instance={{
+            name: 'qq-bot',
+            config: {
+              type: 'qq',
+              appID: 'id',
+              appSecret: qqSecret,
+              webhooks: {
+                sources: {
+                  github: { secret: webhookSecret, targets: {} },
+                },
+              },
+            },
+            secrets: { appSecret: { present: true, source: 'literal' } },
+            webhookSecrets: {
+              github: { present: true, source: 'literal' },
+            },
+            startsWithServe: false,
+            runtime: { state: 'stopped' },
+          }}
+          onOpenChange={vi.fn()}
+          onSubmit={vi.fn()}
+        />,
+      );
+    });
+
+    const values = Array.from(
+      document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
+        'input, textarea',
+      ),
+      (element) => element.value,
+    ).join('\n');
+    expect(values).not.toContain(webhookSecret);
+    expect(values).not.toContain(qqSecret);
+    expect(document.body.innerHTML).not.toContain(webhookSecret);
+    expect(document.body.innerHTML).not.toContain(qqSecret);
+  });
 });

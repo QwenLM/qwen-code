@@ -53,6 +53,7 @@ import { Textarea } from '../ui/textarea';
 import {
   buildChannelUpsertRequest,
   channelEditorNeedsQrHandoff,
+  channelEditorWebhookSources,
   createChannelEditorState,
   selectChannelEditorType,
   SHARED_CHANNEL_FIELDS,
@@ -125,11 +126,13 @@ function ConfigField({
   state,
   setState,
   errors,
+  environmentReference,
 }: {
   descriptor: DaemonChannelConfigFieldDescriptor;
   state: ChannelEditorState;
   setState: (state: ChannelEditorState) => void;
   errors: ReturnType<typeof validateChannelEditor>;
+  environmentReference?: string;
 }) {
   const id = useId();
   const error = fieldError(errors, descriptor.key);
@@ -143,8 +146,24 @@ function ConfigField({
     .join(' ');
 
   if (descriptor.kind === 'secret') {
-    const secret = state.secrets[descriptor.key];
+    const webhookSource = descriptor.key.startsWith('webhook:')
+      ? descriptor.key.slice('webhook:'.length)
+      : undefined;
+    const secret = webhookSource
+      ? state.webhookSecrets[webhookSource]
+      : state.secrets[descriptor.key];
     if (!secret) return null;
+    if (environmentReference) {
+      return (
+        <Field>
+          <FieldLabel>{descriptor.label}</FieldLabel>
+          <FieldDescription>
+            Uses environment reference {environmentReference}. Any stored
+            literal secret will be removed when changes are saved.
+          </FieldDescription>
+        </Field>
+      );
+    }
     return (
       <Field data-invalid={Boolean(error)}>
         <FieldLabel htmlFor={id}>
@@ -570,6 +589,24 @@ export function ChannelEditorDialog({
                       />
                     );
                   })}
+                  {section.title === 'Webhooks'
+                    ? channelEditorWebhookSources(state).map((source) => (
+                        <ConfigField
+                          key={source.name}
+                          descriptor={{
+                            key: `webhook:${source.name}`,
+                            label: `Webhook secret · ${source.name}`,
+                            kind: 'secret',
+                            description:
+                              'Literal webhook secrets are stored separately from configuration.',
+                          }}
+                          state={state}
+                          setState={setState}
+                          errors={errors}
+                          environmentReference={source.secretEnv}
+                        />
+                      ))
+                    : null}
                 </FieldGroup>
               </details>
             ))}

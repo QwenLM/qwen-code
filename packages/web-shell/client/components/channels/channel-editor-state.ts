@@ -31,6 +31,7 @@ export interface ChannelEditorState {
   catalog: readonly DaemonChannelTypeDescriptor[];
   values: Record<string, unknown>;
   secrets: Record<string, SecretEditorState>;
+  webhookSecrets: Record<string, SecretEditorState>;
   preservedConfig: Record<string, unknown>;
   authMethod: ChannelEditorAuthMethod;
   dirtyFields: readonly string[];
@@ -200,12 +201,62 @@ function editorValue(
     return Array.isArray(raw) ? raw.join('\n') : '';
   }
   if (field.key === 'webhooks') {
-    return raw === undefined ? '' : JSON.stringify(raw, null, 2);
+    return raw === undefined
+      ? ''
+      : JSON.stringify(sanitizeWebhookConfig(raw), null, 2);
   }
   if (field.key === 'blockStreaming') return raw === 'on';
   if (field.kind === 'number') return raw === undefined ? '' : String(raw);
   if (field.kind === 'boolean') return raw === true;
   return typeof raw === 'string' ? raw : '';
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function sanitizeWebhookConfig(raw: unknown): unknown {
+  if (!isRecord(raw)) return raw;
+  const webhooks = structuredClone(raw);
+  const sources = webhooks.sources;
+  if (!isRecord(sources)) return webhooks;
+  for (const source of Object.values(sources)) {
+    if (isRecord(source)) delete source.secret;
+  }
+  return webhooks;
+}
+
+function parsedWebhookSources(
+  raw: unknown,
+): Record<string, Record<string, unknown>> | undefined {
+  if (typeof raw !== 'string' || !raw.trim()) return {};
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!isRecord(parsed) || !isRecord(parsed.sources)) return undefined;
+    const sources = Object.create(null) as Record<
+      string,
+      Record<string, unknown>
+    >;
+    for (const [name, source] of Object.entries(parsed.sources)) {
+      if (!isRecord(source)) return undefined;
+      sources[name] = source;
+    }
+    return sources;
+  } catch {
+    return undefined;
+  }
+}
+
+function sanitizedWebhookEditorValue(raw: unknown): unknown {
+  if (typeof raw !== 'string') return raw;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!isRecord(parsed)) return raw;
+    const sanitized = sanitizeWebhookConfig(parsed);
+    return JSON.stringify(sanitized, null, 2);
+  } catch {
+    return raw;
+  }
 }
 
 function requestValue(
@@ -289,8 +340,11 @@ export function createChannelEditorState({
       .filter((field) => field.kind === 'secret')
       .map((field) => field.key) ?? [],
   );
-  const preservedConfig = { ...(instance?.config ?? {}) };
+  const preservedConfig = structuredClone(instance?.config ?? {});
   for (const key of secretKeys) delete preservedConfig[key];
+  if (Object.hasOwn(preservedConfig, 'webhooks')) {
+    preservedConfig.webhooks = sanitizeWebhookConfig(preservedConfig.webhooks);
+  }
   const values: Record<string, unknown> = {};
   for (const field of [
     ...SHARED_CHANNEL_FIELDS,
@@ -317,6 +371,20 @@ export function createChannelEditorState({
       source: secret?.source,
     };
   }
+  const webhookSecrets = Object.create(null) as Record<
+    string,
+    SecretEditorState
+  >;
+  for (const [sourceName, secret] of Object.entries(
+    instance?.webhookSecrets ?? {},
+  )) {
+    webhookSecrets[sourceName] = {
+      operation: 'preserve',
+      value: '',
+      present: secret.present,
+      source: secret.source,
+    };
+  }
   const authMethod: ChannelEditorAuthMethod =
     descriptor?.auth.includes('credentials') === false &&
     descriptor.auth.includes('qr')
@@ -330,6 +398,7 @@ export function createChannelEditorState({
     catalog,
     values,
     secrets,
+    webhookSecrets,
     preservedConfig,
     authMethod,
     dirtyFields: [],
@@ -341,6 +410,39 @@ export function updateChannelEditorField(
   key: string,
   value: unknown,
 ): ChannelEditorState {
+  if (key === 'webhooks') {
+    const sanitized = sanitizedWebhookEditorValue(value);
+    const sources = parsedWebhookSources(sanitized);
+    const webhookSecrets = Object.assign(
+      Object.create(null) as Record<string, SecretEditorState>,
+      state.webhookSecrets,
+    );
+    for (const [sourceName, source] of Object.entries(sources ?? {})) {
+      const current = webhookSecrets[sourceName] ?? {
+        operation: 'preserve' as const,
+        value: '',
+        present: false,
+      };
+      webhookSecrets[sourceName] =
+        typeof source.secretEnv === 'string' &&
+        (current.source === 'literal' || current.operation === 'replace')
+          ? {
+              ...current,
+              operation: 'clear',
+              value: '',
+              clearConfirmed: true,
+            }
+          : current;
+    }
+    return {
+      ...state,
+      values: { ...state.values, [key]: sanitized },
+      webhookSecrets,
+      dirtyFields: state.dirtyFields.includes(key)
+        ? state.dirtyFields
+        : [...state.dirtyFields, key],
+    };
+  }
   return {
     ...state,
     values: { ...state.values, [key]: value },
@@ -385,6 +487,7 @@ export function selectChannelEditorType(
     type,
     values,
     secrets,
+    webhookSecrets: {},
     authMethod:
       descriptor.auth.includes('credentials') || !descriptor.auth.includes('qr')
         ? 'credentials'
@@ -401,6 +504,18 @@ export function updateSecretEditor(
   update: Pick<SecretEditorState, 'operation' | 'value'> &
     Partial<Pick<SecretEditorState, 'clearConfirmed'>>,
 ): ChannelEditorState {
+  if (key.startsWith('webhook:')) {
+    const sourceName = key.slice('webhook:'.length);
+    const current = state.webhookSecrets[sourceName];
+    if (!current) return state;
+    return {
+      ...state,
+      webhookSecrets: {
+        ...state.webhookSecrets,
+        [sourceName]: { ...current, ...update },
+      },
+    };
+  }
   const current = state.secrets[key];
   if (!current) return state;
   return {
@@ -521,6 +636,45 @@ export function validateChannelEditor(
       });
     }
   }
+  const sources = parsedWebhookSources(webhooks);
+  if (sources) {
+    for (const [sourceName, source] of Object.entries(sources)) {
+      if (['__proto__', 'constructor', 'prototype'].includes(sourceName)) {
+        errors.push({
+          field: 'webhooks',
+          message: `Webhook source ${sourceName} is not allowed.`,
+        });
+        continue;
+      }
+      const secret = state.webhookSecrets[sourceName] ?? {
+        operation: 'preserve' as const,
+        value: '',
+        present: false,
+      };
+      const usesEnvironment =
+        typeof source.secretEnv === 'string' && source.secretEnv.length > 0;
+      if (usesEnvironment) {
+        if (secret.operation === 'replace') {
+          errors.push({
+            field: `webhook:${sourceName}`,
+            message: 'Remove secretEnv before entering a literal secret.',
+          });
+        }
+        continue;
+      }
+      if (
+        (secret.operation === 'preserve' && !secret.present) ||
+        (secret.operation === 'replace' && !secret.value) ||
+        secret.operation === 'clear'
+      ) {
+        errors.push({
+          field: `webhook:${sourceName}`,
+          message:
+            'Enter a webhook secret, remove this source, or add secretEnv.',
+        });
+      }
+    }
+  }
   return errors;
 }
 
@@ -562,16 +716,47 @@ export function buildChannelUpsertRequest(
     }
     setValueAt(config, field.key, requestValue(field, state.values[field.key]));
   }
+  if (Object.hasOwn(config, 'webhooks')) {
+    config.webhooks = sanitizeWebhookConfig(config.webhooks);
+  }
   const secrets: Record<string, DaemonChannelSecretUpdate> = {};
   for (const field of descriptor.fields) {
     if (field.kind !== 'secret') continue;
     secrets[field.key] = toSecretUpdate(state.secrets[field.key]!);
   }
+  const webhookSecrets = Object.create(null) as Record<
+    string,
+    DaemonChannelSecretUpdate
+  >;
+  for (const sourceName of Object.keys(
+    parsedWebhookSources(state.values.webhooks) ?? {},
+  )) {
+    const secret = state.webhookSecrets[sourceName] ?? {
+      operation: 'preserve' as const,
+      value: '',
+      present: false,
+    };
+    webhookSecrets[sourceName] = toSecretUpdate(secret);
+  }
   return {
     expectedRevision: state.expectedRevision,
     config,
     ...(Object.keys(secrets).length > 0 ? { secrets } : {}),
+    ...(Object.keys(webhookSecrets).length > 0 ? { webhookSecrets } : {}),
   };
+}
+
+export function channelEditorWebhookSources(
+  state: ChannelEditorState,
+): Array<{ name: string; secretEnv?: string }> {
+  return Object.entries(parsedWebhookSources(state.values.webhooks) ?? {}).map(
+    ([name, source]) => ({
+      name,
+      ...(typeof source.secretEnv === 'string'
+        ? { secretEnv: source.secretEnv }
+        : {}),
+    }),
+  );
 }
 
 export function channelEditorNeedsQrHandoff(
