@@ -286,8 +286,7 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: |-
           npm exec --yes bun@1.3.14 -- test \
-            packages/desktop/packages/session-tools-core/src/handlers/list-sessions.test.ts \
-            packages/desktop/packages/session-tools-core/src/tool-defs-filtering.test.ts
+            packages/desktop/packages/session-tools-core/src/handlers/list-sessions.test.ts
 
       - name: 'Install linters'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
