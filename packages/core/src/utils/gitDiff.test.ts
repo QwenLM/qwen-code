@@ -2110,4 +2110,49 @@ describe('fetchGitCommitDetail', () => {
     );
     expect(result).toBeNull();
   });
+
+  it('counts a renamed file by its new path (not dropped, not empty-path)', async () => {
+    await fs.writeFile(path.join(repo, 'old.txt'), 'a\nb\nc\nd\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'seed');
+    // Rename + a small edit so git reports it as a rename with numstat counts.
+    await git(repo, 'mv', 'old.txt', 'new.txt');
+    await fs.writeFile(path.join(repo, 'new.txt'), 'a\nB\nc\nd\ne\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'rename + edit');
+
+    const log = await fetchGitLog(repo);
+    const detail = await fetchGitCommitDetail(repo, log!.entries[0].sha);
+    expect(detail).not.toBeNull();
+    // The rename is one file, keyed by the NEW path — the three-token `-z`
+    // rename sequence must not record an empty path or drop it.
+    expect(detail!.filesCount).toBe(1);
+    expect(detail!.files).toHaveLength(1);
+    expect(detail!.files[0].path).toBe('new.txt');
+    expect(detail!.files[0].added).toBeGreaterThan(0);
+  });
+
+  it('shows the first-parent diff for a merge commit', async () => {
+    await fs.writeFile(path.join(repo, 'base.txt'), 'base\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base');
+    await git(repo, 'checkout', '-q', '-b', 'feature');
+    await fs.writeFile(path.join(repo, 'feature.txt'), 'feature\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'feature work');
+    await git(repo, 'checkout', '-q', 'main');
+    await fs.writeFile(path.join(repo, 'main.txt'), 'main\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'main work');
+    await git(repo, 'merge', '-q', '--no-ff', 'feature', '-m', 'merge feature');
+
+    const log = await fetchGitLog(repo);
+    const detail = await fetchGitCommitDetail(repo, log!.entries[0].sha);
+    expect(detail).not.toBeNull();
+    expect(detail!.parents.length).toBe(2);
+    // Plain diff-tree emits nothing for a merge; the first-parent diff must
+    // surface what the merge introduced (feature.txt) — else filesCount is 0.
+    expect(detail!.filesCount).toBeGreaterThan(0);
+    expect(detail!.files.some((f) => f.path === 'feature.txt')).toBe(true);
+  });
 });

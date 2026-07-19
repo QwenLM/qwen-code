@@ -1569,6 +1569,12 @@ export async function fetchGitCommitDetail(
           'diff-tree',
           '--no-commit-id',
           '--numstat',
+          // Detect renames so `git mv` counts as one file (by its new path),
+          // matching the main `git diff` path — diff-tree is plumbing and does
+          // NOT honour diff.renames, so without -M a rename splits into a
+          // delete + add pair. The three-token `-z` rename sequence it then
+          // emits is handled by the pending-rename state machine below.
+          '-M',
           '-r',
           '-z',
           `${sha}^1`,
@@ -1579,6 +1585,12 @@ export async function fetchGitCommitDetail(
           'diff-tree',
           '--no-commit-id',
           '--numstat',
+          // Detect renames so `git mv` counts as one file (by its new path),
+          // matching the main `git diff` path — diff-tree is plumbing and does
+          // NOT honour diff.renames, so without -M a rename splits into a
+          // delete + add pair. The three-token `-z` rename sequence it then
+          // emits is handled by the pending-rename state machine below.
+          '-M',
           '-r',
           '-z',
           '--root',
@@ -1593,7 +1605,37 @@ export async function fetchGitCommitDetail(
 
   if (numstatRaw) {
     const tokens = numstatRaw.split('\0').filter((t) => t.length > 0);
+    // Rename entries span three tokens ({counts with empty path}, oldPath,
+    // newPath) under `-z`, mirroring parseGitNumstat. Without this a `git mv`
+    // is recorded with an empty path (and its counts double-lost), so
+    // filesCount / linesAdded / linesRemoved understate the commit.
+    let pending: { added: number; removed: number; isBinary: boolean } | null =
+      null;
+    let oldPathSeen = false;
+    const record = (
+      path: string,
+      added: number,
+      removed: number,
+      isBinary: boolean,
+    ) => {
+      filesCount++;
+      linesAdded += added;
+      linesRemoved += removed;
+      if (files.length < MAX_FILES) {
+        files.push({ path, added, removed, isBinary });
+      }
+    };
     for (const token of tokens) {
+      if (pending) {
+        if (!oldPathSeen) {
+          oldPathSeen = true; // this token is oldPath; the next is newPath
+          continue;
+        }
+        record(token, pending.added, pending.removed, pending.isBinary);
+        pending = null;
+        oldPathSeen = false;
+        continue;
+      }
       const firstTab = token.indexOf('\t');
       if (firstTab < 0) continue;
       const secondTab = token.indexOf('\t', firstTab + 1);
@@ -1604,17 +1646,12 @@ export async function fetchGitCommitDetail(
       const isBinary = addStr === '-' || remStr === '-';
       const fileAdded = isBinary ? 0 : parseInt(addStr, 10) || 0;
       const fileRemoved = isBinary ? 0 : parseInt(remStr, 10) || 0;
-      filesCount++;
-      linesAdded += fileAdded;
-      linesRemoved += fileRemoved;
-      if (files.length < MAX_FILES) {
-        files.push({
-          path: filePath,
-          added: fileAdded,
-          removed: fileRemoved,
-          isBinary,
-        });
+      if (filePath === '') {
+        // Rename header — the next two tokens are oldPath then newPath.
+        pending = { added: fileAdded, removed: fileRemoved, isBinary };
+        continue;
       }
+      record(filePath, fileAdded, fileRemoved, isBinary);
     }
   }
 
