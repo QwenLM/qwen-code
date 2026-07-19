@@ -412,6 +412,7 @@ export async function resolveAtCommandQuery({
         const canonicalPath = await fs.realpath(absolutePath);
         const stats = await fs.stat(canonicalPath);
         if (
+          !isSubpath(configuredProjectTempDir, canonicalPath) &&
           !isSubpath(projectTempDir, canonicalPath) &&
           !workspaceContext.isPathWithinWorkspace(canonicalPath)
         ) {
@@ -853,7 +854,8 @@ export async function resolveAtCommandQuery({
       if (
         currentPath === approvedPath &&
         (stats.isFile() || stats.isDirectory()) &&
-        (isSubpath(projectTempDir, currentPath) ||
+        (isSubpath(configuredProjectTempDir, currentPath) ||
+          isSubpath(projectTempDir, currentPath) ||
           config.getWorkspaceContext().isPathWithinWorkspace(currentPath)) &&
         getIgnoreReason(currentPath) === undefined
       ) {
@@ -862,6 +864,10 @@ export async function resolveAtCommandQuery({
           dev: stats.dev,
           ino: stats.ino,
         });
+      } else {
+        onDebugMessage(
+          `Path ${approvedPath} failed revalidation and will be skipped.`,
+        );
       }
     } catch {
       onDebugMessage(

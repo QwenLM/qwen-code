@@ -351,6 +351,7 @@ async function readFileContent(
       preserveUnsupportedImage,
       ...(signal !== undefined ? { signal } : {}),
       largePdfBehavior: 'reference',
+      displayPath,
     });
     if (validatedStats && fileReadResult.stats) {
       fileReadResult.stats = validatedStats;
