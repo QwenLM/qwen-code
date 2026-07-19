@@ -39,6 +39,7 @@ export class WeixinChannel extends ChannelBase {
   private activeTypingChats = new Set<string>();
   private baseUrl: string;
   private token: string = '';
+  private readonly stateDir?: string;
 
   constructor(
     name: string,
@@ -47,6 +48,7 @@ export class WeixinChannel extends ChannelBase {
     options?: ChannelBaseOptions,
   ) {
     super(name, config, bridge, options);
+    this.stateDir = options?.stateDir;
     this.baseUrl =
       (config as ChannelConfig & { baseUrl?: string }).baseUrl ||
       DEFAULT_BASE_URL;
@@ -82,7 +84,7 @@ export class WeixinChannel extends ChannelBase {
       this.config.instructions =
         this.config.instructions + '\n' + imageInstructions;
     }
-    const account = loadAccount();
+    const account = this.stateDir ? loadAccount(this.stateDir) : loadAccount();
     if (!account) {
       throw new Error(
         'WeChat account not configured. Run "qwen channel configure-weixin" first.',

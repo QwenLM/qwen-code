@@ -4,6 +4,8 @@ const apiMocks = vi.hoisted(() => ({
   getConfig: vi.fn(),
   sendTyping: vi.fn(),
 }));
+const accountMocks = vi.hoisted(() => ({ loadAccount: vi.fn() }));
+const monitorMocks = vi.hoisted(() => ({ startPollLoop: vi.fn() }));
 
 vi.mock('./api.js', async () => {
   const actual = await vi.importActual<typeof import('./api.js')>('./api.js');
@@ -14,9 +16,21 @@ vi.mock('./api.js', async () => {
   };
 });
 
+vi.mock('./accounts.js', () => ({
+  DEFAULT_BASE_URL: 'https://ilinkai.weixin.qq.com',
+  loadAccount: accountMocks.loadAccount,
+}));
+
+vi.mock('./monitor.js', async () => {
+  const actual =
+    await vi.importActual<typeof import('./monitor.js')>('./monitor.js');
+  return { ...actual, startPollLoop: monitorMocks.startPollLoop };
+});
+
 import { WeixinChannel } from './WeixinAdapter.js';
 import type {
   ChannelAgentBridge,
+  ChannelBaseOptions,
   ChannelConfig,
   ChannelTaskLifecycleEvent,
 } from '@qwen-code/channel-base';
@@ -46,6 +60,7 @@ const config: ChannelConfig = {
 
 function createChannel(
   configOverrides: Partial<ChannelConfig> = {},
+  options?: ChannelBaseOptions,
 ): TestWeixinChannel {
   const bridge = Object.assign(new EventEmitter(), {
     newSession: vi.fn(),
@@ -59,6 +74,7 @@ function createChannel(
     'weixin',
     { ...config, ...configOverrides },
     bridge as unknown as ChannelAgentBridge,
+    options,
   );
 }
 
@@ -76,6 +92,35 @@ describe('WeixinChannel', () => {
   beforeEach(() => {
     apiMocks.getConfig.mockReset();
     apiMocks.sendTyping.mockReset();
+    accountMocks.loadAccount.mockReset();
+    monitorMocks.startPollLoop.mockReset();
+    monitorMocks.startPollLoop.mockResolvedValue(undefined);
+  });
+
+  it('loads credentials only from the daemon scoped state directory', async () => {
+    accountMocks.loadAccount.mockReturnValue({
+      token: 'scoped-token',
+      baseUrl: 'https://bot.example',
+      savedAt: '2026-07-19T00:00:00.000Z',
+    });
+    const channel = createChannel({}, { stateDir: '/scoped/weixin' });
+
+    await channel.connect();
+
+    expect(accountMocks.loadAccount).toHaveBeenCalledWith('/scoped/weixin');
+  });
+
+  it('preserves the standalone no-argument account lookup', async () => {
+    accountMocks.loadAccount.mockReturnValue({
+      token: 'legacy-token',
+      baseUrl: 'https://bot.example',
+      savedAt: '2026-07-19T00:00:00.000Z',
+    });
+    const channel = createChannel();
+
+    await channel.connect();
+
+    expect(accountMocks.loadAccount).toHaveBeenCalledWith();
   });
 
   it('maps lifecycle start and terminal events to typing state', () => {

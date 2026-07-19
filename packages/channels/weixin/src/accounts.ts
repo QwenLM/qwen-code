@@ -7,10 +7,11 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   writeFileSync,
   unlinkSync,
-  chmodSync,
 } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { getGlobalQwenDir } from '@qwen-code/channel-base';
 
@@ -33,12 +34,12 @@ export function getStateDir(): string {
   return dir;
 }
 
-function accountPath(): string {
-  return join(getStateDir(), 'account.json');
+function accountPath(stateDir: string): string {
+  return join(stateDir, 'account.json');
 }
 
-export function loadAccount(): AccountData | null {
-  const p = accountPath();
+export function loadAccount(stateDir = getStateDir()): AccountData | null {
+  const p = accountPath(stateDir);
   if (!existsSync(p)) return null;
   try {
     return JSON.parse(readFileSync(p, 'utf-8')) as AccountData;
@@ -47,14 +48,27 @@ export function loadAccount(): AccountData | null {
   }
 }
 
-export function saveAccount(data: AccountData): void {
-  const p = accountPath();
-  writeFileSync(p, JSON.stringify(data, null, 2), 'utf-8');
-  chmodSync(p, 0o600);
+export function saveAccount(data: AccountData, stateDir = getStateDir()): void {
+  mkdirSync(stateDir, { recursive: true });
+  const p = accountPath(stateDir);
+  const temporaryPath = `${p}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporaryPath, JSON.stringify(data, null, 2), {
+      encoding: 'utf8',
+      mode: 0o600,
+      flag: 'wx',
+    });
+    renameSync(temporaryPath, p);
+  } catch (error) {
+    if (existsSync(temporaryPath)) {
+      unlinkSync(temporaryPath);
+    }
+    throw error;
+  }
 }
 
-export function clearAccount(): void {
-  const p = accountPath();
+export function clearAccount(stateDir = getStateDir()): void {
+  const p = accountPath(stateDir);
   if (existsSync(p)) {
     unlinkSync(p);
   }

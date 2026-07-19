@@ -371,6 +371,9 @@ export interface ChannelPlugin {
   /** Serializable metadata for safe configuration management. */
   management?: ChannelManagementDescriptor;
 
+  /** Runtime-only authentication implementation. */
+  authDriver?: ChannelAuthDriver;
+
   /** Create a channel adapter instance. */
   createChannel(
     name: string,

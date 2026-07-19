@@ -22,5 +22,6 @@ describe('channel registry', () => {
       }),
     );
     expect(JSON.stringify(catalog)).not.toContain('createChannel');
+    expect(JSON.stringify(catalog)).not.toContain('authDriver');
   });
 });
