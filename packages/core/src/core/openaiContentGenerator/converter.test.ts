@@ -3676,6 +3676,45 @@ describe('OpenAIContentConverter', () => {
       expect(response.usageMetadata?.thoughtsTokenCount).toBe(5);
     });
 
+    it.each([0, 42])(
+      'preserves provider reasoning tokens for non-streaming content: %s',
+      (reasoningTokens) => {
+        const response = converter.convertOpenAIResponseToGemini(
+          {
+            object: 'chat.completion',
+            id: 'chatcmpl-provider-reasoning-usage',
+            created: 123,
+            model: 'test-model',
+            choices: [
+              {
+                index: 0,
+                message: {
+                  role: 'assistant',
+                  content: 'answer',
+                  reasoning_content: '先仔细想',
+                },
+                finish_reason: 'stop',
+                logprobs: null,
+              },
+            ],
+            usage: {
+              prompt_tokens: 1,
+              completion_tokens: 10,
+              total_tokens: 11,
+              completion_tokens_details: {
+                reasoning_tokens: reasoningTokens,
+              },
+            },
+          } as unknown as OpenAI.Chat.ChatCompletion,
+          requestContext,
+        );
+
+        expect(response.usageMetadata?.thoughtsTokenCount).toBe(
+          reasoningTokens,
+        );
+      },
+    );
+
     it('estimates reasoning tokens past the streaming detection window', () => {
       const context = withStreamParser();
       const reasoningChunk = (id: string, reasoning_content: string) =>
@@ -3720,6 +3759,52 @@ describe('OpenAIContentConverter', () => {
 
       expect(response.usageMetadata?.thoughtsTokenCount).toBe(1128);
     });
+
+    it.each([0, 42])(
+      'preserves provider reasoning tokens for streaming content: %s',
+      (reasoningTokens) => {
+        const context = withStreamParser();
+        converter.convertOpenAIChunkToGemini(
+          {
+            object: 'chat.completion.chunk',
+            id: 'chunk-provider-reasoning',
+            created: 123,
+            model: 'test-model',
+            choices: [
+              {
+                index: 0,
+                delta: { reasoning_content: '先仔细想' },
+                finish_reason: null,
+                logprobs: null,
+              },
+            ],
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          context,
+        );
+        const response = converter.convertOpenAIChunkToGemini(
+          {
+            object: 'chat.completion.chunk',
+            id: 'chunk-provider-reasoning-usage',
+            created: 123,
+            model: 'test-model',
+            choices: [],
+            usage: {
+              prompt_tokens: 1,
+              completion_tokens: 10,
+              total_tokens: 11,
+              completion_tokens_details: {
+                reasoning_tokens: reasoningTokens,
+              },
+            },
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          context,
+        );
+
+        expect(response.usageMetadata?.thoughtsTokenCount).toBe(
+          reasoningTokens,
+        );
+      },
+    );
   });
 
   describe('OpenAI -> Gemini reasoning content', () => {

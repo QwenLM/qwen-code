@@ -1269,8 +1269,8 @@ export function convertOpenAIResponseToGemini(
       estimateTextTokenUnits(reasoningText ?? '') /
         TOKEN_ESTIMATE_UNITS_PER_TOKEN,
     );
-    const thinkingTokens = providerReasoningTokens || estimatedThinkingTokens;
-    if (!providerReasoningTokens && estimatedThinkingTokens > 0) {
+    const thinkingTokens = providerReasoningTokens ?? estimatedThinkingTokens;
+    if (providerReasoningTokens == null && estimatedThinkingTokens > 0) {
       debugLogger.debug(
         `convertOpenAIResponseToGemini: reasoning_tokens absent; estimated ${estimatedThinkingTokens} from text`,
       );
@@ -1741,8 +1741,8 @@ export function convertOpenAIChunkToGemini(
       (requestContext.reasoningDeltaState?.emittedTokenUnits ?? 0) /
         TOKEN_ESTIMATE_UNITS_PER_TOKEN,
     );
-    const thinkingTokens = providerReasoningTokens || estimatedThinkingTokens;
-    if (!providerReasoningTokens && estimatedThinkingTokens > 0) {
+    const thinkingTokens = providerReasoningTokens ?? estimatedThinkingTokens;
+    if (providerReasoningTokens == null && estimatedThinkingTokens > 0) {
       debugLogger.debug(
         `convertOpenAIChunkToGemini: reasoning_tokens absent; estimated ${estimatedThinkingTokens} from streamed text`,
       );
