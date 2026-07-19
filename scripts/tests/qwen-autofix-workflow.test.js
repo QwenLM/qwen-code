@@ -557,6 +557,14 @@ describe('qwen-autofix workflow', () => {
     // the outputs later gates read) — string pins alone would stay green if
     // a future edit dropped the echo, leaving STALE empty and letting a
     // late always() failure post a spurious handoff for a discarded job.
+    // ORDERING is part of the contract: the recheck must run BEFORE the PR
+    // branch checkout (an isolated replay would survive a reordering that
+    // checks out a closed/skip-labeled PR's branch first).
+    expect(
+      prepareBranchAndFeedbackStep.indexOf('target no longer eligible'),
+    ).toBeLessThan(
+      prepareBranchAndFeedbackStep.indexOf('git checkout -B "${BRANCH}"'),
+    );
     const recheck = prepareBranchAndFeedbackStep.match(
       /(PR_LIVE="\$\(gh pr view[\s\S]*?exit 0\n {10}fi)/,
     )?.[1];
@@ -2384,6 +2392,14 @@ describe('qwen-autofix workflow', () => {
     expect(reviewAddressReportStep).toContain('MARK_ROUND="${MAX_ROUNDS}"');
     expect(reviewAddressReportStep).toContain(
       '<!-- autofix-eval ts=${MARK_TS} acted=false round=${MARK_ROUND} win=${WINDOW:-none} -->',
+    );
+    // Per-site (not just the global count-3): each producer keeps its win
+    // key, or windowed ROUND silently restarts at 0 and the cap never fires.
+    expect(pushAndReportStep).toContain(
+      '<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} win=${WINDOW:-none} -->',
+    );
+    expect(pushAndReportStep).toContain(
+      '<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} win=${WINDOW:-none} -->',
     );
     // The ts fallback must be non-empty even under cascading API failure (empty
     // WATERMARK), or the scan's `ts=([^ ]+)` regex would not match the terminal
