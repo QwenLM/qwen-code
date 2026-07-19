@@ -6636,6 +6636,11 @@ export function App({
                       <ChannelsManagerPage
                         onClose={() => setActivePanel('settings')}
                         initialFocusRef={panelHeadingRef}
+                        workspaceCwd={
+                          connection.sessionId
+                            ? connection.workspaceCwd
+                            : undefined
+                        }
                       />
                     ) : (
                       <SessionOverviewPanel

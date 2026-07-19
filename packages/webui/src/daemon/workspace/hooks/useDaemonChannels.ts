@@ -5,10 +5,14 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef } from 'react';
-import {
-  useDaemonWorkspace,
-  useDaemonWorkspaceActions,
-} from '../DaemonWorkspaceProvider.js';
+import type {
+  DaemonChannelAuthBeginRequest,
+  DaemonChannelAuthCommitRequest,
+  DaemonChannelStartupRequest,
+  DaemonChannelUpsertRequest,
+  DaemonRevisionRequest,
+} from '@qwen-code/sdk/daemon';
+import { useDaemonWorkspace } from '../DaemonWorkspaceProvider.js';
 import type {
   DaemonChannelsResource,
   DaemonResourceOptions,
@@ -16,21 +20,43 @@ import type {
 import { withActionTimeout } from '../../timing.js';
 import { useDaemonResource } from './useDaemonResource.js';
 
-export function useDaemonChannels(options: DaemonResourceOptions = {}) {
-  const { client, workspaceCwd } = useDaemonWorkspace();
-  const actions = useDaemonWorkspaceActions();
+export interface DaemonChannelsOptions extends DaemonResourceOptions {
+  workspaceCwd?: string;
+}
+
+export function useDaemonChannels(options: DaemonChannelsOptions = {}) {
+  const { workspaceCwd: workspaceOverride, ...resourceOptions } = options;
+  const { client, workspaceCwd: providerWorkspaceCwd } = useDaemonWorkspace();
+  const workspaceCwd = workspaceOverride ?? providerWorkspaceCwd;
+  const workspace = useMemo(
+    () => (workspaceCwd ? client.workspaceByCwd(workspaceCwd) : undefined),
+    [client, workspaceCwd],
+  );
+  const requireWorkspace = useCallback(() => {
+    if (!workspace) {
+      throw new Error('Channel management requires a workspace.');
+    }
+    return workspace;
+  }, [workspace]);
   const identity = useMemo(
     () => ({ client, workspaceCwd }),
     [client, workspaceCwd],
   );
-  const load = useCallback(
-    (): Promise<DaemonChannelsResource> => actions.loadChannels(),
-    [actions],
-  );
+  const load = useCallback(async (): Promise<DaemonChannelsResource> => {
+    const selected = requireWorkspace();
+    const [catalog, snapshot] = await withActionTimeout(
+      Promise.all([
+        selected.workspaceChannelTypes(),
+        selected.workspaceChannels(),
+      ]),
+      'Load channels timed out',
+    );
+    return { catalog, snapshot };
+  }, [requireWorkspace]);
   const resource = useDaemonResource(
     load,
     {
-      ...options,
+      ...resourceOptions,
       autoLoad: false,
     },
     identity,
@@ -40,11 +66,6 @@ export function useDaemonChannels(options: DaemonResourceOptions = {}) {
   const previousIdentityRef = useRef(identity);
   const identityRef = useRef(identity);
   identityRef.current = identity;
-  const authWorkspace = useMemo(
-    () => (workspaceCwd ? client.workspaceByCwd(workspaceCwd) : undefined),
-    [client, workspaceCwd],
-  );
-
   const reload = useCallback(async () => {
     requestedRef.current = true;
     return reloadResource();
@@ -56,13 +77,13 @@ export function useDaemonChannels(options: DaemonResourceOptions = {}) {
     const identityChanged = previousIdentityRef.current !== identity;
     previousIdentityRef.current = identity;
     if (
-      options.autoLoad !== true &&
+      resourceOptions.autoLoad !== true &&
       !(identityChanged && requestedRef.current)
     ) {
       return;
     }
     void reload();
-  }, [identity, options.autoLoad, reload]);
+  }, [identity, resourceOptions.autoLoad, reload]);
 
   const mutate = useCallback(
     async <T>(operation: () => Promise<T>): Promise<T> => {
@@ -74,82 +95,90 @@ export function useDaemonChannels(options: DaemonResourceOptions = {}) {
   );
 
   const createOrUpdate = useCallback(
-    (
-      name: Parameters<typeof actions.upsertChannel>[0],
-      request: Parameters<typeof actions.upsertChannel>[1],
-    ) => mutate(() => actions.upsertChannel(name, request)),
-    [actions, mutate],
+    (name: string, request: DaemonChannelUpsertRequest) =>
+      mutate(() =>
+        withActionTimeout(
+          requireWorkspace().upsertWorkspaceChannel(name, request),
+          'Update channel timed out',
+        ),
+      ),
+    [mutate, requireWorkspace],
   );
   const remove = useCallback(
-    (
-      name: Parameters<typeof actions.removeChannel>[0],
-      request: Parameters<typeof actions.removeChannel>[1],
-    ) => mutate(() => actions.removeChannel(name, request)),
-    [actions, mutate],
+    (name: string, request: DaemonRevisionRequest) =>
+      mutate(() =>
+        withActionTimeout(
+          requireWorkspace().deleteWorkspaceChannel(name, request),
+          'Remove channel timed out',
+        ),
+      ),
+    [mutate, requireWorkspace],
   );
   const setStartup = useCallback(
-    (
-      name: Parameters<typeof actions.setChannelStartup>[0],
-      request: Parameters<typeof actions.setChannelStartup>[1],
-    ) => mutate(() => actions.setChannelStartup(name, request)),
-    [actions, mutate],
+    (name: string, request: DaemonChannelStartupRequest) =>
+      mutate(() =>
+        withActionTimeout(
+          requireWorkspace().setWorkspaceChannelStartup(name, request),
+          'Update channel startup timed out',
+        ),
+      ),
+    [mutate, requireWorkspace],
   );
   const start = useCallback(
-    (name: string) => mutate(() => actions.startChannel(name)),
-    [actions, mutate],
+    (name: string) =>
+      mutate(() =>
+        withActionTimeout(
+          requireWorkspace().startWorkspaceChannel(name),
+          'Start channel timed out',
+        ),
+      ),
+    [mutate, requireWorkspace],
   );
   const stop = useCallback(
-    (name: string) => mutate(() => actions.stopChannel(name)),
-    [actions, mutate],
+    (name: string) =>
+      mutate(() =>
+        withActionTimeout(
+          requireWorkspace().stopWorkspaceChannel(name),
+          'Stop channel timed out',
+        ),
+      ),
+    [mutate, requireWorkspace],
   );
   const restart = useCallback(
-    (name: string) => mutate(() => actions.restartChannel(name)),
-    [actions, mutate],
+    (name: string) =>
+      mutate(() =>
+        withActionTimeout(
+          requireWorkspace().restartWorkspaceChannel(name),
+          'Restart channel timed out',
+        ),
+      ),
+    [mutate, requireWorkspace],
   );
-  const auth = useMemo(() => {
-    const requireWorkspace = () => {
-      if (!authWorkspace) {
-        throw new Error('Channel authentication requires a workspace.');
-      }
-      return authWorkspace;
-    };
-    return {
-      begin: async (
-        name: Parameters<typeof actions.channelAuth.begin>[0],
-        request: Parameters<typeof actions.channelAuth.begin>[1],
-      ) =>
+  const auth = useMemo(() => ({
+      begin: async (name: string, request: DaemonChannelAuthBeginRequest) =>
         withActionTimeout(
           requireWorkspace().beginWorkspaceChannelAuth(name, request),
           'Begin channel auth timed out',
         ),
-      status: async (
-        name: Parameters<typeof actions.channelAuth.status>[0],
-        sessionId: Parameters<typeof actions.channelAuth.status>[1],
-      ) =>
+      status: async (name: string, sessionId: string) =>
         withActionTimeout(
           requireWorkspace().workspaceChannelAuth(name, sessionId),
           'Load channel auth timed out',
         ),
-      qr: async (
-        name: Parameters<typeof actions.channelAuth.qr>[0],
-        sessionId: Parameters<typeof actions.channelAuth.qr>[1],
-      ) =>
+      qr: async (name: string, sessionId: string) =>
         withActionTimeout(
           requireWorkspace().workspaceChannelAuthQr(name, sessionId),
           'Load channel auth QR timed out',
         ),
-      cancel: async (
-        name: Parameters<typeof actions.channelAuth.cancel>[0],
-        sessionId: Parameters<typeof actions.channelAuth.cancel>[1],
-      ) =>
+      cancel: async (name: string, sessionId: string) =>
         withActionTimeout(
           requireWorkspace().cancelWorkspaceChannelAuth(name, sessionId),
           'Cancel channel auth timed out',
         ),
       commit: async (
-        name: Parameters<typeof actions.channelAuth.commit>[0],
-        sessionId: Parameters<typeof actions.channelAuth.commit>[1],
-        request: Parameters<typeof actions.channelAuth.commit>[2],
+        name: string,
+        sessionId: string,
+        request: DaemonChannelAuthCommitRequest,
       ) => {
         const result = await withActionTimeout(
           requireWorkspace().commitWorkspaceChannelAuth(
@@ -164,8 +193,7 @@ export function useDaemonChannels(options: DaemonResourceOptions = {}) {
         }
         return result;
       },
-    };
-  }, [actions, authWorkspace, identity]);
+    }), [identity, requireWorkspace]);
 
   const current = resource.data;
   return {

@@ -22,6 +22,14 @@ function deferred<T>() {
 
 const { context, actions, client, workspaceA, workspaceB } = vi.hoisted(() => {
   const createWorkspace = () => ({
+    workspaceChannelTypes: vi.fn(),
+    workspaceChannels: vi.fn(),
+    upsertWorkspaceChannel: vi.fn(),
+    deleteWorkspaceChannel: vi.fn(),
+    setWorkspaceChannelStartup: vi.fn(),
+    startWorkspaceChannel: vi.fn(),
+    stopWorkspaceChannel: vi.fn(),
+    restartWorkspaceChannel: vi.fn(),
     beginWorkspaceChannelAuth: vi.fn(),
     workspaceChannelAuth: vi.fn(),
     workspaceChannelAuthQr: vi.fn(),
@@ -135,6 +143,32 @@ describe('useDaemonChannels', () => {
     client.workspaceByCwd.mockImplementation((cwd: string) =>
       cwd === '/workspace-a' ? workspaceA : workspaceB,
     );
+    for (const workspace of [workspaceA, workspaceB]) {
+      workspace.workspaceChannelTypes.mockResolvedValue(
+        channelData('/workspace-a').catalog,
+      );
+      workspace.workspaceChannels.mockImplementation(
+        async () => (await actions.loadChannels()).snapshot,
+      );
+      workspace.upsertWorkspaceChannel.mockImplementation((...args) =>
+        actions.upsertChannel(...args),
+      );
+      workspace.deleteWorkspaceChannel.mockImplementation((...args) =>
+        actions.removeChannel(...args),
+      );
+      workspace.setWorkspaceChannelStartup.mockImplementation((...args) =>
+        actions.setChannelStartup(...args),
+      );
+      workspace.startWorkspaceChannel.mockImplementation((...args) =>
+        actions.startChannel(...args),
+      );
+      workspace.stopWorkspaceChannel.mockImplementation((...args) =>
+        actions.stopChannel(...args),
+      );
+      workspace.restartWorkspaceChannel.mockImplementation((...args) =>
+        actions.restartChannel(...args),
+      );
+    }
   });
 
   afterEach(() => {
@@ -167,6 +201,95 @@ describe('useDaemonChannels', () => {
     });
 
     expect(actions.loadChannels).toHaveBeenCalledTimes(3);
+  });
+
+  it('routes an explicit workspace override without falling back to primary actions', async () => {
+    workspaceB.workspaceChannelTypes.mockResolvedValue(
+      channelData('/workspace-b').catalog,
+    );
+    workspaceB.workspaceChannels.mockResolvedValue(
+      channelData('/workspace-b', '2').snapshot,
+    );
+    for (const mutation of [
+      workspaceB.upsertWorkspaceChannel,
+      workspaceB.deleteWorkspaceChannel,
+      workspaceB.setWorkspaceChannelStartup,
+      workspaceB.startWorkspaceChannel,
+      workspaceB.stopWorkspaceChannel,
+      workspaceB.restartWorkspaceChannel,
+      workspaceB.commitWorkspaceChannelAuth,
+    ]) {
+      mutation.mockResolvedValue({});
+    }
+    const authSession = {
+      id: 'auth-b',
+      state: 'awaiting_scan',
+      expiresAt: '2026-07-20T01:00:00.000Z',
+      qrRevision: 1,
+    };
+    workspaceB.beginWorkspaceChannelAuth.mockResolvedValue(authSession);
+    workspaceB.workspaceChannelAuth.mockResolvedValue(authSession);
+    workspaceB.workspaceChannelAuthQr.mockResolvedValue(
+      new Blob(['qr'], { type: 'image/svg+xml' }),
+    );
+    workspaceB.cancelWorkspaceChannelAuth.mockResolvedValue({
+      cancelled: true,
+    });
+    let result: ReturnType<typeof useDaemonChannels> | undefined;
+
+    function TestComponent() {
+      result = useDaemonChannels({
+        autoLoad: true,
+        workspaceCwd: '/workspace-b',
+      });
+      return null;
+    }
+
+    await act(async () => root.render((<TestComponent />) as ReactNode));
+
+    expect(result?.snapshot?.revision).toBe('2');
+    expect(result?.channels.bot.config.cwd).toBe('/workspace-b');
+    expect(client.workspaceByCwd).toHaveBeenCalledWith('/workspace-b');
+    expect(actions.loadChannels).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await result?.createOrUpdate('bot', {
+        expectedRevision: '2',
+        config: { type: 'qq' },
+      });
+      await result?.remove('bot', { expectedRevision: '2' });
+      await result?.setStartup('bot', {
+        expectedRevision: '2',
+        enabled: true,
+      });
+      await result?.start('bot');
+      await result?.stop('bot');
+      await result?.restart('bot');
+      await result?.auth.begin('bot', { channelType: 'qq' });
+      await result?.auth.status('bot', 'auth-b');
+      await result?.auth.qr('bot', 'auth-b');
+      await result?.auth.cancel('bot', 'auth-b');
+      await result?.auth.commit('bot', 'auth-b', { channelType: 'qq' });
+    });
+
+    for (const operation of [
+      workspaceB.upsertWorkspaceChannel,
+      workspaceB.deleteWorkspaceChannel,
+      workspaceB.setWorkspaceChannelStartup,
+      workspaceB.startWorkspaceChannel,
+      workspaceB.stopWorkspaceChannel,
+      workspaceB.restartWorkspaceChannel,
+      workspaceB.beginWorkspaceChannelAuth,
+      workspaceB.workspaceChannelAuth,
+      workspaceB.workspaceChannelAuthQr,
+      workspaceB.cancelWorkspaceChannelAuth,
+      workspaceB.commitWorkspaceChannelAuth,
+    ]) {
+      expect(operation).toHaveBeenCalledOnce();
+    }
+    expect(
+      Object.values(workspaceA).every((mock) => mock.mock.calls.length === 0),
+    ).toBe(true);
   });
 
   it('does not reload after a failed mutation', async () => {

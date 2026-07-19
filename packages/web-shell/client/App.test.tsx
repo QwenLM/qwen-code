@@ -447,10 +447,16 @@ vi.mock('./components/messages/SettingsMessage', async () => {
 vi.mock('./components/channels/ChannelsManagerPage', async () => {
   const React = await import('react');
   return {
-    ChannelsManagerPage: (props: { onClose: () => void }) =>
+    ChannelsManagerPage: (props: {
+      onClose: () => void;
+      workspaceCwd?: string;
+    }) =>
       React.createElement(
         'div',
-        null,
+        {
+          'data-testid': 'channels-manager',
+          'data-workspace-cwd': props.workspaceCwd,
+        },
         React.createElement('h1', null, 'Channels'),
         React.createElement(
           'button',
@@ -4182,6 +4188,11 @@ describe('App session callbacks', () => {
       expect(
         container.querySelector('[role="region"]')?.getAttribute('aria-label'),
       ).toBe(expectedRegionLabel);
+      expect(
+        container
+          .querySelector('[data-testid="channels-manager"]')
+          ?.getAttribute('data-workspace-cwd'),
+      ).toBe('/tmp/project');
       const back = Array.from(
         container.querySelectorAll<HTMLButtonElement>('button'),
       ).find((button) => button.textContent === 'Back');

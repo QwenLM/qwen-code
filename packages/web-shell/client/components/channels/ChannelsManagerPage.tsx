@@ -76,6 +76,7 @@ import { ChannelQrAuthDialog } from './ChannelQrAuthDialog';
 interface ChannelsManagerPageProps {
   onClose: () => void;
   initialFocusRef?: Ref<HTMLHeadingElement>;
+  workspaceCwd?: string;
 }
 
 type EditorIntent = { mode: 'add' } | { mode: 'edit'; name: string };
@@ -111,6 +112,7 @@ function isChannelSettingsConflict(error: unknown): boolean {
 export function ChannelsManagerPage({
   onClose,
   initialFocusRef,
+  workspaceCwd,
 }: ChannelsManagerPageProps) {
   const { t } = useI18n();
   const workspace = useWorkspace();
@@ -127,7 +129,7 @@ export function ChannelsManagerPage({
     stop,
     restart,
     auth,
-  } = useChannels({ autoLoad: true });
+  } = useChannels({ autoLoad: true, workspaceCwd });
   const supportsManagement =
     workspace.capabilities?.features.includes('channel_management') === true;
   const hasBearerToken = Boolean(workspace.token);
