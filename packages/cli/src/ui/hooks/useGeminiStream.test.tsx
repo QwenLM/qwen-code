@@ -259,6 +259,8 @@ describe('useGeminiStream', () => {
       getEmitToolUseSummaries: vi.fn(() => false),
       getFastModel: vi.fn(() => undefined),
       getBackgroundTaskRegistry: vi.fn(() => ({
+        canStartBackgroundAgent: vi.fn(() => true),
+        getMaxConcurrentBackgroundAgents: vi.fn(() => 10),
         setNotificationCallback: vi.fn(),
       })),
       getBackgroundShellRegistry: vi.fn(() => mockBackgroundShellRegistry),
@@ -1264,6 +1266,155 @@ describe('useGeminiStream', () => {
       'prompt-id-2',
       { type: SendMessageType.ToolResult },
     );
+  });
+
+  it('waits for a background agent when its launch exhausts capacity', async () => {
+    const responseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'agent-call',
+          name: 'agent',
+          response: { result: 'Background agent launched successfully.' },
+        },
+      },
+    ];
+    let notificationCallback:
+      | ((displayText: string, modelText: string) => void)
+      | undefined;
+    const getMaxConcurrentBackgroundAgents = vi.fn(() => 1);
+    mockConfig.getBackgroundTaskRegistry = vi.fn(() => ({
+      canStartBackgroundAgent: vi.fn(() => false),
+      getMaxConcurrentBackgroundAgents,
+      setNotificationCallback: vi.fn((callback) => {
+        notificationCallback = callback;
+      }),
+    })) as Config['getBackgroundTaskRegistry'];
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    const client = new MockedGeminiClientClass(mockConfig);
+    renderHook(() =>
+      useGeminiStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    await waitFor(() => expect(notificationCallback).toBeDefined());
+    await act(async () => {
+      await capturedOnComplete?.([
+        {
+          request: {
+            callId: 'agent-call',
+            name: 'agent',
+            args: { run_in_background: true },
+            isClientInitiated: false,
+            prompt_id: 'prompt-id-agent',
+          },
+          status: 'success',
+          responseSubmittedToGemini: false,
+          response: {
+            callId: 'agent-call',
+            responseParts,
+            errorType: undefined,
+            resultDisplay: {
+              type: 'task_execution',
+              subagentName: 'researcher',
+              taskDescription: 'Research',
+              taskPrompt: 'Inspect the code',
+              status: 'background',
+            },
+          },
+          tool: { displayName: 'Agent' },
+          invocation: {
+            getDescription: () => 'Research',
+          } as unknown as AnyToolInvocation,
+        } as TrackedCompletedToolCall,
+      ]);
+    });
+
+    expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['agent-call']);
+    expect(client.addHistory).toHaveBeenCalledWith({
+      role: 'user',
+      parts: responseParts,
+    });
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
+
+    act(() => {
+      notificationCallback?.(
+        'Background agent completed.',
+        '<task-notification>done</task-notification>',
+      );
+    });
+
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledOnce());
+    expect(mockSendMessageStream).toHaveBeenCalledWith(
+      '<task-notification>done</task-notification>',
+      expect.any(AbortSignal),
+      expect.any(String),
+      expect.objectContaining({ type: SendMessageType.Notification }),
+    );
+
+    mockSendMessageStream.mockClear();
+    client.addHistory.mockClear();
+    getMaxConcurrentBackgroundAgents.mockReturnValue(2);
+    await act(async () => {
+      await capturedOnComplete?.([
+        {
+          request: {
+            callId: 'agent-call-2',
+            name: 'agent',
+            args: { run_in_background: true },
+            isClientInitiated: false,
+            prompt_id: 'prompt-id-agent-2',
+          },
+          status: 'success',
+          responseSubmittedToGemini: false,
+          response: {
+            callId: 'agent-call-2',
+            responseParts,
+            errorType: undefined,
+            resultDisplay: {
+              type: 'task_execution',
+              subagentName: 'researcher',
+              taskDescription: 'Research',
+              taskPrompt: 'Inspect the code',
+              status: 'background',
+            },
+          },
+          tool: { displayName: 'Agent' },
+          invocation: {
+            getDescription: () => 'Research',
+          } as unknown as AnyToolInvocation,
+        } as TrackedCompletedToolCall,
+      ]);
+    });
+
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledOnce());
+    expect(client.addHistory).not.toHaveBeenCalled();
   });
 
   it('records mid-turn queued user messages after tool results accept them', async () => {

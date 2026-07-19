@@ -483,6 +483,7 @@ describe('BackgroundTaskRegistry', () => {
       registry = new BackgroundTaskRegistry({
         maxConcurrentBackgroundAgents: 2,
       });
+      expect(registry.getMaxConcurrentBackgroundAgents()).toBe(2);
 
       registry.register(makeRegistration('bg-1'));
       registry.register(makeRegistration('bg-2'));

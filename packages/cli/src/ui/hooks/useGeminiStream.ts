@@ -3463,6 +3463,27 @@ export const useGeminiStream = (
         return;
       }
 
+      const backgroundTaskRegistry = config.getBackgroundTaskRegistry();
+      const backgroundLaunchExhaustedCapacity =
+        backgroundTaskRegistry.getMaxConcurrentBackgroundAgents() === 1 &&
+        !backgroundTaskRegistry.canStartBackgroundAgent() &&
+        geminiTools.some((toolCall) => {
+          const display = toolCall.response.resultDisplay;
+          return (
+            toolCall.request.name === ToolNames.AGENT &&
+            typeof display === 'object' &&
+            display !== null &&
+            'type' in display &&
+            'status' in display &&
+            display.type === 'task_execution' &&
+            display.status === 'background'
+          );
+        });
+      if (backgroundLaunchExhaustedCapacity) {
+        geminiClient?.addHistory({ role: 'user', parts: responsesToSend });
+        return;
+      }
+
       // Drain steerable user messages at this sampling boundary and append
       // them after the tool responses as genuine user content.
       // Skip if the turn was cancelled — messages stay in queue for next turn.
