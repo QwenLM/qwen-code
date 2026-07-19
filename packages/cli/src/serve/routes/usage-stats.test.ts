@@ -174,6 +174,8 @@ describe('usage-stats route (cache + range + clamping)', () => {
     expect(min.body.heatmapDays).toBe(1);
     const def = await request(app).get('/usage/dashboard?heatmapDays=abc');
     expect(def.body.heatmapDays).toBe(183);
+    const negative = await request(app).get('/usage/dashboard?heatmapDays=-5');
+    expect(negative.body.heatmapDays).toBe(183);
     const fractional = await request(app).get(
       '/usage/dashboard?heatmapDays=1.5',
     );
