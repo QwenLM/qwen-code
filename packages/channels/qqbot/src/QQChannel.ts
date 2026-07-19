@@ -209,6 +209,7 @@ export class QQChannel extends ChannelBase {
   private blockStreaming: boolean = false;
   private flushedSessions: Set<string> = new Set();
   private readonly qqStatePath: string;
+  private readonly credsFile: string;
   /**
    * Path to the global sessions.json managed by start.ts.
    * start.ts deletes it on shutdown, so we back it up.
@@ -265,6 +266,7 @@ export class QQChannel extends ChannelBase {
       this.qqConfig.bufferFlushLength = QQChannel.MAX_BUFFER_LENGTH;
     }
     this.blockStreaming = this.config.blockStreaming === 'on';
+    this.credsFile = getCredsFilePath(safeName, options?.stateDir);
     this.qqStatePath = join(stateDir, `${safeName}-state.json`);
     // In standalone mode (no external router), use the per-channel
     // sessions path so the channel owns its own session file.
@@ -1659,14 +1661,11 @@ export class QQChannel extends ChannelBase {
   // ── Token ──────────────────────────────────────────────────────
 
   private async fetchToken(): Promise<void> {
-    const safeName = this.name.replace(/[^A-Za-z0-9_-]/g, '_');
-    const credsFile = getCredsFilePath(safeName);
-
     let appID = this.qqConfig.appID;
     let appSecret = this.qqConfig.appSecret;
 
     if (!appID || !appSecret) {
-      const saved = loadCredentials(credsFile);
+      const saved = loadCredentials(this.credsFile);
       if (saved) {
         appID = saved.appId;
         appSecret = saved.appSecret;
@@ -1684,7 +1683,7 @@ export class QQChannel extends ChannelBase {
       appSecret = creds.appSecret;
       this.qqConfig.appID = appID;
       this.qqConfig.appSecret = appSecret;
-      saveCredentials(credsFile, appID, appSecret);
+      saveCredentials(this.credsFile, appID, appSecret);
     }
 
     const token = await fetchAccessToken(appID, appSecret);

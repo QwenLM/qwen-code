@@ -1,10 +1,12 @@
 import { writeFileSync, renameSync } from 'node:fs';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-const { mockSendQQMessage, mockFetchAccessToken } = vi.hoisted(() => ({
-  mockSendQQMessage: vi.fn(),
-  mockFetchAccessToken: vi.fn(),
-}));
+const { mockSendQQMessage, mockFetchAccessToken, mockGetCredsFilePath } =
+  vi.hoisted(() => ({
+    mockSendQQMessage: vi.fn(),
+    mockFetchAccessToken: vi.fn(),
+    mockGetCredsFilePath: vi.fn(() => '/tmp/test-creds.json'),
+  }));
 
 let fsStore: Record<string, string> = {};
 let fsExists: Record<string, boolean> = {};
@@ -34,7 +36,7 @@ vi.mock('./api.js', () => ({
 }));
 
 vi.mock('./accounts.js', () => ({
-  getCredsFilePath: () => '/tmp/test-creds.json',
+  getCredsFilePath: mockGetCredsFilePath,
   loadCredentials: () => null,
   saveCredentials: vi.fn(),
 }));
@@ -91,7 +93,9 @@ const { QQChannel } = await import('./QQChannel.js');
 
 type QQChannelClass = InstanceType<typeof QQChannel>;
 
-function makeChannel(): QQChannelClass {
+function makeChannel(
+  options?: import('@qwen-code/channel-base').ChannelBaseOptions,
+): QQChannelClass {
   const ch = new QQChannel(
     'test-bot',
     {
@@ -107,6 +111,7 @@ function makeChannel(): QQChannelClass {
       appSecret: 'test-secret',
     },
     {} as unknown as import('@qwen-code/channel-base').AcpBridge,
+    options,
   );
   return ch;
 }
@@ -126,6 +131,17 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe('credential storage scope', () => {
+  it('uses daemon stateDir without falling back to standalone credentials', () => {
+    makeChannel({ stateDir: '/tmp/daemon/qq/test-bot' });
+
+    expect(mockGetCredsFilePath).toHaveBeenCalledWith(
+      'test-bot',
+      '/tmp/daemon/qq/test-bot',
+    );
+  });
 });
 
 // ─── saveQQState ─────────────────────────────────────────────────

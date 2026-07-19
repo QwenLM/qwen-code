@@ -1,90 +1,93 @@
-import { describe, it, expect, vi } from 'vitest';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, expect, it } from 'vitest';
+import {
+  getCredsFilePath,
+  loadCredentials,
+  saveCredentials,
+} from './accounts.js';
 
-const { mockReadFileSync, mockWriteFileSync, mockExistsSync, mockMkdirSync } =
-  vi.hoisted(() => ({
-    mockReadFileSync: vi.fn(),
-    mockWriteFileSync: vi.fn(),
-    mockExistsSync: vi.fn(),
-    mockMkdirSync: vi.fn(),
-  }));
-
-vi.mock('node:fs', () => ({
-  readFileSync: mockReadFileSync,
-  writeFileSync: mockWriteFileSync,
-  existsSync: mockExistsSync,
-  mkdirSync: mockMkdirSync,
-}));
-
-vi.mock('@qwen-code/channel-base', () => ({
-  getGlobalQwenDir: () => '/tmp/test-qwen',
-}));
-
-const { getCredsFilePath, loadCredentials, saveCredentials } = await import(
-  './accounts.js'
-);
-
-describe('getCredsFilePath', () => {
-  it('returns path under channels dir with credentials suffix', () => {
-    expect(getCredsFilePath('mybot')).toBe(
-      '/tmp/test-qwen/channels/mybot-credentials.json',
+describe('QQ credential storage', () => {
+  it('keeps the standalone credential path compatible', () => {
+    expect(getCredsFilePath('mybot')).toMatch(
+      /[/\\]channels[/\\]mybot-credentials\.json$/u,
     );
   });
 
-  it('includes the safeName in the filename', () => {
-    const path = getCredsFilePath('test_123');
-    expect(path).toContain('test_123-credentials.json');
-  });
-});
-
-describe('loadCredentials', () => {
-  it('returns null when file does not exist', () => {
-    mockExistsSync.mockReturnValue(false);
-    expect(loadCredentials('/path/to/creds.json')).toBeNull();
-  });
-
-  it('returns null when file is missing appId', () => {
-    mockExistsSync.mockReturnValue(true);
-    mockReadFileSync.mockReturnValue(
-      JSON.stringify({ appSecret: 'secret-only' }),
+  it('uses a daemon-scoped credential file when stateDir is provided', () => {
+    expect(getCredsFilePath('mybot', '/tmp/daemon/qq/mybot')).toBe(
+      '/tmp/daemon/qq/mybot/credentials.json',
     );
-    expect(loadCredentials('/path/to/creds.json')).toBeNull();
   });
 
-  it('returns null when file is missing appSecret', () => {
-    mockExistsSync.mockReturnValue(true);
-    mockReadFileSync.mockReturnValue(JSON.stringify({ appId: 'app-only' }));
-    expect(loadCredentials('/path/to/creds.json')).toBeNull();
-  });
-
-  it('returns null on parse error (corrupt file)', () => {
-    mockExistsSync.mockReturnValue(true);
-    mockReadFileSync.mockReturnValue('not-valid-json');
-    expect(loadCredentials('/path/to/creds.json')).toBeNull();
-  });
-
-  it('returns credentials when both fields are present', () => {
-    mockExistsSync.mockReturnValue(true);
-    mockReadFileSync.mockReturnValue(
-      JSON.stringify({ appId: 'my-app', appSecret: 'my-secret' }),
+  it('does not fall back to standalone credentials by default', () => {
+    const root = mkdtempSync(join(tmpdir(), 'qq-isolation-'));
+    const scopedFile = join(root, 'scoped', 'credentials.json');
+    const legacyFile = join(root, 'legacy.json');
+    writeFileSync(
+      legacyFile,
+      JSON.stringify({ appId: 'legacy-id', appSecret: 'legacy-secret' }),
     );
-    expect(loadCredentials('/path/to/creds.json')).toEqual({
-      appId: 'my-app',
-      appSecret: 'my-secret',
+
+    expect(loadCredentials(scopedFile, { legacyFile })).toBeNull();
+  });
+
+  it('uses standalone credentials only with explicit legacy fallback', () => {
+    const root = mkdtempSync(join(tmpdir(), 'qq-fallback-'));
+    const scopedFile = join(root, 'scoped', 'credentials.json');
+    const legacyFile = join(root, 'legacy.json');
+    writeFileSync(
+      legacyFile,
+      JSON.stringify({ appId: 'legacy-id', appSecret: 'legacy-secret' }),
+    );
+
+    expect(
+      loadCredentials(scopedFile, {
+        allowLegacyFallback: true,
+        legacyFile,
+      }),
+    ).toEqual({ appId: 'legacy-id', appSecret: 'legacy-secret' });
+  });
+
+  it('rejects incomplete and corrupt credentials', () => {
+    const root = mkdtempSync(join(tmpdir(), 'qq-invalid-'));
+    const credsFile = join(root, 'credentials.json');
+    writeFileSync(credsFile, JSON.stringify({ appId: 'id' }));
+    expect(loadCredentials(credsFile)).toBeNull();
+
+    writeFileSync(credsFile, 'not-json');
+    expect(loadCredentials(credsFile)).toBeNull();
+  });
+
+  it('writes credentials atomically with mode 0600', () => {
+    const stateDir = mkdtempSync(join(tmpdir(), 'qq-credentials-'));
+    const credsFile = join(stateDir, 'credentials.json');
+
+    saveCredentials(credsFile, 'id', 'secret');
+
+    expect(JSON.parse(readFileSync(credsFile, 'utf8'))).toEqual({
+      appId: 'id',
+      appSecret: 'secret',
     });
+    expect(statSync(credsFile).mode & 0o777).toBe(0o600);
+    expect(readdirSync(stateDir)).toEqual(['credentials.json']);
   });
-});
 
-describe('saveCredentials', () => {
-  it('creates dir and writes file with 0o600 permissions', () => {
-    saveCredentials('/path/to/creds.json', 'app-id', 'app-secret');
+  it('cleans up its unique temporary file when rename fails', () => {
+    const stateDir = mkdtempSync(join(tmpdir(), 'qq-rename-failure-'));
+    const credsFile = join(stateDir, 'credentials.json');
+    mkdirSync(credsFile);
 
-    expect(mockMkdirSync).toHaveBeenCalledWith('/tmp/test-qwen/channels', {
-      recursive: true,
-    });
-    expect(mockWriteFileSync).toHaveBeenCalledWith(
-      '/path/to/creds.json',
-      JSON.stringify({ appId: 'app-id', appSecret: 'app-secret' }),
-      { mode: 0o600 },
-    );
+    expect(() => saveCredentials(credsFile, 'id', 'secret')).toThrow();
+
+    expect(readdirSync(stateDir)).toEqual(['credentials.json']);
   });
 });

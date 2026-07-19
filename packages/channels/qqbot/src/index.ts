@@ -1,6 +1,8 @@
 export { QQChannel } from './QQChannel.js';
+export { authDriver } from './login.js';
 
 import { QQChannel } from './QQChannel.js';
+import { authDriver } from './login.js';
 import type { ChannelPlugin } from '@qwen-code/channel-base';
 
 export const plugin: ChannelPlugin = {
@@ -17,6 +19,7 @@ export const plugin: ChannelPlugin = {
     fields: [],
     auth: ['qr'],
   },
+  authDriver,
   createChannel: (name, config, bridge, options) =>
     new QQChannel(name, config, bridge, options),
 };
