@@ -11359,6 +11359,98 @@ describe('GeminiChat', async () => {
     });
   });
 
+  describe('redactApprovedPlanFromHistory', () => {
+    // After an approved exit_plan_mode the full plan text would otherwise
+    // stay in history as the model's own tool-call argument and get
+    // regurgitated into later responses (#6237). These tests pin the
+    // targeted history rewrite the tool scheduler performs post-approval.
+
+    const REPLACEMENT = '[Plan approved and saved to /tmp/p.md]';
+
+    function chatWith(history: Content[]): GeminiChat {
+      return new GeminiChat({} as unknown as Config, {}, history);
+    }
+
+    it('rewrites only the plan arg of the matching exit_plan_mode call', () => {
+      const chat = chatWith([
+        { role: 'user', parts: [{ text: 'plan it' }] },
+        {
+          role: 'model',
+          parts: [
+            { text: 'My plan follows.' },
+            {
+              functionCall: {
+                id: 'call-plan',
+                name: 'exit_plan_mode',
+                args: { plan: 'SECRET BIG PLAN', originalRequest: 'plan it' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      expect(chat.redactApprovedPlanFromHistory('call-plan', REPLACEMENT)).toBe(
+        true,
+      );
+
+      const entry = chat.getHistory()[1]!;
+      const fnCall = entry.parts![1]!.functionCall!;
+      expect(fnCall.args!['plan']).toBe(REPLACEMENT);
+      expect(fnCall.args!['originalRequest']).toBe('plan it');
+      expect(fnCall.id).toBe('call-plan');
+      expect(entry.parts![0]).toEqual({ text: 'My plan follows.' });
+      expect(JSON.stringify(chat.getHistory())).not.toContain(
+        'SECRET BIG PLAN',
+      );
+    });
+
+    it('returns false when no matching call id or tool name exists', () => {
+      const chat = chatWith([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-other',
+                name: 'write_file',
+                args: { plan: 'not a plan tool' },
+              },
+            },
+          ],
+        },
+      ]);
+      expect(chat.redactApprovedPlanFromHistory('call-plan', REPLACEMENT)).toBe(
+        false,
+      );
+      expect(
+        chat.redactApprovedPlanFromHistory('call-other', REPLACEMENT),
+      ).toBe(false);
+      expect(chat.getHistory()[0]!.parts![0]!.functionCall!.args!['plan']).toBe(
+        'not a plan tool',
+      );
+    });
+
+    it('returns false when the matching call has no string plan arg', () => {
+      const chat = chatWith([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-plan',
+                name: 'exit_plan_mode',
+                args: {},
+              },
+            },
+          ],
+        },
+      ]);
+      expect(chat.redactApprovedPlanFromHistory('call-plan', REPLACEMENT)).toBe(
+        false,
+      );
+    });
+  });
+
   describe('redactStructuredOutputArgsForRecording', () => {
     // The chat-recording JSONL persists assistant turns to disk and re-feeds
     // them on `--continue` / `--resume`. For `--json-schema` runs the

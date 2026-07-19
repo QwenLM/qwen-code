@@ -3520,6 +3520,53 @@ export class GeminiChat {
     this.clearPendingPartialState();
   }
 
+  /**
+   * Replaces the `plan` argument of an `exit_plan_mode` `functionCall` in
+   * history with a short reference, keeping every other part and argument
+   * intact.
+   *
+   * The full plan text a model submits to `exit_plan_mode` stays in history
+   * as its own tool-call arguments; on long conversations models
+   * occasionally regurgitate chunks of that blob in later responses
+   * (#6237). Once the plan is approved it is persisted to disk by
+   * `Config.savePlan`, so the in-context copy can be swapped for a pointer
+   * without losing information. Rejected plans are left untouched — the
+   * model needs the text to revise them.
+   *
+   * The entry is replaced immutably at the same index; the partial-push
+   * markers compare by index and role, so this cannot desync them.
+   *
+   * @returns true when a matching functionCall was found and rewritten.
+   */
+  redactApprovedPlanFromHistory(callId: string, replacement: string): boolean {
+    for (let i = this.history.length - 1; i >= 0; i--) {
+      const entry = this.history[i];
+      if (entry?.role !== 'model' || !entry.parts) continue;
+      const partIdx = entry.parts.findIndex(
+        (part) =>
+          part.functionCall?.id === callId &&
+          part.functionCall.name === ToolNames.EXIT_PLAN_MODE,
+      );
+      if (partIdx === -1) continue;
+      const part = entry.parts[partIdx]!;
+      const functionCall = part.functionCall!;
+      if (typeof (functionCall.args ?? {})['plan'] !== 'string') {
+        return false;
+      }
+      const newParts = [...entry.parts];
+      newParts[partIdx] = {
+        ...part,
+        functionCall: {
+          ...functionCall,
+          args: { ...functionCall.args, plan: replacement },
+        },
+      };
+      this.history[i] = { ...entry, parts: newParts };
+      return true;
+    }
+    return false;
+  }
+
   setHistory(history: Content[]): void {
     this.history = history;
     // History replacement (compression, /clear, --resume reload) wipes
