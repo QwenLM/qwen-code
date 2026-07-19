@@ -1562,6 +1562,9 @@ describe('handleAtCommand', () => {
           expect(JSON.stringify(result.processedQuery)).not.toContain(
             'outside secret',
           );
+          expect(mockOnDebugMessage).toHaveBeenCalledWith(
+            `Path ${filePath} failed revalidation and will be skipped.`,
+          );
         } finally {
           await fsPromises.rm(outsideDir, { recursive: true, force: true });
         }

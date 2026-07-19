@@ -7201,7 +7201,11 @@ export class Session implements SessionContext {
       string,
       { dev: number; ino: number }
     >();
-    for (const textPath of textPathSpecsToRead) {
+    const candidatePathsToRead = [
+      ...textPathSpecsToRead,
+      ...atPathCommandParts.map((part) => part.fileData!.fileUri!),
+    ];
+    for (const textPath of candidatePathsToRead) {
       try {
         if (
           resolveExistingFile(textPath) !== textPath ||
@@ -7222,12 +7226,7 @@ export class Session implements SessionContext {
         // The path changed between validation steps; skip it fail-closed.
       }
     }
-    const pathSpecsToRead = [
-      ...new Set([
-        ...revalidatedTextPaths,
-        ...atPathCommandParts.map((part) => part.fileData!.fileUri!),
-      ]),
-    ];
+    const pathSpecsToRead = [...new Set(revalidatedTextPaths)];
 
     if (
       pathSpecsToRead.length === 0 &&

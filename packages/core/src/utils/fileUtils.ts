@@ -949,6 +949,7 @@ export interface ProcessSingleFileContentOptions {
    * PDFs use `reference` so the model gets guidance without a failed read.
    */
   largePdfBehavior?: 'error' | 'reference';
+  displayPath?: string;
 }
 
 /**
@@ -1025,6 +1026,7 @@ export async function processSingleFileContent(
     preparePdfForVisionBridge = false,
     signal,
     largePdfBehavior = 'error',
+    displayPath = filePath,
   } = options;
   const rootDirectory = config.getTargetDir();
   try {
@@ -1073,10 +1075,10 @@ export async function processSingleFileContent(
 
     const fileType = await detectFileType(filePath);
     const relativePathForDisplay = path
-      .relative(rootDirectory, filePath)
+      .relative(rootDirectory, displayPath)
       .replace(/\\/g, '/');
 
-    const displayName = path.basename(filePath);
+    const displayName = path.basename(displayPath);
     // Use optional call (`?.()`) so mock Configs that don't implement
     // getContentGeneratorConfig still work for non-media file types.
     const modalities: InputModalities =
@@ -1751,12 +1753,12 @@ export async function processSingleFileContent(
       throw error;
     }
     const errorMessage = getErrorMessage(error);
-    const displayPath = path
-      .relative(rootDirectory, filePath)
+    const relativeDisplayPath = path
+      .relative(rootDirectory, displayPath)
       .replace(/\\/g, '/');
     return {
-      llmContent: `Error reading file ${displayPath}: ${errorMessage}`,
-      returnDisplay: `Error reading file ${displayPath}: ${errorMessage}`,
+      llmContent: `Error reading file ${relativeDisplayPath}: ${errorMessage}`,
+      returnDisplay: `Error reading file ${relativeDisplayPath}: ${errorMessage}`,
       error: `Error reading file ${filePath}: ${errorMessage}`,
       errorType: ToolErrorType.READ_CONTENT_FAILURE,
     };
