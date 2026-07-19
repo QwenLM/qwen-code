@@ -233,6 +233,48 @@ describe('AnthropicContentConverter', () => {
       });
     });
 
+    it('normalizes legacy dotted MCP names before sending history', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call-legacy-mcp',
+                  name: 'mcp__zybio__database.query_uniprot',
+                  args: { query: 'P12345' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call-legacy-mcp',
+                  name: 'mcp__zybio__database.query_uniprot',
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+      const assistant = messages[0];
+      const toolUse = Array.isArray(assistant?.content)
+        ? assistant.content.find((block) => block.type === 'tool_use')
+        : undefined;
+
+      expect(toolUse?.type).toBe('tool_use');
+      if (toolUse?.type === 'tool_use') {
+        expect(toolUse.name).toMatch(/^[A-Za-z][A-Za-z0-9_-]*$/);
+        expect(toolUse.name).not.toContain('.');
+      }
+    });
+
     it('converts functionResponse parts into user tool_result messages', () => {
       const { messages } = converter.convertGeminiRequestToAnthropic({
         model: 'models/test',
