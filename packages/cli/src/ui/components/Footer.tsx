@@ -38,7 +38,9 @@ export const Footer: React.FC = () => {
     respectUserColors,
     hideContextIndicator,
   } = useStatusLine();
-  const configInitMessage = useConfigInitMessage(uiState.isConfigInitialized);
+  const configInitMessage = useConfigInitMessage(
+    uiState.isConfigInitialized || Boolean(uiState.initError),
+  );
 
   const { promptTokenCount, showAutoAcceptIndicator } = {
     promptTokenCount: uiState.sessionStats.lastPromptTokenCount,

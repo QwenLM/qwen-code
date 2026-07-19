@@ -54,6 +54,7 @@ import {
   makeFakeConfig,
   type GeminiClient,
   type SubagentManager,
+  SessionWriterConflictError,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import type { InitializationResult } from '../core/initializer.js';
@@ -594,6 +595,40 @@ describe('AppContainer State Management', () => {
   };
 
   describe('Basic Rendering', () => {
+    it('surfaces interactive config initialization failures', async () => {
+      const error = new SessionWriterConflictError();
+      let rejectInitialization!: (error: Error) => void;
+      vi.spyOn(mockConfig, 'initialize').mockReturnValue(
+        new Promise<void>((_resolve, reject) => {
+          rejectInitialization = reject;
+        }),
+      );
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      try {
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+
+        await vi.waitFor(() => {
+          expect(mockConfig.initialize).toHaveBeenCalledOnce();
+        });
+        rejectInitialization(error);
+        await vi.waitFor(() => {
+          expect(stderrSpy).toHaveBeenCalledWith(`${error.message}\n`);
+        });
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
     it('continues quitting when cancelling the active request fails', () => {
       vi.useFakeTimers();
       const cancelOngoingRequest = vi.fn(() => {

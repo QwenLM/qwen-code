@@ -385,6 +385,19 @@ describe('<Footer />', () => {
       expect(frame).toContain('? for shortcuts');
     });
 
+    it('stops showing init progress when initialization fails', () => {
+      const { lastFrame } = renderWithWidth(
+        120,
+        createMockUIState({
+          isConfigInitialized: false,
+          initError: 'This session is already open in another Qwen process.',
+        }),
+      );
+      const frame = lastFrame()!;
+      expect(frame).not.toContain('Initializing...');
+      expect(frame).toContain('? for shortcuts');
+    });
+
     // Init progress is more useful than zero layout shift: we show it even
     // when a custom status line is active, accepting that the row shrinks
     // by one line once init completes. Still strictly better than the

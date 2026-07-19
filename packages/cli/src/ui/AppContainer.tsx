@@ -153,7 +153,7 @@ import {
   formatSessionWindowTitle,
   writeTerminalTitle,
 } from '../utils/windowTitle.js';
-import { clearScreen } from '../utils/stdioHelpers.js';
+import { clearScreen, writeStderrLine } from '../utils/stdioHelpers.js';
 import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
 import {
@@ -588,6 +588,9 @@ export const AppContainer = (props: AppContainerProps) => {
   const [currentModel, setCurrentModel] = useState(() => config.getModel());
 
   const [isConfigInitialized, setConfigInitialized] = useState(false);
+  const [configInitializationError, setConfigInitializationError] = useState<
+    string | null
+  >(null);
 
   const [userMessages, setUserMessages] = useState<string[]>([]);
 
@@ -730,11 +733,16 @@ export const AppContainer = (props: AppContainerProps) => {
   useEffect(() => {
     if (configInitializationStartedRef.current) return;
     configInitializationStartedRef.current = true;
-    (async () => {
-      // Note: the program will not work if this fails so let errors be
-      // handled by the global catch.
+    void (async () => {
       profileCheckpoint('config_initialize_start');
-      await config.initialize();
+      try {
+        await config.initialize();
+      } catch (error) {
+        const message = getErrorMessage(error);
+        writeStderrLine(message);
+        setConfigInitializationError(message);
+        return;
+      }
       config.startRuntimeStatus();
       setStartupWarnings((currentWarnings) =>
         mergeStartupWarnings(currentWarnings, config.getWarnings()),
@@ -1874,7 +1882,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const {
     streamingState,
     submitQuery,
-    initError,
+    initError: geminiInitializationError,
     pendingHistoryItems: pendingGeminiHistoryItems,
     thought,
     cancelOngoingRequest,
@@ -1911,6 +1919,7 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalWidthRef,
     midTurnRestoreRef,
   );
+  const initError = configInitializationError ?? geminiInitializationError;
   cancelOngoingRequestRef.current = cancelOngoingRequest;
 
   // Now that streamingState is available, keep isIdleRef in sync and
