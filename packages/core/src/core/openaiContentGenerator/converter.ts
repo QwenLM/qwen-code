@@ -1172,6 +1172,16 @@ function throwProtocolTagLeak(requestContext: RequestContext): never {
 }
 
 /**
+/**
+ * Estimate token count from text length when the provider does not return
+ * reasoning_tokens in usage. Uses ~4 chars/token as a rough approximation
+ * for English/mixed content.
+ */
+function estimateTokensFromText(text: string | undefined | null): number {
+  if (!text) return 0;
+  return Math.ceil(text.length / 4);
+}
+
  * Convert OpenAI response to Gemini format.
  */
 export function convertOpenAIResponseToGemini(
@@ -1261,7 +1271,8 @@ export function convertOpenAIResponseToGemini(
       extendedUsage.cached_tokens ??
       0;
     const thinkingTokens =
-      usage.completion_tokens_details?.reasoning_tokens || 0;
+      usage.completion_tokens_details?.reasoning_tokens ||
+      estimateTokensFromText(reasoningText);
 
     // If we only have total tokens but no breakdown, estimate the split
     // Typically input is ~70% and output is ~30% for most conversations
@@ -1719,7 +1730,8 @@ export function convertOpenAIChunkToGemini(
     const completionTokens = usage.completion_tokens || 0;
     const totalTokens = usage.total_tokens || 0;
     const thinkingTokens =
-      usage.completion_tokens_details?.reasoning_tokens || 0;
+      usage.completion_tokens_details?.reasoning_tokens ||
+      Math.ceil((requestContext.reasoningDeltaState?.emittedLength ?? 0) / 4);
     // Support both formats: prompt_tokens_details.cached_tokens (OpenAI standard)
     // and cached_tokens (some models return it at top level)
     const extendedUsage = usage as ExtendedCompletionUsage;
