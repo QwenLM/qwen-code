@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { hashDaemonWorkspace, Storage } from '@qwen-code/qwen-code-core';
 import {
@@ -9,6 +10,13 @@ function assertSafeChannelType(channelType: string): void {
   if (!isSafePathComponent(channelType)) {
     throw new Error(`Invalid channel type: ${JSON.stringify(channelType)}.`);
   }
+}
+
+function hashedIdentifierSegment(kind: 'name' | 'type', value: string): string {
+  return createHash('sha256')
+    .update(`channel-${kind}\0`, 'utf8')
+    .update(value, 'utf8')
+    .digest('hex');
 }
 
 export function daemonChannelStateDir(
@@ -23,7 +31,7 @@ export function daemonChannelStateDir(
     'channels',
     'daemon',
     hashDaemonWorkspace(workspaceCwd),
-    channelName,
-    channelType,
+    hashedIdentifierSegment('name', channelName),
+    hashedIdentifierSegment('type', channelType),
   );
 }
