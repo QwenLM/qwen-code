@@ -1096,29 +1096,22 @@ export class DaemonClient {
       timeoutMs !== undefined
         ? `?timeoutMs=${encodeURIComponent(timeoutMs)}`
         : '';
-    return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/acp/preheat${suffix}`,
-      { method: 'POST', headers: this.headers() },
-      async (res) => {
-        if (!res.ok) {
-          throw await this.failOnError(res, 'POST /workspace/acp/preheat');
-        }
-        return (await res.json()) as DaemonWorkspaceAcpPreheatResult;
+    return await this.jsonRequest<DaemonWorkspaceAcpPreheatResult>(
+      `/workspace/acp/preheat${suffix}`,
+      'POST /workspace/acp/preheat',
+      {
+        method: 'POST',
+        timeoutMs: serverBudgetMs + 2_000,
+        mode: 'rest',
       },
-      serverBudgetMs + 2_000,
     );
   }
 
   async workspaceAcpStatus(): Promise<DaemonWorkspaceAcpStatusResult> {
-    return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/acp/status`,
-      { headers: this.headers() },
-      async (res) => {
-        if (!res.ok) {
-          throw await this.failOnError(res, 'GET /workspace/acp/status');
-        }
-        return (await res.json()) as DaemonWorkspaceAcpStatusResult;
-      },
+    return await this.jsonRequest<DaemonWorkspaceAcpStatusResult>(
+      '/workspace/acp/status',
+      'GET /workspace/acp/status',
+      { mode: 'rest' },
     );
   }
 

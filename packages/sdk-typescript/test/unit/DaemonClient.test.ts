@@ -684,6 +684,55 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it.each(['acp-http', 'acp-ws'] as const)(
+      'uses REST for ACP workspace control routes with %s',
+      async (transportType) => {
+        const preheat = {
+          ready: true,
+          channelLive: true,
+          durationMs: 12,
+        };
+        const acpStatus = { channelLive: true };
+        const { fetch: restFetch, calls } = recordingFetch((req) =>
+          req.url.endsWith('/workspace/acp/preheat?timeoutMs=1234')
+            ? jsonResponse(200, preheat)
+            : jsonResponse(200, acpStatus),
+        );
+        const transportFetch = vi.fn(async () =>
+          jsonResponse(404, { error: 'ACP transport route not found' }),
+        );
+        const transport: DaemonTransport = {
+          type: transportType,
+          supportsReplay: transportType === 'acp-http',
+          connected: true,
+          restFetch,
+          fetch: transportFetch,
+          async *subscribeEvents() {},
+          dispose() {},
+        };
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          token: 'secret',
+          transport,
+        });
+
+        await expect(client.workspaceAcpPreheat(1234)).resolves.toEqual(
+          preheat,
+        );
+        await expect(client.workspaceAcpStatus()).resolves.toEqual(acpStatus);
+        expect(calls.map((call) => [call.method, call.url])).toEqual([
+          ['POST', 'http://daemon/workspace/acp/preheat?timeoutMs=1234'],
+          ['GET', 'http://daemon/workspace/acp/status'],
+        ]);
+        expect(
+          calls.every(
+            (call) => call.headers['authorization'] === 'Bearer secret',
+          ),
+        ).toBe(true);
+        expect(transportFetch).not.toHaveBeenCalled();
+      },
+    );
+
     it('reloads primary and workspace-qualified MCP settings over REST', async () => {
       const result = { accepted: true };
       const { fetch, calls } = recordingFetch(() => jsonResponse(202, result));
