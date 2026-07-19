@@ -256,9 +256,17 @@ const probeHostname =
   hostname.startsWith('[') && hostname.endsWith(']')
     ? hostname.slice(1, -1)
     : hostname;
-const port = hasOption('--port')
-  ? String(startPort)
-  : String(await findAvailablePort(probeHostname, startPort));
+let port;
+try {
+  port = hasOption('--port')
+    ? String(startPort)
+    : String(await findAvailablePort(probeHostname, startPort));
+} catch (err) {
+  console.error(
+    `[daemon-dev] ${err instanceof Error ? err.message : String(err)}`,
+  );
+  process.exit(1);
+}
 const token =
   readOption('--token') ||
   process.env.QWEN_SERVER_TOKEN ||
@@ -298,7 +306,7 @@ console.log(`qwen daemon dev`);
 console.log(`  daemon:   ${webEnv.QWEN_DAEMON_URL}`);
 console.log(`  workspace: ${workspace}`);
 console.log(
-  `  web-shell: http://localhost:5173/ (token: ${token.slice(0, 4)}...)`,
+  `  web-shell: opening in browser (auto-increments from 5173 if busy — see Vite output for the actual URL, token: ${token.slice(0, 4)}...)`,
 );
 console.log('');
 
@@ -322,7 +330,6 @@ waitForDaemon(webEnv.QWEN_DAEMON_URL)
         '--',
         '--open',
         `/?token=${encodeURIComponent(token)}`,
-        '--strictPort',
       ],
       {
         cwd: root,

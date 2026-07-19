@@ -112,6 +112,10 @@ export default defineConfig({
     },
   },
   test: {
+    // See packages/core/vitest.config.ts: raise the per-test ceiling above
+    // vitest's 5s default so I/O-bound tests (e.g. the workspace registration
+    // store's tempdir round-trip) don't blow it purely under CI contention.
+    testTimeout: 15000,
     include: ['**/*.{test,spec}.?(c|m)[jt]s?(x)', 'config.test.ts'],
     exclude: ['**/node_modules/**', '**/dist/**', '**/cypress/**'],
     environment: 'jsdom',
