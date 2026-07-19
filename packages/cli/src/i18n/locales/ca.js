@@ -753,8 +753,8 @@ export default {
   'Failed to parse {{terminalName}} keybindings.json. The file contains invalid JSON. Please fix the file manually or delete it to allow automatic configuration.':
     'Error en analitzar {{terminalName}} keybindings.json. El fitxer conté JSON no vàlid. Corregiu el fitxer manualment o elimineu-lo per permetre la configuració automàtica.',
   'Error: {{error}}': 'Error: {{error}}',
-  'Shift+Enter binding already exists': 'La drecera Shift+Return ja existeix',
-  'Ctrl+Enter binding already exists': 'La drecera Ctrl+Return ja existeix',
+  'Shift+Enter binding already exists': 'La drecera Shift+Enter ja existeix',
+  'Ctrl+Enter binding already exists': 'La drecera Ctrl+Enter ja existeix',
   'Existing keybindings detected. Will not modify to avoid conflicts.':
     "S'han detectat dreceres existents. No es modificaran per evitar conflictes.",
   'Please check and modify manually if needed: {{file}}':
