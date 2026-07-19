@@ -317,6 +317,31 @@ describe('ShellExecutionService', () => {
     return { result, handle, abortController };
   };
 
+  describe('child environment sanitization (#6601)', () => {
+    it('strips Qwen-internal daemon secrets from the pty child env while keeping user vars and third-party credentials', async () => {
+      process.env['QWEN_SERVER_TOKEN'] = 'serve-secret';
+      process.env['QWEN_DAEMON_TOKEN'] = 'daemon-secret';
+      process.env['GH_TOKEN'] = 'gh-abc';
+      process.env['PATH'] = '/usr/bin';
+
+      await simulateExecution('echo hi', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      const spawnEnv = (
+        mockPtySpawn.mock.calls[0][2] as { env: NodeJS.ProcessEnv }
+      ).env;
+      // Internal daemon secrets must not leak into agent-run commands.
+      expect(spawnEnv['QWEN_SERVER_TOKEN']).toBeUndefined();
+      expect(spawnEnv['QWEN_DAEMON_TOKEN']).toBeUndefined();
+      // Benign vars + third-party credentials user commands rely on are kept.
+      expect(spawnEnv['PATH']).toContain('/usr/bin');
+      expect(spawnEnv['GH_TOKEN']).toBe('gh-abc');
+      // The shell tool's own marker is still applied on top.
+      expect(spawnEnv['QWEN_CODE']).toBe('1');
+    });
+  });
+
   describe('Successful Execution', () => {
     it('should execute a command and capture output', async () => {
       const { result, handle } = await simulateExecution('ls -l', (pty) => {
@@ -2252,6 +2277,32 @@ describe('ShellExecutionService child_process fallback', () => {
     const result = await handle.result;
     return { result, handle, abortController };
   };
+
+  describe('child environment sanitization (#6601)', () => {
+    it('strips Qwen-internal daemon secrets from the child_process env while keeping user vars and third-party credentials', async () => {
+      process.env['QWEN_SERVER_TOKEN'] = 'serve-secret';
+      process.env['QWEN_DAEMON_TOKEN'] = 'daemon-secret';
+      process.env['GH_TOKEN'] = 'gh-abc';
+      process.env['PATH'] = '/usr/bin';
+
+      await simulateExecution('echo hi', (cp) => {
+        cp.emit('exit', 0, null);
+        cp.emit('close', 0, null);
+      });
+
+      const spawnEnv = (
+        mockCpSpawn.mock.calls[0][2] as { env: NodeJS.ProcessEnv }
+      ).env;
+      // Internal daemon secrets must not leak into agent-run commands.
+      expect(spawnEnv['QWEN_SERVER_TOKEN']).toBeUndefined();
+      expect(spawnEnv['QWEN_DAEMON_TOKEN']).toBeUndefined();
+      // Benign vars + third-party credentials user commands rely on are kept.
+      expect(spawnEnv['PATH']).toContain('/usr/bin');
+      expect(spawnEnv['GH_TOKEN']).toBe('gh-abc');
+      // The shell tool's own marker is still applied on top.
+      expect(spawnEnv['QWEN_CODE']).toBe('1');
+    });
+  });
 
   describe('Successful Execution', () => {
     it('should execute a command and capture stdout and stderr', async () => {
