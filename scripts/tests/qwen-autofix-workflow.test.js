@@ -2867,20 +2867,79 @@ describe('qwen-autofix workflow', () => {
       "STALE: '${{ steps.prepare.outputs.stale }}'",
     );
 
-    // Terminal-round transition: feedback read (NEWEST set) → normal increment;
-    // feedback never read (empty) → MAX_ROUNDS so the scan skips instead of
-    // re-handing-off forever.
-    const markRound = reviewAddressReportStep.match(
-      /(if \[\[ -n "\$\{NEWEST:-\}" \]\]; then\n[\s\S]*?\n\s*fi)/,
+    // Handoff marker semantics across the three crash/handoff shapes. The block
+    // sets BOTH MARK_TS (watermark) and MARK_ROUND (retry budget); replay the
+    // real bash so a regression in either is caught, not string-matched. The
+    // `\n {12}fi` anchor matches the OUTER fi (12 spaces), skipping the nested
+    // DETAIL_FILE `fi` (14 spaces).
+    const markBlock = reviewAddressReportStep.match(
+      /(MARK_TS="\$\{NEWEST[\s\S]*?\n {12}fi)\n/,
     )?.[1];
-    expect(markRound).toBeTruthy();
-    const runMarkRound = (env) =>
-      execFileSync('bash', ['-c', `${markRound}\nprintf '%s' "$MARK_ROUND"`], {
-        env: { ...process.env, MAX_ROUNDS: '5', ROUND: '2', ...env },
+    expect(markBlock).toBeTruthy();
+    const runMark = (env) =>
+      execFileSync(
+        'bash',
+        ['-c', `${markBlock}\nprintf '%s|%s' "$MARK_TS" "$MARK_ROUND"`],
+        {
+          env: {
+            ...process.env,
+            MAX_ROUNDS: '5',
+            ROUND: '2',
+            WATERMARK: '',
+            DETAIL_FILE: '',
+            NEWEST: '',
+            ...env,
+          },
+          encoding: 'utf8',
+        },
+      );
+    const SENTINEL = '9999-12-31T23:59:59Z';
+    // 1. Agent produced output but verify failed: advance the watermark to the
+    //    evaluated feedback; round increments — a real evaluated handoff.
+    expect(
+      runMark({
+        NEWEST: '2026-07-16T00:00:00Z',
+        DETAIL_FILE: '/tmp/failure.md',
+      }),
+    ).toBe('2026-07-16T00:00:00Z|3');
+    // 2. Crash BEFORE any verdict (no output) though prepare ran: the watermark
+    //    must NOT advance (sentinel ts, excluded from EVAL_WM) so the next scan
+    //    RETRIES the same feedback; round still increments to bound the retries.
+    //    This is the #7219-class fix — a transient crash no longer strands a PR.
+    expect(runMark({ NEWEST: '2026-07-16T00:00:00Z', DETAIL_FILE: '' })).toBe(
+      `${SENTINEL}|3`,
+    );
+    // 3. Crash before prepare (NEWEST empty): terminal round so the scan skips
+    //    instead of re-handing-off forever; ts falls back to WATERMARK/sentinel.
+    expect(runMark({ NEWEST: '', WATERMARK: '2026-07-10T00:00:00Z' })).toBe(
+      '2026-07-10T00:00:00Z|5',
+    );
+    expect(runMark({ NEWEST: '', WATERMARK: '' })).toBe(`${SENTINEL}|5`);
+
+    // The no-output-crash HEADLINE must only promise a retry when one will
+    // actually happen: at the final attempt (MARK_ROUND == MAX_ROUNDS) the
+    // scan's round cap skips the PR, so the message must say a human takes
+    // over — never "it will retry" — and it must not embed a Run log URL
+    // (the report block appends that, so embedding would duplicate it).
+    const runHeadline = (env) =>
+      execFileSync('bash', ['-c', `${markBlock}\nprintf '%s' "$HEADLINE"`], {
+        env: {
+          ...process.env,
+          MAX_ROUNDS: '5',
+          WATERMARK: '',
+          DETAIL_FILE: '',
+          NEWEST: '2026-07-16T00:00:00Z',
+          ...env,
+        },
         encoding: 'utf8',
       });
-    expect(runMarkRound({ NEWEST: '2026-07-16T00:00:00Z' })).toBe('3');
-    expect(runMarkRound({ NEWEST: '' })).toBe('5');
+    const midCrash = runHeadline({ ROUND: '2' }); // MARK_ROUND=3 < 5
+    expect(midCrash).toContain('it will retry on the next scan');
+    expect(midCrash).not.toContain('Run log:');
+    const finalCrash = runHeadline({ ROUND: '4' }); // MARK_ROUND=5 == 5
+    expect(finalCrash).toContain('last automatic attempt');
+    expect(finalCrash).not.toContain('it will retry');
+    expect(finalCrash).not.toContain('Run log:');
 
     // Behaviorally replay the pending-staleness jq filter against sample checks so
     // a flipped comparison (which would age out live checks → double-processing)
