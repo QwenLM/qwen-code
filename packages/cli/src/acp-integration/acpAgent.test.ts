@@ -10413,6 +10413,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
   function makeRecordingService() {
     return {
       recordCustomTitle: vi.fn().mockResolvedValue(true),
+      recordUserTextElements: vi.fn().mockResolvedValue(undefined),
       getCurrentCustomTitle: vi.fn().mockReturnValue('Source session'),
       flush: vi.fn().mockResolvedValue(undefined),
       runWithWriteBarrier: vi.fn(
@@ -10540,6 +10541,52 @@ describe('QwenAgent extMethod renameSession routing', () => {
     // SessionService that lacks the in-memory cache update).
     expect(SessionService).not.toHaveBeenCalled();
     expect(result).toEqual({ success: true });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('validates and records live user text elements', async () => {
+    const recording = makeRecordingService();
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod('qwen/session/recordTextElements', {
+        sessionId: liveSessionId,
+        content: 42,
+        textElements: [],
+      }),
+    ).rejects.toThrow('Invalid user text elements payload');
+
+    const payload = {
+      sessionId: liveSessionId,
+      content: 'hello',
+      textElements: [{ text: 'hello', start: 0, end: 5 }],
+    };
+    await expect(
+      agent.extMethod('qwen/session/recordTextElements', payload),
+    ).resolves.toEqual({ sessionId: liveSessionId, persisted: true });
+    expect(recording.recordUserTextElements).toHaveBeenCalledWith({
+      content: payload.content,
+      textElements: payload.textElements,
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rejects registering a second session with the same id', async () => {
+    const recording = makeRecordingService();
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.newSession({ cwd: '/tmp', mcpServers: [] }),
+    ).rejects.toThrow(`Session ${liveSessionId} is already active.`);
+    expect(Session).toHaveBeenCalledTimes(1);
 
     mockConnectionState.resolve();
     await agentPromise;

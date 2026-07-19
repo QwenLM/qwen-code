@@ -4337,6 +4337,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ci,
           `recover unknown close outcome for session ${JSON.stringify(sessionId)}`,
         );
+      } else {
+        entry.closing = false;
       }
       throw error;
     }

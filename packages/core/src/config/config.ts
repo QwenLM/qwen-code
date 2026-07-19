@@ -2293,7 +2293,12 @@ export class Config {
       try {
         await this.chatRecordingService?.close();
       } catch (closeError) {
-        throw new SessionWriterUnavailableError({ cause: closeError });
+        throw new SessionWriterUnavailableError({
+          cause: new AggregateError(
+            [error, closeError],
+            'Chat recording close failed during failed initialization',
+          ),
+        });
       }
       throw error;
     }

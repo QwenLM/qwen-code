@@ -2563,6 +2563,35 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('initialize', () => {
+    it('preserves initialization and recording close failures', async () => {
+      const config = new Config(baseParams);
+      const initializationError = new Error('initialization failed');
+      const closeError = new Error('recording close failed');
+      vi.spyOn(
+        config as unknown as {
+          initializeInternal: () => Promise<void>;
+        },
+        'initializeInternal',
+      ).mockRejectedValue(initializationError);
+      (
+        config as unknown as {
+          chatRecordingService: { close: () => Promise<void> };
+        }
+      ).chatRecordingService = {
+        close: vi.fn().mockRejectedValue(closeError),
+      };
+
+      const result = await config.initialize().catch((error: unknown) => error);
+
+      expect(result).toMatchObject({
+        name: 'SessionWriterUnavailableError',
+        cause: expect.any(AggregateError),
+      });
+      expect(
+        (result as Error & { cause: AggregateError }).cause.errors,
+      ).toEqual([initializationError, closeError]);
+    });
+
     it('should throw an error if initialized more than once', async () => {
       const config = new Config({
         ...baseParams,

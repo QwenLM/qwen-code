@@ -286,6 +286,23 @@ describe('ChatRecordingService', () => {
     });
   });
 
+  describe('recordUserTextElements', () => {
+    it('records user text elements as a strict system payload', async () => {
+      const payload = {
+        content: 'hello',
+        textElements: [{ text: 'hello', start: 0, end: 5 }],
+      };
+
+      await chatRecordingService.recordUserTextElements(payload);
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.type).toBe('system');
+      expect(record.subtype).toBe('user_text_elements');
+      expect(record.systemPayload).toEqual(payload);
+    });
+  });
+
   describe('recordAtCommand', () => {
     it('should record @-command metadata as a system payload', async () => {
       const userParts: Part[] = [{ text: 'Hello, world!' }];
