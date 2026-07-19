@@ -96,6 +96,35 @@ describe('inspectConversationBranches', () => {
     });
   });
 
+  it('summarizes a single linear branch without a branch point', () => {
+    const records = [
+      record('root-user', null, {
+        message: { role: 'user', parts: [{ text: 'only request' }] },
+      }),
+      assistant('only-answer', 'root-user', 'only answer'),
+    ];
+
+    expect(inspectConversationBranches(records).branches).toEqual([
+      expect.objectContaining({
+        leafUuid: 'only-answer',
+        branchPointUuid: null,
+        firstUserTextAfterBranchPoint: 'only request',
+      }),
+    ]);
+  });
+
+  it('counts tool results in a branch chain', () => {
+    const records = [
+      record('root-user', null),
+      assistant('tool-call', 'root-user'),
+      record('tool-result', 'tool-call', { type: 'tool_result' }),
+    ];
+
+    expect(inspectConversationBranches(records).branches[0]).toMatchObject({
+      recordCounts: { user: 1, assistant: 1, toolResult: 1, system: 0 },
+    });
+  });
+
   it('uses the nearest branch point for nested forks', () => {
     const records = [
       record('root', null),
@@ -135,6 +164,22 @@ describe('inspectConversationBranches', () => {
         (branch) => branch.leafUuid,
       ),
     ).toEqual(['conversation-leaf']);
+  });
+
+  it('uses the last collapsed physical leaf timestamp as updatedAt', () => {
+    const records = [
+      record('conversation-leaf', null),
+      system('title', 'conversation-leaf', 'custom_title'),
+      system('artifact', 'conversation-leaf', 'session_artifact_event'),
+    ];
+    records[0]!.timestamp = '2026-01-01T00:00:01.000Z';
+    records[1]!.timestamp = '2026-01-01T00:00:02.000Z';
+    records[2]!.timestamp = '2026-01-01T00:00:03.000Z';
+
+    expect(inspectConversationBranches(records).branches[0]).toMatchObject({
+      leafUuid: 'conversation-leaf',
+      updatedAt: '2026-01-01T00:00:03.000Z',
+    });
   });
 
   it('removes a collapsed ancestor when a real descendant leaf exists', () => {

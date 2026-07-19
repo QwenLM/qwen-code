@@ -78,6 +78,11 @@ interface ForestPosition {
   exitedAt: number;
 }
 
+interface SemanticLeaf {
+  leafUuid: string;
+  physicalLeafUuid: string;
+}
+
 export function inspectConversationBranches(
   records: readonly ChatRecord[],
 ): ConversationBranchAnalysis {
@@ -86,7 +91,7 @@ export function inspectConversationBranches(
   const index = buildConversationIndex(records);
   const semanticLeaves = findSemanticLeaves(index);
   const leafCountByAncestor = countLeafDescendants(
-    semanticLeaves,
+    semanticLeaves.map(({ leafUuid }) => leafUuid),
     index.firstByUuid,
   );
   const rewindUuids = [...index.firstByUuid.values()]
@@ -94,9 +99,10 @@ export function inspectConversationBranches(
     .map((record) => record.uuid);
   const forestPositions = indexForest(index);
 
-  const branches = semanticLeaves.map((leafUuid) =>
+  const branches = semanticLeaves.map(({ leafUuid, physicalLeafUuid }) =>
     summarizeBranch(
       leafUuid,
+      physicalLeafUuid,
       leafCountByAncestor,
       rewindUuids,
       forestPositions,
@@ -237,11 +243,14 @@ function findParentCycles(
   return diagnostics;
 }
 
-function findSemanticLeaves(index: ConversationIndex): string[] {
+function findSemanticLeaves(index: ConversationIndex): SemanticLeaf[] {
   const candidates = new Set<string>();
+  const physicalLeafBySemanticLeaf = new Map<string, string>();
   for (const uuid of index.firstByUuid.keys()) {
     if ((index.childrenByUuid.get(uuid)?.length ?? 0) > 0) continue;
-    candidates.add(collapseNeutralTail(uuid, index.firstByUuid));
+    const leafUuid = collapseNeutralTail(uuid, index.firstByUuid);
+    candidates.add(leafUuid);
+    physicalLeafBySemanticLeaf.set(leafUuid, uuid);
   }
 
   const superseded = new Set<string>();
@@ -263,11 +272,16 @@ function findSemanticLeaves(index: ConversationIndex): string[] {
     (candidate) => !superseded.has(candidate),
   );
 
-  return leaves.sort(
-    (left, right) =>
-      (index.physicalIndexByUuid.get(left) ?? 0) -
-      (index.physicalIndexByUuid.get(right) ?? 0),
-  );
+  return leaves
+    .sort(
+      (left, right) =>
+        (index.physicalIndexByUuid.get(left) ?? 0) -
+        (index.physicalIndexByUuid.get(right) ?? 0),
+    )
+    .map((leafUuid) => ({
+      leafUuid,
+      physicalLeafUuid: physicalLeafBySemanticLeaf.get(leafUuid)!,
+    }));
 }
 
 function countLeafDescendants(
@@ -304,6 +318,7 @@ function collapseNeutralTail(
 
 function summarizeBranch(
   leafUuid: string,
+  physicalLeafUuid: string,
   leafCountByAncestor: ReadonlyMap<string, number>,
   rewindUuids: readonly string[],
   forestPositions: ReadonlyMap<string, ForestPosition>,
@@ -328,7 +343,7 @@ function summarizeBranch(
   );
 
   const firstRecord = index.firstByUuid.get(chain[0])!;
-  const leafRecord = index.firstByUuid.get(leafUuid)!;
+  const physicalLeafRecord = index.firstByUuid.get(physicalLeafUuid)!;
   const recordCounts = { user: 0, assistant: 0, toolResult: 0, system: 0 };
   for (const uuid of chain) {
     const record = index.firstByUuid.get(uuid)!;
@@ -363,7 +378,7 @@ function summarizeBranch(
     ...(lastAssistantText ? { lastAssistantText } : {}),
     recordCounts,
     startedAt: firstRecord.timestamp,
-    updatedAt: leafRecord.timestamp,
+    updatedAt: physicalLeafRecord.timestamp,
   };
 }
 

@@ -58,6 +58,8 @@ message counts, timestamps, the first real user text after the branch point,
 and the latest real user and non-thought assistant text. Notification, cron,
 and mid-turn user records are not treated as user prompts. Text is whitespace
 normalized and truncated; tool arguments and non-text parts are ignored.
+`updatedAt` uses the timestamp of the last physical terminal normalized into
+the semantic leaf so neutral metadata activity is not lost.
 
 A branch is a rewind descendant when its path contains a rewind record. It is
 a rewind sibling when its path diverges from the path to a rewind record. These
