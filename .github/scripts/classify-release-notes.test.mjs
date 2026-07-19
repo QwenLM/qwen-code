@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -71,6 +72,16 @@ describe('release note classification', () => {
         expected: true,
       },
       {
+        title: 'Update docs',
+        files: ['.github/workflows/ci.yml'],
+        expected: false,
+      },
+      {
+        title: 'ci: empty',
+        files: [],
+        expected: false,
+      },
+      {
         title: 'ci: update release automation',
         files: ['.github/workflows/finalize-release.yml'],
         expected: false,
@@ -113,6 +124,45 @@ describe('release note classification', () => {
     }
   });
 
+  it('rejects invalid pull request environment before invoking gh', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'release-note-classifier-'));
+    try {
+      const marker = join(dir, 'gh-invoked');
+      const gh = join(dir, 'gh');
+      writeFileSync(
+        gh,
+        [
+          '#!/usr/bin/env node',
+          `require('node:fs').writeFileSync(${JSON.stringify(marker)}, '1');`,
+          'process.exit(1);',
+        ].join('\n'),
+      );
+      chmodSync(gh, 0o755);
+
+      for (const env of [
+        { GITHUB_REPOSITORY: 'QwenLM/qwen-code/extra', PR_NUMBER: '1' },
+        { GITHUB_REPOSITORY: 'QwenLM/qwen-code', PR_NUMBER: 'abc' },
+      ]) {
+        assert.throws(() =>
+          execFileSync(
+            process.execPath,
+            [join(import.meta.dirname, 'classify-release-notes.mjs')],
+            {
+              env: {
+                ...process.env,
+                ...env,
+                PATH: `${dir}:${process.env.PATH}`,
+              },
+            },
+          ),
+        );
+        assert.equal(existsSync(marker), false);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('keeps renamed production files by checking their previous paths', () => {
     const dir = mkdtempSync(join(tmpdir(), 'release-note-classifier-'));
     try {
@@ -151,10 +201,13 @@ describe('release note classification', () => {
 
   it('wires reclassification and exclusion to the same automatic label', () => {
     const workflow = readFileSync(
-      '.github/workflows/classify-release-notes.yml',
+      join(import.meta.dirname, '../workflows/classify-release-notes.yml'),
       'utf8',
     );
-    const release = readFileSync('.github/release.yml', 'utf8');
+    const release = readFileSync(
+      join(import.meta.dirname, '../release.yml'),
+      'utf8',
+    );
 
     for (const action of ['synchronize', 'edited', 'labeled', 'unlabeled']) {
       assert.match(workflow, new RegExp(`- '${action}'`));

@@ -25,6 +25,7 @@ concurrency:
 
 jobs:
   classify:
+    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     steps:
