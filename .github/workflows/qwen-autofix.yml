@@ -1611,15 +1611,26 @@ jobs:
                 add | [.[] | select((.user.login // "") == $ab)
                      | select(.body // "" | contains("<!-- takeover-ack engaged -->"))
                      | .created_at] | sort | last // ""' "${WORKDIR}/ic.json")"
+              gh api "repos/${REPO}/issues/${PR}/events" --paginate > "${WORKDIR}/pr-events.json" 2> /dev/null \
+                || echo '[]' > "${WORKDIR}/pr-events.json"
+              LAST_LABELED_TS="$(jq -rs --arg lb "${TAKEOVER_LABEL}" '
+                add | [.[] | select(.event == "labeled")
+                     | select((.label.name // "") == $lb)
+                     | .created_at] | sort | last // ""' "${WORKDIR}/pr-events.json")"
               if [[ -z "${LAST_ENGAGE_ACK_TS}" ]]; then
                 NEED_ENGAGE_ACK='true'
+                # In-repo label events have a DEDICATED ack job — the scan is
+                # only its healer. Within a short grace after the label lands,
+                # defer: a concurrent ack job must not be double-posted (that
+                # shifts the window anchor). A failed ack job is healed by the
+                # next scan, which is past the grace. Forks have no ack job,
+                # so no grace applies there.
+                if [[ "$(jq -r '.isCrossRepository // false' <<< "${PR_META}")" != "true" ]] \
+                  && [[ -n "${LAST_LABELED_TS}" && "${LAST_LABELED_TS}" > "$(date -u -d '3 minutes ago' +%Y-%m-%dT%H:%M:%SZ)" ]]; then
+                  echo "🧭 engage ack deferred for #${PR}: in-repo label applied <3m ago — the ack job owns it"
+                  NEED_ENGAGE_ACK='false'
+                fi
               else
-                gh api "repos/${REPO}/issues/${PR}/events" --paginate > "${WORKDIR}/pr-events.json" 2> /dev/null \
-                  || echo '[]' > "${WORKDIR}/pr-events.json"
-                LAST_LABELED_TS="$(jq -rs --arg lb "${TAKEOVER_LABEL}" '
-                  add | [.[] | select(.event == "labeled")
-                       | select((.label.name // "") == $lb)
-                       | .created_at] | sort | last // ""' "${WORKDIR}/pr-events.json")"
                 if [[ -n "${LAST_LABELED_TS}" && "${LAST_LABELED_TS}" > "${LAST_ENGAGE_ACK_TS}" ]]; then
                   NEED_ENGAGE_ACK='true'
                 fi
@@ -1996,7 +2007,7 @@ jobs:
           # UNKNOWN and discards too (fail closed — the next scan re-emits a
           # still-valid target).
           PR_LIVE="$(gh pr view "${PR}" --repo "${REPO}" \
-            --json state,author,isCrossRepository,baseRefName,headRefName,labels,maintainerCanModify 2> /dev/null || echo '{}')"
+            --json state,author,isCrossRepository,baseRefName,headRefName,labels,maintainerCanModify,headRepositoryOwner,headRepository 2> /dev/null || echo '{}')"
           LIVE_STATE="$(jq -r '.state // ""' <<< "${PR_LIVE}")"
           LIVE_AUTHOR="$(jq -r '.author.login // ""' <<< "${PR_LIVE}")"
           LIVE_XREPO="$(jq -r 'if has("isCrossRepository") then .isCrossRepository else true end' <<< "${PR_LIVE}")"
@@ -2014,6 +2025,11 @@ jobs:
           elif [[ "${LIVE_STATE}" != "OPEN" ]]; then INELIGIBLE="state='${LIVE_STATE:-unknown}'"
           elif [[ "${LIVE_SKIP}" == "true" ]]; then INELIGIBLE="${SKIP_LABEL} label present"
           elif [[ "${LIVE_AUTHOR}" != "${AUTOFIX_BOT}" && "${LIVE_TAKEOVER}" != "true" ]]; then INELIGIBLE="author='${LIVE_AUTHOR:-unknown}' without ${TAKEOVER_LABEL}"
+          elif [[ "${LIVE_BASE}" != "main" ]]; then INELIGIBLE="base='${LIVE_BASE:-unknown}'"
+          elif [[ "${LIVE_BRANCH}" != "${BRANCH}" ]]; then INELIGIBLE="head branch is now '${LIVE_BRANCH:-unknown}'"
+          # Base/branch invariants sit ABOVE the fork chain: the last fork
+          # elif ends the ladder for eligible forks, so anything below it
+          # would be unreachable for exactly the PR class we fetch and push.
           elif [[ "${LIVE_XREPO}" != "false" && "${LIVE_TAKEOVER}" != "true" ]]; then INELIGIBLE='fork head without takeover'
           elif [[ "${LIVE_XREPO}" != "false" && "${LIVE_CAN_MODIFY}" != "true" ]]; then INELIGIBLE='fork head without maintainer-edit access'
           elif [[ "${LIVE_XREPO}" != "false" ]]; then
@@ -2024,8 +2040,17 @@ jobs:
               admin|maintain|write) : ;;
               *) INELIGIBLE="fork author '${LIVE_AUTHOR}' permission='${FORK_AUTHOR_PERM:-none}' below write" ;;
             esac
-          elif [[ "${LIVE_BASE}" != "main" ]]; then INELIGIBLE="base='${LIVE_BASE:-unknown}'"
-          elif [[ "${LIVE_BRANCH}" != "${BRANCH}" ]]; then INELIGIBLE="head branch is now '${LIVE_BRANCH:-unknown}'"
+            # The fetch source and token-push target must still be the LIVE
+            # head repository — a fork renamed or transferred since the scan
+            # would route both to a stale path. Fail-closed: moved or
+            # unresolved discards; the next scan re-admits the fresh path.
+            if [[ -z "${INELIGIBLE}" ]]; then
+              LIVE_HR_OWNER="$(jq -r '.headRepositoryOwner.login // ""' <<< "${PR_LIVE}")"
+              LIVE_HR_NAME="$(jq -r '.headRepository.name // ""' <<< "${PR_LIVE}")"
+              if [[ -z "${LIVE_HR_OWNER}" || -z "${LIVE_HR_NAME}" || "${LIVE_HR_OWNER}/${LIVE_HR_NAME}" != "${HEAD_REPO:-${REPO}}" ]]; then
+                INELIGIBLE="fork head repository moved or unresolved (live='${LIVE_HR_OWNER}/${LIVE_HR_NAME}' target='${HEAD_REPO:-${REPO}}')"
+              fi
+            fi
           fi
           if [[ -n "${INELIGIBLE}" ]]; then
             echo "🫥 target no longer eligible (${INELIGIBLE}) — discarding without action or marker"
@@ -2049,7 +2074,16 @@ jobs:
           if [[ "${HEAD_REPO:-${REPO}}" != "${REPO}" ]]; then
             # Maintainer-fork target: the branch does not exist on origin —
             # fetch it (data only; hooks are severed) from the fork.
-            git fetch "https://github.com/${HEAD_REPO}.git" "refs/heads/${BRANCH}"
+            if ! git fetch "https://github.com/${HEAD_REPO}.git" "refs/heads/${BRANCH}"; then
+              echo "🫥 fork fetch failed for ${HEAD_REPO} (${BRANCH}) — discarding without action or marker"
+              {
+                echo "stale=true"
+                echo "conflict=false"
+                echo "newest=${WATERMARK}"
+                echo "effective_round=${ROUND}"
+              } >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
             git checkout -B "${BRANCH}" FETCH_HEAD
             # Allow-edits pushes ride the classic-PAT grant — GITHUB_TOKEN
             # and fine-grained PATs are documented as NOT receiving it.

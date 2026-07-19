@@ -599,6 +599,7 @@ describe('qwen-autofix workflow', () => {
               PR: '7163',
               REPO: 'QwenLM/qwen-code',
               BRANCH: 'ci/some-branch',
+              HEAD_REPO: 'maint-fork/qwen-code',
               WATERMARK: '2026-07-18T08:00:00Z',
               ROUND: '2',
               AUTOFIX_BOT: 'qwen-code-dev-bot',
@@ -662,12 +663,32 @@ describe('qwen-autofix workflow', () => {
       maintainerCanModify: true,
       author: { login: 'maint-fork' },
       labels: [{ name: 'autofix/takeover' }],
+      headRepositoryOwner: { login: 'maint-fork' },
+      headRepository: { name: 'qwen-code' },
     });
     expect(runRecheck(forkPr).passed).toBe(true);
     expect(runRecheck({ ...forkPr, maintainerCanModify: false }).passed).toBe(
       false,
     );
     expect(runRecheck(forkPr, 'read').passed).toBe(false);
+    // The base/branch invariants must remain REACHABLE for eligible forks:
+    // the fork elif chain ends the ladder, so a retargeted or head-renamed
+    // fork previously sailed through to a wrong-base push.
+    expect(runRecheck({ ...forkPr, baseRefName: 'develop' }).passed).toBe(
+      false,
+    );
+    expect(runRecheck({ ...forkPr, headRefName: 'renamed' }).passed).toBe(
+      false,
+    );
+    // A fork renamed/transferred since the scan must not be fetched or
+    // pushed at the stale path — moved or unresolved discards.
+    expect(
+      runRecheck({ ...forkPr, headRepositoryOwner: { login: 'somewhere' } })
+        .passed,
+    ).toBe(false);
+    expect(runRecheck({ ...forkPr, headRepository: { name: '' } }).passed).toBe(
+      false,
+    );
     expect(runRecheck(pr({ headRefName: 'renamed' })).passed).toBe(false);
     // Retargeted off main while queued → discard (previously only pinned).
     expect(runRecheck(pr({ baseRefName: 'develop' })).passed).toBe(false);
@@ -1135,7 +1156,7 @@ describe('qwen-autofix workflow', () => {
       .match(
         /LAST_LABELED_TS="\$\(jq -rs --arg lb "\$\{TAKEOVER_LABEL\}" '([\s\S]*?)' "\$\{WORKDIR\}\/pr-events\.json"\)"/,
       )?.[1]
-      ?.replace(/\n {18}/g, '\n');
+      ?.replace(/\n {16}/g, '\n');
     expect(labeledTsProgram).toBeTruthy();
     const labeledTs = execFileSync(
       'jq',
@@ -1187,6 +1208,14 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain(
       'DRY-RUN: would post engage ack on #${PR} (window key untouched)',
     );
+    // In-repo first-pickup defers to the label event's DEDICATED ack job
+    // within a short grace, so a concurrent ack job is never double-posted.
+    expect(reviewScanJob).toContain('engage ack deferred for #${PR}');
+    // A fork fetch failure (force-push/rename race) discards gracefully
+    // instead of a red run, and a fork moved since the scan is discarded at
+    // the live re-check rather than fetched/pushed at the stale path.
+    expect(workflow).toContain('fork fetch failed for ${HEAD_REPO}');
+    expect(workflow).toContain('fork head repository moved or unresolved');
     // The producers must actually REQUEST labels — the jq consumers above
     // stay green on handcrafted fixtures even if a future edit drops the
     // field and skip/takeover filtering silently dies in production.
@@ -2506,14 +2535,15 @@ describe('qwen-autofix workflow', () => {
     // re-points .husky itself so its commits still get checked.
     // Hooks are severed BEFORE either checkout form (origin branch or the
     // fork-remote FETCH_HEAD path used by maintainer-fork takeover). The
-    // origin form sits in the else-branch AFTER the fork branch's push
-    // preflight, hence the wider window — the assertion is about order,
-    // and one hooksPath site genuinely covers both arms of the if.
+    // fork arm carries the fetch-failure discard before its checkout and
+    // the origin form sits in the else-branch after the push preflight,
+    // hence the wider windows — the assertions are about order, and one
+    // hooksPath site genuinely covers both arms of the if.
     expect(workflow).toMatch(
-      /git config core\.hooksPath \/dev\/null\n[\s\S]{0,400}git checkout -B "\$\{BRANCH\}" FETCH_HEAD/,
+      /git config core\.hooksPath \/dev\/null\n[\s\S]{0,900}git checkout -B "\$\{BRANCH\}" FETCH_HEAD/,
     );
     expect(workflow).toMatch(
-      /git config core\.hooksPath \/dev\/null\n[\s\S]{0,1500}git checkout -B "\$\{BRANCH\}" "origin\/\$\{BRANCH\}"/,
+      /git config core\.hooksPath \/dev\/null\n[\s\S]{0,2200}git checkout -B "\$\{BRANCH\}" "origin\/\$\{BRANCH\}"/,
     );
     expect(workflow).toMatch(
       /git config core\.hooksPath \.husky\n[\s\S]{0,200}node "\$\{RUNNER_TEMP\}\/run-agent\.mjs"/,
