@@ -146,6 +146,38 @@ describe('SessionTranscriptReader', () => {
     expect(page.lastUpdated).toMatch(ISO_8601);
   });
 
+  it('retains content with an invalid record timestamp', async () => {
+    const invalidTimestamp = record('u1', null, 'kept content');
+    invalidTimestamp.timestamp = 'not-a-date';
+    await writeRecords([invalidTimestamp]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+    );
+
+    expect(page.records).toHaveLength(1);
+    expect(page.records[0]).toMatchObject({ uuid: 'u1' });
+    expect(page.records[0]?.timestamp).toBeUndefined();
+    expect(Number.isFinite(new Date(page.startTime).getTime())).toBe(true);
+  });
+
+  it('does not select a trailing artifact record as the active leaf', async () => {
+    const root = record('u1', null, 'conversation');
+    const artifact: ChatRecord = {
+      ...record('artifact', 'u1', 'side channel'),
+      type: 'system',
+      subtype: 'session_artifact_event',
+      message: undefined,
+    };
+    await writeRecords([root, artifact]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+    );
+
+    expect(page.records.map((item) => item.uuid)).toEqual(['u1']);
+  });
+
   it.each([0, -1, SESSION_TRANSCRIPT_MAX_LIMIT + 1, 1.5])(
     'rejects invalid page limit %s',
     async (limit) => {

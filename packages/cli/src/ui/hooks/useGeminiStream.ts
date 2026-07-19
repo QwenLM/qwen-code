@@ -25,7 +25,6 @@ import {
   type ThoughtSummary,
   type ToolCallRequestInfo,
   type GeminiErrorEventValue,
-  type StopFailureErrorType,
   type ActiveGoal,
   type SteerInput,
   GeminiEventType as ServerGeminiEventType,
@@ -118,6 +117,7 @@ import { useDualOutput } from '../../dualOutput/DualOutputContext.js';
 import { recordGoalStatusItem } from '../utils/restoreGoal.js';
 import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import process from 'node:process';
+import { classifyApiError } from '../../utils/classify-api-error.js';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
 
@@ -237,43 +237,6 @@ function extractToolResultText(parts: Part[] | Part | undefined): unknown {
   if (chunks.length === 0) return '';
   if (chunks.length === 1) return chunks[0];
   return chunks;
-}
-
-/**
- * Classify API error to StopFailureErrorType
- * @internal Exported for testing purposes
- */
-export function classifyApiError(error: {
-  message: string;
-  status?: number;
-}): StopFailureErrorType {
-  const status = error.status;
-  const message = error.message?.toLowerCase() ?? '';
-
-  if (status === 429 || message.includes('rate limit')) {
-    return 'rate_limit';
-  }
-  if (status === 401 || message.includes('unauthorized')) {
-    return 'authentication_failed';
-  }
-  if (
-    status === 402 ||
-    status === 403 ||
-    message.includes('billing') ||
-    message.includes('quota')
-  ) {
-    return 'billing_error';
-  }
-  if (status === 400 || message.includes('invalid')) {
-    return 'invalid_request';
-  }
-  if (status !== undefined && status >= 500) {
-    return 'server_error';
-  }
-  if (message.includes('max_tokens') || message.includes('token limit')) {
-    return 'max_output_tokens';
-  }
-  return 'unknown';
 }
 
 /**
