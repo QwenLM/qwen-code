@@ -2045,7 +2045,7 @@ describe('qwen-autofix workflow', () => {
       // repo copy; the review address step runs AFTER the PR branch is
       // checked out and must invoke the TRUSTED STAGED copy instead.
       expect(step).toMatch(
-        /node (?:"\$\{RUNNER_TEMP\}\/run-agent\.mjs"|\.qwen\/skills\/autofix\/scripts\/run-agent\.mjs)/,
+        /node (?:"\$\{RUNNER_TEMP\}\/autofix-skill\/scripts\/run-agent\.mjs"|\.qwen\/skills\/autofix\/scripts\/run-agent\.mjs)/,
       );
       expect(step).not.toContain('qwen --yolo --prompt "${PROMPT}"');
       expect(step).not.toContain('AUTOFIX_INVOCATION:');
@@ -2094,11 +2094,31 @@ describe('qwen-autofix workflow', () => {
       'run-agent.mjs \\\n            --mode develop-issue',
     );
     expect(triageAndAddressStep).toContain(
-      'node "${RUNNER_TEMP}/run-agent.mjs" \\\n            --mode address-review',
+      'node "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs" \\\n            --mode address-review',
+    );
+    // Staging must MIRROR the skill layout: run-agent.mjs resolves its
+    // SKILL as `<own dir>/../SKILL.md`, so the staged runner and a staged
+    // SKILL.md must sit in autofix-skill/{scripts/run-agent.mjs,SKILL.md}.
+    // A flat stage crashes the agent with ENOENT before it reads feedback
+    // (regression: #7165 staged run-agent.mjs alone → ../SKILL.md pointed
+    // one dir above RUNNER_TEMP). Derive the invariant from the invocation
+    // rather than hard-coding the path, so any future relocation stays
+    // self-consistent.
+    const stagedRunner = triageAndAddressStep.match(
+      /node "(\$\{RUNNER_TEMP\}\/\S+\/run-agent\.mjs)"/,
+    )?.[1];
+    expect(stagedRunner).toBeTruthy();
+    // `<dir>/../SKILL.md` where dir = dirname(dirname(stagedRunner)).
+    const stagedSkillDir = stagedRunner
+      .replace(/\/scripts\/run-agent\.mjs$/, '')
+      .trim();
+    expect(workflow).toContain(
+      `cp .qwen/skills/autofix/scripts/run-agent.mjs "${stagedRunner}"`,
     );
     expect(workflow).toContain(
-      `cp .qwen/skills/autofix/scripts/run-agent.mjs "\${RUNNER_TEMP}/run-agent.mjs"`,
+      `cp .qwen/skills/autofix/SKILL.md "${stagedSkillDir}/SKILL.md"`,
     );
+    expect(workflow).toContain(`mkdir -p "${stagedSkillDir}/scripts"`);
     expect(workflow).not.toContain('.github/scripts/build-autofix-prompt.mjs');
 
     for (const step of [
@@ -2318,7 +2338,7 @@ describe('qwen-autofix workflow', () => {
       /git config core\.hooksPath \/dev\/null\n\s+git checkout -B "\$\{BRANCH\}"/,
     );
     expect(workflow).toMatch(
-      /git config core\.hooksPath \.husky\n[\s\S]{0,200}node "\$\{RUNNER_TEMP\}\/run-agent\.mjs"/,
+      /git config core\.hooksPath \.husky\n[\s\S]{0,200}node "\$\{RUNNER_TEMP\}\/autofix-skill\/scripts\/run-agent\.mjs"/,
     );
   });
 

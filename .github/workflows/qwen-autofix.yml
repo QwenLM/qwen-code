@@ -1784,9 +1784,17 @@ jobs:
           # The agent step runs AFTER prepare checks out the PR branch, so
           # invoking the runner from the working tree would execute
           # branch-controlled code on the host with the model key in env
-          # (takeover targets human-authored branches). Stage it from the
-          # trusted base and invoke the staged copy.
-          cp .qwen/skills/autofix/scripts/run-agent.mjs "${RUNNER_TEMP}/run-agent.mjs"
+          # (takeover targets human-authored branches). Stage the runner AND
+          # its SKILL from the trusted base, MIRRORING the skill's on-disk
+          # layout (autofix/{SKILL.md,scripts/run-agent.mjs}) — run-agent.mjs
+          # resolves the skill as `<its dir>/../SKILL.md`, so a flat stage
+          # (RUNNER_TEMP/run-agent.mjs) points ../SKILL.md at RUNNER_TEMP/..
+          # and the agent crashes with ENOENT before reading any feedback.
+          # The mirror also means the model's instructions come from the
+          # trusted base, never the PR branch.
+          mkdir -p "${RUNNER_TEMP}/autofix-skill/scripts"
+          cp .qwen/skills/autofix/SKILL.md "${RUNNER_TEMP}/autofix-skill/SKILL.md"
+          cp .qwen/skills/autofix/scripts/run-agent.mjs "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs"
 
       - name: 'Check runner environment'
         env:
@@ -2182,9 +2190,9 @@ jobs:
           # write-capable collaborators); keep AUTOFIX_OPENAI_API_KEY a
           # low-privilege, quota-bounded, rotatable key.
           git config core.hooksPath .husky
-          # Trusted staged copy — never the PR branch's version (see the
-          # staging step).
-          node "${RUNNER_TEMP}/run-agent.mjs" \
+          # Trusted staged copy in the mirrored layout — resolves
+          # ../SKILL.md to the trusted staged SKILL, never the PR branch's.
+          node "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs" \
             --mode address-review \
             --pr "${PR}" \
             --issue "${ISSUE}" \
