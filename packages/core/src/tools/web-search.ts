@@ -105,12 +105,18 @@ export type WebSearchGateResult =
  * that does not serve the Responses API fails loudly on first use.
  */
 function isDashScopeCompatibleBaseUrl(baseUrl: string): boolean {
-  let hostname: string;
+  let url: URL;
   try {
-    hostname = new URL(baseUrl).hostname.toLowerCase();
+    url = new URL(baseUrl);
   } catch {
     return false;
   }
+  // The side request carries a bearer API key — never accept a plaintext
+  // endpoint.
+  if (url.protocol !== 'https:') {
+    return false;
+  }
+  const hostname = url.hostname.toLowerCase();
   const suffixes = [
     ...DASHSCOPE_REGIONAL_HOSTS,
     'maas.aliyuncs.com',

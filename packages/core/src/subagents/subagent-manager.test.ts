@@ -1911,12 +1911,11 @@ bad`);
         ]);
       });
 
-      it('falls back to the inherited toolset when the allow-list is only the unavailable WebSearch', async () => {
-        // A converted Claude agent declaring `tools: WebSearch` while the
-        // opt-in web_search tool is unregistered used to convert to an empty
-        // allow-list (the old mapping dropped the name) and inherit the full
-        // toolset — dropping the unresolved name must restore that, not
-        // spawn a tool-less agent.
+      it('fails closed when the allow-list is only the unavailable WebSearch', async () => {
+        // The unresolved name stays a dead, restrictive entry: the agent
+        // runs tool-less rather than inheriting shell/write it was not
+        // configured for. Deliberate — supersedes the earlier inherit-all
+        // compatibility fallback for converted Claude agents.
         const configWithUnregistered: SubagentConfig = {
           ...validConfig,
           tools: ['WebSearch'],
@@ -1926,16 +1925,7 @@ bad`);
           configWithUnregistered,
         );
 
-        expect(runtimeConfig.toolConfig?.tools).toEqual(['*']);
-      });
-
-      it('drops an unregistered WebSearch from a mixed list without widening', async () => {
-        const runtimeConfig = await manager.convertToRuntimeConfig({
-          ...validConfig,
-          tools: ['WebSearch', 'read_file'],
-        });
-
-        expect(runtimeConfig.toolConfig?.tools).toEqual(['read_file']);
+        expect(runtimeConfig.toolConfig?.tools).toEqual(['WebSearch']);
       });
 
       it('does not widen an allow-list whose names simply fail to resolve', async () => {

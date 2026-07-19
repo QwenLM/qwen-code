@@ -59,10 +59,7 @@ import {
   parseMaxTurns,
   claudePermissionModeToApprovalMode,
 } from './agent-frontmatter-schema.js';
-import {
-  ToolDisplayNames,
-  ToolDisplayNamesMigration,
-} from '../tools/tool-names.js';
+import { ToolDisplayNamesMigration } from '../tools/tool-names.js';
 import { QWEN_DIR, Storage } from '../config/storage.js';
 import {
   hasRebuiltToolRegistry,
@@ -1094,33 +1091,16 @@ export class SubagentManager {
       (config.tools && config.tools.length > 0) ||
       (config.disallowedTools && config.disallowedTools.length > 0)
     ) {
-      let toolNames = config.tools
+      // Unresolved names (e.g. `WebSearch` while the opt-in web_search tool
+      // is unregistered) stay in the list as dead, restrictive entries: an
+      // explicit allow-list must never be widened on resolution failure, so
+      // an agent whose every tool is unavailable runs tool-less (fail
+      // closed) rather than inheriting shell/write it was not configured
+      // for. Deliberate: this supersedes the earlier compatibility fallback
+      // for converted Claude agents.
+      const toolNames = config.tools
         ? await this.transformToToolNames(config.tools)
         : ['*'];
-      // The opt-in web_search tool registers only when explicitly enabled,
-      // so a converted Claude agent declaring `tools: WebSearch` can carry a
-      // name that resolves to nothing. The old converter mapping dropped the
-      // name entirely, so such agents converted to an empty allow-list and
-      // inherited the full toolset. Restore exactly that: drop the
-      // unresolved WebSearch display name, and fall back to inherit-all only
-      // when the list empties out as a result. Any other unresolved name is
-      // preserved as-is (a dead, restrictive entry) — an explicit allow-list
-      // must never be widened on resolution failure.
-      if (
-        config.tools &&
-        this.config.getToolRegistry() &&
-        toolNames.includes(ToolDisplayNames.WEB_SEARCH)
-      ) {
-        toolNames = toolNames.filter(
-          (name) => name !== ToolDisplayNames.WEB_SEARCH,
-        );
-        if (toolNames.length === 0) {
-          debugLogger.warn(
-            `Subagent "${config.name}": dropping the unavailable WebSearch left the allow-list empty; using the inherited toolset`,
-          );
-          toolNames = ['*'];
-        }
-      }
       toolConfig = {
         tools: toolNames,
         ...(config.disallowedTools && config.disallowedTools.length > 0
