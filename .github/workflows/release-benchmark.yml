@@ -1,8 +1,6 @@
 name: 'Release Benchmarks'
 
 on:
-  push:
-    branches: ['dragon/release-benchmark']
   release:
     types: ['published']
   workflow_dispatch:
@@ -33,10 +31,6 @@ jobs:
         github.repository == 'QwenLM/qwen-code' &&
         (
           (
-            github.event_name == 'push' &&
-            github.ref == 'refs/heads/dragon/release-benchmark'
-          ) ||
-          (
             github.event_name == 'workflow_dispatch' &&
             github.ref == 'refs/heads/main'
           ) ||
@@ -58,8 +52,8 @@ jobs:
       API_URL: '${{ vars.RELEASE_BENCHMARK_API_URL }}'
       GH_TOKEN: '${{ github.token }}'
       OIDC_AUDIENCE: "${{ vars.RELEASE_BENCHMARK_OIDC_AUDIENCE || 'qwen-release-benchmark' }}"
-      RELEASE_TAG: "${{ github.event.release.tag_name || inputs.tag || (github.event_name == 'push' && 'v0.19.11') }}"
-      REQUESTED_SUITE: "${{ inputs.suite || (github.event_name == 'push' && 'release-smoke-v1') || vars.RELEASE_BENCHMARK_SUITE || 'release-full-v1' }}"
+      RELEASE_TAG: '${{ github.event.release.tag_name || inputs.tag }}'
+      REQUESTED_SUITE: "${{ inputs.suite || vars.RELEASE_BENCHMARK_SUITE || 'release-full-v1' }}"
 
     steps:
       - name: 'Resolve stable release'
