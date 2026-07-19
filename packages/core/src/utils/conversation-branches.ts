@@ -249,6 +249,7 @@ function findSemanticLeaves(index: ConversationIndex): SemanticLeaf[] {
   for (const uuid of index.firstByUuid.keys()) {
     if ((index.childrenByUuid.get(uuid)?.length ?? 0) > 0) continue;
     const leafUuid = collapseNeutralTail(uuid, index.firstByUuid);
+    if (leafUuid === null) continue;
     candidates.add(leafUuid);
     physicalLeafBySemanticLeaf.set(leafUuid, uuid);
   }
@@ -300,20 +301,21 @@ function countLeafDescendants(
 function collapseNeutralTail(
   leafUuid: string,
   firstByUuid: ReadonlyMap<string, ChatRecord>,
-): string {
+): string | null {
   const visited = new Set<string>();
   let currentUuid = leafUuid;
 
   while (!visited.has(currentUuid)) {
     visited.add(currentUuid);
     const record = firstByUuid.get(currentUuid);
-    if (!record || !isNeutralTailRecord(record)) break;
+    if (!record) return null;
+    if (!isNeutralTailRecord(record)) return currentUuid;
     const parentUuid = record.parentUuid;
-    if (parentUuid === null || !firstByUuid.has(parentUuid)) break;
+    if (parentUuid === null || !firstByUuid.has(parentUuid)) return null;
     currentUuid = parentUuid;
   }
 
-  return currentUuid;
+  return null;
 }
 
 function summarizeBranch(

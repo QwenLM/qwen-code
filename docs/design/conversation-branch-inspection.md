@@ -39,6 +39,8 @@ allowlist: `custom_title`, `session_artifact_event`, and
 `session_artifact_snapshot`. These records may be appended beside or after a
 conversation tail without creating a distinct recoverable conversation. A
 terminal run of them collapses to its nearest known non-neutral ancestor.
+If no such ancestor exists, the metadata-only run is omitted because it is not
+a reconstructable conversation branch.
 Collapsed candidates are deduplicated, then any candidate that is a strict
 ancestor of another candidate is removed. The result is an antichain of
 semantic leaves.

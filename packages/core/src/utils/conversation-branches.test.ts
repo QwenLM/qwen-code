@@ -166,6 +166,22 @@ describe('inspectConversationBranches', () => {
     ).toEqual(['conversation-leaf']);
   });
 
+  it('drops neutral-only branches without a conversation ancestor', () => {
+    const subtypes = [
+      'custom_title',
+      'session_artifact_event',
+      'session_artifact_snapshot',
+    ] as const;
+
+    for (const subtype of subtypes) {
+      const records = [system('metadata-root', null, subtype)];
+      expect(inspectConversationBranches(records)).toEqual({
+        branches: [],
+        diagnostics: [],
+      });
+    }
+  });
+
   it('uses the last collapsed physical leaf timestamp as updatedAt', () => {
     const records = [
       record('conversation-leaf', null),
