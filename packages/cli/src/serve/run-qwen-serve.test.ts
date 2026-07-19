@@ -5540,7 +5540,26 @@ describe('runQwenServe channel worker supervisor', () => {
 
       const beforeCaps = await fetch(`${handle.url}/capabilities`, { headers });
       expect(await beforeCaps.json()).toMatchObject({
-        features: expect.arrayContaining(['channel_control']),
+        features: expect.arrayContaining([
+          'channel_control',
+          'channel_management',
+        ]),
+      });
+
+      const configured = await fetch(`${handle.url}/workspace/channels`, {
+        headers,
+      });
+      expect(configured.status).toBe(200);
+      expect(await configured.json()).toMatchObject({
+        revision: expect.any(String),
+        instances: {
+          telegram: {
+            name: 'telegram',
+            config: { type: 'telegram' },
+            startsWithServe: false,
+            runtime: { state: 'stopped' },
+          },
+        },
       });
 
       const enable = await fetch(`${handle.url}/workspace/channel`, {

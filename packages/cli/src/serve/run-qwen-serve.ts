@@ -98,6 +98,8 @@ import { getCliVersion } from '../utils/version.js';
 import { getRateLimiter } from './rate-limit.js';
 import type { AcpHttpHandle } from './acp-http/index.js';
 import type { WorkspaceRuntimeRemovalController } from './routes/workspace-management.js';
+import { createChannelManagementService } from './channel-management-service.js';
+import { WorkspaceChannelSettingsStore } from './channel-settings-store.js';
 import {
   allowOriginMode,
   listenerMaxConnections,
@@ -1001,6 +1003,7 @@ function currentServeFeaturesForRunQwenServe(
     reloadAvailable: true,
     channelReloadAvailable: opts.channelSelection !== undefined,
     channelControlAvailable: true,
+    channelManagementAvailable: true,
     persistentWorkspaceRegistrationAvailable: true,
     workspaceRuntimeRemovalAvailable: true,
     // Advertise the same WS feature flags as the runtime path (serve-features.ts)
@@ -3783,6 +3786,36 @@ async function runQwenServeImpl(
         sessionOwnerIndex,
       });
     const workspaceVoiceCoordinator = new WorkspaceVoiceCoordinator();
+    const channelManagementServices = new WeakMap<
+      WorkspaceRuntime,
+      Promise<ReturnType<typeof createChannelManagementService>>
+    >();
+    const channelManagementService = (
+      targetRuntime: WorkspaceRuntime,
+    ): Promise<ReturnType<typeof createChannelManagementService>> => {
+      const existing = channelManagementServices.get(targetRuntime);
+      if (existing) return existing;
+      const pending = (async () => {
+        if (!ensureChannelWorkerManager) {
+          throw Object.assign(
+            new Error('Channel worker manager is unavailable.'),
+            { code: 'channel_worker_unavailable' },
+          );
+        }
+        return createChannelManagementService({
+          workspaceCwd: targetRuntime.workspaceCwd,
+          store: new WorkspaceChannelSettingsStore(targetRuntime.workspaceCwd),
+          manager: await ensureChannelWorkerManager(),
+        });
+      })();
+      channelManagementServices.set(targetRuntime, pending);
+      void pending.catch(() => {
+        if (channelManagementServices.get(targetRuntime) === pending) {
+          channelManagementServices.delete(targetRuntime);
+        }
+      });
+      return pending;
+    };
 
     core.registerDaemonGaugeCallbacks({
       sessionCount: () =>
@@ -4356,6 +4389,7 @@ async function runQwenServeImpl(
         return channelWorkerManager.enqueueWebhookTask(task);
       },
       reloadChannelWorker,
+      channelManagementService,
       getPerfSnapshot: () => ({
         eventLoop: currentDaemonEventLoopMonitor.snapshot(),
         promptQueueWait: {

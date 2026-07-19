@@ -424,6 +424,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_reload',
   'channel_reload',
   'channel_control',
+  'channel_management',
   'workspace_channel_observed_contacts',
   'multi_workspace_sessions',
   'multi_workspace_session_rewind',
@@ -2342,6 +2343,20 @@ describe('createServeApp', () => {
           expect(
             getAdvertisedServeFeatures(undefined, {
               channelControlAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'channel_management') {
+          expect(predicate({ channelManagementAvailable: true })).toBe(true);
+          expect(predicate({ channelManagementAvailable: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              channelManagementAvailable: true,
             }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(

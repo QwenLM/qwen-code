@@ -284,6 +284,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Runtime GET/PUT/DELETE control for daemon-managed channel selection.
   // The route exists even when no selection was supplied at daemon boot.
   channel_control: { since: 'v1' },
+  // Sanitized workspace Channel configuration and lifecycle management.
+  // Advertised only when the workspace-scoped service is wired.
+  channel_management: { since: 'v1' },
   // Read-only workspace graph of recently observed channel contacts.
   workspace_channel_observed_contacts: { since: 'v1' },
   // Multi-workspace session routing. Advertised only when one daemon hosts
@@ -391,6 +394,7 @@ export interface AdvertiseFeatureToggles {
    */
   channelReloadAvailable?: boolean;
   channelControlAvailable?: boolean;
+  channelManagementAvailable?: boolean;
   /**
    * Whether the daemon will accept client-hosted MCP servers over the WS
    * (`client_mcp_over_ws`, issue #5626).
@@ -491,6 +495,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ['workspace_reload', (toggles) => toggles.reloadAvailable === true],
   ['channel_reload', (toggles) => toggles.channelReloadAvailable === true],
   ['channel_control', (toggles) => toggles.channelControlAvailable === true],
+  [
+    'channel_management',
+    (toggles) => toggles.channelManagementAvailable === true,
+  ],
   [
     'multi_workspace_sessions',
     (toggles) => toggles.multiWorkspaceSessionsEnabled === true,
