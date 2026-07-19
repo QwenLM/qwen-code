@@ -1529,9 +1529,33 @@ jobs:
             # manual labels may race the ack job, so a takeover PR with NO
             # engage ack yet gets one here (identity-verified) — it is also
             # the round-window anchor. ic.json is re-fetched so THIS scan
-            # already counts under the fresh key.
-            if [[ "${HAS_TAKEOVER}" == "true" ]] \
-              && ! grep -q 'takeover-ack engaged' "${WORKDIR}/ic.json"; then
+            # already counts under the fresh key. Dedup is author-filtered
+            # (a forged human marker must not suppress the real ack), and a
+            # label application NEWER than the latest bot ack means a fresh
+            # engagement — post a fresh ack so the round window and cap
+            # reset as documented (re-arm), which no ack job can do for
+            # forks.
+            NEED_ENGAGE_ACK='false'
+            if [[ "${HAS_TAKEOVER}" == "true" ]]; then
+              LAST_ENGAGE_ACK_TS="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+                [.[] | select((.user.login // "") == $ab)
+                     | select(.body // "" | contains("<!-- takeover-ack engaged -->"))
+                     | .created_at] | sort | last // ""' "${WORKDIR}/ic.json")"
+              if [[ -z "${LAST_ENGAGE_ACK_TS}" ]]; then
+                NEED_ENGAGE_ACK='true'
+              else
+                gh api "repos/${REPO}/issues/${PR}/events" --paginate > "${WORKDIR}/pr-events.json" 2> /dev/null \
+                  || echo '[]' > "${WORKDIR}/pr-events.json"
+                LAST_LABELED_TS="$(jq -r --arg lb "${TAKEOVER_LABEL}" '
+                  [.[] | select(.event == "labeled")
+                       | select((.label.name // "") == $lb)
+                       | .created_at] | sort | last // ""' "${WORKDIR}/pr-events.json")"
+                if [[ -n "${LAST_LABELED_TS}" && "${LAST_LABELED_TS}" > "${LAST_ENGAGE_ACK_TS}" ]]; then
+                  NEED_ENGAGE_ACK='true'
+                fi
+              fi
+            fi
+            if [[ "${NEED_ENGAGE_ACK}" == "true" ]]; then
               if [[ -z "${SCAN_BOT_ACTOR:-}" ]]; then
                 SCAN_BOT_ACTOR="$(gh api user --jq '.login' 2> /dev/null || echo 'unknown')"
               fi

@@ -1080,6 +1080,84 @@ describe('qwen-autofix workflow', () => {
     // under the fresh key.
     expect(reviewScanJob).toContain('takeover-ack engaged');
     expect(reviewScanJob).toContain('ic re-fetch after engage ack failed');
+    // Ack dedup is author-filtered (a forged human marker must not suppress
+    // the real ack) and re-armable: a takeover-label application newer than
+    // the latest bot ack posts a fresh ack, resetting the round window.
+    const ackTsProgram = reviewScanJob
+      .match(
+        /LAST_ENGAGE_ACK_TS="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" '([\s\S]*?)' "\$\{WORKDIR\}\/ic\.json"\)"/,
+      )?.[1]
+      ?.replace(/\n {16}/g, '\n');
+    expect(ackTsProgram).toBeTruthy();
+    const ackTs = execFileSync(
+      'jq',
+      ['-r', '--arg', 'ab', 'bot', ackTsProgram],
+      {
+        encoding: 'utf8',
+        input: JSON.stringify([
+          {
+            user: { login: 'bot' },
+            body: 'x <!-- takeover-ack engaged -->',
+            created_at: '2026-07-01T00:00:00Z',
+          },
+          {
+            user: { login: 'mallory' },
+            body: 'fake <!-- takeover-ack engaged -->',
+            created_at: '2026-07-05T00:00:00Z',
+          },
+          {
+            user: { login: 'bot' },
+            body: 'y <!-- takeover-ack engaged -->',
+            created_at: '2026-07-03T00:00:00Z',
+          },
+          {
+            user: { login: 'bot' },
+            body: 'released <!-- takeover-ack released -->',
+            created_at: '2026-07-04T00:00:00Z',
+          },
+        ]),
+      },
+    ).trim();
+    expect(ackTs).toBe('2026-07-03T00:00:00Z');
+    const labeledTsProgram = reviewScanJob
+      .match(
+        /LAST_LABELED_TS="\$\(jq -r --arg lb "\$\{TAKEOVER_LABEL\}" '([\s\S]*?)' "\$\{WORKDIR\}\/pr-events\.json"\)"/,
+      )?.[1]
+      ?.replace(/\n {18}/g, '\n');
+    expect(labeledTsProgram).toBeTruthy();
+    const labeledTs = execFileSync(
+      'jq',
+      ['-r', '--arg', 'lb', 'autofix/takeover', labeledTsProgram],
+      {
+        encoding: 'utf8',
+        input: JSON.stringify([
+          {
+            event: 'labeled',
+            label: { name: 'autofix/takeover' },
+            created_at: '2026-07-02T00:00:00Z',
+          },
+          {
+            event: 'labeled',
+            label: { name: 'other' },
+            created_at: '2026-07-09T00:00:00Z',
+          },
+          {
+            event: 'unlabeled',
+            label: { name: 'autofix/takeover' },
+            created_at: '2026-07-08T00:00:00Z',
+          },
+          {
+            event: 'labeled',
+            label: { name: 'autofix/takeover' },
+            created_at: '2026-07-06T00:00:00Z',
+          },
+        ]),
+      },
+    ).trim();
+    expect(labeledTs).toBe('2026-07-06T00:00:00Z');
+    expect(reviewScanJob).toContain(
+      '"${LAST_LABELED_TS}" > "${LAST_ENGAGE_ACK_TS}"',
+    );
     // The producers must actually REQUEST labels — the jq consumers above
     // stay green on handcrafted fixtures even if a future edit drops the
     // field and skip/takeover filtering silently dies in production.
