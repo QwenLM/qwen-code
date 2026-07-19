@@ -403,6 +403,50 @@ describe('RestSseTransport', () => {
       // Either way, no events should be yielded
       expect(events).toHaveLength(0);
     });
+
+    it('aborts the underlying fetch when the consumer breaks early without a caller signal', async () => {
+      // Regression for #7238: a consumer that opens a subscription,
+      // receives an event, and `break`s out — without supplying
+      // opts.signal — must still tear down the fetch/TCP connection so
+      // the daemon EventBus subscriber is released. Previously the
+      // request-lifetime controller was never aborted on normal iterator
+      // exit, so the fetch signal stayed unaborted and the connection
+      // leaked.
+      const frames = [
+        'data: {"type":"a","data":{},"id":1,"v":1}\n\n',
+        'data: {"type":"b","data":{},"id":2,"v":1}\n\n',
+      ].join('');
+      const { fetch, calls } = recordingFetch(() => sseResponse(frames));
+      const transport = new RestSseTransport('http://d', undefined, fetch);
+
+      const events: unknown[] = [];
+      for await (const event of transport.subscribeEvents('s1')) {
+        events.push(event);
+        break; // exit after the first event, no caller signal
+      }
+
+      expect(events).toHaveLength(1);
+      expect(calls[0].signal).not.toBeNull();
+      expect(calls[0].signal?.aborted).toBe(true);
+    });
+
+    it('aborts the underlying fetch after the stream completes normally', async () => {
+      // The request-lifetime controller must be aborted on every exit
+      // path, including normal end-of-stream, so no fetch/TCP connection
+      // is left dangling.
+      const { fetch, calls } = recordingFetch(() =>
+        sseResponse('data: {"type":"a","data":{},"id":1,"v":1}\n\n'),
+      );
+      const transport = new RestSseTransport('http://d', undefined, fetch);
+
+      const events: unknown[] = [];
+      for await (const event of transport.subscribeEvents('s1')) {
+        events.push(event);
+      }
+
+      expect(events).toHaveLength(1);
+      expect(calls[0].signal?.aborted).toBe(true);
+    });
   });
 
   // ---- dispose() --------------------------------------------------------
