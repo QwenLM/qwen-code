@@ -7,7 +7,9 @@
 import type { UpdateObject } from '../ui/utils/updateCheck.js';
 import type { LoadedSettings } from '../config/settings.js';
 import {
+  getNpmCliPath,
   getInstallationInfo,
+  PackageManager,
   resolveUpdateCommand,
 } from './installationInfo.js';
 import { updateEventEmitter } from './updateEventEmitter.js';
@@ -93,10 +95,24 @@ export function handleAutoUpdate(
     installationInfo.updateCommand,
     info.update.latest,
   );
-  const isWindows = os.platform() === 'win32';
-  const shell = isWindows ? 'cmd.exe' : 'bash';
-  const shellArgs = isWindows ? ['/c', updateCommand] : ['-c', updateCommand];
-  const updateProcess = spawnFn(shell, shellArgs, {
+  const platform = os.platform();
+  const isWindows = platform === 'win32';
+  const command =
+    installationInfo.packageManager === PackageManager.NPM
+      ? process.execPath
+      : isWindows
+        ? 'cmd.exe'
+        : 'bash';
+  const commandArgs =
+    installationInfo.packageManager === PackageManager.NPM
+      ? [
+          getNpmCliPath(process.execPath, platform),
+          ...updateCommand.split(' ').slice(1),
+        ]
+      : isWindows
+        ? ['/c', updateCommand]
+        : ['-c', updateCommand];
+  const updateProcess = spawnFn(command, commandArgs, {
     stdio: ['pipe', 'ignore', 'pipe'],
   });
   let errorOutput = '';
