@@ -12,6 +12,59 @@ are listed; nightly and preview pre-releases are intentionally omitted.
 > [GitHub Releases](https://github.com/QwenLM/qwen-code/releases). Do not edit it
 > by hand — run `npm run changelog` to regenerate.
 
+## [0.20.0](https://github.com/QwenLM/qwen-code/releases/tag/v0.20.0) - 2026-07-19
+
+### Highlights
+
+_See the complete change list below._
+
+### Breaking Changes
+
+No known breaking changes.
+
+### Complete Change List
+
+#### Features
+
+- feat(cli): Add bounded daemon log rotation ([#6969](https://github.com/QwenLM/qwen-code/pull/6969)) by @doudouOUC
+- feat(review): bake the round label into a findings role's identity line and key ([#7171](https://github.com/QwenLM/qwen-code/pull/7171)) by @wenshao
+- feat(webshell): replay ChatRecord history in readonly WebShell ([#6999](https://github.com/QwenLM/qwen-code/pull/6999)) by @cxruan
+- feat(ui): let the user read the full plan from the exit_plan_mode confirmation ([#7060](https://github.com/QwenLM/qwen-code/pull/7060)) by @zjunothing
+- feat(providers): add qwen3.8-max-preview to Token Plan model list ([#7199](https://github.com/QwenLM/qwen-code/pull/7199)) by @qwen-code-dev-bot
+
+#### Bug Fixes
+
+- fix(sdk-java): preserve exception cause in AcpClient init failures ([#7189](https://github.com/QwenLM/qwen-code/pull/7189)) by @chinesepowered
+- fix(web-shell): proxy /goals route in Vite dev server ([#7187](https://github.com/QwenLM/qwen-code/pull/7187)) by @wenshao
+- fix(sdk-java): correct TIMEOUT_30_MINUTES to actually be 30 minutes ([#7188](https://github.com/QwenLM/qwen-code/pull/7188)) by @chinesepowered
+- fix(cli): emit deferred stream-json startup warnings ([#7174](https://github.com/QwenLM/qwen-code/pull/7174)) by @barry166
+- fix(review): judge a CI check by its name's latest run, not by any leftover ([#7183](https://github.com/QwenLM/qwen-code/pull/7183)) by @wenshao
+- fix(review): count Step 6's inline findings from the drafted comments, never from typed numbers ([#7173](https://github.com/QwenLM/qwen-code/pull/7173)) by @wenshao
+- fix(web-shell): dedupe restored images and harden the sidebar shortcut handler ([#7169](https://github.com/QwenLM/qwen-code/pull/7169)) by @zjunothing
+- fix(mcp): normalize tool names for strict providers ([#6976](https://github.com/QwenLM/qwen-code/pull/6976)) by @ran411285752
+- fix(core): apply native tool calling schema for gemma 4 ([#7177](https://github.com/QwenLM/qwen-code/pull/7177)) by @ghisguth
+- fix(cli): share one process.stdout resize listener in useTerminalSize ([#7186](https://github.com/QwenLM/qwen-code/pull/7186)) by @mvanhorn
+- fix: surface underlying .cause of OpenAI-compatible connection errors in debug log and API error message ([#7010](https://github.com/QwenLM/qwen-code/pull/7010)) by @mvanhorn
+- fix(web-shell): prevent toolbar label clipping ([#7196](https://github.com/QwenLM/qwen-code/pull/7196)) by @carffuca
+- fix(review): one disclosure per subject — dedupe Not-reviewed, collapse an all-built-none-launched roster ([#7190](https://github.com/QwenLM/qwen-code/pull/7190)) by @wenshao
+- fix(review): an unverified Critical must not become a public blocker — soften the Request changes it rides ([#7191](https://github.com/QwenLM/qwen-code/pull/7191)) by @wenshao
+
+#### Performance
+
+- perf(channels): cache channel memory recall ([#7175](https://github.com/QwenLM/qwen-code/pull/7175)) by @qwen-code-dev-bot
+- perf(cli): Defer TUI runtime from ACP startup ([#7182](https://github.com/QwenLM/qwen-code/pull/7182)) by @doudouOUC
+
+#### Internal Changes
+
+- chore(vscode-ide-companion): sync third-party notices and guard against future drift ([#7161](https://github.com/QwenLM/qwen-code/pull/7161)) by @wenshao
+- ci(autofix): harden the address path against stale targets and untrusted route events ([#7163](https://github.com/QwenLM/qwen-code/pull/7163)) by @wenshao
+
+### New Contributors
+
+- @ghisguth made their first contribution in [#7177](https://github.com/QwenLM/qwen-code/pull/7177)
+
+**Full Changelog**: https://github.com/QwenLM/qwen-code/compare/v0.19.12...v0.20.0
+
 ## [0.19.12](https://github.com/QwenLM/qwen-code/releases/tag/v0.19.12) - 2026-07-18
 
 ### Highlights
