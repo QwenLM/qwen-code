@@ -156,6 +156,27 @@ The durable delivery identity is derived from the task ID and fire timestamp so
 the same scheduled fire cannot enqueue conflicting duplicate work. Delivery
 failure never reruns the Agent; only the persisted final answer is retried.
 
+### Bounded outbox text
+
+Each delivery record stores at most 100,000 JavaScript UTF-16 code units in its
+`text` field. This is an internal per-record outbox bound, not an Agent output
+limit or an IM platform limit.
+
+`enqueueScheduledDelivery` normalizes text before record validation and
+idempotency comparison. Text within the bound is preserved exactly. Text over
+the bound is truncated on a Unicode-safe boundary and receives the stable
+suffix:
+
+```text
+[Channel delivery truncated because the result exceeded the outbox size limit.]
+```
+
+The suffix and its preceding separator count toward the 100,000-unit bound.
+The normalized text is used both for the candidate record and for comparison
+with an existing record carrying the same delivery ID, so retrying an enqueue
+with the same oversized answer remains idempotent. This behavior does not add a
+new outbox field or change the dispatcher, IPC, or adapter contracts.
+
 ## Adapter boundary
 
 The public task contract keeps `channelName` beside `target`. The dispatcher
@@ -194,6 +215,8 @@ ID or report success without sending.
   failure, subject to the dispatcher's bounded exponential backoff.
 - Platform rejection of the ID or credentials: classified by the adapter;
   permanent errors stop retrying, transient errors retry.
+- An oversized successful answer is persisted and delivered as the bounded
+  snapshot described above, with an explicit truncation marker.
 - Outbox persistence failure: the task run remains complete, the failure is
   logged, and the Agent is not rerun.
 
@@ -237,3 +260,7 @@ The implementation plan must cover:
 9. Fast-path bundle and existing scheduled-task regression checks so the daemon
    delivery implementation does not load heavyweight runtime modules into
    unrelated CLI startup paths.
+10. Outbox boundary tests proving that text at the limit is unchanged,
+    oversized text is Unicode-safely truncated with the marker inside the
+    limit, and repeated enqueue of the same oversized answer remains
+    idempotent.
