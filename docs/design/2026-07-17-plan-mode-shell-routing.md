@@ -115,4 +115,18 @@ Known writes, unavailable unknown approval surfaces, and stale approvals use the
 
 Unit coverage exercises policy classification, snapshots, abort, revision and argument changes, PermissionManager deny/error, warning decoration, payload sanitization, Core routing, duplicate response ownership, sibling auto-approval, wrapped sed edit behavior, Monitor parity, speculation, ACP options and warnings, SubAgentTracker, teammate stream-json, background normalization, dual-output, TUI layout, and prompt wording.
 
-Manual validation is recorded in `.qwen/e2e-tests/plan-mode-shell-routing.md`.
+Manual validation uses a disposable Git workspace containing a sample file and
+covers these cases:
+
+1. In Plan mode, verify that `git status` runs, `touch changed.txt` is blocked,
+   and an unknown command such as `python -c 'print(1)'` offers only one-time
+   approval and cancel before prompting again on its next invocation.
+2. Run a wrapped edit in a narrow compact confirmation and verify that the raw
+   command, warning, diff context, question, and available choices remain
+   visible while modification and persistent approval stay unavailable.
+3. Change the Plan-mode revision or working directory while an approval is
+   pending, return changed or unoffered approval payloads, and send duplicate or
+   late responses; verify that each path cancels without execution.
+4. Repeat read-only, write, and unknown cases through Monitor, ACP, stream-json,
+   nested teammates, and background execution; verify that every surface uses
+   the same classification and fail-closed behavior.
