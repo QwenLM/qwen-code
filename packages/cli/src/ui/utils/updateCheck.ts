@@ -97,11 +97,21 @@ export async function isGlobalNpmInstallation(
   run: typeof execFileAsync = execFileAsync,
   canonicalize: typeof realpath = realpath,
 ): Promise<boolean> {
-  if (!cliPath || !looksLikeNpmPackagePath(cliPath)) return false;
-  const [resolvedCliPath, unresolvedGlobalRoot] = await Promise.all([
-    canonicalize(cliPath),
-    runGlobalNpm(['root', '--global'], run),
-  ]);
+  if (!cliPath) return false;
+  // Canonicalize before matching. The CLI can be launched through its global
+  // bin symlink (e.g. `.../bin/qwen`), whose path carries no `node_modules`
+  // segment, and Node does not resolve `process.argv[1]` symlinks. Matching the
+  // raw path would silently skip the global-npm path here, unlike
+  // getInstallationInfo which realpath-resolves first.
+  let resolvedCliPath: string;
+  try {
+    resolvedCliPath = await canonicalize(cliPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+  if (!looksLikeNpmPackagePath(resolvedCliPath)) return false;
+  const unresolvedGlobalRoot = await runGlobalNpm(['root', '--global'], run);
   let globalRoot: string;
   try {
     globalRoot = await canonicalize(unresolvedGlobalRoot);
@@ -128,6 +138,20 @@ export async function fetchGlobalNpmUpdateInfo(
     ['view', packageName, `dist-tags.${distTag}`, '--json', '--global'],
     run,
   );
+  if (output === '') {
+    // `npm view <pkg> dist-tags.<tag> --json` exits 0 with empty stdout when the
+    // configured registry/mirror publishes no version under this dist-tag (e.g.
+    // a private mirror that doesn't carry `nightly`). Treat that as "no newer
+    // version for this tag" instead of throwing — otherwise the empty result
+    // reaches JSON.parse and, via the Promise.all in checkForUpdatesDetailed,
+    // fails the whole check and discards the other tag's result.
+    return {
+      latest: currentVersion,
+      current: currentVersion,
+      type: 'latest',
+      name: packageName,
+    };
+  }
   const latest: unknown = JSON.parse(output);
   if (typeof latest !== 'string') {
     throw new Error(`Invalid npm ${distTag} version response`);

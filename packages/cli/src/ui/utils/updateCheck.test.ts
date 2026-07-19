@@ -279,6 +279,30 @@ describe('checkForUpdates', () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it('resolves a bin symlink before matching the npm package path', async () => {
+    const run = vi.fn().mockResolvedValue({
+      stdout: '/usr/local/lib/node_modules\n',
+      stderr: '',
+    });
+    const canonicalize = vi.fn(async (candidate: string) =>
+      candidate === '/usr/local/bin/qwen'
+        ? '/usr/local/lib/node_modules/@qwen-code/qwen-code/dist/cli.js'
+        : '/usr/local/lib/node_modules',
+    );
+
+    await expect(
+      isGlobalNpmInstallation(
+        '/usr/local/bin/qwen',
+        run as unknown as NonNullable<
+          Parameters<typeof isGlobalNpmInstallation>[1]
+        >,
+        canonicalize as unknown as NonNullable<
+          Parameters<typeof isGlobalNpmInstallation>[2]
+        >,
+      ),
+    ).resolves.toBe(true);
+  });
+
   it('runs the Windows npm CLI through Node without a shell', async () => {
     const run = vi.fn().mockResolvedValue({ stdout: '"1.1.0"', stderr: '' });
     const resolveNpmCliPath = vi
@@ -401,6 +425,21 @@ describe('checkForUpdates', () => {
         >,
       ),
     ).rejects.toThrow('npm view failed');
+  });
+
+  it('treats an empty dist-tag response as no update', async () => {
+    const run = vi.fn().mockResolvedValue({ stdout: '\n', stderr: '' });
+
+    await expect(
+      fetchGlobalNpmUpdateInfo(
+        '@qwen-code/qwen-code',
+        '1.0.0',
+        'nightly',
+        run as unknown as NonNullable<
+          Parameters<typeof fetchGlobalNpmUpdateInfo>[3]
+        >,
+      ),
+    ).resolves.toMatchObject({ current: '1.0.0', latest: '1.0.0' });
   });
 
   it('should pass a non-optional package version to update-notifier', async () => {
