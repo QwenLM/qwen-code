@@ -1342,6 +1342,12 @@ export function registerSessionRoutes(
               await new SessionService(runtime.workspaceCwd).removeSession(
                 session.sessionId,
               );
+              // Clean up the worktree if one was created for this session.
+              if (worktreeMeta) {
+                await new GitWorktreeService(workspaceCwd)
+                  .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
+                  .catch(() => {});
+              }
             }
           } catch {
             // Best-effort cleanup; channel.exited will eventually reap.
@@ -1393,16 +1399,36 @@ export function registerSessionRoutes(
             },
           ).catch(() => {});
         } catch (cdErr) {
-          // The session is usable even if the cd fails — it just stays
-          // in the main checkout. Surface the worktree metadata so the
-          // client knows what was intended.
+          // cd failed — relocation is transactional: kill the session,
+          // remove the worktree, and return an error. Leaving the session
+          // alive with stale worktree metadata in the bridge entry would
+          // make GET /session/:id/status claim isolation the session
+          // doesn't have.
           if (daemonLog) {
-            daemonLog.warn('worktree cd failed after spawn', {
+            daemonLog.warn('worktree cd failed, rolling back', {
               sessionId: session.sessionId,
-              worktreePath: worktreeMeta.path,
               error: cdErr instanceof Error ? cdErr.message : String(cdErr),
             });
           }
+          const killed = await runtime.bridge
+            .killSession(session.sessionId, { requireZeroAttaches: true })
+            .catch(() => false);
+          if (killed) {
+            await new SessionService(workspaceCwd)
+              .removeSession(session.sessionId)
+              .catch(() => {});
+          }
+          // cd failed so the session never entered the worktree — the
+          // worktree is unused regardless of whether the session was
+          // killed or another client keeps it alive in the main checkout.
+          await new GitWorktreeService(workspaceCwd)
+            .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
+            .catch(() => {});
+          res.status(500).json({
+            error: 'Failed to relocate session into worktree',
+            code: 'worktree_relocate_failed',
+          });
+          return;
         }
       }
 

@@ -365,7 +365,7 @@ export function WorkspaceSection({
         {onOpenGitDiff && workspace.trusted && gitStatus?.branch && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <span className={styles.gitPill}>
+              <span className={styles.gitPill} role="button" tabIndex={0}>
                 <GitBranchIndicator
                   branch={gitStatus.branch}
                   status={gitStatus}

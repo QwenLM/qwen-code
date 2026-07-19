@@ -1336,10 +1336,8 @@ export function App({
       workspaces,
     ],
   );
-  // Worktree sessions override the git chip branch via sessionWorktree.branch.
-  // The enriched status (dirty/ahead/behind) still queries the main workspace
-  // because the worktree path is not a registered daemon workspace — full
-  // worktree-scoped git status needs daemon support (Phase 3).
+  // Worktree sessions override the git chip branch via sessionWorktree.branch
+  // and query git status with the worktree path (?cwd= parameter).
   useEffect(() => {
     if (!activeWorkspaceCwd) {
       gitStatusWorkspaceCwdRef.current = undefined;
@@ -2818,9 +2816,12 @@ export function App({
         if (result.worktree) {
           setSessionWorktree(result.worktree);
         }
+        // Clear the pending intent only on success. On failure the
+        // welcome badge stays visible so the user knows the isolation
+        // intent was not fulfilled and can retry.
+        pendingWorktreeRef.current = undefined;
+        setWorktreePending(false);
       });
-      pendingWorktreeRef.current = undefined;
-      setWorktreePending(false);
       // One-shot: the picker targets only the *next* new session, so clear
       // it after creation. The next new chat defaults back to the primary
       // workspace unless the user picks one again.
@@ -3909,7 +3910,6 @@ export function App({
       setSelectedWorkspaceCwd(targetWorkspaceCwd);
       pendingWorktreeRef.current = opts?.worktree;
       setWorktreePending(Boolean(opts?.worktree));
-      setSessionWorktree(undefined);
       // Close the drawer before awaiting so a failed createSession() doesn't leave
       // it stuck open with the page scroll still locked, matching loadSidebarSession.
       closeMobileDrawer();
@@ -3927,6 +3927,9 @@ export function App({
           clearPromise,
           reloadLoadedSkills(targetWorkspaceCwd),
         ]);
+        // Clear after successful clearSession — if it rejects, the old
+        // session's worktree state is preserved.
+        setSessionWorktree(undefined);
         return true;
       } catch (error) {
         if (composerFocusRequestRef.current === focusRequest) {

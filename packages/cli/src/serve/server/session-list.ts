@@ -273,6 +273,34 @@ function encodeMetadataSessionCursor(
   ).toString('base64url');
 }
 
+/**
+ * Enrich persisted session summaries with worktree metadata from sidecar
+ * files so the ⑂ badge survives daemon restarts. Shared by all three
+ * listing paths (default, organized, metadata-filtered).
+ */
+async function enrichWorktreeSidecars(
+  bySessionId: Map<string, BridgeSessionSummary>,
+  sessionService: SessionService,
+  archiveState: SessionArchiveState = 'active',
+): Promise<void> {
+  for (const [sessionId, summary] of bySessionId) {
+    if (summary.worktree) continue;
+    const sidecar = await readWorktreeSession(
+      sessionService.getWorktreeSessionPathForArchiveState(
+        sessionId,
+        archiveState,
+      ),
+    ).catch(() => null);
+    if (sidecar) {
+      summary.worktree = {
+        slug: sidecar.slug,
+        path: sidecar.worktreePath,
+        branch: sidecar.worktreeBranch,
+      };
+    }
+  }
+}
+
 function toSummary(item: {
   sessionId: string;
   cwd: string;
@@ -492,20 +520,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
     );
   }
 
-  // Enrich persisted sessions with worktree metadata from sidecar files.
-  for (const [sessionId, summary] of bySessionId) {
-    if (summary.worktree) continue;
-    const sidecar = await readWorktreeSession(
-      sessionService.getWorktreeSessionPath(sessionId),
-    ).catch(() => null);
-    if (sidecar) {
-      summary.worktree = {
-        slug: sidecar.slug,
-        path: sidecar.worktreePath,
-        branch: sidecar.worktreeBranch,
-      };
-    }
-  }
+  await enrichWorktreeSidecars(bySessionId, sessionService, archiveState);
 
   if (
     readOptions.mergeLive !== false &&
@@ -622,20 +637,7 @@ async function listWorkspaceSessionsByMetadataForResponse(
     bySessionId.set(session.sessionId, session);
   }
 
-  // Enrich persisted sessions with worktree metadata from sidecar files.
-  for (const [sessionId, summary] of bySessionId) {
-    if (summary.worktree) continue;
-    const sidecar = await readWorktreeSession(
-      sessionService.getWorktreeSessionPath(sessionId),
-    ).catch(() => null);
-    if (sidecar) {
-      summary.worktree = {
-        slug: sidecar.slug,
-        path: sidecar.worktreePath,
-        branch: sidecar.worktreeBranch,
-      };
-    }
-  }
+  await enrichWorktreeSidecars(bySessionId, sessionService, archiveState);
 
   let liveMergeFailed = false;
   if (readOptions.mergeLive !== false && archiveState !== 'archived') {
@@ -780,21 +782,7 @@ export async function listWorkspaceSessionsForResponse(
     bySessionId.set(item.sessionId, toSummary(item));
   }
 
-  // Enrich persisted sessions with worktree metadata from sidecar files
-  // so the info survives daemon restarts.
-  for (const [sessionId, summary] of bySessionId) {
-    if (summary.worktree) continue;
-    const sidecar = await readWorktreeSession(
-      sessionService.getWorktreeSessionPath(sessionId),
-    ).catch(() => null);
-    if (sidecar) {
-      summary.worktree = {
-        slug: sidecar.slug,
-        path: sidecar.worktreePath,
-        branch: sidecar.worktreeBranch,
-      };
-    }
-  }
+  await enrichWorktreeSidecars(bySessionId, sessionService, archiveState);
 
   if (archiveState === 'archived' || readOptions.mergeLive === false) {
     const sessions = [...bySessionId.values()];

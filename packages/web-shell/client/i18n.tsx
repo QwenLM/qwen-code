@@ -47,8 +47,6 @@ const EN: Messages = {
   'gitDiff.hidden': (v) => `${v?.count ?? 0} more file(s) not shown`,
   'gitDiff.expand': (v) => `Show changes for ${v?.path ?? 'file'}`,
   'gitDiff.collapse': (v) => `Hide changes for ${v?.path ?? 'file'}`,
-  'worktree.isolatedBanner': (v) =>
-    `Isolated worktree session — branch ${v?.branch ?? ''}`,
   'worktree.welcomeTitle': 'Worktree isolated session',
   'worktree.welcomeDesc':
     'Changes are made in a separate copy of the repo and won’t affect your main branch',
@@ -2186,8 +2184,6 @@ const ZH: Messages = {
   'gitDiff.hidden': (v) => `还有 ${v?.count ?? 0} 个文件未显示`,
   'gitDiff.expand': (v) => `显示 ${v?.path ?? '文件'} 的变更`,
   'gitDiff.collapse': (v) => `隐藏 ${v?.path ?? '文件'} 的变更`,
-  'worktree.isolatedBanner': (v) =>
-    `Worktree 隔离会话 — 分支 ${v?.branch ?? ''}`,
   'worktree.welcomeTitle': 'Worktree 隔离会话',
   'worktree.welcomeDesc': '变更在仓库的独立副本中进行，不会影响主分支',
   'workspace.paneLabel': (v) => `工作区：${v?.name ?? ''}`,

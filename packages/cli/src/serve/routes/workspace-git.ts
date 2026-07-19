@@ -7,6 +7,7 @@
 import type { Application, Request, Response } from 'express';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { getGitWorkingTreeStatus } from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import type { WorkspaceGitState } from '../workspace-git-state.js';
@@ -79,9 +80,36 @@ export function registerWorkspaceQualifiedGitRoutes(
       }
     }
     try {
-      res
-        .status(200)
-        .json(await deps.gitState.getStatus(gitCwd, runtime.bridge));
+      if (gitCwd !== runtime.workspaceCwd) {
+        // Worktree cwd: call getGitWorkingTreeStatus directly to avoid
+        // creating a watcher entry in WorkspaceGitState (which would leak
+        // one fs watcher per worktree path, never disposed).
+        const status = await getGitWorkingTreeStatus(gitCwd).catch(() => null);
+        res.status(200).json(
+          status
+            ? {
+                v: 2,
+                workspaceCwd: gitCwd,
+                branch: status.branch ?? null,
+                detached: status.detached,
+                staged: status.staged,
+                unstaged: status.unstaged,
+                untracked: status.untracked,
+                conflicted: status.conflicted,
+                hasUpstream: status.hasUpstream,
+                ahead: status.ahead,
+                behind: status.behind,
+                stashCount: status.stashCount,
+                ...(status.operation ? { operation: status.operation } : {}),
+                computedAt: Date.now(),
+              }
+            : { v: 2, workspaceCwd: gitCwd, branch: null },
+        );
+      } else {
+        res
+          .status(200)
+          .json(await deps.gitState.getStatus(gitCwd, runtime.bridge));
+      }
     } catch (err) {
       deps.sendBridgeError(res, err, { route });
     }
