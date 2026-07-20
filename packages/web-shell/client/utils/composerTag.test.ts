@@ -184,6 +184,17 @@ describe('parseUserMessageContentSafely', () => {
 
     expect(parts).toEqual([{ type: 'text', text: 'rewritten' }]);
   });
+
+  it('rejects valid non-round-tripping parts when source preservation is required', () => {
+    const parts = parseUserMessageContentSafely(
+      'original',
+      () => [{ type: 'text', text: 'rewritten' }],
+      'test warning',
+      { requireSourcePreservation: true },
+    );
+
+    expect(parts).toBeNull();
+  });
 });
 
 describe('composer tag input annotations', () => {
