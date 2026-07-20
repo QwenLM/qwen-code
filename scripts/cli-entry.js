@@ -90,7 +90,11 @@ function preResolveQwenHome() {
   if (!home) return;
   for (const candidate of [join(home, '.qwen', '.env'), join(home, '.env')]) {
     try {
-      const configured = parseEnv(readFileSync(candidate, 'utf8'))['QWEN_HOME'];
+      const source = readFileSync(candidate, 'utf8').replace(
+        /^(\s*(?:export\s+)?QWEN_HOME)\s*:\s*/gm,
+        '$1=',
+      );
+      const configured = parseEnv(source)['QWEN_HOME'];
       if (configured) {
         process.env['QWEN_HOME'] = configured;
         return;

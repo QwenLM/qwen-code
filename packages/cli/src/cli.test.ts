@@ -566,7 +566,7 @@ describe('bootstrap import boundaries', () => {
       mkdirSync(path.join(tempDir, '.qwen'), { recursive: true });
       writeFileSync(
         path.join(tempDir, '.qwen', '.env'),
-        `QWEN_HOME=${JSON.stringify(qwenHome)}\n`,
+        `QWEN_HOME: ${JSON.stringify(qwenHome)}\n`,
       );
       const childEnv: NodeJS.ProcessEnv = {
         ...process.env,
