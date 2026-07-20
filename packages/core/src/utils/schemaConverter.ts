@@ -136,3 +136,73 @@ function toOpenAPI30(schema: Record<string, unknown>): Record<string, unknown> {
 
   return convert(schema) as Record<string, unknown>;
 }
+
+/**
+ * Relaxes a tool-parameter JSON Schema for the OpenAI-compatible wire
+ * format (#7315).
+ *
+ * OpenAI's structured-output contract requires that when an object schema
+ * carries `additionalProperties: false`, every property must be listed in
+ * `required`; several OpenAI-compatible gateways enforce this server-side
+ * by silently promoting ALL properties to required. For tools with
+ * genuinely optional fields the model is then forced to emit every field
+ * on every call — the Agent tool's mutually exclusive `working_dir` and
+ * `isolation` become impossible to satisfy, and the model loops on the
+ * client-side validation error until loop detection kills the run.
+ *
+ * The relaxation is deliberately surgical:
+ * - `additionalProperties: false` is removed ONLY on object levels that
+ *   declare optional properties (some `properties` key missing from
+ *   `required`). Levels where every property is required keep the
+ *   constraint — there is nothing for a gateway to promote.
+ * - `$schema` / `$id` metadata is dropped at every level (some gateways
+ *   reject unknown keywords).
+ * - Everything else passes through untouched; client-side
+ *   `validateToolParams` still enforces the full source schema, so the
+ *   constraint is relaxed on the wire only.
+ *
+ * Pure: returns new objects, never mutates the input.
+ */
+export function relaxSchemaForFunctionCalling(
+  schema: Record<string, unknown>,
+): Record<string, unknown> {
+  const relax = (obj: unknown): unknown => {
+    if (typeof obj !== 'object' || obj === null) {
+      return obj;
+    }
+    if (Array.isArray(obj)) {
+      return obj.map(relax);
+    }
+    const source = obj as Record<string, unknown>;
+    const target: Record<string, unknown> = {};
+
+    const properties = source['properties'];
+    const required = Array.isArray(source['required'])
+      ? (source['required'] as unknown[]).filter(
+          (r): r is string => typeof r === 'string',
+        )
+      : [];
+    const hasOptionalProperties =
+      typeof properties === 'object' &&
+      properties !== null &&
+      !Array.isArray(properties) &&
+      Object.keys(properties).some((key) => !required.includes(key));
+
+    for (const [key, value] of Object.entries(source)) {
+      if (key === '$schema' || key === '$id') {
+        continue;
+      }
+      if (
+        key === 'additionalProperties' &&
+        value === false &&
+        hasOptionalProperties
+      ) {
+        continue;
+      }
+      target[key] = relax(value);
+    }
+    return target;
+  };
+
+  return relax(schema) as Record<string, unknown>;
+}

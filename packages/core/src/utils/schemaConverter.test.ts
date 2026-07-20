@@ -5,7 +5,10 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { convertSchema } from './schemaConverter.js';
+import {
+  convertSchema,
+  relaxSchemaForFunctionCalling,
+} from './schemaConverter.js';
 
 describe('convertSchema', () => {
   describe('mode: auto (default)', () => {
@@ -142,5 +145,125 @@ describe('convertSchema', () => {
       const expected = { type: 'string' };
       expect(convertSchema(input, 'openapi_30')).toEqual(expected);
     });
+  });
+});
+
+// Regression for #7315: gateways enforcing OpenAI's structured-output
+// contract promote every property to required when an object level carries
+// `additionalProperties: false` — mutually exclusive optional tool fields
+// (Agent working_dir vs isolation) become impossible to satisfy.
+describe('relaxSchemaForFunctionCalling', () => {
+  it('strips additionalProperties:false on levels with optional properties', () => {
+    const agentLike = {
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: {
+        description: { type: 'string' },
+        prompt: { type: 'string' },
+        working_dir: { type: 'string' },
+        isolation: { type: 'string', enum: ['worktree'] },
+      },
+      required: ['description', 'prompt'],
+      additionalProperties: false,
+    };
+    const relaxed = relaxSchemaForFunctionCalling(agentLike);
+    expect(relaxed['additionalProperties']).toBeUndefined();
+    expect(relaxed['$schema']).toBeUndefined();
+    expect(relaxed['required']).toEqual(['description', 'prompt']);
+    expect(Object.keys(relaxed['properties'] as object)).toEqual([
+      'description',
+      'prompt',
+      'working_dir',
+      'isolation',
+    ]);
+  });
+
+  it('keeps additionalProperties:false when every property is required', () => {
+    const strictSchema = {
+      type: 'object',
+      properties: {
+        a: { type: 'string' },
+        b: { type: 'number' },
+      },
+      required: ['a', 'b'],
+      additionalProperties: false,
+    };
+    expect(
+      relaxSchemaForFunctionCalling(strictSchema)['additionalProperties'],
+    ).toBe(false);
+  });
+
+  it('keeps additionalProperties:false when there are no properties to promote', () => {
+    const empty = { type: 'object', additionalProperties: false };
+    expect(relaxSchemaForFunctionCalling(empty)['additionalProperties']).toBe(
+      false,
+    );
+  });
+
+  it('relaxes nested object levels independently', () => {
+    const nested = {
+      type: 'object',
+      properties: {
+        outerRequired: {
+          type: 'object',
+          properties: {
+            x: { type: 'string' },
+            y: { type: 'string' },
+          },
+          required: ['x'],
+          additionalProperties: false,
+        },
+        strictInner: {
+          type: 'object',
+          properties: { z: { type: 'string' } },
+          required: ['z'],
+          additionalProperties: false,
+        },
+      },
+      required: ['outerRequired', 'strictInner'],
+      additionalProperties: false,
+    };
+    const relaxed = relaxSchemaForFunctionCalling(nested) as {
+      additionalProperties?: unknown;
+      properties: Record<string, { additionalProperties?: unknown }>;
+    };
+    // Top level: all props required -> constraint kept.
+    expect(relaxed.additionalProperties).toBe(false);
+    // Inner with an optional property -> stripped.
+    expect(
+      relaxed.properties['outerRequired']!.additionalProperties,
+    ).toBeUndefined();
+    // Inner fully required -> kept.
+    expect(relaxed.properties['strictInner']!.additionalProperties).toBe(false);
+  });
+
+  it('preserves non-false additionalProperties forms and recurses into them', () => {
+    const schema = {
+      type: 'object',
+      properties: { a: { type: 'string' } },
+      additionalProperties: {
+        type: 'object',
+        properties: { inner: { type: 'string' } },
+        required: [],
+        additionalProperties: false,
+      },
+    };
+    const relaxed = relaxSchemaForFunctionCalling(schema) as {
+      additionalProperties: { additionalProperties?: unknown };
+    };
+    expect(typeof relaxed.additionalProperties).toBe('object');
+    expect(relaxed.additionalProperties.additionalProperties).toBeUndefined();
+  });
+
+  it('does not mutate the input schema', () => {
+    const input = {
+      type: 'object',
+      properties: { a: { type: 'string' } },
+      required: [],
+      additionalProperties: false,
+    };
+    const snapshot = JSON.parse(JSON.stringify(input));
+    relaxSchemaForFunctionCalling(input);
+    expect(input).toEqual(snapshot);
   });
 });
