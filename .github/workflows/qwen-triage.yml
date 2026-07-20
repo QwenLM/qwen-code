@@ -2,7 +2,7 @@ name: 'Qwen Triage'
 
 on:
   issues:
-    types: ['opened']
+    types: ['opened', 'edited', 'reopened']
   pull_request_target:
     types: ['opened', 'ready_for_review']
   issue_comment:
@@ -273,7 +273,7 @@ jobs:
         with:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
-          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_TRIAGE_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           settings_json: |-
             {
               "coreTools": [
@@ -567,7 +567,7 @@ jobs:
           GH_TOKEN: ''
           REVIEW_OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
           REVIEW_OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
-          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_TRIAGE_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           PR_NUMBER: '${{ steps.pr.outputs.pr_number }}'
           REPOSITORY: '${{ github.repository }}'
         run: |-

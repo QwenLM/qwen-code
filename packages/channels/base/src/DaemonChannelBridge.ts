@@ -649,7 +649,10 @@ export class DaemonChannelBridge
     switch (type) {
       case 'agent_message_chunk': {
         const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
-        if (typeof meta?.['parentToolCallId'] === 'string') {
+        if (
+          typeof meta?.['parentToolCallId'] === 'string' ||
+          meta?.['qwenDiscreteMessage'] === true
+        ) {
           break;
         }
         const text = getTextContent(update['content']);

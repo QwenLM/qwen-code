@@ -11,6 +11,7 @@ import {
   type DaemonWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import type { WebShellSlashCommandHandler } from '../App';
 import { useI18n } from '../i18n';
 import { ChatPane } from './ChatPane';
 import { ErrorBoundary } from './ErrorBoundary';
@@ -30,7 +31,7 @@ import { useScopedSessions } from '../hooks/useScopedSessions';
 import {
   hasMultipleWorkspaces,
   mergeSessionsById,
-  workspaceBasename,
+  workspaceLabelForCwd,
 } from '../utils/workspace';
 import { isEditableTarget } from '../utils/dom';
 import styles from './SplitView.module.css';
@@ -51,6 +52,7 @@ export interface SplitViewProps {
   /** Leave the split view (back to the single-session chat). */
   onExit: () => void;
   onError?: (error: unknown, fallback: string) => void;
+  onSlashCommand?: WebShellSlashCommandHandler;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onPaneArtifactsChange?: (
     sessionId: string,
@@ -83,6 +85,7 @@ export function SplitView({
   onPanesChange,
   onExit,
   onError,
+  onSlashCommand,
   onRightPanelOpen,
   onPaneArtifactsChange,
   messageTurnOutputs,
@@ -397,7 +400,10 @@ export function SplitView({
                         className={styles.pickerItemWorkspace}
                         title={session.workspaceCwd}
                       >
-                        {workspaceBasename(session.workspaceCwd)}
+                        {workspaceLabelForCwd(
+                          session.workspaceCwd,
+                          connection.capabilities?.workspaces,
+                        )}
                       </span>
                     )}
                   </button>
@@ -488,6 +494,7 @@ export function SplitView({
                       }
                       isMaximized={isMaximized}
                       onError={onError}
+                      onSlashCommand={onSlashCommand}
                       onRightPanelOpen={onRightPanelOpen}
                       onPaneArtifactsChange={onPaneArtifactsChange}
                       messageTurnOutputs={messageTurnOutputs}

@@ -4,10 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
 import {
+  buildPermissionRequestContent,
   interactionMetaFields,
+  requestPermissionWithAbort,
+  resolvePermissionOutcome,
   toPermissionOptions,
 } from './permissionUtils.js';
 
@@ -131,5 +134,82 @@ describe('permissionUtils', () => {
         }),
       ).toEqual({});
     });
+  });
+
+  it('places warnings before edit diff content', () => {
+    const content = buildPermissionRequestContent({
+      type: 'edit',
+      title: 'Confirm edit',
+      fileName: 'a.txt',
+      filePath: '/tmp/a.txt',
+      fileDiff: 'diff',
+      originalContent: 'a',
+      newContent: 'b',
+      warnings: ['Unknown safety', 'Exact shell command: sed -i s/a/b/ a.txt'],
+      onConfirm: async () => undefined,
+    });
+
+    expect(content.map((item) => item.type)).toEqual([
+      'content',
+      'content',
+      'diff',
+    ]);
+    expect(content[0]).toMatchObject({
+      content: { text: 'Unknown safety' },
+    });
+  });
+
+  it('accepts only an option that was actually offered', () => {
+    const options = toPermissionOptions({
+      type: 'exec',
+      title: 'Confirm shell',
+      command: 'python script.py',
+      rootCommand: 'python',
+      hideAlwaysAllow: true,
+      onConfirm: async () => undefined,
+    });
+    expect(
+      resolvePermissionOutcome(
+        {
+          outcome: {
+            outcome: 'selected',
+            optionId: ToolConfirmationOutcome.ProceedOnce,
+          },
+        },
+        options,
+      ),
+    ).toBe(ToolConfirmationOutcome.ProceedOnce);
+    expect(() =>
+      resolvePermissionOutcome(
+        {
+          outcome: {
+            outcome: 'selected',
+            optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
+          },
+        },
+        options,
+      ),
+    ).toThrow('unoffered option');
+  });
+
+  it('aborts permission requests and ignores late settlement', async () => {
+    let resolveRequest: ((value: never) => void) | undefined;
+    const client = {
+      requestPermission: vi.fn(
+        () =>
+          new Promise<never>((resolve) => {
+            resolveRequest = resolve;
+          }),
+      ),
+    };
+    const controller = new AbortController();
+    const request = requestPermissionWithAbort(
+      client as never,
+      { sessionId: 'session', options: [], toolCall: {} as never },
+      controller.signal,
+    );
+    controller.abort();
+    await expect(request).rejects.toThrow('aborted');
+    resolveRequest?.({} as never);
   });
 });

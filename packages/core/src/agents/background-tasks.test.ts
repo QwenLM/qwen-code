@@ -2156,29 +2156,48 @@ describe('BackgroundTaskRegistry', () => {
       ToolConfirmationOutcome.ProceedAlwaysUser,
       ToolConfirmationOutcome.ProceedAlwaysServer,
       ToolConfirmationOutcome.ProceedAlwaysTool,
-    ])(
-      'downgrades persistent approval outcome %s to one-time approval',
-      async (outcome) => {
-        const respond = vi.fn(async () => {});
-        registry.register(makeRegistration(`bg-appr-${outcome}`));
-        registry.addPendingApproval(
-          `bg-appr-${outcome}`,
-          makeApproval('c1', respond),
-        );
+    ])('cancels unoffered persistent approval outcome %s', async (outcome) => {
+      const respond = vi.fn(async () => {});
+      registry.register(makeRegistration(`bg-appr-${outcome}`));
+      registry.addPendingApproval(
+        `bg-appr-${outcome}`,
+        makeApproval('c1', respond),
+      );
 
-        const resolved = await registry.resolvePendingApproval(
-          `bg-appr-${outcome}`,
-          'c1',
-          outcome,
-        );
+      const resolved = await registry.resolvePendingApproval(
+        `bg-appr-${outcome}`,
+        'c1',
+        outcome,
+      );
 
-        expect(resolved).toBe(true);
-        expect(respond).toHaveBeenCalledWith(
-          ToolConfirmationOutcome.ProceedOnce,
-          undefined,
-        );
-      },
-    );
+      expect(resolved).toBe(true);
+      expect(respond).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.Cancel,
+        undefined,
+      );
+    });
+
+    it('preserves the explicit plan ProceedAlways outcome', async () => {
+      const respond = vi.fn(async () => {});
+      registry.register(makeRegistration('bg-plan-always'));
+      registry.addPendingApproval('bg-plan-always', {
+        ...makeApproval('c1', respond),
+        confirmationDetails: {
+          type: 'plan',
+        } as BackgroundApproval['confirmationDetails'],
+      });
+
+      await registry.resolvePendingApproval(
+        'bg-plan-always',
+        'c1',
+        ToolConfirmationOutcome.ProceedAlways,
+      );
+
+      expect(respond).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedAlways,
+        undefined,
+      );
+    });
 
     it('returns false when resolving a non-parked call', async () => {
       registry.register(makeRegistration('bg-appr-5'));

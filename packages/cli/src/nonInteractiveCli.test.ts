@@ -30,8 +30,13 @@ import {
   AUTONOMOUS_SENTINEL_DYNAMIC,
   LOOP_SENTINEL_CRON,
   LOOP_SENTINEL_DYNAMIC,
+  TeamEventType,
+  ToolConfirmationOutcome,
+  ToolNames,
+  PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
+import { EventEmitter } from 'node:events';
 import {
   runNonInteractive,
   skipHeadlessLoopSentinel,
@@ -447,6 +452,133 @@ describe('runNonInteractive', () => {
     );
     expect(processStdoutSpy).toHaveBeenCalledWith('Hello World\n');
     expect(mockShutdownTelemetry).toHaveBeenCalled();
+  });
+
+  it('does not let headless YOLO bypass explicit teammate approval', async () => {
+    setupMetricsMock();
+    const teamEvents = new EventEmitter();
+    const respond = vi.fn().mockResolvedValue(undefined);
+    const teamManager = {
+      setLeaderMessageCallback: vi.fn(),
+      getEventEmitter: () => teamEvents,
+      hasActiveTeammates: () => false,
+      drainLeaderInbox: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.YOLO);
+    vi.mocked(mockConfig.getTeamManager).mockReturnValue(teamManager as never);
+    let emittedApproval = false;
+    mockGeminiClient.sendMessageStream.mockImplementation(
+      async function* (): AsyncGenerator<ServerGeminiStreamEvent> {
+        if (!emittedApproval) {
+          emittedApproval = true;
+          teamEvents.emit(TeamEventType.TEAMMATE_APPROVAL_REQUEST, {
+            teammateName: 'worker',
+            toolName: 'run_shell_command',
+            toolInput: { command: "python -c 'print(1)'" },
+            confirmationDetails: {
+              type: 'info',
+              title: 'Permission rule requires confirmation',
+              prompt: 'Allow this operation?',
+              hideAlwaysAllow: true,
+            },
+            respond,
+            timestamp: Date.now(),
+          });
+        }
+        yield {
+          type: GeminiEventType.Finished,
+          value: {
+            reason: undefined,
+            usageMetadata: { totalTokenCount: 0 },
+          },
+        };
+      },
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Test input',
+      'prompt-exact-teammate',
+    );
+
+    await vi.waitFor(() =>
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel),
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'requires an explicit interactive approval surface',
+      ),
+    );
+    expect(processStderrSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('exact-invocation'),
+    );
+  });
+
+  it('describes the active mode when explicit teammate approval cannot be shown', async () => {
+    setupMetricsMock();
+    const teamEvents = new EventEmitter();
+    const respond = vi.fn().mockResolvedValue(undefined);
+    const teamManager = {
+      setLeaderMessageCallback: vi.fn(),
+      getEventEmitter: () => teamEvents,
+      hasActiveTeammates: () => false,
+      drainLeaderInbox: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.DEFAULT);
+    vi.mocked(mockConfig.getTeamManager).mockReturnValue(teamManager as never);
+    let emittedApproval = false;
+    mockGeminiClient.sendMessageStream.mockImplementation(
+      async function* (): AsyncGenerator<ServerGeminiStreamEvent> {
+        if (!emittedApproval) {
+          emittedApproval = true;
+          teamEvents.emit(TeamEventType.TEAMMATE_APPROVAL_REQUEST, {
+            teammateName: 'worker',
+            toolName: 'run_shell_command',
+            toolInput: { command: "python -c 'print(1)'" },
+            confirmationDetails: {
+              type: 'info',
+              title: 'Permission rule requires confirmation',
+              prompt: 'Allow this operation?',
+              hideAlwaysAllow: true,
+            },
+            respond,
+            timestamp: Date.now(),
+          });
+        }
+        yield {
+          type: GeminiEventType.Finished,
+          value: {
+            reason: undefined,
+            usageMetadata: { totalTokenCount: 0 },
+          },
+        };
+      },
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Test input',
+      'prompt-exact-teammate-default',
+    );
+
+    await vi.waitFor(() =>
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel),
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        `current approval mode (${ApprovalMode.DEFAULT})`,
+      ),
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Use --input-format stream-json --output-format stream-json',
+      ),
+    );
+    expect(processStderrSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('cannot be bypassed by YOLO mode'),
+    );
   });
 
   describe('continueInterrupted', () => {
@@ -1074,6 +1206,94 @@ describe('runNonInteractive', () => {
         },
       }));
     }
+
+    it('isolates enter_plan_mode from headless siblings without charging skipped calls to the budget', async () => {
+      setupMetricsMock();
+      vi.mocked(mockConfig.getMaxToolCalls).mockReturnValue(1);
+      vi.mocked(mockToolRegistry.getTool).mockImplementation(
+        (name: string) =>
+          ({
+            kind:
+              name === ToolNames.READ_FILE
+                ? Kind.Read
+                : name === ToolNames.WRITE_FILE
+                  ? Kind.Edit
+                  : Kind.Other,
+          }) as unknown as ReturnType<typeof mockToolRegistry.getTool>,
+      );
+      mockCoreExecuteToolCall.mockImplementation(
+        async (
+          _config: unknown,
+          request: { callId: string; name: string },
+        ) => ({
+          responseParts: [
+            {
+              functionResponse: {
+                id: request.callId,
+                name: request.name,
+                response: { output: 'entered plan mode' },
+              },
+            },
+          ],
+          resultDisplay: 'entered plan mode',
+        }),
+      );
+
+      mockGeminiClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            ...toolCallEvents(
+              ['write-before-entry'],
+              ToolNames.WRITE_FILE,
+              'p-plan-boundary',
+            ),
+            ...toolCallEvents(
+              ['enter-plan'],
+              ToolNames.ENTER_PLAN_MODE,
+              'p-plan-boundary',
+            ),
+            ...toolCallEvents(
+              ['read-after-entry-1', 'read-after-entry-2'],
+              ToolNames.READ_FILE,
+              'p-plan-boundary',
+            ),
+          ]),
+        )
+        .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'enter plan mode',
+        'p-plan-boundary',
+      );
+
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledOnce();
+      expect(mockCoreExecuteToolCall.mock.calls[0][1]).toMatchObject({
+        callId: 'enter-plan',
+        name: ToolNames.ENTER_PLAN_MODE,
+      });
+      const nextTurnParts = mockGeminiClient.sendMessageStream.mock
+        .calls[1][0] as Part[];
+      expect(nextTurnParts.map((part) => part.functionResponse?.id)).toEqual([
+        'write-before-entry',
+        'enter-plan',
+        'read-after-entry-1',
+        'read-after-entry-2',
+      ]);
+      expect(nextTurnParts[0].functionResponse?.response).toEqual({
+        error: PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+      });
+      expect(nextTurnParts[1].functionResponse?.response).toEqual({
+        output: 'entered plan mode',
+      });
+      expect(nextTurnParts[2].functionResponse?.response).toEqual({
+        error: PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+      });
+      expect(nextTurnParts[3].functionResponse?.response).toEqual({
+        error: PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+      });
+    });
 
     it('runs a batch of concurrency-safe tool calls concurrently', async () => {
       setupMetricsMock();
