@@ -524,6 +524,10 @@ HTTP/SDK 请求超时与 operation deadline 是不同概念：
 ```ts
 interface DurableMutationResult {
   // name/scope/config/changed 等领域字段；Extensions 可携带 generation
+  // applied — runtime activation completed for all affected WorkspaceRuntimes.
+  // deferred — no live runtime; durable commit persisted, activation on next ensure.
+  // reconciling — durable commit persisted, live runtime reconcile in progress (operationId provided).
+  // partial — durable commit persisted, activation succeeded for some WorkspaceRuntimes but failed for others.
   activation: 'applied' | 'deferred' | 'reconciling' | 'partial';
   operationId?: string;
   warnings?: Array<{ workspaceCwd: string; error: string }>;

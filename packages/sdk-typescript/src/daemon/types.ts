@@ -455,7 +455,7 @@ export interface DaemonStatusReport {
     eventRingSize: number;
     promptDeadlineMs: number | null;
     writerIdleTimeoutMs: number | null;
-    channelIdleTimeoutMs: number;
+    channelIdleTimeoutMs: number | null;
     sessionIdleTimeoutMs: number;
     acpConnectionCap: number | null;
     compactedReplayMaxBytes: number;

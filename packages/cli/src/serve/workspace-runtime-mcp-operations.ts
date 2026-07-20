@@ -289,11 +289,13 @@ export class WorkspaceRuntimeMcpOperations {
       }
     }
     this.activeOperationByTarget.clear();
-    if (
-      activeMcpAuthentication?.owner === this.authenticationLaneOwner &&
-      !this.runtime.bridge.isChannelLive()
-    ) {
+    if (activeMcpAuthentication?.owner === this.authenticationLaneOwner) {
       activeMcpAuthentication = undefined;
+    }
+    if (this.authenticationBarrier) {
+      const barrier = this.authenticationBarrier;
+      this.authenticationBarrier = undefined;
+      barrier.release();
     }
   }
 
