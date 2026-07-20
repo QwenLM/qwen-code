@@ -1,0 +1,29 @@
+{
+  "name": "@qwen-code/channel-gitlab",
+  "version": "0.19.10",
+  "description": "GitLab channel adapter for Qwen Code",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest run",
+    "test:ci": "vitest run"
+  },
+  "dependencies": {
+    "@gitbeaker/rest": "^43.0.0",
+    "@qwen-code/channel-base": "file:../base"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}
