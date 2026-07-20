@@ -34,6 +34,8 @@ import { isAskUserPermission } from '../utils/askUserPermission';
 import { isDaemonApprovalMode } from '../utils/sessionPreparation';
 import { isVisibleComposerModel } from '../utils/composerModels';
 import { shouldBlockComposerSubmit } from '../utils/composerInputState';
+import { invokeSlashCommandHandler } from '../utils/slash-command-action';
+import type { WebShellSlashCommandHandler } from '../App';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import {
   hasMultipleWorkspaces,
@@ -94,6 +96,8 @@ export interface ChatPaneProps {
   /** Whether this pane is currently the maximized (solo) one. */
   isMaximized?: boolean;
   onError?: (error: unknown, fallback: string) => void;
+  /** Host slash-command callback shared with the main chat composer. */
+  onSlashCommand?: WebShellSlashCommandHandler;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onPaneArtifactsChange?: (
     sessionId: string,
@@ -119,6 +123,7 @@ export function ChatPane({
   onToggleMaximize,
   isMaximized = false,
   onError,
+  onSlashCommand,
   onRightPanelOpen,
   onPaneArtifactsChange,
   messageTurnOutputs,
@@ -169,6 +174,8 @@ export function ChatPane({
     },
     [onError],
   );
+  const onSlashCommandRef = useRef(onSlashCommand);
+  onSlashCommandRef.current = onSlashCommand;
   const notifySuccess = useCallback(
     (message: string) => store.dispatch([{ type: 'status', text: message }]),
     [store],
@@ -256,6 +263,11 @@ export function ChatPane({
     ): boolean => {
       const trimmed = text.trim();
       if (!trimmed) return false;
+      if (
+        invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError)
+      ) {
+        return true;
+      }
       if (
         shouldBlockComposerSubmit({
           connectionStatus: connection.status,

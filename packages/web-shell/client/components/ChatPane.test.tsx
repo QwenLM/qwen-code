@@ -403,6 +403,87 @@ describe('ChatPane', () => {
     expect(enqueuePrompt).not.toHaveBeenCalled();
   });
 
+  it('lets the host handle a slash command', () => {
+    const onSlashCommand = vi.fn(() => true);
+    render({ onSlashCommand });
+    let returned: boolean | undefined;
+
+    act(() => {
+      returned = latestOnSubmit!('/deploy production');
+    });
+
+    expect(returned).toBe(true);
+    expect(onSlashCommand).toHaveBeenCalledWith({
+      command: 'deploy',
+      args: 'production',
+      input: '/deploy production',
+    });
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(enqueuePrompt).not.toHaveBeenCalled();
+  });
+
+  it('forwards a slash command the host does not handle', () => {
+    const onSlashCommand = vi.fn();
+    render({ onSlashCommand });
+
+    act(() => {
+      latestOnSubmit!('/deploy staging');
+    });
+
+    expect(onSlashCommand).toHaveBeenCalledTimes(1);
+    expect(sendPrompt).toHaveBeenCalledWith('/deploy staging', {
+      onAdmitted: expect.any(Function),
+    });
+  });
+
+  it('lets the host handle a slash command while the pane is disconnected', () => {
+    connectionState.status = 'disconnected';
+    const onSlashCommand = vi.fn(() => true);
+    render({ onSlashCommand });
+
+    act(() => {
+      latestOnSubmit!('/deploy staging');
+    });
+
+    expect(onSlashCommand).toHaveBeenCalledTimes(1);
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('reports a host slash command error and continues default handling', () => {
+    const error = new Error('host handler exploded');
+    const onSlashCommand = vi.fn(() => {
+      throw error;
+    });
+    const onError = vi.fn();
+    render({ onSlashCommand, onError });
+
+    act(() => {
+      latestOnSubmit!('/deploy staging');
+    });
+
+    expect(onError).toHaveBeenCalledWith(
+      error,
+      'onSlashCommand callback failed',
+    );
+    expect(sendPrompt).toHaveBeenCalledWith('/deploy staging', {
+      onAdmitted: expect.any(Function),
+    });
+  });
+
+  it('does not treat an absolute path as a slash command', () => {
+    const onSlashCommand = vi.fn(() => true);
+    render({ onSlashCommand });
+
+    act(() => {
+      latestOnSubmit!('/usr/local/bin/tool');
+    });
+
+    expect(onSlashCommand).not.toHaveBeenCalled();
+    expect(sendPrompt).toHaveBeenCalledWith('/usr/local/bin/tool', {
+      onAdmitted: expect.any(Function),
+    });
+  });
+
   it('commits an idle prompt only after daemon admission', () => {
     render();
     const commit = vi.fn();
