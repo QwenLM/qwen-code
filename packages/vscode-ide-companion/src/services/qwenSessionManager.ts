@@ -44,7 +44,7 @@ export class QwenSessionManager {
   }
 
   /**
-   * Load a saved session by name
+   * Load a saved session by ID
    *
    * @param sessionId - ID of the session to load
    * @param workingDir - Current working directory
