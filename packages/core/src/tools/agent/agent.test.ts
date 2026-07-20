@@ -371,6 +371,9 @@ describe('AgentTool', () => {
       expect(tool.description).toContain(
         "Treat the agent's output as evidence, not as automatically correct",
       );
+      expect(tool.description).toContain(
+        'Never treat launched work as complete merely because it is still running in the background',
+      );
       expect(tool.description).not.toContain(
         "The agent's outputs should generally be trusted",
       );

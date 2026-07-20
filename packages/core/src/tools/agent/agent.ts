@@ -876,6 +876,7 @@ Usage notes:
 - Run agents concurrently only when their tasks are independent. For code changes, give concurrent agents disjoint write scopes; launch them in a single message with multiple tool uses.
 - A background agent reports its result through a completion notification in a later turn. A foreground agent returns its result inline. Agent results are not visible to the user, so relay the relevant outcome in your response.
 - While background agents run, continue meaningful non-overlapping work. Wait for an agent only when its result blocks the next required step.
+- Before finalizing a dependent artifact or responding to the user, account for every required subagent result: wait for it, review it, and integrate or explicitly reject it. Never treat launched work as complete merely because it is still running in the background.
 - Provide clear, detailed prompts so the agent can work autonomously and return exactly the information you need.
 - Treat the agent's output as evidence, not as automatically correct. Verify factual claims, review code changes, and run relevant checks before integrating or relaying the result.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
