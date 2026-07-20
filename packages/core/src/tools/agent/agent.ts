@@ -3168,7 +3168,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const cleanupRuntime = () => {
           if (runtimeDisposed) return;
           runtimeDisposed = true;
-          registry.unregisterResidentAgent(hookOpts.agentId);
+          registry.unregisterResidentAgent(
+            hookOpts.agentId,
+            residentController,
+          );
           residentRegistered = false;
           bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
           bgEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
@@ -3185,7 +3188,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const requestRuntimeDisposal = () => {
           if (disposeRequested || runtimeDisposed) return;
           disposeRequested = true;
-          registry.unregisterResidentAgent(hookOpts.agentId);
+          registry.unregisterResidentAgent(
+            hookOpts.agentId,
+            residentController,
+          );
           residentRegistered = false;
           currentAbortController?.abort();
           if (!turnRunning) {
@@ -3320,7 +3326,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 keepResident =
                   residentRegistered && !needsAutoPermissionLease();
                 if (!keepResident) {
-                  registry.unregisterResidentAgent(hookOpts.agentId);
+                  registry.unregisterResidentAgent(
+                    hookOpts.agentId,
+                    residentController,
+                  );
                   residentRegistered = false;
                 }
                 registry.complete(hookOpts.agentId, finalText, completionStats);

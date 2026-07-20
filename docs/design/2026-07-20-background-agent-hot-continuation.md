@@ -130,6 +130,12 @@ flow.
 - The next turn is chained after the prior turn promise, covering the window in
   which the completion notification is emitted before the prior `finally`
   block has finished.
+- After the final in-loop message drain, a resident turn synchronously claims
+  any inputs queued while stop hooks or cleanup were running. Claimed inputs
+  start another turn on the same runtime; an empty claim is followed by the
+  terminal state transition without another asynchronous boundary.
+- Pending inputs and cleanup are guarded by resident-controller identity so a
+  stale runtime cannot consume work from or unregister its replacement.
 - Failed and cancelled turns remove and dispose the resident controller.
 - If claiming a background slot fails, the row stays completed and the caller
   can use the existing cold-revival error path.

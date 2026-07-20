@@ -943,7 +943,7 @@ export class BackgroundAgentResumeService {
       const runtimeCleanup = () => {
         if (runtimeDisposed) return;
         runtimeDisposed = true;
-        registry.unregisterResidentAgent(meta.agentId);
+        registry.unregisterResidentAgent(meta.agentId, residentController);
         residentRegistered = false;
         bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
         bgEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
@@ -960,7 +960,7 @@ export class BackgroundAgentResumeService {
       const requestRuntimeDisposal = () => {
         if (disposeRequested || runtimeDisposed) return;
         disposeRequested = true;
-        registry.unregisterResidentAgent(meta.agentId);
+        registry.unregisterResidentAgent(meta.agentId, residentController);
         residentRegistered = false;
         currentAbortController?.abort();
         if (!turnRunning) {
@@ -1047,7 +1047,10 @@ export class BackgroundAgentResumeService {
             if (terminateMode === AgentTerminateMode.GOAL) {
               keepResident = residentRegistered && !needsAutoPermissionLease();
               if (!keepResident) {
-                registry.unregisterResidentAgent(meta.agentId);
+                registry.unregisterResidentAgent(
+                  meta.agentId,
+                  residentController,
+                );
                 residentRegistered = false;
               }
               registry.complete(meta.agentId, finalText, stats);
