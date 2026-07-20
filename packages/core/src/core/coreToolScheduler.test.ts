@@ -706,6 +706,7 @@ describe('CoreToolScheduler', () => {
       totalUnavailable: number;
     };
     setAutoModeDenialState?: ReturnType<typeof vi.fn>;
+    setApprovalMode?: ReturnType<typeof vi.fn>;
     onAllToolCallsComplete?: ReturnType<typeof vi.fn>;
     onToolCallsUpdate?: ReturnType<typeof vi.fn>;
     memoryMonitor?: { scheduleCheck: () => void };
@@ -741,6 +742,7 @@ describe('CoreToolScheduler', () => {
         getUsageStatisticsEnabled: () => true,
         getDebugMode: () => false,
         getApprovalMode: () => options.approvalMode ?? ApprovalMode.YOLO,
+        setApprovalMode: options.setApprovalMode ?? vi.fn(),
         getPermissionsAllow: () => [],
         getPermissionsDeny: options.getPermissionsDeny ?? (() => undefined),
         getContentGeneratorConfig: () => ({
@@ -2663,21 +2665,29 @@ describe('CoreToolScheduler', () => {
     }
   });
 
-  it('fires PermissionDenied hooks for AUTO classifier unavailable blocks', async () => {
+  it('asks on AUTO classifier unavailable and can switch to Default', async () => {
     runSideQueryMock
       .mockResolvedValueOnce({ shouldBlock: true })
       .mockRejectedValueOnce(new Error('classifier timed out'));
     const execute = vi.fn().mockResolvedValue({
-      llmContent: 'should not execute',
-      returnDisplay: 'should not execute',
+      llmContent: 'executed',
+      returnDisplay: 'executed',
     });
+    const originalOnConfirm = vi.fn().mockResolvedValue(undefined);
     const toolsByName = new Map<string, MockTool>([
       [
         ToolNames.SHELL,
         new MockTool({
           name: ToolNames.SHELL,
           getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
-          getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+          getConfirmationDetails: () =>
+            Promise.resolve({
+              type: 'exec',
+              title: 'Confirm shell',
+              command: 'touch /tmp/example',
+              rootCommand: 'touch',
+              onConfirm: originalOnConfirm,
+            }),
           execute,
         }),
       ],
@@ -2685,12 +2695,16 @@ describe('CoreToolScheduler', () => {
     const hookSystem = {
       firePermissionDeniedEvent: vi.fn().mockResolvedValue(undefined),
     };
+    const setApprovalMode = vi.fn();
+    const onToolCallsUpdate = vi.fn();
     const { scheduler, onAllToolCallsComplete } =
       createSchedulerForLegacyToolTests({
         toolsByName,
         approvalMode: ApprovalMode.AUTO,
         hookSystem,
         disableHooks: false,
+        setApprovalMode,
+        onToolCallsUpdate,
       });
     const abortController = new AbortController();
 
@@ -2699,7 +2713,7 @@ describe('CoreToolScheduler', () => {
         {
           callId: 'auto-unavailable',
           name: ToolNames.SHELL,
-          args: { command: 'rm -rf /tmp/example' },
+          args: { command: 'touch /tmp/example' },
           isClientInitiated: false,
           prompt_id: 'prompt-auto-unavailable',
         },
@@ -2707,18 +2721,33 @@ describe('CoreToolScheduler', () => {
       abortController.signal,
     );
 
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    expect(waiting.confirmationDetails).toMatchObject({
+      hideAlwaysAllow: true,
+      autoModeFallback: {
+        reason: 'classifier_unavailable',
+        message: expect.stringContaining('Switching to Default Mode'),
+      },
+    });
+    expect(hookSystem.firePermissionDeniedEvent).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+
+    await waiting.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+    );
+
     await vi.waitFor(() => {
       expect(onAllToolCallsComplete).toHaveBeenCalled();
     });
-    expect(hookSystem.firePermissionDeniedEvent).toHaveBeenCalledWith(
-      ToolNames.SHELL,
-      { command: 'rm -rf /tmp/example' },
-      'auto-unavailable',
-      'classifier_unavailable',
-      abortController.signal,
-      'auto-unavailable',
+    expect(originalOnConfirm).toHaveBeenCalledWith(
+      ToolConfirmationOutcome.ProceedOnce,
+      undefined,
     );
-    expect(execute).not.toHaveBeenCalled();
+    expect(setApprovalMode).toHaveBeenCalledWith(ApprovalMode.DEFAULT);
+    expect(execute).toHaveBeenCalledOnce();
   });
 
   it('skips PermissionDenied hooks when hooks are disabled', async () => {

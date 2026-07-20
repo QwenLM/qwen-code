@@ -95,6 +95,7 @@ import {
 } from './plan-mode-entry-policy.js';
 import {
   applyAutoModeDecision,
+  decorateClassifierUnavailableConfirmation,
   evaluateAutoMode,
   getAutoModePermissionDeniedReason,
   shouldClassifyAllShellForAutoMode,
@@ -2547,6 +2548,7 @@ export class CoreToolScheduler {
           // Grep, LS, in-cwd Edit, …) short-circuit even in a denial-streak
           // fallback state — otherwise every trivially safe tool would
           // force manual approval until the user toggles modes.
+          let autoModeFallbackMessage: string | undefined;
           if (
             !requiresUserInteraction &&
             shouldRunAutoModeForCall(approvalMode, canonicalName)
@@ -2626,11 +2628,14 @@ export class CoreToolScheduler {
               case 'fallback':
                 // Drop through to the manual-approval flow below. The
                 // pending dialog tells the user what's being asked;
-                // operators see the cause in the debug log (only when
-                // fallback was specifically armed by denialTracking —
-                // a pmForcedAsk fallback isn't an audit-worthy event).
-                if (isDenialFallbackReason(outcome.reason)) {
+                // operators see recovery fallbacks in the debug log. A
+                // pmForcedAsk fallback isn't an audit-worthy event.
+                if (
+                  isDenialFallbackReason(outcome.reason) ||
+                  outcome.reason === 'classifier_unavailable'
+                ) {
                   this.autoModeFallbackCallIds.add(reqInfo.callId);
+                  autoModeFallbackMessage = outcome.message;
                   debugLogger.warn(
                     `Auto mode fallback to manual approval (${outcome.reason}): ` +
                       formatDenialStateLog(denialState),
@@ -2668,6 +2673,13 @@ export class CoreToolScheduler {
           } else {
             confirmationDetails =
               await invocation.getConfirmationDetails(signal);
+
+            if (autoModeFallbackMessage) {
+              confirmationDetails = decorateClassifierUnavailableConfirmation(
+                confirmationDetails,
+                autoModeFallbackMessage,
+              );
+            }
 
             if (planShellDecision.classification !== 'not-applicable') {
               const preDisplayPlanShellError =
@@ -3262,7 +3274,17 @@ export class CoreToolScheduler {
     signal: AbortSignal,
     payload?: ToolConfirmationPayload,
   ): Promise<void> {
-    await originalOnConfirm(outcome, payload);
+    const shouldSwitchToDefault =
+      outcome === ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault;
+    const normalizedOutcome = shouldSwitchToDefault
+      ? ToolConfirmationOutcome.ProceedOnce
+      : outcome;
+
+    await originalOnConfirm(normalizedOutcome, payload);
+    if (shouldSwitchToDefault) {
+      this.config.setApprovalMode(ApprovalMode.DEFAULT);
+    }
+    outcome = normalizedOutcome;
 
     if (
       outcome === ToolConfirmationOutcome.ProceedAlways ||
@@ -3415,12 +3437,11 @@ export class CoreToolScheduler {
   ): void {
     const wasAutoModeFallback = this.autoModeFallbackCallIds.delete(callId);
 
-    // AUTO-mode denialTracking recovery: when the user manually approves a
-    // call that fell back because denialTracking was armed, clear the armed
-    // counters so subsequent calls return to classifier flow. Ordinary AUTO
-    // approvals for ask rules must not clear cumulative denial totals.
-    // Cancel / abort do NOT reset — spec §9.1.4 treats rejection as a
-    // signal that the classifier was correct to block.
+    // AUTO-mode recovery: when the user manually approves a call that fell
+    // back because denialTracking was armed or the classifier was unavailable,
+    // clear the counters so subsequent calls return to classifier flow.
+    // Ordinary AUTO approvals for ask rules must not clear cumulative totals.
+    // Cancel / abort do not reset because the user declined the action.
     if (
       this.config.getApprovalMode() === ApprovalMode.AUTO &&
       wasAutoModeFallback &&
@@ -5310,10 +5331,23 @@ export class CoreToolScheduler {
               break;
             }
             case 'fallback':
-              if (fallback.fallback) {
+              if (
+                isDenialFallbackReason(outcome.reason) ||
+                outcome.reason === 'classifier_unavailable'
+              ) {
                 this.autoModeFallbackCallIds.add(pendingTool.request.callId);
+                if (outcome.message) {
+                  this.setStatusInternal(
+                    pendingTool.request.callId,
+                    'awaiting_approval',
+                    decorateClassifierUnavailableConfirmation(
+                      pendingTool.confirmationDetails,
+                      outcome.message,
+                    ),
+                  );
+                }
                 debugLogger.warn(
-                  `Auto mode fallback for pending tool (${fallback.reason}): consecutiveBlock=${denialState.consecutiveBlock}, consecutiveUnavailable=${denialState.consecutiveUnavailable}`,
+                  `Auto mode fallback for pending tool (${outcome.reason}): consecutiveBlock=${denialState.consecutiveBlock}, consecutiveUnavailable=${denialState.consecutiveUnavailable}`,
                 );
               }
               break;
