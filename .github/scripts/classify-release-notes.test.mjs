@@ -318,6 +318,12 @@ describe('release note classification', () => {
     assert.match(changelog, /- 'skip-changelog-auto'/);
     assert.match(release, /classify-release-notes\.mjs --batch/);
     assert.match(release, /Auto-label internal CI PRs/);
+    assert.match(
+      release,
+      /Auto-label internal CI PRs for release notes exclusion'\s+continue-on-error: true/,
+    );
+    assert.match(release, /releases\/generate-notes/);
+    assert.doesNotMatch(release, /--search "merged:/);
   });
 
   it('batch mode labels qualifying PRs from stdin', () => {
@@ -330,8 +336,12 @@ describe('release note classification', () => {
         [
           '#!/usr/bin/env node',
           'const args = process.argv.slice(2);',
+          "if (args[0] === 'pr' && args[1] === 'view') {",
+          "  const title = args[2] === '10' ? 'ci: speed up checks' : 'feat: new feature';",
+          '  process.stdout.write(JSON.stringify({ title, labels: [] }));',
+          '  process.exit(0);',
+          '}',
           "if (args[0] === 'api' && args.includes('.[] | .filename, (.previous_filename // empty)')) {",
-          "  const num = args.find((a, i) => args[i-1] === 'pulls' || /^repos\\/.+\\/pulls\\/\\d+\\/files$/.test(a));",
           "  process.stdout.write('.github/workflows/ci.yml\\n');",
           '  process.exit(0);',
           '}',
@@ -344,10 +354,11 @@ describe('release note classification', () => {
       );
       chmodSync(gh, 0o755);
 
-      const input = JSON.stringify([
-        { number: 10, title: 'ci: speed up checks', labels: [] },
-        { number: 11, title: 'feat: new feature', labels: [] },
-      ]);
+      const input = [
+        "## What's Changed",
+        '* ci: speed up checks by @alice in https://github.com/QwenLM/qwen-code/pull/10',
+        '* feat: new feature by @alice in https://github.com/QwenLM/qwen-code/pull/11',
+      ].join('\n');
 
       const output = execFileSync(
         process.execPath,

@@ -341,7 +341,6 @@ jobs:
     permissions:
       contents: 'write'
       packages: 'write'
-      pull-requests: 'write'
       id-token: 'write'
 
     steps:
@@ -460,17 +459,20 @@ jobs:
           npm run verify:installation-release -- --dir dist/standalone
 
       - name: 'Auto-label internal CI PRs for release notes exclusion'
+        continue-on-error: true
         if: |-
           ${{ needs.prepare.outputs.is_dry_run == 'false' }}
         env:
           GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           PREVIOUS_RELEASE_TAG: '${{ needs.prepare.outputs.previous_release_tag }}'
+          RELEASE_BRANCH: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
           RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
         run: |-
           gh label create 'skip-changelog-auto' --repo "${GITHUB_REPOSITORY}" --color 'ededed' --description 'Automatically exclude internal CI changes from release notes' --force
-          gh pr list --repo "${GITHUB_REPOSITORY}" --state merged \
-            --search "merged:${PREVIOUS_RELEASE_TAG}..${RELEASE_TAG}" \
-            --json number,title,labels --limit 200 | \
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f "tag_name=${RELEASE_TAG}" \
+            -f "previous_tag_name=${PREVIOUS_RELEASE_TAG}" \
+            -f "target_commitish=${RELEASE_BRANCH}" --jq '.body' | \
             node .github/scripts/classify-release-notes.mjs --batch
 
       - name: 'Create GitHub Release and Tag'
