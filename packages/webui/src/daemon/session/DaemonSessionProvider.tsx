@@ -123,6 +123,8 @@ export interface DaemonTranscriptHistory {
 }
 
 const SESSION_TRANSCRIPT_PAGINATION_FEATURE = 'session_transcript_pagination';
+const WORKSPACE_ACP_PREHEAT_FEATURE = 'workspace_acp_preheat';
+const WORKSPACE_ACP_STATUS_FEATURE = 'workspace_acp_status';
 
 function assistantDoneFromTurnEvent(
   event: DaemonEvent,
@@ -627,6 +629,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               resolvedWorkspaceCwdRef.current ??
               caps.workspaceCwd;
             activeWorkspaceCwdRef.current = effectWorkspaceCwd;
+            const capabilityFeatures = Array.isArray(caps.features)
+              ? caps.features
+              : [];
+            const canPreheatPrimaryWorkspace =
+              effectWorkspaceCwd === caps.workspaceCwd &&
+              capabilityFeatures.includes(WORKSPACE_ACP_PREHEAT_FEATURE);
+            const canReadPrimaryAcpStatus =
+              canPreheatPrimaryWorkspace &&
+              capabilityFeatures.includes(WORKSPACE_ACP_STATUS_FEATURE);
             if (
               (shouldDeferInitialSessionCreation ||
                 manualSessionClearRef.current) &&
@@ -644,7 +655,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 await Promise.allSettled([
                   client.workspaceProviders(),
                   client.workspaceSkills(),
-                  client.workspaceAcpStatus(),
+                  canReadPrimaryAcpStatus
+                    ? client.workspaceAcpStatus()
+                    : Promise.resolve(undefined),
                   effectWorkspaceCwd
                     ? client.workspaceByCwd(effectWorkspaceCwd).workspaceGit()
                     : client.workspaceGit(),
@@ -661,7 +674,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   skillsResult.reason,
                 );
               }
-              if (acpStatusResult.status === 'rejected') {
+              if (
+                canReadPrimaryAcpStatus &&
+                acpStatusResult.status === 'rejected'
+              ) {
                 console.warn(
                   '[DaemonSessionProvider] workspaceAcpStatus failed in deferred connect:',
                   acpStatusResult.reason,
@@ -706,8 +722,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   : deferredSkills,
               }));
               if (
-                acpStatusResult.status === 'fulfilled' &&
-                !acpStatusResult.value.channelLive &&
+                canPreheatPrimaryWorkspace &&
+                !(
+                  acpStatusResult.status === 'fulfilled' &&
+                  acpStatusResult.value?.channelLive === true
+                ) &&
                 !workspaceAcpPreheatInFlightRef.current
               ) {
                 workspaceAcpPreheatInFlightRef.current = true;
@@ -2055,7 +2074,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         }),
         createDetachedSession: (
           workspaceCwd?: string,
-          overrides?: Pick<CreateSessionRequest, 'approvalMode' | 'sourceType'>,
+          overrides?: Pick<
+            CreateSessionRequest,
+            'approvalMode' | 'sourceType' | 'worktree'
+          >,
         ) => {
           const client =
             workspaceClientRef.current ??
@@ -2075,6 +2097,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               : {}),
             ...(overrides?.sourceType !== undefined
               ? { sourceType: overrides.sourceType }
+              : {}),
+            ...(overrides?.worktree !== undefined
+              ? { worktree: overrides.worktree }
               : {}),
           };
           const requestClientId = clientId

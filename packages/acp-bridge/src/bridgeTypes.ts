@@ -94,6 +94,8 @@ export interface BridgeSpawnRequest {
   /** Optional source-specific identifier. Valid only with `sourceType`. */
   sourceId?: string;
   approvalMode?: ApprovalMode;
+  /** Worktree isolation metadata, set by the daemon route before spawn. */
+  worktree?: { slug: string; path: string; branch: string };
 }
 
 export interface BridgeSession {
@@ -126,6 +128,8 @@ export interface BridgeSession {
   sourceId?: string;
   /** True iff the source metadata was durably written to the transcript. */
   sourcePersisted?: boolean;
+  /** Present when the session was created with worktree isolation. */
+  worktree?: { slug: string; path: string; branch: string };
 }
 
 export interface BridgeRestoreSessionRequest {
@@ -406,6 +410,8 @@ export interface BridgeSessionSummary {
   groupId?: string | null;
   /** Quick color grouping tag; mutually exclusive with `groupId` in the UI. */
   color?: SessionGroupPresetColor | null;
+  /** Present when the session was created with worktree isolation. */
+  worktree?: { slug: string; path: string; branch: string };
 }
 
 /**

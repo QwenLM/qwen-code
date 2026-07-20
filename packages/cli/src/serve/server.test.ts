@@ -152,6 +152,32 @@ import {
   TRUSTED_FOLDERS_FILENAME,
 } from '../config/trustedFolders.js';
 
+// ── Worktree mock infrastructure ────────────────────────────────────
+// GitWorktreeService's constructor calls simpleGit() which validates
+// the directory exists — test workspaces (/work/bound) don't. Replace
+// the class with a controllable mock; each worktree test sets
+// `mockWt.impl` to control instance behaviour.
+const mockWt = vi.hoisted(() => ({
+  impl: undefined as (() => Record<string, unknown>) | undefined,
+}));
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...original,
+    GitWorktreeService: class MockGitWorktreeService {
+      static validateUserWorktreeSlug =
+        original.GitWorktreeService.validateUserWorktreeSlug;
+      static generateAutoSlug = original.GitWorktreeService.generateAutoSlug;
+      constructor() {
+        if (mockWt.impl) {
+          Object.assign(this, mockWt.impl());
+        }
+      }
+    },
+  };
+});
+
 const baseOpts: ServeOptions = {
   hostname: '127.0.0.1',
   port: 4170,
@@ -257,6 +283,8 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_mcp',
   'workspace_skills',
   'workspace_providers',
+  'workspace_acp_preheat',
+  'workspace_acp_status',
   'auth_provider_install',
   'workspace_memory',
   'workspace_memory_remember',
@@ -725,6 +753,7 @@ interface FakeBridge extends AcpSessionBridge {
     opts?: { requireZeroAttaches?: boolean };
   }>;
   detachCalls: Array<{ sessionId: string; clientId?: string }>;
+  changeSessionCwdCalls: Array<{ sessionId: string; path: string }>;
   enqueueMidTurnCalls: Array<{
     sessionId: string;
     message: string;
@@ -902,6 +931,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     opts?: { requireZeroAttaches?: boolean };
   }> = [];
   const detachCalls: FakeBridge['detachCalls'] = [];
+  const changeSessionCwdCalls: Array<{ sessionId: string; path: string }> = [];
   const enqueueMidTurnCalls: FakeBridge['enqueueMidTurnCalls'] = [];
   const enqueueMidTurnImpl =
     opts.enqueueMidTurnImpl ?? (() => ({ accepted: true }));
@@ -964,6 +994,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       workspaceCwd: req.workspaceCwd,
       attached: false,
       clientId: `client-${calls.length}`,
+      ...(req.worktree ? { worktree: req.worktree } : {}),
     }));
   const loadImpl =
     opts.loadImpl ??
@@ -1465,6 +1496,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     cancelCalls,
     killCalls,
     detachCalls,
+    changeSessionCwdCalls,
     enqueueMidTurnCalls,
     permissionVotes,
     sessionPermissionVotes,
@@ -1941,6 +1973,15 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         sessionId,
         ...(clientId !== undefined ? { clientId } : {}),
       });
+    },
+    async changeSessionCwd(sessionId, req) {
+      changeSessionCwdCalls.push({ sessionId, path: req.path });
+      return {
+        sessionId,
+        previousCwd: '/fake/previous',
+        newCwd: req.path,
+        warnings: [],
+      };
     },
     isChannelLive() {
       return false;
@@ -3562,6 +3603,26 @@ describe('createServeApp', () => {
 
       const res = await request(app)
         .post('/workspace/acp/preheat?timeoutMs=60001')
+        .set('Host', `127.0.0.1:${opts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_timeout',
+        error: '`timeoutMs` must be a positive integer no greater than 60000',
+      });
+    });
+
+    it.each([
+      '/workspace/acp/preheat?timeoutMs=',
+      '/workspace/acp/preheat?timeoutMs=1&timeoutMs=2',
+    ])('rejects malformed workspace ACP preheat timeout %s', async (path) => {
+      const bridge = fakeBridge();
+      const opts = { ...baseOpts, workspace: WS_BOUND, token: 'secret' };
+      const app = createServeApp(opts, undefined, { bridge });
+
+      const res = await request(app)
+        .post(path)
         .set('Host', `127.0.0.1:${opts.port}`)
         .set('Authorization', 'Bearer secret');
 
@@ -8069,6 +8130,146 @@ describe('createServeApp', () => {
       // undefined. (This is the core security property — if the
       // dangerous key landed via spread, this check would fail.)
       expect(({} as Record<string, unknown>)['polluted']).toBeUndefined();
+    });
+
+    // ── Worktree isolation ──────────────────────────────────────────
+
+    it('creates a worktree session and relocates via changeSessionCwd', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const mockCreate = vi.fn().mockResolvedValue({
+        success: true,
+        worktree: {
+          path: '/work/a/.qwen/worktrees/my-task',
+          branch: 'worktree-my-task',
+        },
+      });
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+        createUserWorktree: mockCreate,
+      });
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: { slug: 'my-task' } });
+
+        expect(res.status).toBe(200);
+        expect(res.body.worktree).toEqual({
+          slug: 'my-task',
+          path: '/work/a/.qwen/worktrees/my-task',
+          branch: 'worktree-my-task',
+        });
+        expect(bridge.calls[0]?.sessionScope).toBe('thread');
+        expect(bridge.changeSessionCwdCalls).toHaveLength(1);
+        expect(bridge.changeSessionCwdCalls[0]?.path).toBe(
+          '/work/a/.qwen/worktrees/my-task',
+        );
+        expect(mockCreate).toHaveBeenCalledWith('my-task', 'main');
+      } finally {
+        mockWt.impl = undefined;
+      }
+    });
+
+    it('400 when worktree is requested on a non-git workspace', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(false),
+      });
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: {} });
+
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('worktree_not_git_repo');
+        expect(bridge.calls).toHaveLength(0);
+      } finally {
+        mockWt.impl = undefined;
+      }
+    });
+
+    it('400 when worktree slug is invalid', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+      });
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: { slug: '../escape' } });
+
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('worktree_invalid_slug');
+        expect(bridge.calls).toHaveLength(0);
+      } finally {
+        mockWt.impl = undefined;
+      }
+    });
+
+    it('400 when worktree is not an object', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ worktree: 'yes' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_worktree');
+      expect(bridge.calls).toHaveLength(0);
+    });
+
+    it('500 when worktree creation fails', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+        createUserWorktree: () =>
+          Promise.resolve({ success: false, error: 'disk full' }),
+      });
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: {} });
+
+        expect(res.status).toBe(500);
+        expect(res.body.code).toBe('worktree_create_failed');
+        expect(bridge.calls).toHaveLength(0);
+      } finally {
+        mockWt.impl = undefined;
+      }
     });
   });
 

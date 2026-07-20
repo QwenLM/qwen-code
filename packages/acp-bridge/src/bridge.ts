@@ -435,6 +435,8 @@ interface SessionEntry {
   /** Immutable creator attribution, persisted in the transcript when present. */
   sourceType?: string;
   sourceId?: string;
+  /** Worktree isolation metadata, when created with worktree param. */
+  worktree?: { slug: string; path: string; branch: string };
   channel: AcpChannel;
   connection: ClientSideConnection;
   /** Per-session event bus drives `GET /session/:id/events`. */
@@ -1668,6 +1670,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       hasTurnError: entry.turnError !== undefined,
       ...(entry.turnError !== undefined ? { turnError: entry.turnError } : {}),
       pendingInteractions: [...entry.pendingInteractions.values()],
+      ...(entry.worktree ? { worktree: entry.worktree } : {}),
     };
   };
   // Pending + resolved permission state lives in
@@ -2223,6 +2226,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     parentSessionId?: string,
     sourceType?: string,
     sourceId?: string,
+    worktree?: { slug: string; path: string; branch: string },
   ): Promise<BridgeSession> {
     // Get-or-create the daemon's single channel, then call
     // `connection.newSession()` on it. Sessions share the child's
@@ -2327,7 +2331,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         newSessionResp.sessionId,
         boundWorkspace,
         undefined,
-        { parentSessionId, sourceType, sourceId },
+        { parentSessionId, sourceType, sourceId, worktree },
       );
       initializedSessionId = entry.sessionId;
       sessionRegistered = true;
@@ -2518,6 +2522,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ...(entry.parentSessionId
           ? { parentSessionPersisted: parentSessionPersisted === true }
           : {}),
+        ...(entry.worktree ? { worktree: entry.worktree } : {}),
       };
     } finally {
       ci.sessionSpawnsInFlight = Math.max(0, ci.sessionSpawnsInFlight - 1);
@@ -3462,6 +3467,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       parentSessionId?: string;
       sourceType?: string;
       sourceId?: string;
+      worktree?: { slug: string; path: string; branch: string };
     } = {},
   ): SessionEntry => {
     const entry: SessionEntry = {
@@ -3473,6 +3479,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         : {}),
       ...(options.sourceType ? { sourceType: options.sourceType } : {}),
       ...(options.sourceId !== undefined ? { sourceId: options.sourceId } : {}),
+      ...(options.worktree ? { worktree: options.worktree } : {}),
       channel: ci.channel,
       connection: ci.connection,
       events,
@@ -4651,6 +4658,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         req.parentSessionId,
         source.sourceType,
         source.sourceId,
+        req.worktree,
       );
       // Track in-flight spawns regardless of scope. Under `single`
       // this also serves the coalescing path above (a parallel
