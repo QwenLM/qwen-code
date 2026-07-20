@@ -32,6 +32,13 @@ const SEARCH_TIMEOUT_MS = 60_000;
 /** Mirrors claw-code's WebSearchTool `maxResultSizeChars`. */
 const MAX_RESULT_SIZE_CHARS = 100_000;
 /**
+ * formatLlmContent bounds the result body to MAX_RESULT_SIZE_CHARS and then
+ * appends a truncation note plus the citation/safety envelope; the per-tool
+ * scheduler budget needs headroom for that envelope so a max-size result
+ * does not get its footers bisected by the generic truncator.
+ */
+const RESULT_ENVELOPE_HEADROOM_CHARS = 2_000;
+/**
  * Cap on characters accumulated from the SSE stream (text deltas + item
  * payloads). Truncating at parse time is too late — a runaway stream must be
  * aborted while it flows. Observed heavy responses are ~100KB; this is a
@@ -717,12 +724,13 @@ class WebSearchToolInvocation extends BaseToolInvocation<
       if (inStreamError) {
         const message = `Web search backend error ${inStreamError.code}: ${inStreamError.message}`;
         this.debugLogger.error(`[WebSearch] ${message}`);
-        return this.errorResult(
-          message,
-          inStreamError.code.startsWith('Throttling')
-            ? ToolErrorType.WEB_SEARCH_RATE_LIMITED
-            : ToolErrorType.WEB_SEARCH_BACKEND_FAILED,
-        );
+        // Route through the shared tail: results already streamed (and
+        // billed) before the error are evidence worth salvaging, same as the
+        // transport-error and truncated-stream paths.
+        const errorType = inStreamError.code.startsWith('Throttling')
+          ? ToolErrorType.WEB_SEARCH_RATE_LIMITED
+          : ToolErrorType.WEB_SEARCH_BACKEND_FAILED;
+        return terminalFailure(() => this.errorResult(message, errorType));
       }
 
       if (streamError !== undefined) {
@@ -914,6 +922,14 @@ export class WebSearchTool extends BaseDeclarativeTool<
   ToolResult
 > {
   static readonly Name: string = ToolNames.WEB_SEARCH;
+
+  // Results are self-truncated section-aware in formatLlmContent (the
+  // narrated answer shrinks first so the URL evidence sections survive);
+  // without this override the scheduler's global 25k threshold would slice
+  // the output generically before that design ever applies.
+  override get maxOutputChars(): number {
+    return MAX_RESULT_SIZE_CHARS + RESULT_ENVELOPE_HEADROOM_CHARS;
+  }
 
   constructor(private readonly config: Config) {
     super(

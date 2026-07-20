@@ -53,9 +53,22 @@ function makeConfig(overrides: ConfigOverrides = {}): Config {
   return {
     getWebSearchSettings: () =>
       overrides.settings ?? { enabled: true, model: 'qwen3.6-plus' },
-    getAllConfiguredModels: () => models,
-    getResolvedModelConfig: (authType: string, id: string) => {
-      const m = models.find((mm) => mm.authType === authType && mm.id === id);
+    // The real Config disambiguates same-id entries by registry baseUrl;
+    // mirror that so multi-entry tests resolve the gate-selected entry, not
+    // the first (authType, id) match.
+    getAllConfiguredModels: () =>
+      models.map((m) => ({ ...m, registryBaseUrl: m.baseUrl })),
+    getResolvedModelConfig: (
+      authType: string,
+      id: string,
+      baseUrl?: string,
+    ) => {
+      const m = models.find(
+        (mm) =>
+          mm.authType === authType &&
+          mm.id === id &&
+          (baseUrl === undefined || mm.baseUrl === baseUrl),
+      );
       return m
         ? { ...m, generationConfig: m.generationConfig ?? {} }
         : undefined;
@@ -171,7 +184,10 @@ describe('evaluateWebSearchGate', () => {
         settings: { enabled: true, model: 'qwen3.6-plus', webExtractor: false },
       }),
     );
-    expect(gate.ok && gate.backend.webExtractor).toBe(false);
+    expect(gate.ok).toBe(true);
+    if (gate.ok) {
+      expect(gate.backend.webExtractor).toBe(false);
+    }
   });
 
   it('rejects when no model is configured', () => {
@@ -210,6 +226,25 @@ describe('evaluateWebSearchGate', () => {
             authType: 'openai',
             envKey: TEST_ENV_KEY,
             baseUrl: 'https://api.openai.com/v1',
+          },
+        ],
+      }),
+    );
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) expect(gate.notice).toContain('non-DashScope');
+  });
+
+  it('rejects a plain-http DashScope host', () => {
+    // The side request carries a bearer API key; the https-only guard must
+    // reject a DashScope hostname served over plaintext HTTP.
+    const gate = evaluateWebSearchGate(
+      makeConfig({
+        models: [
+          {
+            id: 'qwen3.6-plus',
+            authType: 'openai',
+            envKey: TEST_ENV_KEY,
+            baseUrl: 'http://dashscope.aliyuncs.com/compatible-mode/v1',
           },
         ],
       }),
@@ -735,6 +770,23 @@ describe('WebSearchTool execute', () => {
     );
     const result = await runSearch(makeConfig());
     expect(result.error?.type).toBe(ToolErrorType.WEB_SEARCH_RATE_LIMITED);
+  });
+
+  it('salvages streamed results when an in-stream error follows an executed search', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream([
+        { type: 'response.created' },
+        { type: 'response.output_item.done', item: SEARCH_ITEM },
+        { code: 'Throttling.RateQuota', message: 'Requests throttled.' },
+      ]),
+    );
+    const result = await runSearch(makeConfig());
+    // The search executed (and billed) before the error — its sources must
+    // surface as a partial result, matching the transport-error path.
+    expect(result.error).toBeUndefined();
+    const content = result.llmContent as string;
+    expect(content).toContain('Partial result');
+    expect(content).toContain('https://example.com/a');
   });
 
   it('handles a response.failed terminal event', async () => {
