@@ -1563,6 +1563,7 @@ jobs:
             INSPECTED=$(( INSPECTED + 1 ))
             if [[ "${INSPECTED}" -gt "${MAX_CANDIDATE_INSPECTIONS}" ]]; then
               echo "🧮 candidate-inspection budget (${MAX_CANDIDATE_INSPECTIONS}) reached — deferring the rest to the next scan"
+              fleet_row "${PR}" 'deferred' "candidate-inspection budget reached"
               break
             fi
             # One PR fetch for the branch name, check rollup, creation time
@@ -1886,6 +1887,7 @@ jobs:
             # the remainder (their signals persist).
             if [[ "$(jq 'length' <<< "${TARGETS}")" -ge "${MAX_TARGETS_PER_SCAN}" ]]; then
               echo "⚠️ target budget (${MAX_TARGETS_PER_SCAN}) reached; deferring the remaining candidates to the next scan"
+              fleet_row '-' 'deferred' "target budget (${MAX_TARGETS_PER_SCAN}) reached — remaining candidates deferred to next scan"
               break
             fi
           done
