@@ -10397,6 +10397,16 @@ describe('Session', () => {
       const rawCommand = "python -c 'print(1)'";
       const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
       const executeSpy = vi.fn();
+      const internals = session as unknown as {
+        midTurnRecoveredMessages: Array<{
+          kind: 'text';
+          message: string;
+        }>;
+      };
+      internals.midTurnRecoveredMessages.push({
+        kind: 'text',
+        message: 'recovered before cancellation',
+      });
       const invocation = {
         params: { command: rawCommand },
         getDefaultPermission: vi.fn().mockResolvedValue('allow'),
@@ -10454,6 +10464,31 @@ describe('Session', () => {
       );
       expect(mockClient.extMethod).not.toHaveBeenCalled();
       expect(executeSpy).not.toHaveBeenCalled();
+      expect(internals.midTurnRecoveredMessages).toHaveLength(0);
+      expect(mockChat.addHistory).toHaveBeenCalledWith({
+        role: 'user',
+        parts: [
+          expect.objectContaining({
+            functionResponse: expect.objectContaining({
+              id: 'call-plan-approval-cancelled',
+              name: core.ToolNames.SHELL,
+            }),
+          }),
+          {
+            text: '\n[User message received during tool execution]: recovered before cancellation',
+          },
+        ],
+      });
+      expect(
+        mockChatRecordingService.recordMidTurnUserMessage,
+      ).toHaveBeenCalledWith(
+        [
+          {
+            text: '\n[User message received during tool execution]: recovered before cancellation',
+          },
+        ],
+        'recovered before cancellation',
+      );
     });
 
     it('rejects permission-hook rewrites of unknown Plan shell commands', async () => {
@@ -12954,6 +12989,11 @@ describe('Session', () => {
         ]);
       }
 
+      async function* createAbortingEmptyStream() {
+        await session.cancelPendingPrompt();
+        yield* createEmptyStream();
+      }
+
       it('waits for pending rewrites before ending after cancelled ask_user_question', async () => {
         let releaseRewrite!: () => void;
         const flushTurn = vi.fn().mockResolvedValue(undefined);
@@ -13215,6 +13255,44 @@ describe('Session', () => {
         expect(execute).not.toHaveBeenCalled();
       });
 
+      it('reports cancellation when abort lands between Stop-hook iterations', async () => {
+        const messageBus = {
+          request: vi.fn().mockResolvedValueOnce({
+            success: true,
+            output: {
+              decision: 'block',
+              reason: 'Continue after Stop hook',
+            },
+          }),
+        };
+        mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.hasHooksForEvent = vi
+          .fn()
+          .mockImplementation((eventName: string) => eventName === 'Stop');
+        mockChat.getHistory = vi
+          .fn()
+          .mockReturnValue([
+            { role: 'model', parts: [{ text: 'response text' }] },
+          ]);
+        mockChat.getLastModelMessageText = vi
+          .fn()
+          .mockReturnValue('response text');
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(createAbortingEmptyStream());
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'cancelled' });
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        expect(messageBus.request).toHaveBeenCalledTimes(1);
+      });
+
       it('ends background notification processing after cancelled ask_user_question', async () => {
         const execute = vi.fn();
         mockToolRegistry.getTool.mockReturnValue(
@@ -13314,6 +13392,40 @@ describe('Session', () => {
           );
         });
         expect(execute).not.toHaveBeenCalled();
+      });
+
+      it('reports cancellation when a background stream ends after abort', async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(createAbortingEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'start background work' }],
+        });
+
+        const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+          .calls[0][0] as (
+          displayText: string,
+          modelText: string,
+          meta: { agentId: string; status: string; toolUseId?: string },
+        ) => void;
+        callback('done', '<task-notification />', {
+          agentId: 'agent-1',
+          status: 'completed',
+        });
+
+        await vi.waitFor(() => {
+          expect(mockClient.extNotification).toHaveBeenCalledWith(
+            '_qwencode/end_turn',
+            {
+              sessionId: 'test-session-id',
+              reason: 'cancelled',
+              source: 'background_notification',
+            },
+          );
+        });
       });
     });
   });
@@ -15868,7 +15980,7 @@ describe('Session', () => {
       );
     });
 
-    it('preserves the feature-off Stop-loop result when cancellation arrives before it starts', async () => {
+    it('reports cancellation before a feature-off Stop loop starts', async () => {
       let enterWait!: () => void;
       const waitStarted = new Promise<void>((resolve) => {
         enterWait = resolve;
@@ -15893,7 +16005,7 @@ describe('Session', () => {
       await session.cancelPendingPrompt();
       releaseWait();
 
-      await expect(prompt).resolves.toEqual({ stopReason: 'end_turn' });
+      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
     });
 
     it('runs exactly two continuations and emits replayable status', async () => {
