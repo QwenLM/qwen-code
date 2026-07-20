@@ -57,3 +57,18 @@ supervisord -c /mnt/workspace/qwen-benchmark/service/deploy/supervisord.conf
 
 Use shared-token mode only for a private POC route. The GitHub workflow expects
 OIDC mode for a public HTTPS endpoint.
+
+## Reverse proxy
+
+`deploy/nginx-http.conf` is an HTTP-only connectivity configuration. It keeps
+FastAPI on `127.0.0.1:8000`, proxies `/healthz` and `/api/`, and rejects other
+paths. Do not send credentials or GitHub OIDC tokens over this listener.
+
+For production, copy `deploy/nginx-https.conf.template`, replace
+`BENCHMARK_DOMAIN`, and install a trusted TLS certificate at the paths in the
+template. Only TCP 443 should be public; TCP 8000 remains loopback-only.
+
+The DSW runtime already has a Supervisor instance. Install
+`deploy/nginx-supervisor.conf` under
+`/etc/dsw/sys_configs/supervisor/conf.d/`, then use that runtime's
+`supervisorctl reread` and `supervisorctl update` commands to manage Nginx.
