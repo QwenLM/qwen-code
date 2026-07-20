@@ -18,11 +18,17 @@ import {
 import { useI18n } from '../../i18n';
 import {
   filterSkills,
+  isSkillInConfigInventory,
+  isSkillRuntimeConfirmed,
+  mergeSkillsInventory,
   preserveSkillSelection,
+  skillMutationActivationPresentation,
   type SkillLevelFilter,
+  type SkillMutationActivation,
   type SkillStatusFilter,
 } from './skills-manager-logic';
 import { Alert, AlertDescription } from '../ui/alert';
+import { ManagementNotice } from '../ui/management-notice';
 import { Badge } from '../ui/badge';
 import {
   Breadcrumb,
@@ -81,7 +87,9 @@ import styles from './SkillsManagerPage.module.css';
 interface SkillsManagerPageProps {
   onClose: () => void;
   onUseSkill: (name: string) => void;
+  workspaceCwd?: string;
   embedded?: EmbeddedManagerPage;
+  runtimeReady?: boolean;
 }
 
 function skillLevelLabel(
@@ -158,20 +166,35 @@ function ManualReferenceBadge({ compact = false }: { compact?: boolean }) {
 export function SkillsManagerPage({
   onClose,
   onUseSkill,
+  workspaceCwd,
   embedded,
+  runtimeReady = false,
 }: SkillsManagerPageProps) {
   const { t } = useI18n();
   const workspace = useWorkspace();
   const {
     status,
-    skills,
+    configStatus,
+    runtimeStatus,
+    skills: fallbackSkills,
     loading,
     error,
-    reload,
+    warning,
+    reloadConfig,
+    reloadRuntime,
+    ensureRuntime,
     setEnabled,
     install,
     remove,
-  } = useSkills({ autoLoad: true });
+  } = useSkills({ autoLoad: true }, workspaceCwd);
+  const skills = useMemo(
+    () =>
+      mergeSkillsInventory(
+        configStatus?.skills ?? fallbackSkills,
+        runtimeStatus,
+      ),
+    [configStatus?.skills, fallbackSkills, runtimeStatus],
+  );
   const canToggleSkills =
     workspace.capabilities?.features.includes('workspace_skill_toggle') ===
     true;
@@ -189,11 +212,16 @@ export function SkillsManagerPage({
   const [busySkill, setBusySkill] = useState<string | null>(null);
   const [installOpen, setInstallOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
-  const [listNotice, setListNotice] = useState<string | null>(null);
+  const [listNotice, setListNotice] = useState<{
+    text: string;
+    error: boolean;
+    success?: boolean;
+  } | null>(null);
   const [notice, setNotice] = useState<{
     skillName: string;
     text: string;
     error: boolean;
+    success?: boolean;
   } | null>(null);
   const displayedSkills = useMemo(
     () =>
@@ -207,6 +235,9 @@ export function SkillsManagerPage({
     () => displayedSkills.find((skill) => skill.name === selectedName),
     [displayedSkills, selectedName],
   );
+  const selectedSkillConfigured =
+    selectedSkill !== undefined &&
+    isSkillInConfigInventory(selectedSkill.name, configStatus?.skills ?? []);
   const filteredSkills = useMemo(
     () => filterSkills(displayedSkills, query, levelFilter, statusFilter),
     [displayedSkills, levelFilter, query, statusFilter],
@@ -215,6 +246,7 @@ export function SkillsManagerPage({
     (skill) => skill.status === 'disabled',
   ).length;
   const message = error?.message ?? status?.errors?.[0]?.error;
+  const warningMessage = warning?.message;
   const levelOptions: Array<{
     value: SkillLevelFilter;
     label: string;
@@ -229,6 +261,10 @@ export function SkillsManagerPage({
   useEffect(() => {
     setSelectedName((name) => preserveSkillSelection(name, displayedSkills));
   }, [displayedSkills]);
+
+  useEffect(() => {
+    if (runtimeReady) void reloadRuntime();
+  }, [reloadRuntime, runtimeReady]);
 
   useEffect(() => {
     setStatusOverrides((current) => {
@@ -248,21 +284,89 @@ export function SkillsManagerPage({
     embedded?.onDetailChange(Boolean(selectedSkill));
   }, [embedded, selectedSkill]);
 
+  async function reloadAfterMutation(
+    activation: SkillMutationActivation | undefined,
+  ) {
+    const configReload = reloadConfig();
+    if (activation !== 'applied' && activation !== 'partial') {
+      try {
+        await configReload;
+        return { refreshedRuntime: undefined, refreshError: undefined };
+      } catch (refreshError) {
+        return { refreshedRuntime: undefined, refreshError };
+      }
+    }
+    const [configResult, runtimeResult] = await Promise.allSettled([
+      configReload,
+      reloadRuntime(),
+    ]);
+    return {
+      refreshedRuntime:
+        runtimeResult.status === 'fulfilled' ? runtimeResult.value : undefined,
+      refreshError:
+        configResult.status === 'rejected'
+          ? configResult.reason
+          : runtimeResult.status === 'rejected'
+            ? runtimeResult.reason
+            : undefined,
+    };
+  }
+
+  function refreshFailureMessage(refreshError: unknown): string {
+    return t('skills.refreshAfterMutationFailed', {
+      error:
+        refreshError instanceof Error
+          ? refreshError.message
+          : String(refreshError),
+    });
+  }
+
+  async function refreshSkills(): Promise<void> {
+    await Promise.all([reloadConfig(), ensureRuntime()]);
+  }
+
   async function toggleSkill(skill: DaemonWorkspaceSkillStatus) {
+    if (!isSkillInConfigInventory(skill.name, configStatus?.skills ?? [])) {
+      return;
+    }
     const enabled = skill.status === 'disabled';
     setBusySkill(skill.name);
     setNotice(null);
     try {
-      await setEnabled(skill.name, enabled);
+      const mutation = await setEnabled(skill.name, enabled);
       setStatusOverrides((current) => ({
         ...current,
         [skill.name]: enabled ? 'ok' : 'disabled',
       }));
-      await reload();
+      const { refreshedRuntime, refreshError } = await reloadAfterMutation(
+        mutation.activation,
+      );
+      let presentation = skillMutationActivationPresentation(
+        mutation.activation,
+      );
+      if (
+        refreshError === undefined &&
+        mutation.activation === 'applied' &&
+        !isSkillRuntimeConfirmed(refreshedRuntime, skill.name, enabled)
+      ) {
+        presentation = {
+          messageKey: 'skills.runtimeNotConfirmed',
+          error: true,
+        };
+      }
+      const refreshMessage =
+        refreshError === undefined
+          ? ''
+          : ` ${refreshFailureMessage(refreshError)}`;
+      const error = presentation.error || refreshError !== undefined;
       setNotice({
         skillName: skill.name,
-        text: t(enabled ? 'skills.enabled' : 'skills.disabled'),
-        error: false,
+        text: `${t(enabled ? 'skills.enabled' : 'skills.disabled')} ${t(
+          presentation.messageKey,
+          { activation: mutation.activation ?? 'unknown' },
+        )}${refreshMessage}`,
+        error,
+        success: !error && mutation.activation !== 'deferred',
       });
     } catch (toggleError) {
       setNotice({
@@ -279,9 +383,30 @@ export function SkillsManagerPage({
     request: Parameters<typeof install>[0],
   ): Promise<void> {
     setListNotice(null);
-    await install(request);
-    setListNotice(t('skills.install.succeeded', { name: request.name.trim() }));
-    await reload().catch(() => undefined);
+    const mutation = await install(request);
+    const presentation = skillMutationActivationPresentation(
+      mutation.activation,
+    );
+    setListNotice({
+      text: `${t('skills.install.succeeded', {
+        name: request.name.trim(),
+      })} ${t(presentation.messageKey, {
+        activation: mutation.activation ?? 'unknown',
+      })}`,
+      error: presentation.error,
+      success: !presentation.error && mutation.activation === 'applied',
+    });
+    void reloadAfterMutation(mutation.activation).then(({ refreshError }) => {
+      if (refreshError === undefined) return;
+      setListNotice({
+        text: `${t('skills.install.succeeded', {
+          name: request.name.trim(),
+        })} ${t(presentation.messageKey, {
+          activation: mutation.activation ?? 'unknown',
+        })} ${refreshFailureMessage(refreshError)}`,
+        error: true,
+      });
+    });
   }
 
   async function deleteSkill(): Promise<void> {
@@ -289,11 +414,32 @@ export function SkillsManagerPage({
     const scope = selectedSkill.level === 'project' ? 'workspace' : 'global';
     setBusySkill(selectedSkill.name);
     try {
-      await remove(selectedSkill.name, scope);
+      const mutation = await remove(selectedSkill.name, scope);
+      const presentation = skillMutationActivationPresentation(
+        mutation.activation,
+      );
       setDeleteOpen(false);
       setSelectedName(null);
-      setListNotice(t('skills.delete.succeeded', { name: selectedSkill.name }));
-      await reload().catch(() => undefined);
+      setListNotice({
+        text: `${t('skills.delete.succeeded', {
+          name: selectedSkill.name,
+        })} ${t(presentation.messageKey, {
+          activation: mutation.activation ?? 'unknown',
+        })}`,
+        error: presentation.error,
+        success: !presentation.error && mutation.activation === 'applied',
+      });
+      const { refreshError } = await reloadAfterMutation(mutation.activation);
+      if (refreshError !== undefined) {
+        setListNotice({
+          text: `${t('skills.delete.succeeded', {
+            name: selectedSkill.name,
+          })} ${t(presentation.messageKey, {
+            activation: mutation.activation ?? 'unknown',
+          })} ${refreshFailureMessage(refreshError)}`,
+          error: true,
+        });
+      }
     } catch (deleteError) {
       setDeleteOpen(false);
       setNotice({
@@ -311,7 +457,6 @@ export function SkillsManagerPage({
 
   function returnToList(): void {
     setSelectedName(null);
-    void reload();
   }
 
   const standaloneNavigation = (
@@ -412,77 +557,90 @@ export function SkillsManagerPage({
               <PlayIcon data-icon="inline-start" />
               {t('skills.run')}
             </Button>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  disabled={busySkill !== null}
-                  aria-label={t('skills.actions')}
-                  data-testid="skill-actions"
-                >
-                  {busySkill === selectedSkill.name ? (
-                    <Spinner />
-                  ) : (
-                    <EllipsisVerticalIcon />
-                  )}
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent
-                align="end"
-                onCloseAutoFocus={(event) => event.preventDefault()}
-              >
-                <DropdownMenuGroup>
-                  <DropdownMenuItem
-                    disabled={
-                      busySkill !== null ||
-                      !canToggleSkills ||
-                      selectedSkill.userInvocable === false
-                    }
-                    title={
-                      !canToggleSkills
-                        ? t('skills.toggleUnsupported')
-                        : selectedSkill.userInvocable === false
-                          ? t('skills.notToggleable')
-                          : undefined
-                    }
-                    onSelect={() => void toggleSkill(selectedSkill)}
+            {selectedSkillConfigured ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    disabled={busySkill !== null}
+                    aria-label={t('skills.actions')}
+                    data-testid="skill-actions"
                   >
-                    {t(
-                      selectedSkill.status === 'disabled'
-                        ? 'skills.enable'
-                        : 'skills.disable',
+                    {busySkill === selectedSkill.name ? (
+                      <Spinner />
+                    ) : (
+                      <EllipsisVerticalIcon />
                     )}
-                  </DropdownMenuItem>
-                  {canManageSkills &&
-                  (selectedSkill.level === 'project' ||
-                    selectedSkill.level === 'user') ? (
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent
+                  align="end"
+                  onCloseAutoFocus={(event) => event.preventDefault()}
+                >
+                  <DropdownMenuGroup>
                     <DropdownMenuItem
-                      variant="destructive"
-                      disabled={busySkill !== null}
-                      onSelect={() => setDeleteOpen(true)}
+                      disabled={
+                        busySkill !== null ||
+                        !canToggleSkills ||
+                        selectedSkill.userInvocable === false
+                      }
+                      title={
+                        !canToggleSkills
+                          ? t('skills.toggleUnsupported')
+                          : selectedSkill.userInvocable === false
+                            ? t('skills.notToggleable')
+                            : undefined
+                      }
+                      onSelect={() => void toggleSkill(selectedSkill)}
                     >
-                      {t('skills.delete.action')}
+                      {t(
+                        selectedSkill.status === 'disabled'
+                          ? 'skills.enable'
+                          : 'skills.disable',
+                      )}
                     </DropdownMenuItem>
-                  ) : null}
-                </DropdownMenuGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
+                    {canManageSkills &&
+                    (selectedSkill.level === 'project' ||
+                      selectedSkill.level === 'user') ? (
+                      <DropdownMenuItem
+                        variant="destructive"
+                        disabled={busySkill !== null}
+                        onSelect={() => setDeleteOpen(true)}
+                      >
+                        {t('skills.delete.action')}
+                      </DropdownMenuItem>
+                    ) : null}
+                  </DropdownMenuGroup>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : null}
           </div>
 
           {notice?.skillName === selectedSkill.name ? (
-            <Alert variant={notice.error ? 'destructive' : 'default'}>
-              {notice.error ? <AlertCircleIcon /> : <InfoIcon />}
-              <AlertDescription>{notice.text}</AlertDescription>
+            <ManagementNotice
+              tone={
+                notice.error ? 'error' : notice.success ? 'success' : 'info'
+              }
+              noticeKey={notice.text}
+              closeLabel={t('common.close')}
+              onDismiss={() => setNotice(null)}
+            >
+              {notice.text}
+            </ManagementNotice>
+          ) : null}
+
+          {selectedSkill.error ? (
+            <Alert variant="destructive">
+              <AlertCircleIcon />
+              <AlertDescription>{selectedSkill.error}</AlertDescription>
             </Alert>
           ) : null}
 
-          {message || selectedSkill.error ? (
-            <Alert variant="destructive">
-              <AlertCircleIcon />
-              <AlertDescription>
-                {selectedSkill.error || message}
-              </AlertDescription>
+          {warningMessage ? (
+            <Alert>
+              <InfoIcon />
+              <AlertDescription>{warningMessage}</AlertDescription>
             </Alert>
           ) : null}
 
@@ -580,6 +738,11 @@ export function SkillsManagerPage({
                 disabled: disabledCount,
               })}
             </p>
+            {runtimeStatus?.source && runtimeStatus.source !== 'live' ? (
+              <Badge variant="secondary" className="mt-2">
+                {t(`skills.source.${runtimeStatus.source}`)}
+              </Badge>
+            ) : null}
           </div>
           <div className="flex gap-2">
             {canManageSkills ? (
@@ -591,7 +754,7 @@ export function SkillsManagerPage({
             <Button
               variant="outline"
               disabled={loading}
-              onClick={() => void reload()}
+              onClick={() => void refreshSkills()}
             >
               {loading ? (
                 <Spinner data-icon="inline-start" />
@@ -610,11 +773,37 @@ export function SkillsManagerPage({
           </Alert>
         ) : null}
 
-        {listNotice ? (
+        {warningMessage ? (
           <Alert>
             <InfoIcon />
-            <AlertDescription>{listNotice}</AlertDescription>
+            <AlertDescription>{warningMessage}</AlertDescription>
           </Alert>
+        ) : null}
+
+        {runtimeStatus?.source && runtimeStatus.source !== 'live' ? (
+          <Alert>
+            <InfoIcon />
+            <AlertDescription>
+              {t(`skills.source.${runtimeStatus.source}.description`)}
+            </AlertDescription>
+          </Alert>
+        ) : null}
+
+        {listNotice ? (
+          <ManagementNotice
+            tone={
+              listNotice.error
+                ? 'error'
+                : listNotice.success
+                  ? 'success'
+                  : 'info'
+            }
+            noticeKey={listNotice.text}
+            closeLabel={t('common.close')}
+            onDismiss={() => setListNotice(null)}
+          >
+            {listNotice.text}
+          </ManagementNotice>
         ) : null}
 
         <div className="relative">

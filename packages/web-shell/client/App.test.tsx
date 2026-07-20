@@ -44,6 +44,7 @@ type ChatEditorTestProps = {
   placeholderText?: string;
   workspaces?: Array<{ id: string; cwd: string }>;
   atWorkspaceCwd?: string;
+  onSelectWorkspace?: (cwd: string | undefined) => void;
 };
 
 const {
@@ -62,6 +63,9 @@ const {
   editorFocus,
   editorInsertText,
   settingsReload,
+  workspaceRuntimeStatus,
+  ensureWorkspaceRuntime,
+  workspaceRuntimeSkills,
 } = vi.hoisted(() => {
   const connection: MockConnection = {
     status: 'connected',
@@ -79,10 +83,21 @@ const {
     catchingUp: false,
   };
   const loadSkillsStatus = vi.fn().mockResolvedValue({ skills: [] });
+  const workspaceRuntimeStatus = vi.fn().mockResolvedValue({
+    runtimeLive: true,
+    capabilities: { skills: { state: 'ready' } },
+  });
+  const ensureWorkspaceRuntime = vi.fn().mockResolvedValue({
+    capabilities: { skills: { state: 'ready' } },
+  });
+  const workspaceRuntimeSkills = vi.fn(() => loadSkillsStatus());
   const workspaceClient = {
     workspaceByCwd: vi.fn(() => ({
       workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
       workspaceSkills: loadSkillsStatus,
+      workspaceRuntimeStatus,
+      ensureWorkspaceRuntime,
+      workspaceRuntimeSkills,
     })),
     sessionStatus: vi.fn(() => Promise.resolve({})),
   };
@@ -115,6 +130,7 @@ const {
       client: workspaceClient,
     },
     mockWorkspaceActions: {
+      ensureRuntime: vi.fn().mockResolvedValue({}),
       loadSkillsStatus,
       loadProviders: vi.fn().mockResolvedValue({ current: null }),
       loadPreflight: vi.fn().mockResolvedValue(null),
@@ -124,15 +140,21 @@ const {
       loadMcpResources: vi.fn().mockResolvedValue([]),
     },
     mockMcp: {
+      status: undefined,
       initialize: vi.fn().mockResolvedValue({ accepted: true }),
       reloadConfig: vi.fn().mockResolvedValue({ accepted: true }),
       reload: vi.fn(),
+      loadStatus: vi.fn(),
+      loadConfig: vi.fn(),
+      waitForRuntime: vi.fn(),
       loadTools: vi.fn(),
       loadResources: vi.fn(),
       restartServer: vi.fn(),
       manageServer: vi.fn(),
-      addServer: vi.fn(),
-      removeServer: vi.fn(),
+      operationStatus: vi.fn(),
+      activeOperations: vi.fn().mockResolvedValue({ v: 1, operations: [] }),
+      setConfig: vi.fn(),
+      removeConfig: vi.fn(),
       loading: false,
       error: undefined,
     },
@@ -172,6 +194,7 @@ const {
         onCreateGoal?: (condition: string) => Promise<void>;
         onOpenSession?: (sessionId: string) => void;
       } | null,
+      workspaceActionOwners: [] as Array<string | undefined>,
     },
     sidebarTokens: [] as Array<number | undefined>,
     rawEnqueuePrompt: vi.fn(() => true),
@@ -180,6 +203,9 @@ const {
     editorFocus: vi.fn(),
     editorInsertText: vi.fn(),
     settingsReload: vi.fn().mockResolvedValue(undefined),
+    workspaceRuntimeStatus,
+    ensureWorkspaceRuntime,
+    workspaceRuntimeSkills,
   };
 });
 
@@ -218,7 +244,10 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   }),
   useTranscriptStore: () => mockStore,
   useWorkspace: () => mockWorkspace,
-  useWorkspaceActions: () => mockWorkspaceActions,
+  useWorkspaceActions: (workspaceCwd?: string) => {
+    testState.workspaceActionOwners.push(workspaceCwd);
+    return mockWorkspaceActions;
+  },
   useMcp: () => mockMcp,
   useWorkspaceEventSignals: () => ({
     artifactsVersion: 0,
@@ -922,6 +951,19 @@ beforeEach(() => {
     workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
   };
   mockWorkspace.client.workspaceByCwd.mockClear();
+  workspaceRuntimeStatus.mockClear();
+  workspaceRuntimeStatus.mockResolvedValue({
+    runtimeLive: true,
+    capabilities: { skills: { state: 'ready' } },
+  });
+  ensureWorkspaceRuntime.mockClear();
+  ensureWorkspaceRuntime.mockResolvedValue({
+    capabilities: { skills: { state: 'ready' } },
+  });
+  workspaceRuntimeSkills.mockReset();
+  workspaceRuntimeSkills.mockImplementation(() =>
+    mockWorkspaceActions.loadSkillsStatus(),
+  );
   testState.prompt = 'hello';
   testState.inputAnnotations = undefined;
   testState.promptImages = undefined;
@@ -933,6 +975,7 @@ beforeEach(() => {
   testState.latestAskUserQuestionKeyboardActive = null;
   testState.latestScheduledTasksProps = null;
   testState.latestGoalsProps = null;
+  testState.workspaceActionOwners.length = 0;
   sidebarTokens.length = 0;
   rawEnqueuePrompt.mockClear();
   editorClear.mockClear();
@@ -967,6 +1010,8 @@ beforeEach(() => {
   mockStore.reset.mockClear();
   mockStore.dispatch.mockClear();
   mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({ skills: [] });
+  mockWorkspaceActions.ensureRuntime.mockClear();
+  mockWorkspaceActions.ensureRuntime.mockResolvedValue({});
   mockWorkspaceActions.loadProviders.mockResolvedValue({ current: null });
   mockWorkspaceActions.loadPreflight.mockResolvedValue(null);
   mockWorkspaceActions.loadEnv.mockResolvedValue(null);
@@ -978,6 +1023,17 @@ beforeEach(() => {
   mockMcp.reloadConfig.mockClear();
   mockMcp.reloadConfig.mockResolvedValue({ accepted: true });
   mockMcp.reload.mockReset();
+  mockMcp.reload.mockResolvedValue(undefined);
+  mockMcp.loadStatus.mockReset();
+  mockMcp.loadConfig.mockReset();
+  mockMcp.loadConfig.mockResolvedValue({
+    v: 1,
+    effective: {},
+    user: {},
+    workspace: {},
+    disabledServers: [],
+  });
+  mockMcp.waitForRuntime.mockReset();
   mockMcp.loadTools.mockReset();
   mockMcp.loadResources.mockReset();
   mockMcp.restartServer.mockReset();
@@ -987,6 +1043,11 @@ beforeEach(() => {
     durationMs: 1,
   });
   mockMcp.manageServer.mockReset();
+  mockMcp.operationStatus.mockReset();
+  mockMcp.activeOperations.mockReset();
+  mockMcp.activeOperations.mockResolvedValue({ v: 1, operations: [] });
+  mockMcp.setConfig.mockReset();
+  mockMcp.removeConfig.mockReset();
   vi.spyOn(console, 'warn').mockImplementation(() => {});
 });
 
@@ -1000,6 +1061,14 @@ afterEach(() => {
 });
 
 describe('App session callbacks', () => {
+  it('scopes workspace actions to the connected session workspace', () => {
+    mockConnection.workspaceCwd = '/work/secondary';
+
+    renderApp();
+
+    expect(testState.workspaceActionOwners).toContain('/work/secondary');
+  });
+
   it('submits through a disconnected session when prompt SSE restart is enabled', async () => {
     mockConnection.status = 'disconnected';
     renderApp({ restartSseOnPrompt: true });
@@ -1063,9 +1132,10 @@ describe('App session callbacks', () => {
   });
 
   it('reloads skills from the target workspace when starting a new session', async () => {
-    const { container } = renderApp({
+    const props = {
       lockedWorkspaceCwd: '/work/secondary',
-    });
+    };
+    const { container, rerender } = renderApp(props);
     await flush();
     mockWorkspace.client.workspaceByCwd.mockClear();
 
@@ -1075,6 +1145,9 @@ describe('App session callbacks', () => {
         ?.click();
       await Promise.resolve();
     });
+    mockConnection.sessionId = undefined;
+    rerender(props);
+    await flush();
 
     expect(mockWorkspace.client.workspaceByCwd).toHaveBeenCalledWith(
       '/work/secondary',
@@ -1193,7 +1266,7 @@ describe('App session callbacks', () => {
     mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
       skills: [{ name: 'review', description: 'Review', status: 'ok' }],
     });
-    const { container } = renderApp();
+    const { container, rerender } = renderApp();
     await flush();
     expect(testState.latestChatEditorProps?.skills).toEqual([
       { name: 'review', description: 'Review' },
@@ -1211,29 +1284,33 @@ describe('App session callbacks', () => {
         ?.click();
       await Promise.resolve();
     });
+    mockConnection.sessionId = undefined;
+    rerender();
+    await flush();
+    await flush();
 
     expect(testState.latestChatEditorProps?.skills).toEqual([]);
     expect(testState.latestChatEditorProps?.commands).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ name: 'review' })]),
     );
-    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(2);
+    expect(workspaceRuntimeSkills).toHaveBeenCalledTimes(1);
   });
 
-  it('adds an enabled skill command when starting a new session', async () => {
+  it('adds a runtime-loaded skill command when starting a new session', async () => {
     mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
       skills: [{ name: 'review', description: 'Review', status: 'disabled' }],
     });
-    const { container } = renderApp();
+    const { container, rerender } = renderApp();
     await flush();
     expect(testState.latestChatEditorProps?.commands).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ name: 'review' })]),
     );
 
-    mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
+    workspaceRuntimeSkills.mockResolvedValue({
       skills: [
         {
-          name: 'review',
-          description: 'Review',
+          name: 'design',
+          description: 'Design',
           argumentHint: '<path>',
           status: 'ok',
         },
@@ -1245,14 +1322,47 @@ describe('App session callbacks', () => {
         ?.click();
       await Promise.resolve();
     });
+    mockConnection.sessionId = undefined;
+    rerender();
+    await flush();
+    await flush();
 
     expect(testState.latestChatEditorProps?.commands).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          name: 'review',
+          name: 'design',
           argumentHint: '<path>',
           source: 'skill',
         }),
+      ]),
+    );
+  });
+
+  it('waits for runtime initialization before refreshing new-task skills', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
+      skills: [{ name: 'review', description: 'Review', status: 'disabled' }],
+    });
+    workspaceRuntimeStatus.mockResolvedValue({
+      runtimeLive: false,
+      capabilities: { skills: { state: 'not_started' } },
+    });
+    mockWorkspaceActions.ensureRuntime.mockResolvedValue({
+      capabilities: { skills: { state: 'ready' } },
+    });
+    workspaceRuntimeSkills.mockResolvedValue({
+      skills: [{ name: 'design', description: 'Design', status: 'ok' }],
+    });
+
+    renderApp();
+    await flush();
+    await flush();
+
+    expect(mockWorkspaceActions.ensureRuntime).toHaveBeenCalledOnce();
+    expect(workspaceRuntimeSkills).toHaveBeenCalledOnce();
+    expect(testState.latestChatEditorProps?.commands).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'design', source: 'skill' }),
       ]),
     );
   });
@@ -2384,6 +2494,7 @@ describe('App session callbacks', () => {
     expect(
       container.querySelector('[data-testid="extensions-manager-page"]'),
     ).not.toBeNull();
+    expect(mockWorkspaceActions.ensureRuntime).toHaveBeenCalledOnce();
     const backButton = container.querySelector(
       '[data-testid="extensions-manager-back"]',
     );
@@ -2405,6 +2516,81 @@ describe('App session callbacks', () => {
       container.querySelector('[data-testid="extensions-manager-page"]'),
     ).toBeNull();
     expect(editorFocus).toHaveBeenCalled();
+  });
+
+  it('reloads MCP status when the selected workspace changes', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true },
+        { id: 'secondary', cwd: '/work/secondary', primary: false },
+      ],
+    };
+    mockWorkspaceActions.loadMcpStatus
+      .mockResolvedValueOnce({
+        workspaceCwd: '/workspace',
+        initialized: true,
+        discoveryState: 'completed',
+        servers: [],
+      })
+      .mockResolvedValueOnce({
+        workspaceCwd: '/work/secondary',
+        initialized: true,
+        discoveryState: 'completed',
+        servers: [],
+      });
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/mcp';
+    await clickSubmit(container);
+    await flush();
+    expect(mockWorkspaceActions.loadMcpStatus).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSelectWorkspace?.('/work/secondary');
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockWorkspaceActions.loadMcpStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it('refreshes new-task skills after returning from a management page', async () => {
+    mockConnection.sessionId = undefined;
+    const { container } = renderApp();
+    await flush();
+    await flush();
+
+    testState.prompt = '/extensions manage';
+    await clickSubmit(container);
+    await flush();
+
+    workspaceRuntimeSkills.mockResolvedValue({
+      skills: [
+        {
+          name: 'design',
+          description: 'Design',
+          status: 'ok',
+        },
+      ],
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="extensions-manager-back"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.commands).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'design', source: 'skill' }),
+      ]),
+    );
   });
 
   it.each(['/skills', '/skills detail', '/skills details'])(
@@ -2456,6 +2642,7 @@ describe('App session callbacks', () => {
     ]);
     expect(extensionsTab?.getAttribute('aria-selected')).toBe('true');
     expect(document.activeElement).toBe(extensionsTab);
+    expect(mockWorkspaceActions.ensureRuntime).toHaveBeenCalledOnce();
 
     await act(async () => {
       tabs?.[2]?.focus();
@@ -2467,12 +2654,19 @@ describe('App session callbacks', () => {
         ?.querySelectorAll<HTMLButtonElement>('button[role="tab"]')[2]
         ?.getAttribute('aria-selected'),
     ).toBe('true');
+    expect(mockWorkspaceActions.ensureRuntime).toHaveBeenCalledOnce();
   });
 
-  it('only shows server startup progress during MCP discovery', async () => {
+  it('shows the configured server with explicit runtime startup state', async () => {
     mockWorkspaceActions.loadMcpStatus.mockResolvedValue({
       initialized: true,
       discoveryState: 'starting',
+      workspaceCwd: '/workspace',
+      source: 'live',
+      runtimeEpoch: 1,
+      runtimeState: 'starting',
+      coordinatorRuntimeEpoch: 1,
+      capabilityRuntimeEpoch: 1,
       servers: [
         {
           name: 'filesystem',
@@ -2483,6 +2677,13 @@ describe('App session callbacks', () => {
         },
       ],
     });
+    mockMcp.loadConfig.mockResolvedValue({
+      v: 1,
+      effective: { filesystem: { command: 'filesystem' } },
+      user: {},
+      workspace: { filesystem: { command: 'filesystem' } },
+      disabledServers: [],
+    });
     const { container } = renderApp();
     await flush();
 
@@ -2490,12 +2691,40 @@ describe('App session callbacks', () => {
     await clickSubmit(container);
     await flush();
 
-    expect(container.textContent).toContain(
-      'MCP servers are starting up (1 initializing)',
-    );
+    expect(container.textContent).toContain('Workspace runtime starting');
     expect(container.textContent).not.toContain('Loading MCP tools...');
     expect(
       container.querySelector('[role="button"][aria-label="filesystem"]'),
+    ).toHaveProperty('tabIndex', 0);
+  });
+
+  it('opens MCP configuration when the workspace runtime is unavailable', async () => {
+    mockWorkspaceActions.loadMcpStatus.mockRejectedValue(
+      new Error('Workspace is not trusted'),
+    );
+    mockMcp.initialize.mockRejectedValue(new Error('Workspace is not trusted'));
+    mockMcp.loadConfig.mockResolvedValue({
+      v: 1,
+      effective: { docs: { command: 'docs-server' } },
+      user: {},
+      workspace: { docs: { command: 'docs-server' } },
+      disabledServers: [],
+    });
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/mcp';
+    await clickSubmit(container);
+    await flush();
+
+    expect(
+      container
+        .querySelector('[data-testid="inline-panel"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('MCP Servers');
+    expect(container.textContent).toContain('Workspace is not trusted');
+    expect(
+      container.querySelector('[role="button"][aria-label="docs"]'),
     ).toHaveProperty('tabIndex', 0);
   });
 
@@ -2504,6 +2733,11 @@ describe('App session callbacks', () => {
       initialized: true,
       discoveryState: 'completed',
       workspaceCwd: '/workspace',
+      source: 'live',
+      runtimeEpoch: 1,
+      runtimeState: 'ready',
+      coordinatorRuntimeEpoch: 1,
+      capabilityRuntimeEpoch: 1,
       servers: [
         {
           name: 'filesystem',
@@ -2516,12 +2750,29 @@ describe('App session callbacks', () => {
         },
       ],
     });
+    mockMcp.loadConfig.mockResolvedValue({
+      v: 1,
+      effective: { filesystem: { command: 'filesystem' } },
+      user: {},
+      workspace: { filesystem: { command: 'filesystem' } },
+      disabledServers: [],
+    });
     mockMcp.loadTools.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/workspace',
       serverName: 'filesystem',
+      initialized: true,
+      runtimeEpoch: 1,
+      acpChannelLive: true,
       tools: [{ name: 'read_file', description: 'Read a file' }],
     });
     mockMcp.loadResources.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/workspace',
       serverName: 'filesystem',
+      initialized: true,
+      runtimeEpoch: 1,
+      acpChannelLive: true,
       resources: [{ uri: 'file:///README.md', name: 'README' }],
     });
     const { container } = renderApp();
@@ -2569,7 +2820,7 @@ describe('App session callbacks', () => {
     expect(mockMcp.restartServer).toHaveBeenCalledWith('filesystem');
   });
 
-  it('polls workspace MCP status until browser authentication completes', async () => {
+  it('polls the workspace MCP operation until browser authentication completes', async () => {
     vi.useFakeTimers();
     const disconnectedServer = {
       name: 'yuque',
@@ -2584,6 +2835,11 @@ describe('App session callbacks', () => {
       initialized: true,
       discoveryState: 'completed',
       workspaceCwd: '/workspace',
+      source: 'live',
+      runtimeEpoch: 1,
+      runtimeState: 'ready',
+      coordinatorRuntimeEpoch: 1,
+      capabilityRuntimeEpoch: 1,
       servers: [disconnectedServer],
     });
     mockMcp.loadTools.mockResolvedValue({ serverName: 'yuque', tools: [] });
@@ -2592,31 +2848,54 @@ describe('App session callbacks', () => {
       action: 'authenticate',
       ok: true,
       pending: true,
+      operationId: 'op-auth',
+      deadlineAt: '2099-01-01T00:00:00.000Z',
       messages: ['Open the browser to authenticate.'],
       authUrl: 'https://example.com/oauth',
     });
-    mockMcp.reload
+    const authenticationOperation = {
+      v: 1 as const,
+      operationId: 'op-auth',
+      workspaceCwd: '/workspace',
+      kind: 'mcp' as const,
+      action: 'authenticate',
+      target: 'yuque',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      deadlineAt: '2099-01-01T00:00:00.000Z',
+      authUrl: 'https://example.com/oauth',
+    };
+    mockMcp.operationStatus
       .mockResolvedValueOnce({
-        initialized: true,
-        discoveryState: 'completed',
-        workspaceCwd: '/workspace',
-        servers: [
-          { ...disconnectedServer, authenticationState: 'pending' as const },
-        ],
+        ...authenticationOperation,
+        state: 'waiting_for_input' as const,
       })
       .mockResolvedValueOnce({
-        initialized: true,
-        discoveryState: 'completed',
-        workspaceCwd: '/workspace',
-        servers: [
-          {
-            ...disconnectedServer,
-            mcpStatus: 'connected' as const,
-            hasOAuthTokens: true,
-            authenticationState: 'succeeded' as const,
-          },
-        ],
+        ...authenticationOperation,
+        state: 'waiting_for_input' as const,
+      })
+      .mockResolvedValueOnce({
+        ...authenticationOperation,
+        state: 'succeeded' as const,
       });
+    mockMcp.loadStatus.mockResolvedValue({
+      initialized: true,
+      discoveryState: 'completed',
+      workspaceCwd: '/workspace',
+      source: 'live',
+      runtimeEpoch: 1,
+      runtimeState: 'ready',
+      coordinatorRuntimeEpoch: 1,
+      capabilityRuntimeEpoch: 1,
+      servers: [
+        {
+          ...disconnectedServer,
+          mcpStatus: 'connected' as const,
+          hasOAuthTokens: true,
+          authenticationState: 'succeeded' as const,
+        },
+      ],
+    });
     const { container } = renderApp();
     await flush();
 
@@ -2654,19 +2933,24 @@ describe('App session callbacks', () => {
     expect(container.textContent).toContain(
       'Open the browser to authenticate.',
     );
-    expect(mockMcp.reload).not.toHaveBeenCalled();
+    expect(mockMcp.operationStatus).toHaveBeenCalledTimes(1);
+    expect(mockMcp.loadStatus).not.toHaveBeenCalled();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1_500);
     });
-    expect(mockMcp.reload).toHaveBeenCalledTimes(1);
-    expect(container.textContent).toContain('Authenticating');
+    expect(mockMcp.operationStatus).toHaveBeenCalledTimes(2);
+    expect(mockMcp.loadStatus).not.toHaveBeenCalled();
+    expect(container.textContent).toContain(
+      "Starting OAuth authentication for MCP server 'yuque'",
+    );
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1_500);
     });
     await flush();
-    expect(mockMcp.reload).toHaveBeenCalledTimes(2);
+    expect(mockMcp.operationStatus).toHaveBeenCalledTimes(3);
+    expect(mockMcp.loadStatus).toHaveBeenCalledOnce();
     expect(container.textContent).toContain('Authenticate complete.');
   });
 
@@ -2690,6 +2974,11 @@ describe('App session callbacks', () => {
     mockWorkspaceActions.loadMcpStatus.mockResolvedValue({
       initialized: true,
       discoveryState: 'completed',
+      source: 'live',
+      runtimeEpoch: 1,
+      runtimeState: 'ready',
+      coordinatorRuntimeEpoch: 1,
+      capabilityRuntimeEpoch: 1,
       servers: [],
     });
     const { container } = renderApp();

@@ -26,14 +26,20 @@ import {
   type DaemonExtensionEntry,
   type DaemonExtensionUpdateState,
   type ExtensionInteractionResponse,
+  type ExtensionMutationResponse,
+  type ExtensionOperationStatus,
   type ExtensionPendingInteraction,
 } from '@qwen-code/sdk/daemon';
 import {
-  useConnection,
+  type DaemonWorkspaceExtensionViewEntry,
   useWorkspaceActions,
   useWorkspaceEventSignals,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
+import {
+  nextPollingDelay,
+  remainingPollingTimeout,
+} from '../../utils/polling-deadline';
 import { trimDialogLabel } from '../../utils/dialogLabels';
 import styles from './ExtensionsManagerPage.module.css';
 import {
@@ -41,6 +47,10 @@ import {
   preserveSelectedExtensionName,
 } from './extensions-manager-logic';
 import { Alert, AlertDescription } from '../ui/alert';
+import {
+  ManagementNotice,
+  type ManagementNoticeTone,
+} from '../ui/management-notice';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -93,12 +103,19 @@ import {
 } from '../ui/empty';
 import { Input } from '../ui/input';
 import { RadioGroup, RadioGroupItem } from '../ui/radio-group';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '../ui/select';
 import { Separator } from '../ui/separator';
 import { Spinner } from '../ui/spinner';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
 import type { EmbeddedManagerPage } from '../plugins/manager-page';
 type Scope = 'user' | 'workspace';
-type Mutation = 'enable' | 'disable';
+type ToggleMutation = 'enable' | 'disable' | 'inherit';
 type T = ReturnType<typeof useI18n>['t'];
 type PendingInteractionState = {
   operationId: string;
@@ -110,6 +127,7 @@ const UPDATE_AVAILABLE: DaemonExtensionUpdateState = 'update available';
 
 interface ExtensionsManagerPageProps {
   onClose: () => void;
+  workspaceCwd?: string;
   initialFocusRef?: Ref<HTMLHeadingElement>;
   embedded?: EmbeddedManagerPage;
 }
@@ -118,8 +136,20 @@ function extensionTitle(extension: DaemonExtensionEntry): string {
   return extension.displayName || extension.name;
 }
 
+function extensionIsActive(extension: DaemonExtensionEntry): boolean {
+  if (
+    extension.workspaceActivation &&
+    extension.workspaceActivation !== 'inherit'
+  ) {
+    return extension.workspaceActivation === 'enabled';
+  }
+  return extension.defaultActivation
+    ? extension.defaultActivation === 'enabled'
+    : extension.isActive;
+}
+
 function statusLabel(extension: DaemonExtensionEntry, t: T): string {
-  return extension.isActive
+  return extensionIsActive(extension)
     ? t('extensions.manage.status.enabled')
     : t('extensions.manage.status.disabled');
 }
@@ -159,6 +189,8 @@ function mutationMessage(operation: string, name: string, t: T): string {
       return t('extensions.manage.enabling', { name });
     case 'disable':
       return t('extensions.manage.disabling', { name });
+    case 'inherit':
+      return t('extensions.manage.inheriting', { name });
     case 'uninstall':
       return t('extensions.manage.uninstalling', { name });
     case 'update':
@@ -174,6 +206,8 @@ function mutationSuccessMessage(operation: string, name: string, t: T): string {
       return t('extensions.manage.enabled', { name });
     case 'disable':
       return t('extensions.manage.disabled', { name });
+    case 'inherit':
+      return t('extensions.manage.inherited', { name });
     case 'uninstall':
       return t('extensions.manage.uninstalled', { name });
     case 'update':
@@ -181,6 +215,37 @@ function mutationSuccessMessage(operation: string, name: string, t: T): string {
     default:
       return t('extensions.manage.queued', { name });
   }
+}
+
+function operationProgressMessage(
+  operation: ExtensionOperationStatus,
+  name: string,
+  t: T,
+): string | undefined {
+  switch (operation.phase) {
+    case 'preparing':
+      return t('extensions.manage.phase.preparing', { name });
+    case 'committing':
+      return t('extensions.manage.phase.committing', { name });
+    case 'reconciling':
+      return t('extensions.manage.phase.reconciling', { name });
+    case undefined:
+      return undefined;
+  }
+}
+
+function withActivationMessage(
+  value: string | null,
+  activation: 'applied' | 'deferred' | 'partial' | undefined,
+  t: T,
+): string | null {
+  const activationMessage =
+    activation === 'deferred'
+      ? t('extensions.manage.activationDeferred')
+      : activation === 'partial'
+        ? t('extensions.manage.activationPartial')
+        : null;
+  return [value, activationMessage].filter(Boolean).join(' ') || null;
 }
 
 function DetailField({ label, value }: { label: string; value: string }) {
@@ -385,14 +450,16 @@ function ExtensionInteractionDialog({
 
 export function ExtensionsManagerPage({
   onClose,
+  workspaceCwd,
   initialFocusRef,
   embedded,
 }: ExtensionsManagerPageProps) {
   const { t } = useI18n();
-  const connection = useConnection();
-  const actions = useWorkspaceActions();
+  const actions = useWorkspaceActions(workspaceCwd);
   const signals = useWorkspaceEventSignals();
-  const [extensions, setExtensions] = useState<DaemonExtensionEntry[]>([]);
+  const [extensions, setExtensions] = useState<
+    DaemonWorkspaceExtensionViewEntry[]
+  >([]);
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [updateStates, setUpdateStates] = useState<
@@ -402,6 +469,8 @@ export function ExtensionsManagerPage({
   const [checkingName, setCheckingName] = useState<string | null>(null);
   const [busyName, setBusyName] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [messageTone, setMessageTone] = useState<ManagementNoticeTone>('info');
+  const [messageOwner, setMessageOwner] = useState<string | null>(null);
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
   const [actionsOpen, setActionsOpen] = useState(false);
   const [uninstallName, setUninstallName] = useState<string | null>(null);
@@ -411,6 +480,7 @@ export function ExtensionsManagerPage({
   const [pendingInstall, setPendingInstall] = useState<{
     operationId: string;
     source: string;
+    deadlineAt: number;
   } | null>(null);
   const [pendingInteraction, setPendingInteraction] =
     useState<PendingInteractionState | null>(null);
@@ -428,8 +498,8 @@ export function ExtensionsManagerPage({
     operationId: string;
     name: string;
     operation?: string;
+    deadlineAt: number;
   } | null>(null);
-
   const clearInteraction = useCallback((operationId?: string) => {
     if (operationId && interactionOperationIdRef.current !== operationId) {
       return;
@@ -483,6 +553,8 @@ export function ExtensionsManagerPage({
               : nextExtensions;
           });
           if (!preserveMessage) {
+            setMessageOwner(null);
+            setMessageTone(status.errors?.[0] ? 'error' : 'info');
             setMessage(status.errors?.[0]?.error ?? null);
           }
           setSelectedName((name) =>
@@ -492,25 +564,50 @@ export function ExtensionsManagerPage({
           );
         })
         .catch((error: unknown) => {
-          setMessage(error instanceof Error ? error.message : String(error));
+          if (!preserveMessage) setMessageOwner(null);
+          setMessageTone('error');
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+          setMessage((current) =>
+            preserveMessage && current
+              ? `${current}\n${t('extensions.manage.followupRefreshFailed', {
+                  error: errorMessage,
+                })}`
+              : errorMessage,
+          );
         })
         .finally(() => setLoading(false));
     },
-    [actions],
+    [actions, t],
   );
-
-  const checkAllUpdates = useCallback(() => {
-    return actions
-      .checkExtensionUpdates(connection.clientId)
-      .then((result) => setUpdateStates(result.states))
-      .catch((error: unknown) => {
-        setMessage(error instanceof Error ? error.message : String(error));
-      });
-  }, [actions, connection.clientId]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  const prepareRuntime = useCallback(
+    (preserveMessage: boolean) => {
+      setLoading(true);
+      return actions
+        .ensureRuntime()
+        .then(() => load(preserveMessage))
+        .catch((error: unknown) => {
+          if (!preserveMessage) setMessageOwner(null);
+          setMessageTone('error');
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+          setMessage((current) =>
+            preserveMessage && current
+              ? `${current}\n${t('extensions.manage.followupRefreshFailed', {
+                  error: errorMessage,
+                })}`
+              : errorMessage,
+          );
+          setLoading(false);
+        });
+    },
+    [actions, load, t],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -530,6 +627,9 @@ export function ExtensionsManagerPage({
                 operationId: activeInstall.operationId,
                 source:
                   activeInstall.source ?? activeInstall.name ?? 'extension',
+                deadlineAt:
+                  activeInstall.deadlineAt ??
+                  activeInstall.createdAt + 21 * 60_000,
               },
           );
         }
@@ -548,6 +648,9 @@ export function ExtensionsManagerPage({
                 operationId: activeMutation.operationId,
                 name: activeMutation.name ?? 'extension',
                 operation: activeMutation.operation,
+                deadlineAt:
+                  activeMutation.deadlineAt ??
+                  activeMutation.createdAt + 21 * 60_000,
               },
           );
           setBusyName((current) => current ?? activeMutation.name ?? null);
@@ -571,20 +674,16 @@ export function ExtensionsManagerPage({
     };
   }, [actions]);
 
-  const extensionsVersionRef = useRef(signals?.extensionsVersion ?? 0);
+  const extensionsVersion = signals?.extensionsVersion ?? 0;
+  const extensionsVersionRef = useRef(extensionsVersion);
   useEffect(() => {
-    const version = signals?.extensionsVersion ?? 0;
+    const version = extensionsVersion;
     if (version !== extensionsVersionRef.current) {
       extensionsVersionRef.current = version;
       setUpdateStates({});
       void load(true);
     }
-  }, [load, signals?.extensionsVersion]);
-
-  useEffect(() => {
-    if (extensions.length === 0) return;
-    void checkAllUpdates();
-  }, [checkAllUpdates, extensions]);
+  }, [extensionsVersion, load]);
 
   useEffect(() => {
     if (!pendingInstall) return;
@@ -596,6 +695,7 @@ export function ExtensionsManagerPage({
       try {
         const operation = await actions.extensionOperationStatus(
           pendingInstall.operationId,
+          remainingPollingTimeout(pendingInstall.deadlineAt),
         );
         if (cancelled) return;
         retryDelay = 1000;
@@ -606,8 +706,12 @@ export function ExtensionsManagerPage({
               operation.interaction,
               'install',
             );
-            timer = setTimeout(() => void poll(), 5000);
+            timer = setTimeout(
+              () => void poll(),
+              nextPollingDelay(pendingInstall.deadlineAt, 5000),
+            );
           } else {
+            setMessageTone('error');
             setMessage(t('extensions.manage.operationFailed'));
             clearInteraction(pendingInstall.operationId);
             setPendingInstall(null);
@@ -615,6 +719,7 @@ export function ExtensionsManagerPage({
           return;
         }
         if (operation.status === 'failed') {
+          setMessageTone('error');
           setMessage(
             t('extensions.install.failed', {
               source: pendingInstall.source,
@@ -627,37 +732,72 @@ export function ExtensionsManagerPage({
         }
         if (
           operation.status === 'succeeded' ||
-          operation.status === 'succeeded_with_refresh_error'
+          operation.status === 'succeeded_with_refresh_error' ||
+          operation.status === 'succeeded_with_warnings'
         ) {
-          setMessage(
-            operation.status === 'succeeded_with_refresh_error'
-              ? t('extensions.manage.refreshFailed', {
-                  error: operation.result?.error ?? '',
+          const warning =
+            operation.warnings?.map((item) => item.error).join('\n') ||
+            operation.result?.error;
+          const resultMessage =
+            operation.status === 'succeeded_with_warnings'
+              ? t('extensions.manage.completedWithWarnings', {
+                  warning: warning ?? '',
                 })
-              : t('extensions.install.installed', {
-                  name: operation.result?.name ?? pendingInstall.source,
-                }),
+              : operation.status === 'succeeded_with_refresh_error'
+                ? t('extensions.manage.refreshFailed', {
+                    error: warning ?? '',
+                  })
+                : t('extensions.install.installed', {
+                    name: operation.result?.name ?? pendingInstall.source,
+                  });
+          setMessageTone(
+            operation.status === 'succeeded_with_refresh_error' ||
+              operation.result?.activation === 'partial'
+              ? 'error'
+              : operation.status === 'succeeded' &&
+                  operation.result?.activation !== 'deferred'
+                ? 'success'
+                : 'info',
+          );
+          setMessage(
+            withActivationMessage(
+              resultMessage,
+              operation.result?.activation,
+              t,
+            ),
           );
           clearInteraction(pendingInstall.operationId);
           setPendingInstall(null);
           void load(true);
           return;
         }
+        setMessageTone('progress');
         setMessage(
-          t('extensions.install.started', {
-            source: pendingInstall.source,
-          }),
+          operationProgressMessage(operation, pendingInstall.source, t) ??
+            t('extensions.install.started', {
+              source: pendingInstall.source,
+            }),
         );
-        timer = setTimeout(() => void poll(), 1000);
+        timer = setTimeout(
+          () => void poll(),
+          nextPollingDelay(pendingInstall.deadlineAt, 1000),
+        );
       } catch (error) {
         if (cancelled) return;
+        setMessageTone('error');
         setMessage(error instanceof Error ? error.message : String(error));
-        if (error instanceof DaemonHttpError && error.status === 404) {
+        if (
+          Date.now() >= pendingInstall.deadlineAt ||
+          (error instanceof DaemonHttpError && error.status === 404)
+        ) {
           clearInteraction(pendingInstall.operationId);
           setPendingInstall(null);
           return;
         }
-        timer = setTimeout(() => void poll(), retryDelay);
+        timer = setTimeout(
+          () => void poll(),
+          nextPollingDelay(pendingInstall.deadlineAt, retryDelay),
+        );
         retryDelay = Math.min(retryDelay * 2, 30_000);
       }
     };
@@ -686,20 +826,20 @@ export function ExtensionsManagerPage({
           pendingInteraction.operationId,
           pendingInteraction.interaction.id,
           response,
-          connection.clientId,
         )
         .then(() => {
           clearInteraction(pendingInteraction.operationId);
           restartPolling();
         })
         .catch((error: unknown) => {
+          setMessageTone('error');
           setMessage(error instanceof Error ? error.message : String(error));
           clearInteraction(pendingInteraction.operationId);
           restartPolling();
         })
         .finally(() => setSubmittingInteraction(false));
     },
-    [actions, clearInteraction, connection.clientId, pendingInteraction],
+    [actions, clearInteraction, pendingInteraction],
   );
 
   useEffect(() => {
@@ -712,8 +852,10 @@ export function ExtensionsManagerPage({
       try {
         const operation = await actions.extensionOperationStatus(
           pendingMutation.operationId,
+          remainingPollingTimeout(pendingMutation.deadlineAt),
         );
         if (cancelled) return;
+        const operationName = pendingMutation.operation ?? operation.operation;
         retryDelay = 1000;
         if (operation.status === 'waiting_for_input') {
           if (operation.interaction) {
@@ -722,8 +864,12 @@ export function ExtensionsManagerPage({
               operation.interaction,
               'mutation',
             );
-            timer = setTimeout(() => void poll(), 5000);
+            timer = setTimeout(
+              () => void poll(),
+              nextPollingDelay(pendingMutation.deadlineAt, 5000),
+            );
           } else {
+            setMessageTone('error');
             setMessage(t('extensions.manage.operationFailed'));
             clearInteraction(pendingMutation.operationId);
             setPendingMutation(null);
@@ -737,6 +883,7 @@ export function ExtensionsManagerPage({
           return;
         }
         if (operation.status === 'failed') {
+          setMessageTone('error');
           setMessage(operation.error ?? t('extensions.manage.operationFailed'));
           clearInteraction(pendingMutation.operationId);
           setPendingMutation(null);
@@ -750,31 +897,56 @@ export function ExtensionsManagerPage({
         }
         if (
           operation.status === 'succeeded' ||
-          operation.status === 'succeeded_with_refresh_error'
+          operation.status === 'succeeded_with_refresh_error' ||
+          operation.status === 'succeeded_with_warnings'
         ) {
-          if (operation.status === 'succeeded_with_refresh_error') {
-            setMessage(
-              t('extensions.manage.refreshFailed', {
-                error: operation.result?.error ?? '',
-              }),
-            );
+          let resultMessage: string | null;
+          if (operation.status === 'succeeded_with_warnings') {
+            resultMessage = t('extensions.manage.completedWithWarnings', {
+              warning:
+                operation.warnings?.map((item) => item.error).join('\n') ||
+                operation.result?.error ||
+                '',
+            });
+          } else if (operation.status === 'succeeded_with_refresh_error') {
+            resultMessage = t('extensions.manage.refreshFailed', {
+              error:
+                operation.warnings?.map((item) => item.error).join('\n') ||
+                operation.result?.error ||
+                '',
+            });
           } else if (operation.operation === 'uninstall') {
-            setMessage(null);
+            resultMessage = null;
           } else {
-            setMessage(
-              mutationSuccessMessage(
-                operation.operation,
-                pendingMutation.name,
-                t,
-              ),
+            resultMessage = mutationSuccessMessage(
+              operationName,
+              pendingMutation.name,
+              t,
             );
           }
+          setMessageTone(
+            operation.status === 'succeeded_with_refresh_error' ||
+              operation.result?.activation === 'partial'
+              ? 'error'
+              : operation.status === 'succeeded' &&
+                  operation.result?.activation !== 'deferred'
+                ? 'success'
+                : 'info',
+          );
+          setMessage(
+            withActivationMessage(
+              resultMessage,
+              operation.result?.activation,
+              t,
+            ),
+          );
           clearInteraction(pendingMutation.operationId);
           setPendingMutation(null);
           setBusyName(null);
           mutationInFlightRef.current = false;
           if (operation.operation === 'uninstall') {
             uninstallInFlightNameRef.current = null;
+            setMessageOwner(null);
             setSelectedName(null);
           }
           if (operation.operation === 'update') {
@@ -787,14 +959,23 @@ export function ExtensionsManagerPage({
           void load(true);
           return;
         }
+        setMessageTone('progress');
         setMessage(
-          mutationMessage(operation.operation, pendingMutation.name, t),
+          operationProgressMessage(operation, pendingMutation.name, t) ??
+            mutationMessage(operationName, pendingMutation.name, t),
         );
-        timer = setTimeout(() => void poll(), 1000);
+        timer = setTimeout(
+          () => void poll(),
+          nextPollingDelay(pendingMutation.deadlineAt, 1000),
+        );
       } catch (error) {
         if (cancelled) return;
+        setMessageTone('error');
         setMessage(error instanceof Error ? error.message : String(error));
-        if (error instanceof DaemonHttpError && error.status === 404) {
+        if (
+          Date.now() >= pendingMutation.deadlineAt ||
+          (error instanceof DaemonHttpError && error.status === 404)
+        ) {
           clearInteraction(pendingMutation.operationId);
           setPendingMutation(null);
           setBusyName(null);
@@ -805,7 +986,10 @@ export function ExtensionsManagerPage({
           }
           return;
         }
-        timer = setTimeout(() => void poll(), retryDelay);
+        timer = setTimeout(
+          () => void poll(),
+          nextPollingDelay(pendingMutation.deadlineAt, retryDelay),
+        );
         retryDelay = Math.min(retryDelay * 2, 30_000);
       }
     };
@@ -818,36 +1002,40 @@ export function ExtensionsManagerPage({
   }, [actions, clearInteraction, load, pendingMutation, showInteraction, t]);
 
   const refreshList = useCallback(() => {
+    setMessageOwner(null);
+    setMessageTone('info');
     setMessage(null);
-    void load();
-  }, [load]);
+    void prepareRuntime(false);
+  }, [prepareRuntime]);
 
   const checkUpdates = useCallback(
     (name: string) => {
       setCheckingName(name);
+      setMessageOwner(selectedName === name ? name : null);
+      setMessageTone('info');
       setMessage(null);
       setUpdateStates((current) => ({
         ...current,
         [name]: 'checking for updates',
       }));
       actions
-        .checkExtensionUpdates(connection.clientId)
+        .checkExtensionUpdates()
         .then((result) => {
           setUpdateStates(result.states);
           setMessage(updateLabel(result.states[name], t));
         })
         .catch((error: unknown) => {
           setUpdateStates((current) => ({ ...current, [name]: 'error' }));
+          setMessageTone('error');
           setMessage(error instanceof Error ? error.message : String(error));
         })
         .finally(() => setCheckingName(null));
     },
-    [actions, connection.clientId, t],
+    [actions, selectedName, t],
   );
 
   const installExtension = useCallback(() => {
     const source = installSource.trim();
-    const clientId = connection.clientId;
     if (
       !source ||
       !operationsRecovered ||
@@ -857,21 +1045,27 @@ export function ExtensionsManagerPage({
     )
       return;
     setInstalling(true);
+    setMessageOwner(null);
+    setMessageTone('info');
     setMessage(null);
     actions
-      .installExtension({ source, consent: true }, clientId)
+      .installExtension({ source, consent: true })
       .then((result) => {
-        setPendingInstall({ operationId: result.operationId, source });
+        setPendingInstall({
+          operationId: result.operationId,
+          source,
+          deadlineAt: result.deadlineAt ?? Date.now() + 21 * 60_000,
+        });
         setInstallSource('');
         setInstallOpen(false);
       })
       .catch((error: unknown) => {
+        setMessageTone('error');
         setMessage(error instanceof Error ? error.message : String(error));
       })
       .finally(() => setInstalling(false));
   }, [
     actions,
-    connection.clientId,
     installSource,
     operationsRecovered,
     pendingInstall,
@@ -881,10 +1075,9 @@ export function ExtensionsManagerPage({
   const runMutation = useCallback(
     (
       name: string,
-      run: (clientId?: string) => Promise<unknown>,
+      run: () => Promise<ExtensionMutationResponse>,
       options: { operation?: string; startMessage?: string } = {},
     ): boolean => {
-      const clientId = connection.clientId;
       if (
         !operationsRecovered ||
         pendingInstall ||
@@ -899,9 +1092,11 @@ export function ExtensionsManagerPage({
         uninstallInFlightNameRef.current = name;
       }
       setBusyName(name);
+      setMessageOwner(selectedName === name ? name : null);
+      setMessageTone('progress');
       setMessage(options.startMessage ?? null);
       let startedPolling = false;
-      run(clientId)
+      run()
         .then((result) => {
           const operationId =
             result &&
@@ -916,12 +1111,14 @@ export function ExtensionsManagerPage({
               operationId,
               name,
               operation: options.operation,
+              deadlineAt: result.deadlineAt ?? Date.now() + 21 * 60_000,
             });
             return;
           }
           setMessage(t('extensions.manage.queued', { name }));
         })
         .catch((error: unknown) => {
+          setMessageTone('error');
           setMessage(error instanceof Error ? error.message : String(error));
         })
         .finally(() => {
@@ -937,12 +1134,12 @@ export function ExtensionsManagerPage({
       return true;
     },
     [
-      connection.clientId,
       checkingName,
       load,
       operationsRecovered,
       pendingInstall,
       pendingMutation,
+      selectedName,
       t,
     ],
   );
@@ -1037,29 +1234,36 @@ export function ExtensionsManagerPage({
       busyName !== null ||
       pendingMutation !== null;
     const checking = checkingName === selectedExtension.name;
-    const mutation: Mutation = selectedExtension.isActive
-      ? 'disable'
-      : 'enable';
-    const toggleScope = (scope: Scope) =>
+    const setScopeActivation = (
+      scope: Scope,
+      activation: 'inherit' | 'enabled' | 'disabled',
+    ) => {
+      if (scope === 'user' && activation === 'inherit') return;
+      const mutation: ToggleMutation =
+        activation === 'enabled'
+          ? 'enable'
+          : activation === 'disabled'
+            ? 'disable'
+            : 'inherit';
       runMutation(
         selectedExtension.name,
-        (clientId) =>
-          mutation === 'enable'
-            ? actions.enableExtension(
-                selectedExtension.name,
-                { scope },
-                clientId,
-              )
-            : actions.disableExtension(
-                selectedExtension.name,
-                { scope },
-                clientId,
-              ),
+        () =>
+          actions.setExtensionActivation(
+            selectedExtension.id,
+            scope === 'user'
+              ? { scope, state: activation as 'enabled' | 'disabled' }
+              : { scope, state: activation },
+          ),
         {
           operation: mutation,
           startMessage: mutationMessage(mutation, selectedExtension.name, t),
         },
       );
+    };
+    const userActivation = selectedExtension.defaultActivation;
+    const workspaceActivation = selectedExtension.workspaceActivation;
+    const activationUnavailable =
+      userActivation === undefined || workspaceActivation === undefined;
     const commands = details?.commands ?? [];
     const skills = details?.skills ?? [];
     const agents = details?.agents ?? [];
@@ -1083,7 +1287,7 @@ export function ExtensionsManagerPage({
                 <Badge
                   variant="secondary"
                   className={
-                    selectedExtension.isActive
+                    extensionIsActive(selectedExtension)
                       ? 'bg-[var(--success-bg)] text-[var(--success-color)]'
                       : undefined
                   }
@@ -1118,11 +1322,7 @@ export function ExtensionsManagerPage({
                     onSelect={() =>
                       runMutation(
                         selectedExtension.name,
-                        (clientId) =>
-                          actions.updateExtension(
-                            selectedExtension.name,
-                            clientId,
-                          ),
+                        () => actions.updateExtension(selectedExtension.name),
                         {
                           operation: 'update',
                           startMessage: mutationMessage(
@@ -1135,24 +1335,6 @@ export function ExtensionsManagerPage({
                     }
                   >
                     {t('extensions.manage.update')}
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    disabled={busy || checking}
-                    onSelect={() => toggleScope('user')}
-                  >
-                    {mutation === 'enable'
-                      ? t('extensions.manage.enable')
-                      : t('extensions.manage.disable')}
-                    · {t('settings.scope.user')}
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    disabled={busy || checking}
-                    onSelect={() => toggleScope('workspace')}
-                  >
-                    {mutation === 'enable'
-                      ? t('extensions.manage.enable')
-                      : t('extensions.manage.disable')}
-                    · {t('settings.scope.workspace')}
                   </DropdownMenuItem>
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
@@ -1173,14 +1355,100 @@ export function ExtensionsManagerPage({
             </DropdownMenu>
           </div>
 
-          {message || recoveryError ? (
-            <Alert>
+          {messageOwner === selectedExtension.name && message ? (
+            <ManagementNotice
+              tone={messageTone}
+              noticeKey={message}
+              closeLabel={t('common.close')}
+              onDismiss={() => setMessage(null)}
+              className="break-words"
+            >
+              {message}
+            </ManagementNotice>
+          ) : null}
+
+          {activationUnavailable ? (
+            <Alert variant="destructive">
               <AlertCircleIcon />
-              <AlertDescription className="break-words">
-                {message ?? recoveryError}
+              <AlertDescription>
+                {t('extensions.manage.setting.unavailableDescription')}
               </AlertDescription>
             </Alert>
           ) : null}
+
+          <Card className="gap-0 py-1">
+            <CardContent className="flex flex-col p-0">
+              <div className="flex items-center justify-between gap-4 px-4 py-3">
+                <div className="min-w-0">
+                  <p className="font-medium">
+                    {t('extensions.manage.userSetting')}
+                  </p>
+                  <p className="text-sm text-muted-foreground">
+                    {t('extensions.manage.userSettingDescription')}
+                  </p>
+                </div>
+                <Select
+                  value={userActivation}
+                  disabled={busy || checking || activationUnavailable}
+                  onValueChange={(value) =>
+                    setScopeActivation('user', value as 'enabled' | 'disabled')
+                  }
+                >
+                  <SelectTrigger className="w-28 shrink-0">
+                    <SelectValue
+                      placeholder={t('extensions.manage.setting.unknown')}
+                    />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="enabled">
+                      {t('extensions.manage.setting.enabled')}
+                    </SelectItem>
+                    <SelectItem value="disabled">
+                      {t('extensions.manage.setting.disabled')}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <Separator />
+              <div className="flex items-center justify-between gap-4 px-4 py-3">
+                <div className="min-w-0">
+                  <p className="font-medium">
+                    {t('extensions.manage.workspaceSetting')}
+                  </p>
+                  <p className="text-sm text-muted-foreground">
+                    {t('extensions.manage.workspaceSettingDescription')}
+                  </p>
+                </div>
+                <Select
+                  value={workspaceActivation}
+                  disabled={busy || checking || activationUnavailable}
+                  onValueChange={(value) =>
+                    setScopeActivation(
+                      'workspace',
+                      value as 'inherit' | 'enabled' | 'disabled',
+                    )
+                  }
+                >
+                  <SelectTrigger className="w-28 shrink-0">
+                    <SelectValue
+                      placeholder={t('extensions.manage.setting.unknown')}
+                    />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="inherit">
+                      {t('extensions.manage.setting.default')}
+                    </SelectItem>
+                    <SelectItem value="enabled">
+                      {t('extensions.manage.setting.enabled')}
+                    </SelectItem>
+                    <SelectItem value="disabled">
+                      {t('extensions.manage.setting.disabled')}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </CardContent>
+          </Card>
 
           <Tabs defaultValue="overview">
             <TabsList className="max-w-full overflow-x-auto">
@@ -1320,8 +1588,7 @@ export function ExtensionsManagerPage({
                   if (
                     runMutation(
                       uninstallName,
-                      (clientId) =>
-                        actions.uninstallExtension(uninstallName, clientId),
+                      () => actions.uninstallExtension(uninstallName),
                       {
                         operation: 'uninstall',
                         startMessage: mutationMessage(
@@ -1394,13 +1661,21 @@ export function ExtensionsManagerPage({
           </div>
         </div>
 
-        {message || recoveryError ? (
-          <Alert>
-            <AlertCircleIcon />
-            <AlertDescription className="break-words">
-              {message ?? recoveryError}
-            </AlertDescription>
-          </Alert>
+        {(messageOwner === null && message) || recoveryError ? (
+          <ManagementNotice
+            tone={recoveryError ? 'error' : messageTone}
+            noticeKey={
+              (messageOwner === null ? message : null) ?? recoveryError ?? ''
+            }
+            closeLabel={t('common.close')}
+            onDismiss={() => {
+              setMessage(null);
+              setRecoveryError(null);
+            }}
+            className="break-words"
+          >
+            {(messageOwner === null ? message : null) ?? recoveryError}
+          </ManagementNotice>
         ) : null}
 
         <div className="relative">
@@ -1458,7 +1733,7 @@ export function ExtensionsManagerPage({
                             <Badge
                               variant="secondary"
                               className={
-                                extension.isActive
+                                extensionIsActive(extension)
                                   ? 'bg-[var(--success-bg)] text-[10px] text-[var(--success-color)]'
                                   : 'text-[10px]'
                               }

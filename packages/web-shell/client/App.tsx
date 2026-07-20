@@ -113,6 +113,7 @@ import {
 } from './utils/goalCondition';
 import { ExtensionsManagerPage } from './components/extensions/ExtensionsManagerPage';
 import { PluginManagerPage } from './components/plugins/PluginManagerPage';
+import { Spinner } from './components/ui/spinner';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { isAskUserPermission } from './utils/askUserPermission';
 import { ToolApproval } from './components/messages/ToolApproval';
@@ -1276,7 +1277,6 @@ export function App({
   );
   const sessionActions = useActions();
   const { notices, dismissNotice } = useSessionNotices();
-  const workspaceActions = useWorkspaceActions();
   // Phase 4: the workspace picked for the *next* new session on multi-workspace
   // daemons. Kept in a ref too because session creation is lazy (first prompt),
   // so the ensureSessionForPrompt callback must read the latest value.
@@ -1338,6 +1338,7 @@ export function App({
   );
   // Worktree sessions override the git chip branch via sessionWorktree.branch
   // and query git status with the worktree path (?cwd= parameter).
+  const workspaceActions = useWorkspaceActions(activeWorkspaceCwd);
   useEffect(() => {
     if (!activeWorkspaceCwd) {
       gitStatusWorkspaceCwdRef.current = undefined;
@@ -2190,28 +2191,59 @@ export function App({
   const [loadedSkillsReady, setLoadedSkillsReady] = useState(false);
   const loadedSkillsRequestRef = useRef(0);
   const reloadLoadedSkills = useCallback(
-    async (workspaceCwd?: string) => {
+    async (workspaceCwd?: string, options?: { reconcileRuntime?: boolean }) => {
       const request = ++loadedSkillsRequestRef.current;
+      const workspaceClient =
+        workspaceCwd && workspace.client
+          ? workspace.client.workspaceByCwd(workspaceCwd)
+          : undefined;
       try {
-        const status =
-          workspaceCwd && workspace.client
-            ? await workspace.client
-                .workspaceByCwd(workspaceCwd)
-                .workspaceSkills()
-            : await workspaceActions.loadSkillsStatus();
+        const status = workspaceClient
+          ? await workspaceClient.workspaceSkills()
+          : await workspaceActions.loadSkillsStatus();
         if (request !== loadedSkillsRequestRef.current) return;
         setLoadedSkills(availableSkillInfos(status));
         setLoadedSkillsReady(true);
       } catch {
         return;
       }
+      if (!options?.reconcileRuntime || !workspaceClient) return;
+      void (async () => {
+        try {
+          const runtime = await workspaceClient.workspaceRuntimeStatus();
+          if (request !== loadedSkillsRequestRef.current) return;
+          if (
+            !runtime.runtimeLive ||
+            runtime.capabilities.skills?.state !== 'ready'
+          ) {
+            const prepared = await workspaceActions.ensureRuntime();
+            if (
+              request !== loadedSkillsRequestRef.current ||
+              prepared.capabilities.skills?.state !== 'ready'
+            ) {
+              return;
+            }
+          }
+          const refreshed = await workspaceClient.workspaceRuntimeSkills();
+          if (request !== loadedSkillsRequestRef.current) return;
+          setLoadedSkills(availableSkillInfos(refreshed));
+          setLoadedSkillsReady(true);
+        } catch (error) {
+          console.warn(
+            '[WebShell] failed to refresh new-task skills from workspace runtime:',
+            error,
+          );
+        }
+      })();
     },
     [workspace.client, workspaceActions],
   );
   useEffect(() => {
-    if (!connected) return;
-    void reloadLoadedSkills(connection.workspaceCwd);
-  }, [connected, connection.workspaceCwd, reloadLoadedSkills]);
+    if (!connected || !activeWorkspaceCwd) return;
+    void reloadLoadedSkills(activeWorkspaceCwd, {
+      reconcileRuntime: !connection.sessionId,
+    });
+  }, [activeWorkspaceCwd, connected, connection.sessionId, reloadLoadedSkills]);
 
   const [modelDialogMode, setModelDialogMode] =
     useState<ModelDialogMode | null>(null);
@@ -2257,8 +2289,26 @@ export function App({
   // dependency (it changes on every pane add/remove).
   const splitSessionIdsRef = useRef<string[]>(splitSessionIds);
   splitSessionIdsRef.current = splitSessionIds;
-  const [mcpDialogMessage, setMcpDialogMessage] =
-    useState<SerializedMcpStatusMessage | null>(null);
+  const [mcpDialogState, setMcpDialogState] = useState<{
+    workspaceCwd: string;
+    message: SerializedMcpStatusMessage;
+  } | null>(null);
+  const mcpDialogRequestRef = useRef(0);
+  const mcpDialogWorkspaceCwd =
+    activeWorkspaceCwd ?? connection.workspaceCwd ?? '';
+  const mcpDialogMessage =
+    mcpDialogState?.workspaceCwd === mcpDialogWorkspaceCwd
+      ? mcpDialogState.message
+      : null;
+  const clearMcpDialogMessage = useCallback(() => {
+    mcpDialogRequestRef.current += 1;
+    setMcpDialogState(null);
+  }, []);
+  const mcpManagerOptionsRef = useRef<{
+    showDescriptions?: boolean;
+    showSchema?: boolean;
+    showTips?: boolean;
+  }>({});
   // Settings and Daemon Status are shown as an in-place panel that replaces the
   // chat view (message list + composer), not as a modal overlay. Only one may be
   // active at a time; null means the normal chat view is shown.
@@ -2272,6 +2322,60 @@ export function App({
     | 'plugins'
     | null
   >(null);
+  const managementPanelActive =
+    activePanel === 'extensions' ||
+    activePanel === 'mcp' ||
+    activePanel === 'skills' ||
+    activePanel === 'plugins';
+  const previousManagementPanelActiveRef = useRef(managementPanelActive);
+  useEffect(() => {
+    const wasManagementPanelActive = previousManagementPanelActiveRef.current;
+    previousManagementPanelActiveRef.current = managementPanelActive;
+    if (
+      !wasManagementPanelActive ||
+      managementPanelActive ||
+      connection.sessionId ||
+      !connected ||
+      !activeWorkspaceCwd
+    ) {
+      return;
+    }
+    void reloadLoadedSkills(activeWorkspaceCwd, { reconcileRuntime: true });
+  }, [
+    activeWorkspaceCwd,
+    connected,
+    connection.sessionId,
+    managementPanelActive,
+    reloadLoadedSkills,
+  ]);
+  const [managementRuntimeState, setManagementRuntimeState] = useState<{
+    status: 'idle' | 'initializing' | 'ready' | 'error';
+    error?: string;
+  }>({ status: 'idle' });
+  const [managementRuntimeAttempt, setManagementRuntimeAttempt] = useState(0);
+  useEffect(() => {
+    if (!managementPanelActive) {
+      setManagementRuntimeState({ status: 'idle' });
+      return;
+    }
+    let cancelled = false;
+    setManagementRuntimeState({ status: 'initializing' });
+    void workspaceActions.ensureRuntime().then(
+      () => {
+        if (!cancelled) setManagementRuntimeState({ status: 'ready' });
+      },
+      (error: unknown) => {
+        if (cancelled) return;
+        setManagementRuntimeState({
+          status: 'error',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [managementPanelActive, managementRuntimeAttempt, workspaceActions]);
   const closePanel = useCallback(() => setActivePanel(null), []);
   const handleUseSkill = useCallback(
     (name: string) => {
@@ -2305,17 +2409,64 @@ export function App({
     },
     [],
   );
-  const loadMcpManagerMessage = useCallback(async () => {
-    const status = await workspaceActions.loadMcpStatus();
-    setMcpDialogMessage({
-      status,
-      toolsByServer: {},
-      resourcesByServer: {},
-      showDescriptions: false,
-      showSchema: false,
-      showTips: false,
-    });
-  }, [workspaceActions]);
+  const loadMcpManagerMessage = useCallback(
+    async (options?: {
+      showDescriptions?: boolean;
+      showSchema?: boolean;
+      showTips?: boolean;
+    }) => {
+      const request = ++mcpDialogRequestRef.current;
+      const workspaceCwd = mcpDialogWorkspaceCwd;
+      let status: SerializedMcpStatusMessage['status'];
+      try {
+        status = await workspaceActions.loadMcpStatus();
+      } catch (error) {
+        status = {
+          v: 1,
+          workspaceCwd,
+          initialized: false,
+          source: 'config',
+          discoveryState: 'not_started',
+          servers: [],
+          errors: [
+            {
+              kind: 'mcp_runtime',
+              status: 'error',
+              error: error instanceof Error ? error.message : String(error),
+            },
+          ],
+        };
+      }
+      if (request !== mcpDialogRequestRef.current) return;
+      setMcpDialogState({
+        workspaceCwd,
+        message: {
+          status,
+          toolsByServer: {},
+          resourcesByServer: {},
+          showDescriptions: options?.showDescriptions === true,
+          showSchema: options?.showSchema === true,
+          showTips: options?.showTips === true,
+        },
+      });
+    },
+    [mcpDialogWorkspaceCwd, workspaceActions],
+  );
+  useEffect(() => {
+    if (
+      activePanel !== 'mcp' ||
+      managementRuntimeState.status !== 'ready' ||
+      mcpDialogMessage
+    ) {
+      return;
+    }
+    void loadMcpManagerMessage(mcpManagerOptionsRef.current);
+  }, [
+    activePanel,
+    loadMcpManagerMessage,
+    managementRuntimeState.status,
+    mcpDialogMessage,
+  ]);
   const openScheduledTasks = useCallback(() => {
     setActivePanel(null);
     setMainView('scheduledTasks');
@@ -2564,7 +2715,7 @@ export function App({
       // panel focus effect self-contained instead of relying on that.)
       editorRef.current?.focus();
     }
-  }, [activePanel, approvalOverlayActive]);
+  }, [activePanel, approvalOverlayActive, managementRuntimeState.status]);
   // A pending approval (a gated tool call or an AskUserQuestion) renders its
   // overlay in the chat footer, which is hidden (display:none) while a panel is
   // shown. Left alone, the turn would hang behind Settings/Status with no
@@ -3905,7 +4056,10 @@ export function App({
        */
       opts?: { keepView?: boolean; worktree?: { slug?: string } },
     ) => {
-      const targetWorkspaceCwd = lockedWorkspaceCwd ?? workspaceCwd;
+      const targetWorkspaceCwd =
+        lockedWorkspaceCwd ??
+        workspaceCwd ??
+        workspaces.find((entry) => entry.primary)?.cwd;
       selectedWorkspaceCwdRef.current = targetWorkspaceCwd;
       setSelectedWorkspaceCwd(targetWorkspaceCwd);
       pendingWorktreeRef.current = opts?.worktree;
@@ -3923,10 +4077,7 @@ export function App({
           sessionActions as typeof sessionActions & SessionActionsWithCreate
         ).clearSession();
         focusRequest = scheduleComposerFocus();
-        await Promise.all([
-          clearPromise,
-          reloadLoadedSkills(targetWorkspaceCwd),
-        ]);
+        await clearPromise;
         // Clear after successful clearSession — if it rejects, the old
         // session's worktree state is preserved.
         setSessionWorktree(undefined);
@@ -3944,9 +4095,9 @@ export function App({
       closePanel,
       lockedWorkspaceCwd,
       reportError,
-      reloadLoadedSkills,
       scheduleComposerFocus,
       sessionActions,
+      workspaces,
     ],
   );
   useEffect(
@@ -4868,22 +5019,13 @@ export function App({
           }
           if (cmd === 'mcp') {
             const mcpArg = text.slice(match[0].length).trim().toLowerCase();
-            workspaceActions
-              .loadMcpStatus()
-              .then((status) => {
-                setMcpDialogMessage({
-                  status,
-                  toolsByServer: {},
-                  resourcesByServer: {},
-                  showDescriptions: mcpArg === 'desc',
-                  showSchema: mcpArg === 'schema',
-                  showTips: !mcpArg,
-                });
-                openPanel('mcp');
-              })
-              .catch((error: unknown) => {
-                reportError(error, 'Failed to load MCP status');
-              });
+            mcpManagerOptionsRef.current = {
+              showDescriptions: mcpArg === 'desc',
+              showSchema: mcpArg === 'schema',
+              showTips: !mcpArg,
+            };
+            clearMcpDialogMessage();
+            openPanel('mcp');
             return true;
           }
           if (cmd === 'skills') {
@@ -5368,6 +5510,7 @@ export function App({
       enqueuePrompt,
       echoOrDeferLocalCommand,
       branchCurrentSession,
+      clearMcpDialogMessage,
       closeMobileDrawer,
       closePanel,
       openPanel,
@@ -6580,7 +6723,44 @@ export function App({
                     </div>
                   )}
                   <div className={styles.panelBody} key={activePanel}>
-                    {activePanel === 'settings' ? (
+                    {managementPanelActive &&
+                    managementRuntimeState.status !== 'ready' ? (
+                      <div
+                        className={styles.managementRuntimeState}
+                        role="status"
+                      >
+                        {managementRuntimeState.status === 'error' ? (
+                          <>
+                            <div className={styles.managementRuntimeError}>
+                              {t('management.runtime.failed')}
+                            </div>
+                            {managementRuntimeState.error ? (
+                              <div
+                                className={styles.managementRuntimeErrorDetail}
+                              >
+                                {managementRuntimeState.error}
+                              </div>
+                            ) : null}
+                            <button
+                              type="button"
+                              className={styles.managementRuntimeRetry}
+                              onClick={() =>
+                                setManagementRuntimeAttempt(
+                                  (attempt) => attempt + 1,
+                                )
+                              }
+                            >
+                              {t('common.retry')}
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <Spinner />
+                            <span>{t('management.runtime.initializing')}</span>
+                          </>
+                        )}
+                      </div>
+                    ) : activePanel === 'settings' ? (
                       <SettingsMessage
                         settingsState={workspaceSettingsState}
                         embedded
@@ -6651,25 +6831,42 @@ export function App({
                       <DaemonStatusDialog />
                     ) : activePanel === 'extensions' ? (
                       <ExtensionsManagerPage
+                        key={`extensions-${activeWorkspaceCwd ?? 'primary'}`}
                         onClose={closePanel}
+                        workspaceCwd={activeWorkspaceCwd}
                         initialFocusRef={panelHeadingRef}
                       />
                     ) : activePanel === 'mcp' && mcpDialogMessage ? (
                       <McpManagerPage
+                        key={`mcp-${activeWorkspaceCwd ?? 'primary'}`}
                         message={mcpDialogMessage}
+                        workspaceCwd={activeWorkspaceCwd}
                         onClose={() => {
-                          setMcpDialogMessage(null);
+                          clearMcpDialogMessage();
                           closePanel();
                         }}
                       />
+                    ) : activePanel === 'mcp' ? (
+                      <div
+                        className={styles.managementRuntimeState}
+                        role="status"
+                      >
+                        <Spinner />
+                        <span>{t('mcp.discovery.initializing')}</span>
+                      </div>
                     ) : activePanel === 'skills' ? (
                       <SkillsManagerPage
+                        key={`skills-${activeWorkspaceCwd ?? 'primary'}`}
                         onClose={closePanel}
                         onUseSkill={handleUseSkill}
+                        workspaceCwd={activeWorkspaceCwd}
+                        runtimeReady
                       />
                     ) : activePanel === 'plugins' ? (
                       <PluginManagerPage
+                        key={`plugins-${activeWorkspaceCwd ?? 'primary'}`}
                         mcpMessage={mcpDialogMessage}
+                        workspaceCwd={activeWorkspaceCwd}
                         loadMcpMessage={async () => {
                           try {
                             await loadMcpManagerMessage();
