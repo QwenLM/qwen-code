@@ -635,22 +635,24 @@ describe('AgentTool', () => {
       ).toBeNull();
     });
 
-    it('rejects an empty working_dir', () => {
-      expect(
-        agentTool.validateToolParams({
-          ...validParams,
-          working_dir: '',
-        }),
-      ).toMatch(/working_dir/i);
+    it('treats an empty working_dir as unset', () => {
+      const params = {
+        ...validParams,
+        working_dir: '',
+      };
+
+      expect(agentTool.validateToolParams(params)).toBeNull();
+      expect(params.working_dir).toBeUndefined();
     });
 
-    it('rejects a whitespace-only working_dir', () => {
-      expect(
-        agentTool.validateToolParams({
-          ...validParams,
-          working_dir: '   ',
-        }),
-      ).toMatch(/working_dir/i);
+    it('treats a whitespace-only working_dir as unset', () => {
+      const params = {
+        ...validParams,
+        working_dir: '   ',
+      };
+
+      expect(agentTool.validateToolParams(params)).toBeNull();
+      expect(params.working_dir).toBeUndefined();
     });
 
     it('treats an empty working_dir as unset when isolation is set', () => {
