@@ -543,6 +543,192 @@ describe('subagent.ts', () => {
         ]);
       });
 
+      it('should reuse chat and tools for sequential follow-up turns', async () => {
+        const { config, toolRegistry } = await createMockConfig();
+        mockSendMessageStream.mockImplementation(
+          createMockStream(['stop', 'stop']),
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          { systemPrompt: 'You are a test agent.' },
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+        const externalMessages: string[] = [];
+        scope.getEventEmitter().on(AgentEventType.EXTERNAL_MESSAGE, (event) => {
+          externalMessages.push(event.text);
+        });
+
+        const initialContext = new ContextState();
+        initialContext.set('task_prompt', 'Initial task');
+        await scope.execute(initialContext);
+
+        scope.getCore().recordToolCallStats('stale_tool', true, 25);
+        scope.getCore().stats.recordTokens(100, 50);
+
+        const followUpContext = new ContextState();
+        followUpContext.set('task_prompt', 'Follow-up task');
+        await scope.execute(followUpContext);
+
+        expect(GeminiChat).toHaveBeenCalledTimes(1);
+        expect(toolRegistry.warmAll).toHaveBeenCalledTimes(1);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+        expect(mockSendMessageStream.mock.calls[0][1].message).toEqual([
+          { text: 'Initial task' },
+        ]);
+        expect(mockSendMessageStream.mock.calls[1][1].message).toEqual([
+          { text: '[Message from parent agent]: Follow-up task' },
+        ]);
+        expect(mockSendMessageStream.mock.calls[0][2]).not.toBe(
+          mockSendMessageStream.mock.calls[1][2],
+        );
+        expect(mockSendMessageStream.mock.calls[0][2]).toMatch(/#0$/);
+        expect(mockSendMessageStream.mock.calls[1][2]).toMatch(/#1$/);
+        expect(externalMessages).toEqual(['Follow-up task']);
+        expect(scope.getExecutionSummary()).toMatchObject({
+          rounds: 1,
+          totalToolCalls: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          totalTokens: 0,
+          toolUsage: [],
+        });
+        expect(scope.getStatistics()).toMatchObject({
+          rounds: 1,
+          totalToolCalls: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          totalTokens: 0,
+          toolUsage: [],
+        });
+      });
+
+      it('should preserve statistics for continuation work in the same logical turn', async () => {
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockImplementation(
+          createMockStream(['stop', 'stop']),
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          { systemPrompt: 'You are a test agent.' },
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+        await scope.execute(new ContextState());
+        scope.getCore().recordToolCallStats('first_attempt_tool', true, 25);
+        scope.getCore().stats.recordTokens(100, 50);
+        scope.getCore().executionStats.inputTokens = 100;
+        scope.getCore().executionStats.outputTokens = 50;
+        scope.getCore().executionStats.totalTokens = 150;
+        const logicalTurnStart = Date.now() - 10_000;
+        scope.getCore().executionStats.startTimeMs = logicalTurnStart;
+        scope.getCore().stats.start(logicalTurnStart);
+
+        const continuationContext = new ContextState();
+        continuationContext.set('task_prompt', 'Address the stop-hook reason');
+        await scope.execute(continuationContext, undefined, {
+          resetStats: false,
+        });
+
+        expect(scope.getExecutionSummary()).toMatchObject({
+          rounds: 2,
+          totalToolCalls: 1,
+          successfulToolCalls: 1,
+          inputTokens: 100,
+          outputTokens: 50,
+        });
+        expect(scope.getCore().executionStats.startTimeMs).toBe(
+          logicalTurnStart,
+        );
+        expect(
+          scope.getCore().executionStats.totalDurationMs,
+        ).toBeGreaterThanOrEqual(10_000);
+        expect(scope.getStatistics()).toMatchObject({
+          rounds: 2,
+          totalDurationMs: expect.any(Number),
+          totalToolCalls: 1,
+          successfulToolCalls: 1,
+          inputTokens: 100,
+          outputTokens: 50,
+        });
+      });
+
+      it('should reject concurrent execute calls', async () => {
+        const { config } = await createMockConfig();
+        let releaseResponse: (() => void) | undefined;
+        const responseGate = new Promise<void>((resolve) => {
+          releaseResponse = resolve;
+        });
+        mockSendMessageStream.mockImplementation(async () =>
+          (async function* () {
+            await responseGate;
+            yield {
+              type: 'chunk',
+              value: {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'Done.' }],
+                    },
+                  },
+                ],
+              },
+            };
+          })(),
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          { systemPrompt: 'You are a test agent.' },
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+        const firstExecution = scope.execute(new ContextState());
+        await vi.waitFor(() =>
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1),
+        );
+
+        await expect(scope.execute(new ContextState())).rejects.toThrow(
+          'AgentHeadless does not support concurrent execute() calls.',
+        );
+
+        releaseResponse?.();
+        await firstExecution;
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      it('should clear the prior result before a failing follow-up turn', async () => {
+        const { config } = await createMockConfig();
+        mockSendMessageStream
+          .mockImplementationOnce(createMockStream(['stop']))
+          .mockRejectedValueOnce(new Error('follow-up failed'));
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          { systemPrompt: 'You are a test agent.' },
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+        await scope.execute(new ContextState());
+        expect(scope.getFinalText()).toBe('Done.');
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+
+        const followUpContext = new ContextState();
+        followUpContext.set('task_prompt', 'Follow-up task');
+        await expect(scope.execute(followUpContext)).rejects.toThrow(
+          'follow-up failed',
+        );
+
+        expect(scope.getFinalText()).toBe('');
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.ERROR);
+      });
+
       it('should append userMemory to the system prompt when available', async () => {
         const { config } = await createMockConfig();
         const userMemoryContent =

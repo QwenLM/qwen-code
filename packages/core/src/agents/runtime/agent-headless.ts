@@ -5,17 +5,18 @@
  */
 
 /**
- * @fileoverview AgentHeadless — one-shot task execution wrapper around AgentCore.
+ * @fileoverview AgentHeadless — sequential task execution wrapper around AgentCore.
  *
- * AgentHeadless manages
- * the lifecycle of a single headless task: start → run → finish.
+ * AgentHeadless runs one headless task at a time while retaining its chat
+ * session for follow-up tasks.
  * It delegates all model reasoning and tool scheduling to AgentCore.
  *
  * For persistent interactive agents, see AgentInteractive (Phase 2).
  */
 
-import type { Content } from '@google/genai';
+import type { Content, FunctionDeclaration } from '@google/genai';
 import type { Config } from '../../config/config.js';
+import type { GeminiChat } from '../../core/geminiChat.js';
 import type { RuntimeContentGeneratorView } from './agent-context.js';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
@@ -38,7 +39,7 @@ import type {
 import { AgentTerminateMode } from './agent-types.js';
 import { logSubagentExecution } from '../../telemetry/loggers.js';
 import { SubagentExecutionEvent } from '../../telemetry/types.js';
-import { AgentCore } from './agent-core.js';
+import { AgentCore, EXTERNAL_MESSAGE_PREFIX } from './agent-core.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 
 const debugLogger = createDebugLogger('SUBAGENT');
@@ -129,17 +130,19 @@ export function templateString(
 // ─── AgentHeadless ──────────────────────────────────────────
 
 /**
- * AgentHeadless — one-shot task executor.
+ * AgentHeadless — sequential task executor.
  *
- * Takes a task, runs it through AgentCore's reasoning loop, and returns
- * the result.
- *
- * Lifecycle: Born → execute() → die.
+ * Each execute() call runs one task through AgentCore's reasoning loop. Calls
+ * must be sequential; later calls reuse the same chat and prepared tools.
  */
 export class AgentHeadless {
   private readonly core: AgentCore;
   private finalText: string = '';
   private terminateMode: AgentTerminateMode = AgentTerminateMode.ERROR;
+  private chat?: GeminiChat;
+  private toolsList?: FunctionDeclaration[];
+  private executing = false;
+  private hasStartedReasoning = false;
   private externalMessageProvider?: () => AgentExternalInput[];
   private externalMessageWaiter?: (
     signal: AbortSignal,
@@ -203,10 +206,38 @@ export class AgentHeadless {
   async execute(
     context: ContextState,
     externalSignal?: AbortSignal,
+    options: { resetStats?: boolean } = {},
+  ): Promise<void> {
+    if (this.executing) {
+      throw new Error(
+        'AgentHeadless does not support concurrent execute() calls.',
+      );
+    }
+
+    this.executing = true;
+    this.finalText = '';
+    this.terminateMode = AgentTerminateMode.ERROR;
+    const resetStats = options.resetStats !== false;
+    if (resetStats) {
+      this.core.resetExecutionStats();
+    }
+
+    try {
+      await this.executeTurn(context, externalSignal, !resetStats);
+    } finally {
+      this.executing = false;
+    }
+  }
+
+  private async executeTurn(
+    context: ContextState,
+    externalSignal?: AbortSignal,
+    preserveStats = false,
   ): Promise<void> {
     const initialMessagesOverride = context.get('initial_messages_override') as
       | Content[]
       | undefined;
+    const isContinuation = this.hasStartedReasoning;
     // Record the initial user turn in the observable message log before
     // anything that can throw — createChat / prepareTools failures still
     // get a transcript showing the task that was asked, which is what
@@ -215,11 +246,25 @@ export class AgentHeadless {
     const initialTaskText = String(
       (context.get('task_prompt') as string) ?? 'Get Started!',
     );
-    if (!initialMessagesOverride || initialMessagesOverride.length === 0) {
+    if (isContinuation) {
+      this.core.eventEmitter.emit(AgentEventType.EXTERNAL_MESSAGE, {
+        subagentId: this.core.subagentId,
+        kind: 'message',
+        text: initialTaskText,
+        timestamp: Date.now(),
+      });
+    } else if (
+      !initialMessagesOverride ||
+      initialMessagesOverride.length === 0
+    ) {
       this.core.pushMessage('user', initialTaskText);
     }
 
-    const chat = await this.core.createChat(context);
+    let chat = this.chat;
+    if (!chat) {
+      chat = await this.core.createChat(context);
+      this.chat = chat;
+    }
 
     if (!chat) {
       this.terminateMode = AgentTerminateMode.ERROR;
@@ -231,16 +276,33 @@ export class AgentHeadless {
     const abortController = createChildAbortController(externalSignal);
 
     try {
-      const toolsList = await this.core.prepareTools();
+      if (!this.toolsList) {
+        this.toolsList = await this.core.prepareTools();
+      }
+      const toolsList = this.toolsList;
 
-      const initialMessages =
-        initialMessagesOverride && initialMessagesOverride.length > 0
+      const initialMessages = isContinuation
+        ? [
+            {
+              role: 'user' as const,
+              parts: [
+                { text: `${EXTERNAL_MESSAGE_PREFIX} ${initialTaskText}` },
+              ],
+            },
+          ]
+        : initialMessagesOverride && initialMessagesOverride.length > 0
           ? initialMessagesOverride
           : [{ role: 'user' as const, parts: [{ text: initialTaskText }] }];
 
-      const startTime = Date.now();
-      this.core.executionStats.startTimeMs = startTime;
-      this.core.stats.start(startTime);
+      const startTime =
+        preserveStats && this.core.executionStats.startTimeMs > 0
+          ? this.core.executionStats.startTimeMs
+          : Date.now();
+      const roundOffset = preserveStats ? this.core.executionStats.rounds : 0;
+      if (!preserveStats || this.core.executionStats.startTimeMs === 0) {
+        this.core.executionStats.startTimeMs = startTime;
+        this.core.stats.start(startTime);
+      }
 
       try {
         // Emit start event
@@ -265,6 +327,7 @@ export class AgentHeadless {
         logSubagentExecution(this.core.runtimeContext, startEvent);
 
         // Delegate to AgentCore's reasoning loop
+        this.hasStartedReasoning = true;
         const result = await this.core.runReasoningLoop(
           chat,
           initialMessages,
@@ -274,6 +337,7 @@ export class AgentHeadless {
             maxTurns: this.core.runConfig.max_turns,
             maxTimeMinutes: this.core.runConfig.max_time_minutes,
             startTimeMs: startTime,
+            roundOffset,
             getExternalMessages: this.externalMessageProvider,
             waitForExternalMessages: this.externalMessageWaiter,
             shouldWaitForExternalMessages: this.externalMessageWaitPredicate,
@@ -293,7 +357,8 @@ export class AgentHeadless {
 
         throw error;
       } finally {
-        this.core.executionStats.totalDurationMs = Date.now() - startTime;
+        this.core.executionStats.totalDurationMs =
+          Date.now() - this.core.executionStats.startTimeMs;
         const summary = this.core.stats.getSummary(Date.now());
         this.core.eventEmitter?.emit(AgentEventType.FINISH, {
           subagentId: this.core.subagentId,

@@ -1657,6 +1657,10 @@ describe('BackgroundAgentResumeService', () => {
     releaseExecute?.();
     await resume;
     await vi.waitFor(() => {
+      expect(registry.get(agentId)?.status).toBe('completed');
+    });
+    expect(registry.disposeResidentAgent(agentId)).toBe(true);
+    await vi.waitFor(() => {
       expect(monitorRegistry.setAgentNotificationCallback).toHaveBeenCalledWith(
         agentId,
         undefined,
@@ -2348,7 +2352,7 @@ describe('BackgroundAgentResumeService', () => {
     );
   });
 
-  it('revives a completed background agent from its transcript and bumps resumeCount', async () => {
+  it('reconstructs a completed agent once, then reuses and disposes its resident runtime', async () => {
     const sessionId = 'session-revive';
     const agentId = 'agent-revive';
     const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
@@ -2423,10 +2427,11 @@ describe('BackgroundAgentResumeService', () => {
       getFinalText: () => 'iterated',
     };
 
+    const dispose = vi.fn().mockResolvedValue(undefined);
     const { service, subagentManager } = createService();
     subagentManager.createAgentHeadless.mockResolvedValue({
       subagent,
-      dispose: vi.fn().mockResolvedValue(undefined),
+      dispose,
     });
 
     const revived = await service.reviveCompletedBackgroundAgent(
@@ -2448,6 +2453,25 @@ describe('BackgroundAgentResumeService', () => {
     expect(fs.statSync(sessionDir).mtime.getTime()).toBeGreaterThan(
       oldSessionMtime.getTime(),
     );
+
+    expect(registry.continueResidentAgent(agentId, 'tighten the summary')).toBe(
+      true,
+    );
+    expect(registry.get(agentId)?.status).toBe('running');
+    await vi.waitFor(() => {
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(registry.get(agentId)?.status).toBe('completed');
+    });
+    expect(subagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
+    const hotContextArg = execute.mock.calls[1]?.[0];
+    expect(hotContextArg?.get('task_prompt')).toBe('tighten the summary');
+    expect(readAgentMeta(metaPath)?.resumeCount).toBe(2);
+    expect(dispose).not.toHaveBeenCalled();
+
+    registry.reset();
+
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(registry.continueResidentAgent(agentId, 'again')).toBe(false);
   });
 
   it('does not revive non-completed or transcript-less entries', async () => {

@@ -114,7 +114,10 @@ import {
   writeAgentMeta,
   type AgentPersistedCliFlags,
 } from '../../agents/agent-transcript.js';
-import type { BackgroundSlotReservation } from '../../agents/background-tasks.js';
+import type {
+  BackgroundSlotReservation,
+  ResidentBackgroundAgent,
+} from '../../agents/background-tasks.js';
 import { getGitBranch } from '../../utils/gitUtils.js';
 import { buildModelIdContext, resolveModelId } from '../../utils/modelId.js';
 
@@ -870,7 +873,6 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
     const teamGuidance = this.config.isAgentTeamEnabled()
       ? `**For tasks requiring multiple agents to coordinate, communicate, or work as a team**: Use ${ToolNames.TEAM_CREATE} first to create a team, then spawn teammates using the Agent tool with the \`name\` parameter (the active team is selected automatically). Teams enable message passing between agents, shared task lists, and coordinated workflows. If the user asks for agents to collaborate, review each other's work, or produce a consolidated result — create a team.`
       : '';
-
     const baseDescription = `Launch a new agent to handle complex, multi-step tasks autonomously.
 The Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
 
@@ -1741,7 +1743,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           typedStopOutput.getEffectiveReason(),
         );
         continueContext.set('hook_context', '');
-        await subagent.execute(continueContext, signal);
+        await subagent.execute(continueContext, signal, {
+          resetStats: false,
+        });
 
         if (signal?.aborted) return undefined;
       } catch (hookError) {
@@ -2749,6 +2753,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // Date.now() alone collides when two parallel background agents of the
       // same type land in the same ms; the registry is keyed by agentId.
       const agentIdSuffix = this.callId ?? randomUUID().slice(0, 8);
+      const launchDepth = childLaunchDepth();
       const hookOpts = {
         agentId: `${subagentConfig.name}-${agentIdSuffix}`,
         // Resolved config name, not the raw requested type: a fork request
@@ -2761,10 +2766,38 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         updateOutput,
       };
 
-      // Create the subagent. Fork bypasses SubagentManager because its
-      // runtime configs are synthesized from the parent's cache-safe params.
+      const shouldBubble = Boolean(
+        shouldRunInBackground &&
+          subagentConfig.approvalMode === BUBBLE_APPROVAL_MODE &&
+          this.config.isInteractive(),
+      );
+      // Background agents have no inline UI. Preserve the resolved approval
+      // mode while overriding only the prompt-avoidance policy used by their
+      // scheduler.
+      const subagentRuntimeConfig = shouldRunInBackground
+        ? (Object.create(agentConfig) as Config)
+        : agentConfig;
+      if (shouldRunInBackground) {
+        subagentRuntimeConfig.getShouldAvoidPermissionPrompts = () =>
+          !shouldBubble;
+      }
+
+      // Background agents need a dedicated emitter so their transcript never
+      // receives events from concurrent agents using the parent tool emitter.
+      // Choose it before construction so every launch creates exactly one
+      // runtime; the old background branch constructed a second runtime and
+      // leaked the first one.
+      const backgroundEventEmitter = shouldRunInBackground
+        ? new AgentEventEmitter()
+        : undefined;
+
+      // Create the subagent. Fork bypasses SubagentManager because its runtime
+      // configs are synthesized from the parent's cache-safe params.
       let subagent: AgentHeadless;
       let taskPrompt: string;
+      let initialMessages: Content[] | undefined;
+      let promptConfig: PromptConfig | undefined;
+      let toolConfig: ToolConfig | undefined;
 
       // Per-spawn cleanup the subagent manager returns. The caller MUST
       // invoke this in the same `finally` block that wraps `execute()` —
@@ -2775,14 +2808,20 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // dispose, so this stays undefined on the fork path.
       let subagentDispose: (() => Promise<void>) | undefined;
       if (isFork) {
-        const fork = await this.createForkSubagent(agentConfig);
+        const fork = await this.createForkSubagent(
+          subagentRuntimeConfig as Config,
+          backgroundEventEmitter,
+        );
         subagent = fork.subagent;
         taskPrompt = fork.taskPrompt;
+        initialMessages = fork.initialMessages;
+        promptConfig = fork.promptConfig;
+        toolConfig = fork.toolConfig;
       } else {
         const result = await this.subagentManager.createAgentHeadless(
           subagentConfig,
-          agentConfig,
-          { eventEmitter: this.eventEmitter },
+          subagentRuntimeConfig as Config,
+          { eventEmitter: backgroundEventEmitter ?? this.eventEmitter },
         );
         subagent = result.subagent;
         subagentDispose = result.dispose;
@@ -2862,54 +2901,16 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // Non-interactive sessions can't answer, so they keep auto-deny.
         // (`bubble` resolves to `default` run behavior, so the resolved mode
         // already requires confirmation — this only flips deny → surface.)
-        const shouldBubble = Boolean(
-          subagentConfig.approvalMode === BUBBLE_APPROVAL_MODE &&
-            this.config.isInteractive(),
-        );
-        // Use Object.create so the resolved approval mode override (e.g.
-        // subagent-level `approvalMode: auto-edit`) is preserved.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const bgConfig = Object.create(agentConfig) as any;
-        bgConfig.getShouldAvoidPermissionPrompts = () => !shouldBubble;
-
-        // Register in the background task registry only AFTER init succeeds — if
-        // construction throws, a pre-registered phantom 'running' entry would hang
-        // the non-interactive hold-back loop forever.
-        // Dedicated emitter for this background agent so the transcript
-        // writer only sees *this* agent's events. Reusing the parent tool's
-        // UI emitter (this.eventEmitter) would mix events from every
-        // concurrent fork/subagent into the same transcript.
-        const bgEventEmitter = new AgentEventEmitter();
-        let bgSubagent: AgentHeadless;
-        let bgInitialMessages: Content[] | undefined;
-        let bgTaskPrompt: string;
-        let bgPromptConfig: PromptConfig | undefined;
-        let bgToolConfig: ToolConfig | undefined;
-        // Per-spawn cleanup from `createAgentHeadless` (background path).
-        // The bg `finally` below invokes this alongside the existing
-        // parent-registry stop; see the foreground call site for the leak
-        // scenarios it covers.
-        let bgSubagentDispose: (() => Promise<void>) | undefined;
-        if (isFork) {
-          const fork = await this.createForkSubagent(
-            bgConfig as Config,
-            bgEventEmitter,
-          );
-          bgSubagent = fork.subagent;
-          bgInitialMessages = fork.initialMessages;
-          bgTaskPrompt = fork.taskPrompt;
-          bgPromptConfig = fork.promptConfig;
-          bgToolConfig = fork.toolConfig;
-        } else {
-          const bgResult = await this.subagentManager.createAgentHeadless(
-            subagentConfig,
-            bgConfig as Config,
-            { eventEmitter: bgEventEmitter },
-          );
-          bgSubagent = bgResult.subagent;
-          bgSubagentDispose = bgResult.dispose;
-          bgTaskPrompt = this.params.prompt;
-        }
+        // Register in the background task registry only AFTER init succeeds —
+        // if construction throws, a pre-registered phantom 'running' entry
+        // would hang the non-interactive hold-back loop forever.
+        const bgEventEmitter = backgroundEventEmitter!;
+        const bgSubagent = subagent;
+        const bgInitialMessages = initialMessages;
+        const bgTaskPrompt = taskPrompt;
+        const bgPromptConfig = promptConfig;
+        const bgToolConfig = toolConfig;
+        const bgSubagentDispose = subagentDispose;
 
         const registry = this.config.getBackgroundTaskRegistry();
 
@@ -2953,7 +2954,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               // Nested-agent lineage (mirrors the meta sidecar); register()
               // resolves the parent's display name from parentAgentId.
               parentAgentId: getCurrentAgentId(),
-              depth: childLaunchDepth(),
+              depth: launchDepth,
             },
             registerOptions,
           );
@@ -3007,6 +3008,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 `[Agent] ToolRegistry stop after background registration failure failed: ${stopError}`,
               );
             });
+          void bgSubagentDispose?.().catch(() => {});
+          restoreParentPM();
           return {
             llmContent: `${errorMessage}${wtSuffix}`,
             returnDisplay: this.currentDisplay!,
@@ -3059,7 +3062,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           resumeCount: 0,
           // Persisted so resume restores the original nesting level; see
           // childLaunchDepth() for the rationale.
-          depth: childLaunchDepth(),
+          depth: launchDepth,
           model: subagentModelId,
         });
 
@@ -3140,23 +3143,110 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           };
         };
 
+        // Some launch modes have resources whose lifecycle cannot safely span
+        // an idle turn yet. Forks carry inherited parent state, temporary
+        // worktrees are finalized after each turn, and frontmatter hooks are
+        // currently registered as global matchers. They retain the existing
+        // transcript-revival behavior.
+        const canStayResident =
+          !isFork &&
+          this.params.isolation !== 'worktree' &&
+          (!subagentConfig.hooks ||
+            Object.keys(subagentConfig.hooks).length === 0);
+        const needsAutoPermissionLease = () =>
+          agentConfig.getApprovalMode() === ApprovalMode.AUTO &&
+          this.config.getApprovalMode() !== ApprovalMode.AUTO;
+        let runtimeDisposed = false;
+        let disposeRequested = false;
+        let turnRunning = false;
+        let currentAbortController: AbortController | undefined =
+          bgAbortController;
+        let currentTurnPromise: Promise<void> | undefined;
+        let hotContinuationCount = 0;
+        let residentRegistered = false;
+
+        const cleanupRuntime = () => {
+          if (runtimeDisposed) return;
+          runtimeDisposed = true;
+          registry.unregisterResidentAgent(hookOpts.agentId);
+          residentRegistered = false;
+          bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
+          bgEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
+          cleanupApprovalBridge?.();
+          cleanupOwnedMonitorNotifications();
+          cleanupJsonl?.();
+          void agentConfig
+            .getToolRegistry()
+            .stop()
+            .catch(() => {});
+          void bgSubagentDispose?.().catch(() => {});
+        };
+
+        const requestRuntimeDisposal = () => {
+          if (disposeRequested || runtimeDisposed) return;
+          disposeRequested = true;
+          registry.unregisterResidentAgent(hookOpts.agentId);
+          residentRegistered = false;
+          currentAbortController?.abort();
+          if (!turnRunning) {
+            cleanupRuntime();
+          }
+        };
+
         // Fire-and-forget: start the subagent without blocking the parent.
         // For forks, wrap the body in runInForkContext so the recursive-fork
         // guard in execute() fires if the fork child's model calls `agent`
         // again — otherwise background forks bypass the ALS marker and can
         // spawn nested forks.
-        const bgBody = async (recordSpanOutcome: SubagentOutcomeSink) => {
+        const bgBody = async (
+          turnContextState: ContextState,
+          turnAbortController: AbortController,
+          recordSpanOutcome: SubagentOutcomeSink,
+          fireStartHook: boolean,
+        ) => {
+          let keepResident = false;
+          turnRunning = true;
           try {
-            await bgSubagent.execute(contextState, bgAbortController.signal);
+            if (fireStartHook && hookSystem) {
+              try {
+                const startHookOutput = await hookSystem.fireSubagentStartEvent(
+                  hookOpts.agentId,
+                  hookOpts.agentType,
+                  resolvedMode,
+                  turnAbortController.signal,
+                );
+                const additionalContext =
+                  startHookOutput?.getAdditionalContext();
+                if (additionalContext) {
+                  turnContextState.set('hook_context', additionalContext);
+                  // The resident chat's system instruction was rendered on
+                  // its first turn, so make new hook context visible in the
+                  // continuation user turn as well.
+                  turnContextState.set(
+                    'task_prompt',
+                    `${String(turnContextState.get('task_prompt'))}\n\n${additionalContext}`,
+                  );
+                }
+              } catch (hookError) {
+                debugLogger.warn(
+                  `[Agent] SubagentStart hook failed, continuing execution: ${hookError}`,
+                );
+              }
+            }
+
+            await bgSubagent.execute(
+              turnContextState,
+              turnAbortController.signal,
+            );
 
             let stopHookWarning: string | undefined;
-            if (hookSystem && !bgAbortController.signal.aborted) {
+            if (hookSystem && !turnAbortController.signal.aborted) {
               stopHookWarning = await this.runSubagentStopHookLoop(bgSubagent, {
                 agentId: hookOpts.agentId,
                 agentType: hookOpts.agentType,
                 transcriptPath: jsonlPath,
                 resolvedMode,
-                signal: bgAbortController.signal,
+                signal: turnAbortController.signal,
               });
             }
 
@@ -3176,7 +3266,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             recordSpanOutcome(
               deriveSubagentOutcomeMetadata({
                 terminateMode,
-                signalAborted: bgAbortController.signal.aborted,
+                signalAborted: turnAbortController.signal.aborted,
                 resultSummaryPresent: Boolean(
                   subagentRawText && subagentRawText.length > 0,
                 ),
@@ -3200,6 +3290,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               ) + wtSuffix;
             const completionStats = getCompletionStats();
             if (terminateMode === AgentTerminateMode.GOAL) {
+              keepResident = residentRegistered && !needsAutoPermissionLease();
+              if (!keepResident) {
+                registry.unregisterResidentAgent(hookOpts.agentId);
+                residentRegistered = false;
+              }
               registry.complete(hookOpts.agentId, finalText, completionStats);
               patchAgentMeta(metaPath, {
                 status: 'completed',
@@ -3243,7 +3338,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             recordSpanOutcome(
               deriveSubagentExceptionMetadata(
                 error,
-                bgAbortController.signal.aborted,
+                turnAbortController.signal.aborted,
               ),
             );
             const baseErrorMsg =
@@ -3270,7 +3365,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // If the error came from a cancellation, preserve the cancelled
             // status so the model's notification matches what task_stop
             // requested rather than reporting it as a generic failure.
-            if (bgAbortController.signal.aborted) {
+            if (turnAbortController.signal.aborted) {
               registry.finalizeCancelled(
                 hookOpts.agentId,
                 errorMsg,
@@ -3290,73 +3385,127 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               });
             }
           } finally {
-            bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
-            bgEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
-            cleanupApprovalBridge?.();
-            cleanupOwnedMonitorNotifications();
-            cleanupJsonl?.();
-            // Release the per-subagent ToolRegistry now that the
-            // background agent has finished — see the matching call in
-            // the foreground finally for why. Stopping here, after
-            // bgSubagent.execute resolves, is safe: by this point the
-            // detached body cannot invoke any more tool factories on
-            // this registry.
-            void agentConfig
-              .getToolRegistry()
-              .stop()
-              .catch(() => {});
-            // Per-spawn cleanup from `SubagentManager.createAgentHeadless`
-            // (background path). Mirrors the foreground finally: releases
-            // agent-scope hook entries and stops the per-agent ToolRegistry
-            // owning MCP child processes; not redundant with the parent
-            // registry stop above.
-            void bgSubagentDispose?.().catch(() => {});
-            // Restore parent PermissionManager's dangerous allow rules
-            // if this AUTO override stripped them. Background path:
-            // restore fires when the bg agent terminates (complete /
-            // fail / cancel), not when this outer execute() returns.
+            turnRunning = false;
             restoreParentPM();
+            if (!keepResident || disposeRequested) {
+              cleanupRuntime();
+            }
           }
         };
-        // Wrap in the agent-identity frame so nested `agent` tool calls
-        // from this subagent's model record this agent's id as their
-        // `parentAgentId` in the sidecar meta. Also wrap in
-        // qwen-code.subagent span (#3731 Phase 3) — background is
-        // fire-and-forget, so the span gets a new traceId + `Link` to the
-        // invoking AGENT tool span. `invocationKind` distinguishes a fork
-        // (subagent_type: "fork") from a named background agent; both are
-        // long-lived enough to qualify for the 4h TTL safety net.
-        const framedBgBody = () =>
-          this.runWithSubagentSpan(
-            this.buildSubagentSpanSpec(
-              hookOpts,
-              subagentConfig,
-              isFork ? 'fork' : 'background',
-            ),
-            // bg uses the per-agent abort controller, not the parent turn
-            // signal — `task_stop` aborts the bg controller alone (silent
-            // failure: a task_stop'd bg agent was being reported as 'failed'
-            // because the wrapper saw an unaborted parent signal).
-            bgAbortController.signal,
-            (recordOutcome) =>
-              runWithAgentContext(hookOpts.agentId, () =>
-                bgBody(recordOutcome),
+        // Wrap every turn in a fresh span and the original agent-identity
+        // frame. The depth override is load-bearing for hot continuations:
+        // send_message runs from the top level, but the continued agent must
+        // retain the nesting budget it had when it was created.
+        const runBackgroundTurn = (
+          turnContextState: ContextState,
+          turnAbortController: AbortController,
+          fireStartHook: boolean,
+        ) => {
+          const framedBgBody = () =>
+            this.runWithSubagentSpan(
+              this.buildSubagentSpanSpec(
+                hookOpts,
+                subagentConfig,
+                isFork ? 'fork' : 'background',
               ),
-          );
-        // Defensive `.catch`: bgBody is supposed to handle its own
-        // errors, but runWithSubagentSpan's `endSubagentSpan` finally
-        // call could theoretically throw if OTel internals break.
-        // Without this, such a throw becomes an unhandled rejection
-        // (Node ≥15 default = process termination). Review wenshao @
-        // #4410 + silent-failure-hunter.
-        const bgPromise = isFork
-          ? runInForkContext(framedBgBody)
-          : framedBgBody();
-        bgPromise.catch((err) =>
+              turnAbortController.signal,
+              (recordOutcome) =>
+                runWithAgentContext(
+                  hookOpts.agentId,
+                  () =>
+                    bgBody(
+                      turnContextState,
+                      turnAbortController,
+                      recordOutcome,
+                      fireStartHook,
+                    ),
+                  launchDepth,
+                ),
+            );
+          return isFork ? runInForkContext(framedBgBody) : framedBgBody();
+        };
+
+        const reportUnexpectedBackgroundError = (err: unknown) => {
           debugLogger.warn(
             `[Agent] background subagent ${hookOpts.agentId} body raised unexpected rejection: ${err instanceof Error ? err.message : String(err)}`,
-          ),
+          );
+        };
+
+        const residentController: ResidentBackgroundAgent = {
+          continue: (message) => {
+            if (!canStayResident || disposeRequested || runtimeDisposed) {
+              return false;
+            }
+            if (needsAutoPermissionLease()) {
+              requestRuntimeDisposal();
+              return false;
+            }
+
+            const nextAbortController = new AbortController();
+            let restarted;
+            try {
+              restarted = registry.restartCompletedAgent(
+                hookOpts.agentId,
+                nextAbortController,
+              );
+            } catch (error) {
+              debugLogger.warn(
+                `[Agent] Could not continue resident background agent ${hookOpts.agentId}: ${error instanceof Error ? error.message : String(error)}`,
+              );
+              return false;
+            }
+            if (
+              !restarted ||
+              disposeRequested ||
+              runtimeDisposed ||
+              registry.get(hookOpts.agentId) !== restarted ||
+              restarted.status !== 'running'
+            ) {
+              return false;
+            }
+
+            liveToolCallCount = 0;
+            currentAbortController = nextAbortController;
+            hotContinuationCount += 1;
+            patchAgentMeta(metaPath, {
+              status: 'running',
+              lastUpdatedAt: new Date().toISOString(),
+              lastError: undefined,
+              resumeCount: hotContinuationCount,
+            });
+
+            const nextContextState = new ContextState();
+            nextContextState.set('task_prompt', message);
+            nextContextState.set('hook_context', '');
+            const previousTurn = currentTurnPromise ?? Promise.resolve();
+            currentTurnPromise = previousTurn
+              .catch(reportUnexpectedBackgroundError)
+              .then(async () => {
+                if (disposeRequested || runtimeDisposed) return;
+                await runBackgroundTurn(
+                  nextContextState,
+                  nextAbortController,
+                  true,
+                );
+              });
+            currentTurnPromise.catch(reportUnexpectedBackgroundError);
+            return true;
+          },
+          dispose: requestRuntimeDisposal,
+        };
+        if (canStayResident && !needsAutoPermissionLease()) {
+          registry.registerResidentAgent(hookOpts.agentId, residentController);
+          residentRegistered = true;
+        }
+
+        // Defensive `.catch`: bgBody handles normal errors, but span teardown
+        // can still reject if telemetry internals fail.
+        currentTurnPromise = runBackgroundTurn(
+          contextState,
+          bgAbortController,
+          false,
         );
+        currentTurnPromise.catch(reportUnexpectedBackgroundError);
 
         this.updateDisplay({ status: 'background' as const }, updateOutput);
         return {
@@ -3608,7 +3757,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           // Nested-agent lineage (mirrors the meta sidecar); register()
           // resolves the parent's display name from parentAgentId.
           parentAgentId: getCurrentAgentId(),
-          depth: childLaunchDepth(),
+          depth: launchDepth,
         });
         writeAgentMeta(fgMetaPath, {
           agentId: hookOpts.agentId,
@@ -3630,7 +3779,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           resumeCount: 0,
           // Persisted so resume restores the original nesting level; see
           // childLaunchDepth() for the rationale.
-          depth: childLaunchDepth(),
+          depth: launchDepth,
         });
 
         const stopHookWarning = await runFramed();

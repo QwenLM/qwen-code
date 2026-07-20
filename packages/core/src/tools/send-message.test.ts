@@ -35,6 +35,17 @@ describe('SendMessageTool — team mode', () => {
     expect(tool.name).toBe('send_message');
   });
 
+  it('advertises resident-or-transcript continuation', () => {
+    const tool = new SendMessageTool(makeTeamConfig());
+
+    expect(tool.description).toContain(
+      'a completed task continues on its resident runtime when available',
+    );
+    expect(tool.description).toContain(
+      'otherwise is revived from its transcript',
+    );
+  });
+
   it('sends a message via TeamManager', async () => {
     const sendMessage = vi.fn().mockResolvedValue(undefined);
     const tool = new SendMessageTool(
@@ -340,7 +351,37 @@ describe('SendMessageTool — background-task mode', () => {
     expect(result.llmContent).toContain('resumed');
   });
 
-  it('revives a completed task with the message as the next instruction', async () => {
+  it('continues a completed task on its resident runtime', async () => {
+    registry.register({
+      agentId: 'agent-1',
+      description: 'test agent',
+      status: 'completed',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
+      metaPath: '/tmp/test.meta.json',
+    });
+    const continueResident = vi.fn().mockReturnValue(true);
+    registry.registerResidentAgent('agent-1', {
+      continue: continueResident,
+      dispose: vi.fn(),
+    });
+
+    const result = await tool.validateBuildAndExecute(
+      { task_id: 'agent-1', message: 'now refactor the helper' },
+      new AbortController().signal,
+    );
+
+    expect(continueResident).toHaveBeenCalledWith('now refactor the helper');
+    expect(reviveCompletedBackgroundAgent).not.toHaveBeenCalled();
+    expect(resumeBackgroundAgent).not.toHaveBeenCalled();
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('existing runtime');
+    expect(result.returnDisplay).toContain('Continued');
+  });
+
+  it('revives a completed task when no resident runtime is available', async () => {
     registry.register({
       agentId: 'agent-1',
       description: 'test agent',

@@ -47,6 +47,7 @@ import type {
   AgentCompletionStats,
   AgentTask,
   AgentTaskRegistration,
+  ResidentBackgroundAgent,
 } from './background-tasks.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../subagents/types.js';
@@ -654,7 +655,6 @@ export class BackgroundAgentResumeService {
 
     let cleanupOwnedMonitorNotifications: (() => void) | undefined;
     let cleanupJsonl: (() => void) | undefined;
-
     try {
       const subagentName = meta.subagentName ?? meta.agentType;
       const target = await this.resolveResumeTarget(subagentName);
@@ -921,18 +921,84 @@ export class BackgroundAgentResumeService {
         ? registry.bridgeApprovalEvents(meta.agentId, bgEmitter)
         : undefined;
 
-      const runBody = async () => {
+      const canStayResident =
+        !target.isFork &&
+        (!target.subagentConfig?.hooks ||
+          Object.keys(target.subagentConfig.hooks).length === 0);
+      const needsAutoPermissionLease = () =>
+        agentConfig.getApprovalMode() === 'auto' &&
+        this.config.getApprovalMode() !== 'auto';
+      let runtimeDisposed = false;
+      let disposeRequested = false;
+      let turnRunning = false;
+      let currentAbortController: AbortController | undefined =
+        bgAbortController;
+      let currentTurnPromise: Promise<void> | undefined;
+      let hotResumeCount = nextResumeCount;
+      let residentRegistered = false;
+
+      const runtimeCleanup = () => {
+        if (runtimeDisposed) return;
+        runtimeDisposed = true;
+        registry.unregisterResidentAgent(meta.agentId);
+        residentRegistered = false;
+        bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
+        bgEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
+        cleanupApprovalBridge?.();
+        cleanupOwnedMonitorNotifications?.();
+        cleanupJsonl?.();
+        void agentConfig
+          .getToolRegistry()
+          .stop()
+          .catch(() => {});
+        void subagentDispose?.().catch(() => {});
+      };
+
+      const requestRuntimeDisposal = () => {
+        if (disposeRequested || runtimeDisposed) return;
+        disposeRequested = true;
+        registry.unregisterResidentAgent(meta.agentId);
+        residentRegistered = false;
+        currentAbortController?.abort();
+        if (!turnRunning) {
+          runtimeCleanup();
+        }
+      };
+
+      const runBody = async (
+        turnContextState: ContextState,
+        turnAbortController: AbortController,
+        fireStartHook: boolean,
+      ) => {
+        let keepResident = false;
+        turnRunning = true;
         try {
-          await subagent.execute(contextState, bgAbortController.signal);
+          if (fireStartHook) {
+            await this.applySubagentStartHook(turnContextState, {
+              agentId: meta.agentId,
+              agentType: meta.agentType,
+              resolvedMode,
+              signal: turnAbortController.signal,
+            });
+            const additionalContext = turnContextState.get('hook_context');
+            if (additionalContext) {
+              turnContextState.set(
+                'task_prompt',
+                `${String(turnContextState.get('task_prompt'))}\n\n${String(additionalContext)}`,
+              );
+            }
+          }
+
+          await subagent.execute(turnContextState, turnAbortController.signal);
 
           let stopHookWarning: string | undefined;
-          if (hookSystem && !bgAbortController.signal.aborted) {
+          if (hookSystem && !turnAbortController.signal.aborted) {
             stopHookWarning = await this.runSubagentStopHookLoop(subagent, {
               agentId: meta.agentId,
               agentType: meta.agentType,
               transcriptPath: outputFile,
               resolvedMode,
-              signal: bgAbortController.signal,
+              signal: turnAbortController.signal,
             });
           }
 
@@ -950,6 +1016,11 @@ export class BackgroundAgentResumeService {
           );
           const stats = getCompletionStats(subagent, liveToolCallCount);
           if (terminateMode === AgentTerminateMode.GOAL) {
+            keepResident = residentRegistered && !needsAutoPermissionLease();
+            if (!keepResident) {
+              registry.unregisterResidentAgent(meta.agentId);
+              residentRegistered = false;
+            }
             registry.complete(meta.agentId, finalText, stats);
             patchAgentMeta(metaPath, {
               status: 'completed',
@@ -979,7 +1050,7 @@ export class BackgroundAgentResumeService {
           debugLogger.error(
             `[BackgroundAgentResume] Background agent failed: ${errorMessage}`,
           );
-          if (bgAbortController.signal.aborted) {
+          if (turnAbortController.signal.aborted) {
             registry.finalizeCancelled(
               meta.agentId,
               errorMessage,
@@ -1003,45 +1074,116 @@ export class BackgroundAgentResumeService {
             });
           }
         } finally {
-          bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
-          bgEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
-          cleanupApprovalBridge?.();
-          cleanupOwnedMonitorNotifications?.();
-          cleanupJsonl?.();
-          // Release the per-subagent ToolRegistry the resumed agent's
-          // wrapper Config built in `createApprovalModeOverride` so any
-          // AgentTool / SkillTool the model instantiated during this
-          // run disposes its change-listeners on shared
-          // SubagentManager / SkillManager. Without this, every resume
-          // accumulates listeners for the rest of the session.
-          void agentConfig
-            .getToolRegistry()
-            .stop()
-            .catch(() => {});
-          // Per-spawn cleanup from `createAgentHeadless`: releases agent-
-          // scope hook entries and stops the per-agent ToolRegistry that
-          // the force rebuild created for `mcpServers`. Distinct from the
-          // parent registry above (no-op when target.isFork).
-          void subagentDispose?.().catch(() => {});
-          // Restore parent PermissionManager's dangerous allow rules if
-          // this override stripped them. See createApprovalModeOverride
-          // strip-lifecycle comment in agent.ts.
+          turnRunning = false;
           restoreParentPM();
+          if (!keepResident || disposeRequested) {
+            runtimeCleanup();
+          }
         }
       };
 
-      // Restore the persisted launch depth so a resumed nested agent keeps
-      // its original nesting level (and spawn eligibility) instead of
-      // recomputing to depth 0 from this top-level resume frame. Normalized
-      // because the sidecar is untrusted input — a tampered negative depth
-      // would otherwise mint unbounded spawn capacity.
-      const framedRunBody = () =>
-        runWithAgentContext(
-          meta.agentId,
-          runBody,
-          normalizeResumedAgentDepth(meta.depth),
+      const runBackgroundTurn = (
+        turnContextState: ContextState,
+        turnAbortController: AbortController,
+        fireStartHook: boolean,
+      ) => {
+        // Restore the persisted launch depth so a resumed nested agent keeps
+        // its original nesting level (and spawn eligibility) instead of
+        // recomputing to depth 0 from this top-level resume frame.
+        const framedRunBody = () =>
+          runWithAgentContext(
+            meta.agentId,
+            () => runBody(turnContextState, turnAbortController, fireStartHook),
+            normalizeResumedAgentDepth(meta.depth),
+          );
+        return target.isFork
+          ? runInForkContext(framedRunBody)
+          : framedRunBody();
+      };
+
+      const reportUnexpectedBackgroundError = (error: unknown) => {
+        debugLogger.warn(
+          `[BackgroundAgentResume] Background agent ${meta.agentId} body raised unexpected rejection: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
         );
-      void (target.isFork ? runInForkContext(framedRunBody) : framedRunBody());
+      };
+
+      const residentController: ResidentBackgroundAgent = {
+        continue: (message) => {
+          if (!canStayResident || disposeRequested || runtimeDisposed) {
+            return false;
+          }
+          if (needsAutoPermissionLease()) {
+            requestRuntimeDisposal();
+            return false;
+          }
+
+          const nextAbortController = new AbortController();
+          let restarted;
+          try {
+            restarted = registry.restartCompletedAgent(
+              meta.agentId,
+              nextAbortController,
+            );
+          } catch (error) {
+            debugLogger.warn(
+              `[BackgroundAgentResume] Could not continue resident background agent ${
+                meta.agentId
+              }: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            return false;
+          }
+          if (
+            !restarted ||
+            disposeRequested ||
+            runtimeDisposed ||
+            registry.get(meta.agentId) !== restarted ||
+            restarted.status !== 'running'
+          ) {
+            return false;
+          }
+
+          liveToolCallCount = 0;
+          currentAbortController = nextAbortController;
+          hotResumeCount += 1;
+          patchAgentMeta(metaPath, {
+            status: 'running',
+            lastUpdatedAt: new Date().toISOString(),
+            lastError: undefined,
+            resumeCount: hotResumeCount,
+          });
+
+          const nextContextState = new ContextState();
+          nextContextState.set('task_prompt', message);
+          nextContextState.set('hook_context', '');
+          const previousTurn = currentTurnPromise ?? Promise.resolve();
+          currentTurnPromise = previousTurn
+            .catch(reportUnexpectedBackgroundError)
+            .then(async () => {
+              if (disposeRequested || runtimeDisposed) return;
+              await runBackgroundTurn(
+                nextContextState,
+                nextAbortController,
+                true,
+              );
+            });
+          currentTurnPromise.catch(reportUnexpectedBackgroundError);
+          return true;
+        },
+        dispose: requestRuntimeDisposal,
+      };
+      if (canStayResident && !needsAutoPermissionLease()) {
+        registry.registerResidentAgent(meta.agentId, residentController);
+        residentRegistered = true;
+      }
+
+      currentTurnPromise = runBackgroundTurn(
+        contextState,
+        bgAbortController,
+        false,
+      );
+      currentTurnPromise.catch(reportUnexpectedBackgroundError);
       return entry;
     } catch (error) {
       cleanupOwnedMonitorNotifications?.();
@@ -1278,7 +1420,9 @@ export class BackgroundAgentResumeService {
           typedStopOutput.getEffectiveReason(),
         );
         continueContext.set('hook_context', '');
-        await subagent.execute(continueContext, signal);
+        await subagent.execute(continueContext, signal, {
+          resetStats: false,
+        });
 
         if (signal?.aborted) return undefined;
       } catch (hookError) {
