@@ -72,6 +72,7 @@ vi.mock('./ChatPane', () => ({
         data-pane-workspace={props.workspaceCwd}
         data-maximized={props.isMaximized ? 'true' : 'false'}
         data-pane-restart-sse={props.restartSseOnPrompt ? 'true' : 'false'}
+        data-slash-handler={props.onSlashCommand ? 'true' : 'false'}
       >
         <span data-testid="pane-title">{props.title}</span>
         {props.onToggleMaximize && (
@@ -201,6 +202,19 @@ describe('SplitView', () => {
         .querySelector('[data-session="s1"] [data-testid="chat-pane"]')
         ?.getAttribute('data-pane-restart-sse'),
     ).toBe('true');
+  });
+
+  it('passes the host slash command handler to every pane', () => {
+    render({
+      sessionIds: ['s1', 's2'],
+      onSlashCommand: vi.fn(),
+    });
+
+    expect(
+      panes().every(
+        (pane) => pane.getAttribute('data-slash-handler') === 'true',
+      ),
+    ).toBe(true);
   });
 
   it('seeds with the current session when no session ids are given', () => {
