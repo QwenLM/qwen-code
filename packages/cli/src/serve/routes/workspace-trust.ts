@@ -36,6 +36,9 @@ export interface WorkspaceTrustRouteDeps {
   ) => string | undefined | null;
   workspaceRegistry?: WorkspaceRegistry;
   workspaceTrustHotReloadAvailable?: boolean;
+  getWorkspaceTrustPolicySnapshot?: () =>
+    | DaemonTrustPolicySnapshot
+    | Promise<DaemonTrustPolicySnapshot>;
 }
 
 function unavailableRuntime(res: Response): void {
@@ -123,6 +126,7 @@ export function registerWorkspaceTrustRoutes(
     parseAndValidateClientId,
     workspaceRegistry,
     workspaceTrustHotReloadAvailable,
+    getWorkspaceTrustPolicySnapshot = readDaemonTrustPolicySnapshot,
   } = deps;
 
   app.get('/workspace/trust', async (req: Request, res: Response) => {
@@ -137,7 +141,7 @@ export function registerWorkspaceTrustRoutes(
           .json(
             trustStatusV2(
               workspaceRegistry.primaryEntry,
-              await readDaemonTrustPolicySnapshot(),
+              await getWorkspaceTrustPolicySnapshot(),
             ),
           );
         return;
@@ -217,12 +221,17 @@ export function registerWorkspaceTrustRoutes(
 
 export function registerWorkspaceQualifiedTrustRoutes(
   app: Application,
-  deps: Pick<WorkspaceTrustRouteDeps, 'mutate' | 'safeBody'> & {
+  deps: Pick<
+    WorkspaceTrustRouteDeps,
+    'mutate' | 'safeBody' | 'getWorkspaceTrustPolicySnapshot'
+  > & {
     workspaceRegistry: WorkspaceRegistry;
     workspaceTrustHotReloadAvailable?: boolean;
   },
 ): void {
   const { workspaceRegistry, mutate, safeBody } = deps;
+  const getWorkspaceTrustPolicySnapshot =
+    deps.getWorkspaceTrustPolicySnapshot ?? readDaemonTrustPolicySnapshot;
 
   app.get('/workspaces/:workspace/trust', async (req, res) => {
     if (
@@ -234,7 +243,7 @@ export function registerWorkspaceQualifiedTrustRoutes(
       try {
         res
           .status(200)
-          .json(trustStatusV2(entry, await readDaemonTrustPolicySnapshot()));
+          .json(trustStatusV2(entry, await getWorkspaceTrustPolicySnapshot()));
       } catch (err) {
         sendTrustError(res, 'GET /workspaces/:workspace/trust', err);
       }
