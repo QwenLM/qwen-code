@@ -84,6 +84,7 @@ const {
       workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
       workspaceSkills: loadSkillsStatus,
     })),
+    sessionStatus: vi.fn(() => Promise.resolve({})),
   };
   return {
     mockConnection: connection,
@@ -2256,6 +2257,130 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     expect(editorCommit).not.toHaveBeenCalled();
     expect(editorClear).not.toHaveBeenCalled();
+  });
+
+  it('notifies the host before forwarding a slash command', async () => {
+    const onSlashCommand = vi.fn();
+    const { container } = renderApp({ onSlashCommand });
+    await flush();
+
+    testState.prompt = '/Deploy staging';
+    await clickSubmit(container);
+    await flush();
+
+    expect(onSlashCommand).toHaveBeenCalledWith({
+      command: 'deploy',
+      args: 'staging',
+      input: '/Deploy staging',
+    });
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      '/Deploy staging',
+      expect.any(Object),
+    );
+  });
+
+  it('lets the host handle a slash command instead of forwarding it', async () => {
+    const onSlashCommand = vi.fn(() => true);
+    const { container } = renderApp({ onSlashCommand });
+    await flush();
+
+    testState.prompt = '/deploy production';
+    await clickSubmit(container);
+    await flush();
+
+    expect(onSlashCommand).toHaveBeenCalledWith({
+      command: 'deploy',
+      args: 'production',
+      input: '/deploy production',
+    });
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('lets the host override a built-in slash command', async () => {
+    const onSlashCommand = vi.fn(() => true);
+    const { container } = renderApp({ onSlashCommand });
+    await flush();
+
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    expect(onSlashCommand).toHaveBeenCalledWith({
+      command: 'settings',
+      args: '',
+      input: '/settings',
+    });
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+  });
+
+  it('does not treat an absolute path as a slash command', async () => {
+    const onSlashCommand = vi.fn(() => true);
+    const { container } = renderApp({ onSlashCommand });
+    await flush();
+
+    testState.prompt = '/usr/local/bin/tool';
+    await clickSubmit(container);
+    await flush();
+
+    expect(onSlashCommand).not.toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      '/usr/local/bin/tool',
+      expect.any(Object),
+    );
+  });
+
+  it('lets the host handle a slash command while the daemon is unavailable', async () => {
+    mockConnection.status = 'error';
+    const onSlashCommand = vi.fn(() => true);
+    const onToast = vi.fn();
+    const { container } = renderApp({ onSlashCommand, onToast });
+    await flush();
+
+    testState.prompt = '/deploy production';
+    await clickSubmit(container);
+    await flush();
+
+    expect(onSlashCommand).toHaveBeenCalledTimes(1);
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(onToast).not.toHaveBeenCalled();
+  });
+
+  it('reports a host slash command error and continues default handling', async () => {
+    const error = new Error('host handler exploded');
+    const onSlashCommand = vi.fn(() => {
+      throw error;
+    });
+    const onToast = vi.fn();
+    const { container } = renderApp({ onSlashCommand, onToast });
+    await flush();
+
+    testState.prompt = '/deploy staging';
+    await clickSubmit(container);
+    await flush();
+
+    expect(onToast).toHaveBeenCalledWith('error', 'host handler exploded');
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      '/deploy staging',
+      expect.any(Object),
+    );
+  });
+
+  it('uses the latest slash command handler after a rerender', async () => {
+    const firstHandler = vi.fn();
+    const secondHandler = vi.fn(() => true);
+    const { container, rerender } = renderApp({
+      onSlashCommand: firstHandler,
+    });
+    await flush();
+
+    rerender({ onSlashCommand: secondHandler });
+    await flush();
+
+    testState.prompt = '/deploy staging';
+    await clickSubmit(container);
+    await flush();
+    expect(firstHandler).not.toHaveBeenCalled();
+    expect(secondHandler).toHaveBeenCalledTimes(1);
   });
 
   it('forwards input annotations for /plan prompts in active sessions', async () => {

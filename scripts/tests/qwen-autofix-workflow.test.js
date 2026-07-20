@@ -8,6 +8,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -655,9 +656,25 @@ describe('qwen-autofix workflow', () => {
     expect(
       runRecheck(pr({ labels: [{ name: 'autofix/skip' }] })).out,
     ).toContain('stale=true');
-    // Fork heads: manageable ONLY with takeover + allow-edits + a fork
-    // author who holds write+ LIVE; anything less discards.
+    // Fork heads: manageable with allow-edits + a fork author who holds write+
+    // LIVE, PLUS either the takeover label (non-bot forks) OR bot authorship
+    // (the bot's own fork needs no label). Anything less discards.
+    // A bot fork with no allow-edits still discards.
     expect(runRecheck(pr({ isCrossRepository: true })).passed).toBe(false);
+    // The bot's OWN fork with allow-edits is eligible WITHOUT a label — the
+    // author check already exempts the bot, and the fork chain no longer
+    // demands a label for it. (head repo matches the HEAD_REPO env.)
+    const botFork = pr({
+      isCrossRepository: true,
+      maintainerCanModify: true,
+      headRepositoryOwner: { login: 'maint-fork' },
+      headRepository: { name: 'qwen-code' },
+    });
+    expect(runRecheck(botFork).passed).toBe(true);
+    // Remove allow-edits and the same bot fork discards (cannot push).
+    expect(runRecheck({ ...botFork, maintainerCanModify: false }).passed).toBe(
+      false,
+    );
     const forkPr = pr({
       isCrossRepository: true,
       maintainerCanModify: true,
@@ -1035,54 +1052,72 @@ describe('qwen-autofix workflow', () => {
     // Rotation: offset 1 starts one past the newest, wrapping — so the
     // oldest tail is reached within pool/budget scans instead of never.
     expect(pick([pr(1), pr(2)], [], 1)).toEqual(['1', '2']);
-    // Fork takeover candidates are admitted separately: allow-edits and no
-    // skip label filter in jq; the author's live write+ gate runs in bash.
+    // Fork candidates are unioned from TWO sources: the bot's own forks
+    // (bot-prs.json is --author AUTOFIX_BOT, so a fork there is the bot's own
+    // work and needs NO label) and takeover-LABELED forks (takeover-prs.json,
+    // any eligible author). Both require allow-edits and no skip; the author's
+    // live write+ gate runs in bash.
     const forkSel = reviewScanJob
       .match(
-        /done < <\(jq -r --arg skip "\$\{SKIP_LABEL\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/takeover-prs\.json"\)/,
+        /done < <\(jq -rs --arg skip "\$\{SKIP_LABEL\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/bot-prs\.json" "\$\{WORKDIR\}\/takeover-prs\.json"\)/,
       )?.[1]
       ?.replace(/\n {14}/g, '\n');
     expect(forkSel).toBeTruthy();
     const forkRows = execFileSync(
       'jq',
-      ['-r', '--arg', 'skip', 'autofix/skip', forkSel],
+      ['-rs', '--arg', 'skip', 'autofix/skip', forkSel],
       {
         encoding: 'utf8',
-        input: JSON.stringify([
-          {
-            number: 9,
-            isCrossRepository: true,
-            maintainerCanModify: true,
-            labels: [{ name: 'autofix/takeover' }],
-            author: { login: 'maint-a' },
-          },
-          {
-            number: 8,
-            isCrossRepository: true,
-            maintainerCanModify: false,
-            labels: [{ name: 'autofix/takeover' }],
-            author: { login: 'maint-b' },
-          },
-          {
-            number: 7,
-            isCrossRepository: true,
-            maintainerCanModify: true,
-            labels: [{ name: 'autofix/takeover' }, { name: 'autofix/skip' }],
-            author: { login: 'maint-c' },
-          },
-          {
-            number: 6,
-            isCrossRepository: false,
-            maintainerCanModify: true,
-            labels: [{ name: 'autofix/takeover' }],
-            author: { login: 'maint-d' },
-          },
-        ]),
+        input:
+          // bot-prs.json (all --author qwen-code-dev-bot)
+          JSON.stringify([
+            {
+              number: 20,
+              isCrossRepository: true,
+              maintainerCanModify: true,
+              labels: [], // no label — admitted anyway, it's the bot's own fork
+              author: { login: 'qwen-code-dev-bot' },
+            },
+            {
+              number: 19,
+              isCrossRepository: true,
+              maintainerCanModify: false, // no allow-edits — the bot cannot push
+              labels: [],
+              author: { login: 'qwen-code-dev-bot' },
+            },
+            {
+              number: 18,
+              isCrossRepository: false, // in-repo bot PR — not a fork candidate
+              maintainerCanModify: true,
+              labels: [],
+              author: { login: 'qwen-code-dev-bot' },
+            },
+          ]) +
+          // takeover-prs.json (--label autofix/takeover)
+          JSON.stringify([
+            {
+              number: 9,
+              isCrossRepository: true,
+              maintainerCanModify: true,
+              labels: [{ name: 'autofix/takeover' }],
+              author: { login: 'maint-a' },
+            },
+            {
+              number: 7,
+              isCrossRepository: true,
+              maintainerCanModify: true,
+              labels: [{ name: 'autofix/takeover' }, { name: 'autofix/skip' }],
+              author: { login: 'maint-c' },
+            },
+          ]),
       },
     )
       .trim()
       .split('\n');
-    expect(forkRows).toEqual(['9\tmaint-a']);
+    // unique_by(.number) sorts ascending: the labeled human fork (#9) and the
+    // bot's own unlabeled fork (#20); #19 (no allow-edits), #18 (in-repo), and
+    // #7 (skip) are dropped.
+    expect(forkRows).toEqual(['9\tmaint-a', '20\tqwen-code-dev-bot']);
     expect(reviewScanJob).toContain('fork takeover candidate #${FPR} admitted');
     // Fork plumbing: the target carries its head repo; prepare fetches the
     // fork branch (origin has no copy) and the report pushes back via
@@ -2107,6 +2142,70 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
+  it('resolves the staged SKILL end-to-end by running the real runner (stage↔resolve contract)', () => {
+    // The string test above pins the mirrored LAYOUT, but it re-implements
+    // run-agent.mjs's `<dir>/../SKILL.md` convention. If that coupling ever
+    // moves in the RUNNER, the string test stays green while prod breaks —
+    // the same class of blind spot that let #7165 ship. This test runs the
+    // ACTUAL runner against the staged layout and asserts it reads the
+    // staged SKILL, exercising the stage↔resolve contract for real.
+    const runner = readFileSync(autofixRunnerScriptPath, 'utf8');
+    const printPrompt = (scriptPath, dir) =>
+      spawnSync(
+        process.execPath,
+        [
+          scriptPath,
+          '--mode',
+          'address-review',
+          '--pr',
+          '1',
+          '--issue',
+          '1',
+          '--workdir',
+          dir,
+          '--print-prompt',
+        ],
+        // spawnSync blocks the event loop, so vitest's async timeout can't
+        // fire — bound each subprocess directly against a hung runner.
+        { encoding: 'utf8', timeout: 10_000 },
+      );
+    withRunnerDir((dir) => {
+      // Mirror the workflow's staging: autofix-skill/{SKILL.md,scripts/run-agent.mjs}.
+      mkdirSync(join(dir, 'autofix-skill', 'scripts'), { recursive: true });
+      writeFileSync(
+        join(dir, 'autofix-skill', 'SKILL.md'),
+        '---\nname: autofix\n---\nSTAGED_SKILL_SENTINEL\n',
+      );
+      const stagedRunner = join(
+        dir,
+        'autofix-skill',
+        'scripts',
+        'run-agent.mjs',
+      );
+      writeFileSync(stagedRunner, runner);
+      const ok = printPrompt(stagedRunner, dir);
+      expect(ok.status).toBe(0);
+      // The real runner resolved ../SKILL.md to the STAGED copy and inlined it.
+      expect(ok.stdout).toContain('STAGED_SKILL_SENTINEL');
+      // Skill directory ends in the mirrored dir name (basename, not the full
+      // temp path — macOS canonicalizes /var → /private/var).
+      expect(ok.stdout).toMatch(/Skill directory: \S*[/\\]autofix-skill\n/);
+
+      // And the FLAT layout #7165 shipped (runner alone, no ../SKILL.md) must
+      // crash with ENOENT — proving this test catches that regression. Nest it
+      // under dir/flat/ so its ../SKILL.md resolves to dir/SKILL.md (which this
+      // test never creates) rather than a shared tmpdir()/SKILL.md a concurrent
+      // job could leave behind and make the runner exit 0 spuriously.
+      mkdirSync(join(dir, 'flat'), { recursive: true });
+      const flatRunner = join(dir, 'flat', 'run-agent.mjs');
+      writeFileSync(flatRunner, runner);
+      const flat = printPrompt(flatRunner, dir);
+      expect(flat.status).not.toBe(0);
+      expect(flat.stderr).toContain('ENOENT');
+      expect(flat.stderr).toContain("SKILL.md'");
+    });
+  });
+
   it('surfaces the running model in every autofix report for diagnosis and attribution', () => {
     // The model is a repo variable (already the agent's OPENAI_MODEL), not a
     // secret, so it is safe to echo into a public comment. Each reporting
@@ -2120,7 +2219,9 @@ describe('qwen-autofix workflow', () => {
       reviewAddressReportStep,
       publishPrStep,
     ]) {
-      expect(step).toContain("MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'");
+      expect(step).toContain(
+        "MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'",
+      );
       expect(step).toContain('MODEL_DISPLAY="${MODEL:-default}"');
       expect(step).toContain(footer);
     }
@@ -2261,7 +2362,10 @@ describe('qwen-autofix workflow', () => {
       ),
     );
     expect(prepareBranchAndFeedbackStep).not.toContain('git clean');
-    expect(prepareBranchAndFeedbackStep).not.toContain('git diff --quiet');
+    // The prepare step must not gate the unconditional build-output restore on
+    // a diff check; `git diff --quiet` only appears in a comment documenting
+    // the verification gate, never as an executed guard here.
+    expect(prepareBranchAndFeedbackStep).not.toContain('if git diff --quiet');
   });
 
   it('clears persistent autofix workdirs before agent steps run', () => {
@@ -2599,9 +2703,17 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toMatch(
       /git config core\.hooksPath \/dev\/null\n[\s\S]{0,2200}git checkout -B "\$\{BRANCH\}" "origin\/\$\{BRANCH\}"/,
     );
-    expect(workflow).toMatch(
-      /git config core\.hooksPath \.husky\n[\s\S]{0,200}node "\$\{RUNNER_TEMP\}\/autofix-skill\/scripts\/run-agent\.mjs"/,
+    // The agent step re-points hooks to .husky BEFORE invoking the runner.
+    // Assert the ordering directly (not a fixed-width window) so adding a
+    // comment between the two lines can't fail the test spuriously.
+    const huskyAt = triageAndAddressStep.indexOf(
+      'git config core.hooksPath .husky',
     );
+    const stagedNodeAt = triageAndAddressStep.indexOf(
+      'node "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs"',
+    );
+    expect(huskyAt).toBeGreaterThanOrEqual(0);
+    expect(stagedNodeAt).toBeGreaterThan(huskyAt);
   });
 
   it('keeps sandbox image fallback covered by a reusable script', () => {

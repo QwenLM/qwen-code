@@ -399,6 +399,13 @@ export class SessionService {
     return this.getWorktreeSessionPathForState(sessionId, 'active');
   }
 
+  getWorktreeSessionPathForArchiveState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return this.getWorktreeSessionPathForState(sessionId, state);
+  }
+
   private async readProjectSessionHead(
     sessionId: string,
     filePath: string,
