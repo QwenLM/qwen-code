@@ -3127,7 +3127,6 @@ describe('qwen-autofix workflow', () => {
     // the table just because its branch of the loop returned early.
     for (const state of [
       'busy',
-      'skipped',
       'unknown',
       'waiting',
       'round-capped',
@@ -3136,6 +3135,14 @@ describe('qwen-autofix workflow', () => {
     ]) {
       expect(scan).toContain(`fleet_row "\${PR}" '${state}'`);
     }
+    // 'skipped' has two distinct call sites; assert each by its unique detail
+    // so removing one is caught even though the other survives.
+    expect(scan).toContain(
+      `fleet_row "\${PR}" 'skipped' "fork head unresolved`,
+    );
+    expect(scan).toContain(
+      `fleet_row "\${PR}" 'skipped' "\${SKIP_LABEL} label present"`,
+    );
     // The table is written to the run summary, not just the job log.
     expect(scan).toContain('AutoFix fleet (${COUNT} selected this scan)');
     expect(scan).toContain('} >> "${GITHUB_STEP_SUMMARY}"');
