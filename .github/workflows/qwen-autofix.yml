@@ -1035,12 +1035,27 @@ jobs:
           # Run changed/related tests for the packages this fix touches.
           # --changed follows the import graph so transitive breakage is caught.
           # Full regression is covered by regular CI on the PR after the push.
+          # Map each changed file to its OWNING package — the nearest ancestor
+          # with a package.json. A flat 'packages/<dir>' assumption breaks on
+          # nested packages like packages/channels/base: 'packages/channels'
+          # has no package.json and the read below would ENOENT-crash the gate.
           CHANGED_PKGS="$(git diff --name-only "origin/main...${BRANCH}" \
-            | grep -oE '^packages/[^/]+' | sort -u || true)"
+            | grep -E '^packages/' \
+            | while IFS= read -r f; do
+                d="$(dirname "$f")"
+                while [[ "$d" == packages/?* ]]; do
+                  if [[ -f "$d/package.json" ]]; then echo "$d"; break; fi
+                  d="$(dirname "$d")"
+                done
+              done | sort -u || true)"
           if [[ -z "${CHANGED_PKGS}" ]]; then
             echo 'No package changes detected; skipping package tests.'
           else
             for p in ${CHANGED_PKGS}; do
+              if [[ ! -f "${p}/package.json" ]]; then
+                echo "Skipping ${p}: no package.json."
+                continue
+              fi
               test_script="$(node -e 'const fs = require("node:fs"); const pkg = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(pkg.scripts?.test || "");' "${p}/package.json")"
               if [[ "${test_script}" != *vitest* ]]; then
                 echo "Skipping ${p}: test script is not Vitest."
@@ -2413,6 +2428,16 @@ jobs:
         if: |-
           ${{ always() && steps.prepare.outputs.stale != 'true' }}
         run: |-
+          # Any non-zero exit AFTER the agent committed — a failed
+          # build/typecheck/lint/per-package test in the deterministic re-run
+          # below — leaves this step under `set -e` without writing an outcome,
+          # so OUTCOME is empty and the handoff falls through to the neutral
+          # framing, showing the agent's optimistic address-summary.md (which
+          # can cite a commit) as though it had landed. Report any such exit as
+          # a verify failure so the handoff says the change was NOT pushed. The
+          # explicit exit-1 paths already wrote outcome=failed (last-write-wins
+          # keeps it failed); the noop/success paths exit 0, so the guard skips.
+          trap 'rc=$?; if [[ "${rc}" -ne 0 ]]; then echo "outcome=failed" >> "${GITHUB_OUTPUT}"; fi' EXIT
           if [[ -f "${WORKDIR}/failure.md" && -n "$(git status --porcelain)" ]]; then
             echo "❌ Agent wrote failure.md after leaving a dirty workspace:"
             git status --short
@@ -2476,12 +2501,27 @@ jobs:
           # Test changed/related files for the packages this PR touches.
           # --changed follows the import graph so transitive breakage is caught.
           # Full regression is covered by regular CI on the PR after the push.
+          # Map each changed file to its OWNING package — the nearest ancestor
+          # with a package.json. A flat 'packages/<dir>' assumption breaks on
+          # nested packages like packages/channels/base: 'packages/channels'
+          # has no package.json and the read below would ENOENT-crash the gate.
           CHANGED_PKGS="$(git diff --name-only "origin/main...${BRANCH}" \
-            | grep -oE '^packages/[^/]+' | sort -u || true)"
+            | grep -E '^packages/' \
+            | while IFS= read -r f; do
+                d="$(dirname "$f")"
+                while [[ "$d" == packages/?* ]]; do
+                  if [[ -f "$d/package.json" ]]; then echo "$d"; break; fi
+                  d="$(dirname "$d")"
+                done
+              done | sort -u || true)"
           if [[ -z "${CHANGED_PKGS}" ]]; then
             echo 'No package changes detected; skipping package tests.'
           else
             for p in ${CHANGED_PKGS}; do
+              if [[ ! -f "${p}/package.json" ]]; then
+                echo "Skipping ${p}: no package.json."
+                continue
+              fi
               test_script="$(node -e 'const fs = require("node:fs"); const pkg = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(pkg.scripts?.test || "");' "${p}/package.json")"
               if [[ "${test_script}" != *vitest* ]]; then
                 echo "Skipping ${p}: test script is not Vitest."
@@ -2768,7 +2808,16 @@ jobs:
               echo "${HEADLINE}"
               echo
               if [[ -n "${DETAIL_FILE}" ]]; then
-                echo "**What I found before stopping:**"
+                if [[ "${OUTCOME}" == "failed" ]]; then
+                  # The agent's own address-summary.md can read like a success
+                  # and cite a commit SHA, but on OUTCOME=failed the verification
+                  # gate rejected the change and "Push and report" was skipped —
+                  # nothing landed on the branch. Say so before the summary, or
+                  # the reader chases a commit that was discarded with the runner.
+                  echo "⚠️ This change did NOT pass the verification gate and was NOT pushed — any commit referenced below was made only in the runner workspace and has been discarded. What the agent reported:"
+                else
+                  echo "**What I found before stopping:**"
+                fi
                 # -c drops any partial multi-byte sequence a byte-level head -c may
                 # have split, so the comment body stays valid UTF-8. iconv -c still
                 # EXITS 1 when it discards a byte, which under this shell's

@@ -2778,6 +2778,118 @@ describe('qwen-autofix workflow', () => {
     }
   });
 
+  it('maps a changed nested-package file to its owning package, not the container', () => {
+    // packages/channels/* are nested packages; the container packages/channels
+    // has no package.json, so a flat 'packages/<dir>' assumption ENOENT-crashes
+    // the verify gate. The detection must walk up to the nearest package.json.
+    const walk = verificationGateSteps
+      .join('\n')
+      .match(/while IFS= read -r f; do\n[\s\S]*?\n {14}done/)?.[0];
+    expect(walk).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'chpkg-'));
+    try {
+      for (const pkg of [
+        'packages/channels/base',
+        'packages/channels/dingtalk',
+        'packages/cli',
+      ]) {
+        mkdirSync(join(dir, pkg), { recursive: true });
+        writeFileSync(join(dir, pkg, 'package.json'), '{}');
+      }
+      const changed = [
+        'packages/channels/base/src/x.ts',
+        'packages/channels/dingtalk/src/z.ts',
+        'packages/cli/src/y.ts',
+        'packages/channels/base/README.md',
+      ].join('\n');
+      const out = execFileSync(
+        'bash',
+        [
+          '-c',
+          `cd "${dir}"; printf '%s\\n' "$1" | ${walk} | sort -u`,
+          '_',
+          changed,
+        ],
+        { encoding: 'utf8' },
+      ).trim();
+      expect(out.split('\n')).toEqual([
+        'packages/channels/base',
+        'packages/channels/dingtalk',
+        'packages/cli',
+      ]);
+      // Never the bare container (which would crash the package.json read).
+      expect(out.split('\n')).not.toContain('packages/channels');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('handoff frames a verify-failed change as NOT pushed', () => {
+    // On OUTCOME=failed the agent's own address-summary.md can read like a
+    // success and cite a commit SHA, but the verify gate rejected it and the
+    // push was skipped — the comment must say so, or the reader chases a
+    // discarded commit.
+    const body = reviewAddressReportStep.match(
+      /if \[\[ -n "\$\{DETAIL_FILE\}" \]\]; then\n[\s\S]*?\n {14}fi/,
+    )?.[0];
+    expect(body).toBeTruthy();
+    const run = (outcome) => {
+      const dir = mkdtempSync(join(tmpdir(), 'hoff-'));
+      try {
+        writeFileSync(join(dir, 'd.md'), 'Done. Single commit abc1234.\n');
+        return execFileSync('bash', ['-c', body], {
+          env: {
+            ...process.env,
+            DETAIL_FILE: join(dir, 'd.md'),
+            OUTCOME: outcome,
+          },
+          encoding: 'utf8',
+        });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const failed = run('failed');
+    expect(failed).toContain(
+      'did NOT pass the verification gate and was NOT pushed',
+    );
+    expect(failed).not.toContain('What I found before stopping');
+    // A non-verify handoff (e.g. a crash) keeps the neutral framing.
+    expect(run('')).toContain('What I found before stopping');
+  });
+
+  it('verify gate reports a post-commit deterministic-check failure as outcome=failed', () => {
+    // build/typecheck/lint/per-package tests run under `set -e` and exit the
+    // step non-zero WITHOUT writing an outcome; the EXIT trap must turn that
+    // into outcome=failed so the handoff frames the change as NOT pushed
+    // instead of letting an empty OUTCOME fall through to neutral framing.
+    const trap = verificationGateSteps[1].match(/trap '[^']*' EXIT/)?.[0];
+    expect(trap).toBeTruthy();
+    const run = (tail) => {
+      const dir = mkdtempSync(join(tmpdir(), 'trap-'));
+      const out = join(dir, 'gh_output');
+      writeFileSync(out, '');
+      try {
+        execFileSync('bash', ['-c', `set -eo pipefail\n${trap}\n${tail}`], {
+          env: { ...process.env, GITHUB_OUTPUT: out },
+          encoding: 'utf8',
+        });
+      } catch {
+        // The script may exit non-zero (the very path under test); the EXIT
+        // trap still wrote to GITHUB_OUTPUT before the shell terminated.
+      }
+      const result = readFileSync(out, 'utf8');
+      rmSync(dir, { recursive: true, force: true });
+      return result;
+    };
+    // A deterministic-check crash (npm run build → non-zero) => outcome=failed.
+    expect(run('false')).toContain('outcome=failed');
+    // The noop / success paths exit 0 => the guard must NOT overwrite outcome.
+    expect(
+      run('echo "outcome=noop" >> "${GITHUB_OUTPUT}"; exit 0'),
+    ).not.toContain('outcome=failed');
+  });
+
   it('still runs review verification reporting when the agent step fails', () => {
     expect(verificationGateSteps).toHaveLength(2);
     const reviewVerificationGateStep = verificationGateSteps[1];
