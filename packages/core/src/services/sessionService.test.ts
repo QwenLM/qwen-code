@@ -3900,7 +3900,7 @@ describe('SessionService', () => {
     const worktreeSessionId = '7ca8c920-e29b-41d4-a716-446655440001';
 
     it('includes a session whose transcript cwd is a worktree under this project', async () => {
-      (path as Record<string, unknown>).sep = '/';
+      (path as unknown as Record<string, unknown>)['sep'] = '/';
       readdirSyncSpy.mockReturnValue([
         `${worktreeSessionId}.jsonl`,
       ] as unknown as Array<fs.Dirent<Buffer>>);
@@ -3920,7 +3920,7 @@ describe('SessionService', () => {
     });
 
     it('excludes a session whose worktree belongs to a different project', async () => {
-      (path as Record<string, unknown>).sep = '/';
+      (path as unknown as Record<string, unknown>)['sep'] = '/';
       readdirSyncSpy.mockReturnValue([
         `${worktreeSessionId}.jsonl`,
       ] as unknown as Array<fs.Dirent<Buffer>>);
