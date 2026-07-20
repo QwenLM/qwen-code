@@ -162,6 +162,49 @@ describe('ScreenBuffer (Ink frame-controller M0)', () => {
     ).toBe(source);
   });
 
+  it.each([
+    ['leading indentation', '   hello'],
+    ['whitespace-only content', '   '],
+  ])('preserves wrapped %s', (_name, source) => {
+    current = render(
+      <Box width={2}>
+        <Text>{source}</Text>
+      </Box>,
+    );
+    const frame = getScreenBuffer(
+      current.stdout as unknown as NodeJS.WriteStream,
+    )!.frame!;
+
+    expect(
+      getSelectedText(frame, {
+        sx: 0,
+        sy: 0,
+        ex: frame.width - 1,
+        ey: frame.height - 1,
+      }),
+    ).toBe(source);
+  });
+
+  it('keeps renderer background fill out of selected text', () => {
+    current = render(
+      <Box width={5} backgroundColor="blue">
+        <Text>hi</Text>
+      </Box>,
+    );
+    const frame = getScreenBuffer(
+      current.stdout as unknown as NodeJS.WriteStream,
+    )!.frame!;
+
+    expect(
+      getSelectedText(frame, {
+        sx: 0,
+        sy: 0,
+        ex: frame.width - 1,
+        ey: frame.height - 1,
+      }),
+    ).toBe('hi');
+  });
+
   it('distinguishes explicit hard newlines from exact-width wraps', () => {
     current = render(
       <Box width={5}>
@@ -290,6 +333,19 @@ describe('ScreenBuffer (Ink frame-controller M0)', () => {
     )!.frame!;
 
     expect(frame.boundaries[0].every((claim) => claim === null)).toBe(true);
+  });
+
+  it('limits boundary claims to the rendered text width', () => {
+    current = render(
+      <Box width={5}>
+        <Text selectionBreakAfter="soft">hi</Text>
+      </Box>,
+    );
+    const frame = getScreenBuffer(
+      current.stdout as unknown as NodeJS.WriteStream,
+    )!.frame!;
+
+    expect(frame.boundaries[0].filter(Boolean)).toHaveLength(2);
   });
 
   it('propagates selectability and producer-supplied boundaries', () => {

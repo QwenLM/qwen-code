@@ -134,6 +134,28 @@ describe('getSelectedText', () => {
     );
   });
 
+  it('does not use boundary claims to override selected row content', () => {
+    const frame = frameFromLines(['abc', 'xyz']);
+    setBoundary(frame, 0, 'soft', '');
+    for (const currentCell of frame.cells[1]) {
+      (currentCell as FrameCell).flowId = 2;
+    }
+
+    expect(getSelectedText(frame, { sx: 0, sy: 0, ex: 2, ey: 1 })).toBe(
+      'abc\nxyz',
+    );
+  });
+
+  it('preserves a newline for a one-sided partial flow overlap', () => {
+    const frame = frameFromLines(['abc', 'def']);
+    setBoundary(frame, 0, 'soft', '');
+    (frame.cells[0][1] as FrameCell).flowId = 2;
+
+    expect(getSelectedText(frame, { sx: 0, sy: 0, ex: 2, ey: 1 })).toBe(
+      'abc\ndef',
+    );
+  });
+
   it('preserves hard and ambiguous visual breaks', () => {
     const hard = frameFromLines(['hello', 'world']);
     setBoundary(hard, 0, 'hard', '\n');

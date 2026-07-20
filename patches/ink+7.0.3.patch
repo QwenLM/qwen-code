@@ -233,7 +233,7 @@ index ef659f3..c3fad13 100644
          }
      }
 diff --git a/node_modules/ink/build/output.d.ts b/node_modules/ink/build/output.d.ts
-index 0f4523f..8548498 100644
+index 0f4523f..477cd3d 100644
 --- a/node_modules/ink/build/output.d.ts
 +++ b/node_modules/ink/build/output.d.ts
 @@ -1,4 +1,6 @@
@@ -247,12 +247,12 @@ index 0f4523f..8548498 100644
      constructor(options: Options);
      write(x: number, y: number, text: string, options: {
          transformers: OutputTransformer[];
++        selectable?: boolean;
 +        semantic?: {
 +            flowId: number;
 +            selectable: boolean;
 +            selectableRows: boolean[];
 +            boundaries: Array<TextBoundary | null>;
-+            width: number;
 +        };
      }): void;
      clip(clip: Clip): void;
@@ -267,7 +267,7 @@ index 0f4523f..8548498 100644
  }
  export {};
 diff --git a/node_modules/ink/build/output.js b/node_modules/ink/build/output.js
-index c763b77..02cca4d 100644
+index c763b77..c94da37 100644
 --- a/node_modules/ink/build/output.js
 +++ b/node_modules/ink/build/output.js
 @@ -1,6 +1,26 @@
@@ -302,19 +302,20 @@ index c763b77..02cca4d 100644
      }
      write(x, y, text, options) {
 -        const { transformers } = options;
-+        const { transformers, semantic } = options;
++        const { transformers, selectable, semantic } = options;
          if (!text) {
              return;
          }
-@@ -55,6 +75,7 @@ export default class Output {
+@@ -55,6 +75,8 @@ export default class Output {
              y,
              text,
              transformers,
++            selectable,
 +            semantic,
          });
      }
      clip(clip) {
-@@ -68,7 +89,7 @@ export default class Output {
+@@ -68,7 +90,7 @@ export default class Output {
              type: 'unclip',
          });
      }
@@ -323,7 +324,7 @@ index c763b77..02cca4d 100644
          // Initialize output array with a specific set of rows, so that margin/padding at the bottom is preserved
          const output = [];
          for (let y = 0; y < this.height; y++) {
-@@ -79,10 +100,13 @@ export default class Output {
+@@ -79,10 +101,13 @@ export default class Output {
                      value: ' ',
                      fullWidth: false,
                      styles: [],
@@ -337,19 +338,19 @@ index c763b77..02cca4d 100644
          const clips = [];
          for (const operation of this.operations) {
              if (operation.type === 'clip') {
-@@ -92,9 +116,10 @@ export default class Output {
+@@ -92,9 +117,10 @@ export default class Output {
                  clips.pop();
              }
              if (operation.type === 'write') {
 -                const { text, transformers } = operation;
-+                const { text, transformers, semantic } = operation;
++                const { text, transformers, selectable, semantic } = operation;
                  let { x, y } = operation;
                  let lines = text.split('\n');
 +                let firstLineIndex = 0;
                  const clip = clips.at(-1);
                  if (clip) {
                      const clipHorizontally = typeof clip?.x1 === 'number' && typeof clip?.x2 === 'number';
-@@ -129,6 +154,7 @@ export default class Output {
+@@ -129,6 +155,7 @@ export default class Output {
                          const height = lines.length;
                          const to = y + height > clip.y2 ? clip.y2 - y : height;
                          lines = lines.slice(from, to);
@@ -357,13 +358,15 @@ index c763b77..02cca4d 100644
                          if (y < clip.y1) {
                              y = clip.y1;
                          }
-@@ -144,8 +170,32 @@ export default class Output {
+@@ -144,8 +171,34 @@ export default class Output {
                      for (const transformer of transformers) {
                          line = transformer(line, index);
                      }
 +                    const boundaryRow = boundaries[y + offsetY];
 +                    if (boundaryRow) {
-+                        const boundaryWidth = semantic?.width ?? this.caches.getStringWidth(line);
++                        const boundaryWidth = semantic
++                            ? Math.max(1, this.caches.getStringWidth(line))
++                            : this.caches.getStringWidth(line);
 +                        const boundaryOrigin = semantic ? operation.x : x;
 +                        const startX = Math.max(0, boundaryOrigin, clip?.x1 ?? 0);
 +                        const endX = Math.min(this.width, boundaryOrigin + boundaryWidth, clip?.x2 ?? this.width);
@@ -386,11 +389,11 @@ index c763b77..02cca4d 100644
 +                    const rowSelectable = semantic
 +                        ? semantic.selectable &&
 +                            (semantic.selectableRows[firstLineIndex + index] ?? true)
-+                        : true;
++                        : selectable ?? true;
                      // Nothing to write (e.g. line was clipped away).
                      if (characters.length === 0) {
                          offsetY++;
-@@ -156,6 +206,8 @@ export default class Output {
+@@ -156,6 +209,8 @@ export default class Output {
                          value: ' ',
                          fullWidth: false,
                          styles: [],
@@ -399,7 +402,7 @@ index c763b77..02cca4d 100644
                      };
                      // Wide characters (e.g. CJK) occupy two cells: a leading
                      // cell with the character and a trailing placeholder with
-@@ -169,7 +221,11 @@ export default class Output {
+@@ -169,7 +224,11 @@ export default class Output {
                          currentLine[offsetX - 1] = spaceCell;
                      }
                      for (const character of characters) {
@@ -412,7 +415,7 @@ index c763b77..02cca4d 100644
                          // Determine printed width using string-width to align with measurement
                          const characterWidth = Math.max(1, this.caches.getStringWidth(character.value));
                          // For multi-column characters, clear following cells to avoid stray spaces/artifacts
-@@ -180,6 +236,8 @@ export default class Output {
+@@ -180,6 +239,8 @@ export default class Output {
                                      value: '',
                                      fullWidth: false,
                                      styles: character.styles,
@@ -421,7 +424,7 @@ index c763b77..02cca4d 100644
                                  };
                              }
                          }
-@@ -192,6 +250,30 @@ export default class Output {
+@@ -192,6 +253,30 @@ export default class Output {
                  }
              }
          }
@@ -452,7 +455,7 @@ index c763b77..02cca4d 100644
          const generatedOutput = output
              .map(line => {
              // See https://github.com/vadimdemedes/ink/pull/564#issuecomment-1637022742
-@@ -202,6 +284,8 @@ export default class Output {
+@@ -202,6 +287,8 @@ export default class Output {
          return {
              output: generatedOutput,
              height: output.length,
@@ -461,6 +464,22 @@ index c763b77..02cca4d 100644
          };
      }
  }
+diff --git a/node_modules/ink/build/render-background.js b/node_modules/ink/build/render-background.js
+index db5c807..bb54771 100644
+--- a/node_modules/ink/build/render-background.js
++++ b/node_modules/ink/build/render-background.js
+@@ -18,7 +18,10 @@ const renderBackground = (x, y, node, output) => {
+     // Create background fill for each row
+     const backgroundLine = colorize(' '.repeat(contentWidth), node.style.backgroundColor, 'background');
+     for (let row = 0; row < contentHeight; row++) {
+-        output.write(x + leftBorderWidth, y + topBorderHeight + row, backgroundLine, { transformers: [] });
++        output.write(x + leftBorderWidth, y + topBorderHeight + row, backgroundLine, {
++            transformers: [],
++            selectable: false,
++        });
+     }
+ };
+ export default renderBackground;
 diff --git a/node_modules/ink/build/render-node-to-output.d.ts b/node_modules/ink/build/render-node-to-output.d.ts
 index 127c620..6d5a005 100644
 --- a/node_modules/ink/build/render-node-to-output.d.ts
@@ -519,7 +538,7 @@ index f00a278..2e474c0 100644
      if (skipStaticElements && node.internal_static) {
          return;
      }
-@@ -88,16 +88,56 @@ const renderNodeToOutput = (node, output, options) => {
+@@ -88,16 +88,54 @@ const renderNodeToOutput = (node, output, options) => {
              newTransformers = [node.internal_transform, ...transformers];
          }
          if (node.nodeName === 'ink-text') {
@@ -565,7 +584,6 @@ index f00a278..2e474c0 100644
 +                            selectable: false,
 +                            selectableRows: wrapped.selectableRows.map(() => false),
 +                            boundaries: wrapped.boundaries.map(() => null),
-+                            width: textOffset.x,
 +                        },
 +                    });
                  }
@@ -578,7 +596,6 @@ index f00a278..2e474c0 100644
 +                        selectable: node.attributes.selectable !== false,
 +                        selectableRows: wrapped.selectableRows,
 +                        boundaries,
-+                        width: Math.max(1, maxWidth),
 +                    },
 +                });
              }
@@ -674,7 +691,7 @@ index 935cfb8..3dddced 100644
 +};
  export default wrapText;
 diff --git a/node_modules/ink/build/wrap-text.js b/node_modules/ink/build/wrap-text.js
-index 51f696c..8cce89a 100644
+index 51f696c..ec8525d 100644
 --- a/node_modules/ink/build/wrap-text.js
 +++ b/node_modules/ink/build/wrap-text.js
 @@ -1,5 +1,6 @@
@@ -684,7 +701,7 @@ index 51f696c..8cce89a 100644
  const cache = {};
  const wrapText = (text, maxWidth, wrapType) => {
      const cacheKey = text + String(maxWidth) + String(wrapType);
-@@ -34,4 +35,49 @@ const wrapText = (text, maxWidth, wrapType) => {
+@@ -34,4 +35,50 @@ const wrapText = (text, maxWidth, wrapType) => {
      cache[cacheKey] = wrappedText;
      return wrappedText;
  };
@@ -701,9 +718,10 @@ index 51f696c..8cce89a 100644
 +        let sourceOffset = 0;
 +        for (const [wrappedLineIndex, wrappedLine] of wrappedLines.entries()) {
 +            const visibleLine = stripAnsi(wrappedLine);
-+            const separatorRow = wrappedLines.length > 1 &&
++            const separatorRow = sourceOffset > 0 &&
 +                visibleLine.length > 0 &&
-+                /^\s+$/u.test(visibleLine);
++                /^\s+$/u.test(visibleLine) &&
++                /\S/u.test(visibleSource.slice(sourceOffset));
 +            const sourceSeparator = separatorRow
 +                ? /^\s+/u.exec(visibleSource.slice(sourceOffset))?.[0] ?? ''
 +                : '';

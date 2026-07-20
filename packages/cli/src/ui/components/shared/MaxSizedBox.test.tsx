@@ -117,6 +117,22 @@ of text`);
     );
   });
 
+  it('does not join clipped content to the bottom overflow banner', () => {
+    const { stdout, lastFrame } = render(
+      <OverflowProvider>
+        <MaxSizedBox maxWidth={5} maxHeight={2} overflowDirection="bottom">
+          <Box>
+            <Text wrap="wrap">abcdefghijklm</Text>
+          </Box>
+        </MaxSizedBox>
+      </OverflowProvider>,
+    );
+
+    expect(selectedFrameText(stdout as unknown as NodeJS.WriteStream)).toBe(
+      lastFrame(),
+    );
+  });
+
   it.each([
     ['multiple spaces', 'hello  world'],
     ['a tab', 'hello\tworld'],

@@ -61,6 +61,9 @@ function selectedFlows(
       flows.add(cell.flowId);
     }
   }
+  if (flows.size > 0) {
+    return flows;
+  }
   for (const boundaryY of [y - 1, y]) {
     const boundaryRow = frame.boundaries[boundaryY] ?? [];
     for (
@@ -84,12 +87,17 @@ function boundaryJoiner(
 ): string {
   const currentFlows = selectedFlows(frame, selection, y);
   const nextFlows = selectedFlows(frame, selection, y + 1);
-  const commonFlows = [...currentFlows].filter((flow) => nextFlows.has(flow));
-  if (commonFlows.length !== 1) {
+  const [currentFlow] = currentFlows;
+  const [nextFlow] = nextFlows;
+  if (
+    currentFlows.size !== 1 ||
+    nextFlows.size !== 1 ||
+    currentFlow !== nextFlow
+  ) {
     return '\n';
   }
 
-  const flowId = commonFlows[0];
+  const flowId = currentFlow!;
   const claims = (frame.boundaries[y] ?? []).filter(
     (claim): claim is FrameBoundary =>
       claim !== null && claim.selectable && claim.flowId === flowId,
