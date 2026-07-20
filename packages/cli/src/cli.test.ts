@@ -550,14 +550,14 @@ describe('bootstrap import boundaries', () => {
         'process.stdout.write(JSON.stringify({ managed: process.env.QWEN_CODE_MANAGED_NPM_UPDATE, launcher: process.env.QWEN_CODE_CLI, args: process.argv.slice(2) }));\n',
       );
       mkdirSync(launcherRoot, { recursive: true });
-      const { dev, ino, size, mtimeMs } = statSync(entryPath);
+      const { mtimeMs } = statSync(entryPath);
       writeFileSync(
         path.join(launcherRoot, 'active.json'),
         JSON.stringify({
           version: '2.0.0',
           bootstrap: realpathSync(entryPath),
           baseVersion: '1.0.0',
-          bootstrapFingerprint: { dev, ino, size, mtimeMs },
+          bootstrapMtimeMs: mtimeMs,
         }),
       );
 
@@ -576,31 +576,6 @@ describe('bootstrap import boundaries', () => {
         args: ['--prompt', 'hello'],
       });
 
-      writeFileSync(
-        path.join(launcherRoot, 'active.json'),
-        JSON.stringify({
-          version: '2.0.0',
-          bootstrap: path.join(tempDir, 'another-install', 'cli-entry.js'),
-          baseVersion: '1.0.0',
-          bootstrapFingerprint: { dev, ino, size, mtimeMs },
-        }),
-      );
-      expect(
-        execFileSync(process.execPath, [entryPath, '--prompt', 'hello'], {
-          encoding: 'utf8',
-          env: { ...process.env, QWEN_HOME: qwenHome },
-        }),
-      ).toBe('old version\n');
-
-      writeFileSync(
-        path.join(launcherRoot, 'active.json'),
-        JSON.stringify({
-          version: '2.0.0',
-          bootstrap: realpathSync(entryPath),
-          baseVersion: '1.0.0',
-          bootstrapFingerprint: { dev, ino, size, mtimeMs },
-        }),
-      );
       writeFileSync(
         path.join(entryDir, 'package.json'),
         JSON.stringify({

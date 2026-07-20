@@ -41,10 +41,9 @@ launcher-mismatched pointer is ignored and the original npm package remains the
 fallback. The pointer also records the base package and launcher identity, so a
 later explicit global npm install supersedes the managed version.
 
-The launcher creates a process lease before starting a managed version.
-Activation keeps leased versions for running sessions and removes unleased
-superseded versions. The active pointer, lease creation, and cleanup share a
-short lock; package installation and validation remain asynchronous.
+Version directories are retained because an older live session may still load
+from them. Cleanup is intentionally deferred until disk usage shows that a
+lease-based collector is necessary.
 
 ## Scope
 

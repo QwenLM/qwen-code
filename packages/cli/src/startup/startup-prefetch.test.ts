@@ -247,6 +247,27 @@ describe('startupPrefetch', () => {
     expect(mockRequestUpdateOnExit).not.toHaveBeenCalled();
   });
 
+  it('keeps manual guidance for npm installs without an update command', async () => {
+    mockGetInstallationInfo.mockReturnValue({
+      packageManager: 'npm',
+      isGlobal: true,
+      updateMessage: 'Update requires sudo.',
+    });
+    mockCheckForUpdatesDetailed.mockResolvedValue({
+      status: 'update',
+      info: {
+        message: 'Update available',
+        update: { latest: '2.0.0' },
+      },
+    });
+
+    startPostRenderPrefetches(makeConfig(), makeSettings());
+    await vi.dynamicImportSettled();
+
+    expect(mockHandleAutoUpdate).toHaveBeenCalledOnce();
+    expect(mockRequestUpdateOnExit).not.toHaveBeenCalled();
+  });
+
   it('prompts non-npm installs when no parent supervisor is available', async () => {
     mockRequestUpdateOnExit.mockReturnValue(false);
     mockGetInstallationInfo.mockReturnValue({

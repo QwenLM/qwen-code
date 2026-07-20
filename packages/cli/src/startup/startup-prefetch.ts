@@ -196,7 +196,10 @@ export function startPostRenderPrefetches(
             return;
           }
           const installationInfo = getInstallationInfo(projectRoot, true);
-          if (installationInfo.packageManager === 'npm') {
+          if (
+            installationInfo.packageManager === 'npm' &&
+            installationInfo.updateCommand
+          ) {
             void handleAutoUpdate(result.info, settings, projectRoot);
             return;
           }

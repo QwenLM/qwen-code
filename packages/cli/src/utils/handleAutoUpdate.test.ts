@@ -268,6 +268,7 @@ describe('handleAutoUpdate', () => {
       ],
       {
         stdio: ['pipe', 'ignore', 'pipe'],
+        cwd: '/tmp/2.0.0-nightly',
       },
     );
   });
@@ -295,6 +296,7 @@ describe('handleAutoUpdate', () => {
       ],
       {
         stdio: ['pipe', 'ignore', 'pipe'],
+        cwd: '/tmp/2.0.0',
       },
     );
   });

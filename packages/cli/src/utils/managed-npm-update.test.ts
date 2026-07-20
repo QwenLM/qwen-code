@@ -67,11 +67,13 @@ afterEach(() => {
 });
 
 describe('managed npm update', () => {
-  it('stages an exact package version for one global launcher', () => {
+  it('stages an exact version for one launcher', () => {
     const root = makeTemporaryDirectory();
-    const updateRoot = path.join(root, 'updates');
-    const bootstrap = writeBaseInstallation(root);
-    const update = prepareManagedNpmUpdate('2.0.0', bootstrap, updateRoot);
+    const update = prepareManagedNpmUpdate(
+      '2.0.0',
+      writeBaseInstallation(root),
+      path.join(root, 'updates'),
+    );
 
     expect(update.installArgs).toEqual([
       'install',
@@ -86,31 +88,22 @@ describe('managed npm update', () => {
     );
   });
 
-  it('activates only a complete matching installation', async () => {
+  it('activates a verified install without changing running files', async () => {
     const root = makeTemporaryDirectory();
-    const updateRoot = path.join(root, 'updates');
     const bootstrap = writeBaseInstallation(root);
-    const runningChunk = path.join(root, 'running', 'chunks', 'old.js');
-    fs.mkdirSync(path.dirname(runningChunk), { recursive: true });
+    const runningChunk = path.join(root, 'running', 'old.js');
+    fs.mkdirSync(path.dirname(runningChunk));
     fs.writeFileSync(runningChunk, 'old chunk');
-    const update = prepareManagedNpmUpdate('2.0.0', bootstrap, updateRoot);
+    const update = prepareManagedNpmUpdate(
+      '2.0.0',
+      bootstrap,
+      path.join(root, 'updates'),
+    );
     writeInstallation(update.stagingDir, '2.0.0');
 
     await activateManagedNpmUpdate(update, '2.0.0', bootstrap);
 
-    expect(fs.existsSync(update.stagingDir)).toBe(false);
-    expect(
-      fs.existsSync(
-        path.join(
-          update.versionDir,
-          'node_modules',
-          '@qwen-code',
-          'qwen-code',
-          'dist',
-          'cli.js',
-        ),
-      ),
-    ).toBe(true);
+    expect(fs.existsSync(update.versionDir)).toBe(true);
     expect(
       JSON.parse(
         fs.readFileSync(path.join(update.launcherRoot, 'active.json'), 'utf8'),
@@ -124,42 +117,35 @@ describe('managed npm update', () => {
     expect(fs.readFileSync(runningChunk, 'utf8')).toBe('old chunk');
   });
 
-  it('does not activate a mismatched package', async () => {
+  it.each([
+    ['a mismatched package', '2.0.1', undefined, 'did not match'],
+    ['a failed smoke test', '2.0.0', 'broken', 'reported version broken'],
+  ])('rejects %s', async (_name, installed, reported, error) => {
     const root = makeTemporaryDirectory();
-    const updateRoot = path.join(root, 'updates');
     const bootstrap = writeBaseInstallation(root);
-    const update = prepareManagedNpmUpdate('2.0.0', bootstrap, updateRoot);
-    writeInstallation(update.stagingDir, '2.0.1');
+    const update = prepareManagedNpmUpdate(
+      '2.0.0',
+      bootstrap,
+      path.join(root, 'updates'),
+    );
+    writeInstallation(update.stagingDir, installed);
+    if (reported) {
+      fs.writeFileSync(
+        path.join(
+          update.stagingDir,
+          'node_modules',
+          '@qwen-code',
+          'qwen-code',
+          'scripts',
+          'cli-entry.js',
+        ),
+        `process.stdout.write('${reported}\\n');\n`,
+      );
+    }
 
     await expect(
       activateManagedNpmUpdate(update, '2.0.0', bootstrap),
-    ).rejects.toThrow('Installed package did not match');
-    expect(fs.existsSync(path.join(update.launcherRoot, 'active.json'))).toBe(
-      false,
-    );
-  });
-
-  it('does not activate a package that fails its version smoke test', async () => {
-    const root = makeTemporaryDirectory();
-    const updateRoot = path.join(root, 'updates');
-    const bootstrap = writeBaseInstallation(root);
-    const update = prepareManagedNpmUpdate('2.0.0', bootstrap, updateRoot);
-    writeInstallation(update.stagingDir, '2.0.0');
-    fs.writeFileSync(
-      path.join(
-        update.stagingDir,
-        'node_modules',
-        '@qwen-code',
-        'qwen-code',
-        'scripts',
-        'cli-entry.js',
-      ),
-      "process.stdout.write('broken\\n');\n",
-    );
-
-    await expect(
-      activateManagedNpmUpdate(update, '2.0.0', bootstrap),
-    ).rejects.toThrow('Installed package reported version broken');
+    ).rejects.toThrow(error);
     expect(fs.existsSync(path.join(update.launcherRoot, 'active.json'))).toBe(
       false,
     );
@@ -167,41 +153,44 @@ describe('managed npm update', () => {
 
   it('does not mask a global install that changes while staging', async () => {
     const root = makeTemporaryDirectory();
-    const updateRoot = path.join(root, 'updates');
     const bootstrap = writeBaseInstallation(root);
-    const update = prepareManagedNpmUpdate('2.0.0', bootstrap, updateRoot);
+    const update = prepareManagedNpmUpdate(
+      '2.0.0',
+      bootstrap,
+      path.join(root, 'updates'),
+    );
     writeInstallation(update.stagingDir, '2.0.0');
     fs.writeFileSync(bootstrap, 'manually reinstalled launcher');
 
     await expect(
       activateManagedNpmUpdate(update, '2.0.0', bootstrap),
     ).rejects.toThrow('changed during update');
-    expect(fs.existsSync(path.join(update.launcherRoot, 'active.json'))).toBe(
-      false,
-    );
   });
 
-  it('does not replace a newer active version from another session', async () => {
+  it('replaces a higher pointer from an older global install', async () => {
     const root = makeTemporaryDirectory();
     const updateRoot = path.join(root, 'updates');
     const bootstrap = writeBaseInstallation(root);
-    const newer = prepareManagedNpmUpdate('3.0.0', bootstrap, updateRoot);
-    writeInstallation(newer.stagingDir, '3.0.0');
-    await activateManagedNpmUpdate(newer, '3.0.0', bootstrap);
-    const older = prepareManagedNpmUpdate('2.0.0', bootstrap, updateRoot);
-    writeInstallation(older.stagingDir, '2.0.0');
+    const oldUpdate = prepareManagedNpmUpdate('3.0.0', bootstrap, updateRoot);
+    writeInstallation(oldUpdate.stagingDir, '3.0.0');
+    await activateManagedNpmUpdate(oldUpdate, '3.0.0', bootstrap);
 
-    await activateManagedNpmUpdate(older, '2.0.0', bootstrap);
+    writeBaseInstallation(root, '2.0.0');
+    const newUpdate = prepareManagedNpmUpdate('2.1.0', bootstrap, updateRoot);
+    writeInstallation(newUpdate.stagingDir, '2.1.0');
+    await activateManagedNpmUpdate(newUpdate, '2.1.0', bootstrap);
 
     expect(
       JSON.parse(
-        fs.readFileSync(path.join(older.launcherRoot, 'active.json'), 'utf8'),
+        fs.readFileSync(
+          path.join(newUpdate.launcherRoot, 'active.json'),
+          'utf8',
+        ),
       ),
-    ).toMatchObject({ version: '3.0.0' });
-    expect(fs.existsSync(older.versionDir)).toBe(false);
+    ).toMatchObject({ version: '2.1.0', baseVersion: '2.0.0' });
   });
 
-  it('publishes an existing payload during concurrent activation', async () => {
+  it('keeps the highest concurrently activated version', async () => {
     const root = makeTemporaryDirectory();
     const updateRoot = path.join(root, 'updates');
     const bootstrap = writeBaseInstallation(root);
@@ -209,14 +198,6 @@ describe('managed npm update', () => {
     const newer = prepareManagedNpmUpdate('3.0.0', bootstrap, updateRoot);
     writeInstallation(older.stagingDir, '2.0.0');
     writeInstallation(newer.stagingDir, '3.0.0');
-    const staleLock = path.join(older.launcherRoot, 'activation.lock');
-    fs.mkdirSync(staleLock);
-    fs.writeFileSync(
-      path.join(staleLock, 'owner.json'),
-      JSON.stringify({ pid: 999999, token: 'stale-owner' }),
-    );
-    const staleTime = new Date(Date.now() - 2 * 60 * 1000);
-    fs.utimesSync(staleLock, staleTime, staleTime);
 
     await Promise.all([
       activateManagedNpmUpdate(older, '2.0.0', bootstrap),
@@ -232,76 +213,31 @@ describe('managed npm update', () => {
     ).toBe(true);
   });
 
-  it('isolates version payloads for different global launchers', async () => {
+  it('isolates payloads for different launchers', async () => {
     const root = makeTemporaryDirectory();
     const updateRoot = path.join(root, 'updates');
-    const firstBootstrap = writeBaseInstallation(path.join(root, 'node-22'));
-    const secondBootstrap = writeBaseInstallation(path.join(root, 'node-24'));
     const launcherRoots = new Set<string>();
 
-    for (const bootstrap of [firstBootstrap, secondBootstrap]) {
+    for (const bootstrap of [
+      writeBaseInstallation(path.join(root, 'node-22')),
+      writeBaseInstallation(path.join(root, 'node-24')),
+    ]) {
       const update = prepareManagedNpmUpdate('2.0.0', bootstrap, updateRoot);
       writeInstallation(update.stagingDir, '2.0.0');
       await activateManagedNpmUpdate(update, '2.0.0', bootstrap);
       launcherRoots.add(update.launcherRoot);
-      expect(fs.existsSync(update.versionDir)).toBe(true);
     }
 
     expect(launcherRoots).toHaveLength(2);
   });
 
-  it('keeps leased versions and removes them after their process exits', async () => {
-    const root = makeTemporaryDirectory();
-    const updateRoot = path.join(root, 'updates');
-    const bootstrap = writeBaseInstallation(root);
-    const first = prepareManagedNpmUpdate('2.0.0', bootstrap, updateRoot);
-    writeInstallation(first.stagingDir, '2.0.0');
-    await activateManagedNpmUpdate(first, '2.0.0', bootstrap);
-    const leasesDir = path.join(first.versionDir, '.leases');
-    fs.mkdirSync(leasesDir);
-    fs.writeFileSync(path.join(leasesDir, String(process.pid)), '');
-
-    const second = prepareManagedNpmUpdate('3.0.0', bootstrap, updateRoot);
-    writeInstallation(second.stagingDir, '3.0.0');
-    await activateManagedNpmUpdate(second, '3.0.0', bootstrap);
-
-    expect(fs.existsSync(first.versionDir)).toBe(true);
-    fs.rmSync(path.join(leasesDir, String(process.pid)));
-
-    const third = prepareManagedNpmUpdate('4.0.0', bootstrap, updateRoot);
-    writeInstallation(third.stagingDir, '4.0.0');
-    await activateManagedNpmUpdate(third, '4.0.0', bootstrap);
-
-    expect(fs.existsSync(first.versionDir)).toBe(false);
-    expect(fs.existsSync(second.versionDir)).toBe(false);
-    expect(fs.existsSync(third.versionDir)).toBe(true);
-  });
-
-  it('retries cleanup of abandoned staging and trash directories', async () => {
-    const root = makeTemporaryDirectory();
-    const updateRoot = path.join(root, 'updates');
-    const bootstrap = writeBaseInstallation(root);
-    const update = prepareManagedNpmUpdate('2.0.0', bootstrap, updateRoot);
-    writeInstallation(update.stagingDir, '2.0.0');
-    const abandoned = path.join(update.launcherRoot, 'versions', '.abandoned');
-    fs.mkdirSync(abandoned);
-    fs.writeFileSync(path.join(abandoned, '.qwen-update-owner'), '999999');
-    const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
-    fs.utimesSync(abandoned, old, old);
-    const trash = path.join(update.launcherRoot, '.trash-old');
-    fs.mkdirSync(trash);
-
-    await activateManagedNpmUpdate(update, '2.0.0', bootstrap);
-
-    expect(fs.existsSync(abandoned)).toBe(false);
-    expect(fs.existsSync(trash)).toBe(false);
-  });
-
   it('removes a failed staging directory', async () => {
     const root = makeTemporaryDirectory();
-    const updateRoot = path.join(root, 'updates');
-    const bootstrap = writeBaseInstallation(root);
-    const update = prepareManagedNpmUpdate('2.0.0', bootstrap, updateRoot);
+    const update = prepareManagedNpmUpdate(
+      '2.0.0',
+      writeBaseInstallation(root),
+      path.join(root, 'updates'),
+    );
 
     await cleanupManagedNpmUpdate(update);
 

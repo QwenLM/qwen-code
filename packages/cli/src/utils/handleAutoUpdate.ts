@@ -137,6 +137,7 @@ export function handleAutoUpdate(
         : ['-c', updateCommand];
   const updateProcess = spawnFn(command, commandArgs, {
     stdio: ['pipe', 'ignore', 'pipe'],
+    ...(managedNpmUpdate ? { cwd: managedNpmUpdate.stagingDir } : {}),
   });
   let finishUpdate!: (success: boolean) => void;
   let settled = false;
