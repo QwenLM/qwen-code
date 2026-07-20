@@ -7,7 +7,10 @@
 import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { createDebugLogger } from './debugLogger.js';
 import { persistAndTruncateToolResult } from './truncation.js';
+
+const debugLogger = createDebugLogger('TOOL_RESPONSE_FINALIZER');
 
 export interface ToolResponseBudgetEntry {
   callId: string;
@@ -299,5 +302,13 @@ export async function finalizeToolResponses(
     }
   }
 
-  return replaceTextSlots(withPersistence, slots, allocations);
+  const finalized = replaceTextSlots(withPersistence, slots, allocations);
+  const finalizedTotal = collectTextSlots(finalized).reduce(
+    (sum, slot) => sum + slot.text.length,
+    0,
+  );
+  debugLogger.info(
+    `Tool response budget (${budget} chars): reduced ${entriesToPersist.size} result(s) from ${total} to ${finalizedTotal} chars.`,
+  );
+  return finalized;
 }

@@ -16,6 +16,17 @@ import {
 } from './tool-response-finalizer.js';
 import { persistAndTruncateToolResult } from './truncation.js';
 
+const debugLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
+vi.mock('./debugLogger.js', () => ({
+  createDebugLogger: () => debugLogger,
+}));
+
 vi.mock('./truncation.js', () => ({
   persistAndTruncateToolResult: vi.fn(),
 }));
@@ -68,6 +79,7 @@ describe('tool response finalization', () => {
       entries,
     );
     expect(persist).not.toHaveBeenCalled();
+    expect(debugLogger.info).not.toHaveBeenCalled();
   });
 
   it('preserves the plan-mode lifecycle reminder outside the output budget', async () => {
@@ -178,6 +190,9 @@ describe('tool response finalization', () => {
     expect(JSON.stringify(result)).toContain('/tmp/two.output');
     expect(JSON.stringify(result)).not.toContain('Full output:');
     expect(JSON.stringify(result)).toContain('Persisted tool-output artifact:');
+    expect(debugLogger.info).toHaveBeenCalledWith(
+      'Tool response budget (10000 chars): reduced 2 result(s) from 14096 to 10000 chars.',
+    );
   });
 
   it('keeps every producer artifact path visible when the budget permits', async () => {
