@@ -8230,6 +8230,55 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(frames[0]).toMatchObject({ error: { code: -32602 } });
     });
 
+    it.each([
+      {
+        method: '_qwen/file/write',
+        params: { path: 'test.txt', content: 'new content' },
+      },
+      {
+        method: '_qwen/file/edit',
+        params: { path: 'test.txt', oldText: 'old', newText: 'new' },
+      },
+    ])(
+      '$method rejects success when its runtime generation closes in flight',
+      async ({ method, params }) => {
+        const generationGuard = createWorkspaceGenerationGuard();
+        const closeGeneration = async () => {
+          generationGuard.close();
+          return { writtenBytes: 3 };
+        };
+        await restartServer({
+          generationGuard,
+          fsFactory: makeFileFsFactory({
+            writeTextOverwrite: closeGeneration,
+            edit: closeGeneration,
+          }),
+        });
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 95,
+          method,
+          params,
+        });
+
+        const frames = await takeFrames(await streamRes, 1);
+        expect(frames[0]).toMatchObject({
+          id: 95,
+          error: {
+            data: {
+              errorKind: 'workspace_runtime_unavailable',
+              httpStatus: 503,
+              retryable: true,
+            },
+          },
+        });
+      },
+    );
+
     it('_qwen/file/glob rejects missing pattern', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);
