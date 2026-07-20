@@ -336,6 +336,69 @@ describe('registerBackgroundResponseRelay', () => {
       );
     });
   });
+
+  it('logs when no route exists for the background response', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const bridge = new EventEmitter();
+    const router = { getTarget: vi.fn() };
+
+    try {
+      registerBackgroundResponseRelay(
+        bridge as never,
+        router as never,
+        new Map(),
+      );
+      bridge.emit(
+        'backgroundResponse',
+        'session-1',
+        'Background final answer.',
+      );
+
+      await vi.waitFor(() => {
+        expect(stderr.mock.calls.join('')).toContain(
+          'No route for background response from session session-1',
+        );
+      });
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('logs when the channel is not found for the background response', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const bridge = new EventEmitter();
+    const router = {
+      getTarget: vi.fn(() => ({
+        channelName: 'telegram',
+        chatId: 'chat1',
+      })),
+    };
+
+    try {
+      registerBackgroundResponseRelay(
+        bridge as never,
+        router as never,
+        new Map(),
+      );
+      bridge.emit(
+        'backgroundResponse',
+        'session-1',
+        'Background final answer.',
+      );
+
+      await vi.waitFor(() => {
+        expect(stderr.mock.calls.join('')).toContain(
+          'No channel "telegram" for background response from session session-1',
+        );
+      });
+    } finally {
+      stderr.mockRestore();
+    }
+  });
 });
 
 describe('registerSessionCleanup', () => {
