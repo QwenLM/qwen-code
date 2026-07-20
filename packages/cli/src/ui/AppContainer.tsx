@@ -118,6 +118,7 @@ const STARTUP_PROFILE_FINALIZE_CAP_MS = 35_000;
 import { useHistory } from './hooks/useHistoryManager.js';
 import { useMemoryMonitor } from './hooks/useMemoryMonitor.js';
 import { useResizeSettleRepaint } from './hooks/useResizeSettleRepaint.js';
+import { useWakeRepaint } from './hooks/use-wake-repaint.js';
 import { useThemeCommand } from './hooks/useThemeCommand.js';
 import { useFeedbackDialog } from './hooks/useFeedbackDialog.js';
 import { useAuthCommand } from './auth/useAuth.js';
@@ -3095,6 +3096,12 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Repaint static history on the trailing edge of a resize burst (#4891).
   useResizeSettleRepaint(terminalWidth, refreshStatic);
+
+  // Repaint after the process resumes from OS sleep / suspend (lid close,
+  // display sleep, Ctrl+Z → fg).  The terminal's screen buffer is stale but
+  // Ink's frame-diff state still reflects the pre-sleep output, so the next
+  // render strands border characters on screen.
+  useWakeRepaint(refreshStatic);
 
   useEffect(() => {
     if (ideNeedsRestart) {

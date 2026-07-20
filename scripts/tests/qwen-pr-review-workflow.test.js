@@ -79,6 +79,15 @@ function runScenario(scenario, { timeoutMinutes = 180 } = {}) {
         '  transient_persist) r success false "[API Error: 503 upstream overloaded]" ;;',
         '  quota) r success false "[API Error: 429 Your token-plan quota has been exhausted. The quota will reset at 07-19 13:17:00 UTC.]" ;;',
         '  quota_noreset) r success false "[API Error: 429 Your quota has been exhausted.]" ;;',
+        '  abort_no_status) r success false "[API Error: Connection error.]" ;;',
+        '  abort_status_suffix) r success false "[API Error: Rate limit exceeded (Status: RESOURCE_EXHAUSTED)]" ;;',
+        '  abort_long_body) EPAD=$(printf "A%.0s" $(seq 1 750)); r success false "[API Error: upstream returned an unparseable error body: ${EPAD}]" ;;',
+        '  abort_appended) r success false "Partial review text streamed before the connection dropped.[API Error: Connection error.]" ;;',
+        '  abort_appended_long) EPAD=$(printf "A%.0s" $(seq 1 750)); r success false "Partial review text streamed before the error.[API Error: upstream returned an unparseable error body: ${EPAD}]" ;;',
+        '  abort_with_suffix) r success false "[API Error: Rate limit exceeded]\\nPossible quota limitations in place or slow response times detected. Please wait and try again later." ;;',
+        '  success_mentions_api_error) PAD=$(printf "x%.0s" $(seq 1 600)); r success false "This PR detects the [API Error: ...] pattern and routes to retry. quota and rate.?limit keywords cover the common messages. ${PAD} Review complete: COMMENT posted (0 Critical, 1 Suggestion inline)." ;;',
+        '  success_quotes_status_code) PAD=$(printf "x%.0s" $(seq 1 700)); r success false "This PR adds retry for [API Error: 429 quota exceeded] and similar. ${PAD} Verdict: COMMENT, 0 Critical." ;;',
+        '  success_ends_with_bracket) r success false "Review of [API Error: 429 quota exhausted] handling. Checklist: - [x]" ;;',
         '  errresult) r error true "connection dropped mid-review" ;;',
         '  hardexit) exit 3 ;;',
         'esac',
@@ -158,6 +167,69 @@ describe('qwen pr review transient retry', () => {
     expect(r.attempts).toBe(1);
   });
 
+  it('retries an abort with no status code in the message', () => {
+    const r = runScenario('abort_no_status');
+    expect(r.line).toContain('FAIL');
+    expect(r.line).not.toContain('kind=[quota]');
+    expect(r.attempts).toBe(2);
+  });
+
+  it('retries an abort with status at the end (Status: …) shape', () => {
+    const r = runScenario('abort_status_suffix');
+    expect(r.line).toContain('FAIL');
+    expect(r.line).not.toContain('kind=[quota]');
+    expect(r.attempts).toBe(2);
+  });
+
+  it('detects an abort whose error body exceeds the 600-byte tail window', () => {
+    const r = runScenario('abort_long_body');
+    expect(r.line).toContain('FAIL');
+    expect(r.line).not.toContain('kind=[quota]');
+    expect(r.attempts).toBe(2);
+  });
+
+  it('detects the production abort shape: error appended to partial review', () => {
+    // BaseJsonOutputAdapter appendText puts the error last, after any
+    // partial review text the model already streamed.
+    const r = runScenario('abort_appended');
+    expect(r.line).toContain('FAIL');
+    expect(r.line).not.toContain('kind=[quota]');
+    expect(r.attempts).toBe(2);
+  });
+
+  it('detects a long error appended to partial review (exceeds any fixed window)', () => {
+    const r = runScenario('abort_appended_long');
+    expect(r.line).toContain('FAIL');
+    expect(r.line).not.toContain('kind=[quota]');
+    expect(r.attempts).toBe(2);
+  });
+
+  it('detects an abort with a rate-limit guidance suffix after the ]', () => {
+    // "Rate limit exceeded" + "quota limitations" in the suffix → quota
+    // bucket → no retry (1 attempt).
+    const r = runScenario('abort_with_suffix');
+    expect(r.line).toContain('FAIL kind=[quota]');
+    expect(r.attempts).toBe(1);
+  });
+
+  it('does NOT misclassify a successful review that mentions [API Error: ...] in its summary', () => {
+    // A review of PR #7247 (API error retry) quoted "[API Error: ...]" and
+    // "quota … limit" in its result text. The old pattern *"[API Error"*
+    // matched the prose and the quota grep hit "quota … limit", falsely
+    // reporting quota exhaustion on a successful review.
+    const r = runScenario('success_mentions_api_error');
+    expect(r.line).toContain('OK outcome=success');
+    expect(r.attempts).toBe(1);
+  });
+
+  it('does NOT misclassify prose quoting a real status code mid-body', () => {
+    // A long review (>600 bytes) that quotes "[API Error: 429 quota
+    // exceeded]" early in the body must not trip the tail-anchored detector.
+    const r = runScenario('success_quotes_status_code');
+    expect(r.line).toContain('OK outcome=success');
+    expect(r.attempts).toBe(1);
+  });
+
   it('retries an aborted (error-result) run', () => {
     const r = runScenario('errresult');
     expect(r.line).toContain('FAIL');
@@ -198,5 +270,30 @@ describe('qwen pr review transient retry', () => {
     ).run;
     expect(fallback).toContain('"$FAILURE_KIND" = "quota"');
     expect(fallback).toContain('model quota exhausted');
+  });
+
+  it('keeps the workflow rate-limit suffix list in sync with errorParsing.ts', () => {
+    const src = readFileSync(
+      'packages/core/src/utils/errorParsing.ts',
+      'utf8',
+    );
+    const blk = src.slice(
+      src.indexOf('RATE_LIMIT_MESSAGE_BY_AUTH = {'),
+      src.indexOf('} as const;'),
+    );
+    const suffixes = [...blk.matchAll(/'\\n([^']+)'/g)].map((m) => m[1]);
+    expect(suffixes).toHaveLength(3);
+    for (const s of suffixes) expect(workflow).toContain(s);
+  });
+
+  // Known limitation: a successful review that quotes "[API Error: …]" and
+  // ends with "]" (e.g. a "- [x]" checklist or a "[1]" ref link) trips the
+  // ends-with gate. The current review template ends with </details> + a
+  // <sub> footer, which accidentally protects us. Accepted trade-off; the
+  // durable fix is checking that the bot comment actually landed (§5).
+  it('KNOWN: prose ending with ] after quoting the pattern is a false positive', () => {
+    const r = runScenario('success_ends_with_bracket');
+    expect(r.line).toContain('FAIL kind=[quota]');
+    expect(r.attempts).toBe(1);
   });
 });

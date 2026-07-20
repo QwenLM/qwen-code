@@ -153,6 +153,10 @@ import {
   COPY_MESSAGES,
 } from './utils/copyCommand';
 import { isEditableTarget } from './utils/dom';
+import {
+  invokeSlashCommandHandler,
+  SLASH_COMMAND_PATTERN,
+} from './utils/slash-command-action';
 import { getModelDisplayName } from './utils/modelDisplay';
 import { isVisibleComposerModel } from './utils/composerModels';
 import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
@@ -455,6 +459,19 @@ export type WebShellComposerPlaceholders = Readonly<
   Partial<Record<WebShellComposerPlaceholderState, string>>
 >;
 
+export interface WebShellSlashCommand {
+  /** Slash command name without the leading slash, normalized to lower case. */
+  command: string;
+  /** Trimmed text following the command name. */
+  args: string;
+  /** Original text submitted from the composer. */
+  input: string;
+}
+
+export type WebShellSlashCommandHandler = (
+  command: WebShellSlashCommand,
+) => boolean | void;
+
 export interface WebShellProps {
   /** Called whenever the attached daemon session or workspace changes. */
   onSessionIdChange?: (
@@ -520,6 +537,11 @@ export interface WebShellProps {
   hiddenSlashCommands?: string[];
   /** Slash command category order. Defaults to custom, skill, system. */
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
+  /**
+   * Called before Web Shell handles a slash command. Return true to skip the
+   * built-in or daemon behavior after handling the command in the host.
+   */
+  onSlashCommand?: WebShellSlashCommandHandler;
   /** Built-in @ mention providers to enable. Defaults to all built-ins. */
   builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
   /** Additional @ mention categories shown alongside built-in files/extensions. */
@@ -1005,6 +1027,7 @@ export function App({
   onBugReport,
   hiddenSlashCommands,
   slashCommandCategoryOrder,
+  onSlashCommand,
   builtinAtProviders,
   atProviders,
   composerTagIcons,
@@ -2839,6 +2862,8 @@ export function App({
   }, [lockedWorkspaceCwd, sessionActions, workspaces]);
   const onSubmitBeforeRef = useRef(onSubmitBefore);
   onSubmitBeforeRef.current = onSubmitBefore;
+  const onSlashCommandRef = useRef(onSlashCommand);
+  onSlashCommandRef.current = onSlashCommand;
   const [sessionListReloadToken, setSessionListReloadToken] = useState(0);
   const delayedReloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
@@ -4502,6 +4527,11 @@ export function App({
       commitComposerAccepted?: ComposerSubmitCommit,
       metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
     ) => {
+      if (
+        invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError)
+      ) {
+        return true;
+      }
       if (connectionRef.current.loadingTranscript) {
         pushToast('warning', t('editor.sessionLoading'));
         return false;
@@ -4540,7 +4570,7 @@ export function App({
         return clearComposerOnPromptStart ? false : true;
       };
       if (text.startsWith('/')) {
-        const match = text.match(/^\/([\w-]+)/);
+        const match = text.match(SLASH_COMMAND_PATTERN);
         if (match) {
           const cmd = match[1];
           if (hiddenCommands.has(normalizeHiddenCommand(cmd))) {
@@ -6917,6 +6947,7 @@ export function App({
                         // is launched from), not the single-session chat.
                         onExit={handleSplitExit}
                         onError={reportError}
+                        onSlashCommand={onSlashCommand}
                         onRightPanelOpen={handleTurnOutputOpen}
                         onPaneArtifactsChange={handlePaneArtifactsChange}
                         messageTurnOutputs={messageTurnOutputs}
