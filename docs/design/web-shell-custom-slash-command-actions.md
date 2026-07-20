@@ -9,7 +9,8 @@ behavior or replace it with an application-specific action.
 ## Design
 
 Add an optional `onSlashCommand` prop. It runs before hidden-command,
-built-in-command, and daemon-forwarding behavior and receives:
+built-in-command, daemon-connection, and daemon-forwarding behavior in both the
+main composer and split-view composers. It receives:
 
 - `command`: the slash command name, normalized to lower case;
 - `args`: the trimmed text after the command name;
@@ -19,7 +20,12 @@ Returning `true` marks the command as handled and skips Web Shell's default
 behavior. Returning `false` or nothing lets the existing command pipeline
 continue unchanged. The callback is synchronous so composer acceptance keeps
 the existing synchronous submit contract; embedders may start asynchronous
-work inside the callback.
+work inside the callback. Callback errors are reported through Web Shell's
+existing error path before default handling continues.
+
+Only a leading slash followed by a word-or-hyphen command name and then
+whitespace or the end of the input is recognized. This keeps absolute paths
+such as `/usr/local/bin/tool` out of the host callback.
 
 ## Compatibility
 
@@ -33,3 +39,6 @@ embedder to implement a command without daemon support.
   still reaches the daemon when the callback does not handle it.
 - Verify returning `true` prevents the command from reaching the daemon.
 - Verify returning `true` prevents a built-in command's local behavior.
+- Verify main and split-view callbacks can handle commands while disconnected.
+- Verify callback errors are reported before default handling continues.
+- Verify absolute paths do not invoke the callback.

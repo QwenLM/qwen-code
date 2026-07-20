@@ -203,6 +203,10 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 />
 ```
 
+回调在主聊天和分屏聊天中都会触发，也可以在 daemon 断连时处理纯宿主操作。
+命令名后必须是空白或输入结束，因此 `/usr/local/bin/tool` 等绝对路径不会触发
+回调。如果回调抛出异常，Web Shell 会报告错误并继续执行默认命令流程。
+
 锁定工作区时，可以自定义 Sidebar 文件夹行的内容：
 
 ```tsx
