@@ -372,4 +372,44 @@ describe('workspace trust reconciler', () => {
     expect(buildRuntime).toHaveBeenCalledOnce();
     expect(registry.primary.trusted).toBe(false);
   });
+
+  it('does not repeat containment after the previous runtime was disposed', async () => {
+    const primary = makeRuntime('/primary', { primary: true });
+    const registry = createWorkspaceRegistry([primary]);
+    const nextPolicy = policy('two', {
+      '/primary': TrustLevel.DO_NOT_TRUST,
+    });
+    const buildRuntime = vi
+      .fn<WorkspaceTrustReconcilerOptions['buildRuntime']>()
+      .mockRejectedValueOnce(new Error('build failed'))
+      .mockImplementation(async ({ entry, trusted, generationGuard }) =>
+        makeRuntime(entry.workspaceCwd, {
+          workspaceId: entry.workspaceId,
+          primary: entry.primary,
+          trusted,
+          trustMaterialization: String(trusted),
+          generationGuard,
+        }),
+      );
+    const drainRuntime = vi.fn(async () => undefined);
+    const disposeRuntime = vi.fn(async () => undefined);
+    const reconciler = createWorkspaceTrustReconciler({
+      registry,
+      readLatestSnapshot: async () => nextPolicy,
+      buildRuntime,
+      drainRuntime,
+      disposeRuntime,
+    });
+
+    await reconciler.reconcile(nextPolicy);
+    expect(registry.primaryEntry.state).toBe('blocked');
+    expect(registry.primaryEntry.current).toBeUndefined();
+
+    await reconciler.reconcile(nextPolicy);
+
+    expect(drainRuntime).toHaveBeenCalledOnce();
+    expect(disposeRuntime).toHaveBeenCalledOnce();
+    expect(buildRuntime).toHaveBeenCalledTimes(2);
+    expect(registry.primary.trusted).toBe(false);
+  });
 });
