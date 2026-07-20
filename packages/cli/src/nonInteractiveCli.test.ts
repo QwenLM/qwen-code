@@ -1253,7 +1253,7 @@ describe('runNonInteractive', () => {
               'p-plan-boundary',
             ),
             ...toolCallEvents(
-              ['read-after-entry'],
+              ['read-after-entry-1', 'read-after-entry-2'],
               ToolNames.READ_FILE,
               'p-plan-boundary',
             ),
@@ -1278,7 +1278,8 @@ describe('runNonInteractive', () => {
       expect(nextTurnParts.map((part) => part.functionResponse?.id)).toEqual([
         'write-before-entry',
         'enter-plan',
-        'read-after-entry',
+        'read-after-entry-1',
+        'read-after-entry-2',
       ]);
       expect(nextTurnParts[0].functionResponse?.response).toEqual({
         error: PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
@@ -1287,6 +1288,9 @@ describe('runNonInteractive', () => {
         output: 'entered plan mode',
       });
       expect(nextTurnParts[2].functionResponse?.response).toEqual({
+        error: PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+      });
+      expect(nextTurnParts[3].functionResponse?.response).toEqual({
         error: PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
       });
     });
