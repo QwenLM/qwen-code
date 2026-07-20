@@ -2500,6 +2500,7 @@ describe('runQwenServe runtime startup failures', () => {
       .spyOn(acpBridge, 'createAcpSessionBridge')
       .mockImplementation(() => makeRuntimeBridge());
     let restoredCwds: string[] = [];
+    let restoredDisplayNames: Array<string | undefined> = [];
     let restoredRemovable: Array<boolean | undefined> = [];
     let restoredRegistrationIds: Array<readonly string[] | undefined> = [];
     let advertisedMaxTotalSessions: number | undefined;
@@ -2509,6 +2510,10 @@ describe('runQwenServe runtime startup failures', () => {
           deps?.workspaceRegistry
             ?.list()
             .map((runtime) => runtime.workspaceCwd) ?? [];
+        restoredDisplayNames =
+          deps?.workspaceRegistry
+            ?.list()
+            .map((runtime) => runtime.displayName) ?? [];
         restoredRemovable =
           deps?.workspaceRegistry?.list().map((runtime) => runtime.removable) ??
           [];
@@ -2531,6 +2536,14 @@ describe('runQwenServe runtime startup failures', () => {
           restoredSecondaryAlias,
           canonicalRestoredSecondary,
         ],
+        displayNames: {
+          [workspaceRegistrationId(canonicalExplicitSecondary)]:
+            'Explicit workspace',
+          [workspaceRegistrationId(restoredSecondaryAlias)]:
+            'Restored workspace',
+          [workspaceRegistrationId(canonicalRestoredSecondary)]:
+            'Later alias name',
+        },
       }),
     } as unknown as WorkspaceRegistrationStore;
 
@@ -2557,6 +2570,11 @@ describe('runQwenServe runtime startup failures', () => {
         canonicalPrimary,
         canonicalExplicitSecondary,
         canonicalRestoredSecondary,
+      ]);
+      expect(restoredDisplayNames).toEqual([
+        undefined,
+        'Explicit workspace',
+        'Restored workspace',
       ]);
       expect(restoredRemovable).toEqual([false, false, true]);
       expect(restoredRegistrationIds).toEqual([
