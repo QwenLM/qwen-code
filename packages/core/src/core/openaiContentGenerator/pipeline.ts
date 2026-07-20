@@ -847,13 +847,10 @@ export class ContentGenerationPipeline {
             this.contentGeneratorConfig,
           )
         ) {
-          // Skip disabling thinking for models whose preset explicitly
-          // requires it (e.g. qwen3.8-max-preview). These models reject
-          // enable_thinking=false with a 400 error (#7332). The preset
-          // signals this via extra_body.enable_thinking=true.
-          const presetThinking =
-            this.contentGeneratorConfig.extra_body?.['enable_thinking'];
-          if (presetThinking !== true) {
+          // Skip disabling thinking for thinking-only models (e.g.
+          // qwen3.8-max-preview) that reject enable_thinking=false with a
+          // 400 error (#7332). The preset signals this via thinkingMandatory.
+          if (!this.contentGeneratorConfig.thinkingMandatory) {
             typed['enable_thinking'] = false;
           }
         } else {

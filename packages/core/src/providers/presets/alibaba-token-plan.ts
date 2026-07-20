@@ -32,6 +32,7 @@ const TOKEN_PLAN_MODELS: ModelSpec[] = [
   {
     id: 'qwen3.8-max-preview',
     contextWindowSize: 1000000,
+    thinkingMandatory: true,
     enableThinking: true,
     modalities: { image: true, video: true },
   },

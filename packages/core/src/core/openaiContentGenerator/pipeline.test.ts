@@ -954,13 +954,13 @@ describe('ContentGenerationPipeline', () => {
 
     it('skips enable_thinking:false for thinking-only models (#7332)', async () => {
       // qwen3.8-max-preview rejects enable_thinking=false with a 400 error.
-      // When the model's preset sets extra_body.enable_thinking=true, the
-      // pipeline must NOT override it with false.
+      // The preset signals this via thinkingMandatory=true.
       mockContentGeneratorConfig = {
         ...mockContentGeneratorConfig,
         baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
         model: 'qwen3.8-max-preview',
         extra_body: { enable_thinking: true },
+        thinkingMandatory: true,
       } as ContentGeneratorConfig;
       mockConfig = {
         ...mockConfig,
@@ -989,8 +989,47 @@ describe('ContentGenerationPipeline', () => {
 
       const apiCall = (mockClient.chat.completions.create as Mock).mock
         .calls[0][0];
-      // Must NOT set enable_thinking to false for thinking-only models
       expect(apiCall.enable_thinking).not.toBe(false);
+    });
+
+    it('emits enable_thinking:false for hybrid models with extra_body.enable_thinking (#7332)', async () => {
+      // Hybrid models (e.g. qwen3.7-max) have extra_body.enable_thinking=true
+      // from their preset but do NOT have thinkingMandatory. The pipeline must
+      // still emit enable_thinking=false when reasoning is disabled.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.7-max',
+        extra_body: { enable_thinking: true },
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'qwen3.7-max',
+        contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Summarize' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBe(false);
     });
 
     it('emits enable_thinking:false on DashScope hostname when reasoning is configured to false', async () => {
