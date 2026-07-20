@@ -654,7 +654,11 @@ export class DaemonChannelBridge
         }
         const text = getTextContent(update['content']);
         if (meta?.['qwenDiscreteMessage'] === true) {
-          if (meta['source'] === 'background_notification_response' && text) {
+          if (
+            meta['source'] === 'background_notification_response' &&
+            meta['rewritten'] !== true &&
+            text
+          ) {
             this.emit('backgroundResponse', sessionId, text);
           }
           break;

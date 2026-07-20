@@ -323,6 +323,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         if (meta?.['qwenDiscreteMessage'] === true) {
           if (
             meta['source'] === 'background_notification_response' &&
+            meta['rewritten'] !== true &&
             content?.type === 'text' &&
             content.text
           ) {

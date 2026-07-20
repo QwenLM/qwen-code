@@ -399,6 +399,45 @@ describe('registerBackgroundResponseRelay', () => {
       stderr.mockRestore();
     }
   });
+
+  it('logs when dispatchBackgroundResponse rejects', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const bridge = new EventEmitter();
+    const router = {
+      getTarget: vi.fn(() => ({
+        channelName: 'telegram',
+        chatId: 'chat1',
+      })),
+    };
+    const channel = {
+      dispatchBackgroundResponse: vi
+        .fn()
+        .mockRejectedValue(new Error('network down')),
+    };
+
+    try {
+      registerBackgroundResponseRelay(
+        bridge as never,
+        router as never,
+        new Map([['telegram', channel as never]]),
+      );
+      bridge.emit(
+        'backgroundResponse',
+        'session-1',
+        'Background final answer.',
+      );
+
+      await vi.waitFor(() => {
+        expect(stderr.mock.calls.join('')).toContain(
+          'Background response relay failed for session session-1',
+        );
+      });
+    } finally {
+      stderr.mockRestore();
+    }
+  });
 });
 
 describe('registerSessionCleanup', () => {
