@@ -6766,6 +6766,34 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   });
 
   describe('workspace methods', () => {
+    it('maps a closed runtime generation to a retryable RPC error', async () => {
+      const generationGuard = createWorkspaceGenerationGuard();
+      await restartServer({ generationGuard });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      generationGuard.close();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 592,
+        method: '_qwen/workspace/mcp',
+        params: {},
+      });
+
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        id: 592,
+        error: {
+          code: -32603,
+          data: {
+            errorKind: 'workspace_runtime_unavailable',
+            httpStatus: 503,
+            retryable: true,
+          },
+        },
+      });
+    });
+
     it('rejects trusted-only methods after primary trust is revoked', async () => {
       await restartServer({ primaryTrusted: false });
       const connId = await initialize();

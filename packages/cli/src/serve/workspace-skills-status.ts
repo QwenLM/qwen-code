@@ -139,6 +139,7 @@ function readDisabledSkillNames(
   workspaceTrusted: boolean,
 ): ReadonlySet<string> {
   const raw = loadSettings(workspaceCwd, {
+    consumeCorruptionEnvVars: false,
     skipLoadEnvironment: !workspaceTrusted,
     skipWorkspaceSettings: !workspaceTrusted,
   }).merged.skills?.disabled;

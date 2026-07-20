@@ -307,7 +307,6 @@ export async function atomicWriteFile(
               throw unlinkErr;
             }
           }
-          options?.assertCanCommit?.();
           const fd = await openImpl(
             targetPath,
             fsSync.constants.O_WRONLY |
