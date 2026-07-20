@@ -847,7 +847,15 @@ export class ContentGenerationPipeline {
             this.contentGeneratorConfig,
           )
         ) {
-          typed['enable_thinking'] = false;
+          // Skip disabling thinking for models whose preset explicitly
+          // requires it (e.g. qwen3.8-max-preview). These models reject
+          // enable_thinking=false with a 400 error (#7332). The preset
+          // signals this via extra_body.enable_thinking=true.
+          const presetThinking =
+            this.contentGeneratorConfig.extra_body?.['enable_thinking'];
+          if (presetThinking !== true) {
+            typed['enable_thinking'] = false;
+          }
         } else {
           // Non-DashScope OpenAI-compatible servers (vLLM, SGLang, ...) render
           // the model's chat template server-side and read the thinking switch
