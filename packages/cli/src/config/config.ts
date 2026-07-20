@@ -1257,7 +1257,7 @@ function resolveWebSearchSettings(
       : webSearch?.webExtractor;
   const baseUrl = process.env['WEB_SEARCH_BASE_URL']?.trim() || undefined;
   const apiKeyEnv = baseUrl
-    ? process.env['WEB_SEARCH_API_KEY']
+    ? process.env['WEB_SEARCH_API_KEY']?.trim()
       ? 'WEB_SEARCH_API_KEY'
       : 'DASHSCOPE_API_KEY'
     : undefined;

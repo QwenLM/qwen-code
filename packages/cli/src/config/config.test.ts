@@ -1691,6 +1691,96 @@ describe('loadCliConfig', () => {
       expect(config.getProxy()).toBe('http://localhost:7890');
     });
   });
+
+  describe('web search settings resolution', () => {
+    const loadWithSettings = async (settings: Settings) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      return loadCliConfig(settings, argv);
+    };
+
+    it('returns undefined when neither settings nor env configure web search', async () => {
+      const config = await loadWithSettings({});
+      expect(config.getWebSearchSettings()).toBeUndefined();
+    });
+
+    it('passes tools.webSearch through from settings', async () => {
+      const config = await loadWithSettings({
+        tools: { webSearch: { enabled: true, model: 'qwen3.6-plus' } },
+      });
+      expect(config.getWebSearchSettings()).toEqual({
+        enabled: true,
+        model: 'qwen3.6-plus',
+      });
+    });
+
+    it('lets ENABLE_WEB_SEARCH override the settings flag', async () => {
+      vi.stubEnv('ENABLE_WEB_SEARCH', 'false');
+      const config = await loadWithSettings({
+        tools: { webSearch: { enabled: true, model: 'qwen3.6-plus' } },
+      });
+      expect(config.getWebSearchSettings()?.enabled).toBe(false);
+    });
+
+    it('treats a set-but-empty ENABLE_WEB_SEARCH as unset', async () => {
+      vi.stubEnv('ENABLE_WEB_SEARCH', '');
+      const config = await loadWithSettings({
+        tools: { webSearch: { enabled: true, model: 'qwen3.6-plus' } },
+      });
+      expect(config.getWebSearchSettings()?.enabled).toBe(true);
+    });
+
+    it('lets WEB_SEARCH_MODEL and WEB_SEARCH_EXTRACTOR override settings', async () => {
+      vi.stubEnv('WEB_SEARCH_MODEL', 'env-model');
+      vi.stubEnv('WEB_SEARCH_EXTRACTOR', 'false');
+      const config = await loadWithSettings({
+        tools: {
+          webSearch: { enabled: true, model: 'settings-model' },
+        },
+      });
+      expect(config.getWebSearchSettings()).toEqual({
+        enabled: true,
+        model: 'env-model',
+        webExtractor: false,
+      });
+    });
+
+    it('resolves WEB_SEARCH_BASE_URL with the DASHSCOPE_API_KEY fallback', async () => {
+      vi.stubEnv(
+        'WEB_SEARCH_BASE_URL',
+        'https://dashscope.aliyuncs.com/api/v2',
+      );
+      const config = await loadWithSettings({});
+      expect(config.getWebSearchSettings()).toEqual({
+        baseUrl: 'https://dashscope.aliyuncs.com/api/v2',
+        apiKeyEnv: 'DASHSCOPE_API_KEY',
+      });
+    });
+
+    it('selects WEB_SEARCH_API_KEY when it is non-empty', async () => {
+      vi.stubEnv(
+        'WEB_SEARCH_BASE_URL',
+        'https://dashscope.aliyuncs.com/api/v2',
+      );
+      vi.stubEnv('WEB_SEARCH_API_KEY', 'sk-live');
+      const config = await loadWithSettings({});
+      expect(config.getWebSearchSettings()?.apiKeyEnv).toBe(
+        'WEB_SEARCH_API_KEY',
+      );
+    });
+
+    it('treats a whitespace-only WEB_SEARCH_API_KEY as unset', async () => {
+      vi.stubEnv(
+        'WEB_SEARCH_BASE_URL',
+        'https://dashscope.aliyuncs.com/api/v2',
+      );
+      vi.stubEnv('WEB_SEARCH_API_KEY', '   ');
+      const config = await loadWithSettings({});
+      expect(config.getWebSearchSettings()?.apiKeyEnv).toBe(
+        'DASHSCOPE_API_KEY',
+      );
+    });
+  });
 });
 
 describe('loadCliConfig telemetry', () => {
