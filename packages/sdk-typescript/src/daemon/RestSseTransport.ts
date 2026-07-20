@@ -83,15 +83,23 @@ export class RestSseTransport implements DaemonTransport {
       headers['Last-Event-ID'] = String(opts.lastEventId);
     }
 
-    // Connect-phase timeout (request → headers received). The SSE
-    // body itself is long-lived and must NOT be timed out.
-    const connectCtrl = new AbortController();
+    // Request-lifetime controller. It drives the connect-phase timeout
+    // (request → headers received) AND owns teardown of the long-lived
+    // SSE body: aborting it in the `finally` around the `yield*` below
+    // releases the underlying fetch/TCP connection when the consumer
+    // exits the iterator for any reason (break, return, throw, or normal
+    // end), even when no caller signal was supplied. Without this,
+    // `reader.cancel()` alone does not reliably close the connection on
+    // some runtimes (e.g. Bun), leaking the daemon-side EventBus
+    // subscriber. The SSE body must NOT be timed out, so the connect
+    // timer only fires before headers arrive.
+    const requestCtrl = new AbortController();
     let connectTimer: ReturnType<typeof setTimeout> | undefined;
     const connectTimeoutMs = opts.connectTimeoutMs;
     if (connectTimeoutMs && Number.isFinite(connectTimeoutMs)) {
       connectTimer = setTimeout(
         () =>
-          connectCtrl.abort(
+          requestCtrl.abort(
             new DOMException('Initial connect timed out', 'TimeoutError'),
           ),
         connectTimeoutMs,
@@ -106,8 +114,8 @@ export class RestSseTransport implements DaemonTransport {
     }
 
     const fetchSignal = opts.signal
-      ? composeAbortSignals([opts.signal, connectCtrl.signal])
-      : connectCtrl.signal;
+      ? composeAbortSignals([opts.signal, requestCtrl.signal])
+      : requestCtrl.signal;
 
     // Build the SSE URL, optionally with `?maxQueued=N`.
     let url = `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/events`;
@@ -166,7 +174,16 @@ export class RestSseTransport implements DaemonTransport {
       throw new Error('No SSE body');
     }
 
-    yield* parseSseStream(res.body, opts.signal);
+    // Pass the composed signal (caller + request controller) to the
+    // parser, and abort the request controller when the iterator exits
+    // for any reason. This tears down the underlying fetch/TCP
+    // connection and releases the daemon EventBus subscriber regardless
+    // of whether the caller supplied `opts.signal`.
+    try {
+      yield* parseSseStream(res.body, fetchSignal);
+    } finally {
+      requestCtrl.abort();
+    }
   }
 
   dispose(): void {

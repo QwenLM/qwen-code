@@ -84,6 +84,7 @@ const {
       workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
       workspaceSkills: loadSkillsStatus,
     })),
+    sessionStatus: vi.fn(() => Promise.resolve({})),
   };
   return {
     mockConnection: connection,

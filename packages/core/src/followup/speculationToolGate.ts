@@ -16,7 +16,7 @@
  */
 
 import { ToolNames } from '../tools/tool-names.js';
-import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
+import { classifyShellCommandSafety } from '../utils/shellAstParser.js';
 import { ApprovalMode } from '../config/config.js';
 import { unescapePath, PATH_ARG_KEYS } from '../utils/paths.js';
 import type { OverlayFs } from './overlayFs.js';
@@ -94,7 +94,10 @@ export async function evaluateToolCall(
   // Shell — use AST parser for accurate read-only detection
   if (toolName === ToolNames.SHELL) {
     const command = typeof args['command'] === 'string' ? args['command'] : '';
-    if (command && (await isShellCommandReadOnlyAST(command))) {
+    if (
+      command &&
+      (await classifyShellCommandSafety(command)) === 'read-only'
+    ) {
       return { action: 'allow' };
     }
     return {
