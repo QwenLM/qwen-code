@@ -272,6 +272,7 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
   type AgentLike = {
     initialize: (args: Record<string, unknown>) => Promise<unknown>;
     loadSession: (args: Record<string, unknown>) => Promise<unknown>;
+    unstable_resumeSession: (args: Record<string, unknown>) => Promise<unknown>;
   };
 
   let capturedAgentFactory:
@@ -279,7 +280,11 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
     | undefined;
   let mockConfig: Config;
   let lastSessionMock:
-    | { pendingWorktreeNotice: string | null; getId: ReturnType<typeof vi.fn> }
+    | {
+        pendingWorktreeNotice: string | null;
+        pendingRecoveredAgentsNotice: string | null;
+        getId: ReturnType<typeof vi.fn>;
+      }
     | undefined;
   // Use `any` for these spies because vitest's MockInstance<T> doesn't
   // accept the heterogeneous Node.js prototype signatures (process.exit:
@@ -332,6 +337,8 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
       getSessionService: vi.fn().mockReturnValue(mockSessionService),
+      loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
+      consumePendingRecoveredAgentsNotice: vi.fn().mockReturnValue(null),
       getWorkspaceContext: vi.fn().mockReturnValue({
         getDirectories: vi.fn().mockReturnValue([]),
         addDirectory: vi.fn(),
@@ -426,6 +433,7 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
         pendingWorktreeNotice: null as string | null,
+        pendingRecoveredAgentsNotice: null as string | null,
       };
       lastSessionMock = mock;
       return mock as unknown as InstanceType<typeof Session>;
@@ -514,6 +522,53 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
     ).resolves.not.toThrow();
 
     expect(lastSessionMock?.pendingWorktreeNotice).toBeNull();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('restores background agents and transfers the one-shot notice on loadSession', async () => {
+    const notice =
+      '2 background agents were restored. Use list_agents to inspect them.';
+    const innerConfig = makeInnerConfig();
+    innerConfig.consumePendingRecoveredAgentsNotice.mockReturnValueOnce(notice);
+    const { agent, agentPromise } = await bootAgentWithLoadSession(innerConfig);
+
+    await agent.loadSession({
+      sessionId: SESSION_ID,
+      cwd: '/fake/project',
+      mcpServers: [],
+    });
+
+    expect(innerConfig.loadPausedBackgroundAgents).toHaveBeenCalledWith(
+      SESSION_ID,
+    );
+    expect(
+      innerConfig.consumePendingRecoveredAgentsNotice,
+    ).toHaveBeenCalledOnce();
+    expect(lastSessionMock?.pendingRecoveredAgentsNotice).toBe(notice);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('restores background agents for unstable_resumeSession too', async () => {
+    const notice =
+      '1 background agent was restored. Use list_agents to inspect it.';
+    const innerConfig = makeInnerConfig();
+    innerConfig.consumePendingRecoveredAgentsNotice.mockReturnValueOnce(notice);
+    const { agent, agentPromise } = await bootAgentWithLoadSession(innerConfig);
+
+    await agent.unstable_resumeSession({
+      sessionId: SESSION_ID,
+      cwd: '/fake/project',
+      mcpServers: [],
+    });
+
+    expect(innerConfig.loadPausedBackgroundAgents).toHaveBeenCalledWith(
+      SESSION_ID,
+    );
+    expect(lastSessionMock?.pendingRecoveredAgentsNotice).toBe(notice);
 
     mockConnectionState.resolve();
     await agentPromise;

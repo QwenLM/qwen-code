@@ -77,6 +77,8 @@ import { cleanupReviewWorktreeLeases } from './services/review-worktree-lease.js
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 
+const restoredBackgroundAgentSessions = new WeakMap<Config, Set<string>>();
+
 /**
  * Maximum wait, in milliseconds, for in-flight background tasks to emit
  * their terminal `task_notification` after `abortAll()` on the
@@ -649,6 +651,24 @@ export async function runNonInteractive(
       );
       adapter.emitMessage(systemMessage);
 
+      const resumedSessionData = config.getResumedSessionData();
+      if (resumedSessionData) {
+        const restoredSessions =
+          restoredBackgroundAgentSessions.get(config) ?? new Set<string>();
+        if (!restoredSessions.has(sessionId)) {
+          try {
+            await config.loadPausedBackgroundAgents(sessionId);
+            restoredSessions.add(sessionId);
+            restoredBackgroundAgentSessions.set(config, restoredSessions);
+          } catch (error) {
+            debugLogger.warn(
+              'background agent restore failed (non-fatal):',
+              error,
+            );
+          }
+        }
+      }
+
       let initialPartList: PartListUnion | null = extractPartsFromUserMessage(
         options.userMessage,
       );
@@ -831,10 +851,7 @@ export async function runNonInteractive(
         adapter.emitSystemMessage('worktree_started', {
           notice: startupNotice,
         });
-      } else if (
-        !options.continueInterrupted &&
-        config.getResumedSessionData()
-      ) {
+      } else if (!options.continueInterrupted && resumedSessionData) {
         try {
           const sessionPath = config
             .getSessionService()
@@ -856,6 +873,14 @@ export async function runNonInteractive(
         } catch (error) {
           debugLogger.warn(`worktree restore failed (non-fatal):`, error);
         }
+      }
+
+      const recoveredAgentsNotice =
+        !options.continueInterrupted && !isSlashCommand(input)
+          ? config.consumePendingRecoveredAgentsNotice()
+          : null;
+      if (recoveredAgentsNotice) {
+        initialPartList = withReminder(initialPartList, recoveredAgentsNotice);
       }
 
       const initialParts = normalizePartList(initialPartList);

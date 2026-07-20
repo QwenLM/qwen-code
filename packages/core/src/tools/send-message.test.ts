@@ -35,6 +35,16 @@ describe('SendMessageTool — team mode', () => {
     expect(tool.name).toBe('send_message');
   });
 
+  it('advertises list_agents discovery and transcript-based revival', () => {
+    const tool = new SendMessageTool(makeTeamConfig());
+
+    expect(tool.description).toContain('list_agents');
+    expect(tool.description).toContain(
+      'a completed task is revived from its transcript',
+    );
+    expect(tool.description).not.toContain('resident runtime');
+  });
+
   it('sends a message via TeamManager', async () => {
     const sendMessage = vi.fn().mockResolvedValue(undefined);
     const tool = new SendMessageTool(

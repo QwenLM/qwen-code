@@ -95,6 +95,9 @@ export function getAgentMetaPath(
   );
 }
 
+export const ISOLATED_AGENT_CONTINUATION_BLOCKED_REASON =
+  'Agents launched with isolation: "worktree" cannot be resumed because their temporary worktree is no longer available.';
+
 export interface AgentMeta {
   agentId: string;
   agentType: string;
@@ -110,6 +113,14 @@ export interface AgentMeta {
    * `running` as resumable work that was interrupted by process exit.
    */
   status?: 'running' | 'completed' | 'failed' | 'cancelled' | 'paused';
+  /**
+   * Whether the original launch ran asynchronously. Completed entries are
+   * restored only when this is explicitly true so legacy foreground sidecars
+   * are never exposed as reusable background agents.
+   */
+  isBackgrounded?: boolean;
+  /** Temporary worktree isolation cannot be reconstructed for a later turn. */
+  isolation?: 'worktree';
   /** ISO 8601 timestamp of the latest lifecycle transition. */
   lastUpdatedAt?: string;
   /** Resolved approval mode used when the agent was launched. */

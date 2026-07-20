@@ -592,6 +592,9 @@ describe('useResumeCommand', () => {
       }),
       expect.any(Number),
     );
+    expect(historyManager.loadHistory.mock.invocationCallOrder[0]).toBeLessThan(
+      historyManager.addItem.mock.invocationCallOrder[0],
+    );
   });
 
   it('blocks resume when the current session still has running background work', async () => {
@@ -732,11 +735,12 @@ describe('useResumeCommand', () => {
   it('rolls core back to the old session when something fails after core swap but before UI swap', async () => {
     const startNewSession = vi.fn();
     const geminiClient = {
-      initialize: vi
-        .fn()
-        .mockRejectedValueOnce(new Error('init boom'))
-        .mockResolvedValueOnce(undefined),
+      initialize: vi.fn().mockResolvedValue(undefined),
     };
+    const backgroundTaskReset = vi.fn();
+    const backgroundShellReset = vi.fn();
+    const monitorReset = vi.fn();
+    const workflowReset = vi.fn();
 
     const config = {
       getSessionId: () => 'old-session-id',
@@ -745,23 +749,28 @@ describe('useResumeCommand', () => {
       startNewSession: vi.fn(),
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(false),
-        reset: vi.fn(),
+        reset: backgroundTaskReset,
       }),
       getBackgroundShellRegistry: () => ({
         getAll: vi.fn().mockReturnValue([]),
         hasRunningEntries: vi.fn().mockReturnValue(false),
-        reset: vi.fn(),
+        reset: backgroundShellReset,
       }),
       getMonitorRegistry: () => ({
         getRunning: vi.fn().mockReturnValue([]),
-        reset: vi.fn(),
+        reset: monitorReset,
       }),
       getWorkflowRunRegistry: () => ({
         hasRunningEntries: vi.fn().mockReturnValue(false),
-        reset: vi.fn(),
+        reset: workflowReset,
         abortAll: vi.fn(),
       }),
-      loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
+      loadPausedBackgroundAgents: vi.fn().mockResolvedValue([{}]),
+      getBackgroundAgentResumeService: () => ({
+        buildRecoveredBackgroundAgentsNotice: () => {
+          throw new Error('restore notice boom');
+        },
+      }),
       getChatRecordingService: () => ({ rebuildTurnBoundaries: vi.fn() }),
       getDebugLogger: () => ({
         warn: vi.fn(),
@@ -795,6 +804,10 @@ describe('useResumeCommand', () => {
       'new-session-id',
       expect.any(Object),
     );
+    expect(backgroundTaskReset).toHaveBeenCalledTimes(2);
+    expect(backgroundShellReset).toHaveBeenCalledTimes(2);
+    expect(monitorReset).toHaveBeenCalledTimes(2);
+    expect(workflowReset).toHaveBeenCalledTimes(2);
     expect(config.startNewSession).toHaveBeenNthCalledWith(
       2,
       'old-session-id',
@@ -808,7 +821,9 @@ describe('useResumeCommand', () => {
     expect(historyManager.addItem).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'error',
-        text: expect.stringMatching(/Failed to resume session.*init boom/),
+        text: expect.stringMatching(
+          /Failed to resume session.*restore notice boom/,
+        ),
       }),
       expect.any(Number),
     );

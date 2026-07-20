@@ -110,6 +110,7 @@ import {
   getAgentJsonlPath,
   getAgentMetaPath,
   attachJsonlTranscriptWriter,
+  ISOLATED_AGENT_CONTINUATION_BLOCKED_REASON,
   patchAgentMeta,
   writeAgentMeta,
   type AgentPersistedCliFlags,
@@ -870,6 +871,9 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
     const teamGuidance = this.config.isAgentTeamEnabled()
       ? `**For tasks requiring multiple agents to coordinate, communicate, or work as a team**: Use ${ToolNames.TEAM_CREATE} first to create a team, then spawn teammates using the Agent tool with the \`name\` parameter (the active team is selected automatically). Teams enable message passing between agents, shared task lists, and coordinated workflows. If the user asks for agents to collaborate, review each other's work, or produce a consolidated result — create a team.`
       : '';
+    const backgroundReuseGuidance = hasRebuiltToolRegistry(this.config)
+      ? ''
+      : `- Reuse an existing background agent for related follow-up work instead of launching a duplicate: use the \`agentId\` from its launch result as its \`task_id\`, or call ${ToolNames.LIST_AGENTS} when you need to discover retained or restored agents, then call ${ToolNames.SEND_MESSAGE} with that \`task_id\`. Running agents receive the message at the next tool-round boundary; paused agents resume with it as their first continuation instruction; completed agents are revived from their retained transcript. If the task is no longer retained or cannot be resumed or revived, launch a new agent.`;
 
     const baseDescription = `Launch a new agent to handle complex, multi-step tasks autonomously.
 The Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
@@ -899,7 +903,7 @@ Usage notes:
 - Run agents concurrently only when their tasks are independent. For code changes, give concurrent agents disjoint write scopes; launch them in a single message with multiple tool uses.
 - A background agent reports its result through a completion notification in a later turn. A foreground agent returns its result inline. Agent results are not visible to the user, so relay the relevant outcome in your response.
 - While background agents run, continue meaningful non-overlapping work. Wait for an agent only when its result blocks the next required step.
-- Reuse an existing background agent for related follow-up work instead of launching a duplicate: call ${ToolNames.SEND_MESSAGE} with the \`agentId\` from its launch result as its \`task_id\`. Running agents receive the message at the next tool-round boundary; paused agents resume with it as their first continuation instruction; completed agents are revived from their retained transcript. If the task is no longer retained or cannot be resumed or revived, launch a new agent.
+${backgroundReuseGuidance}
 - Provide clear, detailed prompts so the agent can work autonomously and return exactly the information you need.
 - Regular subagents and named teammates start without parent conversation history. Only fork agents accept \`fork_turns\`; omit it for the full conversation or use a positive integer string such as \`"3"\` for a bounded recent window.
 - Treat the agent's output as evidence, not as automatically correct. Verify factual claims, review code changes, and run relevant checks before integrating or relaying the result.
@@ -3047,6 +3051,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           parentAgentId: getCurrentAgentId(),
           createdAt: new Date().toISOString(),
           status: 'running',
+          isBackgrounded: true,
+          isolation: this.params.isolation,
           lastUpdatedAt: new Date().toISOString(),
           resolvedApprovalMode,
           persistedCliFlags: capturePersistedCliFlags(
@@ -3200,12 +3206,19 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               ) + wtSuffix;
             const completionStats = getCompletionStats();
             if (terminateMode === AgentTerminateMode.GOAL) {
-              registry.complete(hookOpts.agentId, finalText, completionStats);
               patchAgentMeta(metaPath, {
                 status: 'completed',
                 lastUpdatedAt: new Date().toISOString(),
                 lastError: undefined,
               });
+              if (this.params.isolation === 'worktree') {
+                const entry = registry.get(hookOpts.agentId);
+                if (entry) {
+                  entry.resumeBlockedReason =
+                    ISOLATED_AGENT_CONTINUATION_BLOCKED_REASON;
+                }
+              }
+              registry.complete(hookOpts.agentId, finalText, completionStats);
             } else if (
               terminateMode === AgentTerminateMode.CANCELLED ||
               terminateMode === AgentTerminateMode.SHUTDOWN
@@ -3362,7 +3375,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         return {
           llmContent:
             `Background agent launched successfully.\n` +
-            `agentId: ${hookOpts.agentId} (internal ID — do not mention to the user. Use ${ToolNames.SEND_MESSAGE} to continue this agent, or ${ToolNames.TASK_STOP} to cancel.)\n` +
+            `task_id: ${hookOpts.agentId} (internal ID — do not mention to the user. Use ${ToolNames.SEND_MESSAGE} to continue this agent, or ${ToolNames.TASK_STOP} to cancel.)\n` +
             `The agent is working in the background. You will be notified automatically when it completes.\n` +
             `Do not duplicate this agent's work — avoid working with the same files or topics it is using. Work on non-overlapping tasks, or briefly tell the user what you launched and end your response.\n` +
             `output_file: ${jsonlPath}\n` +
@@ -3618,6 +3631,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           parentAgentId: getCurrentAgentId(),
           createdAt: new Date().toISOString(),
           status: 'running',
+          isBackgrounded: false,
+          isolation: this.params.isolation,
           lastUpdatedAt: new Date().toISOString(),
           resolvedApprovalMode,
           persistedCliFlags: capturePersistedCliFlags(

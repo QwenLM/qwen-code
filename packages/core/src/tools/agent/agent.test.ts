@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   AgentTool,
+  TOOL_REGISTRY_REBUILT,
   type AgentParams,
   resolveSubagentApprovalMode,
 } from './agent.js';
@@ -370,8 +371,13 @@ describe('AgentTool', () => {
       expect(tool.description).toContain(
         'Reuse an existing background agent for related follow-up work',
       );
+      expect(tool.description).toContain('call list_agents');
       expect(tool.description).toContain(
-        'send_message with the `agentId` from its launch result as its `task_id`',
+        'use the `agentId` from its launch result as its `task_id`',
+      );
+      expect(tool.description).toContain('call list_agents');
+      expect(tool.description).toContain(
+        'call send_message with that `task_id`',
       );
       expect(tool.description).toContain('next tool-round boundary');
       expect(tool.description).toContain(
@@ -382,6 +388,24 @@ describe('AgentTool', () => {
       );
       expect(tool.description).toContain('return to their direct parent');
       expect(tool.description).not.toContain('Top-level one-shot agents');
+    });
+
+    it('does not advertise parent-only roster tools to nested agents', async () => {
+      const nestedConfig = Object.create(config) as Config;
+      (
+        nestedConfig as Config & {
+          [TOOL_REGISTRY_REBUILT]: boolean;
+        }
+      )[TOOL_REGISTRY_REBUILT] = true;
+      const tool = new AgentTool(nestedConfig);
+      await vi.runAllTimersAsync();
+
+      expect(tool.description).not.toContain('call list_agents');
+      expect(tool.description).not.toContain(
+        'call send_message with its `task_id`',
+      );
+
+      tool.dispose();
     });
 
     it('requires bounded delegation and verification of subagent results', async () => {
@@ -1569,6 +1593,7 @@ describe('AgentTool', () => {
     it('passes custom ignore files into worktree isolation file service', async () => {
       vi.useRealTimers();
       const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wt-'));
+      const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
       try {
         execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
         execFileSync('git', ['config', 'user.email', 't@e.com'], {
@@ -1594,7 +1619,6 @@ describe('AgentTool', () => {
           respectQwenIgnore: true,
           customIgnoreFiles: ['.cursorignore'],
         });
-
         const invocation = (
           agentTool as AgentToolWithProtectedMethods
         ).createInvocation({
@@ -1620,7 +1644,15 @@ describe('AgentTool', () => {
             .getFileService()
             .getQwenIgnoreFileDisplayForPath('secret.txt'),
         ).toBe('.cursorignore');
+        expect(writeMetaSpy).toHaveBeenCalledWith(
+          expect.any(String),
+          expect.objectContaining({
+            isBackgrounded: true,
+            isolation: 'worktree',
+          }),
+        );
       } finally {
+        writeMetaSpy.mockRestore();
         fs.rmSync(repo, { recursive: true, force: true });
         vi.useFakeTimers();
       }
@@ -4261,6 +4293,7 @@ describe('AgentTool', () => {
       waitForBackgroundSlot: ReturnType<typeof vi.fn>;
       releaseBackgroundSlot: ReturnType<typeof vi.fn>;
       getQueuedCount: ReturnType<typeof vi.fn>;
+      get: ReturnType<typeof vi.fn>;
       register: ReturnType<typeof vi.fn>;
       unregisterForeground: ReturnType<typeof vi.fn>;
       complete: ReturnType<typeof vi.fn>;
@@ -4312,6 +4345,7 @@ describe('AgentTool', () => {
           .mockResolvedValue({ id: Symbol('background-slot') }),
         releaseBackgroundSlot: vi.fn(),
         getQueuedCount: vi.fn().mockReturnValue(0),
+        get: vi.fn(),
         register: vi.fn(),
         unregisterForeground: vi.fn(),
         complete: vi.fn(),
@@ -4369,6 +4403,8 @@ describe('AgentTool', () => {
       expect(llmText).toContain(
         `Use ${ToolNames.SEND_MESSAGE} to continue this agent`,
       );
+      expect(llmText).toContain('task_id: monitor-');
+      expect(llmText).not.toContain('agentId:');
       expect(llmText).toContain(`or ${ToolNames.TASK_STOP} to cancel.`);
       expect(llmText).not.toContain('with to:');
       expect(llmText).not.toContain('Use send_message with task_id:');
@@ -4403,6 +4439,7 @@ describe('AgentTool', () => {
       expect(writeMetaSpy).toHaveBeenCalledWith(
         expect.any(String),
         expect.objectContaining({
+          isBackgrounded: true,
           persistedCliFlags: expect.objectContaining({
             model: 'subagent-model',
           }),
@@ -4410,6 +4447,63 @@ describe('AgentTool', () => {
       );
       writeMetaSpy.mockRestore();
     });
+
+    it('marks a completed temporary-worktree agent as non-continuable', async () => {
+      vi.useRealTimers();
+      const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-bg-wt-'));
+      const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
+      try {
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+        execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: repo });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+        execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        fs.writeFileSync(path.join(repo, 'README.md'), 'initial\n');
+        execFileSync('git', ['add', '.'], { cwd: repo });
+        execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+          cwd: repo,
+        });
+
+        vi.mocked(config.getProjectRoot).mockReturnValue(repo);
+        vi.mocked(config.getTargetDir).mockReturnValue(repo);
+        vi.mocked(config.getCwd).mockReturnValue(repo);
+        vi.mocked(config.getWorkingDir).mockReturnValue(repo);
+        const completedRow: { resumeBlockedReason?: string } = {};
+        mockRegistry.get.mockReturnValue(completedRow);
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'Inspect in isolation',
+          prompt: 'Inspect the repository',
+          subagent_type: 'monitor',
+          isolation: 'worktree',
+        });
+        await invocation.execute();
+
+        expect(writeMetaSpy).toHaveBeenCalledWith(
+          expect.any(String),
+          expect.objectContaining({
+            isBackgrounded: true,
+            isolation: 'worktree',
+          }),
+        );
+        await vi.waitFor(
+          () => {
+            expect(mockRegistry.complete).toHaveBeenCalled();
+            expect(completedRow.resumeBlockedReason).toBe(
+              transcript.ISOLATED_AGENT_CONTINUATION_BLOCKED_REASON,
+            );
+          },
+          { timeout: 5000 },
+        );
+      } finally {
+        writeMetaSpy.mockRestore();
+        fs.rmSync(repo, { recursive: true, force: true });
+        vi.useFakeTimers();
+      }
+    }, 20000);
 
     it('stores sanitized background results in the registry', async () => {
       vi.mocked(mockAgent.getFinalText).mockReturnValue(
@@ -4455,6 +4549,31 @@ describe('AgentTool', () => {
         '(subagent produced no model-visible output)',
         expect.any(Object),
       );
+    });
+
+    it('persists completion before publishing the terminal notification', async () => {
+      const patchMetaSpy = vi.spyOn(transcript, 'patchAgentMeta');
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+
+      await invocation.execute();
+      await vi.waitFor(() => {
+        expect(mockRegistry.complete).toHaveBeenCalled();
+      });
+
+      const completedPatchIndex = patchMetaSpy.mock.calls.findIndex(
+        ([, update]) => update.status === 'completed',
+      );
+      expect(completedPatchIndex).toBeGreaterThanOrEqual(0);
+      expect(
+        patchMetaSpy.mock.invocationCallOrder[completedPatchIndex],
+      ).toBeLessThan(mockRegistry.complete.mock.invocationCallOrder[0]!);
+      patchMetaSpy.mockRestore();
     });
 
     it('routes owned monitor notifications into a background agent external input queue', async () => {
@@ -5122,6 +5241,7 @@ describe('AgentTool', () => {
           status: 'running',
           agentType: 'file-search',
           description: 'Search files',
+          isBackgrounded: false,
           persistedCliFlags: expect.objectContaining({
             approvalMode: 'auto-edit',
             bare: false,

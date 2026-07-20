@@ -23,6 +23,8 @@ import {
   readAgentMeta,
   patchAgentMeta,
   attachJsonlTranscriptWriter,
+  ISOLATED_AGENT_CONTINUATION_BLOCKED_REASON,
+  type AgentMeta,
 } from './agent-transcript.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { buildOrderedUuidChain } from '../utils/conversation-chain.js';
@@ -43,10 +45,11 @@ import {
   FORK_SUBAGENT_TYPE,
   runInForkContext,
 } from '../tools/agent/fork-subagent.js';
-import type {
-  AgentCompletionStats,
-  AgentTask,
-  AgentTaskRegistration,
+import {
+  MAX_RETAINED_TERMINAL_AGENTS,
+  type AgentCompletionStats,
+  type AgentTask,
+  type AgentTaskRegistration,
 } from './background-tasks.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../subagents/types.js';
@@ -366,8 +369,27 @@ function getCompletionStats(
 
 function buildRecoveredNotice(count: number): string {
   return count === 1
-    ? 'Recovered 1 interrupted background agent. Open Background tasks and press r to resume.'
-    : `Recovered ${count} interrupted background agents. Open Background tasks and press r to resume.`;
+    ? 'Restored 1 background agent from this session. Open Background tasks to inspect it.'
+    : `Restored ${count} background agents from this session. Open Background tasks to inspect them.`;
+}
+
+function buildRecoveredModelNotice(count: number): string {
+  return (
+    `${count} background agent${count === 1 ? ' was' : 's were'} restored ` +
+    'from this session. Use list_agents to inspect them and send_message ' +
+    'with a task_id to continue one.'
+  );
+}
+
+interface RecoverableAgentSidecar {
+  fileName: string;
+  metaPath: string;
+  meta: AgentMeta;
+}
+
+function recoveryTimestamp(meta: AgentMeta): number {
+  const parsed = Date.parse(meta.lastUpdatedAt ?? meta.createdAt);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 export class BackgroundAgentResumeService {
@@ -390,15 +412,52 @@ export class BackgroundAgentResumeService {
       throw error;
     }
 
-    const registry = this.config.getBackgroundTaskRegistry();
-    const recovered: AgentTask[] = [];
-
+    const sidecars: RecoverableAgentSidecar[] = [];
     for (const fileName of files) {
       if (!fileName.endsWith(META_FILE_SUFFIX)) continue;
       const metaPath = path.join(dir, fileName);
       try {
         const meta = readAgentMeta(metaPath);
-        if (!meta || meta.status !== 'running') continue;
+        if (
+          !meta ||
+          (meta.status !== 'running' && meta.status !== 'completed') ||
+          (meta.status === 'completed' && meta.isBackgrounded !== true)
+        ) {
+          continue;
+        }
+        sidecars.push({ fileName, metaPath, meta });
+      } catch (error) {
+        debugLogger.warn(
+          `[BackgroundAgentResume] Failed to read background agent metadata from ${metaPath}:`,
+          error,
+        );
+      }
+    }
+
+    sidecars.sort((a, b) => {
+      if (a.meta.status !== b.meta.status) {
+        return a.meta.status === 'running' ? -1 : 1;
+      }
+      if (a.meta.status === 'completed') {
+        return recoveryTimestamp(b.meta) - recoveryTimestamp(a.meta);
+      }
+      return a.fileName.localeCompare(b.fileName);
+    });
+
+    const registry = this.config.getBackgroundTaskRegistry();
+    const recovered: AgentTask[] = [];
+    let completedCount = registry
+      .getAll()
+      .filter((entry) => entry.notified === true).length;
+
+    for (const { fileName, metaPath, meta } of sidecars) {
+      if (
+        meta.status === 'completed' &&
+        completedCount >= MAX_RETAINED_TERMINAL_AGENTS
+      ) {
+        continue;
+      }
+      try {
         if (registry.get(meta.agentId)) continue;
         const subagentName = meta.subagentName ?? meta.agentType;
         if (!subagentName) continue;
@@ -409,10 +468,17 @@ export class BackgroundAgentResumeService {
           fileName.slice(0, -META_FILE_SUFFIX.length) + '.jsonl',
         );
         const records = await jsonl.read<ChatRecord>(outputFile);
+        if (meta.status === 'completed' && records.length === 0) {
+          continue;
+        }
         const recovery = recoverTranscript(records);
         const parsedStartTime = Date.parse(meta.createdAt);
+        const parsedEndTime = Date.parse(meta.lastUpdatedAt ?? meta.createdAt);
 
         const resumeBlockedReason =
+          (meta.isolation === 'worktree'
+            ? ISOLATED_AGENT_CONTINUATION_BLOCKED_REASON
+            : undefined) ||
           target.unavailableReason ||
           (target.isFork && !recovery.forkBootstrap
             ? LEGACY_FORK_RESUME_BLOCKED_REASON
@@ -427,10 +493,17 @@ export class BackgroundAgentResumeService {
           description: meta.description,
           subagentType: target.agentName,
           isBackgrounded: true,
-          status: 'paused',
+          status: meta.status === 'running' ? 'paused' : 'completed',
           startTime: Number.isFinite(parsedStartTime)
             ? parsedStartTime
             : Date.now(),
+          ...(meta.status === 'completed'
+            ? {
+                endTime: Number.isFinite(parsedEndTime)
+                  ? parsedEndTime
+                  : Date.now(),
+              }
+            : {}),
           abortController: new AbortController(),
           prompt: recovery.initialPrompt,
           outputFile,
@@ -446,7 +519,17 @@ export class BackgroundAgentResumeService {
           depth: meta.depth,
           model: meta.model,
         };
-        const entry = registry.register(registration);
+        if (meta.status === 'completed') {
+          (registration as AgentTask).notified = true;
+          (registration as AgentTask).outputOffset = 0;
+        }
+        const entry = registry.register(registration, {
+          suppressRegisterCallback: meta.status === 'completed',
+          preserveNotificationState: meta.status === 'completed',
+        });
+        if (meta.status === 'completed') {
+          completedCount += 1;
+        }
         recovered.push(entry);
       } catch (error) {
         debugLogger.warn(
@@ -498,16 +581,14 @@ export class BackgroundAgentResumeService {
    *
    * Returns `undefined` (and logs why) when the agent can't be revived: not an
    * in-registry, finished background agent with a persisted transcript, or the
-   * background-agent concurrency cap is full. Cross-session / evicted completed
-   * agents are out of scope (see QwenLM/qwen-code#5540).
+   * background-agent concurrency cap is full. Completed agents restored from
+   * the same parent session use this path after process restart.
    */
   async reviveCompletedBackgroundAgent(
     agentId: string,
     initialMessage?: string,
   ): Promise<AgentTask | undefined> {
-    // A resume/revive already in flight for this id owns the lifecycle — fold
-    // into it. (The status flip below is await-free, so this guards a genuinely
-    // concurrent in-flight operation, not a same-tick re-entry.)
+    // A resume/revive already in flight for this id owns the lifecycle.
     if (this.resumeOperations.has(agentId)) {
       return this.resumeBackgroundAgent(agentId, initialMessage);
     }
@@ -541,9 +622,17 @@ export class BackgroundAgentResumeService {
       );
       return undefined;
     }
-    if (!readAgentMeta(entry.metaPath)) {
+    const meta = readAgentMeta(entry.metaPath);
+    if (!meta) {
       debugLogger.warn(
         `[BackgroundAgentResume] Cannot revive "${agentId}": metadata could not be read.`,
+      );
+      return undefined;
+    }
+    if (meta.isolation === 'worktree') {
+      entry.resumeBlockedReason = ISOLATED_AGENT_CONTINUATION_BLOCKED_REASON;
+      debugLogger.warn(
+        `[BackgroundAgentResume] Cannot revive "${agentId}": ${entry.resumeBlockedReason}`,
       );
       return undefined;
     }
@@ -579,8 +668,32 @@ export class BackgroundAgentResumeService {
           `${error instanceof Error ? error.message : String(error)}`,
       );
     }
+    const activeOperation = this.resumeOperations.get(agentId);
+    if (activeOperation) {
+      return this.resumeBackgroundAgent(agentId, initialMessage);
+    }
+    const latestEntry = registry.get(agentId);
+    if (latestEntry?.status === 'running') {
+      const trimmedMessage = initialMessage?.trim();
+      if (trimmedMessage) {
+        registry.queueMessage(agentId, trimmedMessage);
+      }
+      return latestEntry;
+    }
+    if (latestEntry?.status === 'paused') {
+      return this.resumeBackgroundAgent(agentId, initialMessage);
+    }
+    if (
+      !latestEntry ||
+      !latestEntry.isBackgrounded ||
+      latestEntry.status !== 'completed' ||
+      !latestEntry.metaPath ||
+      !latestEntry.outputFile
+    ) {
+      return undefined;
+    }
     try {
-      registry.assertCanStartBackgroundAgent(entry.model);
+      registry.assertCanStartBackgroundAgent(latestEntry.model);
     } catch (error) {
       debugLogger.warn(
         `[BackgroundAgentResume] Cannot revive "${agentId}": ` +
@@ -589,15 +702,31 @@ export class BackgroundAgentResumeService {
       return undefined;
     }
     const completedEntry = {
-      ...entry,
-      pendingMessages: [...(entry.pendingMessages ?? [])],
-      recentActivities: [...(entry.recentActivities ?? [])],
-      pendingApprovals: [...(entry.pendingApprovals ?? [])],
+      ...latestEntry,
+      pendingMessages: [...(latestEntry.pendingMessages ?? [])],
+      recentActivities: [...(latestEntry.recentActivities ?? [])],
+      pendingApprovals: [...(latestEntry.pendingApprovals ?? [])],
     };
     this.restorePausedEntry(agentId, { suppressRegisterCallback: true });
     const revived = await this.resumeBackgroundAgent(agentId, initialMessage);
     if (!revived) {
-      this.restoreCompletedEntry(completedEntry);
+      const failedEntry = registry.get(agentId);
+      if (failedEntry?.status === 'paused') {
+        this.restoreCompletedEntry({
+          ...completedEntry,
+          pendingMessages: [
+            ...(failedEntry.pendingMessages ?? completedEntry.pendingMessages),
+          ],
+          recentActivities: [
+            ...(failedEntry.recentActivities ??
+              completedEntry.recentActivities),
+          ],
+          pendingApprovals: [
+            ...(failedEntry.pendingApprovals ??
+              completedEntry.pendingApprovals),
+          ],
+        });
+      }
     }
     return revived;
   }
@@ -610,6 +739,9 @@ export class BackgroundAgentResumeService {
     const existing = registry.get(agentId);
     if (!existing || existing.status !== 'paused') {
       return existing;
+    }
+    if (existing.resumeBlockedReason) {
+      return undefined;
     }
 
     const metaPath = existing.metaPath;
@@ -1085,6 +1217,10 @@ export class BackgroundAgentResumeService {
 
   buildRecoveredBackgroundAgentsNotice(count: number): string {
     return buildRecoveredNotice(count);
+  }
+
+  buildRecoveredBackgroundAgentsModelNotice(count: number): string {
+    return buildRecoveredModelNotice(count);
   }
 
   private async resolveResumeTarget(

@@ -3959,6 +3959,7 @@ class QwenAgent implements Agent {
     }
 
     await this.#restoreWorktreeOnResume(config, session);
+    await this.#restoreBackgroundAgentsOnResume(config, session);
     this.#restoreGoalOnResume(config, session);
 
     const modesData = this.buildModesData(config);
@@ -4046,6 +4047,7 @@ class QwenAgent implements Agent {
     }
 
     await this.#restoreWorktreeOnResume(config, session);
+    await this.#restoreBackgroundAgentsOnResume(config, session);
     this.#restoreGoalOnResume(config, session);
 
     const modesData = this.buildModesData(config);
@@ -4083,6 +4085,19 @@ class QwenAgent implements Agent {
       }
     } catch (error) {
       debugLogger.warn(`ACP worktree restore failed: ${error}`);
+    }
+  }
+
+  async #restoreBackgroundAgentsOnResume(
+    config: Config,
+    session: Session,
+  ): Promise<void> {
+    try {
+      await config.loadPausedBackgroundAgents(config.getSessionId());
+      session.pendingRecoveredAgentsNotice =
+        config.consumePendingRecoveredAgentsNotice();
+    } catch (error) {
+      debugLogger.warn(`ACP background-agent restore failed: ${error}`);
     }
   }
 

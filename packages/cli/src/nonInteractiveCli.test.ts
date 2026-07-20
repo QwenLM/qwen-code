@@ -332,6 +332,8 @@ describe('runNonInteractive', () => {
       // --worktree flag, so return null to short-circuit injection
       // and let the resume-restore branch run.
       consumePendingStartupWorktreeNotice: vi.fn().mockReturnValue(null),
+      loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
+      consumePendingRecoveredAgentsNotice: vi.fn().mockReturnValue(null),
     } as unknown as Config;
 
     mockSettings = {
@@ -5355,6 +5357,170 @@ describe('runNonInteractive', () => {
       // a trailing newline — no JSON envelope, no extra event log.
       const stdout = writes.join('');
       expect(stdout).toBe(`${JSON.stringify(structuredArgs)}\n`);
+    });
+  });
+
+  describe('--resume with background agents', () => {
+    const finishedEvents = (): ServerGeminiStreamEvent[] => [
+      {
+        type: GeminiEventType.Finished,
+        value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+      },
+    ];
+
+    beforeEach(() => {
+      (mockConfig.getResumedSessionData as Mock).mockReturnValue({
+        sessionId: 'test-session-id',
+        conversation: { messages: [] },
+      });
+      (mockConfig as { getSessionService?: () => unknown }).getSessionService =
+        vi.fn().mockReturnValue({
+          getWorktreeSessionPath: vi
+            .fn()
+            .mockReturnValue('/missing/session.worktree.json'),
+        });
+    });
+
+    it('restores once and injects the recovered-agent notice into the next ordinary prompt once', async () => {
+      setupMetricsMock();
+      (mockConfig.loadPausedBackgroundAgents as Mock).mockResolvedValue([
+        { agentId: 'agent-1' },
+      ]);
+      (
+        mockConfig.consumePendingRecoveredAgentsNotice as Mock
+      ).mockReturnValueOnce(
+        '1 background agent was restored. Use list_agents to inspect it.',
+      );
+      mockGeminiClient.sendMessageStream.mockImplementation(() =>
+        createStreamFromEvents(finishedEvents()),
+      );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'first prompt',
+        'prompt-agents-1',
+      );
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'second prompt',
+        'prompt-agents-2',
+      );
+
+      expect(mockConfig.loadPausedBackgroundAgents).toHaveBeenCalledOnce();
+      expect(mockConfig.loadPausedBackgroundAgents).toHaveBeenCalledWith(
+        'test-session-id',
+      );
+      expect(
+        mockConfig.consumePendingRecoveredAgentsNotice,
+      ).toHaveBeenCalledTimes(2);
+
+      const firstParts = mockGeminiClient.sendMessageStream.mock
+        .calls[0][0] as Part[];
+      expect(firstParts).toEqual([
+        {
+          text: expect.stringContaining(
+            'Use list_agents to inspect it.',
+          ) as string,
+        },
+        { text: 'first prompt' },
+      ]);
+
+      const secondParts = mockGeminiClient.sendMessageStream.mock
+        .calls[1][0] as Part[];
+      expect(secondParts).toEqual([{ text: 'second prompt' }]);
+    });
+
+    it('does not consume the notice for a slash command', async () => {
+      setupMetricsMock();
+      const mockCommand = {
+        name: 'testcommand',
+        description: 'a test command',
+        kind: CommandKind.FILE,
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'Prompt from command' }],
+        }),
+      };
+      mockGetCommands.mockReturnValue([mockCommand]);
+      (
+        mockConfig.consumePendingRecoveredAgentsNotice as Mock
+      ).mockReturnValueOnce('Recovered agents are available.');
+      mockGeminiClient.sendMessageStream.mockImplementation(() =>
+        createStreamFromEvents(finishedEvents()),
+      );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/testcommand',
+        'prompt-agents-slash',
+      );
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'ordinary prompt',
+        'prompt-agents-after-slash',
+      );
+
+      expect(mockConfig.loadPausedBackgroundAgents).toHaveBeenCalledOnce();
+      expect(
+        mockConfig.consumePendingRecoveredAgentsNotice,
+      ).toHaveBeenCalledOnce();
+      expect(mockGeminiClient.sendMessageStream.mock.calls[0][0]).toEqual([
+        { text: 'Prompt from command' },
+      ]);
+      expect(mockGeminiClient.sendMessageStream.mock.calls[1][0]).toEqual([
+        { text: expect.stringContaining('Recovered agents are available.') },
+        { text: 'ordinary prompt' },
+      ]);
+    });
+
+    it('restores agents without consuming the notice or moving continued tool results', async () => {
+      setupMetricsMock();
+      (mockConfig.consumePendingRecoveredAgentsNotice as Mock).mockReturnValue(
+        'Recovered agents are available.',
+      );
+      mockGeminiClient.getChat = vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+        getHistory: vi.fn().mockReturnValue([
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'call-1', name: 'shell' } }],
+          },
+        ]),
+      }));
+      mockGeminiClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents(finishedEvents()),
+      );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '',
+        'prompt-agents-continue',
+        { continueInterrupted: true },
+      );
+
+      expect(mockConfig.loadPausedBackgroundAgents).toHaveBeenCalledWith(
+        'test-session-id',
+      );
+      expect(
+        mockConfig.consumePendingRecoveredAgentsNotice,
+      ).not.toHaveBeenCalled();
+      const [request, , , options] =
+        mockGeminiClient.sendMessageStream.mock.calls[0]!;
+      expect(options).toEqual(
+        expect.objectContaining({ type: SendMessageType.ToolResult }),
+      );
+      expect(request[0]).toEqual({
+        functionResponse: {
+          id: 'call-1',
+          name: 'shell',
+          response: { error: expect.stringContaining('not recorded') },
+        },
+      });
     });
   });
 

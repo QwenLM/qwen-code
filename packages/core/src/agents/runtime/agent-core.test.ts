@@ -520,6 +520,7 @@ describe('AgentCore.prepareTools', () => {
     const { core, debugSpy } = buildAgentForTools(
       {
         tools: [
+          { name: ToolNames.LIST_AGENTS } as FunctionDeclaration,
           { name: ToolNames.SEND_MESSAGE } as FunctionDeclaration,
           { name: ToolNames.TASK_UPDATE } as FunctionDeclaration,
           { name: ToolNames.ENTER_PLAN_MODE } as FunctionDeclaration,
@@ -533,6 +534,9 @@ describe('AgentCore.prepareTools', () => {
     const tools = await core.prepareTools();
 
     expect(tools).toEqual([inlineSafe]);
+    expect(debugSpy).toHaveBeenCalledWith(
+      `[prepareTools] Filtered inline declaration "${ToolNames.LIST_AGENTS}" from subagent tool list`,
+    );
     expect(debugSpy).toHaveBeenCalledWith(
       `[prepareTools] Filtered inline declaration "${ToolNames.SEND_MESSAGE}" from subagent tool list`,
     );
@@ -549,6 +553,10 @@ describe('AgentCore.prepareTools', () => {
 
   it('keeps teammate coordination tools but excludes plan lifecycle tools', async () => {
     const fnDecls: FunctionDeclaration[] = [
+      {
+        name: ToolNames.LIST_AGENTS,
+        description: 'list agents',
+      } as FunctionDeclaration,
       {
         name: ToolNames.SEND_MESSAGE,
         description: 'send message',
