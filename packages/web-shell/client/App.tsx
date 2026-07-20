@@ -7306,11 +7306,13 @@ export function App({
                           currentMode={currentMode}
                           currentModel={currentModel}
                           gitBranch={
-                            sessionWorktree?.branch ??
-                            (connection.sessionId
-                              ? connection.gitBranch
-                              : (selectedWorkspaceGitStatus?.branch ??
-                                undefined))
+                            sessionWorktree
+                              ? (selectedWorkspaceGitStatus?.branch ??
+                                sessionWorktree.branch)
+                              : (connection.sessionId
+                                ? connection.gitBranch
+                                : (selectedWorkspaceGitStatus?.branch ??
+                                  undefined))
                           }
                           gitWorktree={Boolean(sessionWorktree)}
                           gitStatus={selectedWorkspaceGitStatus}
