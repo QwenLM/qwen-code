@@ -8381,6 +8381,32 @@ describe('useGeminiStream', () => {
       );
     });
 
+    it('should clean up review lease when the stream throws', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'partial',
+          };
+          throw new Error('stream blew up');
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('error query');
+      });
+
+      await waitFor(() =>
+        expect(mockCleanupReviewWorktreeLeases).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          promptId: 'test-session-id########5',
+          repositoryRoot: '/test/dir',
+        }),
+      );
+    });
+
     it('should commit thought to history on Error', async () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
@@ -9455,6 +9481,13 @@ describe('useGeminiStream', () => {
           typeof result.current.loopDetectionConfirmationRequest?.onComplete,
         ).toBe('function');
       });
+      await waitFor(() =>
+        expect(mockCleanupReviewWorktreeLeases).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          promptId: 'test-session-id########5',
+          repositoryRoot: '/test/dir',
+        }),
+      );
     });
 
     it('should disable loop detection and show message when user selects "disable"', async () => {

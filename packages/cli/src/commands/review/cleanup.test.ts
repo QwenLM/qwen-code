@@ -97,4 +97,15 @@ describe('runCleanup', () => {
     );
     expect(mocks.clearReviewWorktreeLease).not.toHaveBeenCalled();
   });
+
+  it('clears the lease when cleanup succeeds', () => {
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+
+    runCleanup('pr-123');
+
+    expect(mocks.clearReviewWorktreeLease).toHaveBeenCalledWith(
+      process.cwd(),
+      'pr-123',
+    );
+  });
 });

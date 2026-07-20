@@ -2362,6 +2362,7 @@ describe('qwen-autofix workflow', () => {
       ),
     );
     expect(prepareBranchAndFeedbackStep).not.toContain('git clean');
+    expect(prepareBranchAndFeedbackStep).not.toContain('if git diff --quiet');
     expect(prepareBranchAndFeedbackStep).not.toContain(
       'if ! git diff --quiet || ! git diff --cached --quiet; then',
     );
