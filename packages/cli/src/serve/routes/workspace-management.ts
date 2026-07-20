@@ -5,7 +5,10 @@
  */
 
 import { readdir, stat } from 'node:fs/promises';
-import { translateWindowsWorkspaceForPosixSandbox , MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';
+import {
+  translateWindowsWorkspaceForPosixSandbox,
+  MAX_WORKSPACE_PATH_LENGTH,
+} from '@qwen-code/acp-bridge/workspacePaths';
 import { realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import type { Application, Request, Response } from 'express';
@@ -240,22 +243,24 @@ export function registerWorkspaceManagementRoutes(
         return;
       }
 
+      // Bound the input before any filesystem work, matching the limit other
+      // workspace routes enforce (memory-amplification guard). Must run
+      // before the sandbox translation below — its existence probe is a
+      // filesystem call.
+      if (cwd.length > MAX_WORKSPACE_PATH_LENGTH) {
+        res.status(400).json({
+          error: `\`cwd\` exceeds the ${MAX_WORKSPACE_PATH_LENGTH}-character limit`,
+          code: 'invalid_path',
+        });
+        return;
+      }
+
       // #7139: map a Windows-shaped cwd to its container bind mount before
       // the absolute-path guard (no-op outside a POSIX container sandbox).
       const sandboxCwd = translateWindowsWorkspaceForPosixSandbox(cwd);
       if (!isAbsolute(sandboxCwd)) {
         res.status(400).json({
           error: '`cwd` must be an absolute path',
-          code: 'invalid_path',
-        });
-        return;
-      }
-
-      // Bound the input before any filesystem work, matching the limit other
-      // workspace routes enforce (memory-amplification guard).
-      if (cwd.length > MAX_WORKSPACE_PATH_LENGTH) {
-        res.status(400).json({
-          error: `\`cwd\` exceeds the ${MAX_WORKSPACE_PATH_LENGTH}-character limit`,
           code: 'invalid_path',
         });
         return;
