@@ -806,7 +806,95 @@ describe('DingtalkChannel prompt reactions', () => {
     }
   });
 
+  it('retries transient emotion failures before succeeding', async () => {
+    vi.useFakeTimers();
+    const channel = createChannel();
+    let emotionAttempts = 0;
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith('https://oapi.dingtalk.com/gettoken')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                errcode: 0,
+                access_token: 'proactive-token',
+                expires_in: 7200,
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        emotionAttempts++;
+        return Promise.resolve(
+          new Response('{}', { status: emotionAttempts < 3 ? 500 : 200 }),
+        );
+      });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    try {
+      const request = (
+        channel as unknown as {
+          attachReaction(msgId: string, conversationId: string): Promise<void>;
+        }
+      ).attachReaction('msg-1', 'cid-123');
+      await vi.runAllTimersAsync();
+      await request;
+
+      expect(emotionAttempts).toBe(3);
+      expect(stderr).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      stderr.mockRestore();
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('does not retry non-transient emotion failures', async () => {
+    const channel = createChannel();
+    let emotionAttempts = 0;
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith('https://oapi.dingtalk.com/gettoken')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                errcode: 0,
+                access_token: 'proactive-token',
+                expires_in: 7200,
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        emotionAttempts++;
+        return Promise.resolve(new Response('{}', { status: 400 }));
+      });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    try {
+      await (
+        channel as unknown as {
+          attachReaction(msgId: string, conversationId: string): Promise<void>;
+        }
+      ).attachReaction('msg-1', 'cid-123');
+
+      expect(emotionAttempts).toBe(1);
+    } finally {
+      stderr.mockRestore();
+      fetchSpy.mockRestore();
+    }
+  });
+
   it('sanitizes failed emotion response details before logging', async () => {
+    vi.useFakeTimers();
     const channel = createChannel();
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
@@ -833,16 +921,26 @@ describe('DingtalkChannel prompt reactions', () => {
       .mockImplementation(() => true);
 
     try {
-      await (
+      const request = (
         channel as unknown as {
           attachReaction(msgId: string, conversationId: string): Promise<void>;
         }
       ).attachReaction('msg-1', 'cid-123');
+      await vi.runAllTimersAsync();
+      await request;
 
       const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      const emotionCalls = fetchSpy.mock.calls.filter((call) =>
+        String(call[0]).startsWith(
+          'https://api.dingtalk.com/v1.0/robot/emotion/reply',
+        ),
+      );
+      expect(emotionCalls).toHaveLength(3);
+      expect(stderr).toHaveBeenCalledOnce();
       expect(logged).toContain('bad\\n[DingTalk:fake] forged');
       expect(logged).not.toContain('bad\n');
     } finally {
+      vi.useRealTimers();
       stderr.mockRestore();
       fetchSpy.mockRestore();
     }
