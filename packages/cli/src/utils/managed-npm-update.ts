@@ -5,7 +5,7 @@
  */
 
 import { Storage } from '@qwen-code/qwen-code-core';
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
@@ -13,9 +13,9 @@ import * as path from 'node:path';
 import { promisify } from 'node:util';
 import lockfile from 'proper-lockfile';
 import semver from 'semver';
+import { getNpmCliPath } from './installationInfo.js';
 
 const PACKAGE_NAME = '@qwen-code/qwen-code';
-const OWNERLESS_STAGING_MAX_AGE_MS = 60 * 60 * 1000;
 const execFileAsync = promisify(execFile);
 
 interface ManagedNpmUpdate {
@@ -37,43 +37,6 @@ function packageDir(prefix: string): string {
   return path.join(prefix, 'node_modules', '@qwen-code', 'qwen-code');
 }
 
-function processIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'EPERM';
-  }
-}
-
-function reclaimStaleStaging(versionsDir: string): void {
-  for (const entry of fs.readdirSync(versionsDir, { withFileTypes: true })) {
-    if (!entry.isDirectory() || !entry.name.startsWith('.')) continue;
-    const stagingDir = path.join(versionsDir, entry.name);
-    const owner = Number.parseInt(
-      entry.name.match(/-(\d+)-[^-]+$/)?.[1] ?? '',
-      10,
-    );
-    if (Number.isInteger(owner) && owner > 0) {
-      if (processIsAlive(owner)) {
-        continue;
-      }
-    } else {
-      let age: number;
-      try {
-        age = Date.now() - fs.statSync(stagingDir).mtimeMs;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
-        throw error;
-      }
-      if (age < OWNERLESS_STAGING_MAX_AGE_MS) {
-        continue;
-      }
-    }
-    fs.rmSync(stagingDir, { recursive: true, force: true });
-  }
-}
-
 function resolveBootstrapPath(bootstrapPath?: string): string {
   if (!bootstrapPath) {
     throw new Error('Unable to identify the Qwen Code npm launcher');
@@ -83,6 +46,26 @@ function resolveBootstrapPath(bootstrapPath?: string): string {
 
 function launcherId(bootstrapPath: string): string {
   return createHash('sha256').update(bootstrapPath).digest('hex').slice(0, 16);
+}
+
+function resolveNpmGlobalConfigPath(): string {
+  const configured = process.env['NPM_CONFIG_GLOBALCONFIG'];
+  if (configured) return path.resolve(configured);
+  const output = execFileSync(
+    process.execPath,
+    [
+      getNpmCliPath(process.execPath, process.platform),
+      'config',
+      'get',
+      'globalconfig',
+      '--global',
+    ],
+    { encoding: 'utf8', timeout: 2000 },
+  ).trim();
+  if (!output || output === 'null' || output === 'undefined') {
+    throw new Error('Unable to resolve the global npm configuration');
+  }
+  return output;
 }
 
 function readBaseInstallation(bootstrapPath: string): {
@@ -163,15 +146,16 @@ async function readActiveVersion(
 export function prepareManagedNpmUpdate(
   version: string,
   bootstrapPath = process.env['QWEN_CODE_CLI'],
-  updateRoot = path.join(Storage.getGlobalQwenDir(), 'updates', 'npm'),
+  updateRoot = process.env['QWEN_CODE_MANAGED_NPM_ROOT'] ??
+    path.join(Storage.getGlobalQwenDir(), 'updates', 'npm'),
 ): ManagedNpmUpdate {
   assertVersion(version);
   const resolvedBootstrapPath = resolveBootstrapPath(bootstrapPath);
   const base = readBaseInstallation(resolvedBootstrapPath);
+  const npmGlobalConfigPath = resolveNpmGlobalConfigPath();
   const launcherRoot = path.join(updateRoot, launcherId(resolvedBootstrapPath));
   const versionsDir = path.join(launcherRoot, 'versions');
   fs.mkdirSync(versionsDir, { recursive: true });
-  reclaimStaleStaging(versionsDir);
   const stagingDir = fs.mkdtempSync(
     path.join(versionsDir, `.${version}-${process.pid}-`),
   );
@@ -183,6 +167,8 @@ export function prepareManagedNpmUpdate(
     bootstrapCtimeMs: base.ctimeMs,
     installArgs: [
       'install',
+      '--globalconfig',
+      npmGlobalConfigPath,
       '--prefix',
       stagingDir,
       '--global=false',
@@ -191,6 +177,47 @@ export function prepareManagedNpmUpdate(
       `${PACKAGE_NAME}@${version}`,
     ],
   };
+}
+
+export async function installManagedNpmUpdate(
+  version: string,
+  bootstrapPath = process.env['QWEN_CODE_CLI'],
+  updateRoot = process.env['QWEN_CODE_MANAGED_NPM_ROOT'] ??
+    path.join(Storage.getGlobalQwenDir(), 'updates', 'npm'),
+  spawnFn: typeof spawn = spawn,
+): Promise<void> {
+  const update = prepareManagedNpmUpdate(version, bootstrapPath, updateRoot);
+  const env = { ...process.env };
+  for (const key of ['NPM_CONFIG_USERCONFIG', 'npm_config_userconfig']) {
+    const configured = env[key];
+    if (configured) env[key] = path.resolve(configured);
+  }
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawnFn(
+        process.execPath,
+        [
+          getNpmCliPath(process.execPath, process.platform),
+          ...update.installArgs,
+        ],
+        {
+          cwd: update.stagingDir,
+          env,
+          stdio: 'ignore',
+          windowsHide: true,
+        },
+      );
+      child.once('error', reject);
+      child.once('close', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`npm install exited with code ${code}`));
+      });
+    });
+    await activateManagedNpmUpdate(update, version, bootstrapPath);
+  } catch (error) {
+    await cleanupManagedNpmUpdate(update);
+    throw error;
+  }
 }
 
 export async function activateManagedNpmUpdate(

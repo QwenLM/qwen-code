@@ -4,15 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   activateManagedNpmUpdate,
   cleanupManagedNpmUpdate,
+  installManagedNpmUpdate,
   prepareManagedNpmUpdate,
 } from './managed-npm-update.js';
+import { EventEmitter } from 'node:events';
+import type { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 const temporaryDirectories: string[] = [];
 
@@ -59,7 +63,12 @@ function writeBaseInstallation(root: string, version = '1.0.0'): string {
   return bootstrap;
 }
 
+beforeEach(() => {
+  vi.stubEnv('NPM_CONFIG_GLOBALCONFIG', '/global/npmrc');
+});
+
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const directory of temporaryDirectories.splice(0)) {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -76,6 +85,8 @@ describe('managed npm update', () => {
 
     expect(update.installArgs).toEqual([
       'install',
+      '--globalconfig',
+      '/global/npmrc',
       '--prefix',
       update.stagingDir,
       '--global=false',
@@ -86,22 +97,6 @@ describe('managed npm update', () => {
     expect(update.versionDir).toBe(
       path.join(update.launcherRoot, 'versions', '2.0.0'),
     );
-  });
-
-  it('reclaims staging owned by a terminated process', () => {
-    const root = makeTemporaryDirectory();
-    const updateRoot = path.join(root, 'updates');
-    const bootstrap = writeBaseInstallation(root);
-    const first = prepareManagedNpmUpdate('2.0.0', bootstrap, updateRoot);
-    const abandoned = path.join(
-      path.dirname(first.stagingDir),
-      '.2.0.0-999999999-abandoned',
-    );
-    fs.renameSync(first.stagingDir, abandoned);
-
-    prepareManagedNpmUpdate('2.0.1', bootstrap, updateRoot);
-
-    expect(fs.existsSync(abandoned)).toBe(false);
   });
 
   it('activates a verified install without changing running files', async () => {
@@ -131,6 +126,71 @@ describe('managed npm update', () => {
     });
     expect(fs.readFileSync(bootstrap, 'utf8')).toBe('global launcher');
     expect(fs.readFileSync(runningChunk, 'utf8')).toBe('old chunk');
+  });
+
+  it('installs and activates inside the managed worker', async () => {
+    const root = makeTemporaryDirectory();
+    const bootstrap = writeBaseInstallation(root);
+    const updateRoot = path.join(root, 'updates');
+    vi.stubEnv('NPM_CONFIG_USERCONFIG', 'config/npmrc');
+    const spawnFn = vi.fn(
+      (
+        _command: string,
+        args: readonly string[],
+        _options: object,
+      ): ReturnType<typeof spawn> => {
+        const prefix = args[args.indexOf('--prefix') + 1]!;
+        writeInstallation(prefix, '2.0.0');
+        const child = new EventEmitter();
+        queueMicrotask(() => child.emit('close', 0));
+        return child as ReturnType<typeof spawn>;
+      },
+    );
+
+    await installManagedNpmUpdate(
+      '2.0.0',
+      bootstrap,
+      updateRoot,
+      spawnFn as unknown as typeof spawn,
+    );
+
+    expect(spawnFn).toHaveBeenCalledWith(
+      process.execPath,
+      [
+        expect.stringMatching(/npm-cli\.js$/),
+        'install',
+        '--globalconfig',
+        '/global/npmrc',
+        '--prefix',
+        expect.any(String),
+        '--global=false',
+        '--no-save',
+        '--package-lock=false',
+        '@qwen-code/qwen-code@2.0.0',
+      ],
+      expect.objectContaining({
+        env: expect.objectContaining({
+          NPM_CONFIG_USERCONFIG: path.resolve('config/npmrc'),
+        }),
+        stdio: 'ignore',
+        windowsHide: true,
+      }),
+    );
+    expect(
+      JSON.parse(
+        fs.readFileSync(
+          path.join(
+            updateRoot,
+            createHash('sha256')
+              .update(fs.realpathSync(bootstrap))
+              .digest('hex')
+              .slice(0, 16),
+            'active.json',
+          ),
+          'utf8',
+        ),
+      ),
+    ).toMatchObject({ version: '2.0.0' });
   });
 
   it.each([

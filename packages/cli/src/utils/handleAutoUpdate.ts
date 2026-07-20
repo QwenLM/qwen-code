@@ -7,7 +7,6 @@
 import type { UpdateObject } from '../ui/utils/updateCheck.js';
 import type { LoadedSettings } from '../config/settings.js';
 import {
-  getNpmCliPath,
   getInstallationInfo,
   PackageManager,
   resolveUpdateCommand,
@@ -21,11 +20,6 @@ import { t } from '../i18n/index.js';
 import type { spawn } from 'node:child_process';
 import os from 'node:os';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
-import {
-  activateManagedNpmUpdate,
-  cleanupManagedNpmUpdate,
-  prepareManagedNpmUpdate,
-} from './managed-npm-update.js';
 
 const debugLogger = createDebugLogger('AUTO_UPDATE');
 
@@ -101,61 +95,48 @@ export function handleAutoUpdate(
   );
   const platform = os.platform();
   const isWindows = platform === 'win32';
-  let managedNpmUpdate: ReturnType<typeof prepareManagedNpmUpdate> | undefined;
-  try {
-    managedNpmUpdate =
-      installationInfo.packageManager === PackageManager.NPM
-        ? prepareManagedNpmUpdate(info.update.latest)
-        : undefined;
-  } catch (error) {
-    debugLogger.warn('Automatic update preparation failed:', error);
-    updateEventEmitter.emit('update-failed', {
-      message: t(UPDATE_FAILED_MESSAGE),
-    });
-    return Promise.resolve(false);
-  }
-  const command =
-    installationInfo.packageManager === PackageManager.NPM
-      ? process.execPath
-      : isWindows
-        ? 'cmd.exe'
-        : 'bash';
-  const commandArgs =
-    installationInfo.packageManager === PackageManager.NPM
-      ? [
-          getNpmCliPath(process.execPath, platform),
-          ...managedNpmUpdate!.installArgs,
-        ]
-      : isWindows
-        ? ['/c', updateCommand]
-        : ['-c', updateCommand];
+  const isManagedNpmUpdate =
+    installationInfo.packageManager === PackageManager.NPM;
+  const command = isManagedNpmUpdate
+    ? process.execPath
+    : isWindows
+      ? 'cmd.exe'
+      : 'bash';
+  const commandArgs = isManagedNpmUpdate
+    ? [process.argv[1]!]
+    : isWindows
+      ? ['/c', updateCommand]
+      : ['-c', updateCommand];
   const updateProcess = spawnFn(command, commandArgs, {
-    stdio: ['pipe', 'ignore', 'pipe'],
-    ...(managedNpmUpdate ? { cwd: managedNpmUpdate.stagingDir } : {}),
+    ...(isManagedNpmUpdate
+      ? {
+          detached: true,
+          env: {
+            ...process.env,
+            QWEN_CODE_MANAGED_NPM_UPDATE_VERSION: info.update.latest,
+          },
+          stdio: 'ignore' as const,
+          windowsHide: true,
+        }
+      : { stdio: ['pipe', 'ignore', 'pipe'] as const }),
   });
   let errorOutput = '';
-  updateProcess.stderr.on('data', (data) => {
+  updateProcess.stderr?.on('data', (data) => {
     errorOutput += data.toString();
   });
 
   return new Promise<boolean>((resolve) => {
     let settled = false;
-    const finish = async (error?: unknown) => {
+    const finish = (error?: unknown) => {
       if (settled) return;
       settled = true;
       try {
         if (error) throw error;
-        if (managedNpmUpdate) {
-          await activateManagedNpmUpdate(managedNpmUpdate, info.update.latest);
-        }
         updateEventEmitter.emit('update-success', {
           message: t(UPDATE_SUCCESS_MESSAGE),
         });
         resolve(true);
       } catch (error) {
-        if (managedNpmUpdate) {
-          await cleanupManagedNpmUpdate(managedNpmUpdate);
-        }
         debugLogger.warn('Automatic update failed:', error);
         updateEventEmitter.emit('update-failed', {
           message: t(UPDATE_FAILED_MESSAGE),
@@ -164,7 +145,7 @@ export function handleAutoUpdate(
       }
     };
     updateProcess.once('close', (code) => {
-      void finish(
+      finish(
         code === 0
           ? undefined
           : new Error(
@@ -173,7 +154,7 @@ export function handleAutoUpdate(
       );
     });
     updateProcess.once('error', (error) => {
-      void finish(error);
+      finish(error);
     });
   });
 }

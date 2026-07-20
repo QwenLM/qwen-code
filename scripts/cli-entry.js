@@ -79,21 +79,25 @@ function resolveQwenHome() {
   if (!configured) return join(homedir() || tmpdir(), '.qwen');
   if (configured === '~') return homedir();
   if (configured.startsWith('~/') || configured.startsWith('~\\')) {
-    return resolve(homedir(), configured.slice(2));
+    return join(
+      homedir(),
+      ...configured
+        .slice(2)
+        .split(/[/\\]+/)
+        .filter(Boolean),
+    );
   }
   return resolve(configured);
 }
 
 function preResolveQwenHome() {
-  if (process.env['QWEN_HOME']) return;
-  const home = homedir();
-  if (!home) return;
+  if (Object.hasOwn(process.env, 'QWEN_HOME')) return;
+  const home = homedir() || tmpdir();
   for (const candidate of [join(home, '.qwen', '.env'), join(home, '.env')]) {
     try {
-      const source = readFileSync(candidate, 'utf8').replace(
-        /^(\s*(?:export\s+)?QWEN_HOME)\s*:\s*/gm,
-        '$1=',
-      );
+      const source = readFileSync(candidate, 'utf8')
+        .replace(/^\uFEFF/, '')
+        .replace(/^(\s*(?:export\s+)?QWEN_HOME):[^\S\r\n]+/gm, '$1=');
       const configured = parseEnv(source)['QWEN_HOME'];
       if (configured) {
         process.env['QWEN_HOME'] = configured;
@@ -108,39 +112,70 @@ function preResolveQwenHome() {
 delete process.env['QWEN_CODE_MANAGED_NPM_UPDATE'];
 preResolveQwenHome();
 
-function getManagedNpmInstallation() {
+function getManagedNpmPin() {
   try {
-    const updateRoot = join(resolveQwenHome(), 'updates', 'npm');
-    const id = createHash('sha256')
-      .update(currentEntryPath)
-      .digest('hex')
-      .slice(0, 16);
-    const launcherRoot = join(updateRoot, id);
-    const active = JSON.parse(
-      readFileSync(join(launcherRoot, 'active.json'), 'utf8'),
-    );
-    const basePackageJsonPath = [
-      join(__dirname, 'package.json'),
-      join(__dirname, '..', 'package.json'),
-    ].find((candidate) => existsSync(candidate));
-    if (!basePackageJsonPath) return undefined;
-    const basePackage = JSON.parse(readFileSync(basePackageJsonPath, 'utf8'));
+    const pin = JSON.parse(process.env['QWEN_CODE_MANAGED_NPM_PIN'] ?? '');
+    if (pin.bootstrap !== currentEntryPath) return undefined;
     if (
-      typeof active.version !== 'string' ||
-      !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(
-        active.version,
-      ) ||
-      typeof active.bootstrap !== 'string' ||
-      realpathSync(active.bootstrap) !== currentEntryPath ||
-      active.baseVersion !== basePackage.version ||
-      active.bootstrapCtimeMs !== statSync(currentEntryPath).ctimeMs
+      typeof pin.updateRoot !== 'string' ||
+      resolve(pin.updateRoot) !== pin.updateRoot
     ) {
       return undefined;
+    }
+    if (pin.version === null) {
+      return { version: null, updateRoot: pin.updateRoot };
+    }
+    return typeof pin.version === 'string' &&
+      /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(
+        pin.version,
+      )
+      ? { version: pin.version, updateRoot: pin.updateRoot }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const managedNpmPin = getManagedNpmPin();
+const managedNpmUpdateRoot =
+  managedNpmPin?.updateRoot ?? join(resolveQwenHome(), 'updates', 'npm');
+
+function getManagedNpmInstallation() {
+  try {
+    if (managedNpmPin?.version === null) return undefined;
+    const launcherRoot = join(
+      managedNpmUpdateRoot,
+      createHash('sha256').update(currentEntryPath).digest('hex').slice(0, 16),
+    );
+    let version = managedNpmPin?.version;
+    if (version === undefined) {
+      const active = JSON.parse(
+        readFileSync(join(launcherRoot, 'active.json'), 'utf8'),
+      );
+      const basePackageJsonPath = [
+        join(__dirname, 'package.json'),
+        join(__dirname, '..', 'package.json'),
+      ].find((candidate) => existsSync(candidate));
+      if (!basePackageJsonPath) return undefined;
+      const basePackage = JSON.parse(readFileSync(basePackageJsonPath, 'utf8'));
+      if (
+        typeof active.version !== 'string' ||
+        !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(
+          active.version,
+        ) ||
+        typeof active.bootstrap !== 'string' ||
+        realpathSync(active.bootstrap) !== currentEntryPath ||
+        active.baseVersion !== basePackage.version ||
+        active.bootstrapCtimeMs !== statSync(currentEntryPath).ctimeMs
+      ) {
+        return undefined;
+      }
+      version = active.version;
     }
     const packageRoot = join(
       launcherRoot,
       'versions',
-      active.version,
+      version,
       'node_modules',
       '@qwen-code',
       'qwen-code',
@@ -150,13 +185,13 @@ function getManagedNpmInstallation() {
     const cliPath = join(packageRoot, 'cli.js');
     if (
       pkg.name !== '@qwen-code/qwen-code' ||
-      pkg.version !== active.version ||
+      pkg.version !== version ||
       !existsSync(cliPath)
     ) {
       return undefined;
     }
     process.env['QWEN_CODE_MANAGED_NPM_UPDATE'] = 'true';
-    return { cliPath, packageJsonPath };
+    return { cliPath, packageJsonPath, version };
   } catch {
     return undefined;
   }
@@ -175,9 +210,9 @@ function getManagedNpmInstallation() {
 // Assignment, not `||=`: an inherited value is another session's CLI — an outer
 // qwen shelling out to this one — and honouring it re-creates the exact skew above,
 // one level up. Each entry stamps itself, so nested sessions each call their own
-// build. Nothing downstream overwrites this: the spawn below runs the bundled CLI,
-// which never re-executes this wrapper, and the post-update relaunch re-enters
-// through the launcher's own wrapper — which stamps the updated entry, as it must.
+// build. The managed-version pin keeps nested calls on the running session's build
+// even if a background update changes the active pointer. A post-update relaunch
+// clears that pin so the launcher's wrapper selects the newly active build.
 //
 // One exception, and it points the SAME way: the standalone package launches this
 // file through a shim (`bin/qwen`) that selects the BUNDLED Node — the host may
@@ -192,12 +227,23 @@ function getManagedNpmInstallation() {
 // wearing this one's stamp.
 const standaloneShim = process.env['QWEN_CODE_LAUNCHER_PATH'];
 delete process.env['QWEN_CODE_LAUNCHER_PATH'];
-process.env['QWEN_CODE_CLI'] =
-  standaloneShim && existsSync(standaloneShim)
-    ? standaloneShim
-    : fileURLToPath(import.meta.url);
 
 const managedNpmInstallation = getManagedNpmInstallation();
+const validStandaloneShim =
+  standaloneShim && existsSync(standaloneShim) ? standaloneShim : undefined;
+process.env['QWEN_CODE_CLI'] =
+  validStandaloneShim ?? fileURLToPath(import.meta.url);
+if (validStandaloneShim) {
+  delete process.env['QWEN_CODE_MANAGED_NPM_PIN'];
+  delete process.env['QWEN_CODE_MANAGED_NPM_ROOT'];
+} else {
+  process.env['QWEN_CODE_MANAGED_NPM_ROOT'] = managedNpmUpdateRoot;
+  process.env['QWEN_CODE_MANAGED_NPM_PIN'] = JSON.stringify({
+    bootstrap: currentEntryPath,
+    version: managedNpmInstallation?.version ?? null,
+    updateRoot: managedNpmUpdateRoot,
+  });
+}
 const cliPathCandidates = [
   managedNpmInstallation?.cliPath,
   join(__dirname, 'cli.js'),
@@ -290,7 +336,7 @@ if (isInProcessFastPath()) {
   } else {
     if (!launcher) {
       process.stderr.write(
-        'Update installed. Restart Qwen Code to use the new version.\n',
+        'Update successful! The new version will be used on your next run.\n',
       );
       process.exit(0);
     }
@@ -299,6 +345,7 @@ if (isInProcessFastPath()) {
       QWEN_CODE_RELAUNCH_ARGS: JSON.stringify(cliArgs),
       QWEN_CODE_SKIP_UPDATE_CHECK_ONCE: 'true',
     };
+    delete relaunchEnv['QWEN_CODE_MANAGED_NPM_PIN'];
     const relaunchResult =
       process.platform === 'win32' && launcher.endsWith('.cmd')
         ? spawnSync(

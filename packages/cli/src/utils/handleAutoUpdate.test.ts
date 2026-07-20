@@ -16,10 +16,6 @@ import { performStandaloneUpdate } from './standalone-update.js';
 import { MessageType } from '../ui/types.js';
 import os from 'node:os';
 
-const mockPrepareManagedNpmUpdate = vi.hoisted(() => vi.fn());
-const mockActivateManagedNpmUpdate = vi.hoisted(() => vi.fn());
-const mockCleanupManagedNpmUpdate = vi.hoisted(() => vi.fn());
-
 vi.mock('./installationInfo.js', async () => {
   const actual = await vi.importActual('./installationInfo.js');
   return {
@@ -30,15 +26,6 @@ vi.mock('./installationInfo.js', async () => {
 
 vi.mock('./standalone-update.js', () => ({
   performStandaloneUpdate: vi.fn(),
-}));
-
-vi.mock('./managed-npm-update.js', () => ({
-  prepareManagedNpmUpdate: (version: string) =>
-    mockPrepareManagedNpmUpdate(version),
-  activateManagedNpmUpdate: (...args: unknown[]) =>
-    mockActivateManagedNpmUpdate(...args),
-  cleanupManagedNpmUpdate: (...args: unknown[]) =>
-    mockCleanupManagedNpmUpdate(...args),
 }));
 
 vi.mock('./updateEventEmitter.js', async () => {
@@ -99,19 +86,6 @@ describe('handleAutoUpdate', () => {
     mockSpawn.mockReturnValue(
       mockChildProcess as unknown as ReturnType<typeof mockSpawn>,
     );
-    mockPrepareManagedNpmUpdate.mockImplementation((version: string) => ({
-      stagingDir: `/tmp/${version}`,
-      versionDir: `/updates/${version}`,
-      installArgs: [
-        'install',
-        '--prefix',
-        `/tmp/${version}`,
-        '--global=false',
-        '--no-save',
-        '--package-lock=false',
-        `@qwen-code/qwen-code@${version}`,
-      ],
-    }));
   });
 
   afterEach(() => {
@@ -237,25 +211,6 @@ describe('handleAutoUpdate', () => {
     });
   });
 
-  it('reports managed update preparation failures', async () => {
-    mockGetInstallationInfo.mockReturnValue({
-      updateCommand: 'npm i -g @qwen-code/qwen-code@latest',
-      isGlobal: true,
-      packageManager: PackageManager.NPM,
-    });
-    mockPrepareManagedNpmUpdate.mockImplementation(() => {
-      throw new Error('update directory is not writable');
-    });
-
-    await expect(
-      handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn),
-    ).resolves.toBe(false);
-    expect(mockSpawn).not.toHaveBeenCalled();
-    expect(emitSpy).toHaveBeenCalledWith('update-failed', {
-      message: 'Automatic update failed. Please try updating manually.',
-    });
-  });
-
   it('should use the "@nightly" tag for nightly updates', async () => {
     mockUpdateInfo.update.latest = '2.0.0-nightly';
     mockGetInstallationInfo.mockReturnValue({
@@ -269,19 +224,14 @@ describe('handleAutoUpdate', () => {
 
     expect(mockSpawn).toHaveBeenCalledWith(
       process.execPath,
-      [
-        expect.stringMatching(/npm-cli\.js$/),
-        'install',
-        '--prefix',
-        '/tmp/2.0.0-nightly',
-        '--global=false',
-        '--no-save',
-        '--package-lock=false',
-        '@qwen-code/qwen-code@2.0.0-nightly',
-      ],
+      [process.argv[1]],
       {
-        stdio: ['pipe', 'ignore', 'pipe'],
-        cwd: '/tmp/2.0.0-nightly',
+        detached: true,
+        env: expect.objectContaining({
+          QWEN_CODE_MANAGED_NPM_UPDATE_VERSION: '2.0.0-nightly',
+        }),
+        stdio: 'ignore',
+        windowsHide: true,
       },
     );
   });
@@ -298,19 +248,14 @@ describe('handleAutoUpdate', () => {
 
     expect(mockSpawn).toHaveBeenCalledWith(
       process.execPath,
-      [
-        expect.stringMatching(/npm-cli\.js$/),
-        'install',
-        '--prefix',
-        '/tmp/2.0.0',
-        '--global=false',
-        '--no-save',
-        '--package-lock=false',
-        '@qwen-code/qwen-code@2.0.0',
-      ],
+      [process.argv[1]],
       {
-        stdio: ['pipe', 'ignore', 'pipe'],
-        cwd: '/tmp/2.0.0',
+        detached: true,
+        env: expect.objectContaining({
+          QWEN_CODE_MANAGED_NPM_UPDATE_VERSION: '2.0.0',
+        }),
+        stdio: 'ignore',
+        windowsHide: true,
       },
     );
   });
@@ -354,34 +299,6 @@ describe('handleAutoUpdate', () => {
     expect(emitSpy).toHaveBeenCalledWith('update-success', {
       message:
         'Update successful! The new version will be used on your next run.',
-    });
-    expect(mockActivateManagedNpmUpdate).toHaveBeenCalledWith(
-      expect.objectContaining({ versionDir: '/updates/2.0.0' }),
-      '2.0.0',
-    );
-  });
-
-  it('reports activation failure after npm exits successfully', async () => {
-    mockGetInstallationInfo.mockReturnValue({
-      updateCommand: 'npm i -g @qwen-code/qwen-code@latest',
-      isGlobal: true,
-      packageManager: PackageManager.NPM,
-    });
-    mockActivateManagedNpmUpdate.mockImplementation(() => {
-      throw new Error('pointer write failed');
-    });
-
-    const update = handleAutoUpdate(
-      mockUpdateInfo,
-      mockSettings,
-      '/root',
-      mockSpawn,
-    )!;
-    mockChildProcess.emit('close', 0);
-
-    await expect(update).resolves.toBe(false);
-    expect(emitSpy).toHaveBeenCalledWith('update-failed', {
-      message: 'Automatic update failed. Please try updating manually.',
     });
   });
 });

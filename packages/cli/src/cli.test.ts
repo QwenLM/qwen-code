@@ -47,6 +47,7 @@ const mocks = vi.hoisted(() => ({
   mcpListHandler: vi.fn(),
   mcpAddHandler: vi.fn(),
   getCliVersion: vi.fn(),
+  installManagedNpmUpdate: vi.fn(),
 }));
 
 vi.mock('./gemini.js', () => ({
@@ -72,6 +73,10 @@ vi.mock('./utils/cpuProfiler.js', () => ({
 
 vi.mock('./utils/version.js', () => ({
   getCliVersion: mocks.getCliVersion,
+}));
+
+vi.mock('./utils/managed-npm-update.js', () => ({
+  installManagedNpmUpdate: mocks.installManagedNpmUpdate,
 }));
 
 vi.mock('./commands/mcp.js', () => ({
@@ -138,6 +143,8 @@ describe('resolveBootstrapRoute', () => {
 describe('runCliEntry', () => {
   const savedEnv = {
     CLI_VERSION: process.env['CLI_VERSION'],
+    QWEN_CODE_MANAGED_NPM_UPDATE_VERSION:
+      process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'],
   };
 
   let stdout: string[];
@@ -170,6 +177,12 @@ describe('runCliEntry', () => {
     } else {
       process.env['CLI_VERSION'] = savedEnv.CLI_VERSION;
     }
+    if (savedEnv.QWEN_CODE_MANAGED_NPM_UPDATE_VERSION === undefined) {
+      delete process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'];
+    } else {
+      process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'] =
+        savedEnv.QWEN_CODE_MANAGED_NPM_UPDATE_VERSION;
+    }
     vi.restoreAllMocks();
   });
 
@@ -181,6 +194,16 @@ describe('runCliEntry', () => {
     expect(mocks.tryRunServeFastPath).not.toHaveBeenCalled();
     expect(mocks.initStartupProfiler).not.toHaveBeenCalled();
     expect(mocks.initCpuProfiler).not.toHaveBeenCalled();
+  });
+
+  it('runs a managed update worker without starting the CLI', async () => {
+    process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'] = '2.0.0';
+
+    await runCliEntry([]);
+
+    expect(mocks.installManagedNpmUpdate).toHaveBeenCalledWith('2.0.0');
+    expect(process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION']).toBeUndefined();
+    expect(mocks.main).not.toHaveBeenCalled();
   });
 
   it('falls back to getCliVersion when CLI_VERSION is unset', async () => {
@@ -507,11 +530,11 @@ describe('bootstrap import boundaries', () => {
     expect(output).toBe(`${expectedVersion}\n`);
   });
 
-  it('resolves managed updates from home env and an empty home', () => {
+  it('resolves and pins managed updates from the configured home', () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-managed-npm-'));
     const entryDir = path.join(tempDir, 'bootstrap');
     const entryPath = path.join(entryDir, 'cli-entry.mjs');
-    const qwenHome = path.join(tempDir, 'custom-home');
+    const qwenHome = path.join(tempDir, 'custom', 'qwen');
     try {
       mkdirSync(entryDir, { recursive: true });
       copyFileSync('../../scripts/cli-entry.js', entryPath);
@@ -531,7 +554,7 @@ describe('bootstrap import boundaries', () => {
       mkdirSync(packageRoot, { recursive: true });
       writeFileSync(
         path.join(entryDir, 'cli.js'),
-        "process.stdout.write('old version\\n');\n",
+        "process.stdout.write(JSON.stringify({ build: 'base', pin: process.env.QWEN_CODE_MANAGED_NPM_PIN }));\n",
       );
       writeFileSync(
         path.join(entryDir, 'package.json'),
@@ -549,24 +572,15 @@ describe('bootstrap import boundaries', () => {
       );
       writeFileSync(
         path.join(packageRoot, 'cli.js'),
-        'process.stdout.write(JSON.stringify({ managed: process.env.QWEN_CODE_MANAGED_NPM_UPDATE, launcher: process.env.QWEN_CODE_CLI, args: process.argv.slice(2) }));\n',
+        "process.stdout.write(JSON.stringify({ build: 'managed-2', managed: process.env.QWEN_CODE_MANAGED_NPM_UPDATE, launcher: process.env.QWEN_CODE_CLI, pin: process.env.QWEN_CODE_MANAGED_NPM_PIN, args: process.argv.slice(2) }));\n",
       );
       mkdirSync(launcherRoot, { recursive: true });
       const bootstrapStat = statSync(entryPath);
-      writeFileSync(
-        path.join(launcherRoot, 'active.json'),
-        JSON.stringify({
-          version: '2.0.0',
-          bootstrap: realpathSync(entryPath),
-          baseVersion: '1.0.0',
-          bootstrapCtimeMs: bootstrapStat.ctimeMs,
-        }),
-      );
 
       mkdirSync(path.join(tempDir, '.qwen'), { recursive: true });
       writeFileSync(
         path.join(tempDir, '.qwen', '.env'),
-        `QWEN_HOME: ${JSON.stringify(qwenHome)}\n`,
+        '\uFEFFQWEN_HOME: ~\\custom\\qwen\n',
       );
       const childEnv: NodeJS.ProcessEnv = {
         ...process.env,
@@ -577,6 +591,72 @@ describe('bootstrap import boundaries', () => {
         TMP: tempDir,
       };
       delete childEnv['QWEN_HOME'];
+      delete childEnv['QWEN_CODE_MANAGED_NPM_PIN'];
+      const baseSession = JSON.parse(
+        execFileSync(process.execPath, [entryPath, '--prompt', 'hello'], {
+          encoding: 'utf8',
+          env: childEnv,
+        }),
+      ) as { build: string; pin: string };
+      expect(baseSession.build).toBe('base');
+
+      writeFileSync(
+        path.join(launcherRoot, 'active.json'),
+        JSON.stringify({
+          version: '2.0.0',
+          bootstrap: realpathSync(entryPath),
+          baseVersion: '1.0.0',
+          bootstrapCtimeMs: bootstrapStat.ctimeMs,
+        }),
+      );
+      expect(
+        JSON.parse(
+          execFileSync(process.execPath, [entryPath, '--prompt', 'hello'], {
+            encoding: 'utf8',
+            env: {
+              ...childEnv,
+              QWEN_CODE_MANAGED_NPM_PIN: baseSession.pin,
+            },
+          }),
+        ),
+      ).toMatchObject({ build: 'base' });
+      expect(
+        JSON.parse(
+          execFileSync(process.execPath, [entryPath, '--prompt', 'hello'], {
+            encoding: 'utf8',
+            env: { ...childEnv, QWEN_HOME: '' },
+          }),
+        ),
+      ).toMatchObject({ build: 'base' });
+
+      writeFileSync(
+        path.join(tempDir, '.qwen', '.env'),
+        `QWEN_HOME:${qwenHome}\n`,
+      );
+      expect(
+        JSON.parse(
+          execFileSync(process.execPath, [entryPath, '--prompt', 'hello'], {
+            encoding: 'utf8',
+            env: childEnv,
+          }),
+        ),
+      ).toMatchObject({ build: 'base' });
+      writeFileSync(
+        path.join(tempDir, '.qwen', '.env'),
+        `QWEN_HOME:   \nOTHER=${qwenHome}\n`,
+      );
+      expect(
+        JSON.parse(
+          execFileSync(process.execPath, [entryPath, '--prompt', 'hello'], {
+            encoding: 'utf8',
+            env: childEnv,
+          }),
+        ),
+      ).toMatchObject({ build: 'base' });
+      writeFileSync(
+        path.join(tempDir, '.qwen', '.env'),
+        '\uFEFFQWEN_HOME: ~\\custom\\qwen\n',
+      );
       const output = execFileSync(
         process.execPath,
         [entryPath, '--prompt', 'hello'],
@@ -586,11 +666,49 @@ describe('bootstrap import boundaries', () => {
         },
       );
 
-      expect(JSON.parse(output)).toEqual({
+      const managedSession = JSON.parse(output) as {
+        build: string;
+        managed: string;
+        launcher: string;
+        pin: string;
+        args: string[];
+      };
+      expect(managedSession).toMatchObject({
+        build: 'managed-2',
         managed: 'true',
         launcher: realpathSync(entryPath),
         args: ['--prompt', 'hello'],
       });
+      writeFileSync(
+        path.join(launcherRoot, 'active.json'),
+        JSON.stringify({
+          version: '3.0.0',
+          bootstrap: realpathSync(entryPath),
+          baseVersion: '1.0.0',
+          bootstrapCtimeMs: bootstrapStat.ctimeMs,
+        }),
+      );
+      expect(
+        JSON.parse(
+          execFileSync(process.execPath, [entryPath, '--prompt', 'hello'], {
+            encoding: 'utf8',
+            env: {
+              ...childEnv,
+              QWEN_HOME: 'different-relative-home',
+              QWEN_CODE_MANAGED_NPM_PIN: managedSession.pin,
+            },
+          }),
+        ),
+      ).toMatchObject({ build: 'managed-2' });
+      writeFileSync(
+        path.join(launcherRoot, 'active.json'),
+        JSON.stringify({
+          version: '2.0.0',
+          bootstrap: realpathSync(entryPath),
+          baseVersion: '1.0.0',
+          bootstrapCtimeMs: bootstrapStat.ctimeMs,
+        }),
+      );
 
       const emptyHomeRoot = path.join(tempDir, 'empty-home');
       const emptyQwenHome = path.join(emptyHomeRoot, '.qwen');
@@ -616,7 +734,8 @@ describe('bootstrap import boundaries', () => {
             env: emptyHomeEnv,
           }),
         ),
-      ).toEqual({
+      ).toMatchObject({
+        build: 'managed-2',
         managed: 'true',
         launcher: realpathSync(entryPath),
         args: ['--prompt', 'hello'],
@@ -628,11 +747,13 @@ describe('bootstrap import boundaries', () => {
       utimesSync(entryPath, bootstrapStat.atime, bootstrapStat.mtime);
       expect(statSync(entryPath).ctimeMs).not.toBe(bootstrapStat.ctimeMs);
       expect(
-        execFileSync(process.execPath, [entryPath, '--prompt', 'hello'], {
-          encoding: 'utf8',
-          env: emptyHomeEnv,
-        }),
-      ).toBe('old version\n');
+        JSON.parse(
+          execFileSync(process.execPath, [entryPath, '--prompt', 'hello'], {
+            encoding: 'utf8',
+            env: emptyHomeEnv,
+          }),
+        ),
+      ).toMatchObject({ build: 'base' });
 
       writeFileSync(
         path.join(entryDir, 'package.json'),
@@ -642,18 +763,20 @@ describe('bootstrap import boundaries', () => {
         }),
       );
       expect(
-        execFileSync(process.execPath, [entryPath, '--prompt', 'hello'], {
-          encoding: 'utf8',
-          env: {
-            ...emptyHomeEnv,
-            QWEN_CODE_MANAGED_NPM_UPDATE: 'true',
-          },
-        }),
-      ).toBe('old version\n');
+        JSON.parse(
+          execFileSync(process.execPath, [entryPath, '--prompt', 'hello'], {
+            encoding: 'utf8',
+            env: {
+              ...emptyHomeEnv,
+              QWEN_CODE_MANAGED_NPM_UPDATE: 'true',
+            },
+          }),
+        ),
+      ).toMatchObject({ build: 'base' });
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
-  });
+  }, 60_000);
 
   it('falls through to cli.js when wrapper package.json lookup fails', () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-cli-entry-'));
