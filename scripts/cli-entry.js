@@ -60,13 +60,216 @@ if (isTopLevelVersion && process.env['CLI_VERSION']) {
   process.exit(0);
 }
 
-const { existsSync, realpathSync } = await import('node:fs');
+const {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} = await import('node:fs');
+const { createHash, randomUUID } = await import('node:crypto');
+const { homedir } = await import('node:os');
 const { fileURLToPath, pathToFileURL } = await import('node:url');
 const { delimiter, dirname, join, parse, resolve, sep } = await import(
   'node:path'
 );
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const currentEntryPath = realpathSync(fileURLToPath(import.meta.url));
+const lockWaiter = new Int32Array(new SharedArrayBuffer(4));
+
+function resolveQwenHome() {
+  const configured = process.env['QWEN_HOME'];
+  if (!configured) return join(homedir(), '.qwen');
+  if (configured === '~') return homedir();
+  if (configured.startsWith('~/') || configured.startsWith('~\\')) {
+    return resolve(homedir(), configured.slice(2));
+  }
+  return resolve(configured);
+}
+
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === 'EPERM';
+  }
+}
+
+function acquireActivationLock(lockPath) {
+  const deadline = Date.now() + 1000;
+  while (true) {
+    const token = randomUUID();
+    try {
+      mkdirSync(lockPath);
+      try {
+        writeFileSync(
+          join(lockPath, 'owner.json'),
+          JSON.stringify({ pid: process.pid, token }),
+        );
+      } catch (error) {
+        rmSync(lockPath, { recursive: true, force: true });
+        throw error;
+      }
+      return token;
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+      let lockStats;
+      try {
+        lockStats = statSync(lockPath);
+      } catch {
+        continue;
+      }
+      let owner = Number.NaN;
+      let ownerToken;
+      try {
+        const metadata = JSON.parse(
+          readFileSync(join(lockPath, 'owner.json'), 'utf8'),
+        );
+        owner = typeof metadata.pid === 'number' ? metadata.pid : Number.NaN;
+        ownerToken =
+          typeof metadata.token === 'string' ? metadata.token : undefined;
+      } catch {
+        // The lock owner may still be creating its metadata.
+      }
+      const hasOwner = Number.isInteger(owner) && owner > 0;
+      const lockAge = Date.now() - lockStats.mtimeMs;
+      if (
+        (!hasOwner && lockAge >= 30000) ||
+        (hasOwner && !processIsAlive(owner)) ||
+        lockAge >= 300000
+      ) {
+        const staleIdentity =
+          ownerToken ??
+          `${lockStats.dev}-${lockStats.ino}-${lockStats.mtimeMs}`;
+        const staleId = createHash('sha256')
+          .update(staleIdentity)
+          .digest('hex')
+          .slice(0, 16);
+        const stalePath = `${lockPath}.stale-${staleId}`;
+        try {
+          renameSync(lockPath, stalePath);
+        } catch (error) {
+          if (
+            error?.code !== 'ENOENT' &&
+            error?.code !== 'EEXIST' &&
+            error?.code !== 'ENOTEMPTY' &&
+            !(
+              (error?.code === 'EPERM' || error?.code === 'EACCES') &&
+              existsSync(stalePath)
+            )
+          ) {
+            throw error;
+          }
+        }
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error('Timed out waiting for the npm update lock');
+      }
+      Atomics.wait(lockWaiter, 0, 0, 25);
+    }
+  }
+}
+
+function releaseActivationLock(lockPath, token) {
+  try {
+    const owner = JSON.parse(
+      readFileSync(join(lockPath, 'owner.json'), 'utf8'),
+    );
+    if (owner.token !== token) return;
+    const releasedPath = `${lockPath}.release-${token}`;
+    renameSync(lockPath, releasedPath);
+    rmSync(releasedPath, { recursive: true, force: true });
+  } catch {
+    // A missing or replaced lock is no longer ours to release.
+  }
+}
+
+function matchesFingerprint(actual, expected) {
+  return (
+    expected &&
+    actual.dev === expected.dev &&
+    actual.ino === expected.ino &&
+    actual.size === expected.size &&
+    actual.mtimeMs === expected.mtimeMs
+  );
+}
+
+delete process.env['QWEN_CODE_MANAGED_NPM_UPDATE'];
+
+function getManagedNpmInstallation() {
+  let lockPath;
+  let lockToken;
+  try {
+    const updateRoot = join(resolveQwenHome(), 'updates', 'npm');
+    const id = createHash('sha256')
+      .update(currentEntryPath)
+      .digest('hex')
+      .slice(0, 16);
+    const launcherRoot = join(updateRoot, id);
+    lockPath = join(launcherRoot, 'activation.lock');
+    lockToken = acquireActivationLock(lockPath);
+    const active = JSON.parse(
+      readFileSync(join(launcherRoot, 'active.json'), 'utf8'),
+    );
+    const basePackageJsonPath = [
+      join(__dirname, 'package.json'),
+      join(__dirname, '..', 'package.json'),
+    ].find((candidate) => existsSync(candidate));
+    if (!basePackageJsonPath) return undefined;
+    const basePackage = JSON.parse(readFileSync(basePackageJsonPath, 'utf8'));
+    if (
+      typeof active.version !== 'string' ||
+      !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(
+        active.version,
+      ) ||
+      typeof active.bootstrap !== 'string' ||
+      realpathSync(active.bootstrap) !== currentEntryPath ||
+      active.baseVersion !== basePackage.version ||
+      !matchesFingerprint(
+        statSync(currentEntryPath),
+        active.bootstrapFingerprint,
+      )
+    ) {
+      return undefined;
+    }
+    const packageRoot = join(
+      launcherRoot,
+      'versions',
+      active.version,
+      'node_modules',
+      '@qwen-code',
+      'qwen-code',
+    );
+    const packageJsonPath = join(packageRoot, 'package.json');
+    const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
+    const cliPath = join(packageRoot, 'dist', 'cli.js');
+    if (
+      pkg.name !== '@qwen-code/qwen-code' ||
+      pkg.version !== active.version ||
+      !existsSync(cliPath)
+    ) {
+      return undefined;
+    }
+    const leasesDir = join(launcherRoot, 'versions', active.version, '.leases');
+    mkdirSync(leasesDir, { recursive: true });
+    const leasePath = join(leasesDir, String(process.pid));
+    writeFileSync(leasePath, '');
+    process.env['QWEN_CODE_MANAGED_NPM_UPDATE'] = 'true';
+    return { cliPath, packageJsonPath, leasePath };
+  } catch {
+    return undefined;
+  } finally {
+    if (lockToken) {
+      releaseActivationLock(lockPath, lockToken);
+    }
+  }
+}
 
 // The entry a subprocess should call to reach THIS build.
 //
@@ -103,14 +306,22 @@ process.env['QWEN_CODE_CLI'] =
     ? standaloneShim
     : fileURLToPath(import.meta.url);
 
+const managedNpmInstallation = getManagedNpmInstallation();
+if (managedNpmInstallation?.leasePath) {
+  process.once('exit', () => {
+    rmSync(managedNpmInstallation.leasePath, { force: true });
+  });
+}
 const cliPathCandidates = [
+  managedNpmInstallation?.cliPath,
   join(__dirname, 'cli.js'),
   join(__dirname, '..', 'dist', 'cli.js'),
-];
+].filter(Boolean);
 const packageJsonPathCandidates = [
+  managedNpmInstallation?.packageJsonPath,
   join(__dirname, 'package.json'),
   join(__dirname, '..', 'package.json'),
-];
+].filter(Boolean);
 const cliPath =
   cliPathCandidates.find((candidate) => existsSync(candidate)) ??
   cliPathCandidates[0];

@@ -12,10 +12,13 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { FatalError } from '@qwen-code/qwen-code-core';
@@ -500,6 +503,124 @@ describe('bootstrap import boundaries', () => {
     );
 
     expect(output).toBe(`${expectedVersion}\n`);
+  });
+
+  it('launches the active managed npm version without replacing the running package', () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-managed-npm-'));
+    const entryDir = path.join(tempDir, 'bootstrap');
+    const entryPath = path.join(entryDir, 'cli-entry.mjs');
+    const qwenHome = path.join(tempDir, 'home');
+    try {
+      mkdirSync(entryDir, { recursive: true });
+      copyFileSync('../../scripts/cli-entry.js', entryPath);
+      const bootstrapId = createHash('sha256')
+        .update(realpathSync(entryPath))
+        .digest('hex')
+        .slice(0, 16);
+      const launcherRoot = path.join(qwenHome, 'updates', 'npm', bootstrapId);
+      const packageRoot = path.join(
+        launcherRoot,
+        'versions',
+        '2.0.0',
+        'node_modules',
+        '@qwen-code',
+        'qwen-code',
+      );
+      mkdirSync(path.join(packageRoot, 'dist'), { recursive: true });
+      writeFileSync(
+        path.join(entryDir, 'cli.js'),
+        "process.stdout.write('old version\\n');\n",
+      );
+      writeFileSync(
+        path.join(entryDir, 'package.json'),
+        JSON.stringify({
+          name: '@qwen-code/qwen-code',
+          version: '1.0.0',
+        }),
+      );
+      writeFileSync(
+        path.join(packageRoot, 'package.json'),
+        JSON.stringify({
+          name: '@qwen-code/qwen-code',
+          version: '2.0.0',
+        }),
+      );
+      writeFileSync(
+        path.join(packageRoot, 'dist', 'cli.js'),
+        'process.stdout.write(JSON.stringify({ managed: process.env.QWEN_CODE_MANAGED_NPM_UPDATE, launcher: process.env.QWEN_CODE_CLI, args: process.argv.slice(2) }));\n',
+      );
+      mkdirSync(launcherRoot, { recursive: true });
+      const { dev, ino, size, mtimeMs } = statSync(entryPath);
+      writeFileSync(
+        path.join(launcherRoot, 'active.json'),
+        JSON.stringify({
+          version: '2.0.0',
+          bootstrap: realpathSync(entryPath),
+          baseVersion: '1.0.0',
+          bootstrapFingerprint: { dev, ino, size, mtimeMs },
+        }),
+      );
+
+      const output = execFileSync(
+        process.execPath,
+        [entryPath, '--prompt', 'hello'],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, QWEN_HOME: qwenHome },
+        },
+      );
+
+      expect(JSON.parse(output)).toEqual({
+        managed: 'true',
+        launcher: realpathSync(entryPath),
+        args: ['--prompt', 'hello'],
+      });
+
+      writeFileSync(
+        path.join(launcherRoot, 'active.json'),
+        JSON.stringify({
+          version: '2.0.0',
+          bootstrap: path.join(tempDir, 'another-install', 'cli-entry.js'),
+          baseVersion: '1.0.0',
+          bootstrapFingerprint: { dev, ino, size, mtimeMs },
+        }),
+      );
+      expect(
+        execFileSync(process.execPath, [entryPath, '--prompt', 'hello'], {
+          encoding: 'utf8',
+          env: { ...process.env, QWEN_HOME: qwenHome },
+        }),
+      ).toBe('old version\n');
+
+      writeFileSync(
+        path.join(launcherRoot, 'active.json'),
+        JSON.stringify({
+          version: '2.0.0',
+          bootstrap: realpathSync(entryPath),
+          baseVersion: '1.0.0',
+          bootstrapFingerprint: { dev, ino, size, mtimeMs },
+        }),
+      );
+      writeFileSync(
+        path.join(entryDir, 'package.json'),
+        JSON.stringify({
+          name: '@qwen-code/qwen-code',
+          version: '3.0.0',
+        }),
+      );
+      expect(
+        execFileSync(process.execPath, [entryPath, '--prompt', 'hello'], {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            QWEN_HOME: qwenHome,
+            QWEN_CODE_MANAGED_NPM_UPDATE: 'true',
+          },
+        }),
+      ).toBe('old version\n');
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it('falls through to cli.js when wrapper package.json lookup fails', () => {

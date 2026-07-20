@@ -10,12 +10,16 @@ import { EventEmitter } from 'node:events';
 
 const checkForUpdatesDetailed = vi.hoisted(() => vi.fn());
 const handleAutoUpdate = vi.hoisted(() => vi.fn());
+const waitForAutoUpdate = vi.hoisted(() => vi.fn());
 const getInstallationInfo = vi.hoisted(() => vi.fn());
 const performStandaloneUpdate = vi.hoisted(() => vi.fn());
 const writeStderrLine = vi.hoisted(() => vi.fn());
 
 vi.mock('../ui/utils/updateCheck.js', () => ({ checkForUpdatesDetailed }));
-vi.mock('./handleAutoUpdate.js', () => ({ handleAutoUpdate }));
+vi.mock('./handleAutoUpdate.js', () => ({
+  handleAutoUpdate,
+  waitForAutoUpdate,
+}));
 vi.mock('./installationInfo.js', () => ({ getInstallationInfo }));
 vi.mock('./standalone-update.js', () => ({ performStandaloneUpdate }));
 vi.mock('./stdioHelpers.js', () => ({ writeStderrLine }));
@@ -30,6 +34,13 @@ describe('updateBeforeRelaunch', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    waitForAutoUpdate.mockImplementation(
+      (updateProcess: EventEmitter) =>
+        new Promise<boolean>((resolve) => {
+          updateProcess.once('close', (code) => resolve(code === 0));
+          updateProcess.once('error', () => resolve(false));
+        }),
+    );
     checkForUpdatesDetailed.mockResolvedValue({
       status: 'update',
       info: {

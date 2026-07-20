@@ -21,7 +21,7 @@ export async function updateBeforeRelaunch(
   try {
     const [
       { checkForUpdatesDetailed },
-      { handleAutoUpdate },
+      { handleAutoUpdate, waitForAutoUpdate },
       { getInstallationInfo },
       { performStandaloneUpdate },
       { t },
@@ -65,10 +65,7 @@ export async function updateBeforeRelaunch(
         projectRoot,
       );
       const success = updateProcess
-        ? await new Promise<boolean>((resolve) => {
-            updateProcess.once('close', (code) => resolve(code === 0));
-            updateProcess.once('error', () => resolve(false));
-          })
+        ? await waitForAutoUpdate(updateProcess)
         : false;
       writeStderrLine(
         t(

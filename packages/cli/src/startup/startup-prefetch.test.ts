@@ -128,6 +128,7 @@ describe('startupPrefetch', () => {
     });
     mockGetInstallationInfo.mockReturnValue({
       updateCommand: 'npm install -g @qwen-code/qwen-code@latest',
+      packageManager: 'npm',
       isStandalone: false,
     });
     mockRequestUpdateOnExit.mockReturnValue(true);
@@ -220,8 +221,9 @@ describe('startupPrefetch', () => {
     );
   });
 
-  it('defers an available update until the session exits', async () => {
+  it('installs npm updates in the background after first render', async () => {
     const config = makeConfig();
+    const settings = makeSettings();
     mockCheckForUpdatesDetailed.mockResolvedValue({
       status: 'update',
       info: {
@@ -230,19 +232,28 @@ describe('startupPrefetch', () => {
       },
     });
 
-    startPostRenderPrefetches(config, makeSettings());
+    startPostRenderPrefetches(config, settings);
 
     await vi.dynamicImportSettled();
 
-    expect(mockRequestUpdateOnExit).toHaveBeenCalledTimes(1);
-    expect(mockUpdateEventEmit).toHaveBeenCalledWith('update-info', {
-      message:
-        'Update available\nThe update will be installed after you exit this session.',
-    });
+    expect(mockHandleAutoUpdate).toHaveBeenCalledWith(
+      {
+        message: 'Update available',
+        update: { latest: '2.0.0' },
+      },
+      settings,
+      '/repo',
+    );
+    expect(mockRequestUpdateOnExit).not.toHaveBeenCalled();
   });
 
-  it('prompts for an explicit update when no parent supervisor is available', async () => {
+  it('prompts non-npm installs when no parent supervisor is available', async () => {
     mockRequestUpdateOnExit.mockReturnValue(false);
+    mockGetInstallationInfo.mockReturnValue({
+      updateCommand: 'pnpm add -g @qwen-code/qwen-code@latest',
+      packageManager: 'pnpm',
+      isGlobal: true,
+    });
     mockCheckForUpdatesDetailed.mockResolvedValue({
       status: 'update',
       info: {
@@ -270,6 +281,7 @@ describe('startupPrefetch', () => {
     });
     mockGetInstallationInfo.mockReturnValue({
       updateCommand: 'standalone update',
+      packageManager: 'standalone',
       isStandalone: true,
       standaloneDir: '/tmp/qwen-code',
     });
