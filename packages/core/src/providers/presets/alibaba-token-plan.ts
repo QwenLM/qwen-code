@@ -104,9 +104,11 @@ export const tokenPlanProvider: ProviderConfig = {
       : 'ModelStudio Token Plan',
   ownsModel: (model) =>
     model.envKey === TOKEN_PLAN_ENV_KEY &&
-    typeof model.baseUrl === 'string' &&
-    (model.baseUrl === TOKEN_PLAN_CHINA_BASE_URL ||
-      model.baseUrl === TOKEN_PLAN_GLOBAL_BASE_URL),
+    ((typeof model.baseUrl === 'string' &&
+      (model.baseUrl === TOKEN_PLAN_CHINA_BASE_URL ||
+        model.baseUrl === TOKEN_PLAN_GLOBAL_BASE_URL)) ||
+      (typeof model.name === 'string' &&
+        model.name.startsWith('[ModelStudio Token Plan]'))),
   uiGroup: 'alibaba',
   uiLabels: { flowTitle: 'Alibaba ModelStudio', baseUrlStepTitle: 'Region' },
 };

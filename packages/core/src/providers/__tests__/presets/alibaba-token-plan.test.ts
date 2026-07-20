@@ -104,6 +104,11 @@ describe('token plan provider', () => {
   });
 
   it('creates a Token Plan install plan for the Singapore region', () => {
+    expect(TOKEN_PLAN_GLOBAL_BASE_URL).toBe(
+      'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+    );
+    expect(tokenPlanProvider.uiLabels?.baseUrlStepTitle).toBe('Region');
+
     const template = buildProviderTemplate(
       tokenPlanProvider,
       TOKEN_PLAN_GLOBAL_BASE_URL,
@@ -188,6 +193,14 @@ describe('token plan provider', () => {
         envKey: TOKEN_PLAN_ENV_KEY,
       }),
     ).toBe(false);
+    expect(
+      tokenPlanProvider.ownsModel?.({
+        id: 'legacy-token-model',
+        name: '[ModelStudio Token Plan] legacy-token-model',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        envKey: TOKEN_PLAN_ENV_KEY,
+      }),
+    ).toBe(true);
     expect(
       tokenPlanProvider.ownsModel?.({
         id: 'token-model',
