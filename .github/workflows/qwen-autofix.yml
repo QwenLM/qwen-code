@@ -1414,6 +1414,15 @@ jobs:
           FORCED_PR: '${{ needs.route.outputs.pr_number }}'
           DRY_RUN: '${{ needs.route.outputs.dry_run }}'
         run: |-
+          # Fleet visibility: every per-PR decision below also records a row so
+          # the run summary shows the WHOLE managed fleet in one table.
+          # Reconstructing this by hand (list bot PRs, regex each one's eval
+          # markers, cross-check checks and fork state) was the only way to see
+          # a stall, so stalls stayed invisible until someone went looking.
+          FLEET_FILE="$(mktemp)"
+          fleet_row() {
+            printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "${FLEET_FILE}"
+          }
           WORKDIR="$(mktemp -d)"
 
           # Candidate PRs: open, same-repo, targeting main, and either
@@ -1548,6 +1557,7 @@ jobs:
             # inspection budget.
             if [[ "${BUSY_PRS}" == *" ${PR} "* ]]; then
               echo "⏳ #${PR}: review-address already in flight or queued — skipping"
+              fleet_row "${PR}" 'busy' 'address run in flight'
               continue
             fi
             INSPECTED=$(( INSPECTED + 1 ))
@@ -1579,6 +1589,7 @@ jobs:
             # address job re-checks it live once more before any mutation).
             if [[ "$(jq -r --arg t "${SKIP_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${PR_META}")" == "true" ]]; then
               echo "⏭️ #${PR}: ${SKIP_LABEL} label present (applied mid-scan) — skipping"
+              fleet_row "${PR}" 'skipped' "${SKIP_LABEL} label present"
               continue
             fi
             EFF_MAX_ROUNDS="${MAX_ROUNDS}"
@@ -1590,6 +1601,7 @@ jobs:
               # not start evaluation" handoff. Retried on the next scan. (This also
               # means CREATED_WM below is only reached with a populated PR_META.)
               echo "⚠️ #${PR}: could not fetch PR metadata (API error); skipping until next scan"
+              fleet_row "${PR}" 'unknown' 'PR metadata unreadable (API error)'
               continue
             fi
             # Extract issue number: autofix/issue-<N> → N; otherwise use PR number.
@@ -1611,6 +1623,7 @@ jobs:
             ' <<< "${CHECKS_JSON}")"
             if [[ "${HAS_PENDING_CHECKS}" == "true" ]]; then
               echo "⏳ #${PR}: active checks in flight; skipping until they finish (only checks stuck >${PENDING_STALE_MIN}m past their start are treated as dead and ignored)"
+              fleet_row "${PR}" 'waiting' 'active checks in flight'
               continue
             fi
             # Pre-first-eval floor: the PR's IMMUTABLE creation time. Feedback
@@ -1740,6 +1753,7 @@ jobs:
 
             if [[ "${ROUND}" -ge "${EFF_MAX_ROUNDS}" ]]; then
               echo "🚧 #${PR}: hit the round cap (${ROUND}/${EFF_MAX_ROUNDS}) — leaving for a human"
+              fleet_row "${PR}" 'round-capped' "round ${ROUND}/${EFF_MAX_ROUNDS} - needs a human or @qwen-code /retry"
               # A MANAGED PR pausing at its cap deserves a visible reminder —
               # maintainers otherwise learn about it only from workflow logs.
               # Once per counting window: re-arming opens a fresh window and,
@@ -1846,10 +1860,12 @@ jobs:
 
             if [[ "${N_REVIEWS}" -eq 0 && "${N_COMMENTS}" -eq 0 && "${N_ISSUE_COMMENTS}" -eq 0 && "${N_FAILED_CHECKS}" -eq 0 && "${HAS_CONFLICT}" != "true" ]]; then
               echo "✅ #${PR}: nothing new since ${EFF_WM} (conflict=${HAS_CONFLICT})"
+              fleet_row "${PR}" 'idle' "nothing new since ${EFF_WM} (round ${ROUND}/${EFF_MAX_ROUNDS}, conflict=${HAS_CONFLICT})"
               continue
             fi
 
             echo "🔎 #${PR}: ${N_REVIEWS} review(s) + ${N_COMMENTS} inline + ${N_ISSUE_COMMENTS} issue comment(s) + ${N_FAILED_CHECKS} failed check(s) new, conflict=${HAS_CONFLICT}, round=${ROUND}"
+            fleet_row "${PR}" 'SELECTED' "${N_REVIEWS} review + ${N_COMMENTS} inline + ${N_ISSUE_COMMENTS} comment + ${N_FAILED_CHECKS} failed-check new (round ${ROUND}/${EFF_MAX_ROUNDS}, conflict=${HAS_CONFLICT})"
             TARGETS="$(jq -c \
               --arg pr "${PR}" --arg branch "${BRANCH}" --arg issue "${ISSUE}" \
               --arg round "${ROUND}" --arg wm "${EFF_WM}" --arg mr "${EFF_MAX_ROUNDS}" \
@@ -1875,6 +1891,20 @@ jobs:
 
           COUNT="$(jq 'length' <<< "${TARGETS}")"
           echo "📋 ${COUNT} PR(s) to process"
+          {
+            echo "### 🤖 AutoFix fleet (${COUNT} selected this scan)"
+            echo
+            echo '| PR | State | Detail |'
+            echo '| --- | --- | --- |'
+            if [[ -s "${FLEET_FILE}" ]]; then
+              while IFS=$'\t' read -r f_pr f_state f_detail; do
+                printf '| #%s | %s | %s |\n' "${f_pr}" "${f_state}" "${f_detail}"
+              done < "${FLEET_FILE}"
+            else
+              echo '| - | no managed PRs inspected | - |'
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+          rm -f "${FLEET_FILE}"
           echo "targets=${TARGETS}" >> "${GITHUB_OUTPUT}"
           echo "has_targets=$([[ "${COUNT}" -gt 0 ]] && echo true || echo false)" >> "${GITHUB_OUTPUT}"
 

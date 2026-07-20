@@ -3114,6 +3114,82 @@ describe('qwen-autofix workflow', () => {
     ).toBe(0);
   });
 
+  it('renders the whole managed fleet into the run summary', () => {
+    // Diagnosing a stall used to mean listing bot PRs, regexing each one's eval
+    // markers, and cross-checking checks and fork state by hand - so stalls
+    // stayed invisible until someone went looking. The scan already computes
+    // all of it; this surfaces it as one table per run.
+    const scan =
+      workflow.match(
+        /- name: 'Scan for PRs with new feedback'[\s\S]*?(?=\n {6}- name: )/,
+      )?.[0] ?? '';
+    // Every per-PR terminal decision records a row, so a PR cannot fall out of
+    // the table just because its branch of the loop returned early.
+    for (const state of [
+      'busy',
+      'skipped',
+      'unknown',
+      'waiting',
+      'round-capped',
+      'idle',
+      'SELECTED',
+    ]) {
+      expect(scan).toContain(`fleet_row "\${PR}" '${state}'`);
+    }
+    // The table is written to the run summary, not just the job log.
+    expect(scan).toContain('AutoFix fleet (${COUNT} selected this scan)');
+    expect(scan).toContain('} >> "${GITHUB_STEP_SUMMARY}"');
+
+    // Replay the real helper + render block over fixtures.
+    const lines = scan.split('\n');
+    const hi = lines.findIndex((l) => l.trim() === 'FLEET_FILE="$(mktemp)"');
+    const hj = lines.findIndex((l, i) => i > hi && l.trim() === '}');
+    const helper = lines.slice(hi, hj + 1).join('\n');
+    expect(helper).toContain('fleet_row()');
+    const fi = lines.findIndex((l) => l.includes('AutoFix fleet ('));
+    let start = fi;
+    while (lines[start].trim() !== '{') start -= 1;
+    const end = lines.findIndex(
+      (l, i) => i > fi && l.trim().startsWith('} >> "${GITHUB_STEP_SUMMARY}"'),
+    );
+    const render = lines
+      .slice(start, end + 1)
+      .join('\n')
+      .replace('${GITHUB_STEP_SUMMARY}', '/dev/stdout');
+
+    const out = execFileSync(
+      'bash',
+      [
+        '-c',
+        [
+          'set -uo pipefail',
+          helper,
+          'COUNT=1',
+          "fleet_row 7329 'SELECTED' '1 review + 5 inline new (round 0/5)'",
+          "fleet_row 7333 'idle' 'nothing new since 2026-07-20T13:54:18Z'",
+          "fleet_row 7208 'round-capped' 'round 100/100 - needs a human'",
+          render,
+        ].join('\n'),
+      ],
+      { encoding: 'utf8' },
+    );
+    expect(out).toContain('AutoFix fleet (1 selected this scan)');
+    expect(out).toContain('| PR | State | Detail |');
+    expect(out).toContain(
+      '| #7329 | SELECTED | 1 review + 5 inline new (round 0/5) |',
+    );
+    expect(out).toContain('| #7333 | idle |');
+    expect(out).toContain('| #7208 | round-capped |');
+
+    // An empty fleet still renders a table rather than a bare heading.
+    const empty = execFileSync(
+      'bash',
+      ['-c', ['set -uo pipefail', helper, 'COUNT=0', render].join('\n')],
+      { encoding: 'utf8' },
+    );
+    expect(empty).toContain('no managed PRs inspected');
+  });
+
   it('replays the handoff decision and terminal-round transitions under bash', () => {
     // The agent step is bounded below the 120-minute job timeout so a runaway
     // agent fails the STEP, not the job, leaving the always() report step time to
