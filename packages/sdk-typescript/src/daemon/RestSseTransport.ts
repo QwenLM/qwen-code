@@ -76,6 +76,18 @@ export class RestSseTransport implements DaemonTransport {
       throw new DaemonTransportClosedError();
     }
 
+    // Request-lifetime controller. It drives the connect-phase timeout
+    // (request → headers received) AND owns teardown of the long-lived
+    // SSE body: aborting it in the `finally` below releases the
+    // underlying fetch/TCP connection when the consumer exits the
+    // iterator for any reason (break, return, throw, or normal end),
+    // even when no caller signal was supplied. Without this,
+    // `reader.cancel()` alone does not reliably close the connection on
+    // some runtimes (e.g. Bun), leaking the daemon-side EventBus
+    // subscriber. It is also tracked in `activeSseRequests` so
+    // `dispose()` can abort in-flight subscriptions. The SSE body must
+    // NOT be timed out, so the connect timer only fires before headers
+    // arrive.
     const requestCtrl = new AbortController();
     this.activeSseRequests.add(requestCtrl);
 
