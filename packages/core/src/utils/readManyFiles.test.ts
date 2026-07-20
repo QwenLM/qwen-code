@@ -147,6 +147,73 @@ describe('readManyFiles', () => {
       expect(content).toContain('--- End of content ---');
     });
 
+    it('drops a validated path when its file identity changes before reading', async () => {
+      const { relativePath, absolutePath } =
+        await createTestFile('approved.txt');
+      const approvedStats = await fs.stat(absolutePath);
+      await fs.rename(absolutePath, `${absolutePath}.original`);
+      await fs.writeFile(absolutePath, 'replacement secret');
+      const mockConfig = createMockConfig(tempRootDir);
+
+      const result = await readManyFiles(mockConfig, {
+        paths: [relativePath],
+        validatedPathIdentities: new Map([
+          [absolutePath, { dev: approvedStats.dev, ino: approvedStats.ino }],
+        ]),
+      });
+
+      expect(contentToString(result.contentParts)).not.toContain(
+        'replacement secret',
+      );
+      expect(result.files).toHaveLength(0);
+    });
+
+    it('reads a validated file from its approved handle during an ABA path swap', async () => {
+      const { relativePath, absolutePath } =
+        await createTestFile('approved.txt');
+      const approvedStats = await fs.stat(absolutePath);
+      const backupPath = `${absolutePath}.approved`;
+      const outsideDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'read-many-files-outside-'),
+      );
+      const outsidePath = path.join(outsideDir, 'secret.txt');
+      await fs.writeFile(outsidePath, 'outside secret');
+      const fileSystemService = new StandardFileSystemService();
+      const readTextFile =
+        fileSystemService.readTextFile.bind(fileSystemService);
+      vi.spyOn(fileSystemService, 'readTextFile').mockImplementation(
+        async (options) => {
+          await fs.rename(absolutePath, backupPath);
+          await fs.symlink(outsidePath, absolutePath);
+          try {
+            return await readTextFile(options);
+          } finally {
+            await fs.unlink(absolutePath);
+            await fs.rename(backupPath, absolutePath);
+          }
+        },
+      );
+      const mockConfig = {
+        ...createMockConfig(tempRootDir),
+        getFileSystemService: () => fileSystemService,
+      } as Config;
+
+      try {
+        const result = await readManyFiles(mockConfig, {
+          paths: [relativePath],
+          validatedPathIdentities: new Map([
+            [absolutePath, { dev: approvedStats.dev, ino: approvedStats.ino }],
+          ]),
+        });
+        const content = contentToString(result.contentParts);
+
+        expect(content).toContain('Content of approved.txt');
+        expect(content).not.toContain('outside secret');
+      } finally {
+        await fs.rm(outsideDir, { recursive: true, force: true });
+      }
+    });
+
     it('should include truncated large text files instead of reporting a size error', async () => {
       const relativePath = 'large.log';
       const absolutePath = path.join(tempRootDir, relativePath);
@@ -489,12 +556,20 @@ describe('readManyFiles', () => {
       const absolutePath = path.join(tempRootDir, relativePath);
       // 10MB + 1 byte to cross the 9.9MB threshold.
       await fs.writeFile(absolutePath, Buffer.alloc(10 * 1024 * 1024 + 1));
+      const stats = await fs.stat(absolutePath);
 
       const mockConfig = createMockConfig(tempRootDir);
-      const result = await readManyFiles(mockConfig, { paths: [relativePath] });
+      const result = await readManyFiles(mockConfig, {
+        paths: [relativePath],
+        validatedPathIdentities: new Map([
+          [absolutePath, { dev: stats.dev, ino: stats.ino }],
+        ]),
+      });
 
       const content = contentToString(result.contentParts);
       expect(content).toContain('File size exceeds the 10MB limit');
+      expect(content).toContain('huge.bin');
+      expect(content).not.toContain('qwen-validated-read-');
       expect(content).not.toContain(
         'No files matching the criteria were found',
       );

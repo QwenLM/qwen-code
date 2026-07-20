@@ -8,6 +8,7 @@ import type {
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   Config,
+  RuntimeContentGeneratorView,
 } from '../index.js';
 import {
   CoreToolScheduler,
@@ -20,6 +21,7 @@ export interface ExecuteToolCallOptions {
   outputUpdateHandler?: OutputUpdateHandler;
   onAllToolCallsComplete?: AllToolCallsCompleteHandler;
   onToolCallsUpdate?: ToolCallsUpdateHandler;
+  runtimeView?: RuntimeContentGeneratorView;
 }
 
 /**
@@ -46,7 +48,7 @@ export async function executeToolCall(
       getPreferredEditor: () => undefined,
       onEditorClose: () => {},
     })
-      .schedule(toolCallRequest, abortSignal)
+      .schedule(toolCallRequest, abortSignal, options.runtimeView)
       .catch(reject);
   });
 }

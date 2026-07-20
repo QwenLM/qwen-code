@@ -209,6 +209,10 @@ export async function resolveAtCommandQuery({
   const fileDiscovery = config.getFileService();
 
   const respectFileIgnore = config.getFileFilteringOptions();
+  const configuredProjectTempDir = Storage.getGlobalTempDir();
+  const projectTempDir = await fs
+    .realpath(configuredProjectTempDir)
+    .catch(() => path.resolve(configuredProjectTempDir));
 
   const pathSpecsToRead: string[] = [];
   const atPathToResolvedSpecMap = new Map<string, string>();
@@ -217,6 +221,29 @@ export async function resolveAtCommandQuery({
     git: [],
     qwen: [],
     both: [],
+  };
+  const getIgnoreReason = (
+    candidate: string,
+  ): 'git' | 'qwen' | 'both' | undefined => {
+    const gitIgnored =
+      respectFileIgnore.respectGitIgnore &&
+      fileDiscovery.shouldIgnoreFile(candidate, {
+        respectGitIgnore: true,
+        respectQwenIgnore: false,
+      });
+    const qwenIgnored =
+      respectFileIgnore.respectQwenIgnore &&
+      fileDiscovery.shouldIgnoreFile(candidate, {
+        respectGitIgnore: false,
+        respectQwenIgnore: true,
+      });
+    return gitIgnored && qwenIgnored
+      ? 'both'
+      : gitIgnored
+        ? 'git'
+        : qwenIgnored
+          ? 'qwen'
+          : undefined;
   };
 
   // MCP resource references (`@server:uri`) collected during the loop and
@@ -318,12 +345,12 @@ export async function resolveAtCommandQuery({
     const workspaceContext = config.getWorkspaceContext();
 
     // Check if path is in project temp directory
-    const projectTempDir = Storage.getGlobalTempDir();
     const absolutePathName = path.isAbsolute(pathName)
       ? pathName
       : path.resolve(workspaceContext.getDirectories()[0] || '', pathName);
 
     if (
+      !isSubpath(configuredProjectTempDir, absolutePathName) &&
       !isSubpath(projectTempDir, absolutePathName) &&
       !workspaceContext.isPathWithinWorkspace(pathName)
     ) {
@@ -333,22 +360,9 @@ export async function resolveAtCommandQuery({
       continue;
     }
 
-    const gitIgnored =
-      respectFileIgnore.respectGitIgnore &&
-      fileDiscovery.shouldIgnoreFile(pathName, {
-        respectGitIgnore: true,
-        respectQwenIgnore: false,
-      });
-    const qwenIgnored =
-      respectFileIgnore.respectQwenIgnore &&
-      fileDiscovery.shouldIgnoreFile(pathName, {
-        respectGitIgnore: false,
-        respectQwenIgnore: true,
-      });
-
-    if (gitIgnored || qwenIgnored) {
-      const reason =
-        gitIgnored && qwenIgnored ? 'both' : gitIgnored ? 'git' : 'qwen';
+    const ignoredReason = getIgnoreReason(pathName);
+    if (ignoredReason) {
+      const reason = ignoredReason;
       ignoredByReason[reason].push(pathName);
       const reasonText =
         reason === 'both'
@@ -363,16 +377,42 @@ export async function resolveAtCommandQuery({
     let resolvedSuccessfully = false;
     let sawNotFound = false;
     for (const dir of config.getWorkspaceContext().getDirectories()) {
-      let currentPathSpec = pathName;
       try {
         const absolutePath = path.resolve(dir, pathName);
-        const stats = await fs.stat(absolutePath);
+        const canonicalPath = await fs.realpath(absolutePath);
+        const stats = await fs.stat(canonicalPath);
+        if (
+          !isSubpath(configuredProjectTempDir, canonicalPath) &&
+          !isSubpath(projectTempDir, canonicalPath) &&
+          !workspaceContext.isPathWithinWorkspace(canonicalPath)
+        ) {
+          onDebugMessage(
+            `Path ${pathName} is not in the workspace and will be skipped.`,
+          );
+          break;
+        }
+        const canonicalIgnoreReason = getIgnoreReason(canonicalPath);
+        if (canonicalIgnoreReason) {
+          ignoredByReason[canonicalIgnoreReason].push(pathName);
+          const reasonText =
+            canonicalIgnoreReason === 'both'
+              ? 'ignored by both git and qwen'
+              : canonicalIgnoreReason === 'git'
+                ? 'git-ignored'
+                : 'qwen-ignored';
+          onDebugMessage(
+            `Path ${pathName} is ${reasonText} and will be skipped.`,
+          );
+          break;
+        }
         if (stats.isDirectory()) {
-          currentPathSpec = pathName;
           onDebugMessage(`Path ${pathName} resolved to directory.`);
         } else {
           onDebugMessage(`Path ${pathName} resolved to file: ${absolutePath}`);
         }
+        pathSpecsToRead.push(canonicalPath);
+        atPathToResolvedSpecMap.set(originalAtPath, pathName);
+        contentLabelsForDisplay.push(pathName);
         resolvedSuccessfully = true;
       } catch (error) {
         if (isNodeError(error) && error.code === 'ENOENT') {
@@ -385,9 +425,6 @@ export async function resolveAtCommandQuery({
         }
       }
       if (resolvedSuccessfully) {
-        pathSpecsToRead.push(currentPathSpec);
-        atPathToResolvedSpecMap.set(originalAtPath, currentPathSpec);
-        contentLabelsForDisplay.push(pathName);
         break;
       }
     }
@@ -626,12 +663,46 @@ export async function resolveAtCommandQuery({
   // any extension/resource tool-cards already gathered are still surfaced.
   const fileParts: Part[] = [];
   let fileDisplays: IndividualToolCallDisplay[] = [];
-  if (pathSpecsToRead.length > 0) {
+  const revalidatedPathSpecs: string[] = [];
+  const validatedPathIdentities = new Map<
+    string,
+    { dev: number; ino: number }
+  >();
+  for (const approvedPath of pathSpecsToRead) {
+    try {
+      const currentPath = await fs.realpath(approvedPath);
+      const stats = await fs.stat(currentPath);
+      if (
+        currentPath === approvedPath &&
+        (stats.isFile() || stats.isDirectory()) &&
+        (isSubpath(configuredProjectTempDir, currentPath) ||
+          isSubpath(projectTempDir, currentPath) ||
+          config.getWorkspaceContext().isPathWithinWorkspace(currentPath)) &&
+        getIgnoreReason(currentPath) === undefined
+      ) {
+        revalidatedPathSpecs.push(currentPath);
+        validatedPathIdentities.set(currentPath, {
+          dev: stats.dev,
+          ino: stats.ino,
+        });
+      } else {
+        onDebugMessage(
+          `Path ${approvedPath} failed revalidation and will be skipped.`,
+        );
+      }
+    } catch {
+      onDebugMessage(
+        `Path ${approvedPath} changed before it could be read and will be skipped.`,
+      );
+    }
+  }
+  if (revalidatedPathSpecs.length > 0) {
     try {
       const result = await readManyFiles(config, {
-        paths: pathSpecsToRead,
+        paths: revalidatedPathSpecs,
         signal,
         preserveUnsupportedImageForBridge: shouldRunVisionBridge(config),
+        validatedPathIdentities,
       });
 
       const parts = Array.isArray(result.contentParts)
