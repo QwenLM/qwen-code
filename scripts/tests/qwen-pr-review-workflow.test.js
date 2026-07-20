@@ -79,7 +79,10 @@ function runScenario(scenario, { timeoutMinutes = 180 } = {}) {
         '  transient_persist) r success false "[API Error: 503 upstream overloaded]" ;;',
         '  quota) r success false "[API Error: 429 Your token-plan quota has been exhausted. The quota will reset at 07-19 13:17:00 UTC.]" ;;',
         '  quota_noreset) r success false "[API Error: 429 Your quota has been exhausted.]" ;;',
-        '  success_mentions_api_error) r success false "Review of [API Error: ...] handling — quota and rate.?limit keywords look correct." ;;',
+        '  abort_no_status) r success false "[API Error: Connection error.]" ;;',
+        '  abort_status_suffix) r success false "[API Error: Rate limit exceeded (Status: RESOURCE_EXHAUSTED)]" ;;',
+        '  success_mentions_api_error) PAD=$(printf "x%.0s" $(seq 1 600)); r success false "This PR detects the [API Error: ...] pattern and routes to retry. quota and rate.?limit keywords cover the common messages. ${PAD} Review complete: COMMENT posted (0 Critical, 1 Suggestion inline)." ;;',
+        '  success_quotes_status_code) PAD=$(printf "x%.0s" $(seq 1 700)); r success false "This PR adds retry for [API Error: 429 quota exceeded] and similar. ${PAD} Verdict: COMMENT, 0 Critical." ;;',
         '  errresult) r error true "connection dropped mid-review" ;;',
         '  hardexit) exit 3 ;;',
         'esac',
@@ -159,12 +162,34 @@ describe('qwen pr review transient retry', () => {
     expect(r.attempts).toBe(1);
   });
 
+  it('retries an abort with no status code in the message', () => {
+    const r = runScenario('abort_no_status');
+    expect(r.line).toContain('FAIL');
+    expect(r.line).not.toContain('kind=[quota]');
+    expect(r.attempts).toBe(2);
+  });
+
+  it('retries an abort with status at the end (Status: …) shape', () => {
+    const r = runScenario('abort_status_suffix');
+    expect(r.line).toContain('FAIL');
+    expect(r.line).not.toContain('kind=[quota]');
+    expect(r.attempts).toBe(2);
+  });
+
   it('does NOT misclassify a successful review that mentions [API Error: ...] in its summary', () => {
     // A review of PR #7247 (API error retry) quoted "[API Error: ...]" and
     // "quota … limit" in its result text. The old pattern *"[API Error"*
     // matched the prose and the quota grep hit "quota … limit", falsely
     // reporting quota exhaustion on a successful review.
     const r = runScenario('success_mentions_api_error');
+    expect(r.line).toContain('OK outcome=success');
+    expect(r.attempts).toBe(1);
+  });
+
+  it('does NOT misclassify prose quoting a real status code mid-body', () => {
+    // A long review (>600 bytes) that quotes "[API Error: 429 quota
+    // exceeded]" early in the body must not trip the tail-anchored detector.
+    const r = runScenario('success_quotes_status_code');
     expect(r.line).toContain('OK outcome=success');
     expect(r.attempts).toBe(1);
   });

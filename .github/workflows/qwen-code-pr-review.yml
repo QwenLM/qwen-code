@@ -729,7 +729,7 @@ jobs:
           # loop below can try once more; a QUOTA-exhausted 429 is NOT retried
           # in-run (its reset is typically hours away — burning a runner on it
           # helps nobody), and a real timeout or a hard/config failure never
-          # retries. Same detection as before; only the disposition is new.
+          # retries.
           OUTCOME=''
           REASON=''
           KIND=''
@@ -794,13 +794,19 @@ jobs:
               REASON="Qwen review ended in an error result (subtype=${RESULT_SUBTYPE}, is_error=${RESULT_IS_ERROR})."
               return
             fi
-            case "$RESULT_TEXT" in
-              *"[API Error: "[0-9]*)
-                if printf '%s' "$RESULT_TEXT" | grep -qiE 'quota.*(exhaust|exceed|limit|reset)'; then
+            # An aborted run renders the API error as (or at the very end of)
+            # the result text; a successful review that merely *discusses* API
+            # errors quotes them mid-prose. Anchor on the tail so prose quotes
+            # don't trip the detector. 600 bytes covers the longest real error
+            # (~200 bytes for a 429 + rate-limit suffix) with headroom.
+            RESULT_TAIL="$(printf '%s' "$RESULT_TEXT" | tail -c 600)"
+            case "$RESULT_TAIL" in
+              *"[API Error: "*)
+                if printf '%s' "$RESULT_TAIL" | grep -qiE 'quota.*(exhaust|exceed|limit|reset)'; then
                   OUTCOME='quota'
                   KIND='quota'
                   local detail
-                  detail="$(printf '%s' "$RESULT_TEXT" | grep -oiE 'reset at [^]]*' | head -n1 || true)"
+                  detail="$(printf '%s' "$RESULT_TAIL" | grep -oiE 'reset at [^]]*' | head -n1 || true)"
                   REASON="Qwen review stopped: the model API quota is exhausted${detail:+ (${detail})}."
                 else
                   OUTCOME='retryable'
