@@ -5,6 +5,7 @@
  */
 
 import * as crypto from 'node:crypto';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
   APPROVAL_MODES,
@@ -1565,14 +1566,25 @@ export function registerSessionRoutes(
             new SessionService(workspaceCwd).getWorktreeSessionPath(sessionId),
           ).catch(() => null);
           if (sidecar) {
-            // Defense-in-depth: normalize the sidecar path with
-            // path.resolve (defeats `..` traversal) and verify it lands
-            // under a .qwen/worktrees/ segment. Symlink escapes are
-            // handled by the ACP layer's sessionCd handler which does
-            // fs.realpath on the final target.
-            const resolvedPath = path.resolve(sidecar.worktreePath);
-            const marker = `${path.sep}.qwen${path.sep}worktrees${path.sep}`;
-            if (!resolvedPath.includes(marker)) {
+            // Defense-in-depth: resolve symlinks on both the target and
+            // the expected worktrees root, then verify containment. This
+            // defeats both `..` traversal and symlink escapes (e.g.
+            // .qwen/worktrees/escape -> /etc). Uses sidecar.originalCwd
+            // (repo root at creation) as the expected root, falling back
+            // to workspaceCwd for monorepo subdirectory workspaces.
+            let contained = false;
+            try {
+              const realTarget = fs.realpathSync(sidecar.worktreePath);
+              const root = sidecar.originalCwd || workspaceCwd;
+              const realRoot = fs.realpathSync(
+                path.join(root, '.qwen', 'worktrees'),
+              );
+              const rel = path.relative(realRoot, realTarget);
+              contained = !rel.startsWith('..') && !path.isAbsolute(rel);
+            } catch {
+              contained = false;
+            }
+            if (!contained) {
               daemonLog?.warn('worktree sidecar path failed containment', {
                 sessionId,
                 path: sidecar.worktreePath,

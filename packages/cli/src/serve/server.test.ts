@@ -160,7 +160,16 @@ import {
 const mockWt = vi.hoisted(() => ({
   impl: undefined as (() => Record<string, unknown>) | undefined,
   readSidecar: undefined as (() => Promise<unknown>) | undefined,
+  realpath: undefined as ((p: string) => string) | undefined,
 }));
+vi.mock('node:fs', async (importOriginal) => {
+  const original = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...original,
+    realpathSync: (p: fs.PathLike) =>
+      mockWt.realpath ? mockWt.realpath(String(p)) : original.realpathSync(p),
+  };
+});
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const original =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
@@ -8881,6 +8890,8 @@ describe('createServeApp', () => {
         undefined,
         { bridge },
       );
+      // Identity realpath so the containment check passes in the test env.
+      mockWt.realpath = (p) => p;
       mockWt.readSidecar = () =>
         Promise.resolve({
           slug: 'my-task',
@@ -8910,6 +8921,7 @@ describe('createServeApp', () => {
         expect(bridge.setSessionWorktreeCalls).toHaveLength(1);
       } finally {
         mockWt.readSidecar = undefined;
+        mockWt.realpath = undefined;
       }
     });
 
@@ -8948,6 +8960,7 @@ describe('createServeApp', () => {
         undefined,
         { bridge },
       );
+      mockWt.realpath = (p) => p;
       mockWt.readSidecar = () =>
         Promise.resolve({
           slug: 'dead-task',
@@ -8969,6 +8982,7 @@ describe('createServeApp', () => {
         expect(bridge.setSessionWorktreeCalls).toHaveLength(0);
       } finally {
         mockWt.readSidecar = undefined;
+        mockWt.realpath = undefined;
       }
     });
 
