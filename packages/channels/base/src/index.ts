@@ -69,6 +69,21 @@ export {
   sanitizePromptText,
   sanitizeLogText,
 } from './sanitize.js';
+export {
+  parseChatId,
+  parseIssueThreadId,
+  extractFromSubjectUrl,
+  extractCommentIdFromUrl,
+  loadPollCursor,
+  savePollCursor,
+  stripMentions,
+  abortableSleep,
+} from './polling-helpers.js';
+export type {
+  ParsedChatId,
+  ParsedIssueThreadId,
+  PollCursor,
+} from './polling-helpers.js';
 export { isTerminalTaskLifecycleType } from './types.js';
 export type {
   Attachment,

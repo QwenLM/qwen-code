@@ -130,6 +130,14 @@ class TestChannel extends ChannelBase {
     return this.requestActivePromptCancellation(sessionId, 'cancel_command');
   }
 
+  testSendResponseMessage(
+    chatId: string,
+    text: string,
+    sessionId: string,
+  ): Promise<void> {
+    return this.sendResponseMessage(chatId, text, sessionId);
+  }
+
   debugPayloadForTest(platform: string, payload: unknown): void {
     this.logDebugPayload(platform, payload);
   }
@@ -10190,6 +10198,49 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toBe('agent response');
     });
 
+    it('sendResponseMessage skips and logs when session target is gone', async () => {
+      const router = {
+        getTarget: vi.fn().mockReturnValue(undefined),
+        handleSessionDied: vi.fn(),
+        setBridge: vi.fn(),
+      };
+      const ch = createChannel({}, { router } as unknown as ChannelBaseOptions);
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.testSendResponseMessage('chat1', 'hello', 'gone-session');
+
+      const logged = writeSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      writeSpy.mockRestore();
+
+      expect(ch.sent).toEqual([]);
+      expect(logged).toContain('gone-session');
+      expect(logged).toContain('not found');
+    });
+
+    it('sendResponseMessage passes router target threadId to sendThreadMessage', async () => {
+      const target = {
+        channelName: 'test',
+        senderId: 'user',
+        chatId: 'chat1',
+        threadId: 'thread-42',
+      };
+      const router = {
+        getTarget: vi.fn().mockReturnValue(target),
+        handleSessionDied: vi.fn(),
+        setBridge: vi.fn(),
+      };
+      const ch = createChannel({}, { router } as unknown as ChannelBaseOptions);
+      const spy = vi.spyOn(ch, 'sendThreadMessage').mockResolvedValue();
+
+      await ch.testSendResponseMessage('chat1', 'hello', 'session-1');
+
+      expect(spy).toHaveBeenCalledWith('chat1', 'thread-42', 'hello');
+    });
+
     it('does not send when agent returns empty response', async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (bridge.prompt as any).mockResolvedValue('');
@@ -11627,6 +11678,21 @@ describe('ChannelBase', () => {
         expect.stringContaining('pairing notification failed'),
       );
       stderr.mockRestore();
+    });
+
+    it('routes pairing code through sendThreadMessage with envelope threadId', async () => {
+      const ch = createChannel({ senderPolicy: 'pairing', allowedUsers: [] });
+      const spy = vi.spyOn(ch, 'sendThreadMessage').mockResolvedValue();
+
+      await ch.handleInbound(
+        envelope({ senderId: 'stranger', threadId: 'thread-7' }),
+      );
+
+      expect(spy).toHaveBeenCalledWith(
+        'chat1',
+        'thread-7',
+        expect.stringContaining('pairing code'),
+      );
     });
   });
 
@@ -16138,6 +16204,45 @@ describe('ChannelBase', () => {
       expect(ch.taskEvents).toEqual([
         expect.objectContaining({ type: 'started', messageId: 'job-1' }),
         expect.objectContaining({ type: 'completed', messageId: 'job-1' }),
+      ]);
+    });
+
+    it('passes threadId through pushProactive for threaded targets', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+        'threaded response',
+      );
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+      ch.proactiveTargetSupported = true;
+
+      await ch.runLoopPrompt({
+        id: 'job-t',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'chat1',
+          threadId: 'thread-99',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+        source: { type: 'manual' },
+      });
+
+      expect(ch.proactiveTargets).toEqual([
+        expect.objectContaining({
+          chatId: 'chat1',
+          threadId: 'thread-99',
+        }),
       ]);
     });
 
