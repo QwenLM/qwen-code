@@ -36,6 +36,7 @@ import {
   ContentRetryFailureEvent,
 } from '../telemetry/types.js';
 import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
+import { withAgentixMemoryContext } from '../services/agentixMemoryContext.js';
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
 
@@ -340,7 +341,10 @@ export class GeminiChat {
 
     // Add user content to history ONCE before any attempts.
     this.history.push(userContent);
-    const requestContents = this.getHistory(true);
+    const requestContents = withAgentixMemoryContext(
+      this.getHistory(true),
+      this.config.getSessionId(),
+    );
 
     // eslint-disable-next-line @typescript-eslint/no-this-alias
     const self = this;

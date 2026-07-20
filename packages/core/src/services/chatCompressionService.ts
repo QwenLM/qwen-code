@@ -20,6 +20,14 @@ import {
   PreCompactTrigger,
   PostCompactTrigger,
 } from '../hooks/types.js';
+import {
+  getAgentixActiveTurn,
+  readAgentixMemorySnapshot,
+} from './agentixMemoryContext.js';
+import {
+  isAgentixAutoTrainingEnabled,
+  refreshAgentixMemory,
+} from './agentixMemoryTrainer.js';
 
 /**
  * Threshold for compression token count as a fraction of the model's token limit.
@@ -39,6 +47,14 @@ export const COMPRESSION_PRESERVE_THRESHOLD = 0.3;
  * model receives almost no context and generates a useless summary.
  */
 export const MIN_COMPRESSION_FRACTION = 0.05;
+
+const APPROXIMATE_CHARS_PER_TOKEN = 4;
+
+function estimateContentTokens(contents: Content[]): number {
+  return Math.ceil(
+    JSON.stringify(contents).length / APPROXIMATE_CHARS_PER_TOKEN,
+  );
+}
 
 /**
  * Returns the index of the oldest item to keep when compressing. May return
@@ -126,7 +142,15 @@ export class ChatCompressionService {
       };
     }
 
-    const originalTokenCount = uiTelemetryService.getLastPromptTokenCount();
+    const lastPromptTokenCount = uiTelemetryService.getLastPromptTokenCount();
+    const agentixAutoTraining = isAgentixAutoTrainingEnabled();
+    // Snapshot-only requests stay small even while the recorded conversation
+    // grows. In Agentix mode, use the raw history size to decide when memory
+    // needs another training pass instead of waiting for the outbound prompt to
+    // approach the model's context limit.
+    const originalTokenCount = agentixAutoTraining
+      ? estimateContentTokens(curatedHistory)
+      : lastPromptTokenCount;
 
     // Don't compress if not forced and we are under the limit.
     if (!force) {
@@ -154,6 +178,83 @@ export class ChatCompressionService {
       } catch (err) {
         config.getDebugLogger().warn(`PreCompact hook failed: ${err}`);
       }
+    }
+
+    if (agentixAutoTraining) {
+      let snapshot: string;
+      try {
+        snapshot = await refreshAgentixMemory(config.getSessionId(), signal);
+      } catch (error) {
+        config
+          .getDebugLogger()
+          .warn(
+            `Agentix memory training failed; retaining history: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        return {
+          newHistory: null,
+          info: {
+            originalTokenCount,
+            newTokenCount: originalTokenCount,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        };
+      }
+
+      const activeTurn = getAgentixActiveTurn(curatedHistory);
+      const publishedSnapshot =
+        readAgentixMemorySnapshot(config.getSessionId()) ?? snapshot;
+      const newTokenCount = Math.ceil(
+        (publishedSnapshot.length + JSON.stringify(activeTurn).length) /
+          APPROXIMATE_CHARS_PER_TOKEN,
+      );
+
+      logChatCompression(
+        config,
+        makeChatCompressionEvent({
+          tokens_before: originalTokenCount,
+          tokens_after: newTokenCount,
+        }),
+      );
+      uiTelemetryService.setLastPromptTokenCount(newTokenCount);
+
+      try {
+        const permissionMode = String(
+          config.getApprovalMode(),
+        ) as PermissionMode;
+        await config
+          .getHookSystem()
+          ?.fireSessionStartEvent(
+            SessionStartSource.Compact,
+            model ?? '',
+            permissionMode,
+            undefined,
+            signal,
+          );
+      } catch (err) {
+        config.getDebugLogger().warn(`SessionStart hook failed: ${err}`);
+      }
+
+      try {
+        const postCompactTrigger = force
+          ? PostCompactTrigger.Manual
+          : PostCompactTrigger.Auto;
+        await config
+          .getHookSystem()
+          ?.firePostCompactEvent(postCompactTrigger, publishedSnapshot, signal);
+      } catch (err) {
+        config.getDebugLogger().warn(`PostCompact hook failed: ${err}`);
+      }
+
+      return {
+        newHistory: activeTurn,
+        info: {
+          originalTokenCount,
+          newTokenCount,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      };
     }
 
     // For manual /compress (force=true), if the last message is an orphaned model

@@ -21,10 +21,15 @@ import {
   PreCompactTrigger,
   PostCompactTrigger,
 } from '../hooks/types.js';
+import {
+  isAgentixAutoTrainingEnabled,
+  refreshAgentixMemory,
+} from './agentixMemoryTrainer.js';
 
 vi.mock('../telemetry/uiTelemetry.js');
 vi.mock('../core/tokenLimits.js');
 vi.mock('../telemetry/loggers.js');
+vi.mock('./agentixMemoryTrainer.js');
 
 describe('findCompressSplitPoint', () => {
   it('should throw an error for non-positive numbers', () => {
@@ -297,6 +302,7 @@ describe('ChatCompressionService', () => {
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       getHookSystem: mockGetHookSystem,
       getModel: () => 'test-model',
+      getSessionId: () => 'test-session',
       getApprovalMode: () => 'default',
       getDebugLogger: () => ({
         warn: vi.fn(),
@@ -305,10 +311,51 @@ describe('ChatCompressionService', () => {
 
     vi.mocked(tokenLimit).mockReturnValue(1000);
     vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(500);
+    vi.mocked(isAgentixAutoTrainingEnabled).mockReturnValue(false);
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
+  });
+
+  it('replaces model compression with Agentix training and keeps only the active turn', async () => {
+    vi.stubEnv('QWEN_MEMORY_SNAPSHOT_DIR', '/test/no-snapshot');
+    vi.mocked(isAgentixAutoTrainingEnabled).mockReturnValue(true);
+    vi.mocked(refreshAgentixMemory).mockResolvedValue(
+      'Updated Agentix snapshot.',
+    );
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'Old request.' }] },
+      { role: 'model', parts: [{ text: 'Old response.' }] },
+      { role: 'user', parts: [{ text: 'Current request.' }] },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'read_file', args: {} } }],
+      },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    const generateContent = vi.fn();
+    vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
+      generateContent,
+    } as unknown as ContentGenerator);
+
+    const result = await service.compress(
+      mockChat,
+      mockPromptId,
+      true,
+      mockModel,
+      mockConfig,
+      false,
+    );
+
+    expect(refreshAgentixMemory).toHaveBeenCalledWith(
+      'test-session',
+      undefined,
+    );
+    expect(generateContent).not.toHaveBeenCalled();
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.newHistory).toEqual(history.slice(2));
   });
 
   it('should return NOOP if history is empty', async () => {

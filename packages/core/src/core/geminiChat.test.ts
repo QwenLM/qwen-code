@@ -10,7 +10,7 @@ import type {
   GenerateContentConfig,
   GenerateContentResponse,
 } from '@google/genai';
-import { ApiError } from '@google/genai';
+import { ApiError, FinishReason } from '@google/genai';
 import type { ContentGenerator } from '../core/contentGenerator.js';
 import {
   GeminiChat,
@@ -87,6 +87,8 @@ describe('GeminiChat', async () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockFileSystem.clear();
+    vi.stubEnv('QWEN_MEMORY_SNAPSHOT_DIR', '/test/memory-snapshots');
     vi.mocked(uiTelemetryService.setLastPromptTokenCount).mockClear();
     mockContentGenerator = {
       generateContent: vi.fn(),
@@ -134,6 +136,7 @@ describe('GeminiChat', async () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
     vi.resetAllMocks();
   });
@@ -177,6 +180,64 @@ describe('GeminiChat', async () => {
   }
 
   describe('sendMessageStream', () => {
+    it('adds an Agentix snapshot to the outbound request without persisting it in history', async () => {
+      mockFileSystem.set(
+        '/test/memory-snapshots/test-session-id.md',
+        '# Snapshot\nRemember the repository architecture.\n',
+      );
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { role: 'model', parts: [{ text: 'Understood.' }] },
+                finishReason: FinishReason.STOP,
+              },
+            ],
+          } as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'Continue the task.' },
+        'prompt-id-memory-context',
+      );
+      for await (const _ of stream) {
+        // Consume the response so GeminiChat finalizes its history.
+      }
+
+      const request = vi.mocked(mockContentGenerator.generateContentStream).mock
+        .calls[0]![0];
+      expect(request.contents).toEqual([
+        {
+          role: 'user',
+          parts: [
+            {
+              text: expect.stringContaining(
+                'Remember the repository architecture.',
+              ),
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [{ text: 'Continue the task.' }],
+        },
+      ]);
+
+      expect(chat.getHistory()).toEqual([
+        {
+          role: 'user',
+          parts: [{ text: 'Continue the task.' }],
+        },
+        {
+          role: 'model',
+          parts: [{ text: 'Understood.' }],
+        },
+      ]);
+    });
+
     it('should succeed if a tool call is followed by an empty part', async () => {
       // 1. Mock a stream that contains a tool call, then an invalid (empty) part.
       const streamWithToolCall = (async function* () {
