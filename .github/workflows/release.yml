@@ -465,14 +465,12 @@ jobs:
         env:
           GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           PREVIOUS_RELEASE_TAG: '${{ needs.prepare.outputs.previous_release_tag }}'
-          RELEASE_BRANCH: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
-          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
         run: |-
           gh label create 'skip-changelog-auto' --repo "${GITHUB_REPOSITORY}" --color 'ededed' --description 'Automatically exclude internal CI changes from release notes' --force
-          gh api --method POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
-            -f "tag_name=${RELEASE_TAG}" \
-            -f "previous_tag_name=${PREVIOUS_RELEASE_TAG}" \
-            -f "target_commitish=${RELEASE_BRANCH}" --jq '.body' | \
+          git rev-list "${PREVIOUS_RELEASE_TAG}..HEAD" | while read -r commit; do
+            gh api "repos/${GITHUB_REPOSITORY}/commits/${commit}/pulls" \
+              --jq '.[] | select(.merged_at != null) | {number, title, labels}'
+          done | jq -s 'unique_by(.number)' | \
             node .github/scripts/classify-release-notes.mjs --batch
 
       - name: 'Create GitHub Release and Tag'

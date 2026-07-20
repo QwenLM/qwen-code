@@ -4,7 +4,6 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseGeneratedEntries } from '../../scripts/generate-release-notes.js';
 
 const INTERNAL_LABELS = new Set([
   'category/development',
@@ -73,16 +72,6 @@ function fetchFiles(repo, number) {
     .filter(Boolean);
 }
 
-function fetchMetadata(repo, number) {
-  return JSON.parse(
-    execFileSync(
-      'gh',
-      ['pr', 'view', number, '--repo', repo, '--json', 'title,labels'],
-      { encoding: 'utf8' },
-    ),
-  );
-}
-
 function mainSingle() {
   const repo = process.env.GITHUB_REPOSITORY || '';
   const number = process.env.PR_NUMBER || '';
@@ -95,7 +84,13 @@ function mainSingle() {
     );
   }
 
-  const metadata = fetchMetadata(repo, number);
+  const metadata = JSON.parse(
+    execFileSync(
+      'gh',
+      ['pr', 'view', number, '--repo', repo, '--json', 'title,labels'],
+      { encoding: 'utf8' },
+    ),
+  );
   const files = fetchFiles(repo, number);
   process.stdout.write(
     `${shouldAutoSkipChangelog({ ...metadata, files }) ? 'skip' : 'include'}\n`,
@@ -108,16 +103,23 @@ function mainBatch() {
     throw new Error('GITHUB_REPOSITORY must be set to owner/repo.');
   }
 
-  const prs = parseGeneratedEntries(readFileSync(0, 'utf8'));
+  const input = JSON.parse(readFileSync(0, 'utf8'));
+  const prs = Array.isArray(input) ? input : [];
   const labeled = [];
+  const unlabeled = [];
 
   for (const pr of prs) {
     const number = String(pr.number);
     if (!/^[1-9]\d*$/.test(number)) continue;
     try {
-      const metadata = fetchMetadata(repo, number);
       const files = fetchFiles(repo, number);
-      if (shouldAutoSkipChangelog({ ...metadata, files })) {
+      const shouldSkip = shouldAutoSkipChangelog({ ...pr, files });
+      const hasAutoLabel = pr.labels.some(
+        (label) =>
+          (typeof label === 'string' ? label : label.name).toLowerCase() ===
+          AUTO_LABEL,
+      );
+      if (shouldSkip && !hasAutoLabel) {
         execFileSync('gh', [
           'pr',
           'edit',
@@ -128,6 +130,17 @@ function mainBatch() {
           AUTO_LABEL,
         ]);
         labeled.push(number);
+      } else if (!shouldSkip && hasAutoLabel) {
+        execFileSync('gh', [
+          'pr',
+          'edit',
+          number,
+          '--repo',
+          repo,
+          '--remove-label',
+          AUTO_LABEL,
+        ]);
+        unlabeled.push(number);
       }
     } catch {
       process.stderr.write(
@@ -138,6 +151,9 @@ function mainBatch() {
 
   if (labeled.length > 0) {
     process.stdout.write(`Labeled: ${labeled.join(', ')}\n`);
+  }
+  if (unlabeled.length > 0) {
+    process.stdout.write(`Unlabeled: ${unlabeled.join(', ')}\n`);
   }
 }
 

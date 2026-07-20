@@ -322,31 +322,28 @@ describe('release note classification', () => {
       release,
       /Auto-label internal CI PRs for release notes exclusion'\s+continue-on-error: true/,
     );
-    assert.match(release, /releases\/generate-notes/);
+    assert.match(release, /git rev-list "\$\{PREVIOUS_RELEASE_TAG\}\.\.HEAD"/);
+    assert.match(release, /commits\/\$\{commit\}\/pulls/);
     assert.doesNotMatch(release, /--search "merged:/);
   });
 
-  it('batch mode labels qualifying PRs from stdin', () => {
+  it('batch mode adds qualifying labels and removes stale ones', () => {
     const dir = mkdtempSync(join(tmpdir(), 'release-note-classifier-'));
     try {
-      const labeled = join(dir, 'labeled.txt');
+      const updates = join(dir, 'updates.txt');
       const gh = join(dir, 'gh');
       writeFileSync(
         gh,
         [
           '#!/usr/bin/env node',
           'const args = process.argv.slice(2);',
-          "if (args[0] === 'pr' && args[1] === 'view') {",
-          "  const title = args[2] === '10' ? 'ci: speed up checks' : 'feat: new feature';",
-          '  process.stdout.write(JSON.stringify({ title, labels: [] }));',
-          '  process.exit(0);',
-          '}',
           "if (args[0] === 'api' && args.includes('.[] | .filename, (.previous_filename // empty)')) {",
           "  process.stdout.write('.github/workflows/ci.yml\\n');",
           '  process.exit(0);',
           '}',
           "if (args[0] === 'pr' && args[1] === 'edit') {",
-          `  require('node:fs').appendFileSync(${JSON.stringify(labeled)}, args[2] + '\\n');`,
+          `  const action = args.includes('--remove-label') ? 'remove' : 'add';`,
+          `  require('node:fs').appendFileSync(${JSON.stringify(updates)}, args[2] + ' ' + action + '\\n');`,
           '  process.exit(0);',
           '}',
           'process.exit(1);',
@@ -354,11 +351,15 @@ describe('release note classification', () => {
       );
       chmodSync(gh, 0o755);
 
-      const input = [
-        "## What's Changed",
-        '* ci: speed up checks by @alice in https://github.com/QwenLM/qwen-code/pull/10',
-        '* feat: new feature by @alice in https://github.com/QwenLM/qwen-code/pull/11',
-      ].join('\n');
+      const input = JSON.stringify([
+        { number: 10, title: 'ci: speed up checks', labels: [] },
+        {
+          number: 11,
+          title: 'fix: user-visible bug',
+          labels: [{ name: 'skip-changelog-auto' }],
+        },
+        { number: 12, title: 'feat: new feature', labels: [] },
+      ]);
 
       const output = execFileSync(
         process.execPath,
@@ -375,9 +376,9 @@ describe('release note classification', () => {
       );
 
       assert.match(output, /Labeled: 10/);
-      assert.doesNotMatch(output, /11/);
-      const labeledContent = readFileSync(labeled, 'utf8').trim();
-      assert.equal(labeledContent, '10');
+      assert.match(output, /Unlabeled: 11/);
+      const updateContent = readFileSync(updates, 'utf8').trim();
+      assert.equal(updateContent, '10 add\n11 remove');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
