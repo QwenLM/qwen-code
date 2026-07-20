@@ -8,7 +8,12 @@ import type { Mock } from 'vitest';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type OpenAI from 'openai';
 import type { GenerateContentParameters } from '@google/genai';
-import { GenerateContentResponse, Type, FinishReason } from '@google/genai';
+import {
+  FinishReason,
+  FunctionCallingConfigMode,
+  GenerateContentResponse,
+  Type,
+} from '@google/genai';
 import type { ErrorHandler, PipelineConfig } from './types.js';
 import {
   ContentGenerationPipeline,
@@ -668,6 +673,103 @@ describe('ContentGenerationPipeline', () => {
       const apiCall = (mockClient.chat.completions.create as Mock).mock
         .calls[0][0];
       expect(apiCall.enable_thinking).toBe(false);
+    });
+
+    it.each([
+      {
+        name: 'adapt Token Plan qwen3.8 side queries',
+        baseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        reasoning: undefined,
+        includeThoughts: false,
+        expectedThinking: true,
+        expectedToolChoice: undefined,
+      },
+      {
+        name: 'keep thinking disabled for standard DashScope qwen3.8',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        reasoning: undefined,
+        includeThoughts: false,
+        expectedThinking: false,
+        expectedToolChoice: 'required',
+      },
+      {
+        name: 'honor the config-level opt-out for Token Plan qwen3.8',
+        baseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        reasoning: false,
+        includeThoughts: false,
+        expectedThinking: false,
+        expectedToolChoice: 'required',
+      },
+      {
+        name: 'allow automatic tool selection when Token Plan reasoning is on',
+        baseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        reasoning: undefined,
+        includeThoughts: true,
+        expectedThinking: true,
+        expectedToolChoice: undefined,
+      },
+    ])('should $name', async (testCase) => {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: testCase.baseUrl,
+        model: 'qwen3.8-max-preview',
+        reasoning: testCase.reasoning,
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      (mockProvider.buildRequest as Mock).mockImplementation((req) => ({
+        ...req,
+        enable_thinking: true,
+      }));
+
+      const request: GenerateContentParameters = {
+        model: 'qwen3.8-max-preview',
+        contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
+        config: {
+          thinkingConfig: { includeThoughts: testCase.includeThoughts },
+          tools: [
+            {
+              functionDeclarations: [
+                {
+                  name: 'respond_in_schema',
+                  parameters: { type: Type.OBJECT, properties: {} },
+                },
+              ],
+            },
+          ],
+          toolConfig: {
+            functionCallingConfig: { mode: FunctionCallingConfigMode.ANY },
+          },
+        },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Summarize' },
+      ]);
+      (mockConverter.convertGeminiToolsToOpenAI as Mock).mockResolvedValue([
+        { type: 'function', function: { name: 'respond_in_schema' } },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'side-query:permissions-classifier');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBe(testCase.expectedThinking);
+      expect(apiCall.tool_choice).toBe(testCase.expectedToolChoice);
     });
 
     it('should strip reasoning key from extra_body when thinking is disabled', async () => {

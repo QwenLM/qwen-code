@@ -814,7 +814,14 @@ export class ContentGenerationPipeline {
     // In both cases we want the wire shape to actually disable thinking,
     // not just remove the effort knob — otherwise providers whose default
     // is "thinking enabled" (DeepSeek V4+, qwen3) keep paying thinking
-    // latency/cost.
+    // latency/cost. Token Plan qwen3.8 is handled separately because its API
+    // rejects disabled thinking.
+    const model = (context.model ?? '').toLowerCase();
+    const isQwen38TokenPlan =
+      model === 'qwen3.8-max-preview' &&
+      DashScopeOpenAICompatibleProvider.isTokenPlanProvider(
+        this.contentGeneratorConfig,
+      );
     const reasoningDisabled =
       request.config?.thinkingConfig?.includeThoughts === false ||
       this.contentGeneratorConfig.reasoning === false;
@@ -840,14 +847,18 @@ export class ContentGenerationPipeline {
       // config/models.ts, aliased to Qwen 3.6 Plus hybrid) — it doesn't
       // start with `qwen` but is the most common hybrid-thinking model
       // for first-time users, so it must be covered.
-      const model = (context.model ?? '').toLowerCase();
       if (model.startsWith('qwen') || model === 'coder-model') {
         if (
           DashScopeOpenAICompatibleProvider.isDashScopeProvider(
             this.contentGeneratorConfig,
           )
         ) {
-          typed['enable_thinking'] = false;
+          if (
+            !isQwen38TokenPlan ||
+            this.contentGeneratorConfig.reasoning === false
+          ) {
+            typed['enable_thinking'] = false;
+          }
         } else {
           // Non-DashScope OpenAI-compatible servers (vLLM, SGLang, ...) render
           // the model's chat template server-side and read the thinking switch
@@ -895,6 +906,17 @@ export class ContentGenerationPipeline {
       // we don't push it there. See https://api-docs.deepseek.com/.
       if (isDeepSeekHostname(this.contentGeneratorConfig)) {
         typed['thinking'] = { type: 'disabled' };
+      }
+    }
+
+    if (isQwen38TokenPlan) {
+      const typed = providerRequest as unknown as Record<string, unknown>;
+      // Token Plan rejects forced tool selection while thinking is enabled.
+      if (
+        typed['enable_thinking'] !== false &&
+        typed['tool_choice'] === 'required'
+      ) {
+        delete typed['tool_choice'];
       }
     }
 
