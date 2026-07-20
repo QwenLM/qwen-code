@@ -3911,7 +3911,12 @@ describe('SessionService', () => {
           cwd: '/test/project/root/.qwen/worktrees/my-task',
         },
       ]);
-      vi.mocked(getProjectHash).mockReturnValue('test-project-hash');
+      // The full worktree cwd hashes differently from the repo root,
+      // so the first getProjectHash(recordCwd) check fails and the
+      // marker-based inference branch is exercised.
+      vi.mocked(getProjectHash).mockImplementation((p: string) =>
+        p === '/test/project/root' ? 'test-project-hash' : 'worktree-hash',
+      );
 
       const result = await sessionService.listSessions();
 

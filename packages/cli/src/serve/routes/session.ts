@@ -1565,18 +1565,15 @@ export function registerSessionRoutes(
             new SessionService(workspaceCwd).getWorktreeSessionPath(sessionId),
           ).catch(() => null);
           if (sidecar) {
-            // Defense-in-depth: validate the sidecar path is contained
-            // within the workspace's worktrees dir. The ACP layer already
-            // validated this, but a local check makes the route airtight.
+            // Defense-in-depth: normalize the sidecar path with
+            // path.resolve (defeats `..` traversal) and verify it lands
+            // under a .qwen/worktrees/ segment. Symlink escapes are
+            // handled by the ACP layer's sessionCd handler which does
+            // fs.realpath on the final target.
             const resolvedPath = path.resolve(sidecar.worktreePath);
-            const worktreesRoot = path.resolve(
-              workspaceCwd,
-              '.qwen',
-              'worktrees',
-            );
-            const rel = path.relative(worktreesRoot, resolvedPath);
-            if (rel.startsWith('..') || path.isAbsolute(rel)) {
-              daemonLog?.warn('worktree sidecar path outside worktrees dir', {
+            const marker = `${path.sep}.qwen${path.sep}worktrees${path.sep}`;
+            if (!resolvedPath.includes(marker)) {
+              daemonLog?.warn('worktree sidecar path failed containment', {
                 sessionId,
                 path: sidecar.worktreePath,
               });
