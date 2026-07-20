@@ -2233,7 +2233,11 @@ export interface DaemonToolToggleResult {
   enabled: boolean;
 }
 
-export type DaemonSkillToggleActivation = 'applied' | 'deferred' | 'partial';
+export type DaemonSkillToggleActivation =
+  | 'applied'
+  | 'reconciling'
+  | 'deferred'
+  | 'partial';
 
 export interface DaemonSkillToggleResult {
   skillName: string;
@@ -2262,6 +2266,7 @@ export interface DaemonSkillMutationResult {
   scope: DaemonSkillScope;
   installedPath?: string;
   deleted?: boolean;
+  activation?: DaemonSkillToggleActivation;
 }
 
 export interface DaemonSettingDescriptor {

@@ -313,7 +313,6 @@ The workspace projection response is:
       "version": "1.2.3",
       "defaultActivation": "enabled",
       "workspaceActivation": "disabled",
-      "effectiveActivation": "disabled",
       "activationSource": "workspace_override"
     }
   ]
@@ -354,10 +353,12 @@ Location: /extensions/operations/<operation-id>
 Retry-After: 1
 Content-Type: application/json
 
-{"accepted":true,"operationId":"<operation-id>"}
+{"accepted":true,"operationId":"<operation-id>","deadlineAt":1750000600000}
 ```
 
 Workspace-qualified mutations use the same global `/extensions/operations/:operationId` polling path. Operation history is process-local, keeps only a bounded number of terminal entries, and is lost on daemon restart; clients must re-read the catalog or workspace projection and compare generations when an operation id disappears.
+
+`deadlineAt` is the server-owned absolute Unix timestamp for the operation. Clients may use an earlier local deadline, but must not extend this value or reset the budget on each poll.
 
 An operation snapshot has this shape:
 
@@ -370,6 +371,7 @@ An operation snapshot has this shape:
   "phase": "preparing",
   "createdAt": 1750000000000,
   "updatedAt": 1750000000100,
+  "deadlineAt": 1750000600000,
   "source": "owner/repository",
   "name": "demo"
 }
@@ -534,7 +536,7 @@ Response shape:
     "compactedReplayMaxBytes": 4194304,
     "promptDeadlineMs": null,
     "writerIdleTimeoutMs": null,
-    "channelIdleTimeoutMs": 0,
+    "channelIdleTimeoutMs": null,
     "sessionIdleTimeoutMs": 1800000,
     "acpConnectionCap": 64
   },
@@ -1121,6 +1123,72 @@ canonicalizing it. Current daemons emit it for every skill, while clients must
 tolerate its absence from older v1 daemons. Skill bodies, hooks, `skillRoot`,
 and other skill configuration remain excluded. `errors` is omitted when
 discovery succeeds.
+
+### Workspace module management APIs
+
+Extensions, MCP, and Skill management is available without creating or loading
+a Session. Configuration and installation use `/config`; live discovery and
+control use `/runtime`:
+
+| Scope                          | Primary workspace                 | Selected registered workspace                 |
+| ------------------------------ | --------------------------------- | --------------------------------------------- |
+| Runtime preparation and status | `/workspace/runtime/*`            | `/workspaces/:workspace/runtime/*`            |
+| Extension management           | `/workspace/config/extensions/*`  | `/workspaces/:workspace/config/extensions/*`  |
+| MCP server configuration       | `/workspace/config/mcp/servers/*` | `/workspaces/:workspace/config/mcp/servers/*` |
+| MCP server enablement          | `/workspace/config/mcp/:server/*` | `/workspaces/:workspace/config/mcp/:server/*` |
+| Skill management               | `/workspace/config/skills/*`      | `/workspaces/:workspace/config/skills/*`      |
+
+Selected-workspace MCP configuration accepts only `scope: "workspace"`;
+process-global user configuration remains on the primary endpoint. Qualified
+routes resolve the selected `WorkspaceRuntime` and never fall back to the
+primary runtime. Read-only daemon-local configuration inventory is available
+for an untrusted workspace; runtime commands and sensitive workspace mutations
+require trust. Configuration operations commit without starting ACP. The
+no-argument runtime ensure command and explicit domain commands may start or
+reuse that workspace's ACP child, but they do not create a hidden
+Session. The daemon keeps an idle child for the lifetime of its WorkspaceRuntime
+by default. Closing the last Session or finishing a management operation does
+not stop it; later runtime operations reuse the same child and epoch. An
+explicit positive `channelIdleTimeoutMs` enables delayed compatibility
+auto-reaping; `0` is rejected. The
+`/runtime/status` snapshot reports `null` when no timeout is configured; it
+remains side-effect free and does not start or retain a child.
+Runtime ensure and domain-command responses project their status after releasing the
+outer control lease, so a child exit during release is reported as `stopping`
+or `cold` instead of returning a stale live snapshot.
+
+Runtime routes are additive; the legacy `/workspace/mcp`, `/workspace/skills`,
+and related primary-workspace routes keep their existing behavior.
+
+| Operation                                      | Primary workspace                                      | Selected registered workspace                                      |
+| ---------------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------ |
+| Ensure the complete standard Workspace Runtime | `POST /workspace/runtime/ensure`                       | `POST /workspaces/:workspace/runtime/ensure`                       |
+| Read coordinator state                         | `GET /workspace/runtime/status`                        | `GET /workspaces/:workspace/runtime/status`                        |
+| Read MCP discovery state                       | `GET /workspace/runtime/mcp`                           | `GET /workspaces/:workspace/runtime/mcp`                           |
+| Reload MCP configuration                       | `POST /workspace/runtime/mcp/reload`                   | `POST /workspaces/:workspace/runtime/mcp/reload`                   |
+| Enable or disable one MCP server               | `POST /workspace/config/mcp/:server/{enable,disable}`  | `POST /workspaces/:workspace/config/mcp/:server/{enable,disable}`  |
+| Read one MCP server's tools/resources          | `GET /workspace/runtime/mcp/:server/{tools,resources}` | `GET /workspaces/:workspace/runtime/mcp/:server/{tools,resources}` |
+| Manage one MCP server                          | `POST /workspace/runtime/mcp/:server/:action`          | `POST /workspaces/:workspace/runtime/mcp/:server/:action`          |
+| List active MCP operations                     | `GET /workspace/runtime/operations`                    | `GET /workspaces/:workspace/runtime/operations`                    |
+| Poll an MCP operation                          | `GET /workspace/runtime/operations/:operationId`       | `GET /workspaces/:workspace/runtime/operations/:operationId`       |
+| Read Skills or built-in Tools                  | `GET /workspace/runtime/{skills,tools}`                | `GET /workspaces/:workspace/runtime/{skills,tools}`                |
+
+Runtime MCP management actions are `approve`, `authenticate`, and `clear-auth`.
+The legacy `/workspace(s)/.../mcp` control route continues accepting `enable`
+and `disable` with its historical persistence behavior, while new clients use
+the configuration route. Runtime MCP management responses
+include an `operationId` and authoritative `deadlineAt`; OAuth authentication
+can move from `running` to
+`waiting_for_input` and then to `succeeded` or `failed`.
+The active-operation collection and by-id status retain the OAuth `authUrl` so
+a client can resume observing after navigation without restarting authentication.
+Operation history is workspace-local, bounded, and process-local. Built-in tool
+catalogs exclude MCP tools; MCP tools are read from the server-qualified route.
+MCP configuration mutations return `activation: "deferred" | "reconciling"`.
+`deferred` means every affected runtime was cold and will consume the persisted
+configuration on its next preparation; `reconciling` means at least one live
+runtime has started applying it. Clients observe completion through
+`/runtime/status`, not through Session events.
 
 ### `GET /workspace/providers`
 

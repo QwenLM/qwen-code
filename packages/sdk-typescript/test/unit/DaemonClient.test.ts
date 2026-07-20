@@ -748,6 +748,50 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('uses workspace-qualified config routes for managed modules', async () => {
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, {}));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const workspace = client.workspaceById('workspace/id');
+
+      await workspace.workspaceMcpConfig();
+      await workspace.setWorkspaceMcpConfig('docs/server', {
+        command: 'node',
+      });
+      await workspace.removeWorkspaceMcpConfig('docs/server');
+      await workspace.workspaceConfigExtensions();
+      await workspace.workspaceConfigSkills();
+      await workspace.activeWorkspaceConfigExtensionOperations();
+      await workspace.setWorkspaceConfigSkillEnabled('review/skill', true);
+
+      expect(calls.map((call) => [call.method, call.url])).toEqual([
+        ['GET', 'http://daemon/workspaces/workspace%2Fid/config/mcp/servers'],
+        [
+          'PUT',
+          'http://daemon/workspaces/workspace%2Fid/config/mcp/servers/docs%2Fserver',
+        ],
+        [
+          'DELETE',
+          'http://daemon/workspaces/workspace%2Fid/config/mcp/servers/docs%2Fserver?scope=workspace',
+        ],
+        ['GET', 'http://daemon/workspaces/workspace%2Fid/config/extensions'],
+        ['GET', 'http://daemon/workspaces/workspace%2Fid/config/skills'],
+        [
+          'GET',
+          'http://daemon/workspaces/workspace%2Fid/config/extensions/operations',
+        ],
+        [
+          'POST',
+          'http://daemon/workspaces/workspace%2Fid/config/skills/review%2Fskill/enable',
+        ],
+      ]);
+      expect(calls[1]?.body).toBe(
+        JSON.stringify({
+          scope: 'workspace',
+          config: { command: 'node' },
+        }),
+      );
+    });
+
     it('reads primary and workspace-qualified Git status over REST', async () => {
       const primary = {
         v: 1 as const,
@@ -4609,6 +4653,25 @@ describe('DaemonClient', () => {
       expect(polls).toBe(0);
     });
 
+    it('does not let a client timeout extend the server operation deadline', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(500, { error: 'should not poll' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.waitForExtensionOperation(
+          {
+            accepted: true,
+            operationId: 'op-expired',
+            deadlineAt: Date.now() - 1,
+          },
+          { timeoutMs: Number.POSITIVE_INFINITY },
+        ),
+      ).rejects.toThrow('server operation was not cancelled');
+      expect(calls).toHaveLength(0);
+    });
+
     it('aborts an in-flight poll when the operation deadline expires', async () => {
       let pollSignal: AbortSignal | null | undefined;
       const { fetch } = recordingFetch(
@@ -4906,6 +4969,96 @@ describe('DaemonClient', () => {
         ['POST', 'http://daemon/workspaces/%2Fwork%2Fa/extensions/refresh'],
       ]);
       expect(transportFetch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('workspace runtime management', () => {
+    it('uses REST for runtime and management routes with an ACP transport', async () => {
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, {}));
+      const transportFetch = vi.fn(async () =>
+        jsonResponse(500, { error: 'transport should not be used' }),
+      );
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
+      const workspace = client.workspaceByCwd('/work/a');
+
+      await workspace.ensureWorkspaceRuntime();
+      await workspace.workspaceRuntimeStatus();
+      await workspace.workspaceRuntimeOperation('op-1');
+      await workspace.activeWorkspaceRuntimeOperations();
+      await workspace.workspaceRuntimeExtensions();
+      await workspace.workspaceRuntimeMcp();
+      await workspace.workspaceMcpConfig();
+      await workspace.workspaceRuntimeSkills();
+      await workspace.workspaceRuntimeTools();
+      await workspace.workspaceConfigSkills();
+      await workspace.workspaceConfigExtensions();
+      await workspace.setWorkspaceConfigSkillEnabled('review', true);
+      await client.installWorkspaceConfigSkill({
+        name: 'global-review',
+        scope: 'global',
+        source: { type: 'github', url: 'owner/repo' },
+      });
+
+      expect(calls.map((call) => [call.method, call.url])).toEqual([
+        ['POST', 'http://daemon/workspaces/%2Fwork%2Fa/runtime/ensure'],
+        ['GET', 'http://daemon/workspaces/%2Fwork%2Fa/runtime/status'],
+        ['GET', 'http://daemon/workspaces/%2Fwork%2Fa/runtime/operations/op-1'],
+        ['GET', 'http://daemon/workspaces/%2Fwork%2Fa/runtime/operations'],
+        ['GET', 'http://daemon/workspaces/%2Fwork%2Fa/runtime/extensions'],
+        ['GET', 'http://daemon/workspaces/%2Fwork%2Fa/runtime/mcp'],
+        ['GET', 'http://daemon/workspaces/%2Fwork%2Fa/config/mcp/servers'],
+        ['GET', 'http://daemon/workspaces/%2Fwork%2Fa/runtime/skills'],
+        ['GET', 'http://daemon/workspaces/%2Fwork%2Fa/runtime/tools'],
+        ['GET', 'http://daemon/workspaces/%2Fwork%2Fa/config/skills'],
+        ['GET', 'http://daemon/workspaces/%2Fwork%2Fa/config/extensions'],
+        [
+          'POST',
+          'http://daemon/workspaces/%2Fwork%2Fa/config/skills/review/enable',
+        ],
+        ['POST', 'http://daemon/workspace/config/skills/install'],
+      ]);
+      expect(JSON.parse(calls[0]?.body ?? 'null')).toEqual({});
+      expect(transportFetch).not.toHaveBeenCalled();
+    });
+
+    it('persists MCP enablement through the owning configuration route', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          serverName: 'docs',
+          action: 'disable',
+          ok: true,
+          activation: 'deferred',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client
+          .workspaceByCwd('/work/a')
+          .setWorkspaceConfigMcpServerEnabled('docs', false),
+      ).resolves.toMatchObject({ activation: 'deferred' });
+      await expect(
+        client.setUserConfigMcpServerEnabled('docs', true),
+      ).resolves.toMatchObject({ activation: 'deferred' });
+      expect(calls.map((call) => [call.method, call.url])).toEqual([
+        [
+          'POST',
+          'http://daemon/workspaces/%2Fwork%2Fa/config/mcp/docs/disable',
+        ],
+        ['POST', 'http://daemon/workspace/config/mcp/docs/enable'],
+      ]);
     });
   });
 

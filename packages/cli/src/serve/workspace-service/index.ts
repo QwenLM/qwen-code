@@ -19,7 +19,6 @@ import * as path from 'node:path';
 import {
   SERVE_STATUS_EXT_METHODS,
   SERVE_CONTROL_EXT_METHODS,
-  BridgeChannelClosedError,
   STATUS_SCHEMA_VERSION,
   createIdleWorkspaceMcpStatus,
   createIdleWorkspaceSkillsStatus,
@@ -30,7 +29,6 @@ import {
   createIdleAcpPreflightCells,
   mapDomainErrorToErrorKind,
   type ServeWorkspacePreflightStatus,
-  type ServeWorkspaceSkillsRefreshResult,
   type ServeWorkspaceSkillsStatus,
 } from '@qwen-code/acp-bridge/status';
 
@@ -234,6 +232,31 @@ export function createDaemonWorkspaceService(
   let lastWorkspaceSkillsStatus: ServeWorkspaceSkillsStatus | undefined;
   let inFlightAcpPreheat: Promise<void> | undefined;
 
+  const invalidateWorkspaceSkillsStatus = (): void => {
+    lastWorkspaceSkillsStatus = undefined;
+    workspaceSkillsStatusProvider?.invalidate?.(boundWorkspace);
+  };
+
+  const getWorkspaceSkillsConfigStatus =
+    async (): Promise<ServeWorkspaceSkillsStatus> => {
+      if (workspaceSkillsStatusProvider) {
+        try {
+          return {
+            ...(await workspaceSkillsStatusProvider(boundWorkspace)),
+            source: 'config',
+          };
+        } catch (err) {
+          writeStderrLine(
+            `qwen serve: getWorkspaceSkillsConfigStatus local provider failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      return {
+        ...createIdleWorkspaceSkillsStatus(boundWorkspace),
+        source: 'config',
+      };
+    };
+
   const getWorkspaceSkillsStatus =
     async (): Promise<ServeWorkspaceSkillsStatus> => {
       let status: ServeWorkspaceSkillsStatus;
@@ -253,51 +276,28 @@ export function createDaemonWorkspaceService(
         );
         status = createIdleWorkspaceSkillsStatus(boundWorkspace);
       }
-      if (status.initialized) {
-        lastWorkspaceSkillsStatus = status;
-        return status;
+      if (
+        status.initialized &&
+        (status.source === 'live' ||
+          (status.source === undefined && (isChannelLive?.() ?? false)))
+      ) {
+        const liveStatus = { ...status, source: 'live' as const };
+        lastWorkspaceSkillsStatus = liveStatus;
+        return liveStatus;
       }
       // Live child unavailable. Prefer the last answer it produced (keeps the
       // full, extension-aware list available across a reap)...
-      if (lastWorkspaceSkillsStatus) return lastWorkspaceSkillsStatus;
+      if (lastWorkspaceSkillsStatus) {
+        return { ...lastWorkspaceSkillsStatus, source: 'cache' };
+      }
       // ...then fall back to daemon-local enumeration, so a child that has not
       // answered even once (e.g. a preheat that times out under `npm run dev`)
       // still yields the on-disk skills — `/review` included. The provider
       // handles its own errors, but it is injected, so guard the call too and
       // degrade to the idle placeholder rather than failing the request —
       // matching getWorkspaceEnvStatus / getWorkspacePreflightStatus.
-      if (workspaceSkillsStatusProvider) {
-        try {
-          return await workspaceSkillsStatusProvider(boundWorkspace);
-        } catch (err) {
-          writeStderrLine(
-            `qwen serve: getWorkspaceSkillsStatus local provider failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-      }
-      return status;
+      return getWorkspaceSkillsConfigStatus();
     };
-
-  const refreshWorkspaceSkillsAfterMutation = async (): Promise<void> => {
-    lastWorkspaceSkillsStatus = undefined;
-    workspaceSkillsStatusProvider?.invalidate?.(boundWorkspace);
-    if (!(isChannelLive?.() ?? false)) return;
-    try {
-      await invokeWorkspaceCommand<ServeWorkspaceSkillsRefreshResult>(
-        SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
-        { cwd: boundWorkspace },
-      );
-    } catch (err) {
-      if (
-        !(err instanceof SessionNotFoundError) &&
-        !(err instanceof BridgeChannelClosedError)
-      ) {
-        writeStderrLine(
-          `qwen serve: workspace skill refresh after mutation failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }
-  };
 
   // -- Facade --
   return {
@@ -314,13 +314,17 @@ export function createDaemonWorkspaceService(
       // SkillManager (including extension-provided skills). `queryWorkspaceStatus`
       // returns the idle placeholder (`initialized: false`, empty `skills`)
       // whenever no child channel is live — before the first session, after
-      // the child is reaped on session close (`--channel-idle-timeout-ms`
-      // defaults to an immediate kill), and when a cold-start preheat times
-      // out before the child ever answers. In those windows the Web Shell's
+      // workspace removal, a child crash, or an explicit restart, and when a
+      // cold-start preheat times out before the child ever answers. In those
+      // windows the Web Shell's
       // pre-first-prompt slash-command list would otherwise drop every skill,
       // so `/rev` stops autocompleting `/review`. `initialized` cleanly
       // separates a real child answer (always `true`) from the placeholder.
       return getWorkspaceSkillsStatus();
+    },
+
+    async getWorkspaceSkillsConfigStatus(_ctx: WorkspaceRequestContext) {
+      return getWorkspaceSkillsConfigStatus();
     },
 
     async getWorkspaceProvidersStatus(_ctx: WorkspaceRequestContext) {
@@ -721,7 +725,7 @@ export function createDaemonWorkspaceService(
       enabled: boolean,
     ): Promise<WorkspaceSkillToggleResult> {
       const normalizedName = requestedSkillName.trim().toLowerCase();
-      const status = await getWorkspaceSkillsStatus();
+      const status = await getWorkspaceSkillsConfigStatus();
       const skill = status.skills.find(
         (candidate) => candidate.name.trim().toLowerCase() === normalizedName,
       );
@@ -756,42 +760,9 @@ export function createDaemonWorkspaceService(
         skill.name,
         enabled,
       );
-      const channelLive = isChannelLive?.() ?? false;
-      let activation: WorkspaceSkillToggleResult['activation'] = channelLive
-        ? 'applied'
-        : 'deferred';
-      let sessionsRefreshed = 0;
-      let sessionsFailed = 0;
 
       if (persisted.changed) {
-        lastWorkspaceSkillsStatus = undefined;
-        workspaceSkillsStatusProvider?.invalidate?.(boundWorkspace);
-        if (channelLive) {
-          try {
-            const refreshed =
-              await invokeWorkspaceCommand<ServeWorkspaceSkillsRefreshResult>(
-                SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
-                { cwd: boundWorkspace },
-              );
-            sessionsRefreshed = refreshed.sessionsRefreshed;
-            sessionsFailed = refreshed.sessionsFailed;
-            if (sessionsFailed > 0) activation = 'partial';
-          } catch (err) {
-            if (
-              err instanceof SessionNotFoundError ||
-              err instanceof BridgeChannelClosedError
-            ) {
-              activation = 'deferred';
-            } else {
-              activation = 'partial';
-              sessionsFailed = 1;
-              writeStderrLine(
-                `qwen serve: workspace skill refresh failed: ${err instanceof Error ? err.message : String(err)}`,
-              );
-            }
-          }
-        }
-
+        invalidateWorkspaceSkillsStatus();
         publishWorkspaceEvent({
           type: 'settings_changed',
           data: {
@@ -808,9 +779,9 @@ export function createDaemonWorkspaceService(
         skillName: skill.name,
         enabled,
         changed: persisted.changed,
-        activation,
-        sessionsRefreshed,
-        sessionsFailed,
+        activation: 'deferred',
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
       };
     },
 
@@ -823,7 +794,7 @@ export function createDaemonWorkspaceService(
         request,
         skillInstallEnv?.['GH_TOKEN'] ?? skillInstallEnv?.['GITHUB_TOKEN'],
       );
-      await refreshWorkspaceSkillsAfterMutation();
+      invalidateWorkspaceSkillsStatus();
       return result;
     },
 
@@ -833,7 +804,7 @@ export function createDaemonWorkspaceService(
       scope: WorkspaceSkillScope,
     ): Promise<WorkspaceSkillMutationResult> {
       const normalizedName = requestedSkillName.trim().toLowerCase();
-      const status = await getWorkspaceSkillsStatus();
+      const status = await getWorkspaceSkillsConfigStatus();
       const skill = status.skills.find(
         (candidate) => candidate.name.trim().toLowerCase() === normalizedName,
       );
@@ -852,7 +823,7 @@ export function createDaemonWorkspaceService(
         skill.name,
         skill.installedPath,
       );
-      await refreshWorkspaceSkillsAfterMutation();
+      invalidateWorkspaceSkillsStatus();
       return result;
     },
 
@@ -1196,7 +1167,7 @@ export function createDaemonWorkspaceService(
     },
 
     invalidateWorkspaceSkillsStatus() {
-      lastWorkspaceSkillsStatus = undefined;
+      invalidateWorkspaceSkillsStatus();
     },
 
     async refreshExtensionsForAllSessions() {

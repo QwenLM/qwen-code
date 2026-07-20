@@ -96,6 +96,15 @@ interface MockSession {
   }) => AsyncGenerator<DaemonEvent, void, unknown>;
 }
 
+interface MockWorkspaceClient {
+  workspaceProviders: () => Promise<unknown>;
+  workspaceSkills: () => Promise<unknown>;
+  workspaceRuntimeSkills: () => Promise<unknown>;
+  workspaceRuntimeStatus: () => Promise<unknown>;
+  ensureWorkspaceRuntime: () => Promise<unknown>;
+  workspaceGit: () => Promise<unknown>;
+}
+
 interface MockClient {
   createOrAttachSession: (req: unknown) => Promise<MockSession>;
   capabilities: () => Promise<unknown>;
@@ -110,7 +119,7 @@ interface MockClient {
   workspaceAcpStatus: () => Promise<unknown>;
   workspaceAcpPreheat: () => Promise<unknown>;
   workspaceGit: () => Promise<unknown>;
-  workspaceByCwd: (workspaceCwd: string) => Pick<MockClient, 'workspaceGit'>;
+  workspaceByCwd: (workspaceCwd: string) => MockWorkspaceClient;
   workspaceTools: () => Promise<unknown>;
   setWorkspaceToolEnabled: () => Promise<unknown>;
   workspaceMemory: () => Promise<unknown>;
@@ -148,6 +157,7 @@ const sdkMocks = vi.hoisted(() => {
   const sessions: MockSession[] = [];
   const capabilities = vi.fn();
   const workspaceProviders = vi.fn();
+  const singularWorkspaceProviders = vi.fn();
   const listWorkspaceSessions = vi.fn();
   const closeSession = vi.fn();
   const setSessionApprovalMode = vi.fn();
@@ -155,10 +165,21 @@ const sdkMocks = vi.hoisted(() => {
   const workspaceMcpTools = vi.fn();
   const restartMcpServer = vi.fn();
   const workspaceSkills = vi.fn();
+  const singularWorkspaceSkills = vi.fn();
+  const workspaceRuntimeStatus = vi.fn();
+  const ensureWorkspaceRuntime = vi.fn();
   const workspaceAcpStatus = vi.fn();
   const workspaceAcpPreheat = vi.fn();
   const workspaceGit = vi.fn();
-  const workspaceByCwd = vi.fn((_workspaceCwd: string) => ({ workspaceGit }));
+  const singularWorkspaceGit = vi.fn();
+  const workspaceByCwd = vi.fn((_workspaceCwd: string) => ({
+    workspaceProviders,
+    workspaceSkills,
+    workspaceRuntimeSkills: workspaceSkills,
+    workspaceRuntimeStatus,
+    ensureWorkspaceRuntime,
+    workspaceGit,
+  }));
   const workspaceTools = vi.fn();
   const setWorkspaceToolEnabled = vi.fn();
   const workspaceMemory = vi.fn();
@@ -180,17 +201,17 @@ const sdkMocks = vi.hoisted(() => {
       MockDaemonSessionClient.createOrAttach(this, req),
     );
     capabilities = capabilities;
-    workspaceProviders = workspaceProviders;
+    workspaceProviders = singularWorkspaceProviders;
     listWorkspaceSessions = listWorkspaceSessions;
     closeSession = closeSession;
     setSessionApprovalMode = setSessionApprovalMode;
     workspaceMcp = workspaceMcp;
     workspaceMcpTools = workspaceMcpTools;
     restartMcpServer = restartMcpServer;
-    workspaceSkills = workspaceSkills;
+    workspaceSkills = singularWorkspaceSkills;
     workspaceAcpStatus = workspaceAcpStatus;
     workspaceAcpPreheat = workspaceAcpPreheat;
-    workspaceGit = workspaceGit;
+    workspaceGit = singularWorkspaceGit;
     workspaceByCwd = workspaceByCwd;
     workspaceTools = workspaceTools;
     setWorkspaceToolEnabled = setWorkspaceToolEnabled;
@@ -234,10 +255,15 @@ const sdkMocks = vi.hoisted(() => {
     sessions,
     capabilities,
     workspaceProviders,
+    singularWorkspaceProviders,
     workspaceSkills,
+    singularWorkspaceSkills,
+    workspaceRuntimeStatus,
+    ensureWorkspaceRuntime,
     workspaceAcpStatus,
     workspaceAcpPreheat,
     workspaceGit,
+    singularWorkspaceGit,
     workspaceByCwd,
     MockDaemonClient,
     MockDaemonSessionClient,
@@ -260,6 +286,7 @@ const sdkMocks = vi.hoisted(() => {
         initialized: true,
         providers: [],
       });
+      singularWorkspaceProviders.mockReset();
       listWorkspaceSessions.mockReset();
       listWorkspaceSessions.mockResolvedValue([]);
       closeSession.mockReset();
@@ -286,7 +313,38 @@ const sdkMocks = vi.hoisted(() => {
         v: 1,
         workspaceCwd: '/mock-workspace',
         initialized: true,
+        source: 'live',
+        runtimeEpoch: 1,
         skills: [],
+      });
+      singularWorkspaceSkills.mockReset();
+      workspaceRuntimeStatus.mockReset();
+      workspaceRuntimeStatus.mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/mock-workspace',
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 1,
+        capabilities: {
+          skills: {
+            state: 'ready',
+            runtimeEpoch: 1,
+          },
+        },
+      });
+      ensureWorkspaceRuntime.mockReset();
+      ensureWorkspaceRuntime.mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/mock-workspace',
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 1,
+        capabilities: {
+          skills: {
+            state: 'ready',
+            runtimeEpoch: 1,
+          },
+        },
       });
       workspaceAcpStatus.mockReset();
       workspaceAcpStatus.mockResolvedValue({ channelLive: true });
@@ -302,8 +360,14 @@ const sdkMocks = vi.hoisted(() => {
         workspaceCwd: '/mock-workspace',
         branch: 'main',
       });
+      singularWorkspaceGit.mockReset();
       workspaceByCwd.mockReset();
       workspaceByCwd.mockImplementation((_workspaceCwd: string) => ({
+        workspaceProviders,
+        workspaceSkills,
+        workspaceRuntimeSkills: workspaceSkills,
+        workspaceRuntimeStatus,
+        ensureWorkspaceRuntime,
         workspaceGit,
       }));
       workspaceTools.mockReset();
@@ -511,6 +575,8 @@ describe('DaemonSessionProvider', () => {
       v: 1,
       workspaceCwd: '/mock-workspace',
       initialized: true,
+      source: 'live',
+      runtimeEpoch: 1,
       skills: [
         {
           kind: 'skill',
@@ -532,12 +598,16 @@ describe('DaemonSessionProvider', () => {
     await renderWithProvider(<Harness />, {
       autoConnect: true,
       sessionId: undefined,
+      workspaceCwd: '/secondary-workspace',
     });
 
     expect(
       sdkMocks.MockDaemonSessionClient.createOrAttach,
     ).not.toHaveBeenCalled();
-    expect(connection?.status).toBe('connected');
+    expect(connection).toMatchObject({
+      status: 'connected',
+      workspaceCwd: '/secondary-workspace',
+    });
     expect(connection).not.toHaveProperty('sessionId');
     expect(connection?.skills).toEqual(['review']);
     expect(connection?.commands).toEqual([
@@ -546,19 +616,54 @@ describe('DaemonSessionProvider', () => {
         description: 'Review a GitHub pull request',
       }),
     ]);
+    expect(sdkMocks.workspaceByCwd).toHaveBeenCalledWith(
+      '/secondary-workspace',
+    );
+    expect(sdkMocks.workspaceProviders).toHaveBeenCalledOnce();
+    expect(sdkMocks.workspaceSkills).toHaveBeenCalledOnce();
+    expect(sdkMocks.workspaceRuntimeStatus).toHaveBeenCalledOnce();
+    expect(sdkMocks.workspaceGit).toHaveBeenCalledOnce();
+    expect(sdkMocks.singularWorkspaceProviders).not.toHaveBeenCalled();
+    expect(sdkMocks.singularWorkspaceSkills).not.toHaveBeenCalled();
+    expect(sdkMocks.workspaceAcpStatus).not.toHaveBeenCalled();
+    expect(sdkMocks.workspaceAcpPreheat).not.toHaveBeenCalled();
+    expect(sdkMocks.singularWorkspaceGit).not.toHaveBeenCalled();
   });
 
-  it('preheats ACP and refreshes deferred skills when ACP is not running', async () => {
-    sdkMocks.capabilities.mockResolvedValue({
+  it('prepares the workspace runtime and refreshes deferred skills', async () => {
+    sdkMocks.workspaceRuntimeStatus.mockResolvedValue({
+      v: 1,
       workspaceCwd: '/mock-workspace',
-      features: ['workspace_acp_preheat', 'workspace_acp_status'],
+      state: 'cold',
+      runtimeLive: false,
+      runtimeEpoch: 1,
+      capabilities: {
+        skills: {
+          state: 'not_started',
+          runtimeEpoch: 1,
+        },
+      },
     });
-    sdkMocks.workspaceAcpStatus.mockResolvedValue({ channelLive: false });
+    sdkMocks.ensureWorkspaceRuntime.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/mock-workspace',
+      state: 'idle',
+      runtimeLive: true,
+      runtimeEpoch: 2,
+      capabilities: {
+        skills: {
+          state: 'ready',
+          runtimeEpoch: 2,
+        },
+      },
+    });
     sdkMocks.workspaceSkills
       .mockResolvedValueOnce({
         v: 1,
         workspaceCwd: '/mock-workspace',
         initialized: true,
+        source: 'config',
+        runtimeEpoch: 1,
         skills: [
           {
             kind: 'skill',
@@ -574,6 +679,8 @@ describe('DaemonSessionProvider', () => {
         v: 1,
         workspaceCwd: '/mock-workspace',
         initialized: true,
+        source: 'live',
+        runtimeEpoch: 2,
         skills: [
           {
             kind: 'skill',
@@ -609,22 +716,47 @@ describe('DaemonSessionProvider', () => {
       await flushPromises();
     });
 
-    expect(sdkMocks.workspaceAcpPreheat).toHaveBeenCalledWith(5000);
+    expect(sdkMocks.ensureWorkspaceRuntime).toHaveBeenCalledWith();
     expect(sdkMocks.workspaceSkills).toHaveBeenCalledTimes(2);
+    expect(sdkMocks.workspaceAcpStatus).not.toHaveBeenCalled();
+    expect(sdkMocks.workspaceAcpPreheat).not.toHaveBeenCalled();
     expect(connection?.skills).toEqual(['review', 'pdf']);
   });
 
-  it('clears deferred skills when ACP refresh returns an empty list', async () => {
-    sdkMocks.capabilities.mockResolvedValue({
+  it('clears deferred skills when the prepared runtime returns an empty list', async () => {
+    sdkMocks.workspaceRuntimeStatus.mockResolvedValue({
+      v: 1,
       workspaceCwd: '/mock-workspace',
-      features: ['workspace_acp_preheat', 'workspace_acp_status'],
+      state: 'cold',
+      runtimeLive: false,
+      runtimeEpoch: 1,
+      capabilities: {
+        skills: {
+          state: 'not_started',
+          runtimeEpoch: 1,
+        },
+      },
     });
-    sdkMocks.workspaceAcpStatus.mockResolvedValue({ channelLive: false });
+    sdkMocks.ensureWorkspaceRuntime.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/mock-workspace',
+      state: 'idle',
+      runtimeLive: true,
+      runtimeEpoch: 2,
+      capabilities: {
+        skills: {
+          state: 'ready',
+          runtimeEpoch: 2,
+        },
+      },
+    });
     sdkMocks.workspaceSkills
       .mockResolvedValueOnce({
         v: 1,
         workspaceCwd: '/mock-workspace',
         initialized: true,
+        source: 'config',
+        runtimeEpoch: 1,
         skills: [
           {
             kind: 'skill',
@@ -640,6 +772,8 @@ describe('DaemonSessionProvider', () => {
         v: 1,
         workspaceCwd: '/mock-workspace',
         initialized: true,
+        source: 'live',
+        runtimeEpoch: 2,
         skills: [],
       });
     let connection: DaemonConnectionState | undefined;
@@ -698,10 +832,14 @@ describe('DaemonSessionProvider', () => {
     expect(sdkMocks.workspaceAcpPreheat).not.toHaveBeenCalled();
   });
 
-  it('preheats without probing status when only preheat is advertised', async () => {
-    sdkMocks.capabilities.mockResolvedValue({
+  it('prepares the runtime without using legacy ACP feature routes', async () => {
+    sdkMocks.workspaceRuntimeStatus.mockResolvedValue({
+      v: 1,
       workspaceCwd: '/mock-workspace',
-      features: ['workspace_acp_preheat'],
+      state: 'cold',
+      runtimeLive: false,
+      runtimeEpoch: 1,
+      capabilities: { skills: { state: 'not_started', runtimeEpoch: 1 } },
     });
 
     function Harness() {
@@ -717,16 +855,13 @@ describe('DaemonSessionProvider', () => {
       await flushPromises();
     });
 
+    expect(sdkMocks.workspaceRuntimeStatus).toHaveBeenCalledOnce();
+    expect(sdkMocks.ensureWorkspaceRuntime).toHaveBeenCalledOnce();
     expect(sdkMocks.workspaceAcpStatus).not.toHaveBeenCalled();
-    expect(sdkMocks.workspaceAcpPreheat).toHaveBeenCalledWith(5000);
+    expect(sdkMocks.workspaceAcpPreheat).not.toHaveBeenCalled();
   });
 
-  it('does not preheat when the advertised ACP status is live', async () => {
-    sdkMocks.capabilities.mockResolvedValue({
-      workspaceCwd: '/mock-workspace',
-      features: ['workspace_acp_preheat', 'workspace_acp_status'],
-    });
-
+  it('does not ensure the runtime when Skills are already ready', async () => {
     function Harness() {
       useDaemonConnection();
       return null;
@@ -737,18 +872,16 @@ describe('DaemonSessionProvider', () => {
       sessionId: undefined,
     });
 
-    expect(sdkMocks.workspaceAcpStatus).toHaveBeenCalledOnce();
+    expect(sdkMocks.workspaceRuntimeStatus).toHaveBeenCalledOnce();
+    expect(sdkMocks.ensureWorkspaceRuntime).not.toHaveBeenCalled();
+    expect(sdkMocks.workspaceAcpStatus).not.toHaveBeenCalled();
     expect(sdkMocks.workspaceAcpPreheat).not.toHaveBeenCalled();
   });
 
-  it('still preheats when the advertised ACP status request fails', async () => {
+  it('still ensures the runtime when its status request fails', async () => {
     const statusError = new Error('status unavailable');
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    sdkMocks.capabilities.mockResolvedValue({
-      workspaceCwd: '/mock-workspace',
-      features: ['workspace_acp_preheat', 'workspace_acp_status'],
-    });
-    sdkMocks.workspaceAcpStatus.mockRejectedValue(statusError);
+    sdkMocks.workspaceRuntimeStatus.mockRejectedValue(statusError);
 
     function Harness() {
       useDaemonConnection();
@@ -764,20 +897,25 @@ describe('DaemonSessionProvider', () => {
     });
 
     expect(warn).toHaveBeenCalledWith(
-      '[DaemonSessionProvider] workspaceAcpStatus failed in deferred connect:',
+      '[DaemonSessionProvider] workspaceRuntimeStatus failed in deferred connect:',
       statusError,
     );
-    expect(sdkMocks.workspaceAcpPreheat).toHaveBeenCalledWith(5000);
+    expect(sdkMocks.ensureWorkspaceRuntime).toHaveBeenCalledOnce();
+    expect(sdkMocks.workspaceAcpPreheat).not.toHaveBeenCalled();
   });
 
-  it('keeps the deferred connection usable when preheat fails', async () => {
-    const preheatError = new Error('preheat unavailable');
+  it('keeps the deferred connection usable when runtime preparation fails', async () => {
+    const prepareError = new Error('runtime unavailable');
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    sdkMocks.capabilities.mockResolvedValue({
+    sdkMocks.workspaceRuntimeStatus.mockResolvedValue({
+      v: 1,
       workspaceCwd: '/mock-workspace',
-      features: ['workspace_acp_preheat'],
+      state: 'cold',
+      runtimeLive: false,
+      runtimeEpoch: 1,
+      capabilities: { skills: { state: 'not_started', runtimeEpoch: 1 } },
     });
-    sdkMocks.workspaceAcpPreheat.mockRejectedValue(preheatError);
+    sdkMocks.ensureWorkspaceRuntime.mockRejectedValue(prepareError);
     let connection: DaemonConnectionState | undefined;
 
     function Harness() {
@@ -799,8 +937,8 @@ describe('DaemonSessionProvider', () => {
     });
     expect(connection).not.toHaveProperty('sessionId');
     expect(warn).toHaveBeenCalledWith(
-      '[DaemonSessionProvider] ACP preheat for workspace skills failed:',
-      preheatError,
+      '[DaemonSessionProvider] workspace runtime prepare for skills failed:',
+      prepareError,
     );
   });
 

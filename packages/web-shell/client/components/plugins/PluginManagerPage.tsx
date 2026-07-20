@@ -25,6 +25,7 @@ interface PluginManagerPageProps {
   loadMcpMessage: () => Promise<void>;
   onClose: () => void;
   onUseSkill: (name: string) => void;
+  workspaceCwd?: string;
   initialFocusRef?: Ref<HTMLButtonElement>;
 }
 
@@ -33,6 +34,7 @@ export function PluginManagerPage({
   loadMcpMessage,
   onClose,
   onUseSkill,
+  workspaceCwd,
   initialFocusRef,
 }: PluginManagerPageProps) {
   const { t } = useI18n();
@@ -88,16 +90,19 @@ export function PluginManagerPage({
       <TabsContent value={activeTab} className="mt-0">
         {activeTab === 'extensions' ? (
           <ExtensionsManagerPage
-            key={`extensions-${pageRevision}`}
+            key={`extensions-${workspaceCwd ?? 'primary'}-${pageRevision}`}
             onClose={onClose}
+            workspaceCwd={workspaceCwd}
             embedded={embedded}
           />
         ) : activeTab === 'skills' ? (
           <SkillsManagerPage
-            key={`skills-${pageRevision}`}
+            key={`skills-${workspaceCwd ?? 'primary'}-${pageRevision}`}
             onClose={onClose}
             onUseSkill={onUseSkill}
+            workspaceCwd={workspaceCwd}
             embedded={embedded}
+            runtimeReady
           />
         ) : mcpLoadError ? (
           <Alert variant="destructive" className="mt-4">
@@ -111,9 +116,10 @@ export function PluginManagerPage({
           </Alert>
         ) : mcpMessage && mcpLoaded ? (
           <McpManagerPage
-            key={`mcp-${pageRevision}`}
+            key={`mcp-${workspaceCwd ?? 'primary'}-${pageRevision}`}
             message={mcpMessage}
             onClose={onClose}
+            workspaceCwd={workspaceCwd}
             embedded={embedded}
           />
         ) : (
