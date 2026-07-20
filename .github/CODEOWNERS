@@ -7,27 +7,29 @@
 /.github/CODEOWNERS                                    @pomelo-nwu
 
 # --- Tier 1: Agent Loop & System Prompt ---
-/packages/core/src/core/prompts.ts                      @tanzhenxin @yiliang114
-/packages/core/src/core/client.ts                       @tanzhenxin @yiliang114
-/packages/core/src/core/turn.ts                         @tanzhenxin @yiliang114
-/packages/core/src/core/geminiChat.ts                   @tanzhenxin @yiliang114
-/packages/core/src/core/coreToolScheduler.ts            @tanzhenxin @yiliang114
-/packages/core/src/core/tokenLimits.ts                  @tanzhenxin @yiliang114
-/packages/core/src/core/reasoning-effort.ts             @tanzhenxin @yiliang114
-/packages/core/src/core/baseLlmClient.ts                @tanzhenxin @yiliang114
-/packages/core/src/core/contentGenerator.ts             @tanzhenxin @yiliang114
-
-# --- Tier 1: Tool Definitions & Schemas ---
-/packages/core/src/tools/                               @tanzhenxin @LaZzyMan
+/packages/core/src/core/                               @tanzhenxin @yiliang114
 
 # --- Tier 1: API Message Serialization ---
+# (overrides the core/ catch-all above via last-match-wins)
 /packages/core/src/core/openaiContentGenerator/         @tanzhenxin @yiliang114
 /packages/core/src/core/anthropicContentGenerator/      @tanzhenxin @yiliang114
 /packages/core/src/core/geminiContentGenerator/         @tanzhenxin @yiliang114
 /packages/core/src/utils/schemaConverter.ts             @tanzhenxin @yiliang114
 
+# --- Tier 1: Tool Definitions & Schemas ---
+/packages/core/src/tools/                               @tanzhenxin @LaZzyMan
+
+# --- Tier 1: Extension Security ---
+/packages/core/src/extension/                           @tanzhenxin @LaZzyMan
+
 # --- Tier 1: Context Assembly ---
 /packages/core/src/utils/environmentContext.ts          @LaZzyMan @tanzhenxin
+
+# --- Tier 1: Context Dependencies ---
+/packages/core/src/services/tokenEstimation.ts          @tanzhenxin @LaZzyMan
+/packages/core/src/services/image-payload-references.ts @tanzhenxin @LaZzyMan
+/packages/core/src/services/memoryPressureMonitor.ts    @tanzhenxin @LaZzyMan
+/packages/core/src/services/visionBridge/               @tanzhenxin @LaZzyMan
 
 # --- Tier 1: Compaction & Truncation ---
 /packages/core/src/services/chatCompressionService.ts   @tanzhenxin @LaZzyMan
@@ -42,8 +44,17 @@
 /packages/core/src/providers/                           @yiliang114 @tanzhenxin
 /packages/core/src/config/models.ts                     @yiliang114 @tanzhenxin
 
+# --- Tier 1: MCP ---
+/packages/core/src/mcp/                                 @tanzhenxin @LaZzyMan
+/packages/core/src/prompts/prompt-registry.ts           @tanzhenxin @LaZzyMan
+/packages/core/src/resources/resource-registry.ts       @tanzhenxin @LaZzyMan
+
 # --- Tier 2: Permission System ---
+# (permission-helpers/permissionFlow override the core/ catch-all)
 /packages/core/src/permissions/                         @LaZzyMan @qqqys
+/packages/core/src/core/permission-helpers.ts           @LaZzyMan @qqqys
+/packages/core/src/core/permissionFlow.ts               @LaZzyMan @qqqys
+/packages/core/src/confirmation-bus/                    @LaZzyMan @qqqys
 
 # --- Tier 2: Memory System ---
 /packages/core/src/memory/                              @LaZzyMan @qqqys
@@ -52,7 +63,14 @@
 /packages/core/src/services/loopDetectionService.ts     @tanzhenxin @LaZzyMan
 
 # --- Tier 2: Skills / Subagents / Agents ---
-/packages/core/src/skills/                              @wenshao @tanzhenxin
+# (individual runtime files; skills/bundled/ content is intentionally excluded)
+/packages/core/src/skills/index.ts                      @wenshao @tanzhenxin
+/packages/core/src/skills/skill-activation.ts           @wenshao @tanzhenxin
+/packages/core/src/skills/skill-load.ts                 @wenshao @tanzhenxin
+/packages/core/src/skills/skill-manager.ts              @wenshao @tanzhenxin
+/packages/core/src/skills/skill-paths.ts                @wenshao @tanzhenxin
+/packages/core/src/skills/symlinkScope.ts               @wenshao @tanzhenxin
+/packages/core/src/skills/types.ts                      @wenshao @tanzhenxin
 /packages/core/src/subagents/                           @wenshao @tanzhenxin
 /packages/core/src/agents/                              @wenshao @tanzhenxin
 
