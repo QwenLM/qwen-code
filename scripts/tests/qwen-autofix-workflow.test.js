@@ -3292,6 +3292,11 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain("RETRY_COMMAND: '@qwen-code /retry'");
     expect(workflow).toContain('<!-- autofix-rearm -->');
     expect(workflow).toContain('<!-- (autofix-eval|autofix-rearm|qwen-triage|');
+    // Verify all four filter sites (scan + 3 address) include autofix-rearm
+    const filterMatches = [
+      ...workflow.matchAll(/autofix-eval\|autofix-rearm\|qwen-triage/g),
+    ];
+    expect(filterMatches.length).toBeGreaterThanOrEqual(4);
     // The re-arm marker is posted by the bot itself (both scanners filter by
     // that login), so the job verifies the PAT identity before commenting.
     const job = workflow.match(

@@ -343,9 +343,9 @@ jobs:
                 elif [[ -z "${CMD}" && -z "${RETRY_REQ}" ]]; then
                   echo "🧭 command ignored: body is not an exact command"
                 elif [[ "${ISSUE_STATE}" != 'open' ]]; then
-                  echo "🧭 takeover command ignored: PR is not open"
+                  echo "🧭 command ignored: PR is not open"
                 elif [[ -z "${SENDER_LOGIN}" || "${SENDER_LOGIN}" == "${AUTOFIX_BOT}" ]]; then
-                  echo "🧭 takeover command ignored: sender '${SENDER_LOGIN:-n/a}'"
+                  echo "🧭 command ignored: sender '${SENDER_LOGIN:-n/a}'"
                 else
                   sender_is_authorized=false
                   sender_permission=''
@@ -395,7 +395,7 @@ jobs:
                       echo "🧭 takeover command accepted: ${CMD} ${TAKEOVER_LABEL} on PR #${ISSUE_NUMBER} by ${SENDER_LOGIN} (${sender_permission})"
                     fi
                   else
-                    echo "🧭 takeover command ignored: sender '${SENDER_LOGIN}' permission='${sender_permission:-none}' is not the PR author or write+"
+                    echo "🧭 command ignored: sender '${SENDER_LOGIN}' permission='${sender_permission:-none}' is not the PR author or write+"
                   fi
                 fi
               fi
