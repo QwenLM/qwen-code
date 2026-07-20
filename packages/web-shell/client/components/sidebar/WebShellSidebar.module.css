@@ -476,6 +476,14 @@
   white-space: nowrap;
 }
 
+.sessionBadgeIcon {
+  display: inline;
+  vertical-align: -1px;
+  margin-right: 3px;
+  color: var(--color-accent-fg, #8b5cf6);
+  flex-shrink: 0;
+}
+
 .projectName {
   flex: 0 1 auto;
 }

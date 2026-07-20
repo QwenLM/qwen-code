@@ -152,6 +152,52 @@ import {
   TRUSTED_FOLDERS_FILENAME,
 } from '../config/trustedFolders.js';
 
+// ── Worktree mock infrastructure ────────────────────────────────────
+// GitWorktreeService's constructor calls simpleGit() which validates
+// the directory exists — test workspaces (/work/bound) don't. Replace
+// the class with a controllable mock; each worktree test sets
+// `mockWt.impl` to control instance behaviour.
+const mockWt = vi.hoisted(() => ({
+  impl: undefined as (() => Record<string, unknown>) | undefined,
+  readSidecar: undefined as (() => Promise<unknown>) | undefined,
+  realpath: undefined as ((p: string) => string) | undefined,
+}));
+vi.mock('node:fs', async (importOriginal) => {
+  const original = await importOriginal<typeof import('node:fs')>();
+  const wrapped = ((p: fs.PathLike) =>
+    mockWt.realpath
+      ? mockWt.realpath(String(p))
+      : original.realpathSync(p)) as typeof original.realpathSync;
+  wrapped.native = original.realpathSync.native;
+  return {
+    ...original,
+    realpathSync: wrapped,
+  };
+});
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...original,
+    readWorktreeSession: (...args: unknown[]) =>
+      mockWt.readSidecar
+        ? mockWt.readSidecar()
+        : (original.readWorktreeSession as (...a: unknown[]) => unknown)(
+            ...args,
+          ),
+    GitWorktreeService: class MockGitWorktreeService {
+      static validateUserWorktreeSlug =
+        original.GitWorktreeService.validateUserWorktreeSlug;
+      static generateAutoSlug = original.GitWorktreeService.generateAutoSlug;
+      constructor() {
+        if (mockWt.impl) {
+          Object.assign(this, mockWt.impl());
+        }
+      }
+    },
+  };
+});
+
 const baseOpts: ServeOptions = {
   hostname: '127.0.0.1',
   port: 4170,
@@ -257,6 +303,8 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_mcp',
   'workspace_skills',
   'workspace_providers',
+  'workspace_acp_preheat',
+  'workspace_acp_status',
   'auth_provider_install',
   'workspace_memory',
   'workspace_memory_remember',
@@ -335,6 +383,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_extensions',
   'session_branch',
   'workspace_channel_observed_contacts',
+  'workspace_display_name',
   'workspace_qualified_rest_core',
   'extension_management_v2',
   'workspace_persisted_transcript',
@@ -386,6 +435,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_extensions' &&
       f !== 'session_branch' &&
       f !== 'workspace_channel_observed_contacts' &&
+      f !== 'workspace_display_name' &&
       f !== 'workspace_qualified_rest_core' &&
       f !== 'extension_management_v2' &&
       f !== 'workspace_persisted_transcript' &&
@@ -429,6 +479,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'multi_workspace_session_rewind',
   'multi_workspace_session_shell',
   'persistent_workspace_registration',
+  'workspace_display_name',
   'workspace_runtime_removal',
   'workspace_qualified_rest_core',
   'workspace_qualified_voice',
@@ -472,6 +523,15 @@ interface FakeBridgeOpts {
     promptId: string,
   ) => { removed: boolean };
   spawnImpl?: (req: BridgeSpawnRequest) => Promise<BridgeSession>;
+  changeSessionCwdImpl?: (
+    sessionId: string,
+    req: { path: string },
+  ) => Promise<{
+    sessionId: string;
+    previousCwd: string;
+    newCwd: string;
+    warnings: string[];
+  }>;
   loadImpl?: (
     req: BridgeRestoreSessionRequest,
   ) => Promise<BridgeRestoredSession>;
@@ -725,6 +785,11 @@ interface FakeBridge extends AcpSessionBridge {
     opts?: { requireZeroAttaches?: boolean };
   }>;
   detachCalls: Array<{ sessionId: string; clientId?: string }>;
+  changeSessionCwdCalls: Array<{ sessionId: string; path: string }>;
+  setSessionWorktreeCalls: Array<{
+    sessionId: string;
+    worktree: { slug: string; path: string; branch: string };
+  }>;
   enqueueMidTurnCalls: Array<{
     sessionId: string;
     message: string;
@@ -902,6 +967,11 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     opts?: { requireZeroAttaches?: boolean };
   }> = [];
   const detachCalls: FakeBridge['detachCalls'] = [];
+  const changeSessionCwdCalls: Array<{ sessionId: string; path: string }> = [];
+  const setSessionWorktreeCalls: Array<{
+    sessionId: string;
+    worktree: { slug: string; path: string; branch: string };
+  }> = [];
   const enqueueMidTurnCalls: FakeBridge['enqueueMidTurnCalls'] = [];
   const enqueueMidTurnImpl =
     opts.enqueueMidTurnImpl ?? (() => ({ accepted: true }));
@@ -964,6 +1034,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       workspaceCwd: req.workspaceCwd,
       attached: false,
       clientId: `client-${calls.length}`,
+      ...(req.worktree ? { worktree: req.worktree } : {}),
     }));
   const loadImpl =
     opts.loadImpl ??
@@ -1465,6 +1536,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     cancelCalls,
     killCalls,
     detachCalls,
+    changeSessionCwdCalls,
+    setSessionWorktreeCalls,
     enqueueMidTurnCalls,
     permissionVotes,
     sessionPermissionVotes,
@@ -1941,6 +2014,21 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         sessionId,
         ...(clientId !== undefined ? { clientId } : {}),
       });
+    },
+    async changeSessionCwd(sessionId, req) {
+      changeSessionCwdCalls.push({ sessionId, path: req.path });
+      if (opts.changeSessionCwdImpl) {
+        return opts.changeSessionCwdImpl(sessionId, req);
+      }
+      return {
+        sessionId,
+        previousCwd: '/fake/previous',
+        newCwd: req.path,
+        warnings: [],
+      };
+    },
+    setSessionWorktree(sessionId, worktree) {
+      setSessionWorktreeCalls.push({ sessionId, worktree });
     },
     isChannelLive() {
       return false;
@@ -3562,6 +3650,26 @@ describe('createServeApp', () => {
 
       const res = await request(app)
         .post('/workspace/acp/preheat?timeoutMs=60001')
+        .set('Host', `127.0.0.1:${opts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_timeout',
+        error: '`timeoutMs` must be a positive integer no greater than 60000',
+      });
+    });
+
+    it.each([
+      '/workspace/acp/preheat?timeoutMs=',
+      '/workspace/acp/preheat?timeoutMs=1&timeoutMs=2',
+    ])('rejects malformed workspace ACP preheat timeout %s', async (path) => {
+      const bridge = fakeBridge();
+      const opts = { ...baseOpts, workspace: WS_BOUND, token: 'secret' };
+      const app = createServeApp(opts, undefined, { bridge });
+
+      const res = await request(app)
+        .post(path)
         .set('Host', `127.0.0.1:${opts.port}`)
         .set('Authorization', 'Bearer secret');
 
@@ -8070,6 +8178,146 @@ describe('createServeApp', () => {
       // dangerous key landed via spread, this check would fail.)
       expect(({} as Record<string, unknown>)['polluted']).toBeUndefined();
     });
+
+    // ── Worktree isolation ──────────────────────────────────────────
+
+    it('creates a worktree session and relocates via changeSessionCwd', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const mockCreate = vi.fn().mockResolvedValue({
+        success: true,
+        worktree: {
+          path: '/work/a/.qwen/worktrees/my-task',
+          branch: 'worktree-my-task',
+        },
+      });
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+        createUserWorktree: mockCreate,
+      });
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: { slug: 'my-task' } });
+
+        expect(res.status).toBe(200);
+        expect(res.body.worktree).toEqual({
+          slug: 'my-task',
+          path: '/work/a/.qwen/worktrees/my-task',
+          branch: 'worktree-my-task',
+        });
+        expect(bridge.calls[0]?.sessionScope).toBe('thread');
+        expect(bridge.changeSessionCwdCalls).toHaveLength(1);
+        expect(bridge.changeSessionCwdCalls[0]?.path).toBe(
+          '/work/a/.qwen/worktrees/my-task',
+        );
+        expect(mockCreate).toHaveBeenCalledWith('my-task', 'main');
+      } finally {
+        mockWt.impl = undefined;
+      }
+    });
+
+    it('400 when worktree is requested on a non-git workspace', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(false),
+      });
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: {} });
+
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('worktree_not_git_repo');
+        expect(bridge.calls).toHaveLength(0);
+      } finally {
+        mockWt.impl = undefined;
+      }
+    });
+
+    it('400 when worktree slug is invalid', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+      });
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: { slug: '../escape' } });
+
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('worktree_invalid_slug');
+        expect(bridge.calls).toHaveLength(0);
+      } finally {
+        mockWt.impl = undefined;
+      }
+    });
+
+    it('400 when worktree is not an object', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ worktree: 'yes' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_worktree');
+      expect(bridge.calls).toHaveLength(0);
+    });
+
+    it('500 when worktree creation fails', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+        createUserWorktree: () =>
+          Promise.resolve({ success: false, error: 'disk full' }),
+      });
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: {} });
+
+        expect(res.status).toBe(500);
+        expect(res.body.code).toBe('worktree_create_failed');
+        expect(bridge.calls).toHaveLength(0);
+      } finally {
+        mockWt.impl = undefined;
+      }
+    });
   });
 
   describe('POST /session/:id/load and /resume', () => {
@@ -8641,6 +8889,141 @@ describe('createServeApp', () => {
     // CI. The same constraint applies here. The cleanup behavior
     // is exercised manually via the route handler closure shared
     // between both routes in `restoreSessionHandler`.
+
+    it('restores worktree isolation on load when sidecar exists', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      // Identity realpath so the containment check passes in the test env.
+      mockWt.realpath = (p) => p;
+      mockWt.readSidecar = () =>
+        Promise.resolve({
+          slug: 'my-task',
+          worktreePath: `${WS_BOUND}/.qwen/worktrees/my-task`,
+          worktreeBranch: 'worktree-my-task',
+          originalCwd: WS_BOUND,
+          originalBranch: 'main',
+          originalHeadCommit: 'abc123',
+        });
+
+      try {
+        const res = await request(app)
+          .post('/session/wt-session/load')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: WS_BOUND });
+
+        expect(res.status).toBe(200);
+        expect(res.body.worktree).toEqual({
+          slug: 'my-task',
+          path: `${WS_BOUND}/.qwen/worktrees/my-task`,
+          branch: 'worktree-my-task',
+        });
+        expect(bridge.changeSessionCwdCalls).toHaveLength(1);
+        expect(bridge.changeSessionCwdCalls[0].path).toBe(
+          `${WS_BOUND}/.qwen/worktrees/my-task`,
+        );
+        expect(bridge.setSessionWorktreeCalls).toHaveLength(1);
+      } finally {
+        mockWt.readSidecar = undefined;
+        mockWt.realpath = undefined;
+      }
+    });
+
+    it('skips worktree restore when no sidecar exists', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.readSidecar = () => Promise.resolve(null);
+
+      try {
+        const res = await request(app)
+          .post('/session/plain-session/load')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: WS_BOUND });
+
+        expect(res.status).toBe(200);
+        expect(res.body.worktree).toBeUndefined();
+        expect(bridge.changeSessionCwdCalls).toHaveLength(0);
+        expect(bridge.setSessionWorktreeCalls).toHaveLength(0);
+      } finally {
+        mockWt.readSidecar = undefined;
+      }
+    });
+
+    it('returns 200 without worktree when changeSessionCwd fails', async () => {
+      const bridge = fakeBridge({
+        changeSessionCwdImpl: async () => {
+          throw new Error('cd failed');
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.realpath = (p) => p;
+      mockWt.readSidecar = () =>
+        Promise.resolve({
+          slug: 'dead-task',
+          worktreePath: `${WS_BOUND}/.qwen/worktrees/dead-task`,
+          worktreeBranch: 'worktree-dead-task',
+          originalCwd: WS_BOUND,
+          originalBranch: 'main',
+          originalHeadCommit: 'abc123',
+        });
+
+      try {
+        const res = await request(app)
+          .post('/session/dead-session/load')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: WS_BOUND });
+
+        expect(res.status).toBe(200);
+        expect(res.body.worktree).toBeUndefined();
+        expect(bridge.setSessionWorktreeCalls).toHaveLength(0);
+      } finally {
+        mockWt.readSidecar = undefined;
+        mockWt.realpath = undefined;
+      }
+    });
+
+    it('skips restore when sidecar path fails containment check', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.readSidecar = () =>
+        Promise.resolve({
+          slug: 'escape',
+          worktreePath: '/etc/passwd',
+          worktreeBranch: 'worktree-escape',
+          originalCwd: WS_BOUND,
+          originalBranch: 'main',
+          originalHeadCommit: 'abc123',
+        });
+
+      try {
+        const res = await request(app)
+          .post('/session/escape-session/load')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: WS_BOUND });
+
+        expect(res.status).toBe(200);
+        expect(res.body.worktree).toBeUndefined();
+        expect(bridge.changeSessionCwdCalls).toHaveLength(0);
+        expect(bridge.setSessionWorktreeCalls).toHaveLength(0);
+      } finally {
+        mockWt.readSidecar = undefined;
+      }
+    });
   });
 
   describe('POST /session/:id/prompt', () => {

@@ -13,23 +13,26 @@ import type {
   DaemonWorkspaceCapability,
   DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
-import { FolderClosedIcon, FolderOpenIcon } from 'lucide-react';
+import { FolderClosedIcon, FolderOpenIcon, GitForkIcon } from 'lucide-react';
 import { GitBranchIndicator } from '../GitBranchIndicator';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '../ui/dropdown-menu';
 import { SESSION_LIST_PAGE_SIZE } from '../../constants/sessions';
+import { useI18n } from '../../i18n';
 import {
   readWorkspaceCollapsedGroupIds,
   writeWorkspaceCollapsedGroupIds,
 } from './collapsedSessionSections';
+import { workspaceLabel } from '../../utils/workspace';
 import { SessionGroupSection } from './SessionGroupSection';
 import styles from './WorkspaceSection.module.css';
 
 function cx(...classes: Array<string | false | undefined>): string {
   return classes.filter(Boolean).join(' ');
-}
-
-function getWorkspaceName(cwd: string): string {
-  const parts = cwd.split(/[\\/]+/).filter(Boolean);
-  return parts.at(-1) ?? cwd;
 }
 
 // The cwd-qualified daemon route only accepts a workspace id or absolute path.
@@ -97,6 +100,8 @@ interface WorkspaceSectionProps {
    * fires this on click. Omitted for untrusted workspaces (no git surface).
    */
   onOpenGitDiff?: (workspaceCwd: string) => void;
+  /** Create a new worktree-isolated session in this workspace. */
+  onNewWorktreeSession?: (workspaceCwd: string) => void;
 }
 
 export function WorkspaceSection({
@@ -126,7 +131,9 @@ export function WorkspaceSection({
   groupActionsDisabled,
   excludePinned = false,
   onOpenGitDiff,
+  onNewWorktreeSession,
 }: WorkspaceSectionProps) {
+  const { t } = useI18n();
   const [sessions, setSessions] = useState<DaemonSessionSummary[]>([]);
   const [groups, setGroups] = useState<DaemonSessionGroup[]>([]);
   const [loadError, setLoadError] = useState(false);
@@ -338,9 +345,7 @@ export function WorkspaceSection({
                 <WorkspaceFolderIcon open={expanded} />
               </span>
               <span className={styles.headerContent}>
-                <span className={styles.name}>
-                  {getWorkspaceName(workspace.cwd)}
-                </span>
+                <span className={styles.name}>{workspaceLabel(workspace)}</span>
               </span>
               {!workspace.trusted && (
                 <span className={styles.badge}>{untrustedLabel}</span>
@@ -352,14 +357,40 @@ export function WorkspaceSection({
           )}
         </button>
         {onOpenGitDiff && workspace.trusted && gitStatus?.branch && (
-          <span className={styles.gitPill}>
-            <GitBranchIndicator
-              branch={gitStatus.branch}
-              status={gitStatus}
-              compact
-              onOpenDiff={() => onOpenGitDiff(workspace.cwd)}
-            />
-          </span>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <span className={styles.gitPill} role="button" tabIndex={0}>
+                <GitBranchIndicator
+                  branch={gitStatus.branch}
+                  status={gitStatus}
+                  compact
+                />
+              </span>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent side="bottom" align="start">
+              <DropdownMenuItem onClick={() => onOpenGitDiff(workspace.cwd)}>
+                {t('gitDiff.title')}
+              </DropdownMenuItem>
+              {onNewWorktreeSession && (
+                <DropdownMenuItem
+                  onClick={() => onNewWorktreeSession(workspace.cwd)}
+                  className="flex-col items-start gap-0"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <GitForkIcon
+                      size={14}
+                      strokeWidth={1.2}
+                      style={{ color: 'var(--color-accent-fg, #8b5cf6)' }}
+                    />
+                    {t('sidebar.newWorktreeTask')}
+                  </span>
+                  <span className="text-xs opacity-60 font-normal">
+                    {t('sidebar.worktreeDescription')}
+                  </span>
+                </DropdownMenuItem>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
         )}
         {headerActions?.(actionsVisible)}
       </div>

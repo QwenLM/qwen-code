@@ -721,57 +721,147 @@ jobs:
           fi
 
           QWEN_TIMEOUT="$TIMEOUT_MINUTES"
-          set +e
-          # GNU timeout times out command children unless --foreground is used.
-          timeout --kill-after=10s "${QWEN_TIMEOUT}m" qwen \
-            --auth-type openai \
-            --approval-mode yolo \
-            "${MODEL_ARGS[@]}" \
-            --prompt "$PROMPT" \
-            --output-format stream-json \
-            | tee "$LOG_PATH"
-          pipeline_status=("${PIPESTATUS[@]}")
-          set -e
-          qwen_status="${pipeline_status[0]}"
-          tee_status="${pipeline_status[1]}"
 
-          if [ "$tee_status" -ne 0 ]; then
-            fail "Failed to write qwen review log."
-          fi
-          # GNU timeout may report 137 if --kill-after escalates to SIGKILL.
-          if [ "$qwen_status" -eq 124 ] || [ "$qwen_status" -eq 137 ]; then
-            fail "Qwen review timed out after ${QWEN_TIMEOUT} minutes." 1 "timeout"
-          fi
-          if [ "$qwen_status" -ne 0 ]; then
-            fail "Qwen review exited with status ${qwen_status}."
-          fi
+          # One attempt of the qwen review. Sets OUTCOME (success | retryable |
+          # quota | timeout | fatal), plus REASON/KIND for the failure paths.
+          # A transient abort (dropped connection, a non-quota API/rate-limit
+          # error, an empty or aborted run) is classified `retryable` so the
+          # loop below can try once more; a QUOTA-exhausted 429 is NOT retried
+          # in-run (its reset is typically hours away — burning a runner on it
+          # helps nobody), and a real timeout or a hard/config failure never
+          # retries.
+          OUTCOME=''
+          REASON=''
+          KIND=''
+          run_review_once() {
+            local attempt_timeout="$1"
+            OUTCOME='fatal'
+            REASON=''
+            KIND=''
+            set +e
+            # GNU timeout times out command children unless --foreground is used.
+            timeout --kill-after=10s "${attempt_timeout}s" qwen \
+              --auth-type openai \
+              --approval-mode yolo \
+              "${MODEL_ARGS[@]}" \
+              --prompt "$PROMPT" \
+              --output-format stream-json \
+              | tee "$LOG_PATH"
+            local ps=("${PIPESTATUS[@]}")
+            set -e
+            local qwen_status="${ps[0]}"
+            local tee_status="${ps[1]}"
 
-          if [ ! -s "$LOG_PATH" ]; then
-            fail "Qwen review completed but produced no output."
-          fi
+            if [ "$tee_status" -ne 0 ]; then
+              REASON="Failed to write qwen review log."
+              return
+            fi
+            # GNU timeout may report 137 if --kill-after escalates to SIGKILL.
+            if [ "$qwen_status" -eq 124 ] || [ "$qwen_status" -eq 137 ]; then
+              OUTCOME='timeout'
+              REASON="Qwen review timed out after ${attempt_timeout} seconds (of the ${QWEN_TIMEOUT}-minute budget)."
+              KIND='timeout'
+              return
+            fi
+            if [ "$qwen_status" -ne 0 ]; then
+              REASON="Qwen review exited with status ${qwen_status}."
+              return
+            fi
+            if [ ! -s "$LOG_PATH" ]; then
+              OUTCOME='retryable'
+              REASON="Qwen review completed but produced no output."
+              return
+            fi
 
-          # qwen can exit 0 even when the run aborted mid-review (e.g. the model
-          # connection dropped before the review was posted). In that case the
-          # final stream-json `result` event still renders the error inline and
-          # carries subtype=success / is_error=false, so the checks above all
-          # pass and the job goes green without ever posting a comment. Inspect
-          # the terminal `result` event explicitly and treat an errored or
-          # aborted run as a failure so the fallback-comment step runs.
-          RESULT_LINE="$(grep '"type":"result"' "$LOG_PATH" | tail -n1 || true)"
-          if [ -z "$RESULT_LINE" ]; then
-            fail "Qwen review produced no result event (run aborted before completion)."
-          fi
-          RESULT_IS_ERROR="$(printf '%s' "$RESULT_LINE" | jq -r '.is_error // false')"
-          RESULT_SUBTYPE="$(printf '%s' "$RESULT_LINE" | jq -r '.subtype // ""')"
-          RESULT_TEXT="$(printf '%s' "$RESULT_LINE" | jq -r '.result // ""')"
-          if [ "$RESULT_IS_ERROR" = "true" ] || [ "$RESULT_SUBTYPE" != "success" ]; then
-            fail "Qwen review ended in an error result (subtype=${RESULT_SUBTYPE}, is_error=${RESULT_IS_ERROR})."
-          fi
-          case "$RESULT_TEXT" in
-            *"[API Error"*)
-              fail "Qwen review aborted with an API error before posting comments."
-              ;;
-          esac
+            # qwen can exit 0 even when the run aborted mid-review (e.g. the
+            # model connection dropped before the review was posted). In that
+            # case the final stream-json `result` event still renders the error
+            # inline and carries subtype=success / is_error=false, so the checks
+            # above all pass and the job goes green without ever posting a
+            # comment. Inspect the terminal `result` event explicitly and treat
+            # an errored or aborted run as a failure so the fallback runs.
+            RESULT_LINE="$(grep '"type":"result"' "$LOG_PATH" | tail -n1 || true)"
+            if [ -z "$RESULT_LINE" ]; then
+              OUTCOME='retryable'
+              REASON="Qwen review produced no result event (run aborted before completion)."
+              return
+            fi
+            RESULT_IS_ERROR="$(printf '%s' "$RESULT_LINE" | jq -r '.is_error // false')"
+            RESULT_SUBTYPE="$(printf '%s' "$RESULT_LINE" | jq -r '.subtype // ""')"
+            RESULT_TEXT="$(printf '%s' "$RESULT_LINE" | jq -r '.result // ""')"
+            if [ "$RESULT_IS_ERROR" = "true" ] || [ "$RESULT_SUBTYPE" != "success" ]; then
+              OUTCOME='retryable'
+              REASON="Qwen review ended in an error result (subtype=${RESULT_SUBTYPE}, is_error=${RESULT_IS_ERROR})."
+              return
+            fi
+            # The stream-json adapter appends the formatted API error last
+            # (BaseJsonOutputAdapter appendText), so an aborted run's result
+            # ENDS with "[API Error: …]" — optionally followed by a rate-limit
+            # guidance suffix. A review that merely *discusses* API errors
+            # quotes them mid-prose and keeps writing afterwards. Strip the
+            # known suffixes, rtrim, then check the trailing shape.
+            BODY="$RESULT_TEXT"
+            for S in \
+              'Possible quota limitations in place or slow response times detected. Please wait and try again later.' \
+              'Please wait and try again later. To increase your limits, request a quota increase through AI Studio, or switch to another /auth method' \
+              'Please wait and try again later. To increase your limits, request a quota increase through Vertex, or switch to another /auth method'; do
+              BODY="${BODY%"$S"}"
+            done
+            BODY="${BODY%"${BODY##*[![:space:]]}"}"
+            case "$BODY" in
+              *"[API Error: "*"]")
+                if printf '%s' "$RESULT_TEXT" | grep -qiE 'quota.*(exhaust|exceed|limit|reset)'; then
+                  OUTCOME='quota'
+                  KIND='quota'
+                  local detail
+                  detail="$(printf '%s' "$RESULT_TEXT" | grep -oiE 'reset at [^]]*' | head -n1 || true)"
+                  REASON="Qwen review stopped: the model API quota is exhausted${detail:+ (${detail})}."
+                else
+                  OUTCOME='retryable'
+                  REASON="Qwen review aborted with an API error before posting comments."
+                fi
+                return
+                ;;
+            esac
+            OUTCOME='success'
+          }
+
+          # Retry budget: all attempts SHARE QWEN_TIMEOUT, so two tries can never
+          # exceed the single-review budget (nor the job timeout). The first
+          # attempt gets the whole remaining budget; a retry is capped at 5 min —
+          # a transient that has cleared succeeds fast, and a still-failing retry
+          # can't burn another hour. Retry only a `retryable` outcome, only once,
+          # and only with real budget left.
+          BUDGET_SECONDS=$(( QWEN_TIMEOUT * 60 ))
+          RETRY_CAP_SECONDS=300
+          RETRY_BACKOFF_SECONDS=60
+          MAX_ATTEMPTS=2
+          START_TS="$(date +%s)"
+          attempt=1
+          while :; do
+            remaining=$(( BUDGET_SECONDS - ($(date +%s) - START_TS) ))
+            if [ "$attempt" -eq 1 ]; then
+              attempt_timeout="$remaining"
+            else
+              attempt_timeout="$RETRY_CAP_SECONDS"
+              [ "$remaining" -lt "$attempt_timeout" ] && attempt_timeout="$remaining"
+            fi
+            if [ "$attempt_timeout" -lt 30 ]; then
+              fail "${REASON:-Qwen review ran out of time budget before it could complete.}" 1 "$KIND"
+            fi
+            run_review_once "$attempt_timeout"
+            if [ "$OUTCOME" = "success" ]; then
+              break
+            fi
+            if [ "$OUTCOME" = "retryable" ] && [ "$attempt" -lt "$MAX_ATTEMPTS" ] \
+              && [ "$(( BUDGET_SECONDS - ($(date +%s) - START_TS) ))" -gt "$(( RETRY_BACKOFF_SECONDS + RETRY_CAP_SECONDS ))" ]; then
+              echo "::warning::Transient review failure (${REASON}) — retrying once after ${RETRY_BACKOFF_SECONDS}s."
+              sleep "$RETRY_BACKOFF_SECONDS"
+              attempt=$(( attempt + 1 ))
+              continue
+            fi
+            fail "$REASON" 1 "$KIND"
+          done
 
       - name: 'Post fallback comment on failure'
         if: |-
@@ -807,8 +897,12 @@ jobs:
             else
               body="**Qwen Code review timed out.** ${FAILURE_REASON} This run already used the maximum 240 minute timeout. See [workflow logs](${RUN_URL})."
             fi
+          elif [ "$FAILURE_KIND" = "quota" ]; then
+            # A quota reset is typically hours out, so an in-run retry can't
+            # help — tell the reviewer exactly how to recover once it resets.
+            body="**Qwen Code review paused — model quota exhausted.** ${FAILURE_REASON} Transient errors auto-retry, but a quota reset is too far out to wait on a runner. Re-run once it resets by commenting \`@qwen-code /review\`. See [workflow logs](${RUN_URL})."
           else
-            body="**Qwen Code review did not complete successfully.** ${FAILURE_REASON} See [workflow logs](${RUN_URL})."
+            body="**Qwen Code review did not complete successfully.** ${FAILURE_REASON} A transient error is retried automatically; if you are seeing this, retry with \`@qwen-code /review\`. See [workflow logs](${RUN_URL})."
           fi
           gh pr comment "$PR_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \

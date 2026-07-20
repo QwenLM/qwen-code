@@ -51,6 +51,7 @@ export const BACKGROUND_AGENT_CONCURRENCY_ENV =
 
 function normalizeBackgroundApprovalOutcome(
   outcome: Parameters<BackgroundApproval['respond']>[0],
+  confirmationDetails: BackgroundApproval['confirmationDetails'],
 ): Parameters<BackgroundApproval['respond']>[0] {
   if (
     outcome === ToolConfirmationOutcome.ProceedAlways ||
@@ -59,7 +60,13 @@ function normalizeBackgroundApprovalOutcome(
     outcome === ToolConfirmationOutcome.ProceedAlwaysServer ||
     outcome === ToolConfirmationOutcome.ProceedAlwaysTool
   ) {
-    return ToolConfirmationOutcome.ProceedOnce;
+    if (
+      confirmationDetails.type === 'plan' &&
+      outcome === ToolConfirmationOutcome.ProceedAlways
+    ) {
+      return outcome;
+    }
+    return ToolConfirmationOutcome.Cancel;
   }
   return outcome;
 }
@@ -955,9 +962,13 @@ export class BackgroundTaskRegistry {
     );
     this.emitApprovalChange(entry);
     try {
+      const normalizedOutcome = normalizeBackgroundApprovalOutcome(
+        outcome,
+        approval.confirmationDetails,
+      );
       await approval.respond(
-        normalizeBackgroundApprovalOutcome(outcome),
-        payload,
+        normalizedOutcome,
+        normalizedOutcome === outcome ? payload : undefined,
       );
     } catch (error) {
       debugLogger.error(

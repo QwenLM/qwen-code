@@ -38,6 +38,7 @@ import * as core from '@qwen-code/qwen-code-core';
 import { SettingScope } from '../../config/settings.js';
 import type {
   AgentSideConnection,
+  PermissionOption,
   PromptRequest,
   SessionNotification,
 } from '@agentclientprotocol/sdk';
@@ -521,6 +522,7 @@ describe('Session', () => {
       // session.prompt(), so the default must be defined. Individual tests
       // that care override via `mockConfig.getApprovalMode = vi.fn()...`.
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getApprovalModeRevision: vi.fn().mockReturnValue(0),
       switchModel: switchModelSpy,
       getModel: vi.fn().mockImplementation(() => currentModel),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
@@ -10196,6 +10198,709 @@ describe('Session', () => {
       expect(executeSpy).toHaveBeenCalled();
     });
 
+    it('blocks known Plan shell writes before requesting ACP permission', async () => {
+      const executeSpy = vi.fn();
+      const getConfirmationDetails = vi.fn();
+      const invocation = {
+        params: { command: 'touch changed.txt' },
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getConfirmationDetails,
+        getDescription: vi.fn().mockReturnValue('touch changed.txt'),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: executeSpy,
+      };
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.SHELL,
+        kind: core.Kind.Execute,
+        build: vi.fn().mockReturnValue(invocation),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockConfig.getApprovalModeRevision = vi.fn().mockReturnValue(1);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-plan-write',
+                  name: core.ToolNames.SHELL,
+                  args: { command: 'touch changed.txt' },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'run write' }],
+      });
+
+      expect(getConfirmationDetails).not.toHaveBeenCalled();
+      expect(mockClient.requestPermission).not.toHaveBeenCalled();
+      expect(executeSpy).not.toHaveBeenCalled();
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          error: expect.objectContaining({
+            message: expect.stringContaining('classified as state-modifying'),
+          }),
+        }),
+      );
+    });
+
+    it('routes unknown resolved shell aliases to exact one-off ACP approval', async () => {
+      const rawCommand = "python -c 'print(1)'";
+      const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+      const executeSpy = vi.fn().mockResolvedValue({
+        llmContent: 'ok',
+        returnDisplay: 'ok',
+      });
+      const invocation = {
+        params: { command: rawCommand },
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'exec',
+          title: 'Confirm shell',
+          command: rawCommand,
+          rootCommand: 'python',
+          onConfirm: onConfirmSpy,
+        }),
+        getDescription: vi.fn().mockReturnValue(rawCommand),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: executeSpy,
+      };
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.SHELL,
+        kind: core.Kind.Execute,
+        build: vi.fn().mockReturnValue(invocation),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockConfig.getApprovalModeRevision = vi.fn().mockReturnValue(2);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-plan-unknown',
+                  name: 'Shell',
+                  args: { command: rawCommand },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'inspect through wrapper' }],
+      });
+
+      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+      const permissionRequest = vi.mocked(mockClient.requestPermission).mock
+        .calls[0][0];
+      expect(
+        (permissionRequest.options as PermissionOption[]).map(
+          (option) => option.optionId,
+        ),
+      ).toEqual([
+        core.ToolConfirmationOutcome.ProceedOnce,
+        core.ToolConfirmationOutcome.Cancel,
+      ]);
+      expect(permissionRequest.toolCall.content[0]).toMatchObject({
+        content: {
+          text: expect.stringContaining('exact invocation once'),
+        },
+      });
+      expect(onConfirmSpy).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.ProceedOnce,
+        undefined,
+      );
+      expect(executeSpy).toHaveBeenCalledOnce();
+    });
+
+    it('reports ACP Plan shell approval request failures accurately', async () => {
+      const rawCommand = "python -c 'print(1)'";
+      const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+      const executeSpy = vi.fn();
+      const invocation = {
+        params: { command: rawCommand },
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'exec',
+          title: 'Confirm shell',
+          command: rawCommand,
+          rootCommand: 'python',
+          onConfirm: onConfirmSpy,
+        }),
+        getDescription: vi.fn().mockReturnValue(rawCommand),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: executeSpy,
+      };
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.SHELL,
+        kind: core.Kind.Execute,
+        build: vi.fn().mockReturnValue(invocation),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockConfig.getApprovalModeRevision = vi.fn().mockReturnValue(2);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      vi.mocked(mockClient.requestPermission).mockRejectedValueOnce(
+        new Error('ACP host disconnected'),
+      );
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-plan-approval-failed',
+                  name: core.ToolNames.SHELL,
+                  args: { command: rawCommand },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'inspect through wrapper' }],
+      });
+
+      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+      expect(onConfirmSpy).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.Cancel,
+      );
+      expect(executeSpy).not.toHaveBeenCalled();
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          error: expect.objectContaining({
+            message:
+              'Plan mode could not complete approval for this shell command: ACP host disconnected. The command was not run; Plan mode remains active.',
+          }),
+        }),
+      );
+    });
+
+    it('preserves parent cancellation while unknown Plan shell approval is pending', async () => {
+      const rawCommand = "python -c 'print(1)'";
+      const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+      const executeSpy = vi.fn();
+      const internals = session as unknown as {
+        midTurnRecoveredMessages: Array<{
+          kind: 'text';
+          message: string;
+        }>;
+      };
+      internals.midTurnRecoveredMessages.push({
+        kind: 'text',
+        message: 'recovered before cancellation',
+      });
+      const invocation = {
+        params: { command: rawCommand },
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'exec',
+          title: 'Confirm shell',
+          command: rawCommand,
+          rootCommand: 'python',
+          onConfirm: onConfirmSpy,
+        }),
+        getDescription: vi.fn().mockReturnValue(rawCommand),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: executeSpy,
+      };
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.SHELL,
+        kind: core.Kind.Execute,
+        build: vi.fn().mockReturnValue(invocation),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockConfig.getApprovalModeRevision = vi.fn().mockReturnValue(2);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      vi.mocked(mockClient.requestPermission).mockImplementationOnce(
+        () => new Promise(() => {}),
+      );
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-plan-approval-cancelled',
+                  name: core.ToolNames.SHELL,
+                  args: { command: rawCommand },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      const prompt = session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'inspect through wrapper' }],
+      });
+      await vi.waitFor(() => {
+        expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+      });
+      await session.cancelPendingPrompt();
+
+      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+      expect(onConfirmSpy).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.Cancel,
+      );
+      expect(mockClient.extMethod).not.toHaveBeenCalled();
+      expect(executeSpy).not.toHaveBeenCalled();
+      expect(internals.midTurnRecoveredMessages).toHaveLength(0);
+      expect(mockChat.addHistory).toHaveBeenCalledWith({
+        role: 'user',
+        parts: [
+          expect.objectContaining({
+            functionResponse: expect.objectContaining({
+              id: 'call-plan-approval-cancelled',
+              name: core.ToolNames.SHELL,
+            }),
+          }),
+          {
+            text: '\n[User message received during tool execution]: recovered before cancellation',
+          },
+        ],
+      });
+      expect(
+        mockChatRecordingService.recordMidTurnUserMessage,
+      ).toHaveBeenCalledWith(
+        [
+          {
+            text: '\n[User message received during tool execution]: recovered before cancellation',
+          },
+        ],
+        'recovered before cancellation',
+      );
+    });
+
+    it('rejects permission-hook rewrites of unknown Plan shell commands', async () => {
+      const rawCommand = "python -c 'print(1)'";
+      const hookSpy = vi
+        .spyOn(core, 'firePermissionRequestHook')
+        .mockResolvedValue({
+          hasDecision: true,
+          shouldAllow: true,
+          updatedInput: { command: 'touch changed.txt' },
+        });
+      const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+      const executeSpy = vi.fn();
+      const invocation = {
+        params: { command: rawCommand },
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'exec',
+          title: 'Confirm shell',
+          command: rawCommand,
+          rootCommand: 'python',
+          onConfirm: onConfirmSpy,
+        }),
+        getDescription: vi.fn().mockReturnValue(rawCommand),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: executeSpy,
+      };
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.SHELL,
+        kind: core.Kind.Execute,
+        build: vi.fn().mockReturnValue(invocation),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockConfig.getApprovalModeRevision = vi.fn().mockReturnValue(2);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-plan-hook-rewrite',
+                  name: core.ToolNames.SHELL,
+                  args: { command: rawCommand },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'inspect through wrapper' }],
+        });
+      } finally {
+        hookSpy.mockRestore();
+      }
+
+      expect(mockClient.requestPermission).not.toHaveBeenCalled();
+      expect(onConfirmSpy).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.Cancel,
+        expect.objectContaining({
+          cancelMessage: expect.stringContaining('exact invocation changed'),
+        }),
+      );
+      expect(executeSpy).not.toHaveBeenCalled();
+    });
+
+    it('rejects ACP shell args mutated while building the invocation', async () => {
+      const rawCommand = "python -c 'print(1)'";
+      const executeSpy = vi.fn();
+      const getConfirmationDetails = vi.fn();
+      const build = vi.fn((input: Record<string, unknown>) => {
+        input['command'] = 'touch changed.txt';
+        return {
+          params: input,
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getConfirmationDetails,
+          getDescription: vi.fn().mockReturnValue('touch changed.txt'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: executeSpy,
+        };
+      });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.SHELL,
+        kind: core.Kind.Execute,
+        build,
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockConfig.getApprovalModeRevision = vi.fn().mockReturnValue(2);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-plan-build-mutation',
+                  name: core.ToolNames.SHELL,
+                  args: { command: rawCommand },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'run wrapper' }],
+      });
+
+      expect(build).toHaveBeenCalledOnce();
+      expect(getConfirmationDetails).not.toHaveBeenCalled();
+      expect(mockClient.requestPermission).not.toHaveBeenCalled();
+      expect(executeSpy).not.toHaveBeenCalled();
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          error: expect.objectContaining({
+            message: expect.stringContaining('exact invocation changed'),
+          }),
+        }),
+      );
+    });
+
+    it('cancels forged ACP outcomes that were not offered', async () => {
+      const rawCommand = "python -c 'print(1)'";
+      const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+      const executeSpy = vi.fn();
+      const invocation = {
+        params: { command: rawCommand },
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'exec',
+          title: 'Confirm shell',
+          command: rawCommand,
+          rootCommand: 'python',
+          onConfirm: onConfirmSpy,
+        }),
+        getDescription: vi.fn().mockReturnValue(rawCommand),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: executeSpy,
+      };
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.SHELL,
+        kind: core.Kind.Execute,
+        build: vi.fn().mockReturnValue(invocation),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockConfig.getApprovalModeRevision = vi.fn().mockReturnValue(3);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      vi.mocked(mockClient.requestPermission).mockImplementation(
+        async (params) => {
+          params.options.push({
+            optionId: core.ToolConfirmationOutcome.ProceedAlwaysProject,
+            name: 'Injected persistent approval',
+            kind: 'allow_always',
+          });
+          return {
+            outcome: {
+              outcome: 'selected',
+              optionId: core.ToolConfirmationOutcome.ProceedAlwaysProject,
+            },
+          };
+        },
+      );
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-plan-forged',
+                  name: core.ToolNames.SHELL,
+                  args: { command: rawCommand },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'run wrapper' }],
+      });
+
+      expect(onConfirmSpy).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.Cancel,
+      );
+      expect(executeSpy).not.toHaveBeenCalled();
+    });
+
+    it('keeps ambient Shell cwd fixed after ACP approval is consumed', async () => {
+      const rawCommand = "python -c 'print(1)'";
+      const modelArgs = { command: rawCommand };
+      let targetDir = '/workspace/one';
+      const onConfirmSpy = vi.fn().mockImplementation(async () => {
+        targetDir = '/workspace/two';
+        modelArgs.command = 'touch changed.txt';
+      });
+      const executeSpy = vi.fn();
+      const invocation = {
+        params: modelArgs,
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'exec',
+          title: 'Confirm shell',
+          command: rawCommand,
+          rootCommand: 'python',
+          onConfirm: onConfirmSpy,
+        }),
+        getDescription: vi.fn().mockReturnValue(rawCommand),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: executeSpy,
+      };
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.SHELL,
+        kind: core.Kind.Execute,
+        build: vi.fn().mockReturnValue(invocation),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockConfig.getApprovalModeRevision = vi.fn().mockReturnValue(4);
+      mockConfig.getTargetDir = vi.fn(() => targetDir);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-plan-cwd-consumed',
+                  name: core.ToolNames.SHELL,
+                  args: modelArgs,
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'inspect through wrapper' }],
+      });
+
+      expect(invocation.params).toEqual({
+        command: rawCommand,
+        directory: '/workspace/one',
+      });
+      expect(targetDir).toBe('/workspace/two');
+      expect(modelArgs.command).toBe('touch changed.txt');
+      expect(onConfirmSpy).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.ProceedOnce,
+        undefined,
+      );
+      expect(executeSpy).toHaveBeenCalledOnce();
+    });
+
+    it('invalidates ACP approval when ambient Shell cwd moves while pending', async () => {
+      const rawCommand = "python -c 'print(1)'";
+      let targetDir = '/workspace/one';
+      const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+      const executeSpy = vi.fn();
+      const invocation = {
+        params: { command: rawCommand },
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'exec',
+          title: 'Confirm shell',
+          command: rawCommand,
+          rootCommand: 'python',
+          onConfirm: onConfirmSpy,
+        }),
+        getDescription: vi.fn().mockReturnValue(rawCommand),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: executeSpy,
+      };
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.SHELL,
+        kind: core.Kind.Execute,
+        build: vi.fn().mockReturnValue(invocation),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockConfig.getApprovalModeRevision = vi.fn().mockReturnValue(4);
+      mockConfig.getTargetDir = vi.fn(() => targetDir);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      vi.mocked(mockClient.requestPermission).mockImplementation(async () => {
+        targetDir = '/workspace/two';
+        return {
+          outcome: {
+            outcome: 'selected',
+            optionId: core.ToolConfirmationOutcome.ProceedOnce,
+          },
+        };
+      });
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-plan-cwd-stale',
+                  name: core.ToolNames.SHELL,
+                  args: { command: rawCommand },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'inspect through wrapper' }],
+      });
+
+      expect(invocation.params).toEqual({
+        command: rawCommand,
+        directory: '/workspace/one',
+      });
+      expect(onConfirmSpy).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.Cancel,
+        expect.objectContaining({
+          cancelMessage: expect.stringContaining('no longer valid'),
+        }),
+      );
+      expect(executeSpy).not.toHaveBeenCalled();
+    });
+
+    it('revalidates Plan shell context after a pending permission hook', async () => {
+      const rawCommand = "python -c 'print(1)'";
+      let revision = 4;
+      const hookSpy = vi
+        .spyOn(core, 'firePermissionRequestHook')
+        .mockImplementation(async () => {
+          revision++;
+          return { hasDecision: false };
+        });
+      const executeSpy = vi.fn();
+      const invocation = {
+        params: { command: rawCommand },
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'exec',
+          title: 'Confirm shell',
+          command: rawCommand,
+          rootCommand: 'python',
+          onConfirm: vi.fn().mockResolvedValue(undefined),
+        }),
+        getDescription: vi.fn().mockReturnValue(rawCommand),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: executeSpy,
+      };
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.SHELL,
+        kind: core.Kind.Execute,
+        build: vi.fn().mockReturnValue(invocation),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockConfig.getApprovalModeRevision = vi.fn(() => revision);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-plan-hook-stale',
+                  name: core.ToolNames.SHELL,
+                  args: { command: rawCommand },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'inspect through wrapper' }],
+        });
+      } finally {
+        hookSpy.mockRestore();
+      }
+
+      expect(mockClient.requestPermission).not.toHaveBeenCalled();
+      expect(executeSpy).not.toHaveBeenCalled();
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          error: expect.objectContaining({
+            message: expect.stringContaining('no longer valid'),
+          }),
+        }),
+      );
+    });
+
     it('returns permission error for disabled tools (L1 isToolEnabled check)', async () => {
       const executeSpy = vi.fn();
       const invocation = {
@@ -11252,6 +11957,57 @@ describe('Session', () => {
           );
         });
 
+        it('preserves goal feedback alongside an external stop reason', async () => {
+          const messageBus = {
+            request: vi
+              .fn()
+              .mockResolvedValueOnce({
+                success: true,
+                output: {
+                  decision: 'block',
+                  continue: false,
+                  stopReason: 'External stop hook feedback',
+                  reason: 'Keep working on the active goal',
+                  hookSpecificOutput: {
+                    qwenGoalHookId: 'goal-hook',
+                  },
+                },
+              })
+              .mockResolvedValueOnce({
+                success: true,
+                output: {},
+              }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi
+            .fn()
+            .mockImplementation((eventName: string) => eventName === 'Stop');
+          mockChat.getHistory = vi
+            .fn()
+            .mockReturnValue([
+              { role: 'model', parts: [{ text: 'response text' }] },
+            ]);
+          mockChat.getLastModelMessageText = vi
+            .fn()
+            .mockReturnValue('response text');
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValue(createEmptyStream());
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+          const continuation = vi.mocked(mockChat.sendMessageStream).mock
+            .calls[1]?.[1] as { message: Part[] };
+          expect(textParts(continuation.message)).toEqual([
+            'External stop hook feedback\nKeep working on the active goal',
+          ]);
+        });
+
         it('ends Stop hook continuation when the blocking cap is reached', async () => {
           const messageBus = {
             request: vi.fn().mockImplementation(async (request) => ({
@@ -12233,6 +12989,11 @@ describe('Session', () => {
         ]);
       }
 
+      async function* createAbortingEmptyStream() {
+        await session.cancelPendingPrompt();
+        yield* createEmptyStream();
+      }
+
       it('waits for pending rewrites before ending after cancelled ask_user_question', async () => {
         let releaseRewrite!: () => void;
         const flushTurn = vi.fn().mockResolvedValue(undefined);
@@ -12446,6 +13207,92 @@ describe('Session', () => {
         });
       });
 
+      it('preserves parent cancellation during Stop-hook permission', async () => {
+        const execute = vi.fn();
+        mockToolRegistry.getTool.mockReturnValue(
+          mockConfirmingTool(core.ToolNames.ASK_USER_QUESTION, execute),
+        );
+        vi.mocked(mockClient.requestPermission).mockImplementationOnce(
+          () => new Promise(() => {}),
+        );
+        const messageBus = {
+          request: vi.fn().mockResolvedValueOnce({
+            success: true,
+            output: {
+              decision: 'block',
+              reason: 'Continue after Stop hook',
+            },
+          }),
+        };
+        mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.hasHooksForEvent = vi
+          .fn()
+          .mockImplementation((eventName: string) => eventName === 'Stop');
+        mockChat.getHistory = vi
+          .fn()
+          .mockReturnValue([
+            { role: 'model', parts: [{ text: 'response text' }] },
+          ]);
+        mockChat.getLastModelMessageText = vi
+          .fn()
+          .mockReturnValue('response text');
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(createAskUserQuestionResponseStream());
+
+        const prompt = session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+        await vi.waitFor(() => {
+          expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+        });
+        await session.cancelPendingPrompt();
+
+        await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+        expect(execute).not.toHaveBeenCalled();
+      });
+
+      it('reports cancellation when abort lands between Stop-hook iterations', async () => {
+        const messageBus = {
+          request: vi.fn().mockResolvedValueOnce({
+            success: true,
+            output: {
+              decision: 'block',
+              reason: 'Continue after Stop hook',
+            },
+          }),
+        };
+        mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.hasHooksForEvent = vi
+          .fn()
+          .mockImplementation((eventName: string) => eventName === 'Stop');
+        mockChat.getHistory = vi
+          .fn()
+          .mockReturnValue([
+            { role: 'model', parts: [{ text: 'response text' }] },
+          ]);
+        mockChat.getLastModelMessageText = vi
+          .fn()
+          .mockReturnValue('response text');
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(createAbortingEmptyStream());
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'cancelled' });
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        expect(messageBus.request).toHaveBeenCalledTimes(1);
+      });
+
       it('ends background notification processing after cancelled ask_user_question', async () => {
         const execute = vi.fn();
         mockToolRegistry.getTool.mockReturnValue(
@@ -12498,6 +13345,86 @@ describe('Session', () => {
               }),
             }),
           ],
+        });
+      });
+
+      it('reports cancellation while a background notification awaits permission', async () => {
+        const execute = vi.fn();
+        mockToolRegistry.getTool.mockReturnValue(
+          mockConfirmingTool(core.ToolNames.ASK_USER_QUESTION, execute),
+        );
+        vi.mocked(mockClient.requestPermission).mockImplementationOnce(
+          () => new Promise(() => {}),
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(createAskUserQuestionResponseStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'start background work' }],
+        });
+
+        const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+          .calls[0][0] as (
+          displayText: string,
+          modelText: string,
+          meta: { agentId: string; status: string; toolUseId?: string },
+        ) => void;
+        callback('done', '<task-notification />', {
+          agentId: 'agent-1',
+          status: 'completed',
+        });
+        await vi.waitFor(() => {
+          expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+        });
+        await session.cancelPendingPrompt();
+
+        await vi.waitFor(() => {
+          expect(mockClient.extNotification).toHaveBeenCalledWith(
+            '_qwencode/end_turn',
+            {
+              sessionId: 'test-session-id',
+              reason: 'cancelled',
+              source: 'background_notification',
+            },
+          );
+        });
+        expect(execute).not.toHaveBeenCalled();
+      });
+
+      it('reports cancellation when a background stream ends after abort', async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(createAbortingEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'start background work' }],
+        });
+
+        const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+          .calls[0][0] as (
+          displayText: string,
+          modelText: string,
+          meta: { agentId: string; status: string; toolUseId?: string },
+        ) => void;
+        callback('done', '<task-notification />', {
+          agentId: 'agent-1',
+          status: 'completed',
+        });
+
+        await vi.waitFor(() => {
+          expect(mockClient.extNotification).toHaveBeenCalledWith(
+            '_qwencode/end_turn',
+            {
+              sessionId: 'test-session-id',
+              reason: 'cancelled',
+              source: 'background_notification',
+            },
+          );
         });
       });
     });
@@ -12599,6 +13526,100 @@ describe('Session', () => {
         isOutputMarkdown: true,
       };
     }
+
+    it('isolates enter_plan_mode from executable ACP siblings while preserving duplicate responses', async () => {
+      const writeExecute = vi.fn().mockResolvedValue({
+        llmContent: 'wrote',
+        returnDisplay: 'wrote',
+      });
+      const enterExecute = vi.fn().mockResolvedValue({
+        llmContent: 'entered plan mode',
+        returnDisplay: 'entered plan mode',
+      });
+      const readExecute = vi.fn().mockResolvedValue({
+        llmContent: 'read',
+        returnDisplay: 'read',
+      });
+      mockToolRegistry.getTool.mockImplementation((name: string) => {
+        const execute =
+          name === core.ToolNames.ENTER_PLAN_MODE
+            ? enterExecute
+            : name === core.ToolNames.WRITE_FILE
+              ? writeExecute
+              : readExecute;
+        return mockAllowedTool(name, execute);
+      });
+      const historyIds = new Set(['duplicate_read']);
+      vi.mocked(mockChat.getHistoryFunctionResponseIds).mockReturnValue(
+        historyIds,
+      );
+      const [duplicatePart] = core.normalizeModelToolCallIds(
+        [
+          {
+            functionCall: {
+              id: 'duplicate_read',
+              name: core.ToolNames.READ_FILE,
+              args: { file_path: 'duplicate.ts' },
+            },
+          },
+        ],
+        historyIds,
+        new Set<string>(),
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-plan-boundary', [
+        {
+          id: 'write_before_entry',
+          name: core.ToolNames.WRITE_FILE,
+          args: { file_path: 'before.txt' },
+        },
+        duplicatePart.functionCall!,
+        {
+          id: 'enter_plan',
+          name: core.ToolNames.ENTER_PLAN_MODE,
+          args: {},
+        },
+        {
+          id: 'read_after_entry',
+          name: core.ToolNames.READ_FILE,
+          args: { file_path: 'after.ts' },
+        },
+      ]);
+
+      expect(writeExecute).not.toHaveBeenCalled();
+      expect(enterExecute).toHaveBeenCalledOnce();
+      expect(readExecute).not.toHaveBeenCalled();
+      expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
+        'write_before_entry',
+        'duplicate_read__qwen_dup_2',
+        'enter_plan',
+        'read_after_entry',
+      ]);
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        error: core.PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+      });
+      expect(result.parts[1].functionResponse?.response).toEqual({
+        error: expect.stringContaining(
+          'Duplicate provider tool call id "duplicate_read"',
+        ),
+      });
+      expect(result.parts[2].functionResponse?.response).toEqual({
+        output: 'entered plan mode',
+      });
+      expect(result.parts[3].functionResponse?.response).toEqual({
+        error: core.PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+      });
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        [result.parts[0]],
+        expect.objectContaining({
+          callId: 'write_before_entry',
+          status: 'error',
+          errorType: core.ToolErrorType.EXECUTION_DENIED,
+        }),
+      );
+    });
 
     it('keeps a structured timeout as an error after a later parent abort', async () => {
       const parentController = new AbortController();
@@ -14959,7 +15980,7 @@ describe('Session', () => {
       );
     });
 
-    it('preserves the feature-off Stop-loop result when cancellation arrives before it starts', async () => {
+    it('reports cancellation before a feature-off Stop loop starts', async () => {
       let enterWait!: () => void;
       const waitStarted = new Promise<void>((resolve) => {
         enterWait = resolve;
@@ -14984,7 +16005,7 @@ describe('Session', () => {
       await session.cancelPendingPrompt();
       releaseWait();
 
-      await expect(prompt).resolves.toEqual({ stopReason: 'end_turn' });
+      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
     });
 
     it('runs exactly two continuations and emits replayable status', async () => {

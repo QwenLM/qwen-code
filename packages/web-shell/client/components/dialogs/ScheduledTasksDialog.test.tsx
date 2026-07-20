@@ -326,7 +326,7 @@ describe('ScheduledTasksDialog editing', () => {
         {
           id: 'ext-1',
           name: 'alibabacloud-compute-suite',
-          displayName: 'Alibaba Cloud',
+          displayName: '\u001b[31mAlibaba Cloud\u001b[0m\u202e\u0007',
           description: '',
           version: '1.0.0',
           isActive: true,
@@ -374,8 +374,12 @@ describe('ScheduledTasksDialog editing', () => {
     click(findButtonContaining('repo-tools'));
     await flush();
 
-    expect(document.querySelector('[role="textbox"]')?.textContent).toContain(
-      'alibabacloud-compute-suite',
+    const extensionTag = document.querySelector<HTMLElement>(
+      '[data-prompt-tag-serialized="@ext:alibabacloud-compute-suite"]',
+    );
+    expect(extensionTag?.textContent).toBe('Alibaba Cloud');
+    expect(extensionTag?.dataset.promptTagSerialized).toBe(
+      '@ext:alibabacloud-compute-suite',
     );
 
     click(findButton('Create'));
@@ -542,7 +546,6 @@ describe('ScheduledTasksDialog editing', () => {
         {
           id: 'ext-1',
           name: 'alibabacloud-compute-suite',
-          displayName: 'Alibaba Cloud',
           description: '',
           version: '1.0.0',
           isActive: true,
@@ -565,6 +568,11 @@ describe('ScheduledTasksDialog editing', () => {
     await flush();
     click(findButtonContaining('alibabacloud-compute-suite'));
     await flush();
+
+    const extensionTag = prompt.querySelector<HTMLElement>(
+      '[data-prompt-tag-serialized="@ext:alibabacloud-compute-suite"]',
+    );
+    expect(extensionTag?.textContent).toBe('alibabacloud-compute-suite');
 
     click(findButton('Create'));
     await flush();
@@ -880,8 +888,20 @@ describe('ScheduledTasksDialog next-run countdown', () => {
 
 describe('ScheduledTasksDialog multi-workspace', () => {
   const WORKSPACES = [
-    { id: 'id-main', cwd: '/repo/main', primary: true, trusted: true },
-    { id: 'id-other', cwd: '/repo/other', primary: false, trusted: true },
+    {
+      id: 'id-main',
+      cwd: '/repo/main',
+      displayName: 'Main Workspace',
+      primary: true,
+      trusted: true,
+    },
+    {
+      id: 'id-other',
+      cwd: '/repo/other',
+      displayName: 'Payments API',
+      primary: false,
+      trusted: true,
+    },
     { id: 'id-locked', cwd: '/repo/locked', primary: false, trusted: false },
   ];
 
@@ -947,13 +967,13 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     expect(actions.listScheduledTasks).toHaveBeenCalledWith('id-other');
     expect(actions.listScheduledTasks).not.toHaveBeenCalledWith('id-locked');
 
-    // Each card carries a workspace badge (title = cwd), labeled by basename.
+    // Each card carries a workspace badge (title = cwd), labeled for display.
     const primaryBadge = document.querySelector('[title="/repo/main"]');
     const secondaryBadge = document.querySelector('[title="/repo/other"]');
-    expect(primaryBadge?.textContent).toContain('main');
+    expect(primaryBadge?.textContent).toContain('Main Workspace');
     // The primary is no longer singled out with a "(primary)" tag.
     expect(primaryBadge?.textContent).not.toContain('(primary)');
-    expect(secondaryBadge?.textContent).toContain('other');
+    expect(secondaryBadge?.textContent).toContain('Payments API');
   });
 
   it('creates a task in the workspace chosen in the picker', async () => {
@@ -964,14 +984,14 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     const wsSelect = findWorkspaceSelect();
     expect(wsSelect).toBeDefined();
     expect(wsSelect!.querySelectorAll('option')).toHaveLength(2);
-    // Options show the workspace basename only — no "(primary)" tag on the
-    // primary entry (the label this PR removed). Guards the visible dropdown
+    // Options show each workspace label with no "(primary)" tag on the primary
+    // entry (the label this PR removed). Guards the visible dropdown
     // text, which the count/value assertions above do not cover.
     expect(
       Array.from(wsSelect!.querySelectorAll('option')).map(
         (o) => o.textContent,
       ),
-    ).toEqual(['main', 'other']);
+    ).toEqual(['Main Workspace', 'Payments API']);
 
     // Choose the secondary workspace.
     act(() => {

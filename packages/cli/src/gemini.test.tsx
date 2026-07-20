@@ -967,9 +967,13 @@ describe('gemini.tsx main function', () => {
     const { relaunchOnExitCode } = await import('./utils/relaunch.js');
     const [, options] = vi.mocked(relaunchOnExitCode).mock.calls[0]!;
 
-    await expect(options?.onUpdateRelaunch?.()).resolves.toBe(44);
+    await expect(options?.onUpdateRelaunch?.(true)).resolves.toBe(44);
 
-    expect(mockUpdateBeforeRelaunch).toHaveBeenCalledTimes(1);
+    expect(mockUpdateBeforeRelaunch).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(String),
+      true,
+    );
   });
 
   it('passes host update capability into a container sandbox', async () => {

@@ -17,6 +17,7 @@ describe('subscription plan definitions', () => {
       'qwen3.7-plus',
       'qwen3.6-plus',
       'qwen3.7-max',
+      'qwen3.8-max-preview',
       'qwen3.6-flash',
       'deepseek-v4-pro',
       'deepseek-v4-flash',

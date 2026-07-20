@@ -324,6 +324,100 @@ describe('AcpBridge', () => {
     );
   });
 
+  it('excludes discrete background notifications from the final response', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Final answer.' },
+          },
+        });
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Background agent "Explore" completed.',
+            },
+            _meta: {
+              source: 'background_notification',
+              qwenDiscreteMessage: true,
+            },
+          },
+        });
+      }),
+    };
+
+    await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
+      'Final answer.',
+    );
+  });
+
+  it('emits a completed background response separately from the active turn', () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const backgroundResponses: Array<[string, string]> = [];
+    bridge.on('backgroundResponse', (sessionId, text) => {
+      backgroundResponses.push([sessionId, text]);
+    });
+    const textChunks: Array<[string, string]> = [];
+    bridge.on('textChunk', (sessionId, text) => {
+      textChunks.push([sessionId, text]);
+    });
+
+    bridge.handleSessionUpdate({
+      sessionId: 's-1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Background final answer.' },
+        _meta: {
+          source: 'background_notification_response',
+          qwenDiscreteMessage: true,
+        },
+      },
+    });
+
+    expect(backgroundResponses).toEqual([['s-1', 'Background final answer.']]);
+    expect(textChunks).toEqual([]);
+  });
+
+  it('ignores a rewritten background response to avoid duplicate delivery', () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const backgroundResponses: Array<[string, string]> = [];
+    bridge.on('backgroundResponse', (sessionId, text) => {
+      backgroundResponses.push([sessionId, text]);
+    });
+
+    bridge.handleSessionUpdate({
+      sessionId: 's-1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Background final answer.' },
+        _meta: {
+          source: 'background_notification_response',
+          qwenDiscreteMessage: true,
+          rewritten: true,
+        },
+      },
+    });
+
+    expect(backgroundResponses).toEqual([]);
+  });
+
   it('returns only the final slash-command output', async () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',

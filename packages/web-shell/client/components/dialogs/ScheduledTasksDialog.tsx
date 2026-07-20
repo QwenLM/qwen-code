@@ -24,10 +24,11 @@ import type {
   DaemonWorkspaceMcpServerStatus,
   DaemonWorkspaceSkillStatus,
 } from '@qwen-code/sdk/daemon';
+import { sanitizeDisplayText } from '../../hooks/useAtMentionMenu';
 import { useI18n } from '../../i18n';
 import { getComposerTagIconUrl } from '../../utils/composerTag';
 import { cssUrlValue } from '../../utils/cssUrlVar';
-import { workspaceBasename } from '../../utils/workspace';
+import { workspaceLabel, workspaceLabelForCwd } from '../../utils/workspace';
 import { DialogShell } from './DialogShell';
 import {
   buildCron,
@@ -141,6 +142,7 @@ interface PromptReferenceItem {
   id: string;
   kind: PromptTagKind;
   label: string;
+  tagLabel?: string;
   description?: string;
   insertText: string;
 }
@@ -313,7 +315,7 @@ function makePromptTagElement(item: PromptReferenceItem): HTMLElement {
 
   const value = document.createElement('span');
   value.className = styles.promptTagValue;
-  value.textContent = item.label;
+  value.textContent = item.tagLabel ?? item.label;
   tag.appendChild(value);
   return tag;
 }
@@ -730,6 +732,9 @@ export function ScheduledTasksDialog({
               id: extension.id || extension.name,
               kind,
               label: extension.name,
+              tagLabel:
+                sanitizeDisplayText(extension.displayName ?? '') ||
+                extension.name,
               description: extensionDescription(extension),
               insertText: `@ext:${escapeAtReferenceText(extension.name)} `,
             }));
@@ -1140,7 +1145,7 @@ export function ScheduledTasksDialog({
                 >
                   {operableWorkspaces.map((ws) => (
                     <option key={ws.id} value={workspaceActionId(ws) ?? ''}>
-                      {workspaceBasename(ws.cwd)}
+                      {workspaceLabel(ws)}
                     </option>
                   ))}
                 </select>
@@ -1455,7 +1460,7 @@ export function ScheduledTasksDialog({
                     <span className={styles.workspaceIcon} aria-hidden="true">
                       ⌂
                     </span>
-                    {workspaceBasename(task.workspaceCwd)}
+                    {workspaceLabelForCwd(task.workspaceCwd, workspaceList)}
                   </span>
                 )}
                 <span className={styles.schedulePill}>

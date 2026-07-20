@@ -643,7 +643,12 @@ describe('getPlanModeSystemReminder', () => {
 
     expect(result).toContain('When a Tool is Blocked by Plan Mode');
     expect(result).toContain('Do NOT retry');
+    expect(result).toContain(
+      'wrappers, quoting tricks, aliases, or obfuscation',
+    );
     expect(result).toContain('Pivot to read-only');
+    expect(result).toContain('does not approve the plan');
+    expect(result).toContain('exit Plan mode');
   });
 
   it('should be deterministic', () => {

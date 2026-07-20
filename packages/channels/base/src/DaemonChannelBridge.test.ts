@@ -512,6 +512,166 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it('excludes discrete background notifications from the daemon response', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.prompt.mockImplementation(async () => {
+      events.push({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Final answer.' },
+          },
+        },
+      });
+      events.push({
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Background agent "Explore" completed.',
+            },
+            _meta: {
+              source: 'background_notification',
+              qwenDiscreteMessage: true,
+            },
+          },
+        },
+      });
+      events.push(turnCompleteEvent());
+      return { stopReason: 'end_turn' };
+    });
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    await expect(bridge.prompt('session-1', 'summarize')).resolves.toBe(
+      'Final answer.',
+    );
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('emits the completed background response without appending it to the active turn', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.prompt.mockImplementation(async () => {
+      events.push({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Initial answer.' },
+          },
+        },
+      });
+      events.push(turnCompleteEvent());
+      return { stopReason: 'end_turn' };
+    });
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    const backgroundResponses: Array<[string, string]> = [];
+    bridge.on('backgroundResponse', (sessionId, text) => {
+      backgroundResponses.push([sessionId, text]);
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+    await expect(bridge.prompt('session-1', 'investigate')).resolves.toBe(
+      'Initial answer.',
+    );
+
+    events.push({
+      id: 2,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Background final answer.' },
+          _meta: {
+            source: 'background_notification_response',
+            qwenDiscreteMessage: true,
+          },
+        },
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(backgroundResponses).toEqual([
+        ['session-1', 'Background final answer.'],
+      ]);
+    });
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('ignores a rewritten background response to avoid duplicate delivery', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.prompt.mockImplementation(async () => {
+      events.push(turnCompleteEvent());
+      return { stopReason: 'end_turn' };
+    });
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    const backgroundResponses: Array<[string, string]> = [];
+    bridge.on('backgroundResponse', (sessionId, text) => {
+      backgroundResponses.push([sessionId, text]);
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+    await bridge.prompt('session-1', 'investigate');
+
+    events.push({
+      id: 2,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Background final answer.' },
+          _meta: {
+            source: 'background_notification_response',
+            qwenDiscreteMessage: true,
+            rewritten: true,
+          },
+        },
+      },
+    });
+
+    await new Promise((r) => setTimeout(r, 50));
+    expect(backgroundResponses).toEqual([]);
+
+    events.close();
+    bridge.stop();
+  });
+
   it('returns only the final slash-command output from the daemon', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
