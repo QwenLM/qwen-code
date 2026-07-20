@@ -41,6 +41,16 @@ describe('release note classification', () => {
         expected: true,
       },
       {
+        title: 'ci: update spec tests',
+        files: ['packages/core/src/auth.spec.ts'],
+        expected: true,
+      },
+      {
+        title: 'ci: update playwright config',
+        files: ['packages/e2e/playwright.config.ts'],
+        expected: true,
+      },
+      {
         title: 'ci: update release classifier tests',
         files: ['.github/scripts/classify-release-notes.test.mjs'],
         expected: true,
