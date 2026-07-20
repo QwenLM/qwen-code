@@ -140,9 +140,10 @@ describe('createExtensionsController', () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
     const refreshCache = vi
-      .spyOn(ExtensionManager.prototype, 'refreshCache')
+      .spyOn(ExtensionManager.prototype, 'refreshCacheWithSnapshot')
       .mockImplementation(async () => {
         vi.setSystemTime(3_000);
+        return { extensions: {} } as never;
       });
     vi.spyOn(ExtensionManager.prototype, 'getLoadedExtensions').mockReturnValue(
       [],
@@ -157,6 +158,53 @@ describe('createExtensionsController', () => {
     await controller.buildLocalExtensionsStatus();
 
     expect(refreshCache).toHaveBeenCalledOnce();
+  });
+
+  it('reports user and workspace activation from the existing store rules', async () => {
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'refreshCacheWithSnapshot',
+    ).mockResolvedValue({ extensions: {} } as never);
+    vi.spyOn(ExtensionManager.prototype, 'getLoadedExtensions').mockReturnValue(
+      [
+        {
+          id: 'extension-id',
+          name: 'demo',
+          version: '1.0.0',
+          isActive: false,
+          path: '/extensions/demo',
+          config: {},
+          contextFiles: [],
+        } as never,
+      ],
+    );
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'getExtensionActivationFromSnapshot',
+    ).mockImplementation((_id, _snapshot, path) => ({
+      default: 'enabled',
+      workspace: 'inherit',
+      effective: path === '/work/bound' ? 'disabled' : 'enabled',
+      source: 'legacy_path_rule',
+    }));
+    const controller = createExtensionsController({
+      boundWorkspace: '/work/bound',
+      bridge: {} as AcpSessionBridge,
+      workspace: {} as DaemonWorkspaceService,
+    });
+
+    await expect(
+      controller.buildLocalExtensionsStatus(),
+    ).resolves.toMatchObject({
+      extensions: [
+        {
+          name: 'demo',
+          isActive: false,
+          defaultActivation: 'enabled',
+          workspaceActivation: 'disabled',
+        },
+      ],
+    });
   });
 
   it('reports an accepted operation as running while its cache refreshes', async () => {
@@ -383,7 +431,15 @@ describe('createExtensionsController', () => {
       { manager, deadlineMs: 100 },
     );
     await vi.advanceTimersByTimeAsync(0);
-    const operationId = responseBody.mock.calls[0]?.[0].operationId as string;
+    const accepted = responseBody.mock.calls[0]?.[0] as {
+      operationId: string;
+      deadlineAt: number;
+    };
+    const operationId = accepted.operationId;
+    expect(accepted.deadlineAt).toBe(Date.now() + 100);
+    expect(controller.getOperation(operationId)?.deadlineAt).toBe(
+      accepted.deadlineAt,
+    );
     let probeStarted = false;
     const probe = controller.preparationQueue.run(async () => {
       probeStarted = true;
