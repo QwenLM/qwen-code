@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   useWorkspace,
   useWorkspaceEventSignals,
@@ -157,6 +157,21 @@ export function VoiceButton({
     );
     return () => clearInterval(id);
   }, [isRecording]);
+
+  const voiceWasEnabled = useRef(voiceEnabled);
+  useEffect(() => {
+    const wasEnabled = voiceWasEnabled.current;
+    voiceWasEnabled.current = voiceEnabled;
+    if (
+      wasEnabled &&
+      !voiceEnabled &&
+      (status === 'recording' ||
+        status === 'connecting' ||
+        status === 'transcribing')
+    ) {
+      abort();
+    }
+  }, [abort, status, voiceEnabled]);
 
   if (!voiceEnabled) return null;
 

@@ -92,7 +92,9 @@ const click = (button: HTMLButtonElement) => {
 beforeEach(() => {
   mocks.settingsVersion = 0;
   mocks.workspace.capabilities.features = ['voice_transcribe'];
-  mocks.workspace.client.workspaceVoice = mocks.workspaceVoice;
+  mocks.workspace.client = {
+    workspaceVoice: mocks.workspaceVoice,
+  };
   mocks.workspaceVoice.mockReset();
   mocks.workspaceVoice.mockResolvedValue(voiceStatus(true));
   mocks.capture.status = 'idle';
@@ -196,6 +198,55 @@ describe('VoiceButton', () => {
       await Promise.resolve();
     });
     expect(container.querySelector('button')).toBeNull();
+  });
+
+  it('waits for the current workspace client voice status', async () => {
+    const { root, container } = mount(false);
+    await flush();
+    expect(container.querySelector('button')).not.toBeNull();
+
+    let resolveNext: (value: ReturnType<typeof voiceStatus>) => void = () =>
+      undefined;
+    const workspaceVoice = vi.fn(
+      () =>
+        new Promise<ReturnType<typeof voiceStatus>>((resolve) => {
+          resolveNext = resolve;
+        }),
+    );
+    mocks.workspace.client = { workspaceVoice };
+    act(() => {
+      root.render(<VoiceButton disabled={false} onInsert={() => {}} />);
+    });
+
+    expect(container.querySelector('button')).toBeNull();
+    expect(workspaceVoice).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      resolveNext(voiceStatus(true));
+      await Promise.resolve();
+    });
+    expect(container.querySelector('button')).not.toBeNull();
+  });
+
+  it('aborts active capture when the voice gate reloads', async () => {
+    const { root, container } = mount(false);
+    await flush();
+    expect(container.querySelector('button')).not.toBeNull();
+
+    mocks.capture.status = 'recording';
+    act(() => {
+      root.render(<VoiceButton disabled={false} onInsert={() => {}} />);
+    });
+    expect(mocks.capture.abort).not.toHaveBeenCalled();
+
+    mocks.settingsVersion = 1;
+    mocks.workspaceVoice.mockReturnValue(new Promise(() => undefined));
+    act(() => {
+      root.render(<VoiceButton disabled={false} onInsert={() => {}} />);
+    });
+
+    expect(container.querySelector('button')).toBeNull();
+    expect(mocks.capture.abort).toHaveBeenCalledOnce();
   });
 
   it('lets a disabled composer stop active dictation', async () => {

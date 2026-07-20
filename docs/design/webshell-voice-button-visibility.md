@@ -10,6 +10,8 @@ The host toolbar filter remains the outer gate. When the host allows voice, `Voi
 
 The status is fail-closed: the button stays hidden while the request is pending or after it fails. Each settings event invalidates the previous result and starts a fresh request. Results are tied to the workspace client and settings version so a late response cannot re-enable a stale configuration.
 
+If a previously enabled gate becomes invalid during an active capture, the capture is aborted before the control remains hidden so the microphone and voice connection are released.
+
 ## Boundaries
 
 Voice model selection, available model discovery, and voice mode do not affect button visibility. Invalid model configuration continues to use the existing capture error path after the user clicks the button.
