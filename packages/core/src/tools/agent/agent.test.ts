@@ -653,6 +653,28 @@ describe('AgentTool', () => {
       ).toMatch(/working_dir/i);
     });
 
+    it('treats an empty working_dir as unset when isolation is set', () => {
+      const params = {
+        ...validParams,
+        isolation: 'worktree' as const,
+        working_dir: '',
+      };
+
+      expect(agentTool.validateToolParams(params)).toBeNull();
+      expect(params.working_dir).toBeUndefined();
+    });
+
+    it('treats a whitespace-only working_dir as unset when isolation is set', () => {
+      const params = {
+        ...validParams,
+        isolation: 'worktree' as const,
+        working_dir: '   ',
+      };
+
+      expect(agentTool.validateToolParams(params)).toBeNull();
+      expect(params.working_dir).toBeUndefined();
+    });
+
     it('rejects working_dir combined with isolation', () => {
       expect(
         agentTool.validateToolParams({
