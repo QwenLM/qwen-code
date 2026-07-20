@@ -2096,17 +2096,25 @@ export class CoreToolScheduler {
       }
 
       const newToolCalls: ToolCall[] = [];
-      const retryErrorsRecordedInBatch = new Set<string>();
+      const retryErrorsRecordedInBatch = new Map<string, number>();
       const recordBatchRetryableToolError = (
         toolName: string,
         errorMessage: string,
       ): number => {
         const key = `${toolName}:${errorMessage}`;
-        if (retryErrorsRecordedInBatch.has(key)) {
-          return this.validationRetryCounts.get(key) ?? 0;
+        const existingCount = retryErrorsRecordedInBatch.get(key);
+        if (existingCount !== undefined) {
+          for (const trackedKey of this.validationRetryCounts.keys()) {
+            if (trackedKey.startsWith(`${toolName}:`)) {
+              this.validationRetryCounts.delete(trackedKey);
+            }
+          }
+          this.validationRetryCounts.set(key, existingCount);
+          return existingCount;
         }
-        retryErrorsRecordedInBatch.add(key);
-        return this.recordRetryableToolError(toolName, errorMessage);
+        const count = this.recordRetryableToolError(toolName, errorMessage);
+        retryErrorsRecordedInBatch.set(key, count);
+        return count;
       };
       for (const reqInfo of requestsToProcess) {
         const canonicalName = canonicalToolName(reqInfo.name);

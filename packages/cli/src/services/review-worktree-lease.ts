@@ -18,12 +18,16 @@ const LEASE_PREFIX = 'qwen-review-lease-';
 const GIT_TIMEOUT_MS = 120_000;
 const debugLogger = createDebugLogger('REVIEW_WORKTREE_LEASE');
 
-function gitOptions() {
+function gitOptions(timeout: number) {
   return {
     stdio: 'ignore' as const,
-    timeout: GIT_TIMEOUT_MS,
+    timeout,
     env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
   };
+}
+
+function validTarget(target: string): boolean {
+  return /^pr-\d+$/.test(target);
 }
 
 interface ReviewWorktreeLease {
@@ -47,6 +51,7 @@ export function clearReviewWorktreeLease(
   repositoryRoot: string,
   target: string,
 ): void {
+  if (!validTarget(target)) return;
   rmSync(leasePath(resolve(repositoryRoot), target), { force: true });
 }
 
@@ -58,7 +63,9 @@ export function createReviewWorktreeLease(params: {
   worktreePath: string;
   branch: string;
 }): void {
-  if (!params.sessionId || !params.promptId) return;
+  if (!params.sessionId || !params.promptId || !validTarget(params.target)) {
+    return;
+  }
 
   const repositoryRoot = resolve(params.repositoryRoot);
   const lease: ReviewWorktreeLease = {
@@ -97,7 +104,10 @@ function readLease(path: string): ReviewWorktreeLease | null {
   }
 }
 
-function removeLeaseWorktree(lease: ReviewWorktreeLease): boolean {
+function removeLeaseWorktree(
+  lease: ReviewWorktreeLease,
+  gitTimeout: number,
+): boolean {
   const prMatch = /^pr-(\d+)$/.exec(lease.target);
   if (!prMatch || lease.branch !== reviewBranch(prMatch[1])) {
     debugLogger.debug(`Rejected invalid review lease ${lease.target}`);
@@ -123,7 +133,7 @@ function removeLeaseWorktree(lease: ReviewWorktreeLease): boolean {
     execFileSync(
       'git',
       ['-C', repositoryRoot, 'worktree', 'remove', worktreePath, '--force'],
-      gitOptions(),
+      gitOptions(gitTimeout),
     );
   } catch (error) {
     debugLogger.debug(
@@ -135,7 +145,7 @@ function removeLeaseWorktree(lease: ReviewWorktreeLease): boolean {
       execFileSync(
         'git',
         ['-C', repositoryRoot, 'worktree', 'prune'],
-        gitOptions(),
+        gitOptions(gitTimeout),
       );
     } catch (fallbackError) {
       debugLogger.debug(
@@ -158,7 +168,7 @@ function removeLeaseWorktree(lease: ReviewWorktreeLease): boolean {
         '--quiet',
         `refs/heads/${lease.branch}`,
       ],
-      gitOptions(),
+      gitOptions(gitTimeout),
     );
   } catch (error) {
     if ((error as { status?: unknown }).status !== 1) {
@@ -175,7 +185,7 @@ function removeLeaseWorktree(lease: ReviewWorktreeLease): boolean {
       execFileSync(
         'git',
         ['-C', repositoryRoot, 'branch', '-D', lease.branch],
-        gitOptions(),
+        gitOptions(gitTimeout),
       );
     } catch (error) {
       debugLogger.debug(
@@ -192,6 +202,7 @@ export function cleanupReviewWorktreeLeases(params: {
   sessionId: string;
   promptId: string;
   repositoryRoot: string;
+  gitTimeout?: number;
 }): void {
   try {
     const repositoryRoot = resolve(params.repositoryRoot);
@@ -210,7 +221,7 @@ export function cleanupReviewWorktreeLeases(params: {
       ) {
         continue;
       }
-      if (removeLeaseWorktree(lease)) {
+      if (removeLeaseWorktree(lease, params.gitTimeout ?? GIT_TIMEOUT_MS)) {
         rmSync(path, { force: true });
       }
     }

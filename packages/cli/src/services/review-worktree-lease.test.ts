@@ -7,6 +7,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -77,6 +78,67 @@ describe('review worktree leases', () => {
     expect(
       existsSync(join(root, '.qwen', 'tmp', 'qwen-review-lease-pr-1.json')),
     ).toBe(false);
+  });
+
+  it('falls back to removing an unregistered worktree directory', () => {
+    const root = createRepository();
+    const worktree = join(root, '.qwen', 'tmp', 'review-pr-1');
+    mkdirSync(worktree, { recursive: true });
+    writeFileSync(join(worktree, 'marker'), 'remove');
+    execFileSync('git', ['-C', root, 'branch', 'qwen-review/pr-1']);
+    createReviewWorktreeLease({
+      sessionId: 'session-a',
+      promptId: 'prompt-parent',
+      target: 'pr-1',
+      repositoryRoot: root,
+      worktreePath: worktree,
+      branch: 'qwen-review/pr-1',
+    });
+
+    cleanupReviewWorktreeLeases({
+      sessionId: 'session-a',
+      promptId: 'prompt-parent',
+      repositoryRoot: root,
+    });
+
+    expect(existsSync(worktree)).toBe(false);
+    expect(
+      execFileSync(
+        'git',
+        ['-C', root, 'branch', '--list', 'qwen-review/pr-1'],
+        { encoding: 'utf8' },
+      ).trim(),
+    ).toBe('');
+    expect(
+      existsSync(join(root, '.qwen', 'tmp', 'qwen-review-lease-pr-1.json')),
+    ).toBe(false);
+  });
+
+  it('keeps the lease when fallback pruning fails', () => {
+    const root = createRepository();
+    const worktree = join(root, '.qwen', 'tmp', 'review-pr-1');
+    mkdirSync(worktree, { recursive: true });
+    execFileSync('git', ['-C', root, 'branch', 'qwen-review/pr-1']);
+    createReviewWorktreeLease({
+      sessionId: 'session-a',
+      promptId: 'prompt-parent',
+      target: 'pr-1',
+      repositoryRoot: root,
+      worktreePath: worktree,
+      branch: 'qwen-review/pr-1',
+    });
+    renameSync(join(root, '.git'), join(root, '.git-hidden'));
+
+    cleanupReviewWorktreeLeases({
+      sessionId: 'session-a',
+      promptId: 'prompt-parent',
+      repositoryRoot: root,
+    });
+
+    expect(existsSync(worktree)).toBe(false);
+    expect(
+      existsSync(join(root, '.qwen', 'tmp', 'qwen-review-lease-pr-1.json')),
+    ).toBe(true);
   });
 
   it('removes only worktrees owned by the completed session', () => {
@@ -233,28 +295,69 @@ describe('review worktree leases', () => {
     });
 
     expect(existsSync(worktree)).toBe(true);
+    expect(
+      existsSync(join(root, '.qwen', 'tmp', 'qwen-review-lease-pr-1.json')),
+    ).toBe(true);
+  });
+
+  it('does not derive lease paths from invalid targets', () => {
+    const root = createRepository();
+    const marker = join(root, 'keep.json');
+    writeFileSync(marker, 'keep');
+
+    createReviewWorktreeLease({
+      sessionId: 'session-a',
+      promptId: 'prompt-parent',
+      target: '../../../keep',
+      repositoryRoot: root,
+      worktreePath: join(root, '.qwen', 'tmp', 'review-pr-1'),
+      branch: 'qwen-review/pr-1',
+    });
+    clearReviewWorktreeLease(root, '../../../keep');
+
+    expect(readFileSync(marker, 'utf8')).toBe('keep');
+    expect(existsSync(join(root, '.qwen', 'tmp'))).toBe(false);
   });
 
   it('lets explicit review cleanup disarm the finalizer', () => {
     const root = createRepository();
+    const worktree = join(root, '.qwen', 'tmp', 'review-pr-1');
+    execFileSync('git', ['-C', root, 'branch', 'qwen-review/pr-1']);
+    execFileSync('git', [
+      '-C',
+      root,
+      'worktree',
+      'add',
+      '-q',
+      worktree,
+      'qwen-review/pr-1',
+    ]);
     createReviewWorktreeLease({
       sessionId: 'session-a',
       promptId: 'prompt-parent',
       target: 'pr-1',
       repositoryRoot: root,
-      worktreePath: join(root, '.qwen', 'tmp', 'review-pr-1'),
+      worktreePath: worktree,
       branch: 'qwen-review/pr-1',
     });
 
     clearReviewWorktreeLease(root, 'pr-1');
+    expect(
+      existsSync(join(root, '.qwen', 'tmp', 'qwen-review-lease-pr-1.json')),
+    ).toBe(false);
     cleanupReviewWorktreeLeases({
       sessionId: 'session-a',
       promptId: 'prompt-parent',
       repositoryRoot: root,
     });
 
+    expect(existsSync(worktree)).toBe(true);
     expect(
-      existsSync(join(root, '.qwen', 'tmp', 'qwen-review-lease-pr-1.json')),
-    ).toBe(false);
+      execFileSync(
+        'git',
+        ['-C', root, 'branch', '--list', 'qwen-review/pr-1'],
+        { encoding: 'utf8' },
+      ).trim(),
+    ).toContain('qwen-review/pr-1');
   });
 });

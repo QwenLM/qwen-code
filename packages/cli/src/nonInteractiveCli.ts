@@ -389,14 +389,15 @@ export async function runNonInteractive(
     // Get readonly values once at the start
     const sessionId = config.getSessionId();
     const permissionMode = config.getApprovalMode() as PermissionMode;
-    const cleanupReviewWorktrees = () =>
+    const cleanupReviewWorktrees = (gitTimeout?: number) =>
       cleanupReviewWorktreeLeases({
         sessionId,
         promptId: prompt_id,
         repositoryRoot: config.getProjectRoot(),
+        gitTimeout,
       });
-    const unregisterReviewWorktreeCleanup = registerCleanup(
-      cleanupReviewWorktrees,
+    const unregisterReviewWorktreeCleanup = registerCleanup(() =>
+      cleanupReviewWorktrees(1_000),
     );
 
     let turnCount = 0;

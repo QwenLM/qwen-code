@@ -80,6 +80,7 @@ function runCleanup(target: string): void {
         writeStderrLine(
           `Failed to delete branch ${branch}: ${(err as Error).message}`,
         );
+        failedAny = true;
       }
     }
   }
