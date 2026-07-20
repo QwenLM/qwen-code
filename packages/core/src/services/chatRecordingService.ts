@@ -348,11 +348,12 @@ export interface NotificationRecordPayload {
 
 export interface AgentBootstrapRecordPayload {
   /** Bootstrap kind for future-proof decoding. */
-  kind: 'fork';
+  kind: 'fork' | 'context';
   /**
    * Exact model-facing history prefix seeded before the agent emitted any
    * runtime events. For forks, this includes the inherited parent context and
-   * the original first task prompt/user turn.
+   * the original first task prompt/user turn. For regular subagents, a
+   * `context` bootstrap contains only inherited parent conversation history.
    */
   history: Content[];
   /**

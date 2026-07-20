@@ -7,7 +7,7 @@ Subagents are specialized AI assistants that handle specific types of tasks with
 Subagents are independent AI assistants that:
 
 - **Specialize in specific tasks** - Each Subagent is configured with a focused system prompt for particular types of work
-- **Have separate context** - They maintain their own conversation history, separate from your main chat
+- **Have separate runtime context** - They keep their own system prompt, tools, and working directory while optionally inheriting parent conversation turns
 - **Use controlled tools** - You can configure which tools each Subagent has access to
 - **Work autonomously** - Once given a task, they work independently until completion or failure
 - **Provide detailed feedback** - You can see their progress, tool usage, and execution statistics in real-time
@@ -16,14 +16,24 @@ Subagents are independent AI assistants that:
 
 In addition to named subagents, Qwen Code supports **forking** — selected explicitly with `subagent_type: "fork"` (available in interactive sessions). A fork inherits the parent's full conversation context and runs detached in the background. Omitting `subagent_type` does **not** fork; it launches the general-purpose subagent. Top-level named subagents run in the background by default and deliver their results through completion notifications. Set `run_in_background: false` when the current turn must wait for the result inline.
 
+## Parent Context with `fork_turns`
+
+Regular named subagents and agent-team teammates accept `fork_turns`:
+
+- `all` inherits all available parent conversation turns.
+- `none` (default) starts without parent conversation history.
+- A positive integer string such as `"3"` inherits the most recent three real user turns.
+
+Tool responses and pure system reminders do not count as user turns. Regular subagents still use their own configured system prompt, tools, model, approval mode, and working directory. This differs from `subagent_type: "fork"`, which reuses the parent's exact system prompt and tools for cache sharing and always inherits the full context.
+
 ### How Fork Differs from Named Subagents
 
-|               | Named Subagent                                                 | Fork Subagent                                         |
-| ------------- | -------------------------------------------------------------- | ----------------------------------------------------- |
-| Context       | Starts fresh, no parent history                                | Inherits parent's full conversation history           |
-| System prompt | Uses its own configured prompt                                 | Uses parent's exact system prompt (for cache sharing) |
-| Execution     | Background by default; supports an explicit foreground opt-out | Always detached; parent continues immediately         |
-| Use case      | Specialized tasks (testing, docs)                              | Parallel tasks that need the current context          |
+|               | Named Subagent                                                                  | Fork Subagent                                         |
+| ------------- | ------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| Context       | Starts fresh by default; inherits context when `fork_turns` requests it          | Always inherits parent's full conversation history    |
+| System prompt | Uses its own configured prompt                                                  | Uses parent's exact system prompt (for cache sharing) |
+| Execution     | Background by default; supports an explicit foreground opt-out                  | Always detached; parent continues immediately         |
+| Use case      | Specialized tasks whose result returns through notification or inline execution | Fire-and-forget work that needs the current context   |
 
 ### When Fork is Used
 
@@ -50,7 +60,7 @@ Fork children cannot create further forks. This is enforced at runtime — if a 
 
 - **Task Specialization**: Create agents optimized for specific workflows (testing, documentation, refactoring, etc.)
 - **Context Isolation**: Keep specialized work separate from your main conversation
-- **Context Inheritance**: Fork subagents inherit the full conversation for context-heavy parallel tasks
+- **Context Inheritance**: Regular subagents can inherit all or a bounded number of parent turns; fork subagents always inherit the full conversation
 - **Prompt Cache Sharing**: Fork subagents share the parent's cache prefix, reducing token costs
 - **Reusability**: Save and reuse agent configurations across projects and sessions
 - **Controlled Access**: Limit which tools each agent can use for security and focus

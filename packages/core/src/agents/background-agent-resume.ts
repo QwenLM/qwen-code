@@ -91,6 +91,7 @@ interface TranscriptRecovery {
   history: Content[];
   initialPrompt?: string;
   lastStableUuid: string | null;
+  contextBootstrapHistory?: Content[];
   forkBootstrap?: {
     history: Content[];
     taskPrompt: string;
@@ -315,6 +316,15 @@ function recoverTranscript(records: ChatRecord[]): TranscriptRecovery {
       stableForBranch.length > 0
         ? stableForBranch[stableForBranch.length - 1]!.uuid
         : null,
+    contextBootstrapHistory:
+      bootstrapRecord?.systemPayload &&
+      (bootstrapRecord.systemPayload as AgentBootstrapRecordPayload).kind ===
+        'context'
+        ? structuredClone(
+            (bootstrapRecord.systemPayload as AgentBootstrapRecordPayload)
+              .history,
+          )
+        : undefined,
     forkBootstrap:
       bootstrapRecord?.systemPayload &&
       (bootstrapRecord.systemPayload as AgentBootstrapRecordPayload).kind ===
@@ -729,6 +739,7 @@ export class BackgroundAgentResumeService {
                 ),
               })
             )[0],
+            ...(recovery.contextBootstrapHistory ?? []),
             ...recovery.history,
           ];
       const promptMessages = [...operation.continuationMessages];

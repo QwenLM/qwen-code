@@ -3,6 +3,12 @@ import type { Content } from '@google/genai';
 import type { Config } from '../../config/config.js';
 import type { SubagentConfig } from '../../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
+import {
+  getStartupContextLength,
+  isSystemReminderContent,
+  stripStartupContext,
+} from '../../utils/environmentContext.js';
+import { isFunctionResponse } from '../../utils/messageInspectors.js';
 
 export const FORK_SUBAGENT_TYPE = 'fork';
 
@@ -69,6 +75,17 @@ export function isInForkExecution(): boolean {
 export const FORK_PLACEHOLDER_RESULT =
   'Fork started — processing in background';
 
+export type ForkTurns = 'all' | 'none' | `${number}`;
+export type NormalizedForkTurns = 'all' | 'none' | number;
+
+export function normalizeForkTurns(
+  forkTurns: ForkTurns | undefined,
+): NormalizedForkTurns {
+  if (forkTurns === undefined || forkTurns === 'none') return 'none';
+  if (forkTurns === 'all') return 'all';
+  return Number(forkTurns);
+}
+
 /**
  * Build functionResponse parts for every open function call in a model message.
  *
@@ -98,6 +115,82 @@ export function buildFunctionResponseParts(
       response: { output: placeholderOutput },
     },
   }));
+}
+
+/**
+ * Select parent conversation history for a regular subagent or teammate.
+ *
+ * A turn is a real user prompt, not a function response or a pure structural
+ * reminder. The child keeps its own system prompt and startup context; only
+ * conversational history is returned here.
+ */
+export function buildInheritedSubagentHistory(
+  rawHistory: Content[],
+  forkTurns: NormalizedForkTurns,
+): Content[] {
+  if (forkTurns === 'none' || rawHistory.length === 0) return [];
+
+  const history = stripStartupContext(rawHistory);
+  let selected = history;
+
+  if (typeof forkTurns === 'number') {
+    const syntheticPrefixLength = getStartupContextLength(history, {
+      includeCompressed: true,
+    });
+    const realUserTurnIndexes: number[] = [];
+    for (let index = syntheticPrefixLength; index < history.length; index++) {
+      const content = history[index]!;
+      if (
+        content.role === 'user' &&
+        !isFunctionResponse(content) &&
+        !isSystemReminderContent(content)
+      ) {
+        realUserTurnIndexes.push(index);
+      }
+    }
+
+    if (realUserTurnIndexes.length === 0) {
+      selected = [];
+    } else {
+      selected = history.slice(
+        realUserTurnIndexes[
+          Math.max(0, realUserTurnIndexes.length - forkTurns)
+        ],
+      );
+    }
+  }
+
+  if (selected.length === 0) return [];
+  const prepared = [...selected];
+
+  while (prepared.length > 0) {
+    const last = prepared[prepared.length - 1]!;
+    if (last.role === 'model') {
+      const responses = buildFunctionResponseParts(
+        last,
+        'Delegated to child agent.',
+      );
+      if (responses.length > 0) {
+        prepared.push(
+          { role: 'user', parts: responses },
+          { role: 'model', parts: [{ text: 'Acknowledged.' }] },
+        );
+      }
+      return prepared;
+    }
+
+    if (isFunctionResponse(last)) {
+      prepared.push({
+        role: 'model',
+        parts: [{ text: 'Acknowledged.' }],
+      });
+      return prepared;
+    }
+
+    prepared.pop();
+  }
+
+  return prepared;
 }
 
 /**

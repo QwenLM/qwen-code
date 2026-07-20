@@ -272,9 +272,11 @@ export interface AttachJsonlOptions {
   initialUserPrompt?: string;
   /**
    * Exact bootstrap history that seeded the agent before its first runtime
-   * turn. Used by transcript-first resume to reconstruct fork constraints.
+   * turn. Used by transcript-first resume to reconstruct inherited context.
    */
   bootstrapHistory?: Content[];
+  /** Identifies whether bootstrap history belongs to a fork or regular agent. */
+  bootstrapKind?: AgentBootstrapRecordPayload['kind'];
   /**
    * Immutable launch-time system instruction for fork resume.
    */
@@ -458,7 +460,7 @@ export function attachJsonlTranscriptWriter(
 
   if (hasBootstrapPayload) {
     const payload: AgentBootstrapRecordPayload = {
-      kind: 'fork',
+      kind: options.bootstrapKind ?? 'fork',
       history: structuredClone(options.bootstrapHistory ?? []),
       ...(options.bootstrapSystemInstruction !== undefined
         ? {

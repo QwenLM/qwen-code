@@ -412,6 +412,24 @@ describe('AgentTool', () => {
       );
     });
 
+    it('declares fork_turns with the backward-compatible none default', () => {
+      const properties = agentTool.schema.parametersJsonSchema as {
+        properties: {
+          fork_turns: {
+            default?: string;
+            description?: string;
+            oneOf?: unknown[];
+          };
+        };
+      };
+
+      expect(properties.properties.fork_turns.default).toBe('none');
+      expect(properties.properties.fork_turns.description).toContain(
+        'positive integer string',
+      );
+      expect(properties.properties.fork_turns.oneOf).toHaveLength(2);
+    });
+
     it('does not advertise "fork" in the enum, even when interactive', async () => {
       // `fork` is intentionally omitted from the enum so the model is not
       // steered to fork result-bearing work; it stays valid via validation.
@@ -552,6 +570,40 @@ describe('AgentTool', () => {
       expect(result).toBe(
         'Parameter "subagent_type" must be a non-empty string.',
       );
+    });
+
+    it.each(['all', 'none', '1', '12'] as const)(
+      'accepts fork_turns=%s',
+      (forkTurns) => {
+        expect(
+          agentTool.validateToolParams({
+            ...validParams,
+            fork_turns: forkTurns,
+          }),
+        ).toBeNull();
+      },
+    );
+
+    it.each(['', '0', '-1', '1.5', ' 3 '] as const)(
+      'rejects invalid fork_turns=%j',
+      (forkTurns) => {
+        expect(
+          agentTool.validateToolParams({
+            ...validParams,
+            fork_turns: forkTurns as AgentParams['fork_turns'],
+          }),
+        ).toMatch(/fork_turns/i);
+      },
+    );
+
+    it('rejects explicit fork_turns for detached fork agents', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          subagent_type: 'fork',
+          fork_turns: 'none',
+        }),
+      ).toMatch(/always inherit the full parent context/i);
     });
 
     it('accepts a subagent_type missing from the cache (may have been created after startup)', () => {
@@ -886,6 +938,46 @@ describe('AgentTool', () => {
         expect.objectContaining({
           name: 'planner',
           planModeRequired: true,
+        }),
+      );
+    });
+
+    it('passes selected parent history to named teammates', async () => {
+      const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate,
+      } as never);
+      vi.mocked(config.getGeminiClient).mockReturnValue({
+        getHistoryShallow: vi.fn().mockReturnValue([
+          {
+            role: 'user',
+            parts: [
+              {
+                text: '<system-reminder>\nstartup\n</system-reminder>',
+              },
+            ],
+          },
+          { role: 'user', parts: [{ text: 'parent question' }] },
+          { role: 'model', parts: [{ text: 'parent answer' }] },
+        ]),
+      } as unknown as ReturnType<Config['getGeminiClient']>);
+
+      const invocation = agentTool.build({
+        description: 'Investigate issue',
+        prompt: 'Find the cause',
+        subagent_type: 'file-search',
+        name: 'investigator',
+        fork_turns: '1',
+      });
+
+      await invocation.execute(new AbortController().signal);
+
+      expect(spawnTeammate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          chatHistory: [
+            { role: 'user', parts: [{ text: 'parent question' }] },
+            { role: 'model', parts: [{ text: 'parent answer' }] },
+          ],
         }),
       );
     });
@@ -3025,6 +3117,76 @@ describe('AgentTool', () => {
       );
     });
 
+    it('inherits all parent turns when explicitly requested', async () => {
+      vi.mocked(config.getGeminiClient).mockReturnValue({
+        getHistoryShallow: vi.fn().mockReturnValue([
+          {
+            role: 'user',
+            parts: [
+              {
+                text: '<system-reminder>\nstartup\n</system-reminder>',
+              },
+            ],
+          },
+          { role: 'user', parts: [{ text: 'parent question' }] },
+          { role: 'model', parts: [{ text: 'parent answer' }] },
+        ]),
+      } as unknown as ReturnType<Config['getGeminiClient']>);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+        fork_turns: 'all',
+        run_in_background: false,
+      });
+
+      await invocation.execute();
+
+      expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledWith(
+        mockSubagents[0],
+        expect.anything(),
+        expect.objectContaining({
+          promptConfigOverrides: {
+            extraHistory: [
+              { role: 'user', parts: [{ text: 'parent question' }] },
+              { role: 'model', parts: [{ text: 'parent answer' }] },
+            ],
+          },
+        }),
+      );
+    });
+
+    it('starts without parent history by default', async () => {
+      vi.mocked(config.getGeminiClient).mockReturnValue({
+        getHistoryShallow: vi.fn().mockReturnValue([
+          { role: 'user', parts: [{ text: 'parent question' }] },
+          { role: 'model', parts: [{ text: 'parent answer' }] },
+        ]),
+      } as unknown as ReturnType<Config['getGeminiClient']>);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+        run_in_background: false,
+      });
+
+      await invocation.execute();
+
+      expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledWith(
+        mockSubagents[0],
+        expect.anything(),
+        {
+          eventEmitter: expect.anything(),
+        },
+      );
+    });
+
     it('should inject additionalContext from SubagentStart hook into context', async () => {
       const mockStartOutput = {
         getAdditionalContext: vi
@@ -4184,6 +4346,40 @@ describe('AgentTool', () => {
         'Background agent launched',
       );
       expect(mockRegistry.register).toHaveBeenCalled();
+    });
+
+    it('persists inherited context for background-agent revival', async () => {
+      const attachSpy = vi.spyOn(transcript, 'attachJsonlTranscriptWriter');
+      vi.mocked(config.getGeminiClient).mockReturnValue({
+        getHistoryShallow: vi.fn().mockReturnValue([
+          { role: 'user', parts: [{ text: 'parent question' }] },
+          { role: 'model', parts: [{ text: 'parent answer' }] },
+        ]),
+      } as unknown as ReturnType<Config['getGeminiClient']>);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+        fork_turns: 'all',
+      });
+
+      await invocation.execute();
+
+      expect(attachSpy).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.any(String),
+        expect.objectContaining({
+          bootstrapKind: 'context',
+          bootstrapHistory: [
+            { role: 'user', parts: [{ text: 'parent question' }] },
+            { role: 'model', parts: [{ text: 'parent answer' }] },
+          ],
+        }),
+      );
+      attachSpy.mockRestore();
     });
 
     it('keeps a named-teammate launch in the foreground when no team is active and the flag is omitted', async () => {

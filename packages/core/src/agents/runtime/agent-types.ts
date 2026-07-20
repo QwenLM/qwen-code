@@ -40,6 +40,13 @@ export interface PromptConfig {
    * history). Can coexist with `systemPrompt` / `renderedSystemPrompt`.
    */
   initialMessages?: Content[];
+
+  /**
+   * Supplemental conversation history appended after the agent's own env
+   * bootstrap. Used when a regular subagent inherits parent turns while
+   * retaining its own system prompt and working-directory context.
+   */
+  extraHistory?: Content[];
 }
 
 /**

@@ -74,6 +74,7 @@ import { buildTeammatePromptAddendum } from './promptAddendum.js';
 import { runWithTeammateIdentity } from './identity.js';
 import type { SubagentManager } from '../../subagents/subagent-manager.js';
 import type { ToolConfig } from '../runtime/agent-types.js';
+import type { Content } from '@google/genai';
 
 const debug = createDebugLogger('AGENTS_TEAM_MANAGER');
 
@@ -97,6 +98,8 @@ export interface TeammateSpawnConfig {
   cwd?: string;
   /** Start this teammate in plan mode and require leader plan approval. */
   planModeRequired?: boolean;
+  /** Optional inherited conversation history from the team leader. */
+  chatHistory?: Content[];
 }
 
 export interface TeamPlanApprovalRequest {
@@ -437,6 +440,7 @@ export class TeamManager {
             },
             toolConfig,
           },
+          chatHistory: config.chatHistory,
         },
       };
 

@@ -431,6 +431,7 @@ export class AgentCore {
 
     const startHistory = [
       ...envHistory,
+      ...(this.promptConfig.extraHistory ?? []),
       ...(options?.extraHistory ?? []),
       ...(this.promptConfig.initialMessages ?? []),
     ];

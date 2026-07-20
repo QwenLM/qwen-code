@@ -2348,6 +2348,110 @@ describe('BackgroundAgentResumeService', () => {
     );
   });
 
+  it('restores inherited parent context when reviving a regular agent', async () => {
+    const sessionId = 'session-context-bootstrap';
+    const agentId = 'agent-context-bootstrap';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Inherited context task',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'completed',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(
+      outputFile,
+      [
+        JSON.stringify({
+          uuid: 'bootstrap',
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.000Z',
+          type: 'system',
+          subtype: 'agent_bootstrap',
+          systemPayload: {
+            kind: 'context',
+            history: [
+              { role: 'user', parts: [{ text: 'parent question' }] },
+              { role: 'model', parts: [{ text: 'parent answer' }] },
+            ],
+          },
+        }),
+        JSON.stringify({
+          uuid: 'u1',
+          parentUuid: 'bootstrap',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.100Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'original child task' }] },
+        }),
+        JSON.stringify({
+          uuid: 'a1',
+          parentUuid: 'u1',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.200Z',
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'child result' }] },
+        }),
+      ].join('\n') + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Inherited context task',
+      subagentType: 'researcher',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'original child task',
+      outputFile,
+      metaPath,
+      isBackgrounded: true,
+    });
+    registry.complete(agentId, 'child result');
+
+    const { service, subagentManager } = createService();
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent: {
+        execute: vi.fn(async () => undefined),
+        setExternalMessageProvider: vi.fn(),
+        getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+        getExecutionSummary: () => ({
+          totalTokens: 0,
+          outputTokens: 0,
+          totalDurationMs: 0,
+        }),
+        getTerminateMode: () => AgentTerminateMode.GOAL,
+        getFinalText: () => 'continued',
+      },
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await service.reviveCompletedBackgroundAgent(agentId, 'continue');
+
+    expect(subagentManager.createAgentHeadless).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({
+        promptConfigOverrides: {
+          initialMessages: [
+            { role: 'user', parts: [{ text: 'parent question' }] },
+            { role: 'model', parts: [{ text: 'parent answer' }] },
+            { role: 'user', parts: [{ text: 'original child task' }] },
+            { role: 'model', parts: [{ text: 'child result' }] },
+          ],
+        },
+      }),
+    );
+  });
+
   it('revives a completed background agent from its transcript and bumps resumeCount', async () => {
     const sessionId = 'session-revive';
     const agentId = 'agent-revive';

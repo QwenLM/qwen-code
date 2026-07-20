@@ -411,6 +411,30 @@ describe('Team lifecycle E2E', () => {
     expect(prompt).toContain('Do not spawn sub-agents');
   });
 
+  it('passes inherited chat history to spawned teammates', async () => {
+    const config = makeConfig();
+    const createTool = new TeamCreateTool(config);
+    await exec(createTool, { team_name: 'history-test' });
+
+    const backend = capturedBackend!;
+    const manager = config.getTeamManager()!;
+    const chatHistory = [
+      { role: 'user' as const, parts: [{ text: 'parent question' }] },
+      { role: 'model' as const, parts: [{ text: 'parent answer' }] },
+    ];
+
+    await manager.spawnTeammate({
+      name: 'worker',
+      cwd: tmpDir,
+      chatHistory,
+    });
+
+    const workerId = formatAgentId('worker', 'history-test');
+    expect(backend.getSpawnConfig(workerId)?.inProcess?.chatHistory).toEqual(
+      chatHistory,
+    );
+  });
+
   it('appends addendum to custom prompt', async () => {
     const config = makeConfig();
     const createTool = new TeamCreateTool(config);
