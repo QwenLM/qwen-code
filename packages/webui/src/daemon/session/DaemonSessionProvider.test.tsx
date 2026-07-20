@@ -549,6 +549,10 @@ describe('DaemonSessionProvider', () => {
   });
 
   it('preheats ACP and refreshes deferred skills when ACP is not running', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['workspace_acp_preheat', 'workspace_acp_status'],
+    });
     sdkMocks.workspaceAcpStatus.mockResolvedValue({ channelLive: false });
     sdkMocks.workspaceSkills
       .mockResolvedValueOnce({
@@ -611,6 +615,10 @@ describe('DaemonSessionProvider', () => {
   });
 
   it('clears deferred skills when ACP refresh returns an empty list', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['workspace_acp_preheat', 'workspace_acp_status'],
+    });
     sdkMocks.workspaceAcpStatus.mockResolvedValue({ channelLive: false });
     sdkMocks.workspaceSkills
       .mockResolvedValueOnce({
@@ -652,6 +660,148 @@ describe('DaemonSessionProvider', () => {
 
     expect(connection?.skills).toEqual([]);
     expect(connection?.commands).toEqual([]);
+  });
+
+  it('skips ACP workspace routes when the daemon lacks their capabilities', async () => {
+    function Harness() {
+      useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+
+    expect(sdkMocks.workspaceAcpStatus).not.toHaveBeenCalled();
+    expect(sdkMocks.workspaceAcpPreheat).not.toHaveBeenCalled();
+  });
+
+  it('skips primary ACP workspace routes for a secondary workspace', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['workspace_acp_preheat', 'workspace_acp_status'],
+    });
+
+    function Harness() {
+      useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+      workspaceCwd: '/secondary-workspace',
+    });
+
+    expect(sdkMocks.workspaceAcpStatus).not.toHaveBeenCalled();
+    expect(sdkMocks.workspaceAcpPreheat).not.toHaveBeenCalled();
+  });
+
+  it('preheats without probing status when only preheat is advertised', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['workspace_acp_preheat'],
+    });
+
+    function Harness() {
+      useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(sdkMocks.workspaceAcpStatus).not.toHaveBeenCalled();
+    expect(sdkMocks.workspaceAcpPreheat).toHaveBeenCalledWith(5000);
+  });
+
+  it('does not preheat when the advertised ACP status is live', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['workspace_acp_preheat', 'workspace_acp_status'],
+    });
+
+    function Harness() {
+      useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+
+    expect(sdkMocks.workspaceAcpStatus).toHaveBeenCalledOnce();
+    expect(sdkMocks.workspaceAcpPreheat).not.toHaveBeenCalled();
+  });
+
+  it('still preheats when the advertised ACP status request fails', async () => {
+    const statusError = new Error('status unavailable');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['workspace_acp_preheat', 'workspace_acp_status'],
+    });
+    sdkMocks.workspaceAcpStatus.mockRejectedValue(statusError);
+
+    function Harness() {
+      useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(warn).toHaveBeenCalledWith(
+      '[DaemonSessionProvider] workspaceAcpStatus failed in deferred connect:',
+      statusError,
+    );
+    expect(sdkMocks.workspaceAcpPreheat).toHaveBeenCalledWith(5000);
+  });
+
+  it('keeps the deferred connection usable when preheat fails', async () => {
+    const preheatError = new Error('preheat unavailable');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['workspace_acp_preheat'],
+    });
+    sdkMocks.workspaceAcpPreheat.mockRejectedValue(preheatError);
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({
+      status: 'connected',
+      workspaceCwd: '/mock-workspace',
+    });
+    expect(connection).not.toHaveProperty('sessionId');
+    expect(warn).toHaveBeenCalledWith(
+      '[DaemonSessionProvider] ACP preheat for workspace skills failed:',
+      preheatError,
+    );
   });
 
   it('warns when deferred workspace providers fail', async () => {

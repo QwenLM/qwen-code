@@ -14,7 +14,7 @@ import { writeStderrLine } from './stdioHelpers.js';
 
 interface RelaunchOptions {
   afterSpawn?: () => void;
-  onUpdateRelaunch?: () => Promise<number> | number;
+  onUpdateRelaunch?: (relaunchOnFailure: boolean) => Promise<number> | number;
 }
 
 export async function relaunchOnExitCode(
@@ -26,7 +26,7 @@ export async function relaunchOnExitCode(
       const exitCode = await runner();
 
       if (exitCode === UPDATE_RELAUNCH_EXIT_CODE && options?.onUpdateRelaunch) {
-        const updatedExitCode = await options.onUpdateRelaunch();
+        const updatedExitCode = await options.onUpdateRelaunch(true);
         process.exit(updatedExitCode);
       }
 
@@ -114,7 +114,7 @@ export async function relaunchAppInChildProcess(
           options?.onUpdateRelaunch
         ) {
           updateOnExitRequested = false;
-          void Promise.resolve(options.onUpdateRelaunch()).then(
+          void Promise.resolve(options.onUpdateRelaunch(false)).then(
             (updatedExitCode) => resolve(updatedExitCode),
             reject,
           );

@@ -10,9 +10,16 @@
 // says otherwise.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 
 const ghMock = vi.hoisted(() =>
   vi.fn((_payload: string, ..._rest: string[]) => ''),
@@ -250,6 +257,105 @@ describe('payload consistency — refuse before GitHub sees it', () => {
   /** What was actually sent to GitHub. */
   const posted = () => JSON.parse(ghMock.mock.calls[0][0] as string);
 
+  /**
+   * A plan whose Step 4 verification is provably delivered — recorded prompt,
+   * brief, and a transcript that ran it verbatim and opened the brief.
+   *
+   * The tests below post Criticals, and a Critical nobody verified no longer
+   * blocks: composeReview softens the Request changes and says so. These
+   * tests are about OTHER properties of a blocking submission (count
+   * derivation, body escaping, unanchorable carriage), so they carry the
+   * verification that keeps the Request changes standing.
+   */
+  function verifiedPlan(): string {
+    const diffPath = join(dir, 'verified-diff.txt');
+    writeFileSync(diffPath, 'diff');
+    const plan = join(dir, 'verified-plan.json');
+    writeFileSync(
+      plan,
+      JSON.stringify({
+        diffPathAbsolute: diffPath,
+        srcDiffLines: 10,
+        diffLines: 10,
+        files: [],
+        chunks: [{ id: 1, startLine: 1, endLine: 1 }],
+      }),
+    );
+    const d = promptRecordDir(plan);
+    mkdirSync(d, { recursive: true });
+    const brief = briefPath(plan, 'verify');
+    writeFileSync(brief, 'The verify brief.');
+    const launch =
+      `You are review agent \`verify\`.\n` + `read_file(file_path="${brief}")`;
+    writeFileSync(join(d, 'verify.txt'), launch);
+    // Transcripts newer than the plan, as in a real run.
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    const sub = join(dir, 'subagents', 'SUBV');
+    mkdirSync(sub, { recursive: true });
+    const base = {
+      agentId: 'v1',
+      agentName: 'general-purpose',
+      sessionId: 'SUBV',
+    };
+    writeFileSync(
+      join(sub, 'agent-v1.jsonl'),
+      [
+        {
+          ...base,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: launch }] },
+        },
+        {
+          ...base,
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: { name: 'read_file', args: { file_path: brief } },
+              },
+            ],
+          },
+        },
+        {
+          ...base,
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  name: 'read_file',
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          },
+        },
+      ]
+        .map((x) => JSON.stringify(x))
+        .join('\n') + '\n',
+    );
+    return plan;
+  }
+
+  /** Run with the transcript env the stripped-`env` compose path reads. */
+  function withVerifyEnv(fn: () => void): void {
+    const prevDir = process.env['QWEN_CODE_PROJECT_DIR'];
+    const prevSession = process.env['QWEN_CODE_SESSION_ID'];
+    process.env['QWEN_CODE_PROJECT_DIR'] = dir;
+    process.env['QWEN_CODE_SESSION_ID'] = 'SUBV';
+    try {
+      fn();
+    } finally {
+      if (prevDir === undefined) delete process.env['QWEN_CODE_PROJECT_DIR'];
+      else process.env['QWEN_CODE_PROJECT_DIR'] = prevDir;
+      if (prevSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+      else process.env['QWEN_CODE_SESSION_ID'] = prevSession;
+    }
+  }
+
   it("refuses a payload that carries a verdict — that is not the caller's to write", () => {
     // The failure this replaces. Dogfooded, a run read the coverage check's
     // refusal, decided "the agents clearly did their job", skipped
@@ -286,16 +392,18 @@ describe('payload consistency — refuse before GitHub sees it', () => {
   it('counts the blockers it is actually carrying, not the ones it was told about', () => {
     // A Critical attached inline is a Critical, whatever the state says. There is
     // no `criticalsInline` field to under-report it with — and one supplied
-    // anyway is refused.
+    // anyway is refused. Verification is on record, so the Request changes the
+    // count earns actually stands.
     const review = file('c1.json', {
       ...REVIEW,
+      state: { ...REVIEW.state, planPath: verifiedPlan() },
       comments: [
         { path: 'a.ts', line: 12, body: '**[Critical]** boom' },
         { path: 'b.ts', line: 3, body: '**[Suggestion]** tidy' },
       ],
     });
 
-    runSubmit(authorized({ review }));
+    withVerifyEnv(() => runSubmit(authorized({ review })));
     expect(posted().event).toBe('REQUEST_CHANGES');
   });
 
@@ -342,6 +450,7 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       ...REVIEW,
       state: {
         ...REVIEW.state,
+        planPath: verifiedPlan(),
         bodyCriticals: [
           'the splitter uses `/\\n/` where the input is CRLF, so every line ' +
             'keeps a trailing `\\r`',
@@ -349,7 +458,7 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       },
     });
 
-    runSubmit(authorized({ review }));
+    withVerifyEnv(() => runSubmit(authorized({ review })));
     expect(posted().event).toBe('REQUEST_CHANGES');
     expect(posted().body).toContain('`/\\n/`');
     // Real newlines, not the two characters.
@@ -424,12 +533,13 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       ...REVIEW,
       state: {
         ...REVIEW.state,
+        planPath: verifiedPlan(),
         bodyCriticals: ['the inline cache is stale after a rebase'],
       },
       comments: [],
     });
 
-    runSubmit(authorized({ review }));
+    withVerifyEnv(() => runSubmit(authorized({ review })));
     expect(ghMock).toHaveBeenCalledOnce();
     const sent = JSON.parse(ghMock.mock.calls[0][0] as string);
     expect(sent.event).toBe('REQUEST_CHANGES');

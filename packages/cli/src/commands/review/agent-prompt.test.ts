@@ -1253,6 +1253,50 @@ describe('--roster — every prompt the plan requires, in one call', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('emits the working_dir parameter note when worktreePath is present', () => {
+    // A run that passed both `working_dir` and `isolation: "worktree"` failed
+    // all 11 agents (mutually exclusive). The roster is the last text the
+    // orchestrator reads before constructing agent calls — the parameter note
+    // must be there, not just 400 lines back in SKILL.md.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-roster-wt-'));
+    try {
+      const wt = '.qwen/tmp/review-pr-9999';
+      const plan = join(dir, 'plan.json');
+      writeFileSync(
+        plan,
+        JSON.stringify({ ...PLAN, worktreePath: wt, prNumber: '9999' }),
+      );
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        roster: true,
+      });
+      const printed = (writeStdoutLine as unknown as Mock).mock
+        .calls[0][0] as string;
+      expect(printed).toContain(`working_dir: "${wt}"`);
+      expect(printed).toContain('Do NOT set `isolation`');
+      expect(printed).toContain('mutually exclusive');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('omits the parameter note when worktreePath is absent', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ap-roster-nowt-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN));
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        roster: true,
+      });
+      const printed = (writeStdoutLine as unknown as Mock).mock
+        .calls[0][0] as string;
+      expect(printed).not.toContain('Do NOT set `isolation`');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 // Dogfooded on a real 3A review: the orchestrator delivered Step 3 prompts verbatim

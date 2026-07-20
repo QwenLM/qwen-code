@@ -19,7 +19,7 @@ export interface UseMessageQueueReturn {
   /**
    * Drain plain-text prompts that can steer the active turn. Pass true at the
    * idle boundary to also drain messages explicitly deferred with Ctrl+Q.
-   * Slash commands always stay queued for individual processing.
+   * Slash commands stay queued except `/goal`, which must control active loops.
    */
   drainQueue: (includeDeferred?: boolean) => string[];
   /** Pop the first item from the queue. */
@@ -30,6 +30,8 @@ interface QueuedMessage {
   text: string;
   deferUntilIdle: boolean;
 }
+
+export const GOAL_COMMAND_RE = /^\/goal(?:\s|$)/;
 
 export function useMessageQueue(): UseMessageQueueReturn {
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
@@ -79,7 +81,8 @@ export function useMessageQueue(): UseMessageQueueReturn {
     const current = queueRef.current;
     if (current.length === 0) return [];
     const shouldDrain = (message: QueuedMessage) =>
-      !isSlashCommand(message.text) &&
+      (!isSlashCommand(message.text) ||
+        (!includeDeferred && GOAL_COMMAND_RE.test(message.text))) &&
       (includeDeferred || !message.deferUntilIdle);
     const drained = current.filter(shouldDrain);
     if (drained.length === 0) return [];

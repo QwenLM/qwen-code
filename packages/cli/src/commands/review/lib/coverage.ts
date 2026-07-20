@@ -140,6 +140,17 @@ export interface CoverageFromTranscripts {
   uncoverableChunks: number[];
   /** Chunk ids a working agent actually reviewed. */
   coveredChunks: number[];
+  /**
+   * The pre-formed disclosure entries (`rewrittenPrompts`, `missingRoles`,
+   * `unreadBriefs`), as `{subject, reason}` pairs in push order — for
+   * `compose-review`, which dedupes caller echoes by subject and groups
+   * same-reason subjects into one sentence. The prose twins above remain for
+   * the stderr formatting; REPARSING them was the bug: a reason is free-form
+   * text (labels carry ` — ` for an invariant's file, error interpolations
+   * can carry anything), so a subject/reason boundary recovered from rendered
+   * prose garbles exactly the entries it matters for.
+   */
+  disclosures: Array<{ subject: string; reason: string }>;
 }
 
 /** The plan, as far as coverage needs it. The roster reads more of it — see RosterPlan. */
@@ -285,6 +296,15 @@ export function coverageFromTranscripts(
   const idleAgents: string[] = [];
   const unopenedAgents: string[] = [];
   const rewrittenPrompts: string[] = [];
+  const disclosures: Array<{ subject: string; reason: string }> = [];
+  // The one source for both registers: the structural entry feeds the posted
+  // body (compose-review), and the returned prose feeds the stderr arrays —
+  // maintained as a pair, an edit to one and not the other would silently
+  // diverge what the operator reads from what the author was told.
+  const disclose = (subject: string, reason: string): string => {
+    disclosures.push({ subject, reason });
+    return `${subject} — ${reason}`;
+  };
   const covered = new Set<number>();
   const uncoverable = new Set<number>();
 
@@ -392,15 +412,21 @@ export function coverageFromTranscripts(
         rewrittenThisRecord = true;
         if (!nothingBuiltAtAll && !superseded(rec, chunk)) {
           rewrittenPrompts.push(
-            `${name} — ran on a prompt the run wrote itself (none was built for ` +
-              `this chunk), so the brief with its method and rules never reached it`,
+            disclose(
+              name,
+              'ran on a prompt the run wrote itself (none was built for this ' +
+                'chunk), so the brief with its method and rules never reached it',
+            ),
           );
         }
       } else if (!wasDeliveredVerbatim(rec.launchPrompt, b)) {
         rewrittenThisRecord = true;
         if (!superseded(rec, chunk)) {
           rewrittenPrompts.push(
-            `${name} — launched with a prompt that is not the one the CLI built`,
+            disclose(
+              name,
+              'launched with a prompt that is not the one the CLI built',
+            ),
           );
         }
       }
@@ -483,11 +509,14 @@ export function coverageFromTranscripts(
     // Phrased to read under the `Not reviewed: ` prefix `compose-review` renders it
     // with, which is where a PR author meets it.
     missingRoles.push(
-      `every dimension — none of the ${roster.length} required agents is on ` +
-        `record as launched with a prompt this skill built, so this diff was ` +
-        `reviewed, if at all, from prompts the run wrote for itself: no record ` +
-        `shows the severity bar, the finding format or this project's own rules ` +
-        `reaching an agent`,
+      disclose(
+        'every dimension',
+        `none of the ${roster.length} required agents is on record as ` +
+          `launched with a prompt this skill built, so this diff was ` +
+          `reviewed, if at all, from prompts the run wrote for itself: no ` +
+          `record shows the severity bar, the finding format or this ` +
+          `project's own rules reaching an agent`,
+      ),
     );
   }
 
@@ -547,9 +576,11 @@ export function coverageFromTranscripts(
     if (b === undefined) {
       if (!nobodyBuiltAnything) {
         missingRoles.push(
-          `${roleLabel(req)} — no record shows its brief reaching an agent, so ` +
-            `this dimension was reviewed, if at all, from a prompt the run ` +
-            `wrote for itself`,
+          disclose(
+            roleLabel(req),
+            'no record shows its brief reaching an agent, so this dimension ' +
+              'was reviewed, if at all, from a prompt the run wrote for itself',
+          ),
         );
       }
       missingRoleSelectors.push(selectorOf(req));
@@ -562,12 +593,15 @@ export function coverageFromTranscripts(
       // shortage of transcripts, not an artifact of claim order.
       const anyMatch = candidatesOf[buildableIdx].length > 0;
       missingRoles.push(
-        anyMatch
-          ? `${roleLabel(req)} — its prompt reached only an agent already ` +
-              `credited with another block; one agent was given several blocks, ` +
-              `and one transcript cannot certify two dimensions`
-          : `${roleLabel(req)} — its prompt was built, but no agent on record ` +
-              `was launched with it`,
+        disclose(
+          roleLabel(req),
+          anyMatch
+            ? 'its prompt reached only an agent already credited with ' +
+                'another block; one agent was given several blocks, and one ' +
+                'transcript cannot certify two dimensions'
+            : 'its prompt was built, but no agent on record was launched ' +
+                'with it',
+        ),
       );
       missingRoleSelectors.push(selectorOf(req));
       continue;
@@ -597,8 +631,11 @@ export function coverageFromTranscripts(
     );
     if (!opened) {
       unreadBriefs.push(
-        `${roleLabel(req)} — never opened its brief (${brief}), so it reviewed ` +
-          'without the instructions it was launched to follow',
+        disclose(
+          roleLabel(req),
+          `never opened its brief (${brief}), so it reviewed without the ` +
+            'instructions it was launched to follow',
+        ),
       );
     }
   }
@@ -628,6 +665,7 @@ export function coverageFromTranscripts(
     rewrittenPrompts,
     missingRoles,
     missingRoleSelectors,
+    disclosures,
     unreadBriefs,
     missingChunks,
     uncoverableChunks: [...uncoverable].sort((a, b) => a - b),
@@ -795,6 +833,15 @@ export interface VerificationReport {
    * orchestrator reads. Never rendered into the body.
    */
   remediation: string[];
+  /**
+   * True when this review posts findings and NO verifier's delivery came back
+   * clean — the structured form of the `verification — …` gap line, for the
+   * verdict computation. A Request changes is "earned by a confirmed
+   * Critical", and this is the bit that says the confirmation never happened;
+   * parsing the gap text for it would put the verdict at the mercy of a
+   * wording change.
+   */
+  unverifiedFindings: boolean;
 }
 
 /**
@@ -912,6 +959,7 @@ export function verificationGaps(
   // non-deterministic body Criticals, and excludes deterministic `[build]`/`[test]`
   // findings, which are pre-confirmed and skip verification by design. A review that
   // confirmed nothing has nothing to verify.
+  let unverifiedFindings = false;
   if (opts.postsFindings) {
     // The whole key family: `verify--<digest>` per shard (the record now folds
     // the findings in, so a launch that dropped them matches nothing), plus the
@@ -921,6 +969,7 @@ export function verificationGaps(
     );
     const verify = bestDelivery(verifyKeys);
     if (verify !== 'ok') {
+      unverifiedFindings = true;
       gaps.push(`verification — ${VERIFY_GAP[verify].gap}`);
       remediation.push(
         `verification: ${VERIFY_GAP[verify].fix.replace(
@@ -933,7 +982,7 @@ export function verificationGaps(
     }
   }
 
-  return { ok: gaps.length === 0, gaps, remediation };
+  return { ok: gaps.length === 0, gaps, remediation, unverifiedFindings };
 }
 
 export { TranscriptsUnavailableError };

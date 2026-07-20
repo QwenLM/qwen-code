@@ -263,6 +263,10 @@ export class DaemonSessionClient {
     return this.session.clientId;
   }
 
+  get worktree(): DaemonSession['worktree'] {
+    return this.session.worktree;
+  }
+
   get lastEventId(): number | undefined {
     return this.lastSeenEventId;
   }
