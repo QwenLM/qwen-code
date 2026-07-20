@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DaemonWorkspaceProvider,
   useDaemonWorkspace,
+  useDaemonWorkspaceActions,
   useOptionalDaemonWorkspace,
   type DaemonWorkspaceActions,
   type DaemonWorkspaceContextValue,
@@ -44,22 +45,40 @@ const sdkMocks = vi.hoisted(() => {
   const deleteSessionsData = vi.fn();
   const exportSession = vi.fn();
   const daemonStatus = vi.fn();
+  const workspaceByCwd = vi.fn();
 
   class MockDaemonClient {
     constructor(_opts: unknown) {}
+
+    workspaceByCwd(workspaceCwd: string) {
+      workspaceByCwd(workspaceCwd);
+      return this;
+    }
 
     capabilities = capabilities;
     workspaceMcp = workspaceMcp;
     workspaceMcpTools = workspaceMcpTools;
     workspaceMcpResources = workspaceMcpResources;
     restartMcpServer = restartMcpServer;
+    workspaceRuntimeMcp = workspaceMcp;
+    workspaceRuntimeMcpTools = workspaceMcpTools;
+    workspaceRuntimeMcpResources = workspaceMcpResources;
+    restartWorkspaceRuntimeMcpServer = restartMcpServer;
     workspaceSkills = workspaceSkills;
     setWorkspaceSkillEnabled = setWorkspaceSkillEnabled;
     installWorkspaceSkill = installWorkspaceSkill;
     deleteWorkspaceSkill = deleteWorkspaceSkill;
+    workspaceConfigSkills = workspaceSkills;
+    workspaceRuntimeSkills = workspaceSkills;
+    setWorkspaceConfigSkillEnabled = setWorkspaceSkillEnabled;
+    installWorkspaceConfigSkill = installWorkspaceSkill;
+    deleteWorkspaceConfigSkill = deleteWorkspaceSkill;
     workspaceAcpStatus = workspaceAcpStatus;
     workspaceAcpPreheat = workspaceAcpPreheat;
+    workspaceRuntimeStatus = workspaceAcpStatus;
+    ensureWorkspaceRuntime = workspaceAcpPreheat;
     workspaceTools = workspaceTools;
+    workspaceRuntimeTools = workspaceTools;
     setWorkspaceToolEnabled = setWorkspaceToolEnabled;
     workspaceMemory = workspaceMemory;
     readWorkspaceFile = readWorkspaceFile;
@@ -103,6 +122,7 @@ const sdkMocks = vi.hoisted(() => {
     deleteSessionsData,
     exportSession,
     daemonStatus,
+    workspaceByCwd,
     reset() {
       capabilities.mockReset();
       capabilities.mockResolvedValue({
@@ -228,6 +248,7 @@ const sdkMocks = vi.hoisted(() => {
         status: 'ok',
         issues: [],
       });
+      workspaceByCwd.mockReset();
     },
   };
 });
@@ -265,14 +286,17 @@ describe('DaemonWorkspaceProvider', () => {
     vi.unstubAllGlobals();
   });
 
-  function renderWithProvider(children: ReactNode) {
+  function renderWithProvider(children: ReactNode, workspaceCwd?: string) {
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
     return new Promise<void>((resolve) => {
       act(() => {
         root?.render(
-          <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:4170">
+          <DaemonWorkspaceProvider
+            baseUrl="http://127.0.0.1:4170"
+            workspaceCwd={workspaceCwd}
+          >
             {children}
           </DaemonWorkspaceProvider>,
         );
@@ -297,6 +321,40 @@ describe('DaemonWorkspaceProvider', () => {
     expect(context).toBeDefined();
     expect(context?.baseUrl).toBe('http://127.0.0.1:4170');
     expect(context?.workspaceCwd).toBe('/mock-workspace');
+  });
+
+  it('keeps an explicit workspace owner instead of replacing it with primary capabilities', async () => {
+    let context: DaemonWorkspaceContextValue | undefined;
+
+    function Harness() {
+      context = useOptionalDaemonWorkspace();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, '/other-workspace');
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(context?.workspaceCwd).toBe('/other-workspace');
+  });
+
+  it('creates actions for an explicit workspace owner', async () => {
+    let actions: DaemonWorkspaceActions | undefined;
+
+    function Harness() {
+      actions = useDaemonWorkspaceActions('/other-workspace');
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await actions?.loadSkillsConfigStatus();
+    });
+
+    expect(sdkMocks.workspaceByCwd).toHaveBeenCalledWith('/other-workspace');
+    expect(sdkMocks.workspaceSkills).toHaveBeenCalledOnce();
   });
 
   it('refreshCapabilities re-fetches and updates capabilities state', async () => {
@@ -379,9 +437,11 @@ describe('DaemonWorkspaceProvider', () => {
     });
 
     expect(actions).toBeDefined();
+    expect(typeof actions?.ensureRuntime).toBe('function');
     expect(typeof actions?.loadMcpStatus).toBe('function');
     expect(typeof actions?.reloadMcp).toBe('function');
     expect(typeof actions?.loadSkillsStatus).toBe('function');
+    expect(typeof actions?.loadSkillsConfigStatus).toBe('function');
     expect(typeof actions?.setWorkspaceSkillEnabled).toBe('function');
     expect(typeof actions?.installWorkspaceSkill).toBe('function');
     expect(typeof actions?.deleteWorkspaceSkill).toBe('function');
@@ -416,7 +476,7 @@ describe('DaemonWorkspaceProvider', () => {
     expect(context).toBeUndefined();
   });
 
-  it('returns MCP tools fallback for older daemons', async () => {
+  it('surfaces MCP tools loading errors', async () => {
     sdkMocks.workspaceMcpTools.mockRejectedValueOnce(
       new Error('missing route'),
     );
@@ -438,21 +498,9 @@ describe('DaemonWorkspaceProvider', () => {
     const workspaceActions = actions;
 
     await act(async () => {
-      await expect(workspaceActions.loadMcpTools('server-a')).resolves.toEqual({
-        v: 1,
-        workspaceCwd: '',
-        serverName: 'server-a',
-        initialized: false,
-        acpChannelLive: false,
-        tools: [],
-        errors: [
-          {
-            kind: 'mcp_tools',
-            status: 'error',
-            error: 'The connected daemon does not expose MCP tool details.',
-          },
-        ],
-      });
+      await expect(workspaceActions.loadMcpTools('server-a')).rejects.toThrow(
+        'missing route',
+      );
     });
   });
 
@@ -492,7 +540,7 @@ describe('DaemonWorkspaceProvider', () => {
     expect(sdkMocks.workspaceMcpResources).toHaveBeenCalledWith('docs');
   });
 
-  it('returns MCP resources fallback for older daemons', async () => {
+  it('surfaces MCP resources loading errors', async () => {
     sdkMocks.workspaceMcpResources.mockRejectedValueOnce(
       new Error('missing route'),
     );
@@ -515,21 +563,7 @@ describe('DaemonWorkspaceProvider', () => {
     await act(async () => {
       await expect(
         workspaceActions.loadMcpResources('server-a'),
-      ).resolves.toEqual({
-        v: 1,
-        workspaceCwd: '',
-        serverName: 'server-a',
-        initialized: false,
-        acpChannelLive: false,
-        resources: [],
-        errors: [
-          {
-            kind: 'mcp_resources',
-            status: 'error',
-            error: 'The connected daemon does not expose MCP resource details.',
-          },
-        ],
-      });
+      ).rejects.toThrow('missing route');
     });
   });
 

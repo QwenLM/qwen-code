@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { DaemonClient } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonClient,
+  DaemonMcpManageResult,
+  DaemonWorkspaceRuntimeCapability,
+  DaemonWorkspaceRuntimeStatus,
+  WorkspaceDaemonClient,
+} from '@qwen-code/sdk/daemon';
+import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import { withActionTimeout } from '../timing.js';
 import type {
   DaemonDirectoryListing,
@@ -16,6 +23,11 @@ import type {
 } from './types.js';
 
 const AGENT_GENERATE_TIMEOUT_MS = 330_000;
+const WORKSPACE_RUNTIME_ENSURE_ACTION_TIMEOUT_MS = 130_000;
+const WORKSPACE_RUNTIME_ENSURE_POLL_TIMEOUT_MS = 125_000;
+const WORKSPACE_RUNTIME_ACTION_TIMEOUT_MS = 70_000;
+const WORKSPACE_RUNTIME_POLL_INTERVAL_MS = 500;
+const WORKSPACE_RUNTIME_POLL_TIMEOUT_MS = 65_000;
 
 export interface CreateDaemonWorkspaceActionsArgs {
   getClient: () => DaemonClient | undefined;
@@ -30,6 +42,17 @@ export function createDaemonWorkspaceActions({
   baseUrl,
   token,
 }: CreateDaemonWorkspaceActionsArgs): DaemonWorkspaceActions {
+  type ExtensionOperationRoute = 'primary' | 'workspace' | 'v2';
+  const extensionOperationRoutes = new Map<string, ExtensionOperationRoute>();
+
+  const rememberExtensionOperation = <T extends { operationId: string }>(
+    result: T,
+    route: ExtensionOperationRoute,
+  ): T => {
+    extensionOperationRoutes.set(result.operationId, route);
+    return result;
+  };
+
   return {
     async listSessions(options) {
       const client = requireClient(getClient, 'List sessions failed');
@@ -153,120 +176,207 @@ export function createDaemonWorkspaceActions({
       return result.unarchived.length > 0 || result.alreadyActive.length > 0;
     },
 
-    async loadMcpStatus() {
-      const client = requireClient(getClient, 'Load MCP status failed');
+    async ensureRuntime() {
+      const client = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Ensure workspace runtime failed',
+      );
       return withActionTimeout(
-        client.workspaceMcp(),
-        'Load MCP status timed out',
+        ensureWorkspaceRuntime(client),
+        'Ensure workspace runtime timed out',
+        WORKSPACE_RUNTIME_ENSURE_ACTION_TIMEOUT_MS,
       );
     },
 
+    async loadMcpStatus(timeoutMs) {
+      const client = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Load MCP status failed',
+      );
+      const [catalog, runtime] = await withActionTimeout(
+        Promise.all([
+          client.workspaceRuntimeMcp(timeoutMs),
+          client.workspaceRuntimeStatus(timeoutMs).catch(() => undefined),
+        ]),
+        'Load MCP status timed out',
+        timeoutMs,
+      );
+      const capability = runtime?.capabilities.mcp;
+      return {
+        ...catalog,
+        runtimeState: capability?.state,
+        coordinatorRuntimeEpoch: runtime?.runtimeEpoch,
+        capabilityRuntimeEpoch: capability?.runtimeEpoch,
+      };
+    },
+
     async initializeMcp() {
-      const client = requireClient(getClient, 'Initialize MCP failed');
+      const client = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Initialize MCP failed',
+      );
       return withActionTimeout(
-        client.initializeWorkspaceMcp(),
+        ensureRuntimeCapability(client, 'mcp'),
         'Initialize MCP timed out',
+        WORKSPACE_RUNTIME_ACTION_TIMEOUT_MS,
       );
     },
 
     async reloadMcp() {
-      const client = requireClient(getClient, 'Reload MCP failed');
+      const client = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Reload MCP failed',
+      );
       return withActionTimeout(
-        client.reloadWorkspaceMcp(),
+        reloadMcpRuntime(client),
         'Reload MCP timed out',
+        WORKSPACE_RUNTIME_ACTION_TIMEOUT_MS,
       );
     },
 
+    async waitForMcpRuntime() {
+      const client = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Wait for MCP runtime failed',
+      );
+      return withActionTimeout(
+        waitForRuntimeCapability(client, 'mcp'),
+        'Wait for MCP runtime timed out',
+        WORKSPACE_RUNTIME_ACTION_TIMEOUT_MS,
+      );
+    },
+
+    async loadMcpConfig() {
+      const client = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Load MCP config failed',
+      );
+      return withActionTimeout(
+        client.workspaceMcpConfig(),
+        'Load MCP config timed out',
+      );
+    },
+
+    async setMcpConfig(name, scope, config) {
+      const client = requireClient(getClient, 'Set MCP config failed');
+      const operation =
+        scope === 'workspace'
+          ? client
+              .workspaceByCwd(requireWorkspaceCwd(getWorkspaceCwd))
+              .setWorkspaceMcpConfig(name, config)
+          : client.setWorkspaceMcpConfig(name, scope, config);
+      return withActionTimeout(operation, 'Set MCP config timed out');
+    },
+
+    async removeMcpConfig(name, scope) {
+      const client = requireClient(getClient, 'Remove MCP config failed');
+      const operation =
+        scope === 'workspace'
+          ? client
+              .workspaceByCwd(requireWorkspaceCwd(getWorkspaceCwd))
+              .removeWorkspaceMcpConfig(name)
+          : client.removeWorkspaceMcpConfig(name, scope);
+      return withActionTimeout(operation, 'Remove MCP config timed out');
+    },
+
     async loadMcpTools(serverName) {
-      const client = requireClient(getClient, 'Load MCP tools failed');
-      try {
-        return await withActionTimeout(
-          client.workspaceMcpTools(serverName),
-          'Load MCP tools timed out',
-        );
-      } catch {
-        return {
-          v: 1 as const,
-          workspaceCwd: '',
-          serverName,
-          initialized: false,
-          acpChannelLive: false,
-          tools: [],
-          errors: [
-            {
-              kind: 'mcp_tools' as const,
-              status: 'error' as const,
-              error: 'The connected daemon does not expose MCP tool details.',
-            },
-          ],
-        };
-      }
+      const client = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Load MCP tools failed',
+      );
+      return withActionTimeout(
+        client.workspaceRuntimeMcpTools(serverName),
+        'Load MCP tools timed out',
+      );
     },
 
     async loadMcpResources(serverName) {
-      const client = requireClient(getClient, 'Load MCP resources failed');
-      try {
-        return await withActionTimeout(
-          client.workspaceMcpResources(serverName),
-          'Load MCP resources timed out',
-        );
-      } catch {
-        // Older daemons lack the resources route. Degrade gracefully so a
-        // mixed-version client still renders the rest of the /mcp dialog —
-        // mirrors the loadMcpTools fallback.
-        return {
-          v: 1 as const,
-          workspaceCwd: '',
-          serverName,
-          initialized: false,
-          acpChannelLive: false,
-          resources: [],
-          errors: [
-            {
-              kind: 'mcp_resources' as const,
-              status: 'error' as const,
-              error:
-                'The connected daemon does not expose MCP resource details.',
-            },
-          ],
-        };
-      }
+      const client = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Load MCP resources failed',
+      );
+      return withActionTimeout(
+        client.workspaceRuntimeMcpResources(serverName),
+        'Load MCP resources timed out',
+      );
     },
 
     async restartMcpServer(serverName) {
-      const client = requireClient(getClient, 'Restart MCP server failed');
+      const client = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Restart MCP server failed',
+      );
       return withActionTimeout(
-        client.restartMcpServer(serverName),
+        client.restartWorkspaceRuntimeMcpServer(serverName),
         'Restart MCP server timed out',
         5 * 60_000,
       );
     },
 
-    async manageMcpServer(serverName, action) {
-      const client = requireClient(getClient, 'Manage MCP server failed');
+    async manageMcpServer(serverName, action, scope) {
+      const daemon = requireClient(getClient, 'Manage MCP server failed');
       const timeoutMs = action === 'authenticate' ? 10 * 60_000 : 5 * 60_000;
+      let operation: Promise<DaemonMcpManageResult>;
+      if (action === 'enable' || action === 'disable') {
+        if (!scope) {
+          throw new Error('MCP configuration scope is required');
+        }
+        operation =
+          scope === 'user'
+            ? daemon.setUserConfigMcpServerEnabled(
+                serverName,
+                action === 'enable',
+              )
+            : daemon
+                .workspaceByCwd(requireWorkspaceCwd(getWorkspaceCwd))
+                .setWorkspaceConfigMcpServerEnabled(
+                  serverName,
+                  action === 'enable',
+                );
+      } else {
+        operation = daemon
+          .workspaceByCwd(requireWorkspaceCwd(getWorkspaceCwd))
+          .manageWorkspaceRuntimeMcpServer(serverName, action);
+      }
       return withActionTimeout(
-        client.manageMcpServer(serverName, action),
+        operation,
         'Manage MCP server timed out',
         timeoutMs,
       );
     },
 
-    async addRuntimeMcpServer(request) {
-      const client = requireClient(getClient, 'Add MCP server failed');
+    async mcpOperationStatus(operationId, timeoutMs) {
+      const client = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Load MCP operation failed',
+      );
       return withActionTimeout(
-        client.addRuntimeMcpServer(request),
-        'Add MCP server timed out',
-        5 * 60_000,
+        client.workspaceRuntimeOperation(operationId, timeoutMs),
+        'Load MCP operation timed out',
+        timeoutMs,
       );
     },
 
-    async removeRuntimeMcpServer(name) {
-      const client = requireClient(getClient, 'Remove MCP server failed');
+    async activeMcpOperations(timeoutMs) {
+      const client = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Load active MCP operations failed',
+      );
       return withActionTimeout(
-        client.removeRuntimeMcpServer(name),
-        'Remove MCP server timed out',
-        5 * 60_000,
+        client.activeWorkspaceRuntimeOperations(timeoutMs),
+        'Load active MCP operations timed out',
+        timeoutMs,
       );
     },
 
@@ -286,53 +396,118 @@ export function createDaemonWorkspaceActions({
       );
     },
 
-    async loadSkillsStatus() {
-      const client = requireClient(getClient, 'Load skills failed');
+    async loadSkillsConfigStatus() {
+      const client = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Load skills configuration failed',
+      );
       return withActionTimeout(
-        client.workspaceSkills(),
-        'Load skills timed out',
+        client.workspaceConfigSkills(),
+        'Load skills configuration timed out',
       );
     },
 
+    async loadSkillsStatus(runtimeStatus) {
+      const client = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Load skills failed',
+      );
+      const [catalog, runtime] = await withActionTimeout(
+        Promise.all([
+          client.workspaceRuntimeSkills(),
+          runtimeStatus
+            ? Promise.resolve(runtimeStatus)
+            : client.workspaceRuntimeStatus().catch(() => undefined),
+        ]),
+        'Load skills timed out',
+      );
+      const capability = runtime?.capabilities.skills;
+      return {
+        ...catalog,
+        runtimeState: capability?.state,
+        coordinatorRuntimeEpoch: runtime?.runtimeEpoch,
+        capabilityRuntimeEpoch: capability?.runtimeEpoch,
+        runtimeCatalogEpoch: catalog.runtimeEpoch,
+        runtimeCatalogInitialized: catalog.initialized,
+        runtimeCatalogSource: catalog.source,
+        runtimeSkills: catalog.skills,
+      };
+    },
+
     async setWorkspaceSkillEnabled(skillName, enabled) {
-      const client = requireClient(getClient, 'Set skill enabled failed');
+      const client = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Set skill enabled failed',
+      );
       return withActionTimeout(
-        client.setWorkspaceSkillEnabled(skillName, enabled),
+        client.setWorkspaceConfigSkillEnabled(skillName, enabled),
         'Set skill enabled timed out',
       );
     },
 
     async installWorkspaceSkill(request) {
       const client = requireClient(getClient, 'Install skill failed');
-      return withActionTimeout(
-        client.installWorkspaceSkill(request),
-        'Install skill timed out',
-      );
+      const operation =
+        request.scope === 'workspace'
+          ? client
+              .workspaceByCwd(requireWorkspaceCwd(getWorkspaceCwd))
+              .installWorkspaceConfigSkill({ ...request, scope: 'workspace' })
+          : client.installWorkspaceConfigSkill({
+              ...request,
+              scope: 'global',
+            });
+      return withActionTimeout(operation, 'Install skill timed out');
     },
 
     async deleteWorkspaceSkill(skillName, scope) {
       const client = requireClient(getClient, 'Delete skill failed');
-      return withActionTimeout(
-        client.deleteWorkspaceSkill(skillName, scope),
-        'Delete skill timed out',
-      );
+      const operation =
+        scope === 'workspace'
+          ? client
+              .workspaceByCwd(requireWorkspaceCwd(getWorkspaceCwd))
+              .deleteWorkspaceConfigSkill(skillName, 'workspace')
+          : client.deleteWorkspaceConfigSkill(skillName, scope);
+      return withActionTimeout(operation, 'Delete skill timed out');
     },
 
     async loadExtensionsStatus() {
-      const client = requireClient(getClient, 'Load extensions failed');
+      const client = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Load extensions failed',
+      );
       return withActionTimeout(
-        client.workspaceExtensions(),
+        client.workspaceConfigExtensions(),
         'Load extensions timed out',
       );
     },
 
     async loadToolsStatus() {
-      const client = requireClient(getClient, 'Load tools failed');
-      return withActionTimeout(client.workspaceTools(), 'Load tools timed out');
+      const client = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Load tools failed',
+      );
+      await withActionTimeout(
+        ensureRuntimeCapability(client, 'tools'),
+        'Prepare tools timed out',
+        WORKSPACE_RUNTIME_ACTION_TIMEOUT_MS,
+      );
+      return withActionTimeout(
+        client.workspaceRuntimeTools(),
+        'Load tools timed out',
+      );
     },
 
     async setWorkspaceToolEnabled(toolName, enabled) {
-      const client = requireClient(getClient, 'Set tool enabled failed');
+      const client = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Set tool enabled failed',
+      );
       return withActionTimeout(
         client.setWorkspaceToolEnabled(toolName, enabled),
         'Set tool enabled timed out',
@@ -711,22 +886,61 @@ export function createDaemonWorkspaceActions({
       );
     },
 
-    async installExtension(params, clientId) {
+    async installExtension(params) {
       const client = requireClient(getClient, 'Install extension failed');
       return withActionTimeout(
-        client.installExtension(params, clientId),
+        client
+          .installWorkspaceConfigExtension(params)
+          .then((result) => rememberExtensionOperation(result, 'primary')),
         'Install extension timed out',
       );
     },
 
-    async extensionOperationStatus(operationId) {
+    async extensionOperationStatus(operationId, timeoutMs) {
       const client = requireClient(
         getClient,
         'Load extension operation failed',
       );
+      const workspaceClient = client.workspaceByCwd(
+        requireWorkspaceCwd(getWorkspaceCwd),
+      );
+      const route = extensionOperationRoutes.get(operationId);
+      const load = (target: ExtensionOperationRoute) =>
+        target === 'v2'
+          ? client.extensionOperation(operationId)
+          : target === 'primary'
+            ? client.workspaceConfigExtensionOperationStatus(
+                operationId,
+                timeoutMs,
+              )
+            : workspaceClient.workspaceConfigExtensionOperationStatus(
+                operationId,
+                timeoutMs,
+              );
+      let resolvedRoute = route;
+      const operation = route
+        ? load(route)
+        : load('workspace')
+            .then((result) => {
+              resolvedRoute = 'workspace';
+              return result;
+            })
+            .catch((error: unknown) => {
+              if (!(error instanceof DaemonHttpError) || error.status !== 404) {
+                throw error;
+              }
+              resolvedRoute = 'primary';
+              return load('primary');
+            });
       return withActionTimeout(
-        client.extensionOperationStatus(operationId),
+        operation.then((result) => {
+          if (resolvedRoute) {
+            extensionOperationRoutes.set(operationId, resolvedRoute);
+          }
+          return result;
+        }),
         'Load extension operation timed out',
+        timeoutMs,
       );
     },
 
@@ -735,77 +949,144 @@ export function createDaemonWorkspaceActions({
         getClient,
         'Load active extension operations failed',
       );
+      const workspaceClient = client.workspaceByCwd(
+        requireWorkspaceCwd(getWorkspaceCwd),
+      );
       return withActionTimeout(
-        client.activeExtensionOperations(),
+        Promise.all([
+          client.activeWorkspaceConfigExtensionOperations(),
+          workspaceClient.activeWorkspaceConfigExtensionOperations(),
+        ]).then(([primary, workspace]) => {
+          for (const operation of primary.operations) {
+            extensionOperationRoutes.set(operation.operationId, 'primary');
+          }
+          for (const operation of workspace.operations) {
+            extensionOperationRoutes.set(operation.operationId, 'workspace');
+          }
+          return {
+            v: 1 as const,
+            operations: [...primary.operations, ...workspace.operations],
+          };
+        }),
         'Load active extension operations timed out',
       );
     },
 
-    async respondToExtensionInteraction(
-      operationId,
-      interactionId,
-      response,
-      clientId,
-    ) {
+    async respondToExtensionInteraction(operationId, interactionId, response) {
       const client = requireClient(
         getClient,
         'Respond to extension interaction failed',
       );
+      const workspaceClient = client.workspaceByCwd(
+        requireWorkspaceCwd(getWorkspaceCwd),
+      );
+      const route = extensionOperationRoutes.get(operationId) ?? 'primary';
       return withActionTimeout(
-        client.respondToExtensionInteraction(
-          operationId,
-          interactionId,
-          response,
-          clientId,
-        ),
+        route === 'workspace'
+          ? workspaceClient.respondToWorkspaceConfigExtensionInteraction(
+              operationId,
+              interactionId,
+              response,
+            )
+          : client.respondToWorkspaceConfigExtensionInteraction(
+              operationId,
+              interactionId,
+              response,
+            ),
         'Respond to extension interaction timed out',
       );
     },
 
-    async checkExtensionUpdates(clientId) {
+    async checkExtensionUpdates() {
       const client = requireClient(getClient, 'Check extension updates failed');
       return withActionTimeout(
-        client.checkExtensionUpdates(clientId),
+        client.checkWorkspaceConfigExtensionUpdates(),
         'Check extension updates timed out',
       );
     },
 
-    async refreshExtensions(clientId) {
-      const client = requireClient(getClient, 'Refresh extensions failed');
+    async refreshExtensions() {
+      const client = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Refresh extensions failed',
+      );
       return withActionTimeout(
-        client.refreshExtensions(clientId),
+        ensureRuntimeCapability(client, 'extensions'),
         'Refresh extensions timed out',
+        WORKSPACE_RUNTIME_ACTION_TIMEOUT_MS,
       );
     },
 
-    async enableExtension(name, params, clientId) {
-      const client = requireClient(getClient, 'Enable extension failed');
+    async setExtensionActivation(extensionId, params) {
+      const client = requireClient(
+        getClient,
+        'Set extension activation failed',
+      );
+      const operation =
+        params.scope === 'user'
+          ? client.setExtensionDefaultActivation(extensionId, params.state)
+          : params.state === 'inherit'
+            ? client
+                .workspaceByCwd(requireWorkspaceCwd(getWorkspaceCwd))
+                .clearExtensionActivation(extensionId)
+            : client
+                .workspaceByCwd(requireWorkspaceCwd(getWorkspaceCwd))
+                .setExtensionActivation(extensionId, params.state);
       return withActionTimeout(
-        client.enableExtension(name, params, clientId),
+        operation.then((result) => rememberExtensionOperation(result, 'v2')),
+        'Set extension activation timed out',
+      );
+    },
+
+    async enableExtension(name, params) {
+      const client = requireClient(getClient, 'Enable extension failed');
+      const route: ExtensionOperationRoute =
+        params.scope === 'user' ? 'primary' : 'workspace';
+      const operation =
+        route === 'primary'
+          ? client.enableWorkspaceConfigExtension(name, { scope: 'user' })
+          : client
+              .workspaceByCwd(requireWorkspaceCwd(getWorkspaceCwd))
+              .enableWorkspaceConfigExtension(name, { scope: 'workspace' });
+      return withActionTimeout(
+        operation.then((result) => rememberExtensionOperation(result, route)),
         'Enable extension timed out',
       );
     },
 
-    async disableExtension(name, params, clientId) {
+    async disableExtension(name, params) {
       const client = requireClient(getClient, 'Disable extension failed');
+      const route: ExtensionOperationRoute =
+        params.scope === 'user' ? 'primary' : 'workspace';
+      const operation =
+        route === 'primary'
+          ? client.disableWorkspaceConfigExtension(name, { scope: 'user' })
+          : client
+              .workspaceByCwd(requireWorkspaceCwd(getWorkspaceCwd))
+              .disableWorkspaceConfigExtension(name, { scope: 'workspace' });
       return withActionTimeout(
-        client.disableExtension(name, params, clientId),
+        operation.then((result) => rememberExtensionOperation(result, route)),
         'Disable extension timed out',
       );
     },
 
-    async updateExtension(name, clientId) {
+    async updateExtension(name) {
       const client = requireClient(getClient, 'Update extension failed');
       return withActionTimeout(
-        client.updateExtension(name, clientId),
+        client
+          .updateWorkspaceConfigExtension(name)
+          .then((result) => rememberExtensionOperation(result, 'primary')),
         'Update extension timed out',
       );
     },
 
-    async uninstallExtension(name, clientId) {
+    async uninstallExtension(name) {
       const client = requireClient(getClient, 'Uninstall extension failed');
       return withActionTimeout(
-        client.uninstallExtension(name, clientId),
+        client
+          .uninstallWorkspaceConfigExtension(name)
+          .then((result) => rememberExtensionOperation(result, 'primary')),
         'Uninstall extension timed out',
       );
     },
@@ -898,6 +1179,116 @@ export function createDaemonWorkspaceActions({
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
+async function ensureWorkspaceRuntime(
+  client: WorkspaceDaemonClient,
+): Promise<DaemonWorkspaceRuntimeStatus> {
+  const deadlineAt = Date.now() + WORKSPACE_RUNTIME_ENSURE_POLL_TIMEOUT_MS;
+  const initial = await client.ensureWorkspaceRuntime();
+  let status: DaemonWorkspaceRuntimeStatus = initial;
+  while (true) {
+    const capabilities = Object.values(status.capabilities).filter(
+      (capability) => capability !== undefined,
+    );
+    if (
+      capabilities.length > 0 &&
+      capabilities.every(
+        (capability) =>
+          capability.state === 'ready' || capability.state === 'error',
+      )
+    ) {
+      return status;
+    }
+    const remainingMs = Math.floor(deadlineAt - Date.now());
+    if (remainingMs <= 0) {
+      throw new Error('Workspace runtime is still starting');
+    }
+    await new Promise((resolve) =>
+      setTimeout(
+        resolve,
+        Math.min(WORKSPACE_RUNTIME_POLL_INTERVAL_MS, remainingMs),
+      ),
+    );
+    status = await client.workspaceRuntimeStatus(
+      Math.max(1, Math.floor(deadlineAt - Date.now())),
+    );
+  }
+}
+
+async function ensureRuntimeCapability(
+  client: WorkspaceDaemonClient,
+  capability: DaemonWorkspaceRuntimeCapability,
+): Promise<DaemonWorkspaceRuntimeStatus> {
+  const deadlineAt = Date.now() + WORKSPACE_RUNTIME_POLL_TIMEOUT_MS;
+  const initial = await client.ensureWorkspaceRuntime();
+  const terminal = await waitForRuntimeCapability(
+    client,
+    capability,
+    initial,
+    deadlineAt,
+  );
+  return terminal;
+}
+
+async function reloadMcpRuntime(
+  client: WorkspaceDaemonClient,
+): Promise<DaemonWorkspaceRuntimeStatus> {
+  const deadlineAt = Date.now() + WORKSPACE_RUNTIME_POLL_TIMEOUT_MS;
+  const initial = await client.reloadWorkspaceRuntimeMcp(
+    remainingRuntimePollTimeout(deadlineAt, 'mcp'),
+  );
+  const terminal = await waitForRuntimeCapability(
+    client,
+    'mcp',
+    initial,
+    deadlineAt,
+  );
+  return terminal;
+}
+
+async function waitForRuntimeCapability(
+  client: WorkspaceDaemonClient,
+  capability: DaemonWorkspaceRuntimeCapability,
+  initial?: DaemonWorkspaceRuntimeStatus,
+  deadlineAt = Date.now() + WORKSPACE_RUNTIME_POLL_TIMEOUT_MS,
+): Promise<DaemonWorkspaceRuntimeStatus> {
+  let status =
+    initial ??
+    (await client.workspaceRuntimeStatus(
+      remainingRuntimePollTimeout(deadlineAt, capability),
+    ));
+  while (true) {
+    const capabilityStatus = status.capabilities[capability];
+    if (capabilityStatus?.state === 'ready') return status;
+    if (capabilityStatus?.state === 'error') {
+      throw new Error(
+        capabilityStatus.error?.message ??
+          `Workspace ${capability} runtime failed`,
+      );
+    }
+    const remainingMs = remainingRuntimePollTimeout(deadlineAt, capability);
+    await new Promise((resolve) =>
+      setTimeout(
+        resolve,
+        Math.min(WORKSPACE_RUNTIME_POLL_INTERVAL_MS, remainingMs),
+      ),
+    );
+    status = await client.workspaceRuntimeStatus(
+      remainingRuntimePollTimeout(deadlineAt, capability),
+    );
+  }
+}
+
+function remainingRuntimePollTimeout(
+  deadlineAt: number,
+  capability: DaemonWorkspaceRuntimeCapability,
+): number {
+  const remainingMs = Math.floor(deadlineAt - Date.now());
+  if (remainingMs <= 0) {
+    throw new Error(`Workspace ${capability} runtime is still starting`);
+  }
+  return remainingMs;
+}
+
 function requireClient(
   getClient: () => DaemonClient | undefined,
   action: string,
@@ -907,6 +1298,16 @@ function requireClient(
     throw new Error(`${action}: DaemonClient is not connected`);
   }
   return client;
+}
+
+function requireWorkspaceClient(
+  getClient: () => DaemonClient | undefined,
+  getWorkspaceCwd: () => string | undefined,
+  action: string,
+): WorkspaceDaemonClient {
+  return requireClient(getClient, action).workspaceByCwd(
+    requireWorkspaceCwd(getWorkspaceCwd),
+  );
 }
 
 function requireWorkspaceCwd(

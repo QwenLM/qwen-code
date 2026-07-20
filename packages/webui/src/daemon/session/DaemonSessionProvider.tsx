@@ -123,8 +123,6 @@ export interface DaemonTranscriptHistory {
 }
 
 const SESSION_TRANSCRIPT_PAGINATION_FEATURE = 'session_transcript_pagination';
-const WORKSPACE_ACP_PREHEAT_FEATURE = 'workspace_acp_preheat';
-const WORKSPACE_ACP_STATUS_FEATURE = 'workspace_acp_status';
 
 function assistantDoneFromTurnEvent(
   event: DaemonEvent,
@@ -292,7 +290,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   workspaceCapabilitiesRef.current = workspace?.capabilities;
   const workspaceGetCapabilitiesRef = useRef(workspace?.getCapabilities);
   workspaceGetCapabilitiesRef.current = workspace?.getCapabilities;
-  const workspaceAcpPreheatInFlightRef = useRef(false);
+  const workspaceSkillsPrepareInFlightRef = useRef(false);
   const initialRestoreSessionIdRef = useRef(sessionId);
   const initialRestoreSessionId = initialRestoreSessionIdRef.current;
   // Captured once at mount: if the host did not provide an initial session,
@@ -629,15 +627,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               resolvedWorkspaceCwdRef.current ??
               caps.workspaceCwd;
             activeWorkspaceCwdRef.current = effectWorkspaceCwd;
-            const capabilityFeatures = Array.isArray(caps.features)
-              ? caps.features
-              : [];
-            const canPreheatPrimaryWorkspace =
-              effectWorkspaceCwd === caps.workspaceCwd &&
-              capabilityFeatures.includes(WORKSPACE_ACP_PREHEAT_FEATURE);
-            const canReadPrimaryAcpStatus =
-              canPreheatPrimaryWorkspace &&
-              capabilityFeatures.includes(WORKSPACE_ACP_STATUS_FEATURE);
             if (
               (shouldDeferInitialSessionCreation ||
                 manualSessionClearRef.current) &&
@@ -645,6 +634,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               !reconnectSessionId &&
               !shouldCreateFreshSession
             ) {
+              if (!effectWorkspaceCwd) {
+                throw new Error('Daemon workspace is not connected');
+              }
+              const workspaceClient = client.workspaceByCwd(effectWorkspaceCwd);
               // Fetch skills alongside providers so skill-backed slash
               // commands (e.g. /review) can autocomplete before the first
               // prompt. Both are session-less workspace queries; the
@@ -653,14 +646,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               // creates a session.
               const [providerResult, skillsResult, acpStatusResult, gitResult] =
                 await Promise.allSettled([
-                  client.workspaceProviders(),
-                  client.workspaceSkills(),
-                  canReadPrimaryAcpStatus
-                    ? client.workspaceAcpStatus()
-                    : Promise.resolve(undefined),
-                  effectWorkspaceCwd
-                    ? client.workspaceByCwd(effectWorkspaceCwd).workspaceGit()
-                    : client.workspaceGit(),
+                  workspaceClient.workspaceProviders(),
+                  workspaceClient.workspaceSkills(),
+                  workspaceClient.workspaceRuntimeStatus(),
+                  workspaceClient.workspaceGit(),
                 ]);
               if (providerResult.status === 'rejected') {
                 console.warn(
@@ -674,12 +663,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   skillsResult.reason,
                 );
               }
-              if (
-                canReadPrimaryAcpStatus &&
-                acpStatusResult.status === 'rejected'
-              ) {
+              if (acpStatusResult.status === 'rejected') {
                 console.warn(
-                  '[DaemonSessionProvider] workspaceAcpStatus failed in deferred connect:',
+                  '[DaemonSessionProvider] workspaceRuntimeStatus failed in deferred connect:',
                   acpStatusResult.reason,
                 );
               }
@@ -722,30 +708,34 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   : deferredSkills,
               }));
               if (
-                canPreheatPrimaryWorkspace &&
-                !(
-                  acpStatusResult.status === 'fulfilled' &&
-                  acpStatusResult.value?.channelLive === true
-                ) &&
-                !workspaceAcpPreheatInFlightRef.current
+                (acpStatusResult.status !== 'fulfilled' ||
+                  !acpStatusResult.value.runtimeLive ||
+                  acpStatusResult.value.capabilities.skills?.state !==
+                    'ready') &&
+                !workspaceSkillsPrepareInFlightRef.current
               ) {
-                workspaceAcpPreheatInFlightRef.current = true;
+                workspaceSkillsPrepareInFlightRef.current = true;
                 void (async () => {
                   try {
-                    const preheat = await client.workspaceAcpPreheat(5_000);
+                    const prepared =
+                      await workspaceClient.ensureWorkspaceRuntime();
                     if (
                       disposed ||
                       abort.signal.aborted ||
-                      !preheat.ready ||
+                      prepared.capabilities.skills?.state !== 'ready' ||
                       connectionRef.current.sessionId
                     ) {
                       return;
                     }
-                    const refreshed = await client.workspaceSkills();
+                    const refreshed =
+                      await workspaceClient.workspaceRuntimeSkills();
                     if (
                       disposed ||
                       abort.signal.aborted ||
-                      connectionRef.current.sessionId
+                      connectionRef.current.sessionId ||
+                      refreshed.initialized !== true ||
+                      refreshed.source !== 'live' ||
+                      refreshed.runtimeEpoch !== prepared.runtimeEpoch
                     ) {
                       return;
                     }
@@ -757,11 +747,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     );
                   } catch (error) {
                     console.warn(
-                      '[DaemonSessionProvider] ACP preheat for workspace skills failed:',
+                      '[DaemonSessionProvider] workspace runtime prepare for skills failed:',
                       error,
                     );
                   } finally {
-                    workspaceAcpPreheatInFlightRef.current = false;
+                    workspaceSkillsPrepareInFlightRef.current = false;
                   }
                 })();
               }
@@ -1127,16 +1117,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               connectionRef.current.skills !== undefined &&
               connectionRef.current.supportedCommands !== undefined &&
               connectionRef.current.context !== undefined);
+          const activeWorkspaceClient = client.workspaceByCwd(
+            activeSession.workspaceCwd,
+          );
           const gitPromise = skipMetadataRefreshThisIteration
             ? Promise.resolve({ branch: connectionRef.current.gitBranch })
-            : activeSession.workspaceCwd
-              ? client.workspaceByCwd(activeSession.workspaceCwd).workspaceGit()
-              : client.workspaceGit();
+            : activeWorkspaceClient.workspaceGit();
           const [providerResult, commandResult, contextResult, gitResult] =
             await Promise.allSettled([
               canReuseSessionMetadata
                 ? Promise.resolve(undefined)
-                : client.workspaceProviders(),
+                : activeWorkspaceClient.workspaceProviders(),
               canReuseSessionMetadata
                 ? Promise.resolve(undefined)
                 : activeSession.supportedCommands(),
