@@ -315,6 +315,14 @@ function makePromptTagElement(item: PromptReferenceItem): HTMLElement {
   value.className = styles.promptTagValue;
   value.textContent = item.label;
   tag.appendChild(value);
+
+  const remove = document.createElement('span');
+  remove.className = styles.promptTagRemove;
+  remove.setAttribute('role', 'button');
+  remove.tabIndex = -1;
+  remove.dataset.promptTagRemove = '';
+  remove.setAttribute('aria-label', `× ${item.label}`);
+  tag.appendChild(remove);
   return tag;
 }
 
@@ -355,6 +363,26 @@ function insertPromptTagElement(root: HTMLElement, item: PromptReferenceItem) {
   range.collapse(true);
   selection?.removeAllRanges();
   selection?.addRange(range);
+}
+
+function removePromptTag(tag: HTMLElement) {
+  const parent = tag.parentElement;
+  const previous = tag.previousSibling;
+  const next = tag.nextSibling;
+  tag.remove();
+
+  if (
+    next?.nodeType === Node.TEXT_NODE &&
+    /^[ \u00a0]/.test(next.textContent ?? '')
+  ) {
+    next.textContent = (next.textContent ?? '').slice(1);
+  } else if (
+    previous?.nodeType === Node.TEXT_NODE &&
+    /[ \u00a0]$/.test(previous.textContent ?? '')
+  ) {
+    previous.textContent = (previous.textContent ?? '').slice(0, -1);
+  }
+  parent?.normalize();
 }
 
 function PromptReferenceEditor({
@@ -404,6 +432,27 @@ function PromptReferenceEditor({
         aria-label={label}
         aria-multiline="true"
         aria-placeholder={placeholder}
+        onMouseDown={(event) => {
+          if (
+            event.target instanceof Element &&
+            event.target.closest('[data-prompt-tag-remove]')
+          ) {
+            event.preventDefault();
+          }
+        }}
+        onClick={(event) => {
+          if (!(event.target instanceof Element)) return;
+          const remove = event.target.closest('[data-prompt-tag-remove]');
+          const tag = remove?.closest<HTMLElement>(
+            '[data-prompt-tag-serialized]',
+          );
+          if (!tag || !event.currentTarget.contains(tag)) return;
+          removePromptTag(tag);
+          const next = normalizePromptEditor(event.currentTarget);
+          lastAppliedValueRef.current = next;
+          onChange(next);
+          event.currentTarget.focus();
+        }}
         onInput={(event) => {
           const next = normalizePromptEditor(event.currentTarget);
           lastAppliedValueRef.current = next;
@@ -1037,6 +1086,8 @@ export function ScheduledTasksDialog({
                 maxHeight: referencePickerPosition.maxHeight,
               } as CSSProperties
             }
+            onWheel={(event) => event.stopPropagation()}
+            onTouchMove={(event) => event.stopPropagation()}
           >
             {referenceLoading ? (
               <div className={styles.referenceEmpty}>

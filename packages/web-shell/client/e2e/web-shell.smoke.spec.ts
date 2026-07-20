@@ -217,6 +217,115 @@ test('opens slash menu, resume dialog, model dialog, and theme dialog @smoke', a
   await expect(page.locator('[data-web-shell-theme-dialog]')).toHaveCount(0);
 });
 
+test('selects and scrolls scheduled-task prompt references @smoke', async ({
+  page,
+}, testInfo) => {
+  const extensions = Array.from({ length: 20 }, (_, index) => ({
+    id: `extension-${index + 1}`,
+    name: `extension-${index + 1}`,
+    displayName: `Extension ${index + 1}`,
+    description: '',
+    version: '1.0.0',
+    isActive: true,
+    path: `/extensions/${index + 1}`,
+    capabilities: {},
+  }));
+  const scenario = createWebShellDaemonScenario({
+    extensions: { extensions },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+  await page.route('**/scheduled-tasks', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ tasks: [] }),
+    });
+  });
+
+  await gotoSession(page, scenario, daemon);
+  await page.getByRole('button', { name: 'Scheduled Tasks' }).click();
+  await page.getByRole('button', { name: 'New scheduled task' }).click();
+
+  const prompt = page.getByRole('textbox', { name: 'Prompt' });
+  await expect
+    .poll(() => prompt.evaluate((element) => getComputedStyle(element).cursor))
+    .toBe('text');
+
+  const extensionsButton = page.getByRole('button', { name: 'Extensions' });
+  const promptStyles = await prompt.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { backgroundColor: style.backgroundColor, color: style.color };
+  });
+  const referenceButtonStyles = await page
+    .getByRole('button', { name: /^(Extensions|Skills|MCP)$/ })
+    .evaluateAll((elements) =>
+      elements.map((element) => {
+        const style = getComputedStyle(element);
+        return {
+          backgroundColor: style.backgroundColor,
+          borderColor: style.borderColor,
+          color: style.color,
+        };
+      }),
+    );
+  expect(referenceButtonStyles).toHaveLength(3);
+  for (const style of referenceButtonStyles) {
+    expect(style.backgroundColor).toBe(promptStyles.backgroundColor);
+    expect(style.borderColor).not.toBe(promptStyles.color);
+    expect(style.color).not.toBe(promptStyles.color);
+  }
+
+  await extensionsButton.hover();
+  await expect
+    .poll(() =>
+      extensionsButton.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return { borderColor: style.borderColor, color: style.color };
+      }),
+    )
+    .toEqual({
+      borderColor: promptStyles.color,
+      color: promptStyles.color,
+    });
+  await extensionsButton.click();
+
+  const picker = page.getByRole('listbox', { name: 'Reference picker' });
+  await expect(picker).toBeVisible();
+  await expect
+    .poll(() =>
+      picker.evaluate(
+        (element) => element.scrollHeight > element.clientHeight + 1,
+      ),
+    )
+    .toBe(true);
+
+  await picker.hover();
+  await page.mouse.wheel(0, 400);
+  await expect
+    .poll(() => picker.evaluate((element) => element.scrollTop))
+    .toBeGreaterThan(0);
+
+  await page.getByRole('option', { name: /extension-20 Extension 20/ }).click();
+  await expect(prompt).toContainText('extension-20');
+  const promptBox = await prompt.boundingBox();
+  if (!promptBox) throw new Error('Prompt editor has no bounding box');
+  const blankPosition = {
+    x: promptBox.width - 40,
+    y: promptBox.height / 2,
+  };
+  const tag = prompt.locator('[data-prompt-tag-serialized]');
+  const remove = prompt.locator('[data-prompt-tag-remove]');
+
+  await prompt.hover({ position: blankPosition });
+  await expect(
+    remove.evaluate((element) => element.matches(':hover')),
+  ).resolves.toBe(false);
+  await prompt.click({ position: blankPosition });
+  await expect(tag).toBeVisible();
+
+  await remove.click();
+  await expect(prompt).not.toContainText('extension-20');
+});
+
 for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
   test(`grows long text to the responsive composer cap at ${viewportHeight}px @smoke`, async ({
     page,
