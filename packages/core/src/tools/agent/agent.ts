@@ -873,7 +873,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
       : '';
     const backgroundReuseGuidance = hasRebuiltToolRegistry(this.config)
       ? ''
-      : `- Reuse an existing background agent for related follow-up work instead of launching a duplicate: use the \`agentId\` from its launch result as its \`task_id\`, or call ${ToolNames.LIST_AGENTS} when you need to discover retained or restored agents, then call ${ToolNames.SEND_MESSAGE} with that \`task_id\`. Running agents receive the message at the next tool-round boundary; paused agents resume with it as their first continuation instruction; completed agents are revived from their retained transcript. If the task is no longer retained or cannot be resumed or revived, launch a new agent.`;
+      : `- Reuse an existing background agent for related follow-up work instead of launching a duplicate: use the \`task_id\` from its launch result, or call ${ToolNames.LIST_AGENTS} when you need to discover retained or restored agents, then call ${ToolNames.SEND_MESSAGE} with that \`task_id\`. Running agents receive the message at the next tool-round boundary; paused agents resume with it as their first continuation instruction; completed agents are revived from their retained transcript. If the task is no longer retained or cannot be resumed or revived, launch a new agent.`;
 
     const baseDescription = `Launch a new agent to handle complex, multi-step tasks autonomously.
 The Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.

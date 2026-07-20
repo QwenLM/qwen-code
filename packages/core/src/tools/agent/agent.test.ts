@@ -371,9 +371,8 @@ describe('AgentTool', () => {
       expect(tool.description).toContain(
         'Reuse an existing background agent for related follow-up work',
       );
-      expect(tool.description).toContain('call list_agents');
       expect(tool.description).toContain(
-        'use the `agentId` from its launch result as its `task_id`',
+        'use the `task_id` from its launch result',
       );
       expect(tool.description).toContain('call list_agents');
       expect(tool.description).toContain(
