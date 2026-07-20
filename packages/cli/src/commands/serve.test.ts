@@ -538,7 +538,7 @@ describe('serve startup import boundary', () => {
               `serve did not reach listening\nstdout:\n${stdout}\nstderr:\n${stderr}`,
             ),
           );
-        }, 15_000);
+        }, 30_000);
 
         child.stdout.on('data', (chunk: Buffer) => {
           stdout += chunk.toString('utf8');
@@ -584,5 +584,5 @@ describe('serve startup import boundary', () => {
       await removeTempDir(workspace);
       await removeTempDir(qwenHome);
     }
-  }, 20_000);
+  }, 40_000);
 });

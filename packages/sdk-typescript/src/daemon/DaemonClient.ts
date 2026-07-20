@@ -72,6 +72,8 @@ import type {
   DaemonWorkspaceGitStatus,
   DaemonWorkspaceGitDiff,
   DaemonWorkspaceGitDiffHunks,
+  DaemonGitLog,
+  DaemonGitCommitDetail,
   DaemonWorkspaceMcpStatus,
   DaemonWorkspaceMcpInitializeResult,
   DaemonWorkspaceMcpToolsStatus,
@@ -91,7 +93,9 @@ import type {
   DaemonWorkspaceMemoryForgetTask,
   DaemonWorkspaceMemoryRememberOptions,
   DaemonWorkspaceMemoryRememberTask,
+  DaemonWorkspaceCapability,
   DaemonWorkspaceRemovalResult,
+  DaemonWorkspaceUpdate,
   HeartbeatResult,
   PermissionResponse,
   PromptContentBlock,
@@ -1047,6 +1051,26 @@ export class DaemonClient {
     return await this.jsonRequest<DaemonWorkspaceGitDiffHunks>(
       query,
       'GET /workspace/git/diff/file',
+      { mode: 'rest' },
+    );
+  }
+
+  async workspaceGitLog(limit?: number, skip?: number): Promise<DaemonGitLog> {
+    const params = new URLSearchParams();
+    if (limit != null) params.set('limit', String(limit));
+    if (skip != null) params.set('skip', String(skip));
+    const qs = params.toString();
+    return await this.jsonRequest<DaemonGitLog>(
+      `/workspace/git/log${qs ? `?${qs}` : ''}`,
+      'GET /workspace/git/log',
+      { mode: 'rest' },
+    );
+  }
+
+  async workspaceGitCommitDetail(sha: string): Promise<DaemonGitCommitDetail> {
+    return await this.jsonRequest<DaemonGitCommitDetail>(
+      `/workspace/git/log/commit?sha=${urlEncode(sha)}`,
+      'GET /workspace/git/log/commit',
       { mode: 'rest' },
     );
   }
@@ -4023,10 +4047,11 @@ export class DaemonClient {
 
   async addWorkspace(
     cwd: string,
-    options: { persist?: boolean } = {},
+    options: { persist?: boolean; displayName?: string } = {},
   ): Promise<{
     id: string;
     cwd: string;
+    displayName?: string;
     primary: boolean;
     trusted: boolean;
     persisted?: boolean;
@@ -4039,6 +4064,9 @@ export class DaemonClient {
         body: JSON.stringify({
           cwd,
           ...(options.persist ? { persist: true } : {}),
+          ...(options.displayName !== undefined
+            ? { displayName: options.displayName }
+            : {}),
         }),
       },
       async (res) => {
@@ -4048,11 +4076,24 @@ export class DaemonClient {
         return (await res.json()) as {
           id: string;
           cwd: string;
+          displayName?: string;
           primary: boolean;
           trusted: boolean;
           persisted?: boolean;
         };
       },
+    );
+  }
+
+  async updateWorkspace(
+    workspaceSelector: string,
+    update: DaemonWorkspaceUpdate,
+  ): Promise<DaemonWorkspaceCapability> {
+    return await this.workspaceJsonRequest<DaemonWorkspaceCapability>(
+      urlEncode(workspaceSelector),
+      '',
+      'PATCH /workspaces/:workspace',
+      { method: 'PATCH', body: update, mode: 'rest' },
     );
   }
 
@@ -4232,6 +4273,28 @@ export class WorkspaceDaemonClient {
       this.workspaceSelector,
       query,
       'GET /workspaces/:workspace/git/diff/file',
+      { mode: 'rest' },
+    );
+  }
+
+  workspaceGitLog(limit?: number, skip?: number): Promise<DaemonGitLog> {
+    const params = new URLSearchParams();
+    if (limit != null) params.set('limit', String(limit));
+    if (skip != null) params.set('skip', String(skip));
+    const qs = params.toString();
+    return this.client.workspaceJsonRequest<DaemonGitLog>(
+      this.workspaceSelector,
+      `/git/log${qs ? `?${qs}` : ''}`,
+      'GET /workspaces/:workspace/git/log',
+      { mode: 'rest' },
+    );
+  }
+
+  workspaceGitCommitDetail(sha: string): Promise<DaemonGitCommitDetail> {
+    return this.client.workspaceJsonRequest<DaemonGitCommitDetail>(
+      this.workspaceSelector,
+      `/git/log/commit?sha=${urlEncode(sha)}`,
+      'GET /workspaces/:workspace/git/log/commit',
       { mode: 'rest' },
     );
   }

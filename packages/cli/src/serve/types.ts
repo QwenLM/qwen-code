@@ -322,6 +322,7 @@ export interface CapabilitiesEnvelope {
   workspaces?: Array<{
     id: string;
     cwd: string;
+    displayName?: string;
     primary: boolean;
     trusted: boolean;
     removable?: boolean;

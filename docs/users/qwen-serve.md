@@ -66,7 +66,7 @@ qwen serve
 
 The default bind is `127.0.0.1:4170`. Bearer auth is **off** on loopback so local development "just works". The daemon registers the current working directory as its primary workspace; use an absolute `--workspace /path/to/dir` to override it, and repeat the flag to register additional isolated runtimes.
 
-**Open the Web Shell UI.** Browse to `http://127.0.0.1:4170/` (or start the daemon with `qwen serve --open` to launch it automatically) for the full browser terminal — chat, diffs, tool calls, and permission prompts. The UI is served at the daemon root on the same origin as the API. The rest of this guide uses raw HTTP so you can script against the API directly.
+**Open the Web Shell UI.** Browse to `http://127.0.0.1:4170/` (or start the daemon with `qwen serve --open` to launch it automatically) for the full browser terminal — chat, diffs, commit history, tool calls, and permission prompts. The UI is served at the daemon root on the same origin as the API. The rest of this guide uses raw HTTP so you can script against the API directly.
 
 ### 2. Sanity-check it
 

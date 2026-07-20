@@ -90,6 +90,10 @@ import {
   validatePlanModeShellContext,
 } from './plan-mode-shell-policy.js';
 import {
+  findPlanModeEntryBatchBoundaryIndex,
+  PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+} from './plan-mode-entry-policy.js';
+import {
   applyAutoModeDecision,
   evaluateAutoMode,
   getAutoModePermissionDeniedReason,
@@ -181,14 +185,14 @@ function dedupeRequestsByCallId(
 // the headroom ensures the gate only fires for genuinely un-truncated output
 // and must exceed the stub size (~2.3K) to avoid cascading re-persistence.
 const GATE_HEADROOM = 3000;
-// Tools that bound their own output and must bypass the persistence gate.
-// read_file pages/truncates itself; read_mcp_resource caps text in
-// formatMcpResourceContents and sets maxOutputChars=Infinity — but this gate
-// runs first, so without the exemption a 28k–100k resource is spilled to a
-// stub before that self-cap takes effect and the model never sees the body.
+// Tools whose output must bypass the persistence gate. read_file pages itself,
+// and read_mcp_resource caps text in formatMcpResourceContents. enter_plan_mode
+// returns lifecycle policy that must remain inline. This gate runs before
+// per-tool limits, so each requires an explicit exemption here.
 const GATE_EXEMPT_TOOLS = new Set<string>([
   ToolNames.READ_FILE,
   ToolNames.READ_MCP_RESOURCE,
+  ToolNames.ENTER_PLAN_MODE,
 ]);
 
 function extractTextFromPartListUnion(c: PartListUnion): string {
@@ -2083,6 +2087,9 @@ export class CoreToolScheduler {
       const requestsToProcess = dedupeRequestsByCallId(
         Array.isArray(request) ? request : [request],
       );
+      const planModeEntryBoundaryIndex = findPlanModeEntryBatchBoundaryIndex(
+        requestsToProcess.map((item) => canonicalToolName(item.name)),
+      );
 
       // Prune validation retry state per-tool, not wholesale. Keys are
       // "<toolName>:<errorMessage>"; retain counters only for tools actually
@@ -2102,7 +2109,24 @@ export class CoreToolScheduler {
       }
 
       const newToolCalls: ToolCall[] = [];
-      for (const reqInfo of requestsToProcess) {
+      for (const [requestIndex, reqInfo] of requestsToProcess.entries()) {
+        if (
+          planModeEntryBoundaryIndex !== undefined &&
+          requestIndex !== planModeEntryBoundaryIndex
+        ) {
+          newToolCalls.push({
+            status: 'error',
+            request: reqInfo,
+            response: createErrorResponse(
+              reqInfo,
+              new Error(PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE),
+              ToolErrorType.EXECUTION_DENIED,
+            ),
+            durationMs: 0,
+          });
+          continue;
+        }
+
         const canonicalName = canonicalToolName(reqInfo.name);
 
         // Check if the tool is excluded due to permissions/environment restrictions
@@ -4966,7 +4990,7 @@ export class CoreToolScheduler {
     toolName: string,
     content: PartListUnion,
   ): Promise<PartListUnion> {
-    if (GATE_EXEMPT_TOOLS.has(toolName)) return content;
+    if (GATE_EXEMPT_TOOLS.has(canonicalToolName(toolName))) return content;
 
     const text = extractTextFromPartListUnion(content);
     if (!text || isAlreadyTruncated(text)) return content;
@@ -5086,6 +5110,10 @@ export class CoreToolScheduler {
   private async offloadCallOutput(
     call: CompletedToolCall,
   ): Promise<CompletedToolCall | null> {
+    if (canonicalToolName(call.request.name) === ToolNames.ENTER_PLAN_MODE) {
+      return null;
+    }
+
     const parts = call.response.responseParts;
     if (parts.length !== 1) return null;
     const fr = parts[0]?.functionResponse;
