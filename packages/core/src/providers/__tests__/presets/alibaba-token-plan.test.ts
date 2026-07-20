@@ -188,5 +188,12 @@ describe('token plan provider', () => {
         envKey: TOKEN_PLAN_ENV_KEY,
       }),
     ).toBe(false);
+    expect(
+      tokenPlanProvider.ownsModel?.({
+        id: 'token-model',
+        baseUrl: TOKEN_PLAN_CHINA_BASE_URL,
+        envKey: 'SOME_OTHER_API_KEY',
+      }),
+    ).toBe(false);
   });
 });
