@@ -11,6 +11,7 @@ import {
   type DaemonSessionState,
   type DaemonSessionSummary,
   type DaemonWorkspaceExtensionsStatus,
+  type DaemonWorkspaceGitStatus,
   type DaemonWorkspaceMcpResourcesStatus,
   type DaemonWorkspaceMcpStatus,
   type DaemonWorkspaceMcpToolsStatus,
@@ -51,6 +52,11 @@ export interface WebShellDaemonScenario {
   sessionGroups: DaemonSessionGroup[];
   events: DaemonEvent[];
   state: DaemonSessionState;
+  /**
+   * Response for `GET /workspaces/:cwd/git`. Defaults to a null-branch status
+   * (non-git workspace), matching the real daemon's graceful degradation.
+   */
+  gitStatus?: DaemonWorkspaceGitStatus;
 }
 
 export interface MockDaemonController {
@@ -289,6 +295,7 @@ export function createWebShellDaemonScenario(
     sessionGroups: overrides.sessionGroups ?? [],
     events: overrides.events ?? [],
     state,
+    gitStatus: overrides.gitStatus,
   };
 }
 
@@ -485,6 +492,7 @@ function isDaemonPath(path: string): boolean {
     /^\/workspace\/mcp\/[^/]+\/resources\/?$/.test(path) ||
     /^\/workspace\/.+\/sessions\/?$/.test(path) ||
     /^\/workspace\/.+\/session-groups\/?$/.test(path) ||
+    /^\/workspaces\/.+\/git\/?$/.test(path) ||
     path === '/session' ||
     /^\/permission\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/pending-prompts(?:\/[^/]+)?\/?$/.test(path) ||
@@ -540,6 +548,9 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   }
   if (method === 'GET' && /^\/session\/[^/]+\/events\/?$/.test(path)) {
+    return true;
+  }
+  if (method === 'GET' && /^\/workspaces\/.+\/git\/?$/.test(path)) {
     return true;
   }
   if (
@@ -657,6 +668,17 @@ async function handleDaemonRoute(
       colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
     };
     await json(route, catalog);
+    return;
+  }
+  if (method === 'GET' && /^\/workspaces\/.+\/git\/?$/.test(path)) {
+    await json(
+      route,
+      scenario.gitStatus ?? {
+        v: 2,
+        workspaceCwd: scenario.workspaceCwd,
+        branch: null,
+      },
+    );
     return;
   }
   if (method === 'POST' && path === '/session') {

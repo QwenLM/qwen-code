@@ -3544,11 +3544,6 @@ export function WebShellSidebar({
                             groupActionsDisabled={groupBusy}
                             excludePinned
                             onOpenGitDiff={onOpenGitDiff}
-                            onNewWorktreeSession={(cwd) =>
-                              handleNewSession(ws.primary ? undefined : cwd, {
-                                worktree: {},
-                              })
-                            }
                             formatTime={(iso) => formatRelativeTime(iso, t)}
                             searchQuery={searchQuery}
                             expanded={ws.primary ? projectExpanded : undefined}

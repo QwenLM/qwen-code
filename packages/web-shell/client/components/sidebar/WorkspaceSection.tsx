@@ -13,14 +13,8 @@ import type {
   DaemonWorkspaceCapability,
   DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
-import { FolderClosedIcon, FolderOpenIcon, GitForkIcon } from 'lucide-react';
+import { FolderClosedIcon, FolderOpenIcon } from 'lucide-react';
 import { GitBranchIndicator } from '../GitBranchIndicator';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '../ui/dropdown-menu';
 import { SESSION_LIST_PAGE_SIZE } from '../../constants/sessions';
 import { useI18n } from '../../i18n';
 import {
@@ -100,8 +94,6 @@ interface WorkspaceSectionProps {
    * fires this on click. Omitted for untrusted workspaces (no git surface).
    */
   onOpenGitDiff?: (workspaceCwd: string) => void;
-  /** Create a new worktree-isolated session in this workspace. */
-  onNewWorktreeSession?: (workspaceCwd: string) => void;
 }
 
 export function WorkspaceSection({
@@ -131,7 +123,6 @@ export function WorkspaceSection({
   groupActionsDisabled,
   excludePinned = false,
   onOpenGitDiff,
-  onNewWorktreeSession,
 }: WorkspaceSectionProps) {
   const { t } = useI18n();
   const [sessions, setSessions] = useState<DaemonSessionSummary[]>([]);
@@ -357,40 +348,18 @@ export function WorkspaceSection({
           )}
         </button>
         {onOpenGitDiff && workspace.trusted && gitStatus?.branch && (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <span className={styles.gitPill} role="button" tabIndex={0}>
-                <GitBranchIndicator
-                  branch={gitStatus.branch}
-                  status={gitStatus}
-                  compact
-                />
-              </span>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent side="bottom" align="start">
-              <DropdownMenuItem onClick={() => onOpenGitDiff(workspace.cwd)}>
-                {t('gitDiff.title')}
-              </DropdownMenuItem>
-              {onNewWorktreeSession && (
-                <DropdownMenuItem
-                  onClick={() => onNewWorktreeSession(workspace.cwd)}
-                  className="flex-col items-start gap-0"
-                >
-                  <span className="flex items-center gap-1.5">
-                    <GitForkIcon
-                      size={14}
-                      strokeWidth={1.2}
-                      style={{ color: 'var(--color-accent-fg, #8b5cf6)' }}
-                    />
-                    {t('sidebar.newWorktreeTask')}
-                  </span>
-                  <span className="text-xs opacity-60 font-normal">
-                    {t('sidebar.worktreeDescription')}
-                  </span>
-                </DropdownMenuItem>
-              )}
-            </DropdownMenuContent>
-          </DropdownMenu>
+          <button
+            type="button"
+            className={styles.gitPill}
+            aria-label={t('gitDiff.title')}
+            onClick={() => onOpenGitDiff(workspace.cwd)}
+          >
+            <GitBranchIndicator
+              branch={gitStatus.branch}
+              status={gitStatus}
+              compact
+            />
+          </button>
         )}
         {headerActions?.(actionsVisible)}
       </div>
