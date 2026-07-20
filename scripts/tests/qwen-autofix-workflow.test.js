@@ -3204,6 +3204,85 @@ describe('qwen-autofix workflow', () => {
     expect(wmSpoof).toBe('2026-07-20T08:30:00Z');
   });
 
+  it('address-side stale check mirrors the scan-side re-arm logic under bash', () => {
+    // The scan-side and address-side jq blocks are copy-pasted (~40 lines
+    // each, 4 jq expressions). Drift between them is the class of bug the
+    // re-arm feature prevents: a queued address job could stamp an
+    // old-sequence eval marker into a fresh window after /retry. This test
+    // runs the address-side block under bash with the same fixtures and
+    // asserts identical outputs.
+    const block = prepareBranchAndFeedbackStep.match(
+      /(LIVE_MARKS="\$\(jq[\s\S]*?LIVE_MAX_ROUND="\$\(jq[^\n]*\n)/,
+    )?.[1];
+    expect(block).toBeTruthy();
+
+    const BOT = 'qwen-code-dev-bot';
+    const evalMarker = (at, ts, round) => ({
+      user: { login: BOT },
+      created_at: at,
+      body: `<!-- autofix-eval ts=${ts} acted=false round=${round} win=none -->`,
+    });
+    const run = (comments) => {
+      const dir = mkdtempSync(join(tmpdir(), 'rearm-live-'));
+      writeFileSync(join(dir, 'ic.json'), JSON.stringify(comments));
+      const out = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -uo pipefail\n${block}\nprintf '%s|%s|%s' "$LIVE_EVAL_WM" "$LIVE_REARM_KEY" "$LIVE_MAX_ROUND"`,
+        ],
+        {
+          env: { ...process.env, WORKDIR: dir, AUTOFIX_BOT: BOT },
+          encoding: 'utf8',
+        },
+      );
+      rmSync(dir, { recursive: true, force: true });
+      return out.split('|');
+    };
+
+    const evaluated = [
+      evalMarker('2026-07-20T08:00:00Z', '2026-07-20T07:00:00Z', 1),
+      evalMarker('2026-07-20T09:00:00Z', '2026-07-20T08:30:00Z', 2),
+    ];
+    const [wmBefore, keyBefore, roundBefore] = run(evaluated);
+    expect(wmBefore).toBe('2026-07-20T08:30:00Z');
+    expect(keyBefore).toBe('none');
+    expect(roundBefore).toBe('2');
+
+    const [wmAfter, keyAfter, roundAfter] = run([
+      ...evaluated,
+      {
+        user: { login: BOT },
+        created_at: '2026-07-20T10:00:00Z',
+        body: '<!-- autofix-rearm -->',
+      },
+    ]);
+    expect(wmAfter).toBe('');
+    expect(keyAfter).toBe('2026-07-20T10:00:00Z');
+    expect(roundAfter).toBe('0');
+
+    const [wmNext] = run([
+      ...evaluated,
+      {
+        user: { login: BOT },
+        created_at: '2026-07-20T10:00:00Z',
+        body: '<!-- autofix-rearm -->',
+      },
+      evalMarker('2026-07-20T11:00:00Z', '2026-07-20T10:30:00Z', 1),
+    ]);
+    expect(wmNext).toBe('2026-07-20T10:30:00Z');
+
+    const [wmSpoof] = run([
+      ...evaluated,
+      {
+        user: { login: 'someone-else' },
+        created_at: '2026-07-20T10:00:00Z',
+        body: '<!-- autofix-rearm -->',
+      },
+    ]);
+    expect(wmSpoof).toBe('2026-07-20T08:30:00Z');
+  });
+
   it('routes @qwen-code /retry through the takeover command authorization', () => {
     // Prefilter must let the command reach route at all, and the marker must
     // be a CONTROL comment so the agent never sees it as feedback to address.
