@@ -97,8 +97,13 @@ function classifyApiError(render) {
     const status = Number(code);
     if (status === 429 || (status >= 500 && status <= 599)) return 'transient';
     if (status === 401 || status === 402 || status === 403) return 'auth';
-    // Any other code (400, 404, ...) is permanent UNLESS the message itself
-    // names an access/existence problem.
+    // 400 is always a malformed client request — it never self-heals by retry,
+    // regardless of what the message says. Route it terminal unconditionally
+    // so a 'does not exist' in the body (a tool name, a field name) cannot
+    // trigger the auth/access retry path.
+    if (status === 400) return '';
+    // Any other code (404, ...) is permanent UNLESS the message itself names
+    // an access/existence problem.
     return AUTH_API_ERROR.test(render) ? 'auth' : '';
   }
   // Code-less render: fall back to the keyword arms.
@@ -113,9 +118,13 @@ function classifyApiError(render) {
 // failure), but detection is best-effort rather than guaranteed.
 function recoverableApiError(output) {
   const wrapped = output.match(/\[API Error:[^\]\n]*\]/g) || [];
-  for (const render of wrapped.reverse()) {
-    const kind = classifyApiError(render);
-    if (kind) return { error: render, kind };
+  if (wrapped.length > 0) {
+    // Classify only the LAST render — it represents the terminal state of the
+    // run. An earlier transient error followed by a permanent one must not
+    // retry: the permanent error reproduces identically on every attempt.
+    const last = wrapped[wrapped.length - 1];
+    const kind = classifyApiError(last);
+    if (kind) return { error: last, kind };
   }
   // Some quota errors are never wrapped in [API Error: ...] (e.g. Qwen OAuth
   // quota returns early before formatting) - catch the known standalone form.

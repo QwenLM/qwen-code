@@ -3404,6 +3404,11 @@ describe('qwen-autofix workflow', () => {
     for (const render of [
       '[API Error: 400 Invalid value for max_tokens: must be <= 512]',
       '[API Error: 400 context length exceeded: 40000 > 32768]',
+      // A 400 whose message says 'does not exist' in a NON-access context
+      // (a tool name, a field name) must stay terminal — the AUTH_API_ERROR
+      // keyword 'does not exist' must not promote it to a retried auth error.
+      "[API Error: 400 Tool 'web_search' does not exist]",
+      "[API Error: 400 Field 'temperature' does not exist in schema]",
     ]) {
       withRunnerDir((dir) => {
         writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
@@ -3443,6 +3448,38 @@ describe('qwen-autofix workflow', () => {
         ).toBe(kind);
       });
     }
+  });
+
+  it('classifies only the last API error — a terminal error after a transient one stays terminal', () => {
+    // If the output tail contains a transient error (429) followed by a
+    // permanent one (400), the last error represents the terminal state of
+    // the run. Retrying on the earlier transient error would hit the same
+    // permanent error every time.
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "process.stdout.write('[API Error: 429 Too Many Requests]\\n');",
+        "process.stdout.write('[API Error: 400 Bad request: malformed]\\n');",
+        'process.exit(1);',
+      ]);
+      expect(runAddressReview(dir, stub).status).not.toBe(0);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
+    });
+    // The reverse order (permanent then transient) retries on the transient —
+    // the last error is the one that killed the run.
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "process.stdout.write('[API Error: 400 Bad request: malformed]\\n');",
+        "process.stdout.write('[API Error: 429 Too Many Requests]\\n');",
+        'process.exit(1);',
+      ]);
+      expect(runAddressReview(dir, stub).status).not.toBe(0);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(true);
+      expect(
+        readFileSync(join(dir, 'agent-api-error-kind'), 'utf8').trim(),
+      ).toBe('transient');
+    });
   });
 
   it('keeps the API-error headline valid UTF-8 when the byte cap splits a CJK render', () => {
