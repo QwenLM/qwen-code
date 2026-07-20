@@ -814,13 +814,20 @@ export class ContentGenerationPipeline {
     // In both cases we want the wire shape to actually disable thinking,
     // not just remove the effort knob — otherwise providers whose default
     // is "thinking enabled" (DeepSeek V4+, qwen3) keep paying thinking
-    // latency/cost. DashScope qwen3.8 is handled separately because the model
-    // rejects disabled thinking.
+    // latency/cost.
+    //
+    // Exception: `thinkingMandatory` marks models that reject
+    // `enable_thinking: false` with a 400 (e.g. qwen3.8-max-preview on
+    // DashScope Token Plan gateways — set by the preset, or by users via
+    // model generation config). For these, never emit the disable on the
+    // wire: a "disabled" shape is a guaranteed request failure, so the flag
+    // also overrides the config-level `reasoning: false` opt-out.
     const model = (context.model ?? '').toLowerCase();
     const isDashScope = DashScopeOpenAICompatibleProvider.isDashScopeProvider(
       this.contentGeneratorConfig,
     );
-    const requiresThinking = model === 'qwen3.8-max-preview' && isDashScope;
+    const thinkingMandatory =
+      this.contentGeneratorConfig.thinkingMandatory === true;
     const reasoningDisabled =
       request.config?.thinkingConfig?.includeThoughts === false ||
       this.contentGeneratorConfig.reasoning === false;
@@ -846,14 +853,12 @@ export class ContentGenerationPipeline {
       // config/models.ts, aliased to Qwen 3.6 Plus hybrid) — it doesn't
       // start with `qwen` but is the most common hybrid-thinking model
       // for first-time users, so it must be covered.
-      if (model.startsWith('qwen') || model === 'coder-model') {
+      if (
+        !thinkingMandatory &&
+        (model.startsWith('qwen') || model === 'coder-model')
+      ) {
         if (isDashScope) {
-          if (
-            !requiresThinking ||
-            this.contentGeneratorConfig.reasoning === false
-          ) {
-            typed['enable_thinking'] = false;
-          }
+          typed['enable_thinking'] = false;
         } else {
           // Non-DashScope OpenAI-compatible servers (vLLM, SGLang, ...) render
           // the model's chat template server-side and read the thinking switch
@@ -904,9 +909,13 @@ export class ContentGenerationPipeline {
       }
     }
 
-    if (requiresThinking) {
+    if (
+      thinkingMandatory &&
+      isDashScope &&
+      (model.startsWith('qwen') || model === 'coder-model')
+    ) {
       const typed = providerRequest as unknown as Record<string, unknown>;
-      // qwen3.8 rejects forced tool selection while thinking is enabled.
+      // DashScope rejects forced tool selection while thinking is enabled.
       if (
         typed['enable_thinking'] !== false &&
         typed['tool_choice'] === 'required'

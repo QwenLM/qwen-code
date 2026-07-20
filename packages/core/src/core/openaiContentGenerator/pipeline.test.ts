@@ -677,35 +677,59 @@ describe('ContentGenerationPipeline', () => {
 
     it.each([
       {
-        name: 'adapt Token Plan qwen3.8 side queries',
+        name: 'keep thinking for a thinkingMandatory model on Token Plan side queries',
         baseUrl:
           'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.8-max-preview',
+        extraBody: { enable_thinking: true },
+        thinkingMandatory: true,
         reasoning: undefined,
         includeThoughts: false,
         expectedThinking: true,
         expectedToolChoice: undefined,
       },
       {
-        name: 'apply the qwen3.8 constraint across DashScope endpoints',
+        name: 'apply thinkingMandatory to any qwen model on any DashScope endpoint',
         baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.9-turbo',
+        extraBody: { enable_thinking: true },
+        thinkingMandatory: true,
         reasoning: undefined,
         includeThoughts: false,
         expectedThinking: true,
         expectedToolChoice: undefined,
       },
       {
-        name: 'honor the config-level opt-out for Token Plan qwen3.8',
+        name: 'never emit the disable even under the reasoning opt-out',
         baseUrl:
           'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.8-max-preview',
+        extraBody: { enable_thinking: true },
+        thinkingMandatory: true,
         reasoning: false,
+        includeThoughts: false,
+        expectedThinking: true,
+        expectedToolChoice: undefined,
+      },
+      {
+        name: 'still force-disable hybrid models that only declare extra_body.enable_thinking',
+        baseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.7-max',
+        extraBody: { enable_thinking: true },
+        thinkingMandatory: undefined,
+        reasoning: undefined,
         includeThoughts: false,
         expectedThinking: false,
         expectedToolChoice: 'required',
       },
       {
-        name: 'allow automatic tool selection when Token Plan reasoning is on',
+        name: 'allow automatic tool selection when mandatory thinking stays on',
         baseUrl:
           'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.8-max-preview',
+        extraBody: { enable_thinking: true },
+        thinkingMandatory: true,
         reasoning: undefined,
         includeThoughts: true,
         expectedThinking: true,
@@ -715,7 +739,9 @@ describe('ContentGenerationPipeline', () => {
       mockContentGeneratorConfig = {
         ...mockContentGeneratorConfig,
         baseUrl: testCase.baseUrl,
-        model: 'qwen3.8-max-preview',
+        model: testCase.model,
+        extra_body: testCase.extraBody,
+        thinkingMandatory: testCase.thinkingMandatory,
         reasoning: testCase.reasoning,
       } as ContentGeneratorConfig;
       mockConfig = {
@@ -724,13 +750,14 @@ describe('ContentGenerationPipeline', () => {
       };
       pipeline = new ContentGenerationPipeline(mockConfig);
 
+      // Simulate the provider merging user extra_body last (see dashscope.ts).
       (mockProvider.buildRequest as Mock).mockImplementation((req) => ({
         ...req,
-        enable_thinking: true,
+        ...(testCase.extraBody ?? {}),
       }));
 
       const request: GenerateContentParameters = {
-        model: 'qwen3.8-max-preview',
+        model: testCase.model,
         contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
         config: {
           thinkingConfig: { includeThoughts: testCase.includeThoughts },
