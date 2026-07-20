@@ -18,6 +18,12 @@
 
 </div>
 
+> [!NOTE]
+> This fork contains the Agentix memory-context integration on the
+> `agent/agentix-memory` branch. See [AGENTIX_INTEGRATION.md](./AGENTIX_INTEGRATION.md)
+> for its scope, safety defaults, and validation. The upstream Qwen project is
+> available at [`QwenLM/qwen-code`](https://github.com/QwenLM/qwen-code).
+
 ## 🎉 News
 
 - **2026-04-15**: Qwen OAuth free tier has been discontinued. To continue using Qwen Code, switch to [Alibaba Cloud Coding Plan](https://modelstudio.console.alibabacloud.com/?tab=coding-plan#/efm/coding-plan-index), [OpenRouter](https://openrouter.ai), [Fireworks AI](https://app.fireworks.ai), or bring your own API key. Run `qwen auth` to configure.
