@@ -1379,7 +1379,11 @@ export function registerSessionRoutes(
       if (worktreeMeta) {
         try {
           // Compute allowed roots for the sessionCd containment check.
-          const createAllowedRoots = [workspaceCwd];
+          // Narrow to <root>/.qwen/worktrees (not the whole repo) so a
+          // symlink .qwen/worktrees/task -> <repo>/src is rejected.
+          const createAllowedRoots = [
+            path.join(workspaceCwd, '.qwen', 'worktrees'),
+          ];
           let createRepoTop: string | null = null;
           try {
             createRepoTop = await new GitWorktreeService(
@@ -1389,7 +1393,9 @@ export function registerSessionRoutes(
             // Not a git repo or getRepoTopLevel unavailable.
           }
           if (createRepoTop && createRepoTop !== workspaceCwd) {
-            createAllowedRoots.push(createRepoTop);
+            createAllowedRoots.push(
+              path.join(createRepoTop, '.qwen', 'worktrees'),
+            );
           }
           await runtime.bridge.changeSessionCwd(session.sessionId, {
             path: worktreeMeta.path,
@@ -1592,7 +1598,9 @@ export function registerSessionRoutes(
             // the repo top-level, not the workspace cwd. Try workspaceCwd
             // first, then fall back to the git repo top-level.
             let realTarget: string | undefined;
-            const candidateRoots = [workspaceCwd];
+            const candidateRoots = [
+              path.join(workspaceCwd, '.qwen', 'worktrees'),
+            ];
             try {
               realTarget = fs.realpathSync(sidecar.worktreePath);
               let repoTop: string | null = null;
@@ -1604,13 +1612,11 @@ export function registerSessionRoutes(
                 // Not a git repo or getRepoTopLevel unavailable.
               }
               if (repoTop && repoTop !== workspaceCwd) {
-                candidateRoots.push(repoTop);
+                candidateRoots.push(path.join(repoTop, '.qwen', 'worktrees'));
               }
               const contained = candidateRoots.some((root) => {
                 try {
-                  const realRoot = fs.realpathSync(
-                    path.join(root, '.qwen', 'worktrees'),
-                  );
+                  const realRoot = fs.realpathSync(root);
                   const rel = path.relative(realRoot, realTarget!);
                   return !rel.startsWith('..') && !path.isAbsolute(rel);
                 } catch {

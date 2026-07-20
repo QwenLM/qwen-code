@@ -7571,6 +7571,25 @@ class QwenAgent implements Agent {
         // Canonicalize path
         const canonicalPath = await fs.realpath(targetPath);
 
+        // Server-controlled containment check (worktree create/restore).
+        // Must run BEFORE the no-op check: a no-op cd to a directory
+        // outside the allowed roots must still be rejected.
+        const allowedRoots = params['allowedRoots'];
+        if (Array.isArray(allowedRoots) && allowedRoots.length > 0) {
+          const contained = allowedRoots.some((root: unknown) => {
+            if (typeof root !== 'string') return false;
+            const rel = path.relative(root, canonicalPath);
+            return !rel.startsWith('..') && !path.isAbsolute(rel);
+          });
+          if (!contained) {
+            throw new RequestError(
+              -32004,
+              `Path outside allowed roots: ${canonicalPath}`,
+              { errorKind: 'containment_violation', path: canonicalPath },
+            );
+          }
+        }
+
         // Noop check
         const previousCwd = config.getTargetDir();
         if (canonicalPath === previousCwd) {
@@ -7585,26 +7604,6 @@ class QwenAgent implements Agent {
               -32001,
               `Directory not trusted: ${canonicalPath}`,
               { errorKind: 'directory_not_trusted', path: canonicalPath },
-            );
-          }
-        }
-
-        // Server-controlled containment check (worktree create/restore).
-        // When allowedRoots is present, verify the canonical target is
-        // under one of the roots. This closes the TOCTOU between the
-        // route-level validation and this final relocation boundary.
-        const allowedRoots = params['allowedRoots'];
-        if (Array.isArray(allowedRoots) && allowedRoots.length > 0) {
-          const contained = allowedRoots.some((root: unknown) => {
-            if (typeof root !== 'string') return false;
-            const rel = path.relative(root, canonicalPath);
-            return !rel.startsWith('..') && !path.isAbsolute(rel);
-          });
-          if (!contained) {
-            throw new RequestError(
-              -32004,
-              `Path outside allowed roots: ${canonicalPath}`,
-              { errorKind: 'containment_violation', path: canonicalPath },
             );
           }
         }
