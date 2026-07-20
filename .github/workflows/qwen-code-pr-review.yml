@@ -795,7 +795,7 @@ jobs:
               return
             fi
             case "$RESULT_TEXT" in
-              *"[API Error"*)
+              *"[API Error: "[0-9]*)
                 if printf '%s' "$RESULT_TEXT" | grep -qiE 'quota.*(exhaust|exceed|limit|reset)'; then
                   OUTCOME='quota'
                   KIND='quota'

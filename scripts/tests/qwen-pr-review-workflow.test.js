@@ -79,6 +79,7 @@ function runScenario(scenario, { timeoutMinutes = 180 } = {}) {
         '  transient_persist) r success false "[API Error: 503 upstream overloaded]" ;;',
         '  quota) r success false "[API Error: 429 Your token-plan quota has been exhausted. The quota will reset at 07-19 13:17:00 UTC.]" ;;',
         '  quota_noreset) r success false "[API Error: 429 Your quota has been exhausted.]" ;;',
+        '  success_mentions_api_error) r success false "Review of [API Error: ...] handling — quota and rate.?limit keywords look correct." ;;',
         '  errresult) r error true "connection dropped mid-review" ;;',
         '  hardexit) exit 3 ;;',
         'esac',
@@ -155,6 +156,16 @@ describe('qwen pr review transient retry', () => {
     const r = runScenario('quota_noreset');
     expect(r.line).toContain('FAIL kind=[quota]');
     expect(r.line).not.toContain('reset at');
+    expect(r.attempts).toBe(1);
+  });
+
+  it('does NOT misclassify a successful review that mentions [API Error: ...] in its summary', () => {
+    // A review of PR #7247 (API error retry) quoted "[API Error: ...]" and
+    // "quota … limit" in its result text. The old pattern *"[API Error"*
+    // matched the prose and the quota grep hit "quota … limit", falsely
+    // reporting quota exhaustion on a successful review.
+    const r = runScenario('success_mentions_api_error');
+    expect(r.line).toContain('OK outcome=success');
     expect(r.attempts).toBe(1);
   });
 
