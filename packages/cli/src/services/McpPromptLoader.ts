@@ -293,16 +293,17 @@ export class McpPromptLoader implements ICommandLoader {
 
     // Include all args not filled by named args — both required and optional —
     // so positional input maps to optional params too (#7314).
-    const unfilledArgs = promptArgs.filter(
-      (arg) => !Object.hasOwn(promptInputs, arg.name),
-    );
+    // Sort required-first so positional args fill required params before
+    // optional ones regardless of declaration order.
+    const unfilledArgs = promptArgs
+      .filter((arg) => !Object.hasOwn(promptInputs, arg.name))
+      .sort((a, b) => (a.required === b.required ? 0 : a.required ? -1 : 1));
 
-    if (unfilledArgs.length === 1) {
+    if (unfilledArgs.length === 1 && positionalArgs.length > 0) {
       // If we have only one unfilled arg, we don't require quotes we just
-      // join all the given arguments together as if they were quoted.
+      // join all the given positional arguments together as if they were quoted.
       promptInputs[unfilledArgs[0].name] = positionalArgs.join(' ');
     } else if (positionalArgs.length > 0) {
-      // Map positional args to unfilled args in declaration order.
       for (
         let i = 0;
         i < unfilledArgs.length && i < positionalArgs.length;
@@ -312,14 +313,10 @@ export class McpPromptLoader implements ICommandLoader {
       }
     }
 
-    // Only error when the user provided positional args but not enough to
-    // cover all required params. When no positional args were given (e.g.
-    // the user is still typing named args), leave required args unfilled
-    // and let the MCP server decide.
     const missingRequired = promptArgs.filter(
       (arg) => arg.required && !Object.hasOwn(promptInputs, arg.name),
     );
-    if (missingRequired.length > 0 && positionalArgs.length > 0) {
+    if (missingRequired.length > 0) {
       const missingArgNames = missingRequired
         .map((arg) => `--${arg.name}`)
         .join(', ');

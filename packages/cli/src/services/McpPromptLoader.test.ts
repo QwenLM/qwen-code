@@ -139,6 +139,43 @@ describe('McpPromptLoader', () => {
       expect(result).toEqual({ name: 'alice' });
     });
 
+    it('should not assign empty string to optional params when no positional input exists', () => {
+      const loader = new McpPromptLoader(mockConfig);
+      const promptArgs: PromptArgument[] = [
+        { name: 'name', required: true },
+        { name: 'detail', required: false },
+      ];
+      const userArgs = '--name="alice"';
+      const result = loader.parseArgs(userArgs, promptArgs);
+      expect(result).toEqual({ name: 'alice' });
+    });
+
+    it('should error on missing required args even without positional input', () => {
+      const loader = new McpPromptLoader(mockConfig);
+      const promptArgs: PromptArgument[] = [
+        { name: 'name', required: true },
+        { name: 'age', required: true },
+        { name: 'species', required: true },
+      ];
+      const userArgs = '--name="alice"';
+      const result = loader.parseArgs(userArgs, promptArgs);
+      expect(result).toBeInstanceOf(Error);
+      expect((result as Error).message).toBe(
+        'Missing required argument(s): --age, --species',
+      );
+    });
+
+    it('should map positional args to required params before optional regardless of declaration order', () => {
+      const loader = new McpPromptLoader(mockConfig);
+      const promptArgs: PromptArgument[] = [
+        { name: 'detail', required: false },
+        { name: 'name', required: true },
+      ];
+      const userArgs = 'alice';
+      const result = loader.parseArgs(userArgs, promptArgs);
+      expect(result).toEqual({ name: 'alice' });
+    });
+
     it('should treat empty required named arguments as provided', () => {
       const loader = new McpPromptLoader(mockConfig);
       const promptArgs: PromptArgument[] = [
@@ -372,7 +409,24 @@ describe('McpPromptLoader', () => {
         ]);
       });
 
-      it('should suggest remaining arguments when some are present', async () => {
+      it('should suggest remaining optional arguments when all required are present', async () => {
+        const loader = new McpPromptLoader(mockConfigWithPrompts);
+        const commands = await loader.loadCommands(
+          new AbortController().signal,
+        );
+        const completion = commands[0].completion!;
+        const context = {
+          invocation: {
+            raw: '/find --name="test-name" --age="6" --species="tiger" ',
+            name: 'find',
+            args: '--name="test-name" --age="6" --species="tiger"',
+          },
+        } as CommandContext;
+        const suggestions = await completion(context, '');
+        expect(suggestions).toEqual(['--enclosure="', '--trail="']);
+      });
+
+      it('should suggest all arguments when required args are still missing', async () => {
         const loader = new McpPromptLoader(mockConfigWithPrompts);
         const commands = await loader.loadCommands(
           new AbortController().signal,
@@ -387,6 +441,8 @@ describe('McpPromptLoader', () => {
         } as CommandContext;
         const suggestions = await completion(context, '');
         expect(suggestions).toEqual([
+          '--name="',
+          '--age="',
           '--species="',
           '--enclosure="',
           '--trail="',
