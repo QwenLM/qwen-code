@@ -261,8 +261,10 @@ export async function readCronTasks(
 export async function writeCronTasks(
   projectRoot: string,
   tasks: DurableCronTask[],
+  options: { assertCanCommit?: () => void } = {},
 ): Promise<void> {
   const filePath = getCronFilePath(projectRoot);
+  options.assertCanCommit?.();
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   // noFollow: this file lives inside the project working tree, so a cloned
   // or hand-edited repo could pre-place it as a symlink. Following it would
@@ -270,7 +272,10 @@ export async function writeCronTasks(
   // same project-controlled-symlink threat the credential write sites guard
   // against (see the noFollow docs in atomicFileWrite.ts). Replace the link
   // with a regular file instead of writing through it.
-  await atomicWriteJSON(filePath, tasks, { noFollow: true });
+  await atomicWriteJSON(filePath, tasks, {
+    noFollow: true,
+    assertCanCommit: options.assertCanCommit,
+  });
 }
 
 /**
@@ -344,6 +349,7 @@ async function acquireUpdateLock(
 export async function updateCronTasks(
   projectRoot: string,
   mutate: (tasks: DurableCronTask[]) => DurableCronTask[],
+  options: { assertCanCommit?: () => void } = {},
 ): Promise<void> {
   const filePath = getCronFilePath(projectRoot);
   return getUpdateMutex(filePath).runExclusive(async () => {
@@ -352,7 +358,7 @@ export async function updateCronTasks(
       const tasks = await readCronTasks(projectRoot);
       const next = mutate(tasks);
       if (next !== tasks) {
-        await writeCronTasks(projectRoot, next);
+        await writeCronTasks(projectRoot, next, options);
       }
     } finally {
       await release();

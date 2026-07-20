@@ -22,10 +22,12 @@ import {
   WorkspaceSettingsPartialPersistError,
   type WorkspaceSettingsWrite,
 } from '../workspace-service/types.js';
+import { sendGenerationClosedError } from '../workspace-route-runtime.js';
 
 type PersistSettings = (
   workspace: string,
   writes: WorkspaceSettingsWrite[],
+  assertGenerationOpen?: () => void,
 ) => Promise<void>;
 
 const MAX_MODEL_FIELD_LENGTH = 1024;
@@ -40,6 +42,8 @@ function scopeToWire(scope: SettingScope): string {
 
 export interface WorkspaceModelsRouteDeps {
   boundWorkspace: string;
+  isWorkspaceTrusted?: () => boolean;
+  captureGenerationAssertion?: () => (() => void) | undefined;
   mutate: (opts?: { strict?: boolean }) => import('express').RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
   persistSettings: PersistSettings;
@@ -115,6 +119,9 @@ export function registerWorkspaceModelsRoutes(
     '/workspace/models',
     mutate({ strict: true }),
     async (req: Request, res: Response) => {
+      const assertGenerationOpen =
+        deps.captureGenerationAssertion?.() ?? (() => {});
+      assertGenerationOpen();
       const parsed = parseTarget(safeBody(req));
       if ('error' in parsed) {
         res.status(400).json({ error: parsed.error, code: parsed.code });
@@ -143,7 +150,10 @@ export function registerWorkspaceModelsRoutes(
 
       let writes: WorkspaceSettingsWrite[];
       try {
-        const loaded = loadSettings(boundWorkspace);
+        const loaded = loadSettings(boundWorkspace, {
+          skipLoadEnvironment: true,
+          skipWorkspaceSettings: deps.isWorkspaceTrusted?.() === false,
+        });
         const scope = getModelProvidersOwnerScope(loaded) ?? SettingScope.User;
         const modelProviders =
           loaded.forScope(scope).settings.modelProviders ?? {};
@@ -230,16 +240,22 @@ export function registerWorkspaceModelsRoutes(
         }
 
         try {
-          await persistSettings(boundWorkspace, writes);
+          if (deps.captureGenerationAssertion) {
+            await persistSettings(boundWorkspace, writes, assertGenerationOpen);
+          } else {
+            await persistSettings(boundWorkspace, writes);
+          }
         } catch (err) {
           // A multi-key write can fail after committing some keys — surface the
           // committed ones to live clients before reporting the failure.
           if (err instanceof WorkspaceSettingsPartialPersistError) {
+            assertGenerationOpen();
             for (const write of err.committedWrites) broadcastWrite(write);
           }
           throw err;
         }
       } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
         writeStderrLine(
           `qwen serve: DELETE /workspace/models error (authType=${parsed.authType}, modelId=${parsed.modelId}): ${
             err instanceof Error ? err.message : String(err)
@@ -262,6 +278,12 @@ export function registerWorkspaceModelsRoutes(
         return;
       }
 
+      try {
+        assertGenerationOpen();
+      } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
+        throw err;
+      }
       for (const write of writes) broadcastWrite(write);
 
       const clearedActiveModel = writes.some((w) => w.key === 'model.name');

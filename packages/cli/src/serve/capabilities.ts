@@ -168,6 +168,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Inspect bound workspace trust and request local operator action.
   // Remote clients cannot directly write trustedFolders.json.
   workspace_trust: { since: 'v1' },
+  // Workspace trust policy changes rebuild the affected runtime generation
+  // without restarting the daemon. V2 trust status exposes convergence.
+  workspace_trust_hot_reload: { since: 'v1' },
   // `POST /workspace/init` scaffolds an empty
   // `QWEN.md` (or whatever `getCurrentGeminiMdFilename()` returns) at
   // the bound workspace root. Body: `{force?: boolean}`. Default
@@ -428,6 +431,7 @@ export interface AdvertiseFeatureToggles {
    * QWEN_SERVE_ACP_HTTP=0). Workspace-qualified ACP is only advertised when on.
    */
   acpHttpEnabled?: boolean;
+  workspaceTrustHotReloadAvailable?: boolean;
 }
 
 /**
@@ -506,6 +510,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ],
   ['rate_limit', (toggles) => toggles.rateLimit === true],
   ['workspace_reload', (toggles) => toggles.reloadAvailable === true],
+  [
+    'workspace_trust_hot_reload',
+    (toggles) => toggles.workspaceTrustHotReloadAvailable === true,
+  ],
   ['channel_reload', (toggles) => toggles.channelReloadAvailable === true],
   ['channel_control', (toggles) => toggles.channelControlAvailable === true],
   [

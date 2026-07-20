@@ -94,6 +94,8 @@ export interface WriteContextFileOptions {
    * Ignored for `global` writes.
    */
   projectRoot: string;
+  /** Rejects a stale caller immediately before a filesystem mutation. */
+  assertCanCommit?: () => void;
 }
 
 export interface WriteContextFileResult {
@@ -197,9 +199,11 @@ async function runWrite(
     return { filePath, bytesWritten: 0, changed: false };
   }
 
+  options.assertCanCommit?.();
   await fs.mkdir(path.dirname(filePath), { recursive: true });
 
   if (options.mode === 'replace') {
+    options.assertCanCommit?.();
     await fs.writeFile(filePath, options.content, {
       encoding: 'utf8',
       mode: 0o644,
@@ -212,6 +216,7 @@ async function runWrite(
   }
 
   const next = await composeAppendedContent(filePath, options.content);
+  options.assertCanCommit?.();
   await fs.writeFile(filePath, next, { encoding: 'utf8', mode: 0o644 });
   return {
     filePath,

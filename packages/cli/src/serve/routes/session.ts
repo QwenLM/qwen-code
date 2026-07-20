@@ -86,7 +86,10 @@ import {
   GENERATION_HEARTBEAT_MS,
   writeGenerationSseChunk,
 } from '../generation-sse.js';
-import { requireSessionRuntime } from './session-runtime.js';
+import {
+  requirePrimarySessionRuntime,
+  requireSessionRuntime,
+} from './session-runtime.js';
 import {
   parseVirtualSubagentSessionId,
   type VirtualSubagentSessions,
@@ -94,6 +97,7 @@ import {
 import {
   resolveWorkspaceRuntimeFromParam,
   sendUntrustedWorkspaceResponse,
+  sendWorkspaceRuntimeUnavailable,
 } from '../workspace-route-runtime.js';
 import type {
   WorkspaceRegistry,
@@ -443,7 +447,7 @@ export function registerSessionRoutes(
     try {
       key = canonicalizeWorkspace(cwd);
     } catch (err) {
-      if (workspaceRegistry.list().length > 1 && 'cwd' in body) {
+      if (workspaceRegistry.listEntries().length > 1 && 'cwd' in body) {
         logSessionRoutingFailure('POST /session', 'workspace_mismatch', {
           requestedWorkspace: cwd,
         });
@@ -453,17 +457,26 @@ export function registerSessionRoutes(
       sendBridgeError(res, err, { route: 'POST /session' });
       return undefined;
     }
-    if (workspaceRegistry.list().length === 1) {
-      setDaemonTelemetryWorkspace(res, workspaceRegistry.primary.workspaceCwd);
+    if (workspaceRegistry.listEntries().length === 1) {
+      const runtime = requirePrimarySessionRuntime(workspaceRegistry, res);
+      if (!runtime) return undefined;
       return {
-        runtime: workspaceRegistry.primary,
-        workspaceCwd:
-          'cwd' in body ? key : workspaceRegistry.primary.workspaceCwd,
+        runtime,
+        workspaceCwd: 'cwd' in body ? key : runtime.workspaceCwd,
       };
     }
-    const runtime = workspaceRegistry.resolveWorkspaceCwd(
-      'cwd' in body ? key : undefined,
-    );
+    if (!('cwd' in body)) {
+      const runtime = requirePrimarySessionRuntime(workspaceRegistry, res);
+      return runtime
+        ? { runtime, workspaceCwd: runtime.workspaceCwd }
+        : undefined;
+    }
+    const entry = workspaceRegistry.getEntryByWorkspaceCwd(key);
+    if (entry && (entry.state !== 'active' || !entry.current)) {
+      sendWorkspaceRuntimeUnavailable(res, entry);
+      return undefined;
+    }
+    const runtime = workspaceRegistry.resolveWorkspaceCwd(key);
     if (!runtime) {
       logSessionRoutingFailure('POST /session', 'workspace_mismatch', {
         requestedWorkspace: key,
@@ -711,15 +724,15 @@ export function registerSessionRoutes(
   };
   const inFlightRestoreOwners = new Map<
     string,
-    { workspaceCwd: string; count: number }
+    { workspaceId: string; workspaceCwd: string; count: number }
   >();
 
   const sendSessionWorkspaceConflict = (
     res: Response,
     route: string,
     sessionId: string,
-    runtime: WorkspaceRuntime,
-    liveRuntime: WorkspaceRuntime,
+    runtime: Pick<WorkspaceRuntime, 'workspaceCwd' | 'workspaceId'>,
+    liveRuntime: Pick<WorkspaceRuntime, 'workspaceCwd' | 'workspaceId'>,
   ): void => {
     logSessionRoutingFailure(route, 'workspace_conflict', {
       sessionId,
@@ -747,16 +760,7 @@ export function registerSessionRoutes(
   ): (() => void) | undefined => {
     const existing = inFlightRestoreOwners.get(sessionId);
     if (existing && existing.workspaceCwd !== runtime.workspaceCwd) {
-      const existingRuntime =
-        workspaceRegistry.getByWorkspaceCwd(existing.workspaceCwd) ??
-        workspaceRegistry.primary;
-      sendSessionWorkspaceConflict(
-        res,
-        route,
-        sessionId,
-        runtime,
-        existingRuntime,
-      );
+      sendSessionWorkspaceConflict(res, route, sessionId, runtime, existing);
       return undefined;
     }
 
@@ -764,6 +768,7 @@ export function registerSessionRoutes(
       existing.count += 1;
     } else {
       inFlightRestoreOwners.set(sessionId, {
+        workspaceId: runtime.workspaceId,
         workspaceCwd: runtime.workspaceCwd,
         count: 1,
       });
@@ -895,6 +900,7 @@ export function registerSessionRoutes(
         const runtime = resolveLiveSessionRuntime(sessionId, res, route);
         if (!runtime) return;
         await archiveCoordinator.runSharedMany([sessionId], async () => {
+          runtime.generationGuard?.assertOpen();
           await handler(req, res, sessionId, runtime);
         });
       } catch (err) {
@@ -946,9 +952,9 @@ export function registerSessionRoutes(
       throw new SessionNotFoundError(sessionId);
     };
 
-    if (workspaceRegistry.list().length === 1) {
-      const runtime = workspaceRegistry.primary;
-      setDaemonTelemetryWorkspace(res, runtime.workspaceCwd);
+    if (workspaceRegistry.listEntries().length === 1) {
+      const runtime = requirePrimarySessionRuntime(workspaceRegistry, res);
+      if (!runtime) return undefined;
       if (await activeInRuntime(runtime)) {
         return runtime;
       }
@@ -1095,6 +1101,7 @@ export function registerSessionRoutes(
       req: Request,
       res: Response,
       sessionId: string,
+      runtime: WorkspaceRuntime,
     ) => Promise<void> | void,
   ): RequestHandler => {
     if (!isPrimaryOnlyLiveSessionRoute(route)) {
@@ -1120,7 +1127,8 @@ export function registerSessionRoutes(
       }
       try {
         await archiveCoordinator.runSharedMany([sessionId], async () => {
-          await handler(req, res, sessionId);
+          runtime.generationGuard?.assertOpen();
+          await handler(req, res, sessionId, runtime);
         });
       } catch (err) {
         sendBridgeError(res, err, { route, sessionId });
@@ -1254,6 +1262,29 @@ export function registerSessionRoutes(
         ...(source.sourceId !== undefined ? { sourceId: source.sourceId } : {}),
         ...(worktreeMeta ? { worktree: worktreeMeta } : {}),
       });
+      try {
+        runtime.generationGuard?.assertOpen();
+      } catch (error) {
+        if (!session.attached) {
+          try {
+            const killed = await runtime.bridge.killSession(session.sessionId, {
+              requireZeroAttaches: true,
+            });
+            if (killed) {
+              await new SessionService(runtime.workspaceCwd).removeSession(
+                session.sessionId,
+              );
+            }
+          } catch {
+            // Runtime disposal remains responsible for final containment.
+          }
+        } else {
+          await runtime.bridge
+            .detachClient(session.sessionId, session.clientId)
+            .catch(() => {});
+        }
+        throw error;
+      }
       // Client may have disconnected during the 1–3s spawn window. If
       // so, the response can't be delivered. The session is otherwise
       // orphaned (in `byId` / `defaultEntry` with no client knowing the
@@ -1536,6 +1567,7 @@ export function registerSessionRoutes(
             const metadata = await new SessionService(
               workspaceCwd,
             ).readCreationMetadata(sessionId);
+            runtime.generationGuard?.assertOpen();
             return action === 'load'
               ? await runtime.bridge.loadSession({
                   sessionId,
@@ -1555,6 +1587,20 @@ export function registerSessionRoutes(
                 });
           },
         );
+        try {
+          runtime.generationGuard?.assertOpen();
+        } catch (error) {
+          if (!session.attached) {
+            await runtime.bridge
+              .killSession(session.sessionId, { requireZeroAttaches: true })
+              .catch(() => {});
+          } else {
+            await runtime.bridge
+              .detachClient(session.sessionId, session.clientId)
+              .catch(() => {});
+          }
+          throw error;
+        }
         if (daemonLog) {
           daemonLog.info(
             `session ${action}${session.attached ? ' (attached)' : ''}`,
@@ -1814,7 +1860,7 @@ export function registerSessionRoutes(
     mutate(),
     withPrimaryOnlyMutableSession(
       'POST /session/:id/branch',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         const body = safeBody(req);
         let name =
           typeof body?.['name'] === 'string' ? body['name'] : undefined;
@@ -1827,22 +1873,38 @@ export function registerSessionRoutes(
         }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
-        const result = await bridge.branchSession(
+        const result = await runtime.bridge.branchSession(
           sessionId,
           { name },
           { clientId },
         );
+        try {
+          runtime.generationGuard?.assertOpen();
+        } catch (error) {
+          if (!result.attached) {
+            await runtime.bridge
+              .killSession(result.sessionId, { requireZeroAttaches: true })
+              .catch(() => {});
+          } else {
+            await runtime.bridge
+              .detachClient(result.sessionId, result.clientId)
+              .catch(() => {});
+          }
+          throw error;
+        }
         if (!res.writable) {
           if (!result.attached) {
-            bridge
+            runtime.bridge
               .killSession(result.sessionId, { requireZeroAttaches: true })
               .catch(() => {
                 // Best-effort cleanup; channel.exited will eventually reap.
               });
           } else {
-            bridge.detachClient(result.sessionId, result.clientId).catch(() => {
-              // Best-effort cleanup; channel.exited will eventually reap.
-            });
+            runtime.bridge
+              .detachClient(result.sessionId, result.clientId)
+              .catch(() => {
+                // Best-effort cleanup; channel.exited will eventually reap.
+              });
           }
           return;
         }
@@ -1856,7 +1918,7 @@ export function registerSessionRoutes(
     mutate(),
     withPrimaryOnlyMutableSession(
       'POST /session/:id/fork',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         const body = safeBody(req);
         const directive = body['directive'];
         if (typeof directive !== 'string' || directive.trim().length === 0) {
@@ -1868,11 +1930,12 @@ export function registerSessionRoutes(
         }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
-        const result = await bridge.launchSessionForkAgent(
+        const result = await runtime.bridge.launchSessionForkAgent(
           sessionId,
           directive,
           clientId !== undefined ? { clientId } : undefined,
         );
+        runtime.generationGuard?.assertOpen();
         res.status(202).json(result);
       },
     ),
@@ -1883,7 +1946,7 @@ export function registerSessionRoutes(
     mutate(),
     withPrimaryOnlyMutableSession(
       'POST /session/:id/cd',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         const body = safeBody(req);
         const targetPath = body['path'];
         if (
@@ -1899,11 +1962,12 @@ export function registerSessionRoutes(
         }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
-        const result = await bridge.changeSessionCwd(
+        const result = await runtime.bridge.changeSessionCwd(
           sessionId,
           { path: targetPath },
           clientId !== undefined ? { clientId } : undefined,
         );
+        runtime.generationGuard?.assertOpen();
         res.status(200).json(result);
       },
     ),

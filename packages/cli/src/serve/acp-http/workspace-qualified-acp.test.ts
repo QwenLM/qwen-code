@@ -84,6 +84,7 @@ function makeRuntime(input: {
     bridge: input.bridge,
     workspaceService: {} as unknown as DaemonWorkspaceService,
     routeFileSystemFactory: {
+      assertCanWrite: () => {},
       forRequest: () => ({}),
     } as unknown as WorkspaceFileSystemFactory,
     clientMcpSenderRegistry: new ClientMcpSenderRegistry(),
@@ -1109,6 +1110,39 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       200,
     );
     expect(handle!.getWorkspaceActivity('secondary-id').acpConnections).toBe(1);
+  });
+
+  it('does not recreate a disposed mount from a transitioning generation', async () => {
+    const entry = workspaceRegistry.getEntryByWorkspaceId('secondary-id')!;
+    expect(workspaceRegistry.beginReplacement(entry, 'policy-2')).toBe(true);
+    handle!.beginWorkspaceDrain('secondary-id');
+    handle!.disposeWorkspace('secondary-id');
+
+    const transitioning = await postInitialize('/workspaces/secondary-id/acp');
+    expect(transitioning.status).toBe(503);
+    expect(transitioning.headers.get('retry-after')).toBe('1');
+    await expect(transitioning.json()).resolves.toMatchObject({
+      code: 'workspace_runtime_unavailable',
+    });
+    expect(
+      handle!
+        .getSnapshot()
+        .mounts.some((mount) => mount.workspaceId === 'secondary-id'),
+    ).toBe(false);
+
+    const replacement = makeRuntime({
+      id: 'secondary-id',
+      cwd: '/ws-b',
+      primary: false,
+      trusted: true,
+      bridge: makeBridge(),
+    });
+    workspaceRegistry.activateReplacement(entry, replacement, 'policy-2');
+    handle!.cancelWorkspaceDrain('secondary-id');
+
+    expect((await postInitialize('/workspaces/secondary-id/acp')).status).toBe(
+      200,
+    );
   });
 
   it('returns a structured workspace_draining error on an existing WebSocket', async () => {

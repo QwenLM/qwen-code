@@ -15,6 +15,7 @@ import type { DaemonWorkspaceService } from '../workspace-service/index.js';
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
+  sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 
@@ -24,6 +25,8 @@ interface RegisterWorkspaceToolsRoutesDeps {
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
   sendBridgeError: SendBridgeError;
+  isWorkspaceTrusted?: () => boolean;
+  captureGenerationAssertion?: () => (() => void) | undefined;
   parseAndValidateClientId: (
     req: Request,
     res: Response,
@@ -48,6 +51,21 @@ export function registerWorkspaceToolsRoutes(
     '/workspace/tools/:name/enable',
     mutate({ strict: true }),
     async (req, res) => {
+      const assertGenerationOpen =
+        deps.captureGenerationAssertion?.() ?? (() => {});
+      try {
+        assertGenerationOpen();
+      } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
+        throw err;
+      }
+      if (deps.isWorkspaceTrusted?.() === false) {
+        res.status(403).json({
+          error: 'Workspace is not trusted.',
+          code: 'untrusted_workspace',
+        });
+        return;
+      }
       const rawToolName = req.params['name'];
       if (!rawToolName || typeof rawToolName !== 'string') {
         res.status(400).json({

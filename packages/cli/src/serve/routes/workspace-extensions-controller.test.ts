@@ -152,6 +152,50 @@ describe('createExtensionsController', () => {
     await Promise.all([firstOperationFinished, secondOperationFinished]);
   });
 
+  it('does not commit after the captured runtime generation closes', async () => {
+    let generationOpen = true;
+    const controller = createExtensionsController({
+      boundWorkspace: '/work/bound',
+      bridge: {} as AcpSessionBridge,
+      workspace: {} as DaemonWorkspaceService,
+      captureGenerationAssertion: () => () => {
+        if (!generationOpen) throw new Error('generation closed');
+      },
+    });
+    const manager = {
+      refreshCache: vi.fn(async () => undefined),
+    } as unknown as ExtensionManager;
+    const responseBody = vi.fn();
+    const response = {
+      status: vi.fn().mockReturnThis(),
+      location: vi.fn().mockReturnThis(),
+      set: vi.fn().mockReturnThis(),
+      json: responseBody,
+    } as unknown as Response;
+    const commit = vi.fn(async () => ({ generation: 1 }));
+
+    controller.runQueuedExtensionMutation(
+      'install',
+      { name: 'demo' },
+      response,
+      async (_extensionManager, _signal, context) => {
+        await context!.commit(commit);
+        return { status: 'installed', name: 'demo' };
+      },
+      { manager, skipRefresh: true },
+    );
+    generationOpen = false;
+    const operationId = responseBody.mock.calls[0]?.[0].operationId as string;
+
+    await vi.waitFor(() =>
+      expect(controller.getOperation(operationId)).toMatchObject({
+        status: 'failed',
+        error: 'generation closed',
+      }),
+    );
+    expect(commit).not.toHaveBeenCalled();
+  });
+
   it('starts the status cache lifetime after a slow refresh completes', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);

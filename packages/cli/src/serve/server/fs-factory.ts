@@ -13,6 +13,7 @@ import {
   type WorkspaceFileSystemFactory,
 } from '../fs/index.js';
 import type { PathMutexRegistry } from '../fs/path-mutex-registry.js';
+import type { WorkspaceGenerationGuard } from '../workspace-registry.js';
 import { isWithinRoot } from '../../config/path-comparison.js';
 
 const IDE_WORKSPACE_PATH_ENV_VAR = 'QWEN_CODE_IDE_WORKSPACE_PATH';
@@ -66,6 +67,7 @@ export function resolveBridgeFsFactory(input: {
   emit?: (event: BridgeEvent) => void;
   customIgnoreFiles?: string[];
   pathLocks?: PathMutexRegistry;
+  generationGuard?: Pick<WorkspaceGenerationGuard, 'assertOpen'>;
 }): WorkspaceFileSystemFactory {
   if (input.injected) return input.injected;
   return createWorkspaceFileSystemFactory({
@@ -73,6 +75,7 @@ export function resolveBridgeFsFactory(input: {
     trusted: input.trusted,
     emit: input.emit ?? createDefaultFsAuditEmit(),
     pathLocks: input.pathLocks,
+    generationGuard: input.generationGuard,
     ...(input.customIgnoreFiles !== undefined
       ? { customIgnoreFiles: input.customIgnoreFiles }
       : {}),

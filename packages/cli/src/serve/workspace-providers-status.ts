@@ -44,6 +44,7 @@ export type WorkspaceProvidersStatusProvider = (
 export interface WorkspaceProvidersStatusProviderOptions {
   argv?: Partial<CliGenerationConfigInputs['argv']>;
   env?: Record<string, string | undefined>;
+  workspaceTrusted?: boolean;
 }
 
 export function createWorkspaceProvidersStatusProvider(
@@ -61,7 +62,16 @@ function buildWorkspaceProvidersStatus(
   try {
     const loaded = loadSettings(
       workspaceCwd,
-      options.env ? { skipLoadEnvironment: true } : true,
+      options.env
+        ? {
+            skipLoadEnvironment: true,
+            skipWorkspaceSettings: options.workspaceTrusted === false,
+          }
+        : {
+            consumeCorruptionEnvVars: true,
+            skipLoadEnvironment: options.workspaceTrusted === false,
+            skipWorkspaceSettings: options.workspaceTrusted === false,
+          },
     );
     const settings = loaded.merged;
     const env = options.env ?? snapshotProcessEnv();

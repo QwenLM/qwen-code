@@ -65,6 +65,12 @@ import {
   WorkspaceRememberTaskLane,
 } from '../workspace-remember.js';
 import {
+  createSingleWorkspaceRegistry,
+  createWorkspaceGenerationGuard,
+  type WorkspaceGenerationGuard,
+  type WorkspaceRuntime,
+} from '../workspace-registry.js';
+import {
   MAX_TRUST_REASON_LENGTH,
   MAX_VOICE_MODEL_LENGTH,
 } from '../validation-limits.js';
@@ -899,6 +905,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     fsFactory?: WorkspaceFileSystemFactory;
     boundWorkspace?: string;
     daemonEnv?: Readonly<NodeJS.ProcessEnv>;
+    primaryTrusted?: boolean;
+    generationGuard?: WorkspaceGenerationGuard;
   }): Promise<void> {
     server.closeAllConnections?.();
     await new Promise<void>((r) => server.close(() => r()));
@@ -906,11 +914,29 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const boundWorkspace = opts.boundWorkspace ?? '/ws';
     const app = express();
     app.use(express.json());
+    const workspaceRegistry = opts.generationGuard
+      ? createSingleWorkspaceRegistry({
+          workspaceId: 'primary',
+          workspaceCwd: boundWorkspace,
+          primary: true,
+          trusted: opts.primaryTrusted ?? true,
+          env: { mode: 'parent-process', overlayKeys: [] },
+          bridge: bridge as unknown as WorkspaceRuntime['bridge'],
+          workspaceService: fakeWorkspace,
+          routeFileSystemFactory: (opts.fsFactory ??
+            {}) as WorkspaceFileSystemFactory,
+          clientMcpSenderRegistry:
+            {} as WorkspaceRuntime['clientMcpSenderRegistry'],
+          generationGuard: opts.generationGuard,
+        })
+      : undefined;
     mountAcpHttp(app, bridge as unknown as HttpAcpBridge, {
       boundWorkspace,
       workspace: fakeWorkspace,
       enabled: true,
       daemonEnv: opts.daemonEnv,
+      isPrimaryWorkspaceTrusted: () => opts.primaryTrusted ?? true,
+      workspaceRegistry,
       fsFactory: opts.fsFactory,
       sessionShellCommandEnabled: opts.sessionShellCommandEnabled,
       workspaceRememberLane: new WorkspaceRememberTaskLane(
@@ -6740,6 +6766,80 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   });
 
   describe('workspace methods', () => {
+    it('rejects trusted-only methods after primary trust is revoked', async () => {
+      await restartServer({ primaryTrusted: false });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 59,
+        method: '_qwen/workspace/memory/write',
+        params: { content: 'blocked' },
+      });
+
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        error: {
+          data: {
+            errorKind: 'untrusted_workspace',
+            httpStatus: 403,
+          },
+        },
+      });
+    });
+
+    it('rejects a sensitive response when its runtime generation closes in flight', async () => {
+      const generationGuard = createWorkspaceGenerationGuard();
+      let markStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      let releaseRead!: () => void;
+      const readReleased = new Promise<void>((resolve) => {
+        releaseRead = resolve;
+      });
+      const statusSpy = vi
+        .spyOn(fakeWorkspace, 'getWorkspaceMcpStatus')
+        .mockImplementationOnce(async () => {
+          markStarted();
+          await readReleased;
+          return {
+            v: 1,
+            workspaceCwd: '/ws',
+            initialized: false,
+            servers: [],
+          };
+        });
+      await restartServer({ generationGuard });
+      const connId = await initialize();
+      const stream = await openStream(connId);
+      const reader = frameReader(stream);
+
+      const posting = post(connId, {
+        jsonrpc: '2.0',
+        id: 591,
+        method: '_qwen/workspace/mcp',
+        params: {},
+      });
+      await started;
+      generationGuard.close();
+      releaseRead();
+      await posting;
+
+      expect(await reader.next()).toMatchObject({
+        id: 591,
+        error: {
+          data: {
+            errorKind: 'workspace_runtime_unavailable',
+            httpStatus: 503,
+          },
+        },
+      });
+      reader.close();
+      statusSpy.mockRestore();
+    });
+
     it('_qwen/workspace/tools returns tools', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);

@@ -13,6 +13,7 @@ import request from 'supertest';
 import { registerWorkspaceModelsRoutes } from './workspace-models.js';
 import { loadSettings } from '../../config/settings.js';
 import { WorkspaceSettingsPartialPersistError } from '../workspace-service/types.js';
+import { WorkspaceGenerationClosedError } from '../workspace-registry.js';
 
 let home: string;
 let workspace: string;
@@ -50,6 +51,8 @@ function makeApp(
       req: express.Request,
       res: express.Response,
     ) => string | undefined | null;
+    captureGenerationAssertion?: () => (() => void) | undefined;
+    afterPersist?: () => void;
   } = {},
 ) {
   const app = express();
@@ -67,6 +70,7 @@ function makeApp(
   const persistSettings = vi.fn(async (ws: string, writes) => {
     const fresh = loadSettings(ws);
     fresh.setValues(writes);
+    overrides.afterPersist?.();
   });
   registerWorkspaceModelsRoutes(app, {
     boundWorkspace: workspace,
@@ -77,6 +81,7 @@ function makeApp(
     broadcastSettingsChanged,
     parseAndValidateClientId:
       overrides.parseAndValidateClientId ?? (() => undefined),
+    captureGenerationAssertion: overrides.captureGenerationAssertion,
   });
   return { app, mutate, persistSettings, broadcastSettingsChanged };
 }
@@ -96,6 +101,27 @@ afterEach(() => {
 });
 
 describe('DELETE /workspace/models', () => {
+  it('returns 503 without broadcasting when the runtime closes after persist', async () => {
+    writeUserSettings({ modelProviders: { openai: [{ id: 'gpt-4o' }] } });
+    let generationOpen = true;
+    const { app, broadcastSettingsChanged } = makeApp({
+      captureGenerationAssertion: () => () => {
+        if (!generationOpen) throw new WorkspaceGenerationClosedError();
+      },
+      afterPersist: () => {
+        generationOpen = false;
+      },
+    });
+
+    const res = await request(app)
+      .delete('/workspace/models')
+      .send({ authType: 'openai', modelId: 'gpt-4o' });
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
+    expect(broadcastSettingsChanged).not.toHaveBeenCalled();
+  });
+
   it('removes a model from ~/.qwen/settings.json and keeps siblings', async () => {
     writeUserSettings({
       modelProviders: {

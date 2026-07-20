@@ -55,6 +55,7 @@ import {
   WorkspaceSkillNotFoundError,
   WorkspaceSkillNotToggleableError,
 } from '../workspace-service/types.js';
+import { sendGenerationClosedError } from '../workspace-route-runtime.js';
 
 export type BridgeErrorContext = {
   route?: string;
@@ -168,6 +169,7 @@ export function sendBridgeError(
   ctx?: BridgeErrorContext,
   daemonLog?: DaemonLogger,
 ): void {
+  if (sendGenerationClosedError(res, err)) return;
   if (err instanceof SessionWriterError) {
     res.status(err.httpStatus).json({
       error: err.message,

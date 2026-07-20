@@ -71,6 +71,7 @@ function encodeWav(pcm: Uint8Array): Uint8Array {
 export interface VoiceWsDeps {
   loadContext?: (workspaceCwd: string) => DaemonVoiceContext;
   env?: Readonly<Record<string, string | undefined>>;
+  isWorkspaceTrusted?: () => boolean;
   openStream?: (
     ctx: DaemonVoiceContext,
     callbacks: VoiceStreamCallbacks,
@@ -137,10 +138,19 @@ function errMessage(error: unknown): string {
 }
 
 function voiceLeaseCloseReason(signal: AbortSignal): string {
-  return signal.reason instanceof VoiceLeaseAbortError &&
-    signal.reason.kind === 'daemon_shutdown'
-    ? 'Server shutting down'
-    : 'Workspace removed';
+  if (!(signal.reason instanceof VoiceLeaseAbortError)) {
+    return 'Workspace removed';
+  }
+  switch (signal.reason.kind) {
+    case 'daemon_shutdown':
+      return 'Server shutting down';
+    case 'trust_reconfigured':
+      return 'Workspace trust reconfigured';
+    case 'workspace_removed':
+      return 'Workspace removed';
+    default:
+      return signal.reason.message;
+  }
 }
 
 function voiceConfigErrorMessage(error: unknown): string {
@@ -201,7 +211,10 @@ export function createVoiceWsConnectionHandler(
   const loadContext =
     deps.loadContext ??
     ((workspaceCwd: string) =>
-      loadDaemonVoiceContext(workspaceCwd, { env: deps.env }));
+      loadDaemonVoiceContext(workspaceCwd, {
+        env: deps.env,
+        workspaceTrusted: deps.isWorkspaceTrusted?.() ?? true,
+      }));
   const openStream = deps.openStream ?? defaultOpenStream;
   const transcribe = deps.transcribe ?? defaultTranscribe;
   // Kept only for direct embeds that have not supplied the daemon-wide

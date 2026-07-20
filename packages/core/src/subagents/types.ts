@@ -237,6 +237,9 @@ export interface CreateSubagentOptions {
 
   /** Custom directory path (overrides default level-based path) */
   customPath?: string;
+
+  /** Reject the mutation immediately before writing the agent file. */
+  assertCanCommit?: () => void;
 }
 
 /**

@@ -173,6 +173,8 @@ import type {
   DaemonWorkspaceTrustChangeRequest,
   DaemonWorkspaceTrustChangeResult,
   DaemonWorkspaceTrustStatus,
+  DaemonWorkspaceTrustStatusResponse,
+  DaemonWorkspaceTrustStatusV2,
   DaemonUnarchiveSessionsResult,
 } from './types.js';
 import { parseSseStream } from './sse.js';
@@ -3091,9 +3093,19 @@ export class DaemonClient {
 
   async workspaceTrust(opts?: {
     clientId?: string;
-  }): Promise<DaemonWorkspaceTrustStatus> {
+    statusVersion?: 1;
+  }): Promise<DaemonWorkspaceTrustStatus>;
+  async workspaceTrust(opts: {
+    clientId?: string;
+    statusVersion: 2;
+  }): Promise<DaemonWorkspaceTrustStatus | DaemonWorkspaceTrustStatusV2>;
+  async workspaceTrust(opts?: {
+    clientId?: string;
+    statusVersion?: 1 | 2;
+  }): Promise<DaemonWorkspaceTrustStatusResponse> {
+    const query = opts?.statusVersion === 2 ? '?statusVersion=2' : '';
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/trust`,
+      `${this.baseUrl}/workspace/trust${query}`,
       {
         method: 'GET',
         headers: this.headers({}, opts?.clientId),
@@ -3102,7 +3114,7 @@ export class DaemonClient {
         if (!res.ok) {
           throw await this.failOnError(res, 'GET /workspace/trust');
         }
-        return (await res.json()) as DaemonWorkspaceTrustStatus;
+        return (await res.json()) as DaemonWorkspaceTrustStatusResponse;
       },
     );
   }
@@ -4869,9 +4881,18 @@ export class WorkspaceDaemonClient {
 
   workspaceTrust(opts?: {
     clientId?: string;
-  }): Promise<DaemonWorkspaceTrustStatus> {
-    return this.get(
-      '/trust',
+    statusVersion?: 1;
+  }): Promise<DaemonWorkspaceTrustStatus>;
+  workspaceTrust(opts: {
+    clientId?: string;
+    statusVersion: 2;
+  }): Promise<DaemonWorkspaceTrustStatus | DaemonWorkspaceTrustStatusV2>;
+  workspaceTrust(opts?: {
+    clientId?: string;
+    statusVersion?: 1 | 2;
+  }): Promise<DaemonWorkspaceTrustStatusResponse> {
+    return this.get<DaemonWorkspaceTrustStatusResponse>(
+      opts?.statusVersion === 2 ? '/trust?statusVersion=2' : '/trust',
       'GET /workspaces/:workspace/trust',
       opts?.clientId,
     );

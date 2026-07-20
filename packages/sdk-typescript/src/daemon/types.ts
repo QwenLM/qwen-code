@@ -2409,6 +2409,42 @@ export interface DaemonWorkspaceTrustStatus {
   requiresDaemonRestartForChanges: true;
 }
 
+export type DaemonWorkspaceTrustReconciliationState =
+  | 'stable'
+  | 'applying'
+  | 'failed';
+
+export interface DaemonWorkspaceTrustStatusV2 {
+  v: 2;
+  workspaceCwd: string;
+  folderTrustEnabled: boolean;
+  configured: {
+    state: DaemonWorkspaceTrustState | 'error';
+    source: DaemonWorkspaceTrustSource;
+    explicitTrustLevel: DaemonWorkspaceTrustLevel | null;
+  };
+  effective:
+    | { state: 'trusted'; trusted: true }
+    | { state: 'untrusted'; trusted: false }
+    | { state: 'unavailable'; trusted: null };
+  reconciliation: {
+    state: DaemonWorkspaceTrustReconciliationState;
+    revision: string;
+    appliedRevision: string | null;
+    error?: {
+      code:
+        | 'trust_policy_invalid'
+        | 'trust_policy_unreadable'
+        | 'runtime_rebuild_failed';
+    };
+  };
+  requiresDaemonRestartForChanges: false;
+}
+
+export type DaemonWorkspaceTrustStatusResponse =
+  | DaemonWorkspaceTrustStatus
+  | DaemonWorkspaceTrustStatusV2;
+
 export type DaemonWorkspaceTrustDesiredState = 'trusted' | 'untrusted';
 
 export interface DaemonWorkspaceTrustChangeRequest {

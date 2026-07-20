@@ -86,6 +86,35 @@ describe('loadDaemonVoiceContext', () => {
     );
     expect(mocks.loadSettings).toHaveBeenCalledWith('/work/voice', {
       skipLoadEnvironment: true,
+      skipWorkspaceSettings: false,
+    });
+  });
+
+  it('skips workspace settings when the runtime is untrusted', async () => {
+    mocks.loadSettings.mockReturnValue({
+      merged: {
+        voiceModel: 'qwen3-asr-flash',
+        modelProviders: {},
+      },
+    });
+    mocks.getAuthTypeFromEnv.mockReturnValue(AuthType.USE_OPENAI);
+    mocks.resolveCliGenerationConfig.mockReturnValue({
+      generationConfig: {},
+      sources: {},
+    });
+    mocks.isStreamingVoiceModel.mockReturnValue(false);
+
+    const { loadDaemonVoiceContext } = await import(
+      './resolve-voice-config.js'
+    );
+    loadDaemonVoiceContext('/work/voice', {
+      env: {},
+      workspaceTrusted: false,
+    });
+
+    expect(mocks.loadSettings).toHaveBeenCalledWith('/work/voice', {
+      skipLoadEnvironment: true,
+      skipWorkspaceSettings: true,
     });
   });
 });

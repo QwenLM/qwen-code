@@ -16,10 +16,14 @@ import {
   type SetupGithubFileOps,
   type SetupGithubResult,
 } from '../../services/setup-github.js';
-import { loadSettings, type Settings } from '../../config/settings.js';
+import { loadSettings } from '../../config/settings.js';
 import { getWorkspaceTrustStatus } from '../../config/trustedFolders.js';
 import { applyReadHeaders } from './workspace-file-read.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  isGenerationClosedError,
+  sendGenerationClosedError,
+} from '../workspace-route-runtime.js';
 
 const ROUTE = 'POST /workspace/setup-github';
 
@@ -30,6 +34,8 @@ interface RegisterDeps {
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   parseClientId: (req: Request, res: Response) => string | undefined | null;
   safeBody: (req: Request) => Record<string, unknown>;
+  isWorkspaceTrusted?: () => boolean;
+  captureGenerationAssertion?: () => (() => void) | undefined;
 }
 
 export function registerWorkspaceSetupGithubRoutes(
@@ -68,13 +74,27 @@ async function handleSetupGithub(
   if (originatorClientId === null) return;
 
   try {
+    const assertGenerationOpen = deps.captureGenerationAssertion?.();
+    assertGenerationOpen?.();
+    const fileOps = createSetupGithubFileOps(
+      factory,
+      ROUTE,
+      originatorClientId,
+      assertGenerationOpen,
+    );
+    fileOps.assertCanWrite();
     const result = await setupGithub({
       cwd: deps.boundWorkspace,
       workspaceRoot: deps.boundWorkspace,
-      proxy: resolveSetupGithubProxy(deps.boundWorkspace, deps.env),
+      proxy: resolveSetupGithubProxy(
+        deps.boundWorkspace,
+        deps.env,
+        deps.isWorkspaceTrusted?.(),
+      ),
       abortSignal: requestAbortSignal(req, res),
-      fileOps: createSetupGithubFileOps(factory, ROUTE, originatorClientId),
+      fileOps,
     });
+    assertGenerationOpen?.();
     deps.bridge.publishWorkspaceEvent({
       type: 'github_setup_completed',
       data: setupGithubEventData(result),
@@ -127,30 +147,36 @@ export function createSetupGithubFileOps(
   factory: WorkspaceFileSystemFactory,
   route: string,
   originatorClientId: string | undefined,
-): SetupGithubFileOps {
+  assertGenerationOpen?: () => void,
+): SetupGithubFileOps & { assertCanWrite(): void } {
   const fs = factory.forRequest({
     route,
     ...(originatorClientId ? { originatorClientId } : {}),
   });
+  const assertCanWrite = (): void => {
+    assertGenerationOpen?.();
+    try {
+      factory.assertCanWrite();
+    } catch (error) {
+      if (isGenerationClosedError(error)) throw error;
+      throw new SetupGithubError(
+        'github_setup_untrusted_workspace',
+        error instanceof Error
+          ? error.message
+          : 'workspace is not trusted; write operations are forbidden',
+        403,
+      );
+    }
+  };
   return {
-    assertCanWrite(): void {
-      try {
-        factory.assertCanWrite();
-      } catch (error) {
-        throw new SetupGithubError(
-          'github_setup_untrusted_workspace',
-          error instanceof Error
-            ? error.message
-            : 'workspace is not trusted; write operations are forbidden',
-          403,
-        );
-      }
-    },
+    assertCanWrite,
     async ensureWorkflowDirectory(gitRepoRoot: string): Promise<void> {
-      await ensureDirectoryWithoutSymlink(gitRepoRoot, [
-        '.github',
-        'workflows',
-      ]);
+      assertCanWrite();
+      await ensureDirectoryWithoutSymlink(
+        gitRepoRoot,
+        ['.github', 'workflows'],
+        assertCanWrite,
+      );
     },
     async writeTextFile(
       _gitRepoRoot: string,
@@ -182,6 +208,7 @@ export function createSetupGithubFileOps(
 async function ensureDirectoryWithoutSymlink(
   root: string,
   segments: string[],
+  assertCanWrite?: () => void,
 ): Promise<void> {
   await assertDirectoryWithoutSymlink(root, 'Repository root');
   let current = root;
@@ -210,6 +237,7 @@ async function ensureDirectoryWithoutSymlink(
       if (error instanceof SetupGithubError) throw error;
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       try {
+        assertCanWrite?.();
         await fsp.mkdir(current, { mode: 0o755 });
       } catch (mkdirError) {
         if ((mkdirError as NodeJS.ErrnoException).code !== 'EEXIST') {
@@ -297,6 +325,7 @@ function sendSetupGithubError(
   boundWorkspace: string,
 ): void {
   applyReadHeaders(res);
+  if (sendGenerationClosedError(res, error)) return;
   if (error instanceof SetupGithubError) {
     res.status(error.status).json({
       error: sanitizeSetupGithubMessage(error.message, boundWorkspace),
@@ -310,6 +339,14 @@ function sendSetupGithubError(
               : null,
           }
         : {}),
+    });
+    return;
+  }
+  if (isFsError(error) && error.kind === 'untrusted_workspace') {
+    res.status(403).json({
+      error: 'Workspace is not trusted.',
+      code: 'untrusted_workspace',
+      status: 403,
     });
     return;
   }
@@ -341,18 +378,21 @@ export function setupGithubEventData(
 export function resolveSetupGithubProxy(
   boundWorkspace: string,
   env: Readonly<NodeJS.ProcessEnv>,
+  workspaceTrusted?: boolean,
 ): string | undefined {
-  const settings = loadSettings(boundWorkspace, { skipLoadEnvironment: true });
-  const trustState = getWorkspaceTrustStatus(
-    settingsForSetupGithubTrust(settings),
-    boundWorkspace,
-  ).effective.state;
-  const settingsProxy =
-    trustState === 'trusted'
-      ? settings.merged.proxy
-      : settings.user.settings.proxy ||
-        settings.system.settings.proxy ||
-        settings.systemDefaults.settings.proxy;
+  const settings = loadSettings(boundWorkspace, {
+    skipLoadEnvironment: true,
+    skipWorkspaceSettings: workspaceTrusted === false,
+  });
+  const trusted =
+    workspaceTrusted ??
+    getWorkspaceTrustStatus(settings.merged, boundWorkspace).effective.state ===
+      'trusted';
+  const settingsProxy = trusted
+    ? settings.merged.proxy
+    : settings.user.settings.proxy ||
+      settings.system.settings.proxy ||
+      settings.systemDefaults.settings.proxy;
   return (
     settingsProxy ||
     env['HTTPS_PROXY'] ||
@@ -360,22 +400,6 @@ export function resolveSetupGithubProxy(
     env['HTTP_PROXY'] ||
     env['http_proxy']
   );
-}
-
-function settingsForSetupGithubTrust(
-  settings: ReturnType<typeof loadSettings>,
-): Settings {
-  const userFolderTrust = settings.user.settings.security?.folderTrust;
-  const systemFolderTrust = settings.system.settings.security?.folderTrust;
-  if (!userFolderTrust && !systemFolderTrust) return {};
-  return {
-    security: {
-      folderTrust: {
-        ...systemFolderTrust,
-        ...userFolderTrust,
-      },
-    },
-  };
 }
 
 function requestAbortSignal(req: Request, res: Response): AbortSignal {

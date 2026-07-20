@@ -109,6 +109,37 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     ]);
   });
 
+  it('does not read workspace-level disabled skills when untrusted', async () => {
+    vi.spyOn(SkillManager.prototype, 'listSkills').mockResolvedValueOnce([
+      {
+        name: 'project-skill',
+        description: 'Project skill',
+        body: 'Visible only when trusted',
+        filePath: '/skills/project-skill/SKILL.md',
+        level: 'project',
+      },
+    ]);
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-untrusted-'),
+    );
+    await fsp.mkdir(path.join(workspace, '.qwen'), { recursive: true });
+    await fsp.writeFile(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ skills: { disabled: ['project-skill'] } }),
+    );
+    const provider = createWorkspaceSkillsStatusProvider({
+      workspaceTrusted: false,
+    });
+
+    const status = await provider(workspace);
+
+    expect(status.skills[0]).toMatchObject({
+      name: 'project-skill',
+      status: 'ok',
+    });
+    await fsp.rm(workspace, { recursive: true, force: true });
+  });
+
   it('reuses one SkillManager per workspace across calls', async () => {
     const listSpy = vi.spyOn(SkillManager.prototype, 'listSkills');
     const provider = createWorkspaceSkillsStatusProvider();

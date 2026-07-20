@@ -26,6 +26,7 @@ import { safeLogValue } from './server/request-helpers.js';
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
+  sendGenerationClosedError,
 } from './workspace-route-runtime.js';
 import type {
   WorkspaceRegistry,
@@ -106,6 +107,8 @@ export interface WorkspaceAgentsRouteDeps {
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   parseClientId: (req: Request, res: Response) => string | undefined | null;
   safeBody: (req: Request) => Record<string, unknown>;
+  isWorkspaceTrusted?: () => boolean;
+  captureGenerationAssertion?: () => (() => void) | undefined;
 }
 
 export interface WorkspaceQualifiedAgentsRouteDeps {
@@ -115,6 +118,32 @@ export interface WorkspaceQualifiedAgentsRouteDeps {
   safeBody: (req: Request) => Record<string, unknown>;
 }
 
+function captureTrustedGeneration(
+  deps: WorkspaceAgentsRouteDeps,
+  res: Response,
+): (() => void) | null {
+  const assertGenerationOpen =
+    deps.captureGenerationAssertion?.() ?? (() => {});
+  try {
+    assertGenerationOpen();
+  } catch {
+    res.set('Retry-After', '1');
+    res.status(503).json({
+      error: 'Workspace runtime is not active.',
+      code: 'workspace_runtime_unavailable',
+    });
+    return null;
+  }
+  if (deps.isWorkspaceTrusted?.() === false) {
+    res.status(403).json({
+      error: 'Workspace is not trusted.',
+      code: 'untrusted_workspace',
+    });
+    return null;
+  }
+  return assertGenerationOpen;
+}
+
 export function mountWorkspaceAgentsRoutes(
   app: Application,
   deps: WorkspaceAgentsRouteDeps,
@@ -122,6 +151,8 @@ export function mountWorkspaceAgentsRoutes(
   const manager = createDaemonSubagentManager(deps.boundWorkspace);
 
   app.get('/workspace/agents', async (_req, res) => {
+    const assertGenerationOpen = captureTrustedGeneration(deps, res);
+    if (!assertGenerationOpen) return;
     try {
       // `force: true` re-walks `.qwen/agents/` on every call so out-of-
       // band edits (a developer editing an agent file in their IDE
@@ -150,6 +181,7 @@ export function mountWorkspaceAgentsRoutes(
       //     bearer auth on non-loopback, not at the route layer.
       // Revisit if profiling shows the LIST route is on the hot path.
       const agents = await manager.listSubagents({ force: true });
+      assertGenerationOpen();
       const status: ServeWorkspaceAgentsStatus = {
         v: STATUS_SCHEMA_VERSION,
         workspaceCwd: deps.boundWorkspace,
@@ -157,6 +189,7 @@ export function mountWorkspaceAgentsRoutes(
       };
       res.status(200).json(status);
     } catch (err) {
+      if (sendGenerationClosedError(res, err)) return;
       writeStderrLine(
         `qwen serve: GET /workspace/agents failed: ${
           err instanceof Error ? (err.stack ?? err.message) : String(err)
@@ -173,6 +206,8 @@ export function mountWorkspaceAgentsRoutes(
     '/workspace/agents',
     deps.mutate({ strict: true }),
     async (req, res) => {
+      const assertGenerationOpen = captureTrustedGeneration(deps, res);
+      if (!assertGenerationOpen) return;
       const body = deps.safeBody(req);
       const clientIdResult = resolveOriginatorClientId(deps, req, res);
       if (clientIdResult === null) return;
@@ -209,8 +244,14 @@ export function mountWorkspaceAgentsRoutes(
       }
 
       try {
-        await manager.createSubagent(config, { level });
+        assertGenerationOpen();
+        await manager.createSubagent(config, {
+          level,
+          assertCanCommit: assertGenerationOpen,
+        });
+        assertGenerationOpen();
       } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
         if (err instanceof SubagentError) {
           if (err.code === SubagentErrorCode.ALREADY_EXISTS) {
             res.status(409).json({
@@ -268,6 +309,12 @@ export function mountWorkspaceAgentsRoutes(
       }
 
       const created = await manager.loadSubagent(config.name, level);
+      try {
+        assertGenerationOpen();
+      } catch (err) {
+        sendGenerationClosedError(res, err);
+        return;
+      }
       if (!created) {
         // Race window: createSubagent already wrote the file to disk,
         // but the subsequent loadSubagent walked the cache and found
@@ -306,6 +353,8 @@ export function mountWorkspaceAgentsRoutes(
     '/workspace/agents/generate',
     deps.mutate({ strict: true }),
     async (req, res) => {
+      const assertGenerationOpen = captureTrustedGeneration(deps, res);
+      if (!assertGenerationOpen) return;
       const body = deps.safeBody(req);
       const clientIdResult = resolveOriginatorClientId(deps, req, res);
       if (clientIdResult === null) return;
@@ -330,8 +379,10 @@ export function mountWorkspaceAgentsRoutes(
           description.trim(),
           originatorClientId,
         );
+        assertGenerationOpen();
         res.status(200).json(generated);
       } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
         writeStderrLine(
           `qwen serve: POST /workspace/agents/generate failed: ${
             err instanceof Error ? (err.stack ?? err.message) : String(err)
@@ -346,10 +397,13 @@ export function mountWorkspaceAgentsRoutes(
   );
 
   app.get('/workspace/agents/:agentType', async (req, res) => {
+    const assertGenerationOpen = captureTrustedGeneration(deps, res);
+    if (!assertGenerationOpen) return;
     const agentType = validateAgentType(req, res);
     if (agentType === null) return;
     try {
       const config = await manager.loadSubagent(agentType);
+      assertGenerationOpen();
       if (!config) {
         res.status(404).json({
           error: `Subagent "${agentType}" not found`,
@@ -360,6 +414,7 @@ export function mountWorkspaceAgentsRoutes(
       }
       res.status(200).json(toDetail(config));
     } catch (err) {
+      if (sendGenerationClosedError(res, err)) return;
       writeStderrLine(
         `qwen serve: GET /workspace/agents/${safeLogValue(agentType)} failed: ${
           err instanceof Error ? (err.stack ?? err.message) : String(err)
@@ -376,6 +431,8 @@ export function mountWorkspaceAgentsRoutes(
     '/workspace/agents/:agentType',
     deps.mutate({ strict: true }),
     async (req, res) => {
+      const assertGenerationOpen = captureTrustedGeneration(deps, res);
+      if (!assertGenerationOpen) return;
       const agentType = validateAgentType(req, res);
       if (agentType === null) return;
       const clientIdResult = resolveOriginatorClientId(deps, req, res);
@@ -429,8 +486,13 @@ export function mountWorkspaceAgentsRoutes(
       }
 
       try {
-        await manager.updateSubagent(agentType, updates, existing.level);
+        assertGenerationOpen();
+        await manager.updateSubagent(agentType, updates, existing.level, {
+          assertCanCommit: assertGenerationOpen,
+        });
+        assertGenerationOpen();
       } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
         if (err instanceof SubagentError) {
           if (err.code === SubagentErrorCode.NOT_FOUND) {
             res.status(404).json({
@@ -489,6 +551,12 @@ export function mountWorkspaceAgentsRoutes(
       }
 
       const updated = await manager.loadSubagent(agentType, existing.level);
+      try {
+        assertGenerationOpen();
+      } catch (err) {
+        sendGenerationClosedError(res, err);
+        return;
+      }
       if (!updated) {
         // Symmetric to the create-reload-failure branch above. The
         // disk write succeeded but the cache lookup raced; emit a
@@ -525,6 +593,8 @@ export function mountWorkspaceAgentsRoutes(
     '/workspace/agents/:agentType',
     deps.mutate({ strict: true }),
     async (req, res) => {
+      const assertGenerationOpen = captureTrustedGeneration(deps, res);
+      if (!assertGenerationOpen) return;
       const agentType = validateAgentType(req, res);
       if (agentType === null) return;
       const clientIdResult = resolveOriginatorClientId(deps, req, res);
@@ -553,8 +623,13 @@ export function mountWorkspaceAgentsRoutes(
       }
 
       try {
-        await manager.deleteSubagent(agentType, scopedLevel);
+        assertGenerationOpen();
+        await manager.deleteSubagent(agentType, scopedLevel, undefined, {
+          assertCanCommit: assertGenerationOpen,
+        });
+        assertGenerationOpen();
       } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
         if (err instanceof SubagentError) {
           if (err.code === SubagentErrorCode.NOT_FOUND) {
             res.status(404).json({
@@ -614,6 +689,13 @@ export function mountWorkspaceAgentsRoutes(
           // gone — count as successfully removed.
           removed.push(found);
         }
+      }
+
+      try {
+        assertGenerationOpen();
+      } catch (err) {
+        sendGenerationClosedError(res, err);
+        return;
       }
 
       if (remaining.length > 0) {
@@ -706,6 +788,7 @@ export function mountWorkspaceQualifiedAgentsRoutes(
     const manager = createDaemonSubagentManager(runtime.workspaceCwd);
     try {
       const agents = await manager.listSubagents({ force: true });
+      runtime.generationGuard?.assertOpen();
       const status: ServeWorkspaceAgentsStatus = {
         v: STATUS_SCHEMA_VERSION,
         workspaceCwd: runtime.workspaceCwd,
@@ -715,6 +798,7 @@ export function mountWorkspaceQualifiedAgentsRoutes(
       };
       res.status(200).json(status);
     } catch (err) {
+      if (sendGenerationClosedError(res, err)) return;
       writeStderrLine(
         `qwen serve: GET /workspaces/:workspace/agents failed: ${
           err instanceof Error ? (err.stack ?? err.message) : String(err)
@@ -757,8 +841,14 @@ export function mountWorkspaceQualifiedAgentsRoutes(
       }
 
       try {
-        await manager.createSubagent(config, { level });
+        runtime.generationGuard?.assertOpen();
+        await manager.createSubagent(config, {
+          level,
+          assertCanCommit: () => runtime.generationGuard?.assertOpen(),
+        });
+        runtime.generationGuard?.assertOpen();
       } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
         if (sendCreateAgentError(res, err, config.name)) return;
         writeStderrLine(
           `qwen serve: POST /workspaces/:workspace/agents failed: ${
@@ -773,6 +863,12 @@ export function mountWorkspaceQualifiedAgentsRoutes(
       }
 
       const created = await manager.loadSubagent(config.name, level);
+      try {
+        runtime.generationGuard?.assertOpen();
+      } catch (err) {
+        sendGenerationClosedError(res, err);
+        return;
+      }
       if (!created) {
         writeStderrLine(
           `qwen serve: agent_create_reload_failed (name=${safeLogValue(config.name)} ` +
@@ -806,6 +902,7 @@ export function mountWorkspaceQualifiedAgentsRoutes(
     const manager = createDaemonSubagentManager(runtime.workspaceCwd);
     try {
       const config = await manager.loadSubagent(agentType, scopedLevel);
+      runtime.generationGuard?.assertOpen();
       if (!config) {
         res.status(404).json({
           error: `Subagent "${agentType}" not found`,
@@ -816,6 +913,7 @@ export function mountWorkspaceQualifiedAgentsRoutes(
       }
       res.status(200).json(toDetail(config));
     } catch (err) {
+      if (sendGenerationClosedError(res, err)) return;
       writeStderrLine(
         `qwen serve: GET /workspaces/:workspace/agents/${safeLogValue(agentType)} failed: ${
           err instanceof Error ? (err.stack ?? err.message) : String(err)
@@ -877,8 +975,13 @@ export function mountWorkspaceQualifiedAgentsRoutes(
       }
 
       try {
-        await manager.updateSubagent(agentType, updates, existing.level);
+        runtime.generationGuard?.assertOpen();
+        await manager.updateSubagent(agentType, updates, existing.level, {
+          assertCanCommit: () => runtime.generationGuard?.assertOpen(),
+        });
+        runtime.generationGuard?.assertOpen();
       } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
         if (sendUpdateAgentError(res, err, agentType)) return;
         writeStderrLine(
           `qwen serve: POST /workspaces/:workspace/agents/${safeLogValue(agentType)} failed: ${
@@ -893,6 +996,12 @@ export function mountWorkspaceQualifiedAgentsRoutes(
       }
 
       const updated = await manager.loadSubagent(agentType, existing.level);
+      try {
+        runtime.generationGuard?.assertOpen();
+      } catch (err) {
+        sendGenerationClosedError(res, err);
+        return;
+      }
       if (!updated) {
         writeStderrLine(
           `qwen serve: agent_update_reload_failed (name=${safeLogValue(agentType)} ` +
@@ -938,8 +1047,13 @@ export function mountWorkspaceQualifiedAgentsRoutes(
       if (existing && assertMutableLevel(existing, agentType, res)) return;
 
       try {
-        await manager.deleteSubagent(agentType, scopedLevel);
+        runtime.generationGuard?.assertOpen();
+        await manager.deleteSubagent(agentType, scopedLevel, undefined, {
+          assertCanCommit: () => runtime.generationGuard?.assertOpen(),
+        });
+        runtime.generationGuard?.assertOpen();
       } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
         if (err instanceof SubagentError) {
           if (err.code === SubagentErrorCode.NOT_FOUND) {
             res.status(404).json({
@@ -990,6 +1104,13 @@ export function mountWorkspaceQualifiedAgentsRoutes(
         } catch {
           // Access failure means the project-level file is gone.
         }
+      }
+
+      try {
+        runtime.generationGuard?.assertOpen();
+      } catch (err) {
+        sendGenerationClosedError(res, err);
+        return;
       }
 
       runtime.bridge.publishWorkspaceEvent({
