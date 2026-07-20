@@ -2498,10 +2498,22 @@ jobs:
             exit 1
           fi
 
+          # Every check below can legitimately REJECT the agent's attempt, so
+          # each declares that verdict explicitly. That is what lets the handoff
+          # tell a rejection apart from the gate's OWN death: an empty outcome
+          # on a failed job means the gate never reached a verdict (its own bug,
+          # an infra blip), and the agent's work must then be retried rather
+          # than buried by a watermark advance.
+          reject_fix() {
+            echo "❌ ${1}"
+            echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+            exit 1
+          }
+
           echo '🔬 Re-running deterministic checks (independent of the agent)...'
-          npm run build
-          npm run typecheck
-          npm run lint
+          npm run build || reject_fix 'build failed on the agent-committed fix'
+          npm run typecheck || reject_fix 'typecheck failed on the agent-committed fix'
+          npm run lint || reject_fix 'lint failed on the agent-committed fix'
 
           # Test changed/related files for the packages this PR touches.
           # --changed follows the import graph so transitive breakage is caught.
@@ -2532,7 +2544,8 @@ jobs:
                 continue
               fi
               echo "🧪 Testing ${p} (changed files only)..."
-              npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests
+              npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests \
+                || reject_fix "tests failed in ${p}"
             done
           fi
           echo "outcome=fixed" >> "${GITHUB_OUTPUT}"
@@ -2769,10 +2782,22 @@ jobs:
             # ISO-8601 date is used (not a bare word) so it is both non-empty AND
             # sorts above any real timestamp in EVAL_WM's max, belt-and-suspenders
             # with the terminal round.
+            # The gate declares its verdict explicitly (failed / noop / fixed).
+            # An EMPTY outcome on a non-success job means it died BEFORE reaching
+            # one - its own crash (a gate bug, an infra blip, a resolver error),
+            # not a judgement on the agent's work. That must retry like any other
+            # pre-verdict crash instead of advancing the watermark: the
+            # nested-package ENOENT that stranded #7329/#7336 looked exactly like
+            # a rejection, so a fix the agent had already written was discarded
+            # and the PR sat idle until a human deleted the marker by hand.
+            GATE_CRASHED=false
+            if [[ -z "${OUTCOME}" && "${JOB_STATUS:-}" != 'success' ]]; then
+              GATE_CRASHED=true
+            fi
             MARK_TS="${NEWEST:-${WATERMARK:-9999-12-31T23:59:59Z}}"
             if [[ -n "${NEWEST:-}" ]]; then
               MARK_ROUND="$(( ROUND + 1 ))"
-              if [[ -z "${DETAIL_FILE}" ]]; then
+              if [[ -z "${DETAIL_FILE}" || "${GATE_CRASHED}" == 'true' ]]; then
                 # Prepare ran (NEWEST is set) but the agent produced NO output
                 # at all — it crashed before writing any verdict (e.g. a staged
                 # runner that fails to boot). It evaluated NOTHING, so the
@@ -2790,10 +2815,20 @@ jobs:
                 # final attempt must say so itself, or the maintainer waits for
                 # a retry that never comes. No Run log here: the report block
                 # below appends it to every handoff (avoid a duplicate URL).
-                if [[ "${MARK_ROUND}" -lt "${MAX_ROUNDS}" ]]; then
-                  HEADLINE="🤖 AutoFix crashed before it could evaluate the feedback (attempt ${MARK_ROUND}/${MAX_ROUNDS}) — it will retry on the next scan."
+                # Name the real cause: a gate crash points the maintainer at
+                # the gate logs (the agent's work may be fine and is preserved
+                # for the retry), while a no-output crash points at the run.
+                if [[ -z "${DETAIL_FILE}" ]]; then
+                  CAUSE='crashed before it could evaluate the feedback'
+                  LAST_FIX='a human should take over this PR'
                 else
-                  HEADLINE="🤖 AutoFix crashed before it could evaluate the feedback (attempt ${MARK_ROUND}/${MAX_ROUNDS}) — this was the last automatic attempt; a human should take over this PR."
+                  CAUSE='hit a verification-gate error before reaching a verdict'
+                  LAST_FIX='a maintainer should check the gate logs, then re-arm'
+                fi
+                if [[ "${MARK_ROUND}" -lt "${MAX_ROUNDS}" ]]; then
+                  HEADLINE="🤖 AutoFix ${CAUSE} (attempt ${MARK_ROUND}/${MAX_ROUNDS}) — it will retry on the next scan."
+                else
+                  HEADLINE="🤖 AutoFix ${CAUSE} (attempt ${MARK_ROUND}/${MAX_ROUNDS}) — this was the last automatic attempt; ${LAST_FIX}."
                 fi
               else
                 HEADLINE="🤖 Could not address the latest feedback automatically (round ${MARK_ROUND}/${MAX_ROUNDS}). A human should take over this PR."
