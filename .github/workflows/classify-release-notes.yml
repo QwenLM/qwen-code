@@ -25,7 +25,7 @@ concurrency:
 
 jobs:
   classify:
-    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+    if: "${{ github.repository == 'QwenLM/qwen-code' && github.event.label.name != 'skip-changelog-auto' }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     steps:

@@ -259,6 +259,42 @@ describe('release note classification', () => {
     }
   });
 
+  it('prints skip for internal CI changes through main', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'release-note-classifier-'));
+    try {
+      const gh = join(dir, 'gh');
+      writeFileSync(
+        gh,
+        [
+          '#!/usr/bin/env node',
+          'const args = process.argv.slice(2);',
+          "if (args[0] === 'pr') { process.stdout.write(JSON.stringify({ title: 'ci: speed up checks', labels: [] })); process.exit(0); }",
+          "if (args.includes('.[] | .filename, (.previous_filename // empty)')) { process.stdout.write('.github/workflows/ci.yml\\n'); process.exit(0); }",
+          'process.exit(1);',
+        ].join('\n'),
+      );
+      chmodSync(gh, 0o755);
+
+      const decision = execFileSync(
+        process.execPath,
+        [join(import.meta.dirname, 'classify-release-notes.mjs')],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+            PATH: `${dir}:${process.env.PATH}`,
+            PR_NUMBER: '1',
+          },
+        },
+      );
+
+      assert.equal(decision, 'skip\n');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('wires reclassification and exclusion to the same automatic label', () => {
     const workflow = readFileSync(
       join(import.meta.dirname, '../workflows/classify-release-notes.yml'),
@@ -273,6 +309,10 @@ describe('release note classification', () => {
       assert.match(workflow, new RegExp(`- '${action}'`));
     }
     assert.match(workflow, /AUTO_LABEL: 'skip-changelog-auto'/);
+    assert.match(
+      workflow,
+      /github\.event\.label\.name != 'skip-changelog-auto'/,
+    );
     assert.match(workflow, /classification failed; including this PR/);
     assert.doesNotMatch(workflow, /decision=unchanged/);
     assert.match(release, /- 'skip-changelog-auto'/);
