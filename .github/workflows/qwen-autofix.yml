@@ -765,7 +765,7 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
-          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           NO_PROXY: '127.0.0.1,localhost,::1'
           QWEN_HOME: '${{ runner.temp }}/qwen-autofix-home'
           SETTINGS_JSON: |-
@@ -924,7 +924,7 @@ jobs:
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
-          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           NO_PROXY: '127.0.0.1,localhost,::1'
           QWEN_HOME: '${{ runner.temp }}/qwen-autofix-home'
           SETTINGS_JSON: |-
@@ -1085,7 +1085,7 @@ jobs:
           # trigger CI. The bot PAT clears both problems.
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
-          MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
         run: |-
           MODEL_DISPLAY="${MODEL:-default}"
           if [[ -z "${GITHUB_TOKEN}" ]]; then
@@ -2328,7 +2328,7 @@ jobs:
           ISSUE: '${{ env.ISSUE }}'
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
-          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           NO_PROXY: '127.0.0.1,localhost,::1'
           QWEN_HOME: '${{ runner.temp }}/qwen-autofix-review-home'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
@@ -2517,7 +2517,7 @@ jobs:
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
           # Surfaced in the report footer for diagnosis + attribution; a repo
           # variable (not a secret), already the agent's OPENAI_MODEL.
-          MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
         run: |-
           # Prepare may have adopted a sibling's live round; the matrix value
           # would double-write that round's marker.
@@ -2626,7 +2626,7 @@ jobs:
           JOB_STATUS: '${{ job.status }}'
           STALE: '${{ steps.prepare.outputs.stale }}'
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
-          MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
         run: |-
           ROUND="${EFFECTIVE_ROUND:-${ROUND}}"
           MODEL_DISPLAY="${MODEL:-default}"
