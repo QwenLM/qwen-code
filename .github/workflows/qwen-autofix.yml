@@ -525,6 +525,7 @@ jobs:
       - name: 'Stage trusted schema gate'
         run: |-
           cp .github/scripts/check-settings-schema.sh "${RUNNER_TEMP}/check-settings-schema.sh"
+          cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
 
       - name: 'Check bot credentials'
         env:
@@ -1036,18 +1037,12 @@ jobs:
           # --changed follows the import graph so transitive breakage is caught.
           # Full regression is covered by regular CI on the PR after the push.
           # Map each changed file to its OWNING package — the nearest ancestor
-          # with a package.json. A flat 'packages/<dir>' assumption breaks on
-          # nested packages like packages/channels/base: 'packages/channels'
-          # has no package.json and the read below would ENOENT-crash the gate.
+          # with a package.json — via the trusted staged resolver, shared with
+          # the other verify gate so both resolve packages identically. A flat
+          # 'packages/<dir>' assumption ENOENT-crashes on nested packages like
+          # packages/channels/base, whose container has no package.json.
           CHANGED_PKGS="$(git diff --name-only "origin/main...${BRANCH}" \
-            | grep -E '^packages/' \
-            | while IFS= read -r f; do
-                d="$(dirname "$f")"
-                while [[ "$d" == packages/?* ]]; do
-                  if [[ -f "$d/package.json" ]]; then echo "$d"; break; fi
-                  d="$(dirname "$d")"
-                done
-              done | sort -u || true)"
+            | bash "${RUNNER_TEMP}/resolve-owning-packages.sh" || true)"
           if [[ -z "${CHANGED_PKGS}" ]]; then
             echo 'No package changes detected; skipping package tests.'
           else
@@ -1946,6 +1941,7 @@ jobs:
       - name: 'Stage trusted schema gate and agent runner'
         run: |-
           cp .github/scripts/check-settings-schema.sh "${RUNNER_TEMP}/check-settings-schema.sh"
+          cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
           # The agent step runs AFTER prepare checks out the PR branch, so
           # invoking the runner from the working tree would execute
           # branch-controlled code on the host with the model key in env
@@ -2502,18 +2498,12 @@ jobs:
           # --changed follows the import graph so transitive breakage is caught.
           # Full regression is covered by regular CI on the PR after the push.
           # Map each changed file to its OWNING package — the nearest ancestor
-          # with a package.json. A flat 'packages/<dir>' assumption breaks on
-          # nested packages like packages/channels/base: 'packages/channels'
-          # has no package.json and the read below would ENOENT-crash the gate.
+          # with a package.json — via the trusted staged resolver, shared with
+          # the other verify gate so both resolve packages identically. A flat
+          # 'packages/<dir>' assumption ENOENT-crashes on nested packages like
+          # packages/channels/base, whose container has no package.json.
           CHANGED_PKGS="$(git diff --name-only "origin/main...${BRANCH}" \
-            | grep -E '^packages/' \
-            | while IFS= read -r f; do
-                d="$(dirname "$f")"
-                while [[ "$d" == packages/?* ]]; do
-                  if [[ -f "$d/package.json" ]]; then echo "$d"; break; fi
-                  d="$(dirname "$d")"
-                done
-              done | sort -u || true)"
+            | bash "${RUNNER_TEMP}/resolve-owning-packages.sh" || true)"
           if [[ -z "${CHANGED_PKGS}" ]]; then
             echo 'No package changes detected; skipping package tests.'
           else
@@ -2810,11 +2800,16 @@ jobs:
               if [[ -n "${DETAIL_FILE}" ]]; then
                 if [[ "${OUTCOME}" == "failed" ]]; then
                   # The agent's own address-summary.md can read like a success
-                  # and cite a commit SHA, but on OUTCOME=failed the verification
-                  # gate rejected the change and "Push and report" was skipped —
-                  # nothing landed on the branch. Say so before the summary, or
-                  # the reader chases a commit that was discarded with the runner.
-                  echo "⚠️ This change did NOT pass the verification gate and was NOT pushed — any commit referenced below was made only in the runner workspace and has been discarded. What the agent reported:"
+                  # and cite a commit SHA, but every OUTCOME=failed path skips
+                  # "Push and report" — nothing landed on the branch. Say so
+                  # before the summary, or the reader chases a commit that was
+                  # discarded with the runner. Keep the claim to "was NOT pushed"
+                  # (always true here): the four pre-gate failures — an agent
+                  # abort via failure.md, a dirty tree, an unchanged branch, a
+                  # missing address-summary.md — set outcome=failed before the
+                  # deterministic gate runs, so "did not pass the gate" would be
+                  # wrong; the specific reason is the HEADLINE + summary below.
+                  echo "⚠️ This change was NOT pushed — any commit referenced below was made only in the runner workspace and has been discarded. What the agent reported:"
                 else
                   echo "**What I found before stopping:**"
                 fi

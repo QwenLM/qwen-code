@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
@@ -2566,6 +2566,16 @@ describe('qwen-autofix workflow', () => {
       expect(step).not.toContain(
         'bash .github/scripts/check-settings-schema.sh',
       );
+      // The owning-package resolver is likewise a shared script staged from the
+      // trusted base, invoked (not inlined) so the two gates cannot drift into
+      // resolving packages differently. The old inline detection must be gone.
+      expect(step).toContain(
+        'bash "${RUNNER_TEMP}/resolve-owning-packages.sh"',
+      );
+      expect(step).not.toContain("grep -oE '^packages/[^/]+'");
+      expect(step).not.toContain(
+        'bash .github/scripts/resolve-owning-packages.sh',
+      );
       expect(step).toContain(
         'No package changes detected; skipping package tests.',
       );
@@ -2576,6 +2586,12 @@ describe('qwen-autofix workflow', () => {
     expect(
       workflow.match(
         /cp \.github\/scripts\/check-settings-schema\.sh "\$\{RUNNER_TEMP\}\/check-settings-schema\.sh"/g,
+      ) ?? [],
+    ).toHaveLength(2);
+    // The owning-package resolver is staged the same way, in the same steps.
+    expect(
+      workflow.match(
+        /cp \.github\/scripts\/resolve-owning-packages\.sh "\$\{RUNNER_TEMP\}\/resolve-owning-packages\.sh"/g,
       ) ?? [],
     ).toHaveLength(2);
     // In the issue-autofix job the staging must happen BEFORE the verify gate's
@@ -2614,6 +2630,18 @@ describe('qwen-autofix workflow', () => {
     expect(schemaScript).toContain('is out of date');
     expect(schemaScript).toContain('git status --porcelain');
     expect(schemaScript).toContain('outcome=failed');
+    // The owning-package resolver walks each changed path up to its nearest
+    // package.json (never a flat 'packages/<dir>'), so a nested package like
+    // packages/channels/base resolves to itself, not the package.json-less
+    // container packages/channels that would ENOENT-crash the gate.
+    const resolveScript = readFileSync(
+      '.github/scripts/resolve-owning-packages.sh',
+      'utf8',
+    );
+    expect(resolveScript).toContain('d="$(dirname "$f")"');
+    expect(resolveScript).toContain('[[ "$d" == packages/?* ]]');
+    expect(resolveScript).toContain('if [[ -f "$d/package.json" ]]; then');
+    expect(resolveScript).toContain('sort -u');
     // The review gate's freshness check is a STRUCTURAL guard: the script call
     // must run BEFORE the no-op/unchanged return, so a stale-schema PR the agent
     // wrongly no-ops fails (outcome=failed) instead of being reported as evaluated
@@ -2778,22 +2806,27 @@ describe('qwen-autofix workflow', () => {
     }
   });
 
-  it('maps a changed nested-package file to its owning package, not the container', () => {
+  it('resolver maps a changed nested-package file to its owning package, not the container', () => {
     // packages/channels/* are nested packages; the container packages/channels
     // has no package.json, so a flat 'packages/<dir>' assumption ENOENT-crashes
-    // the verify gate. The detection must walk up to the nearest package.json.
-    const walk = verificationGateSteps
-      .join('\n')
-      .match(/while IFS= read -r f; do\n[\s\S]*?\n {14}done/)?.[0];
-    expect(walk).toBeTruthy();
+    // the verify gate. Run the real staged resolver against a temp package tree
+    // and assert it walks each path up to its nearest package.json.
+    const script = resolve('.github/scripts/resolve-owning-packages.sh');
     const dir = mkdtempSync(join(tmpdir(), 'chpkg-'));
     try {
+      for (const d of [
+        'packages/channels/base',
+        'packages/channels/dingtalk',
+        'packages/cli',
+        'packages/sdk-python/src', // non-npm container: no package.json anywhere
+      ]) {
+        mkdirSync(join(dir, d), { recursive: true });
+      }
       for (const pkg of [
         'packages/channels/base',
         'packages/channels/dingtalk',
         'packages/cli',
       ]) {
-        mkdirSync(join(dir, pkg), { recursive: true });
         writeFileSync(join(dir, pkg, 'package.json'), '{}');
       }
       const changed = [
@@ -2801,17 +2834,14 @@ describe('qwen-autofix workflow', () => {
         'packages/channels/dingtalk/src/z.ts',
         'packages/cli/src/y.ts',
         'packages/channels/base/README.md',
+        'packages/sdk-python/src/foo.py', // no owning package.json -> dropped
+        '.github/workflows/qwen-autofix.yml', // outside packages/ -> dropped
       ].join('\n');
-      const out = execFileSync(
-        'bash',
-        [
-          '-c',
-          `cd "${dir}"; printf '%s\\n' "$1" | ${walk} | sort -u`,
-          '_',
-          changed,
-        ],
-        { encoding: 'utf8' },
-      ).trim();
+      const out = execFileSync('bash', [script], {
+        input: changed,
+        cwd: dir,
+        encoding: 'utf8',
+      }).trim();
       expect(out.split('\n')).toEqual([
         'packages/channels/base',
         'packages/channels/dingtalk',
@@ -2826,9 +2856,10 @@ describe('qwen-autofix workflow', () => {
 
   it('handoff frames a verify-failed change as NOT pushed', () => {
     // On OUTCOME=failed the agent's own address-summary.md can read like a
-    // success and cite a commit SHA, but the verify gate rejected it and the
-    // push was skipped — the comment must say so, or the reader chases a
-    // discarded commit.
+    // success and cite a commit SHA, but every failed path skips the push — the
+    // comment must say the change was NOT pushed, or the reader chases a
+    // discarded commit. The claim stays "was NOT pushed" (not "did not pass the
+    // gate"): four pre-gate paths set outcome=failed before the gate runs.
     const body = reviewAddressReportStep.match(
       /if \[\[ -n "\$\{DETAIL_FILE\}" \]\]; then\n[\s\S]*?\n {14}fi/,
     )?.[0];
@@ -2850,9 +2881,9 @@ describe('qwen-autofix workflow', () => {
       }
     };
     const failed = run('failed');
-    expect(failed).toContain(
-      'did NOT pass the verification gate and was NOT pushed',
-    );
+    expect(failed).toContain('This change was NOT pushed');
+    // Do not assert the gate ran — a pre-gate failure.md abort also lands here.
+    expect(failed).not.toContain('did NOT pass the verification gate');
     expect(failed).not.toContain('What I found before stopping');
     // A non-verify handoff (e.g. a crash) keeps the neutral framing.
     expect(run('')).toContain('What I found before stopping');
