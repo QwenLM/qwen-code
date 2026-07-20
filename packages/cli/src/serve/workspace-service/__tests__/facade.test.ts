@@ -1720,7 +1720,7 @@ describe('createDaemonWorkspaceService', () => {
       });
     });
 
-    it('returns ready without preheating when the channel is already live', async () => {
+    it('renews the idle window when the channel is already live', async () => {
       const preheatAcpChild = vi.fn().mockResolvedValue(undefined);
       const svc = createDaemonWorkspaceService(
         makeDeps({ isChannelLive: () => true, preheatAcpChild }),
@@ -1729,7 +1729,7 @@ describe('createDaemonWorkspaceService', () => {
       const result = await svc.preheatAcpChild(makeCtx());
 
       expect(result).toMatchObject({ ready: true, channelLive: true });
-      expect(preheatAcpChild).not.toHaveBeenCalled();
+      expect(preheatAcpChild).toHaveBeenCalledOnce();
     });
 
     it('returns an error when ACP preheat is unavailable', async () => {
