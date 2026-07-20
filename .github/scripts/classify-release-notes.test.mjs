@@ -10,6 +10,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
+import { parse } from 'yaml';
 import { shouldAutoSkipChangelog } from './classify-release-notes.mjs';
 
 describe('release note classification', () => {
@@ -202,20 +203,25 @@ describe('release note classification', () => {
       join(import.meta.dirname, '../release.yml'),
       'utf8',
     );
+    const workflow = parse(release);
+    const publish = workflow.jobs.publish;
+    const autoLabel = publish.steps.find(
+      (step) =>
+        step.name === 'Auto-label internal CI PRs for release notes exclusion',
+    );
 
     assert.match(changelog, /- 'skip-changelog-auto'/);
-    assert.match(release, /classify-release-notes\.mjs/);
-    assert.match(release, /Auto-label internal CI PRs/);
-    assert.match(
-      release,
-      /Auto-label internal CI PRs for release notes exclusion'\s+continue-on-error: true/,
-    );
-    assert.match(release, /git rev-list "\$\{PREVIOUS_RELEASE_TAG\}\.\.HEAD"/);
-    assert.match(release, /commits\/\$\{commit\}\/pulls/);
-    assert.doesNotMatch(release, /--search "merged:/);
+    assert.equal(autoLabel['continue-on-error'], true);
+    assert.equal(autoLabel.env.GITHUB_TOKEN, '${{ github.token }}');
+    assert.equal(publish.permissions.issues, 'write');
+    assert.equal(publish.permissions['pull-requests'], 'write');
+    assert.match(autoLabel.run, /classify-release-notes\.mjs/);
+    assert.match(autoLabel.run, /commits="\$\(git rev-list/);
+    assert.match(autoLabel.run, /Cannot enumerate commits/);
+    assert.match(autoLabel.run, /Failed to fetch PRs for commit/);
   });
 
-  it('updates labels and continues after a lookup failure', () => {
+  it('updates labels after a lookup failure and exits non-zero', () => {
     const dir = mkdtempSync(join(tmpdir(), 'release-note-classifier-'));
     try {
       const updates = join(dir, 'updates.txt');
@@ -226,7 +232,7 @@ describe('release note classification', () => {
           '#!/usr/bin/env node',
           'const args = process.argv.slice(2);',
           "if (args[0] === 'api' && args.includes('.[] | .filename, (.previous_filename // empty)')) {",
-          "  if (args.some((arg) => arg.endsWith('/pulls/11/files'))) process.exit(1);",
+          "  if (args.some((arg) => arg.endsWith('/pulls/11/files'))) { process.stderr.write('lookup failed\\n'); process.exit(1); }",
           "  process.stdout.write('.github/workflows/ci.yml\\n');",
           '  process.exit(0);',
           '}',
@@ -265,10 +271,11 @@ describe('release note classification', () => {
         },
       );
 
-      assert.equal(result.status, 0);
+      assert.equal(result.status, 1);
       assert.match(result.stdout, /Labeled: 10/);
       assert.match(result.stdout, /Unlabeled: 12/);
-      assert.match(result.stderr, /Failed to classify PR #11/);
+      assert.match(result.stderr, /Failed to process PR #11/);
+      assert.match(result.stderr, /lookup failed/);
       const updateContent = readFileSync(updates, 'utf8').trim();
       assert.equal(updateContent, '10 add\n12 remove');
     } finally {

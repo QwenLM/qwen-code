@@ -340,8 +340,10 @@ jobs:
       url: '${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.prepare.outputs.release_tag }}'
     permissions:
       contents: 'write'
+      issues: 'write'
       packages: 'write'
       id-token: 'write'
+      pull-requests: 'write'
 
     steps:
       - name: 'Checkout'
@@ -463,14 +465,20 @@ jobs:
         if: |-
           ${{ needs.prepare.outputs.is_dry_run == 'false' }}
         env:
-          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          GITHUB_TOKEN: '${{ github.token }}'
           PREVIOUS_RELEASE_TAG: '${{ needs.prepare.outputs.previous_release_tag }}'
         run: |-
           gh label create 'skip-changelog-auto' --repo "${GITHUB_REPOSITORY}" --color 'ededed' --description 'Automatically exclude internal CI changes from release notes' --force
-          git rev-list "${PREVIOUS_RELEASE_TAG}..HEAD" | while read -r commit; do
+          commits="$(git rev-list "${PREVIOUS_RELEASE_TAG}..HEAD")" || {
+            echo "::error::Cannot enumerate commits since ${PREVIOUS_RELEASE_TAG}; skipping auto-labeling."
+            exit 1
+          }
+          while read -r commit; do
+            [[ -z "${commit}" ]] && continue
             gh api "repos/${GITHUB_REPOSITORY}/commits/${commit}/pulls" \
-              --jq '.[] | select(.merged_at != null) | {number, title, labels}'
-          done | jq -s 'unique_by(.number)' | \
+              --jq '.[] | select(.merged_at != null) | {number, title, labels}' \
+              || echo "::warning::Failed to fetch PRs for commit ${commit}; skipping." >&2
+          done <<< "${commits}" | jq -s 'unique_by(.number)' | \
             node .github/scripts/classify-release-notes.mjs
 
       - name: 'Create GitHub Release and Tag'

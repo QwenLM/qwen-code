@@ -117,9 +117,10 @@ function main() {
         ]);
         unlabeled.push(number);
       }
-    } catch {
+    } catch (error) {
+      process.exitCode = 1;
       process.stderr.write(
-        `::warning::Failed to classify PR #${number}; skipping.\n`,
+        `::warning::Failed to process PR #${number}: ${error.message}; skipping.\n`,
       );
     }
   }
