@@ -1578,6 +1578,7 @@ jobs:
               # which a joined '/' test would wave through into a red fetch.
               if [[ -z "${HR_OWNER}" || -z "${HR_NAME}" ]]; then
                 echo "⚠️ #${PR}: fork head repository unresolved (owner='${HR_OWNER}' name='${HR_NAME}') — skipping"
+                fleet_row "${PR}" 'skipped' "fork head unresolved (owner='${HR_OWNER}' name='${HR_NAME}')"
                 continue
               fi
               HEAD_REPO_FULL="${HR_OWNER}/${HR_NAME}"

@@ -3155,7 +3155,7 @@ describe('qwen-autofix workflow', () => {
     const render = lines
       .slice(start, end + 1)
       .join('\n')
-      .replace('${GITHUB_STEP_SUMMARY}', '/dev/stdout');
+      .replace('${GITHUB_STEP_SUMMARY}', '${SUMMARY_FILE}');
 
     const out = execFileSync(
       'bash',
@@ -3163,12 +3163,15 @@ describe('qwen-autofix workflow', () => {
         '-c',
         [
           'set -uo pipefail',
+          'SUMMARY_FILE="$(mktemp)"',
           helper,
           'COUNT=1',
           "fleet_row 7329 'SELECTED' '1 review + 5 inline new (round 0/5)'",
           "fleet_row 7333 'idle' 'nothing new since 2026-07-20T13:54:18Z'",
           "fleet_row 7208 'round-capped' 'round 100/100 - needs a human'",
           render,
+          'cat "${SUMMARY_FILE}"',
+          'rm -f "${SUMMARY_FILE}"',
         ].join('\n'),
       ],
       { encoding: 'utf8' },
@@ -3184,7 +3187,18 @@ describe('qwen-autofix workflow', () => {
     // An empty fleet still renders a table rather than a bare heading.
     const empty = execFileSync(
       'bash',
-      ['-c', ['set -uo pipefail', helper, 'COUNT=0', render].join('\n')],
+      [
+        '-c',
+        [
+          'set -uo pipefail',
+          'SUMMARY_FILE="$(mktemp)"',
+          helper,
+          'COUNT=0',
+          render,
+          'cat "${SUMMARY_FILE}"',
+          'rm -f "${SUMMARY_FILE}"',
+        ].join('\n'),
+      ],
       { encoding: 'utf8' },
     );
     expect(empty).toContain('no managed PRs inspected');
