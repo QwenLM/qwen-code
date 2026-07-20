@@ -1565,26 +1565,43 @@ export function registerSessionRoutes(
             new SessionService(workspaceCwd).getWorktreeSessionPath(sessionId),
           ).catch(() => null);
           if (sidecar) {
-            const wt = {
-              slug: sidecar.slug,
-              path: sidecar.worktreePath,
-              branch: sidecar.worktreeBranch,
-            };
-            try {
-              await runtime.bridge.changeSessionCwd(sessionId, {
-                path: wt.path,
-              });
-              runtime.bridge.setSessionWorktree(sessionId, wt);
-              session.worktree = wt;
-            } catch (restoreErr) {
-              daemonLog?.warn('worktree restore failed on load/resume', {
+            // Defense-in-depth: validate the sidecar path is contained
+            // within the workspace's worktrees dir. The ACP layer already
+            // validated this, but a local check makes the route airtight.
+            const resolvedPath = path.resolve(sidecar.worktreePath);
+            const worktreesRoot = path.resolve(
+              workspaceCwd,
+              '.qwen',
+              'worktrees',
+            );
+            const rel = path.relative(worktreesRoot, resolvedPath);
+            if (rel.startsWith('..') || path.isAbsolute(rel)) {
+              daemonLog?.warn('worktree sidecar path outside worktrees dir', {
                 sessionId,
-                worktreePath: wt.path,
-                error:
-                  restoreErr instanceof Error
-                    ? restoreErr.message
-                    : String(restoreErr),
+                path: sidecar.worktreePath,
               });
+            } else {
+              const wt = {
+                slug: sidecar.slug,
+                path: sidecar.worktreePath,
+                branch: sidecar.worktreeBranch,
+              };
+              try {
+                await runtime.bridge.changeSessionCwd(sessionId, {
+                  path: wt.path,
+                });
+                runtime.bridge.setSessionWorktree(sessionId, wt);
+                session.worktree = wt;
+              } catch (restoreErr) {
+                daemonLog?.warn('worktree restore failed on load/resume', {
+                  sessionId,
+                  worktreePath: wt.path,
+                  error:
+                    restoreErr instanceof Error
+                      ? restoreErr.message
+                      : String(restoreErr),
+                });
+              }
             }
           }
         }

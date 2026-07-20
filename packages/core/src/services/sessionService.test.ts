@@ -3896,6 +3896,51 @@ describe('SessionService', () => {
     });
   });
 
+  describe('listSessions worktree membership', () => {
+    const worktreeSessionId = '7ca8c920-e29b-41d4-a716-446655440001';
+
+    it('includes a session whose transcript cwd is a worktree under this project', async () => {
+      (path as Record<string, unknown>).sep = '/';
+      readdirSyncSpy.mockReturnValue([
+        `${worktreeSessionId}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        {
+          ...recordA1,
+          sessionId: worktreeSessionId,
+          cwd: '/test/project/root/.qwen/worktrees/my-task',
+        },
+      ]);
+      vi.mocked(getProjectHash).mockReturnValue('test-project-hash');
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0].sessionId).toBe(worktreeSessionId);
+    });
+
+    it('excludes a session whose worktree belongs to a different project', async () => {
+      (path as Record<string, unknown>).sep = '/';
+      readdirSyncSpy.mockReturnValue([
+        `${worktreeSessionId}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        {
+          ...recordA1,
+          sessionId: worktreeSessionId,
+          cwd: '/other/repo/.qwen/worktrees/my-task',
+        },
+      ]);
+      vi.mocked(getProjectHash).mockImplementation((p: string) =>
+        p.startsWith('/other/repo') ? 'other-hash' : 'test-project-hash',
+      );
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items).toHaveLength(0);
+    });
+  });
+
   describe('listSessions parentSessionId round-trip', () => {
     // Uses real disk like findSessionTitlesByPrefix — readParentSessionIdFromFile
     // does a synchronous tail/head scan of the file, so the mocked
