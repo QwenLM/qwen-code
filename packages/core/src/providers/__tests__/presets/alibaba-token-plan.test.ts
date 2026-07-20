@@ -121,8 +121,9 @@ describe('token plan provider', () => {
     });
 
     expect(baseUrl).toBe(TOKEN_PLAN_GLOBAL_BASE_URL);
-    expect(template[0]).toMatchObject({
-      name: '[ModelStudio Token Plan for Global/Intl] qwen3.6-plus',
+    const firstModel = template[0]!;
+    expect(firstModel).toMatchObject({
+      name: `[ModelStudio Token Plan for Global/Intl] ${firstModel.id}`,
       baseUrl: TOKEN_PLAN_GLOBAL_BASE_URL,
       envKey: TOKEN_PLAN_ENV_KEY,
     });

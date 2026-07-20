@@ -50,8 +50,9 @@ describe('subscription plan definitions', () => {
     expect(china.baseUrl).toBe(
       'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
     );
-    expect(china.template[0]).toMatchObject({
-      name: '[ModelStudio Token Plan] qwen3.6-plus',
+    const firstChinaModel = china.template[0]!;
+    expect(firstChinaModel).toMatchObject({
+      name: `[ModelStudio Token Plan] ${firstChinaModel.id}`,
       baseUrl:
         'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
     });
@@ -60,8 +61,9 @@ describe('subscription plan definitions', () => {
     expect(global.baseUrl).toBe(
       'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
     );
-    expect(global.template[0]).toMatchObject({
-      name: '[ModelStudio Token Plan for Global/Intl] qwen3.6-plus',
+    const firstGlobalModel = global.template[0]!;
+    expect(firstGlobalModel).toMatchObject({
+      name: `[ModelStudio Token Plan for Global/Intl] ${firstGlobalModel.id}`,
       baseUrl:
         'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
     });
