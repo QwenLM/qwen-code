@@ -178,6 +178,37 @@ describe('QueuedPromptDisplay', () => {
     expect(container.textContent).not.toContain(serialized);
   });
 
+  it('truncates a text-only queued prompt at the visible preview budget', () => {
+    const text = 'x'.repeat(300);
+    const { container } = setup({ prompts: [{ id: 1, text }] });
+
+    expect(
+      container.querySelector('[class*="queuedPromptText"]')?.textContent,
+    ).toBe(`${text.slice(0, 240)}...`);
+  });
+
+  it('truncates trailing text after an atomic tag consumes the visible preview budget', () => {
+    const visibleTag = 'x'.repeat(240);
+    const serialized = `<context>${visibleTag}</context>`;
+    const trailingText = ' explain the table';
+    const { container } = setup(
+      { prompts: [{ id: 1, text: `${serialized}${trailingText}` }] },
+      {
+        parseUserMessageContent: () => [
+          {
+            type: 'tag',
+            tag: { id: 'orders', value: visibleTag, serialized },
+          },
+          { type: 'text', text: trailingText },
+        ],
+      },
+    );
+
+    expect(
+      container.querySelector('[class*="queuedPromptText"]')?.textContent,
+    ).toBe(`${visibleTag}...`);
+  });
+
   it('falls back to raw queued text when parsing throws', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const { container } = setup(

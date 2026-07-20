@@ -1502,6 +1502,7 @@ export function useComposerCore(
       view: EditorView,
       textOverride?: string,
       tagsOverride?: readonly WebShellComposerTag[],
+      suppressFollowupCompletion?: boolean,
     ) => boolean
   >(() => true);
   const autoTriggerRef = useRef<{ text: string; from: number } | null>(null);
@@ -1853,6 +1854,7 @@ export function useComposerCore(
       view: EditorView,
       textOverride?: string,
       tagsOverride?: readonly WebShellComposerTag[],
+      suppressFollowupCompletion = false,
     ) => {
       const inlineTags =
         tagsOverride === undefined ? getInlineComposerTagPlacements(view) : [];
@@ -1860,6 +1862,7 @@ export function useComposerCore(
       const followup = followupStateRef.current;
       const followupCompletion =
         textOverride === undefined &&
+        !suppressFollowupCompletion &&
         inlineTags.length === 0 &&
         followup?.isVisible
           ? getFollowupCompletion(editorText, followup.suggestion)
@@ -3119,7 +3122,7 @@ export function useComposerCore(
       closeSearch(false);
       if (!shellModeRef.current) {
         restoreSelectedHistoryMatch(match);
-        submitTextRef.current(view);
+        submitTextRef.current(view, undefined, undefined, true);
         return;
       }
       const text = match.trim();

@@ -21,12 +21,18 @@ function Harness({
   renderComposerTag,
   renderComposerTagTooltip,
   parseUserMessageContent,
+  followupState,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit: ReturnType<typeof vi.fn>;
   renderComposerTag?: () => ReactNode;
   renderComposerTagTooltip?: () => ReactNode;
   parseUserMessageContent?: UserMessageContentParser;
+  followupState?: {
+    isVisible: boolean;
+    shownAt: number;
+    suggestion: string | null;
+  };
 }) {
   const composer = useComposerCore({
     onSubmit,
@@ -35,6 +41,7 @@ function Harness({
     renderComposerTag,
     renderComposerTagTooltip,
     parseUserMessageContent,
+    followupState,
     composerInput,
     composerInputVersion: composerInput ? 1 : undefined,
   });
@@ -49,12 +56,18 @@ async function mount({
   renderComposerTag,
   renderComposerTagTooltip,
   parseUserMessageContent,
+  followupState,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit?: ReturnType<typeof vi.fn>;
   renderComposerTag?: () => ReactNode;
   renderComposerTagTooltip?: () => ReactNode;
   parseUserMessageContent?: UserMessageContentParser;
+  followupState?: {
+    isVisible: boolean;
+    shownAt: number;
+    suggestion: string | null;
+  };
 } = {}) {
   container = document.createElement('div');
   document.body.append(container);
@@ -69,6 +82,7 @@ async function mount({
           renderComposerTag={renderComposerTag}
           renderComposerTagTooltip={renderComposerTagTooltip}
           parseUserMessageContent={parseUserMessageContent}
+          followupState={followupState}
         />
       </I18nProvider>,
     );
@@ -79,6 +93,8 @@ async function mount({
 afterEach(() => {
   act(() => root?.unmount());
   container?.remove();
+  localStorage.removeItem('qwen-web-shell-history');
+  localStorage.removeItem('qwen-web-shell-command-history');
   root = null;
   container = null;
   latest = null;
@@ -497,6 +513,34 @@ describe('useComposerCore tags', () => {
           }),
         ],
       },
+    );
+  });
+
+  it('submits the selected plain Ctrl-R history text instead of a visible followup', async () => {
+    const historyText = 'inspect the orders';
+    localStorage.setItem(
+      'qwen-web-shell-history',
+      JSON.stringify([historyText]),
+    );
+    const { onSubmit } = await mount({
+      followupState: {
+        isVisible: true,
+        shownAt: Date.now(),
+        suggestion: 'inspect the orders table and summarize',
+      },
+    });
+
+    act(() => {
+      latest!.setText('draft');
+      latest!.searchState.openHistorySearch();
+      latest!.searchState.submitSearchMatch(historyText);
+    });
+
+    expect(onSubmit).toHaveBeenLastCalledWith(
+      historyText,
+      undefined,
+      expect.any(Function),
+      undefined,
     );
   });
 
