@@ -2219,7 +2219,9 @@ describe('qwen-autofix workflow', () => {
       reviewAddressReportStep,
       publishPrStep,
     ]) {
-      expect(step).toContain("MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'");
+      expect(step).toContain(
+        "MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'",
+      );
       expect(step).toContain('MODEL_DISPLAY="${MODEL:-default}"');
       expect(step).toContain(footer);
     }
@@ -2360,7 +2362,9 @@ describe('qwen-autofix workflow', () => {
       ),
     );
     expect(prepareBranchAndFeedbackStep).not.toContain('git clean');
-    expect(prepareBranchAndFeedbackStep).not.toContain('git diff --quiet');
+    expect(prepareBranchAndFeedbackStep).not.toContain(
+      'if ! git diff --quiet || ! git diff --cached --quiet; then',
+    );
   });
 
   it('clears persistent autofix workdirs before agent steps run', () => {
