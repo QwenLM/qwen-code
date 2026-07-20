@@ -6,7 +6,10 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { getSubscriptionPlanConfig } from './subscriptionPlanDefinitions.js';
+import {
+  CodingPlanRegion,
+  getSubscriptionPlanConfig,
+} from './subscriptionPlanDefinitions.js';
 
 describe('subscription plan definitions', () => {
   it('keeps Token Plan on its dedicated model list', () => {
@@ -33,5 +36,30 @@ describe('subscription plan definitions', () => {
       tokenPlan.template.find((model) => model.id === 'deepseek-v4-pro')
         ?.generationConfig,
     ).toEqual({ contextWindowSize: 1000000 });
+  });
+
+  it('defaults Token Plan to China and supports the Singapore region', () => {
+    const china = getSubscriptionPlanConfig('token');
+    const global = getSubscriptionPlanConfig('token', CodingPlanRegion.GLOBAL);
+
+    expect(china.region).toBe(CodingPlanRegion.CHINA);
+    expect(china.baseUrl).toBe(
+      'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+    );
+    expect(china.template[0]).toMatchObject({
+      name: '[ModelStudio Token Plan] qwen3.6-plus',
+      baseUrl:
+        'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+    });
+
+    expect(global.region).toBe(CodingPlanRegion.GLOBAL);
+    expect(global.baseUrl).toBe(
+      'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+    );
+    expect(global.template[0]).toMatchObject({
+      name: '[ModelStudio Token Plan for Global/Intl] qwen3.6-plus',
+      baseUrl:
+        'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+    });
   });
 });

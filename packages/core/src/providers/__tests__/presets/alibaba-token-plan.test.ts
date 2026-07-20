@@ -5,18 +5,22 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { AuthType } from '../../../core/contentGenerator.js';
 import {
-  AuthType,
   TOKEN_PLAN_ENV_KEY,
   TOKEN_PLAN_BASE_URL,
+  TOKEN_PLAN_CHINA_BASE_URL,
+  TOKEN_PLAN_GLOBAL_BASE_URL,
   tokenPlanProvider,
+} from '../../presets/alibaba-token-plan.js';
+import {
   buildInstallPlan,
   buildProviderTemplate,
   computeModelListVersion,
   getDefaultModelIds,
   resolveBaseUrl,
   providerMatchesCredentials,
-} from '@qwen-code/qwen-code-core';
+} from '../../provider-config.js';
 
 describe('token plan provider', () => {
   it('creates a Token Plan install plan', () => {
@@ -71,7 +75,38 @@ describe('token plan provider', () => {
     ]);
     expect(plan.providerState).toEqual({
       'providerMetadata.token-plan': {
-        baseUrl: TOKEN_PLAN_BASE_URL,
+        baseUrl: TOKEN_PLAN_CHINA_BASE_URL,
+        version,
+      },
+    });
+  });
+
+  it('creates a Token Plan install plan for the Singapore region', () => {
+    const template = buildProviderTemplate(
+      tokenPlanProvider,
+      TOKEN_PLAN_GLOBAL_BASE_URL,
+    );
+    const version = computeModelListVersion(template);
+    const baseUrl = resolveBaseUrl(
+      tokenPlanProvider,
+      TOKEN_PLAN_GLOBAL_BASE_URL,
+    );
+
+    const plan = buildInstallPlan(tokenPlanProvider, {
+      baseUrl,
+      apiKey: 'sk-token',
+      modelIds: getDefaultModelIds(tokenPlanProvider),
+    });
+
+    expect(baseUrl).toBe(TOKEN_PLAN_GLOBAL_BASE_URL);
+    expect(template[0]).toMatchObject({
+      name: '[ModelStudio Token Plan for Global/Intl] qwen3.6-plus',
+      baseUrl: TOKEN_PLAN_GLOBAL_BASE_URL,
+      envKey: TOKEN_PLAN_ENV_KEY,
+    });
+    expect(plan.providerState).toEqual({
+      'providerMetadata.token-plan': {
+        baseUrl: TOKEN_PLAN_GLOBAL_BASE_URL,
         version,
       },
     });
@@ -88,9 +123,47 @@ describe('token plan provider', () => {
     expect(
       providerMatchesCredentials(
         tokenPlanProvider,
+        TOKEN_PLAN_CHINA_BASE_URL,
+        TOKEN_PLAN_ENV_KEY,
+      ),
+    ).toBe(true);
+    expect(
+      providerMatchesCredentials(
+        tokenPlanProvider,
+        TOKEN_PLAN_GLOBAL_BASE_URL,
+        TOKEN_PLAN_ENV_KEY,
+      ),
+    ).toBe(true);
+    expect(
+      providerMatchesCredentials(
+        tokenPlanProvider,
         'https://custom.example.com/v1',
         'CUSTOM_API_KEY',
       ),
+    ).toBe(false);
+  });
+
+  it('owns Token Plan models from both registered regions', () => {
+    expect(
+      tokenPlanProvider.ownsModel?.({
+        id: 'token-model',
+        baseUrl: TOKEN_PLAN_CHINA_BASE_URL,
+        envKey: TOKEN_PLAN_ENV_KEY,
+      }),
+    ).toBe(true);
+    expect(
+      tokenPlanProvider.ownsModel?.({
+        id: 'token-model',
+        baseUrl: TOKEN_PLAN_GLOBAL_BASE_URL,
+        envKey: TOKEN_PLAN_ENV_KEY,
+      }),
+    ).toBe(true);
+    expect(
+      tokenPlanProvider.ownsModel?.({
+        id: 'custom-model',
+        baseUrl: 'https://custom.example.com/v1',
+        envKey: TOKEN_PLAN_ENV_KEY,
+      }),
     ).toBe(false);
   });
 });

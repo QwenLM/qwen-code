@@ -26,6 +26,14 @@ export type CodingPlanTemplate = SubscriptionPlanModelConfig[];
 
 export const CODING_PLAN_ENV_KEY = 'BAILIAN_CODING_PLAN_API_KEY';
 export const TOKEN_PLAN_ENV_KEY = 'BAILIAN_TOKEN_PLAN_API_KEY';
+const TOKEN_PLAN_CHINA_ENDPOINT =
+  'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
+const TOKEN_PLAN_GLOBAL_ENDPOINT =
+  'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1';
+const TOKEN_PLAN_CHINA_DOC_URL =
+  'https://bailian.console.aliyun.com/cn-beijing?tab=doc#/doc/?type=model&url=3028856';
+const TOKEN_PLAN_GLOBAL_DOC_URL =
+  'https://modelstudio.console.alibabacloud.com/ap-southeast-1?tab=doc#/doc/?type=model';
 
 interface SubscriptionPlanRegionConfig<
   TRegion extends string = SubscriptionPlanRegion,
@@ -159,14 +167,25 @@ const TOKEN_PLAN: SubscriptionPlanDefinition<'token'> = {
   modelNamePrefix: 'ModelStudio Token Plan',
   authEventType: 'coding-plan',
   metadataKey: 'tokenPlan',
-  endpoint:
-    'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
-  documentationUrl:
-    'https://bailian.console.aliyun.com/cn-beijing?tab=doc#/doc/?type=model&url=3028856',
-  apiKeyUrl:
-    'https://bailian.console.aliyun.com/cn-beijing?tab=doc#/doc/?type=model&url=3028856',
-  usageDocumentationUrl:
-    'https://bailian.console.aliyun.com/cn-beijing?tab=doc#/doc/?type=model&url=3028856',
+  defaultRegion: CodingPlanRegion.CHINA,
+  regions: [
+    {
+      id: CodingPlanRegion.CHINA,
+      title: 'China (Beijing)',
+      endpoint: TOKEN_PLAN_CHINA_ENDPOINT,
+      documentationUrl: TOKEN_PLAN_CHINA_DOC_URL,
+      apiKeyUrl: TOKEN_PLAN_CHINA_DOC_URL,
+    },
+    {
+      id: CodingPlanRegion.GLOBAL,
+      title: 'Singapore (International)',
+      endpoint: TOKEN_PLAN_GLOBAL_ENDPOINT,
+      documentationUrl: TOKEN_PLAN_GLOBAL_DOC_URL,
+      apiKeyUrl: TOKEN_PLAN_GLOBAL_DOC_URL,
+      modelNamePrefix: 'ModelStudio Token Plan for Global/Intl',
+    },
+  ],
+  usageDocumentationUrl: TOKEN_PLAN_CHINA_DOC_URL,
   models: BAILIAN_TOKEN_PLAN_MODELS,
 };
 
