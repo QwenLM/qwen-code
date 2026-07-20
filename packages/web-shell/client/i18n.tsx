@@ -47,6 +47,9 @@ const EN: Messages = {
   'gitDiff.hidden': (v) => `${v?.count ?? 0} more file(s) not shown`,
   'gitDiff.expand': (v) => `Show changes for ${v?.path ?? 'file'}`,
   'gitDiff.collapse': (v) => `Hide changes for ${v?.path ?? 'file'}`,
+  'worktree.welcomeTitle': 'Worktree isolated session',
+  'worktree.welcomeDesc':
+    'Changes are made in a separate copy of the repo and won’t affect your main branch',
   'workspace.paneLabel': (v) => `Workspace: ${v?.name ?? ''}`,
   'about.auth': 'Auth',
   'about.baseUrl': 'Base URL',
@@ -871,6 +874,9 @@ const EN: Messages = {
   'sidebar.toggleMenu': 'Toggle menu',
   'sidebar.newChat': 'New chat',
   'sidebar.newTask': 'New task',
+  'sidebar.newWorktreeTask': 'New worktree task',
+  'sidebar.worktreeDescription':
+    'Work in an isolated copy — changes stay separate from the main branch',
   'sidebar.plugins': 'Plugins',
   'sidebar.project': 'Project',
   'sidebar.pinnedSessions': 'Pinned',
@@ -2181,6 +2187,8 @@ const ZH: Messages = {
   'gitDiff.hidden': (v) => `还有 ${v?.count ?? 0} 个文件未显示`,
   'gitDiff.expand': (v) => `显示 ${v?.path ?? '文件'} 的变更`,
   'gitDiff.collapse': (v) => `隐藏 ${v?.path ?? '文件'} 的变更`,
+  'worktree.welcomeTitle': 'Worktree 隔离会话',
+  'worktree.welcomeDesc': '变更在仓库的独立副本中进行，不会影响主分支',
   'workspace.paneLabel': (v) => `工作区：${v?.name ?? ''}`,
   // Tool display names (chat-stream badge labels). Keyed by `toolName.<wire>`;
   // a wire name with no entry here falls back to the English display name via
@@ -3016,6 +3024,8 @@ const ZH: Messages = {
   'sidebar.toggleMenu': '切换菜单',
   'sidebar.newChat': '新对话',
   'sidebar.newTask': '新建任务',
+  'sidebar.newWorktreeTask': '新建 Worktree 任务',
+  'sidebar.worktreeDescription': '在隔离的仓库副本中工作——变更不会影响主分支',
   'sidebar.plugins': '插件',
   'sidebar.project': '项目',
   'sidebar.pinnedSessions': '置顶',
