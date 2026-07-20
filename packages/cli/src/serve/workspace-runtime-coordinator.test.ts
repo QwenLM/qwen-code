@@ -1497,7 +1497,10 @@ describe('WorkspaceRuntimeCoordinator', () => {
       second.runMcpOperation('calendar', 'authenticate', async () => ({
         pending: true,
       })),
-    ).rejects.toThrow('already active');
+    ).rejects.toMatchObject({
+      code: 'mcp_authentication_lane_busy',
+      message: 'Another MCP authentication is already in progress',
+    });
 
     first.dispose();
     await expect(
@@ -1556,7 +1559,7 @@ describe('WorkspaceRuntimeCoordinator', () => {
       await vi.advanceTimersByTimeAsync(0);
       await expect(
         second.runMcpOperation('calendar', 'authenticate', async () => ({})),
-      ).rejects.toThrow('already active');
+      ).rejects.toThrow('already in progress');
 
       physicalPending = false;
       await vi.advanceTimersByTimeAsync(250);
@@ -1611,7 +1614,7 @@ describe('WorkspaceRuntimeCoordinator', () => {
       });
       await expect(
         second.runMcpOperation('calendar', 'authenticate', async () => ({})),
-      ).rejects.toThrow('already active');
+      ).rejects.toThrow('already in progress');
 
       pending = false;
       await vi.advanceTimersByTimeAsync(250);
@@ -1766,7 +1769,7 @@ describe('WorkspaceRuntimeCoordinator', () => {
       });
       await expect(
         second.runMcpOperation('calendar', 'authenticate', async () => ({})),
-      ).rejects.toThrow('already active');
+      ).rejects.toThrow('already in progress');
 
       finishPhysicalRequest({ pending: true, runtimeEpoch: 1 });
       await vi.advanceTimersByTimeAsync(0);
@@ -1775,7 +1778,7 @@ describe('WorkspaceRuntimeCoordinator', () => {
       });
       await expect(
         second.runMcpOperation('calendar', 'authenticate', async () => ({})),
-      ).rejects.toThrow('already active');
+      ).rejects.toThrow('already in progress');
 
       pending = false;
       await vi.advanceTimersByTimeAsync(250);

@@ -5286,6 +5286,39 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('replaces an empty workspace channel after newSession times out', async () => {
+    vi.useFakeTimers();
+    const firstHandle = makeChannel({
+      newSessionImpl: () => new Promise(() => {}),
+    });
+    const secondHandle = makeChannel({ sessionIdPrefix: 'recovered' });
+    const channelFactory = vi
+      .fn()
+      .mockResolvedValueOnce(firstHandle.channel)
+      .mockResolvedValueOnce(secondHandle.channel);
+    const bridge = makeBridge({
+      channelFactory,
+      initializeTimeoutMs: 100,
+    });
+
+    try {
+      const first = bridge
+        .spawnOrAttach({ workspaceCwd: WS_A })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(first).resolves.toBeInstanceOf(BridgeTimeoutError);
+      await vi.waitFor(() => expect(firstHandle.killed).toBe(true));
+
+      await expect(
+        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).resolves.toMatchObject({ sessionId: 'recovered:/work/a' });
+      expect(channelFactory).toHaveBeenCalledTimes(2);
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps the shared channel after overlapping thread spawns fail', async () => {
     const handles: ChannelHandle[] = [];
     const failures = [deferred<never>(), deferred<never>()];

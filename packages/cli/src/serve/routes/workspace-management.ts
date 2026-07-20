@@ -725,7 +725,11 @@ export function registerWorkspaceManagementRoutes(
           controllerDraining = false;
         }
         if (runtimeCoordinatorDraining) {
-          getWorkspaceRuntimeCoordinator(runtime).cancelDrain();
+          try {
+            getWorkspaceRuntimeCoordinator(runtime).cancelDrain();
+          } catch {
+            // Continue rolling back the remaining gates.
+          }
           runtimeCoordinatorDraining = false;
         }
         if (registryDraining) {

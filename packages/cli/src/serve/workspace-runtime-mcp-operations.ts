@@ -84,10 +84,18 @@ let activeMcpAuthentication:
   | {
       owner: object;
       operationId: string;
-      workspaceCwd: string;
-      serverName: string;
     }
   | undefined;
+
+export class WorkspaceRuntimeMcpOperationConflictError extends Error {
+  constructor(
+    readonly code: 'mcp_operation_conflict' | 'mcp_authentication_lane_busy',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'WorkspaceRuntimeMcpOperationConflictError';
+  }
+}
 
 export class WorkspaceRuntimeMcpOperations {
   private disposed = false;
@@ -149,15 +157,15 @@ export class WorkspaceRuntimeMcpOperations {
     this.pruneOperations();
     const activeOperationId = this.activeOperationByTarget.get(serverName);
     if (activeOperationId) {
-      throw new Error(
+      throw new WorkspaceRuntimeMcpOperationConflictError(
+        'mcp_operation_conflict',
         `MCP server "${serverName}" already has active operation "${activeOperationId}"`,
       );
     }
     if (action === 'authenticate' && activeMcpAuthentication) {
-      throw new Error(
-        `MCP authentication operation "${activeMcpAuthentication.operationId}" ` +
-          `is already active for "${activeMcpAuthentication.serverName}" ` +
-          `in workspace "${activeMcpAuthentication.workspaceCwd}"`,
+      throw new WorkspaceRuntimeMcpOperationConflictError(
+        'mcp_authentication_lane_busy',
+        'Another MCP authentication is already in progress',
       );
     }
     const operationId = crypto.randomUUID();
@@ -166,8 +174,6 @@ export class WorkspaceRuntimeMcpOperations {
       activeMcpAuthentication = {
         owner: this.authenticationLaneOwner,
         operationId,
-        workspaceCwd: this.runtime.workspaceCwd,
-        serverName,
       };
       let releaseBarrier!: () => void;
       const barrier = new Promise<void>((resolve) => {
@@ -515,6 +521,7 @@ export class WorkspaceRuntimeMcpOperations {
     operationEpoch?: number,
   ): Promise<void> {
     while (
+      !this.disposed &&
       this.runtime.bridge.isChannelLive() &&
       (operationEpoch === undefined ||
         this.dependencies.runtimeEpoch() === operationEpoch)

@@ -375,6 +375,8 @@ interface ChannelInfo {
   sessionSpawnsInFlight: number;
   /** Workspace-level control calls that use the shared channel without a session. */
   workspaceControlInFlight: number;
+  /** Reset an otherwise-idle channel after a timed-out Session spawn. */
+  sessionSpawnResetPending: boolean;
   workspacePhysicalRequests: Map<
     'extensions' | 'mcp' | 'skills',
     Set<Promise<void>>
@@ -1464,6 +1466,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   }
 
   function startIdleTimer(ci: ChannelInfo, context?: string): void {
+    if (channelInfo !== ci || ci.isDying) return;
+    if (ci.sessionSpawnResetPending && hasNoChannelWork(ci)) {
+      ci.sessionSpawnResetPending = false;
+      cancelIdleTimer();
+      void killChannelWithLog(ci, 'newSession timeout');
+      return;
+    }
     const timeoutMs = channelIdleTimeoutMs;
     if (timeoutMs === null) {
       cancelIdleTimer();
@@ -1472,7 +1481,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     cancelIdleTimer();
     idleTimer = setTimeout(() => {
       idleTimer = undefined;
-      if (hasNoChannelWork(ci)) {
+      if (channelInfo === ci && !ci.isDying && hasNoChannelWork(ci)) {
         writeStderrLine(
           `qwen serve: idle timeout (${timeoutMs}ms) expired${context ? ` after ${context}` : ''}, killing channel`,
         );
@@ -2034,6 +2043,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         pendingRestoreIds: new Set(),
         sessionSpawnsInFlight: 0,
         workspaceControlInFlight: 0,
+        sessionSpawnResetPending: false,
         workspacePhysicalRequests: new Map(),
         workspaceMcpDiscoveryInFlight: false,
         workspaceMcpDiscoveryRequested: false,
@@ -2300,34 +2310,44 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       modes?: { currentModeId?: unknown } | null;
     };
     try {
-      newSessionResp = await telemetry.withSpan(
-        'session.new',
-        {
-          'qwen-code.daemon.bridge.operation': 'session.new',
-          'qwen-code.daemon.session_scope': effectiveScope,
-          'qwen-code.daemon.channel.path': channelPath,
-          'qwen-code.daemon.acp_channel.id': ci.id,
-        },
-        async () => {
-          // This legacy-named helper sanitizes and injects trace metadata
-          // for any ACP request, not only prompts.
-          const response = await withTimeout(
-            ci.connection.newSession(
-              telemetry.injectPromptContext({
-                cwd: boundWorkspace,
-                mcpServers: [],
-              }),
-            ),
-            initTimeoutMs,
-            'newSession',
-          );
-          telemetry.event('session.new.completed', {
-            'session.id': response.sessionId,
+      try {
+        newSessionResp = await telemetry.withSpan(
+          'session.new',
+          {
+            'qwen-code.daemon.bridge.operation': 'session.new',
+            'qwen-code.daemon.session_scope': effectiveScope,
+            'qwen-code.daemon.channel.path': channelPath,
             'qwen-code.daemon.acp_channel.id': ci.id,
-          });
-          return response;
-        },
-      );
+          },
+          async () => {
+            // This legacy-named helper sanitizes and injects trace metadata
+            // for any ACP request, not only prompts.
+            const response = await withTimeout(
+              ci.connection.newSession(
+                telemetry.injectPromptContext({
+                  cwd: boundWorkspace,
+                  mcpServers: [],
+                }),
+              ),
+              initTimeoutMs,
+              'newSession',
+            );
+            telemetry.event('session.new.completed', {
+              'session.id': response.sessionId,
+              'qwen-code.daemon.acp_channel.id': ci.id,
+            });
+            return response;
+          },
+        );
+      } catch (error) {
+        if (
+          error instanceof BridgeTimeoutError ||
+          error instanceof BridgeChannelClosedError
+        ) {
+          ci.sessionSpawnResetPending = true;
+        }
+        throw error;
+      }
 
       // Late-shutdown re-check (BUy4U): shutdown() may have flipped
       // while we were in `connection.newSession` (~1s on cold start).
