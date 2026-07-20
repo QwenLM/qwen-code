@@ -3365,6 +3365,87 @@ describe('qwen-autofix workflow', () => {
     });
   });
 
+  it('classifies permanent API failures terminal and records the cause class', () => {
+    // A permanent 400 whose text happens to carry a 3-digit number in 500-599
+    // (a token cap, an index, a request id) must NOT be retried: matching
+    // \b5\d\d\b anywhere in the message retried these forever.
+    for (const render of [
+      '[API Error: 400 Invalid value for max_tokens: must be <= 512]',
+      '[API Error: 400 context length exceeded: 40000 > 32768]',
+    ]) {
+      withRunnerDir((dir) => {
+        writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+        const stub = writeQwenStub(dir, [
+          `process.stdout.write(${JSON.stringify(render + '\n')});`,
+          'process.exit(1);',
+        ]);
+        expect(runAddressReview(dir, stub).status).not.toBe(0);
+        expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
+      });
+    }
+    // The cause class drives the retry budget: a transient error keeps the full
+    // round budget; an auth/access error (including the OpenAI-compatible
+    // "does not exist / no access" render of what a 403 reports) is capped.
+    for (const [render, kind] of [
+      ['[API Error: 429 Too Many Requests]', 'transient'],
+      ['[API Error: 503 upstream unavailable]', 'transient'],
+      ['[API Error: 403 Model access denied.]', 'auth'],
+      [
+        '[API Error: 404 The model does not exist or you do not have access to it]',
+        'auth',
+      ],
+    ]) {
+      withRunnerDir((dir) => {
+        writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+        const stub = writeQwenStub(dir, [
+          `process.stdout.write(${JSON.stringify(render + '\n')});`,
+          'process.exit(1);',
+        ]);
+        expect(runAddressReview(dir, stub).status).not.toBe(0);
+        expect(existsSync(join(dir, 'agent-api-error'))).toBe(true);
+        expect(
+          readFileSync(join(dir, 'agent-api-error-kind'), 'utf8').trim(),
+        ).toBe(kind);
+      });
+    }
+  });
+
+  it('keeps the API-error headline valid UTF-8 when the byte cap splits a CJK render', () => {
+    // `cut -c` counts bytes under GNU coreutils and the classifier deliberately
+    // matches Chinese renders, so the 200-byte cap can split a multi-byte
+    // character and emit invalid UTF-8 into the PR comment headline.
+    const line = workflow
+      .split('\n')
+      .find((l) => l.includes('API_ERROR_DETAIL="$(head'));
+    expect(line).toBeTruthy();
+    // The guard must stay in the pipeline, and keep its `|| true`: iconv -c
+    // exits 1 when it discards a byte, which would abort the step under the
+    // step's `set -eo pipefail` before the marker and the gh pr comment.
+    expect(line).toContain('iconv -f utf-8 -t utf-8 -c');
+    expect(line).toContain('|| true');
+    const dir = mkdtempSync(join(tmpdir(), 'apierr-'));
+    try {
+      const render = `[API Error: 服务繁忙，${'负载过高，'.repeat(30)}]`;
+      expect(Buffer.byteLength(render, 'utf8')).toBeGreaterThan(200);
+      writeFileSync(join(dir, 'agent-api-error'), `${render}\n`);
+      const out = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -eo pipefail\nWORKDIR=${JSON.stringify(dir)}\n${line.trim()}\nprintf '%s' "$API_ERROR_DETAIL"`,
+        ],
+        { encoding: 'buffer' },
+      );
+      // A strict decode throws on a dangling multi-byte sequence.
+      expect(() =>
+        new TextDecoder('utf-8', { fatal: true }).decode(out),
+      ).not.toThrow();
+      expect(out.length).toBeGreaterThan(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('agrees on the agent-api-error marker name end to end (writer↔reader contract)', () => {
     // Extract the workflow READER *including* the ${WORKDIR}/agent-api-error
     // read (not just the MARK_TS block the other test drives via env), so a

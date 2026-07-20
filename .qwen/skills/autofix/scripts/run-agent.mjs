@@ -67,23 +67,61 @@ function writeFailure(workdir, message) {
   );
 }
 
-// Extract a RECOVERABLE model error from the captured output, or '' if none.
-// Recoverable = transient (5xx, rate limit, overload) or operator-fixable
-// config (401 bad key, 402 billing, 403 access, quota) — these self-heal once
-// the quota resets or the key/access is fixed, so the workflow retries them.
-// A 400 malformed request or a plain 404 fails identically forever and stays
-// terminal (no match). The match is single-line ([^\]\n]) so a multi-line
-// render cannot smuggle a newline into the marker or the PR-comment headline.
-const RECOVERABLE_API_ERROR =
-  /\b(?:401|402|403|429|5\d\d)\b|rate.?limit|quota|exceeded|RESOURCE_EXHAUSTED|overloaded|temporarily|too many requests|api key|\u901f\u7387\u9650\u5236|\u914d\u989d|\u670d\u52a1(?:\u7e41\u5fd9|\u4e0d\u53ef\u7528)/i;
+// Classify a model-side [API Error] render as recoverable, and by CAUSE:
+//   'transient' - 429 / 5xx / rate-limit / overload / quota: self-heals on its
+//                 own once the limit resets, so it earns the full retry budget.
+//   'auth'      - 401 / 402 / 403, or a render saying the model does not exist
+//                 or the key has no access: ONLY a maintainer can fix it, so
+//                 the workflow caps these retries low and then goes terminal
+//                 with the operator fix (each attempt costs an agent run AND a
+//                 PR comment; a hundred of them help nobody).
+//   ''          - terminal: reproduces identically forever (a malformed 400).
+//
+// The status code is read from its POSITION in the render (`[API Error: <code>`)
+// rather than matched anywhere in the text. Matching anywhere made permanent
+// failures look retryable: `400 Invalid value for max_tokens: must be <= 512`
+// matched a bare \b5\d\d\b, and `400 context length exceeded` matched a bare
+// `exceeded` - both reproduce forever. `exceeded` therefore only counts as part
+// of `quota`. The match is single-line ([^\]\n]) so a multi-line render cannot
+// smuggle a newline into the marker or the PR-comment headline.
+const TRANSIENT_API_ERROR =
+  /rate.?limit|quota|RESOURCE_EXHAUSTED|overloaded|temporarily|too many requests|速率限制|配额|服务(?:繁忙|不可用)/i;
+// "does not exist or you do not have access to it" is the OpenAI-compatible
+// render of the same condition a 403 reports - same root cause, same fix.
+const AUTH_API_ERROR =
+  /api key|do not have access|does not exist|unauthorized|forbidden/i;
+
+function classifyApiError(render) {
+  const code = render.match(/\[API Error:\s*(\d{3})\b/)?.[1];
+  if (code) {
+    const status = Number(code);
+    if (status === 429 || (status >= 500 && status <= 599)) return 'transient';
+    if (status === 401 || status === 402 || status === 403) return 'auth';
+    // Any other code (400, 404, ...) is permanent UNLESS the message itself
+    // names an access/existence problem.
+    return AUTH_API_ERROR.test(render) ? 'auth' : '';
+  }
+  // Code-less render: fall back to the keyword arms.
+  if (AUTH_API_ERROR.test(render)) return 'auth';
+  return TRANSIENT_API_ERROR.test(render) ? 'transient' : '';
+}
+
+// Returns { error, kind }; error is '' when nothing recoverable was found.
+// NOTE: the caller passes the last 20 KB of output, so an API error emitted
+// early in a long run can scroll out and be classified terminal. That is the
+// fail-safe direction (a missed retry, never a wrongly-retried permanent
+// failure), but detection is best-effort rather than guaranteed.
 function recoverableApiError(output) {
   const wrapped = output.match(/\[API Error:[^\]\n]*\]/g) || [];
-  const hit = wrapped.reverse().find((e) => RECOVERABLE_API_ERROR.test(e));
-  if (hit) return hit;
-  // Some quota errors are never wrapped in [API Error: …] (e.g. Qwen OAuth
-  // quota returns early before formatting) — catch the known standalone form.
+  for (const render of wrapped.reverse()) {
+    const kind = classifyApiError(render);
+    if (kind) return { error: render, kind };
+  }
+  // Some quota errors are never wrapped in [API Error: ...] (e.g. Qwen OAuth
+  // quota returns early before formatting) - catch the known standalone form.
   const oauth = output.match(/Qwen OAuth quota exceeded[^\n]*/i);
-  return oauth ? `[API Error: ${oauth[0]}]` : '';
+  if (oauth) return { error: `[API Error: ${oauth[0]}]`, kind: 'transient' };
+  return { error: '', kind: '' };
 }
 
 function writeHandoff(workdir, message) {
@@ -130,13 +168,15 @@ function runQwen(options, prompt) {
       settled = true;
       clearTimeout(timer);
       clearTimeout(killTimer);
+      const apiErrorInfo = recoverableApiError(outputTail);
       const payload = {
         ...result,
         timedOut,
         loopDetected: loopDetected || isLoopGuardOutput(outputTail),
         // A RECOVERABLE model error means qwen never evaluated the feedback —
         // the workflow retries it rather than advancing the watermark.
-        apiError: recoverableApiError(outputTail),
+        apiError: apiErrorInfo.error,
+        apiErrorKind: apiErrorInfo.kind,
       };
       if (log.destroyed) {
         resolve(payload);
@@ -262,6 +302,13 @@ if (result.error || result.signal || result.status !== 0) {
         writeFileSync(
           file(options.workdir, 'agent-api-error'),
           `${result.apiError}\n`,
+        );
+        // Cause class ("transient" | "auth") — the handoff step gives a
+        // self-healing transient error the full round budget, but caps an
+        // auth/access error that only a maintainer can fix.
+        writeFileSync(
+          file(options.workdir, 'agent-api-error-kind'),
+          `${result.apiErrorKind}\n`,
         );
       }
     }
