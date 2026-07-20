@@ -54,18 +54,19 @@ SDK (DaemonClient + types)
         │
         ▼
 Web Shell (client)
+  ├─ GitDialog.tsx                         [新增] Changes / History 统一容器
   ├─ GitLogDialog.tsx (+ .module.css)      [新增] 提交列表 + 展开详情
-  ├─ App.tsx                               [扩展] /log 命令拦截 + dialog 状态
+  ├─ App.tsx                               [扩展] /log 命令拦截 + dialog view 状态
   └─ i18n.tsx                              [扩展] gitLog.* 文案
 ```
 
 ## UI 草图
 
-`/log` 或 branch chip 上下文菜单打开。使用 `DialogShell size="xl" allowFullscreen`，
-与 `GitDiffDialog` 同级别：
+`/log` 或 Git chip 打开统一的 `GitDialog`。使用
+`DialogShell size="xl" allowFullscreen`，在同一个 dialog 内切换 Changes / History：
 
 ```text
-┌─ History ──────────────────── main · latest 50 ─ ✕ ┐
+┌─ History ───────────────────────── 50 commits ─ ✕ ┐
 │                                                      │
 │  a1b2c3d  feat(cli): add --json flag        2h ago  │
 │           wenshao                                   │
@@ -213,14 +214,15 @@ export interface DaemonGitCommitDetail {
 
 - 执行：
   ```
-  git --no-optional-locks log
-    --format='%H%x1f%h%x1f%an%x1f%ae%x1f%at%x1f%s%x1f%D%x1f%P%x00'
+  git --no-optional-locks log -z
+    --format='%H%x00%h%x00%an%x00%ae%x00%at%x00%s%x00%D%x00%P'
     -n <limit+1> --skip=<skip>
   ```
-  - `\x1f`（unit separator）分隔字段，`\x00`（NUL）分隔记录。
+  - `\x00`（NUL）分隔字段，`-z` 用 NUL 终止每条记录。
+  - Git commit message 不允许 NUL，因此 subject 中的其他控制字符不会与协议冲突。
   - 请求 `limit + 1` 条来判断 `hasMore`，返回时截断到 `limit`。
   - `--no-optional-locks` 避免写锁。
-- 解析：按 NUL 分割记录，每条按 `\x1f` 分割字段。
+- 解析：按 NUL 切分后，每 8 个字段组成一条记录。
 - 非仓库 / git 失败返回 `null`。
 - 空仓库（无 commit）返回 `{ entries: [], hasMore: false }`。
 - `limit` 上限 200，超出截断到 200。
@@ -231,8 +233,8 @@ export interface DaemonGitCommitDetail {
 - 两次 git 调用：
   1. 元数据：
      ```
-     git --no-optional-locks log -1
-       --format='%H%x1f%h%x1f%an%x1f%ae%x1f%at%x1f%s%x1f%b%x1f%D%x1f%P'
+     git --no-optional-locks log -1 -z
+       --format='%H%x00%h%x00%an%x00%ae%x00%at%x00%s%x00%D%x00%P%x00%b'
        <sha>
      ```
   2. 文件统计：
@@ -333,7 +335,8 @@ export function GitLogDialog({
 **数据获取**：
 
 - 打开时调用 `client.workspaceByCwd(workspaceCwd).workspaceGitLog()` 拉首页。
-- "Load more" 按钮调用 `workspaceGitLog(50, entries.length)` 追加。
+- "Load more" 按钮使用独立的服务端消费 offset 调用
+  `workspaceGitLog(50, nextSkip)`，追加时按 SHA 去重。
 - 展开单条时调用 `workspaceGitCommitDetail(sha)` 按需拉详情。
 - 取消模式与 GitDiffDialog 一致（effect 用 `let cancelled`，click 用
   `useRef`）。
@@ -341,7 +344,7 @@ export function GitLogDialog({
 **渲染**：
 
 - `DialogShell title={t('gitLog.title')} size="xl" allowFullscreen`。
-- subtitle 显示分支名 + 已加载条数。
+- subtitle 显示已加载条数。
 - body 状态机：loading / error / unavailable / empty / data。
 - 提交行：短 SHA（monospace，muted 色）、subject、作者名、相对时间。
 - refs 解析：从 `refs` 字符串提取 `HEAD -> branch`、tag 等，渲染为小标签。
@@ -360,21 +363,15 @@ export function GitLogDialog({
 
 ### 5. App.tsx 集成
 
-- 新增 `logWorkspaceCwd` 状态（`useState<string | undefined>`），与
-  `diffWorkspaceCwd` 平行。
-- `/log` 斜杠命令本地拦截（与 `/diff` 同模式）：
+- 新增统一的 `gitDialog` 状态：
   ```ts
-  if (cmd === 'log') {
-    if (!gitDiffWorkspaceCwd) {
-      pushToast('info', t('localCommand.logNoWorkspace'));
-      return true;
-    }
-    setLogWorkspaceCwd(gitDiffWorkspaceCwd);
-    return true;
-  }
+  { workspaceCwd: string; view: 'diff' | 'log' } | undefined
   ```
-- 条件渲染 `<GitLogDialog>`。
-- `dialogOpen` 判断加入 `logWorkspaceCwd !== undefined`。
+- `/log` 斜杠命令本地拦截（与 `/diff` 同模式），将 `view` 设为 `log`。
+- Git chip 默认打开 `diff` view；`GitDialog` 内的 Changes / History tabs
+  直接切换 view，不关闭或重新打开 Radix dialog。
+- 条件渲染单个 `<GitDialog>`。
+- `dialogOpen` 判断加入 `gitDialog !== undefined`。
 - `getLocalCommands` 补 `log` 补全项。
 
 ### 6. i18n
@@ -384,24 +381,24 @@ export function GitLogDialog({
 | Key                           | EN                                                           | zh-CN                                                         |
 | ----------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------- |
 | `gitLog.title`                | `History`                                                    | `提交历史`                                                    |
-| `gitLog.subtitle`             | `(v) => \`${v?.branch} · ${v?.count} commits\``              | `(v) => \`${v?.branch} · ${v?.count} 条提交\``                |
+| `gitLog.subtitle`             | `(v) => \`${v?.count} commits\``                             | `(v) => \`${v?.count} 条提交\``                               |
 | `gitLog.loading`              | `Loading history…`                                           | `加载历史中…`                                                 |
 | `gitLog.empty`                | `No commits yet`                                             | `暂无提交`                                                    |
 | `gitLog.unavailable`          | `Git is not available for this workspace`                    | `此工作区不可用 Git`                                          |
 | `gitLog.error`                | `Failed to load history`                                     | `加载历史失败`                                                |
 | `gitLog.loadMore`             | `Load more`                                                  | `加载更多`                                                    |
 | `gitLog.loadingMore`          | `Loading…`                                                   | `加载中…`                                                     |
-| `gitLog.merge`                | `Merge`                                                      | `合并`                                                        |
 | `gitLog.files`                | `(v) => \`${v?.count} files · +${v?.added} −${v?.removed}\`` | `(v) => \`${v?.count} 个文件 · +${v?.added} −${v?.removed}\`` |
 | `gitLog.detailError`          | `Failed to load commit details`                              | `加载提交详情失败`                                            |
 | `gitLog.hidden`               | `(v) => \`${v?.count} more file(s) not shown\``              | `(v) => \`还有 ${v?.count} 个文件未显示\``                    |
+| `gitLog.copySha`              | `(v) => \`Copy commit ${v?.sha}\``                           | `(v) => \`复制提交 ${v?.sha}\``                               |
 | `localCommand.logNoWorkspace` | `No workspace is available yet to show history for.`         | `当前还没有可用于查看历史的工作区。`                          |
 
 ## 兼容性
 
 - 新路由、新 SDK 方法、新组件，全部是增量，不修改任何现有接口。
 - 旧 daemon 没有 `/workspace/git/log` 路由：SDK 调用会 404，前端显示
-  `unavailable` 占位，不报错。
+  `Failed to load history` 错误占位。
 - 旧 client 不受影响（不请求新路由）。
 - 非 git 仓库 / 空仓库：`fetchGitLog` 返回 `null` 或空列表，前端显示占位。
 - `/log` 在非 Web Shell 客户端不存在（不影响 CLI / ACP）。

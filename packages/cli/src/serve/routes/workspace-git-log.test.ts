@@ -20,11 +20,10 @@ import {
   registerWorkspaceQualifiedGitLogRoutes,
 } from './workspace-git-log.js';
 
-vi.mock('@qwen-code/qwen-code-core', () => ({
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@qwen-code/qwen-code-core')>()),
   fetchGitLog: vi.fn(),
   fetchGitCommitDetail: vi.fn(),
-  MAX_LOG_LIMIT: 200,
-  DEFAULT_LOG_LIMIT: 50,
 }));
 
 const fetchGitLogMock = vi.mocked(fetchGitLog);
@@ -108,6 +107,20 @@ describe('workspace Git log routes', () => {
       entries: [],
       hasMore: false,
     });
+  });
+
+  it('returns a structured error when fetching the log throws', async () => {
+    fetchGitLogMock.mockRejectedValue(new Error('boom'));
+    const app = express();
+    registerWorkspaceGitLogRoutes(app, {
+      boundWorkspace: '/work/main',
+      sendBridgeError,
+    });
+
+    const response = await request(app).get('/workspace/git/log');
+
+    expect(response.status).toBe(500);
+    expect(response.body).toMatchObject({ error: 'boom' });
   });
 
   it('clamps limit to MAX_LOG_LIMIT and passes skip through', async () => {
@@ -240,6 +253,22 @@ describe('workspace Git log routes', () => {
     expect(response.body).toMatchObject({ available: false });
   });
 
+  it('returns a structured error when fetching commit detail throws', async () => {
+    fetchGitCommitDetailMock.mockRejectedValue(new Error('boom'));
+    const app = express();
+    registerWorkspaceGitLogRoutes(app, {
+      boundWorkspace: '/work/main',
+      sendBridgeError,
+    });
+
+    const response = await request(app).get(
+      '/workspace/git/log/commit?sha=abcdef1',
+    );
+
+    expect(response.status).toBe(500);
+    expect(response.body).toMatchObject({ error: 'boom' });
+  });
+
   it('rejects an untrusted workspace on the qualified routes', async () => {
     const app = express();
     const primary = runtime('primary', '/work/main', true);
@@ -277,5 +306,26 @@ describe('workspace Git log routes', () => {
       limit: 50,
       skip: 0,
     });
+  });
+
+  it('uses the selected trusted workspace for qualified commit detail', async () => {
+    fetchGitCommitDetailMock.mockResolvedValue(null);
+    const app = express();
+    const primary = runtime('primary', '/work/main', true);
+    const secondary = runtime('secondary', '/work/secondary', true);
+    registerWorkspaceQualifiedGitLogRoutes(app, {
+      workspaceRegistry: registry([primary, secondary]),
+      sendBridgeError,
+    });
+
+    const response = await request(app).get(
+      '/workspaces/secondary/git/log/commit?sha=abcdef1',
+    );
+
+    expect(response.status).toBe(200);
+    expect(fetchGitCommitDetailMock).toHaveBeenCalledWith(
+      '/work/secondary',
+      'abcdef1',
+    );
   });
 });

@@ -2019,6 +2019,18 @@ describe('fetchGitLog', () => {
     expect(result!.entries[0].refs).toContain('HEAD');
     expect(result!.entries[0].refs).toContain('main');
   });
+
+  it('preserves a unit separator in the commit subject', async () => {
+    const subject = 'subject\x1ftail';
+    await fs.writeFile(path.join(repo, 'a.txt'), 'x\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', subject);
+
+    const result = await fetchGitLog(repo);
+    expect(result!.entries[0].subject).toBe(subject);
+    expect(result!.entries[0].refs).toContain('HEAD');
+    expect(result!.entries[0].parents).toHaveLength(0);
+  });
 });
 
 describe('fetchGitCommitDetail', () => {
@@ -2075,6 +2087,22 @@ describe('fetchGitCommitDetail', () => {
     expect(detail!.files[0].added).toBe(3);
     expect(detail!.files[0].isBinary).toBe(false);
     expect(detail!.hiddenCount).toBe(0);
+  });
+
+  it('preserves unit separators in the subject and body', async () => {
+    const subject = 'subject\x1ftail';
+    const body = 'body\x1ftail';
+    await fs.writeFile(path.join(repo, 'a.txt'), 'x\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', `${subject}\n\n${body}`);
+
+    const log = await fetchGitLog(repo);
+    const detail = await fetchGitCommitDetail(repo, log!.entries[0].sha);
+
+    expect(detail!.subject).toBe(subject);
+    expect(detail!.body).toBe(body);
+    expect(detail!.refs).toContain('HEAD');
+    expect(detail!.parents).toHaveLength(0);
   });
 
   it('handles root commit (no parent)', async () => {

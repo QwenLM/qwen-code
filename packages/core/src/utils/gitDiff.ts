@@ -1443,24 +1443,12 @@ export interface GitCommitDetail {
   hiddenCount: number;
 }
 
-const LOG_FORMAT = '%H%x1f%h%x1f%an%x1f%ae%x1f%at%x1f%s%x1f%D%x1f%P';
+const LOG_FORMAT = '%H%x00%h%x00%an%x00%ae%x00%at%x00%s%x00%D%x00%P';
 const LOG_DETAIL_FORMAT =
-  '%H%x1f%h%x1f%an%x1f%ae%x1f%at%x1f%s%x1f%D%x1f%P%x1f%b';
-const FIELD_SEP = '\x1f';
+  '%H%x00%h%x00%an%x00%ae%x00%at%x00%s%x00%D%x00%P%x00%b';
 
-function parseLogFields(raw: string): GitLogEntry | null {
-  // Bounded split: only the first 7 separators, so a subject containing a
-  // literal \x1f cannot shift the parents field.
-  const parts: string[] = [];
-  let rest = raw;
-  for (let i = 0; i < 7; i++) {
-    const idx = rest.indexOf(FIELD_SEP);
-    if (idx < 0) break;
-    parts.push(rest.slice(0, idx));
-    rest = rest.slice(idx + 1);
-  }
-  parts.push(rest);
-  if (parts.length < 8) return null;
+function parseLogFields(parts: string[]): GitLogEntry | null {
+  if (parts.length !== 8) return null;
   return {
     sha: parts[0],
     shortSha: parts[1],
@@ -1496,7 +1484,8 @@ export async function fetchGitLog(
     [
       '--no-optional-locks',
       'log',
-      `--format=${LOG_FORMAT}%x00`,
+      '-z',
+      `--format=${LOG_FORMAT}`,
       '-n',
       String(limit + 1),
       ...(skip > 0 ? ['--skip', String(skip)] : []),
@@ -1511,16 +1500,15 @@ export async function fetchGitLog(
     return head === null ? { entries: [], hasMore: false } : null;
   }
 
-  const records = stdout
-    .split('\0')
-    .map((r) => r.replace(/^\n/, ''))
-    .filter((r) => r.length > 0);
-  const hasMore = records.length > limit;
-  const page = hasMore ? records.slice(0, limit) : records;
+  const fields = stdout.split('\0');
+  if (fields.at(-1) === '') fields.pop();
+  const recordCount = Math.floor(fields.length / 8);
+  const hasMore = recordCount > limit;
+  const pageCount = hasMore ? limit : recordCount;
 
   const entries: GitLogEntry[] = [];
-  for (const record of page) {
-    const entry = parseLogFields(record);
+  for (let i = 0; i < pageCount; i++) {
+    const entry = parseLogFields(fields.slice(i * 8, i * 8 + 8));
     if (entry) entries.push(entry);
   }
   return { entries, hasMore };
@@ -1543,24 +1531,21 @@ export async function fetchGitCommitDetail(
   if (!gitRoot) return null;
 
   const metaRaw = await runGit(
-    ['--no-optional-locks', 'log', '-1', `--format=${LOG_DETAIL_FORMAT}`, sha],
+    [
+      '--no-optional-locks',
+      'log',
+      '-1',
+      '-z',
+      `--format=${LOG_DETAIL_FORMAT}`,
+      sha,
+    ],
     gitRoot,
   );
   if (metaRaw === null) return null;
 
-  // Body is the last field and may contain the field separator; split only
-  // the first 8 separators so the remainder is the intact body.
-  const trimmed = metaRaw.replace(/\n$/, '');
-  const parts: string[] = [];
-  let rest = trimmed;
-  for (let i = 0; i < 8; i++) {
-    const idx = rest.indexOf(FIELD_SEP);
-    if (idx < 0) break;
-    parts.push(rest.slice(0, idx));
-    rest = rest.slice(idx + 1);
-  }
-  parts.push(rest);
-  if (parts.length < 9) return null;
+  const parts = metaRaw.split('\0');
+  if (parts.at(-1) === '') parts.pop();
+  if (parts.length !== 9) return null;
 
   const parents = parts[7] ? parts[7].split(' ').filter(Boolean) : [];
 
@@ -1633,7 +1618,7 @@ export async function fetchGitCommitDetail(
     subject: parts[5],
     refs: parts[6],
     parents,
-    body: parts[8],
+    body: parts[8].replace(/\n$/, ''),
     files,
     filesCount,
     linesAdded,
