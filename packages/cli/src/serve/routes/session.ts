@@ -1378,8 +1378,17 @@ export function registerSessionRoutes(
       // before any subsequent prompt is processed.
       if (worktreeMeta) {
         try {
+          // Compute allowed roots for the sessionCd containment check.
+          const createAllowedRoots = [workspaceCwd];
+          const createRepoTop = await new GitWorktreeService(workspaceCwd)
+            .getRepoTopLevel()
+            .catch(() => null);
+          if (createRepoTop && createRepoTop !== workspaceCwd) {
+            createAllowedRoots.push(createRepoTop);
+          }
           await runtime.bridge.changeSessionCwd(session.sessionId, {
             path: worktreeMeta.path,
+            allowedRoots: createAllowedRoots,
           });
           await writeWorktreeSessionMarker(
             worktreeMeta.path,
@@ -1578,9 +1587,9 @@ export function registerSessionRoutes(
             // the repo top-level, not the workspace cwd. Try workspaceCwd
             // first, then fall back to the git repo top-level.
             let realTarget: string | undefined;
+            const candidateRoots = [workspaceCwd];
             try {
               realTarget = fs.realpathSync(sidecar.worktreePath);
-              const candidateRoots = [workspaceCwd];
               let repoTop: string | null = null;
               try {
                 repoTop = await new GitWorktreeService(
@@ -1623,6 +1632,7 @@ export function registerSessionRoutes(
               try {
                 await runtime.bridge.changeSessionCwd(sessionId, {
                   path: wt.path,
+                  allowedRoots: candidateRoots,
                 });
                 runtime.bridge.setSessionWorktree(sessionId, wt);
                 session.worktree = wt;

@@ -7589,6 +7589,26 @@ class QwenAgent implements Agent {
           }
         }
 
+        // Server-controlled containment check (worktree create/restore).
+        // When allowedRoots is present, verify the canonical target is
+        // under one of the roots. This closes the TOCTOU between the
+        // route-level validation and this final relocation boundary.
+        const allowedRoots = params['allowedRoots'];
+        if (Array.isArray(allowedRoots) && allowedRoots.length > 0) {
+          const contained = allowedRoots.some((root: unknown) => {
+            if (typeof root !== 'string') return false;
+            const rel = path.relative(root, canonicalPath);
+            return !rel.startsWith('..') && !path.isAbsolute(rel);
+          });
+          if (!contained) {
+            throw new RequestError(
+              -32004,
+              `Path outside allowed roots: ${canonicalPath}`,
+              { errorKind: 'containment_violation', path: canonicalPath },
+            );
+          }
+        }
+
         // Relocate working directory (skip process.chdir and artifact
         // migration for ACP — storage stays at the bound workspace so
         // branch/load/lifecycle paths remain consistent).
