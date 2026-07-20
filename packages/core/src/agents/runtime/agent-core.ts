@@ -20,6 +20,7 @@ import { randomUUID } from 'node:crypto';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { reportError } from '../../utils/errorReporting.js';
 import { subagentNameContext } from '../../utils/subagentNameContext.js';
+import { runWithInvocationContext } from '../../utils/invocation-context.js';
 import type { Config } from '../../config/config.js';
 import {
   getCurrentAgentDepth,
@@ -658,7 +659,9 @@ export class AgentCore {
         abortController,
         options,
       );
-    return this.runInAgentFrames(inner);
+    return runWithInvocationContext(undefined, () =>
+      this.runInAgentFrames(inner),
+    );
   }
 
   /**

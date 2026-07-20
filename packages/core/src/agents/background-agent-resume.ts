@@ -28,6 +28,7 @@ import type { ChatRecord } from '../services/chatRecordingService.js';
 import { buildOrderedUuidChain } from '../utils/conversation-chain.js';
 import { getInitialChatHistory } from '../utils/environmentContext.js';
 import { getGitBranch } from '../utils/gitUtils.js';
+import { runWithInvocationContext } from '../utils/invocation-context.js';
 import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
 import {
   appendStopHookBlockingCapWarning,
@@ -1041,7 +1042,11 @@ export class BackgroundAgentResumeService {
           runBody,
           normalizeResumedAgentDepth(meta.depth),
         );
-      void (target.isFork ? runInForkContext(framedRunBody) : framedRunBody());
+      const invocationRunBody = () =>
+        runWithInvocationContext(undefined, framedRunBody);
+      void (target.isFork
+        ? runInForkContext(invocationRunBody)
+        : invocationRunBody());
       return entry;
     } catch (error) {
       cleanupOwnedMonitorNotifications?.();

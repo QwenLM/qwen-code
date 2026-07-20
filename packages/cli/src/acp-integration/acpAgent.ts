@@ -40,6 +40,9 @@ import {
   MCPServerStatus,
   McpTransportPool,
   POOLED_TRANSPORTS_DEFAULT,
+  INVOCATION_CONTEXT_META_KEY,
+  PRIVATE_PARENT_CAPABILITY_META_KEY,
+  parseInvocationContext,
   findExistingProviderModels,
   ExtensionManager,
   ExtensionSettingScope,
@@ -2545,7 +2548,14 @@ export async function runAcpAgent(
   config: Config,
   settings: LoadedSettings,
   argv: CliArgs,
+  options?: { privateParentCapability?: string },
 ) {
+  const privateParentCapability =
+    options === undefined
+      ? process.env['QWEN_CODE_PRIVATE_ACP_CAPABILITY']
+      : options.privateParentCapability;
+  delete process.env['QWEN_CODE_PRIVATE_ACP_CAPABILITY'];
+
   // Reverse tool channel (issue #5626, Phase 2). Runtime-MCP-add targets the
   // BOOTSTRAP (workspace-level) config's `McpClientManager` — `this.config` in
   // the `workspaceMcpRuntimeAdd` handler — so a client-hosted MCP server's SDK
@@ -2595,7 +2605,13 @@ export async function runAcpAgent(
     const stream = ndJsonStream(stdout, stdin);
     connection = new AgentSideConnection((conn) => {
       acpConnection = conn;
-      agentInstance = new QwenAgent(config, settings, argv, conn);
+      agentInstance = new QwenAgent(
+        config,
+        settings,
+        argv,
+        conn,
+        privateParentCapability,
+      );
       return agentInstance;
     }, stream);
     markAcpStartup('transportSetupEnd');
@@ -2902,6 +2918,11 @@ class QwenAgent implements Agent {
     TranscriptReplayConfigCacheEntry
   >();
   private clientCapabilities: ClientCapabilities | undefined;
+  private privateParentState:
+    | 'uninitialized'
+    | 'trusted'
+    | 'untrusted'
+    | 'rejected' = 'uninitialized';
   // CPU-usage delta baseline for the daemon's `workspaceResource` extMethod
   // (Daemon Status child-resource chart). The daemon polls this at a fixed
   // cadence, so successive calls form a clean delta window independent of tool
@@ -3289,6 +3310,7 @@ class QwenAgent implements Agent {
     private settings: LoadedSettings,
     private argv: CliArgs,
     private connection: AgentSideConnection,
+    private readonly expectedPrivateParentCapability?: string,
   ) {
     // Pool kill switch via env var so operators can A/B compare or
     // roll back without rebuilding. `run-qwen-serve.ts` sets this when
@@ -3365,6 +3387,28 @@ class QwenAgent implements Agent {
 
   async initialize(args: InitializeRequest): Promise<InitializeResponse> {
     markAcpStartup('initializeHandlerStart');
+    if (this.privateParentState === 'rejected') {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid private ACP parent capability',
+      );
+    }
+    if (this.privateParentState === 'uninitialized') {
+      const expectedCapability = this.expectedPrivateParentCapability;
+      if (expectedCapability === undefined) {
+        this.privateParentState = 'untrusted';
+      } else if (
+        args._meta?.[PRIVATE_PARENT_CAPABILITY_META_KEY] === expectedCapability
+      ) {
+        this.privateParentState = 'trusted';
+      } else {
+        this.privateParentState = 'rejected';
+        throw RequestError.invalidParams(
+          undefined,
+          'Invalid private ACP parent capability',
+        );
+      }
+    }
     this.clientCapabilities = args.clientCapabilities;
     const authMethods = buildAuthMethods();
     const version = process.env['CLI_VERSION'] || process.version;
@@ -3867,7 +3911,35 @@ class QwenAgent implements Agent {
     if (!session) {
       throw new Error(`Session not found: ${params.sessionId}`);
     }
-    return session.prompt(params);
+    const sanitizedParams = { ...params };
+    const meta =
+      params._meta && typeof params._meta === 'object'
+        ? { ...params._meta }
+        : {};
+    const suppliedContext = meta[INVOCATION_CONTEXT_META_KEY];
+    delete meta[INVOCATION_CONTEXT_META_KEY];
+    delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
+    if (Object.keys(meta).length > 0) {
+      sanitizedParams._meta = meta;
+    } else {
+      delete sanitizedParams._meta;
+    }
+
+    const invocationContext =
+      this.privateParentState === 'trusted' && suppliedContext !== undefined
+        ? parseInvocationContext(suppliedContext)
+        : undefined;
+    if (
+      this.privateParentState === 'trusted' &&
+      suppliedContext !== undefined &&
+      invocationContext === undefined
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid trusted ACP invocation context',
+      );
+    }
+    return session.prompt(sanitizedParams, invocationContext);
   }
 
   async cancel(params: CancelNotification): Promise<void> {
