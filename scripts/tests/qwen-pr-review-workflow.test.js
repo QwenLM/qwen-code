@@ -81,6 +81,7 @@ function runScenario(scenario, { timeoutMinutes = 180 } = {}) {
         '  quota_noreset) r success false "[API Error: 429 Your quota has been exhausted.]" ;;',
         '  abort_no_status) r success false "[API Error: Connection error.]" ;;',
         '  abort_status_suffix) r success false "[API Error: Rate limit exceeded (Status: RESOURCE_EXHAUSTED)]" ;;',
+        '  abort_long_body) EPAD=$(printf "A%.0s" $(seq 1 750)); r success false "[API Error: upstream returned an unparseable error body: ${EPAD}]" ;;',
         '  success_mentions_api_error) PAD=$(printf "x%.0s" $(seq 1 600)); r success false "This PR detects the [API Error: ...] pattern and routes to retry. quota and rate.?limit keywords cover the common messages. ${PAD} Review complete: COMMENT posted (0 Critical, 1 Suggestion inline)." ;;',
         '  success_quotes_status_code) PAD=$(printf "x%.0s" $(seq 1 700)); r success false "This PR adds retry for [API Error: 429 quota exceeded] and similar. ${PAD} Verdict: COMMENT, 0 Critical." ;;',
         '  errresult) r error true "connection dropped mid-review" ;;',
@@ -171,6 +172,15 @@ describe('qwen pr review transient retry', () => {
 
   it('retries an abort with status at the end (Status: …) shape', () => {
     const r = runScenario('abort_status_suffix');
+    expect(r.line).toContain('FAIL');
+    expect(r.line).not.toContain('kind=[quota]');
+    expect(r.attempts).toBe(2);
+  });
+
+  it('detects an abort whose error body exceeds the 600-byte tail window', () => {
+    // The [API Error: prefix falls outside tail -c 600, but the
+    // whole-result check still catches it.
+    const r = runScenario('abort_long_body');
     expect(r.line).toContain('FAIL');
     expect(r.line).not.toContain('kind=[quota]');
     expect(r.attempts).toBe(2);

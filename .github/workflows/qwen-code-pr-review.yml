@@ -794,27 +794,29 @@ jobs:
               REASON="Qwen review ended in an error result (subtype=${RESULT_SUBTYPE}, is_error=${RESULT_IS_ERROR})."
               return
             fi
-            # An aborted run renders the API error as (or at the very end of)
-            # the result text; a successful review that merely *discusses* API
-            # errors quotes them mid-prose. Anchor on the tail so prose quotes
-            # don't trip the detector. 600 bytes covers the longest real error
-            # (~200 bytes for a 429 + rate-limit suffix) with headroom.
+            # An aborted run renders the API error as the entire result or at
+            # its very end; a successful review that merely *discusses* API
+            # errors quotes them mid-prose. Two checks cover both shapes:
+            # whole-result match (length-independent) and tail match (catches
+            # errors appended to a partial review). 600 bytes covers the
+            # longest common error (~200 bytes for a 429 + rate-limit suffix).
+            IS_ABORT=0
+            case "$RESULT_TEXT" in "[API Error: "*) IS_ABORT=1 ;; esac
             RESULT_TAIL="$(printf '%s' "$RESULT_TEXT" | tail -c 600)"
-            case "$RESULT_TAIL" in
-              *"[API Error: "*)
-                if printf '%s' "$RESULT_TAIL" | grep -qiE 'quota.*(exhaust|exceed|limit|reset)'; then
-                  OUTCOME='quota'
-                  KIND='quota'
-                  local detail
-                  detail="$(printf '%s' "$RESULT_TAIL" | grep -oiE 'reset at [^]]*' | head -n1 || true)"
-                  REASON="Qwen review stopped: the model API quota is exhausted${detail:+ (${detail})}."
-                else
-                  OUTCOME='retryable'
-                  REASON="Qwen review aborted with an API error before posting comments."
-                fi
-                return
-                ;;
-            esac
+            case "$RESULT_TAIL" in *"[API Error: "*) IS_ABORT=1 ;; esac
+            if [ "$IS_ABORT" -eq 1 ]; then
+              if printf '%s' "$RESULT_TEXT" | grep -qiE 'quota.*(exhaust|exceed|limit|reset)'; then
+                OUTCOME='quota'
+                KIND='quota'
+                local detail
+                detail="$(printf '%s' "$RESULT_TEXT" | grep -oiE 'reset at [^]]*' | head -n1 || true)"
+                REASON="Qwen review stopped: the model API quota is exhausted${detail:+ (${detail})}."
+              else
+                OUTCOME='retryable'
+                REASON="Qwen review aborted with an API error before posting comments."
+              fi
+              return
+            fi
             OUTCOME='success'
           }
 
