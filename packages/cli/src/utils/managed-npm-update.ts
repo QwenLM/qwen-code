@@ -23,7 +23,7 @@ interface ManagedNpmUpdate {
   versionDir: string;
   launcherRoot: string;
   baseVersion: string;
-  bootstrapMtimeMs: number;
+  bootstrapCtimeMs: number;
   installArgs: string[];
 }
 
@@ -87,7 +87,7 @@ function launcherId(bootstrapPath: string): string {
 
 function readBaseInstallation(bootstrapPath: string): {
   version: string;
-  mtimeMs: number;
+  ctimeMs: number;
 } {
   const manifest = JSON.parse(
     fs.readFileSync(
@@ -100,7 +100,7 @@ function readBaseInstallation(bootstrapPath: string): {
   }
   return {
     version: manifest.version,
-    mtimeMs: fs.statSync(bootstrapPath).mtimeMs,
+    ctimeMs: fs.statSync(bootstrapPath).ctimeMs,
   };
 }
 
@@ -141,7 +141,7 @@ async function readActiveVersion(
   expected: {
     bootstrap: string;
     baseVersion: string;
-    bootstrapMtimeMs: number;
+    bootstrapCtimeMs: number;
   },
 ): Promise<string | null> {
   try {
@@ -151,13 +151,13 @@ async function readActiveVersion(
       version?: unknown;
       bootstrap?: unknown;
       baseVersion?: unknown;
-      bootstrapMtimeMs?: unknown;
+      bootstrapCtimeMs?: unknown;
     };
     return typeof active.version === 'string' &&
       semver.valid(active.version) !== null &&
       active.bootstrap === expected.bootstrap &&
       active.baseVersion === expected.baseVersion &&
-      active.bootstrapMtimeMs === expected.bootstrapMtimeMs
+      active.bootstrapCtimeMs === expected.bootstrapCtimeMs
       ? active.version
       : null;
   } catch {
@@ -185,7 +185,7 @@ export function prepareManagedNpmUpdate(
     versionDir: path.join(versionsDir, version),
     launcherRoot,
     baseVersion: base.version,
-    bootstrapMtimeMs: base.mtimeMs,
+    bootstrapCtimeMs: base.ctimeMs,
     installArgs: [
       'install',
       '--prefix',
@@ -226,7 +226,7 @@ export async function activateManagedNpmUpdate(
     const base = readBaseInstallation(resolvedBootstrapPath);
     if (
       base.version !== update.baseVersion ||
-      base.mtimeMs !== update.bootstrapMtimeMs
+      base.ctimeMs !== update.bootstrapCtimeMs
     ) {
       throw new Error(
         'The base Qwen Code npm installation changed during update',
@@ -236,7 +236,7 @@ export async function activateManagedNpmUpdate(
     const activeVersion = await readActiveVersion(activeFile, {
       bootstrap: resolvedBootstrapPath,
       baseVersion: base.version,
-      bootstrapMtimeMs: base.mtimeMs,
+      bootstrapCtimeMs: base.ctimeMs,
     });
     if (activeVersion && semver.gt(activeVersion, version)) {
       try {
@@ -267,7 +267,7 @@ export async function activateManagedNpmUpdate(
           version,
           bootstrap: resolvedBootstrapPath,
           baseVersion: base.version,
-          bootstrapMtimeMs: base.mtimeMs,
+          bootstrapCtimeMs: base.ctimeMs,
         }),
         { mode: 0o600 },
       );

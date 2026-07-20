@@ -16,6 +16,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -551,14 +552,14 @@ describe('bootstrap import boundaries', () => {
         'process.stdout.write(JSON.stringify({ managed: process.env.QWEN_CODE_MANAGED_NPM_UPDATE, launcher: process.env.QWEN_CODE_CLI, args: process.argv.slice(2) }));\n',
       );
       mkdirSync(launcherRoot, { recursive: true });
-      const { mtimeMs } = statSync(entryPath);
+      const bootstrapStat = statSync(entryPath);
       writeFileSync(
         path.join(launcherRoot, 'active.json'),
         JSON.stringify({
           version: '2.0.0',
           bootstrap: realpathSync(entryPath),
           baseVersion: '1.0.0',
-          bootstrapMtimeMs: mtimeMs,
+          bootstrapCtimeMs: bootstrapStat.ctimeMs,
         }),
       );
 
@@ -620,6 +621,18 @@ describe('bootstrap import boundaries', () => {
         launcher: realpathSync(entryPath),
         args: ['--prompt', 'hello'],
       });
+
+      const replacement = `${entryPath}.replacement`;
+      copyFileSync(entryPath, replacement);
+      renameSync(replacement, entryPath);
+      utimesSync(entryPath, bootstrapStat.atime, bootstrapStat.mtime);
+      expect(statSync(entryPath).ctimeMs).not.toBe(bootstrapStat.ctimeMs);
+      expect(
+        execFileSync(process.execPath, [entryPath, '--prompt', 'hello'], {
+          encoding: 'utf8',
+          env: emptyHomeEnv,
+        }),
+      ).toBe('old version\n');
 
       writeFileSync(
         path.join(entryDir, 'package.json'),

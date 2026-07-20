@@ -129,7 +129,7 @@ function getManagedNpmInstallation() {
       typeof active.bootstrap !== 'string' ||
       realpathSync(active.bootstrap) !== currentEntryPath ||
       active.baseVersion !== basePackage.version ||
-      active.bootstrapMtimeMs !== statSync(currentEntryPath).mtimeMs
+      active.bootstrapCtimeMs !== statSync(currentEntryPath).ctimeMs
     ) {
       return undefined;
     }

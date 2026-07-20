@@ -15,7 +15,8 @@ vi.mock('node:child_process', () => ({
   spawnSync: spawnSyncMock,
 }));
 
-vi.mock('node:fs', () => ({
+vi.mock('node:fs', async (importOriginal) => ({
+  ...(await importOriginal()),
   existsSync: existsSyncMock,
   realpathSync: vi.fn((p) => p),
   readFileSync: vi.fn(() => JSON.stringify({ version: '0.0.0-test' })),
