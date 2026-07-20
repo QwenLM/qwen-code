@@ -150,9 +150,11 @@ const FORBIDDEN_ACP_UI_PACKAGES = [
 // resources, api-logs) are intentionally NOT listed.
 //
 // The protocol-chain subset is additionally forbidden from the sdk-impl
-// static closure (issue #7264): @opentelemetry/otlp-transformer sits in the
-// shared serialization layer both the HTTP and gRPC exporter packages pull
-// in, so it catches a static re-import of either protocol module.
+// static closure (issue #7264). Both the gRPC and HTTP exporter packages are
+// listed explicitly so the guard is self-describing and survives upstream
+// dependency restructuring; @opentelemetry/otlp-transformer (the serialization
+// layer both chains share) and @opentelemetry/otlp-exporter-base stay listed as
+// belt-and-suspenders for a static re-import of either protocol module.
 const FORBIDDEN_OTLP_PROTOCOL_PACKAGES = [
   { label: 'gRPC runtime', packageName: '@grpc/grpc-js' },
   { label: 'gRPC proto loader', packageName: '@grpc/proto-loader' },
@@ -160,6 +162,10 @@ const FORBIDDEN_OTLP_PROTOCOL_PACKAGES = [
   {
     label: 'OTLP transformer',
     packageName: '@opentelemetry/otlp-transformer',
+  },
+  {
+    label: 'OTLP exporter base',
+    packageName: '@opentelemetry/otlp-exporter-base',
   },
   {
     label: 'OTLP gRPC trace exporter',
@@ -172,6 +178,18 @@ const FORBIDDEN_OTLP_PROTOCOL_PACKAGES = [
   {
     label: 'OTLP gRPC metric exporter',
     packageName: '@opentelemetry/exporter-metrics-otlp-grpc',
+  },
+  {
+    label: 'OTLP HTTP trace exporter',
+    packageName: '@opentelemetry/exporter-trace-otlp-http',
+  },
+  {
+    label: 'OTLP HTTP log exporter',
+    packageName: '@opentelemetry/exporter-logs-otlp-http',
+  },
+  {
+    label: 'OTLP HTTP metric exporter',
+    packageName: '@opentelemetry/exporter-metrics-otlp-http',
   },
 ];
 

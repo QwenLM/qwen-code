@@ -44,40 +44,6 @@ function createTelemetryDiagLogger(): DiagLogger {
 // surfaced in user-visible UI. Keep diagnostics in the debug log instead.
 diag.setLogger(createTelemetryDiagLogger(), DiagLogLevel.WARN);
 
-/**
- * Standard OTLP HTTP signal-specific paths per the OpenTelemetry specification.
- * gRPC uses service-based routing so no path appending is needed.
- */
-const OTLP_SIGNAL_PATHS = {
-  traces: 'v1/traces',
-  logs: 'v1/logs',
-  metrics: 'v1/metrics',
-} as const;
-
-type OtlpSignal = keyof typeof OTLP_SIGNAL_PATHS;
-
-/**
- * Resolve the final URL for an HTTP OTLP exporter.
- *
- * - If the URL path already ends with the signal-specific path (e.g., /v1/traces),
- *   use it as-is. This supports explicit full-path configuration.
- * - Otherwise, append the signal-specific path to the base URL.
- */
-export function resolveHttpOtlpUrl(
-  baseEndpoint: string,
-  signal: OtlpSignal,
-): string {
-  const signalPath = OTLP_SIGNAL_PATHS[signal];
-  const url = new URL(baseEndpoint);
-  const normalizedPath = url.pathname.replace(/\/+$/, '');
-  if (normalizedPath.endsWith(signalPath)) {
-    return url.href;
-  }
-  // Append the signal path to the URL pathname, preserving query/hash.
-  url.pathname = normalizedPath + '/' + signalPath;
-  return url.href;
-}
-
 // Ceiling for sdk.shutdown() when called directly (e.g. non-interactive mode).
 // In interactive mode, runExitCleanup() imposes its own tighter per-function
 // (2s) and overall (5s) timeouts, so this value is effectively unreachable there.
@@ -103,17 +69,19 @@ export function initializeTelemetry(
   // is cleared in `finally` so a failed dynamic import can be retried, while
   // a successful init keeps returning early via `telemetryInitialized`.
   telemetryInitPromise ??= (async () => {
-    // The heavy SDK assembly is loaded on demand so disabled-telemetry
-    // processes — notably the ACP child on the daemon cold-start path —
-    // never pay the module-load cost. `startTelemetrySdk` in turn loads
-    // only the configured OTLP protocol chain (issue #7264).
-    const { startTelemetrySdk } = await import('./sdk-impl.js');
-    if (telemetryInitialized) return;
-    const started = await startTelemetrySdk(config);
-    if (!started) return;
-    sdk = started.sdk;
     const debugLogger = createDebugLogger('OTEL');
     try {
+      // The heavy SDK assembly is loaded on demand so disabled-telemetry
+      // processes — notably the ACP child on the daemon cold-start path —
+      // never pay the module-load cost. `startTelemetrySdk` in turn loads
+      // only the configured OTLP protocol chain (issue #7264). Both dynamic
+      // imports stay inside the try so a chunk-load failure degrades telemetry
+      // rather than rejecting — the daemon runtime awaits this without a catch.
+      const { startTelemetrySdk } = await import('./sdk-impl.js');
+      if (telemetryInitialized) return;
+      const started = await startTelemetrySdk(config);
+      if (!started) return;
+      sdk = started.sdk;
       sdk.start();
       debugLogger.debug('OpenTelemetry SDK started successfully.');
       telemetryInitialized = true;
@@ -147,17 +115,33 @@ export function refreshSessionContext(sessionId: string): void {
   }
 }
 
-export async function shutdownTelemetry(): Promise<void> {
+export function shutdownTelemetry(): Promise<void> {
   if (telemetryShutdownPromise) {
     return telemetryShutdownPromise;
   }
-  if (!telemetryInitialized || !sdk) {
-    return;
+  // A fire-and-forget init (config bootstrap, startup prefetch) may still be
+  // in flight. When nothing is initializing and nothing is initialized this is
+  // a no-op; otherwise wait for that init inside the shutdown promise so we
+  // tear down — and flush — whatever it registers, instead of racing past the
+  // synchronous `telemetryInitialized` flag and leaking a started SDK.
+  const pendingInit = telemetryInitPromise;
+  if (!pendingInit && (!telemetryInitialized || !sdk)) {
+    return Promise.resolve();
   }
-  endInteractionSpan('cancelled');
-  const currentSdk = sdk;
-  const debugLogger = createDebugLogger('OTEL');
   telemetryShutdownPromise = (async () => {
+    if (pendingInit) {
+      await pendingInit.catch(() => {});
+    }
+    if (!telemetryInitialized || !sdk) {
+      // The awaited init did not finish initializing (telemetry disabled, no
+      // usable exporter, or `sdk.start()` threw). Clear the promise we just set
+      // so a later real shutdown isn't short-circuited by this stale no-op.
+      telemetryShutdownPromise = undefined;
+      return;
+    }
+    endInteractionSpan('cancelled');
+    const currentSdk = sdk;
+    const debugLogger = createDebugLogger('OTEL');
     let timer: ReturnType<typeof setTimeout> | undefined;
     let timedOut = false;
     try {

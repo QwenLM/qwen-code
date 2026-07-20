@@ -1,7 +1,7 @@
 # Lazy-load the OpenTelemetry SDK off the ACP child startup path
 
 - **Issue**: #4748 (Optimize daemon cold start and qwen serve fast-path latency)
-- **Status**: Draft
+- **Status**: implemented
 - **Date**: 2026-07-19
 - **Depends on**: #7182 (TUI module removal), the metafile audit below
 
@@ -148,6 +148,16 @@ Key properties:
    which is _already_ the behavior for the entire pre-constructor window and
    for the interactive TUI path, where telemetry init is deferred to a
    background task (`startup-prefetch.ts:259`). No new failure mode.
+
+   Behavior change (intentional, documented): on the non-deferred paths — the
+   ACP child and headless `-p` runs, where `deferTelemetryInitialization` is
+   false — telemetry was previously fully registered by the time the
+   synchronous `initializeTelemetry` call returned; it now settles
+   asynchronously, so the existing drop window widens by the dynamic-import
+   cost (~50–150ms). We do _not_ `await` here on purpose: awaiting would put
+   the 2.16 MiB import back on the ACP child's critical path and undo the win.
+   Callers that need telemetry guaranteed-ready before proceeding (the daemon
+   runtime, caller 3) `await` explicitly.
 
 2. **`packages/cli/src/startup/startup-prefetch.ts:261`** (deferred task
    runner). Change the task closure to return the promise

@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { wasmLoader } from 'esbuild-plugin-wasm';
+import { isStubbedSdkNodeExporterImport } from './scripts/sdk-node-exporter-stub.js';
 
 let esbuild;
 try {
@@ -66,25 +67,13 @@ const wasmBinaryPlugin = {
 // sdk-node itself — our own protocol modules keep resolving the real ones.
 // The stubbed constructors throw so an unexpectedly reached env path (e.g.
 // `OTEL_METRICS_EXPORTER=otlp`) fails loudly instead of exporting nowhere;
-// NodeSDK.start() is wrapped in try/catch in `sdk.ts`.
-const SDK_NODE_STUBBED_EXPORTERS = new RegExp(
-  '^@opentelemetry/(' +
-    [
-      'exporter-trace-otlp-(grpc|http|proto)',
-      'exporter-logs-otlp-(grpc|http|proto)',
-      'exporter-metrics-otlp-(grpc|http|proto)',
-      'exporter-zipkin',
-      'exporter-prometheus',
-    ].join('|') +
-    ')$',
-);
-
+// NodeSDK.start() is wrapped in try/catch in `sdk.ts`. The resolve decision
+// lives in scripts/sdk-node-exporter-stub.js so it stays unit-testable.
 const sdkNodeExporterStubPlugin = {
   name: 'sdk-node-exporter-stub',
   setup(build) {
     build.onResolve({ filter: /^@opentelemetry\/exporter-/ }, (args) => {
-      if (!SDK_NODE_STUBBED_EXPORTERS.test(args.path)) return null;
-      if (!args.importer.includes(`@opentelemetry${path.sep}sdk-node`)) {
+      if (!isStubbedSdkNodeExporterImport(args.path, args.importer)) {
         return null;
       }
       return { path: args.path, namespace: 'sdk-node-exporter-stub' };
@@ -102,10 +91,22 @@ const sdkNodeExporterStubPlugin = {
             );
           };
           const handler = {
-            get: (_t, prop) =>
-              typeof prop === 'string'
-                ? function stubbedExporter() { throwStubbed(prop); }
-                : undefined,
+            // Module interop and thenable probes must see a plain, non-callable
+            // namespace: a bundler or await import() reads then and __esModule
+            // (Symbol.* keys are already covered by the typeof check), and
+            // constructing those as "exporters" would throw a confusing error.
+            get: (_t, prop) => {
+              if (
+                typeof prop !== 'string' ||
+                prop === 'then' ||
+                prop === '__esModule'
+              ) {
+                return undefined;
+              }
+              return function stubbedExporter() {
+                throwStubbed(prop);
+              };
+            },
           };
           module.exports = new Proxy({}, handler);
         `,

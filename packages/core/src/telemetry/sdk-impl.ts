@@ -49,7 +49,7 @@ import {
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { LogToSpanProcessor } from './log-to-span-processor.js';
 import { getCurrentSessionId } from './session-context.js';
-import { resolveHttpOtlpUrl } from './sdk.js';
+import { resolveHttpOtlpUrl } from './otlp-urls.js';
 
 /**
  * `TextMapPropagator` that emits nothing. Installed when

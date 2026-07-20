@@ -11,9 +11,9 @@ import {
   initializeTelemetry,
   isTelemetrySdkInitialized,
   shutdownTelemetry,
-  resolveHttpOtlpUrl,
   refreshSessionContext,
 } from './sdk.js';
+import { resolveHttpOtlpUrl } from './otlp-urls.js';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-grpc';
 import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-grpc';
 import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-grpc';
@@ -177,6 +177,66 @@ describe('Telemetry SDK', () => {
     expect(NodeSDK).toHaveBeenCalledWith(
       expect.objectContaining({ autoDetectResources: false }),
     );
+  });
+
+  describe('lazy init lifecycle', () => {
+    it('shares a single in-flight init across concurrent callers', async () => {
+      await Promise.all([
+        initializeTelemetry(mockConfig),
+        initializeTelemetry(mockConfig),
+      ]);
+
+      expect(NodeSDK).toHaveBeenCalledTimes(1);
+      expect(NodeSDK.prototype.start).toHaveBeenCalledTimes(1);
+    });
+
+    it('clears the in-flight promise so a failed init can be retried', async () => {
+      vi.mocked(NodeSDK.prototype.start).mockImplementationOnce(() => {
+        throw new Error('start failed');
+      });
+
+      // A failed init must resolve (never reject) and leave telemetry off so a
+      // later call can retry rather than reusing a poisoned single-flight promise.
+      await expect(initializeTelemetry(mockConfig)).resolves.toBeUndefined();
+      expect(isTelemetrySdkInitialized()).toBe(false);
+
+      // The retry succeeds: reaching `initialized === true` requires the
+      // continuation to have run `sdk.start()` again on a fresh SDK.
+      await initializeTelemetry(mockConfig);
+      expect(isTelemetrySdkInitialized()).toBe(true);
+    });
+
+    it('waits for an in-flight init before shutting down', async () => {
+      // Regression guard for the shutdown/init race: shutdown must not no-op
+      // past a not-yet-set `telemetryInitialized` and leak a started SDK whose
+      // buffered spans/logs never flush.
+      const initPromise = initializeTelemetry(mockConfig);
+      const shutdownPromise = shutdownTelemetry();
+
+      await Promise.all([initPromise, shutdownPromise]);
+
+      expect(NodeSDK.prototype.start).toHaveBeenCalledTimes(1);
+      expect(NodeSDK.prototype.shutdown).toHaveBeenCalledTimes(1);
+      expect(isTelemetrySdkInitialized()).toBe(false);
+    });
+
+    it('clears the shutdown promise when it races an init that fails to start', async () => {
+      vi.mocked(NodeSDK.prototype.start).mockImplementationOnce(() => {
+        throw new Error('start failed');
+      });
+
+      const initPromise = initializeTelemetry(mockConfig);
+      const shutdownPromise = shutdownTelemetry();
+      await Promise.all([initPromise, shutdownPromise]);
+      expect(isTelemetrySdkInitialized()).toBe(false);
+
+      // The no-op shutdown above resolved without an SDK; it must not leave a
+      // stale shutdown promise that short-circuits a later real teardown.
+      await initializeTelemetry(mockConfig);
+      await shutdownTelemetry();
+      expect(NodeSDK.prototype.shutdown).toHaveBeenCalledTimes(1);
+      expect(isTelemetrySdkInitialized()).toBe(false);
+    });
   });
 
   it('should route OpenTelemetry diagnostics to debug log instead of console output', async () => {
