@@ -489,7 +489,6 @@ export function createWorkspaceRegistry(
         if (matches.length > 1) {
           return { kind: 'ambiguous', runtimes: matches };
         }
-        return { kind: 'not_found' };
       }
       return options.scanUnindexedOwners !== false
         ? scanLiveOwners(sessionId)

@@ -337,6 +337,31 @@ describe('createWorkspaceRegistry', () => {
     expect(secondarySummary).toHaveBeenCalledTimes(1);
   });
 
+  it('scans live owners after dropping a stale indexed owner', () => {
+    const primary = makeRuntime('/work/primary', {
+      workspaceId: 'ws-primary',
+      primary: true,
+      bridge: bridgeWithSummary((sessionId: string) => ({
+        sessionId,
+        workspaceCwd: '/work/primary',
+      })),
+    });
+    const sessionOwnerIndex = createWorkspaceSessionOwnerIndex();
+    sessionOwnerIndex.register('stale', '/work/removed');
+    const registry = createWorkspaceRegistry([primary], {
+      sessionOwnerIndex,
+      scanUnindexedOwners: true,
+    });
+
+    expect(registry.resolveLiveSessionOwner('stale')).toEqual({
+      kind: 'found',
+      runtime: primary,
+    });
+    expect(sessionOwnerIndex.getWorkspaceCwds('stale')).toEqual([
+      primary.workspaceCwd,
+    ]);
+  });
+
   it('does not infer ambiguous ownership by scanning bridges', () => {
     const first = makeRuntime('/work/primary', {
       workspaceId: 'ws-primary',
