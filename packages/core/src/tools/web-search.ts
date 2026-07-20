@@ -111,17 +111,24 @@ export type WebSearchGateResult =
  * concrete endpoint). This only catches obvious misconfiguration; a host
  * that does not serve the Responses API fails loudly on first use.
  */
-function isDashScopeCompatibleBaseUrl(baseUrl: string): boolean {
+type DashScopeBaseUrlIssue = 'invalid' | 'insecure' | 'unknown-host';
+
+/** Why a base URL fails the gate, or null when it is acceptable — so the
+ * startup notice can name the actual disqualifier (an `http://` typo needs
+ * a different fix than a wrong provider). */
+function classifyDashScopeBaseUrl(
+  baseUrl: string,
+): DashScopeBaseUrlIssue | null {
   let url: URL;
   try {
     url = new URL(baseUrl);
   } catch {
-    return false;
+    return 'invalid';
   }
   // The side request carries a bearer API key — never accept a plaintext
   // endpoint.
   if (url.protocol !== 'https:') {
-    return false;
+    return 'insecure';
   }
   const hostname = url.hostname.toLowerCase();
   const suffixes = [
@@ -132,7 +139,13 @@ function isDashScopeCompatibleBaseUrl(baseUrl: string): boolean {
   ];
   return suffixes.some(
     (suffix) => hostname === suffix || hostname.endsWith('.' + suffix),
-  );
+  )
+    ? null
+    : 'unknown-host';
+}
+
+function isDashScopeCompatibleBaseUrl(baseUrl: string): boolean {
+  return classifyDashScopeBaseUrl(baseUrl) === null;
 }
 
 /**
@@ -162,7 +175,14 @@ export function evaluateWebSearchGate(config: Config): WebSearchGateResult {
   // selector is used as the plain DashScope model id here (no authType
   // prefix semantics).
   if (settings?.baseUrl) {
-    if (!isDashScopeCompatibleBaseUrl(settings.baseUrl)) {
+    const baseUrlIssue = classifyDashScopeBaseUrl(settings.baseUrl);
+    if (baseUrlIssue === 'insecure') {
+      return {
+        ok: false,
+        notice: `WebSearch is enabled but WEB_SEARCH_BASE_URL (${settings.baseUrl}) uses plaintext HTTP. The search request carries a bearer API key; use an https:// endpoint.`,
+      };
+    }
+    if (baseUrlIssue !== null) {
       return {
         ok: false,
         notice: `WebSearch is enabled but WEB_SEARCH_BASE_URL (${settings.baseUrl}) is not a DashScope-compatible endpoint.`,
@@ -229,10 +249,23 @@ export function evaluateWebSearchGate(config: Config): WebSearchGateResult {
       notice: `WebSearch search model "${selector}" resolves to a Qwen OAuth entry. The search side channel needs a modelProviders entry with a direct API key (envKey); OAuth tokens cannot back it. Use an authType-qualified selector (e.g. "openai:<model-id>") to target a specific entry.`,
     };
   }
-  if (!entry.baseUrl || !isDashScopeCompatibleBaseUrl(entry.baseUrl)) {
+  if (!entry.baseUrl) {
     return {
       ok: false,
-      notice: `WebSearch search model "${selector}" resolves to a non-DashScope endpoint (${entry.baseUrl ?? 'no baseUrl'}). The web_search backend requires a DashScope-compatible baseUrl.`,
+      notice: `WebSearch search model "${selector}" resolves to a non-DashScope endpoint (no baseUrl). The web_search backend requires a DashScope-compatible baseUrl.`,
+    };
+  }
+  const entryBaseUrlIssue = classifyDashScopeBaseUrl(entry.baseUrl);
+  if (entryBaseUrlIssue === 'insecure') {
+    return {
+      ok: false,
+      notice: `WebSearch search model "${selector}" resolves to a plaintext-HTTP endpoint (${entry.baseUrl}). The search request carries a bearer API key; use an https:// baseUrl.`,
+    };
+  }
+  if (entryBaseUrlIssue !== null) {
+    return {
+      ok: false,
+      notice: `WebSearch search model "${selector}" resolves to a non-DashScope endpoint (${entry.baseUrl}). The web_search backend requires a DashScope-compatible baseUrl.`,
     };
   }
   if (!entry.envKey) {
@@ -766,17 +799,24 @@ class WebSearchToolInvocation extends BaseToolInvocation<
         );
       }
 
+      // Failed/cancelled terminals route through the shared tail like the
+      // in-stream-error path: items already streamed (and billed) before the
+      // backend gave up are evidence worth salvaging.
       const status = finalResponse.status;
       if (status === 'failed') {
-        return this.errorResult(
-          'Web search backend reported the request as failed.',
-          ToolErrorType.WEB_SEARCH_BACKEND_FAILED,
+        return terminalFailure(() =>
+          this.errorResult(
+            'Web search backend reported the request as failed.',
+            ToolErrorType.WEB_SEARCH_BACKEND_FAILED,
+          ),
         );
       }
       if (status === 'cancelled') {
-        return this.errorResult(
-          'Web search was cancelled by the backend.',
-          ToolErrorType.WEB_SEARCH_BACKEND_FAILED,
+        return terminalFailure(() =>
+          this.errorResult(
+            'Web search was cancelled by the backend.',
+            ToolErrorType.WEB_SEARCH_BACKEND_FAILED,
+          ),
         );
       }
 

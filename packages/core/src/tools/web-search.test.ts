@@ -234,9 +234,10 @@ describe('evaluateWebSearchGate', () => {
     if (!gate.ok) expect(gate.notice).toContain('non-DashScope');
   });
 
-  it('rejects a plain-http DashScope host', () => {
+  it('rejects a plain-http DashScope host, naming HTTPS as the fix', () => {
     // The side request carries a bearer API key; the https-only guard must
-    // reject a DashScope hostname served over plaintext HTTP.
+    // reject a DashScope hostname served over plaintext HTTP — and the
+    // notice must blame the protocol, not the provider.
     const gate = evaluateWebSearchGate(
       makeConfig({
         models: [
@@ -250,7 +251,10 @@ describe('evaluateWebSearchGate', () => {
       }),
     );
     expect(gate.ok).toBe(false);
-    if (!gate.ok) expect(gate.notice).toContain('non-DashScope');
+    if (!gate.ok) {
+      expect(gate.notice).toContain('https://');
+      expect(gate.notice).not.toContain('non-DashScope');
+    }
   });
 
   it('rejects an entry without envKey', () => {
@@ -358,6 +362,24 @@ describe('evaluateWebSearchGate', () => {
     );
     expect(gate.ok).toBe(false);
     if (!gate.ok) expect(gate.notice).toContain('WEB_SEARCH_BASE_URL');
+  });
+
+  it('rejects a plain-http env-declared base URL, naming HTTPS as the fix', () => {
+    const gate = evaluateWebSearchGate(
+      makeConfig({
+        settings: {
+          enabled: true,
+          model: 'qwen3.6-plus',
+          baseUrl: 'http://dashscope.aliyuncs.com/compatible-mode/v1',
+          apiKeyEnv: TEST_ENV_KEY,
+        },
+      }),
+    );
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.notice).toContain('https://');
+      expect(gate.notice).not.toContain('not a DashScope-compatible');
+    }
   });
 
   it('rejects an env-declared backend whose key variable is unset', () => {
@@ -783,6 +805,24 @@ describe('WebSearchTool execute', () => {
     const result = await runSearch(makeConfig());
     // The search executed (and billed) before the error — its sources must
     // surface as a partial result, matching the transport-error path.
+    expect(result.error).toBeUndefined();
+    const content = result.llmContent as string;
+    expect(content).toContain('Partial result');
+    expect(content).toContain('https://example.com/a');
+  });
+
+  it('salvages streamed results when the backend reports the request as failed', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream([
+        { type: 'response.created' },
+        { type: 'response.output_item.done', item: SEARCH_ITEM },
+        { type: 'response.failed', response: { status: 'failed', output: [] } },
+      ]),
+    );
+    const result = await runSearch(makeConfig());
+    // The search executed (and billed) before the backend gave up — its
+    // sources must surface as a partial result, same as the in-stream-error
+    // and transport-error paths.
     expect(result.error).toBeUndefined();
     const content = result.llmContent as string;
     expect(content).toContain('Partial result');
