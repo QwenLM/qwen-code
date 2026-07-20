@@ -3315,6 +3315,97 @@ describe('qwen-autofix workflow', () => {
     expect(routeStep).toContain('retry_pr=${RETRY_PR}');
   });
 
+  it('behaviorally posts the re-arm marker only after verifying the PAT identity', () => {
+    // The retry-command job's bash is extracted and executed against a stubbed
+    // `gh` so the identity guard and the posted comment body are exercised, not
+    // merely string-matched: a malformed printf body or a broken quote escape
+    // would post a marker the scanners ignore while still printing "re-armed",
+    // and the structural toContain('<!-- autofix-rearm -->') check matches the
+    // marker at several workflow sites so it would not catch a typo in the body.
+    const BOT = 'qwen-code-dev-bot';
+    const rearmStep = workflow.match(
+      /- name: 'Post re-arm marker'\n {8}run: \|-\n {10}([\s\S]*?)\n\n {2}takeover-ack:/,
+    )?.[1];
+    expect(rearmStep).toBeTruthy();
+    const block = rearmStep.replace(/\n {10}/g, '\n');
+
+    const runRearm = ({ actor = BOT, apiFail = false } = {}) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-rearm-'));
+      try {
+        writeFileSync(
+          join(dir, 'gh'),
+          [
+            '#!/bin/bash',
+            `echo "$1 $2" >> '${join(dir, 'calls.log')}'`,
+            'if [[ "$1" == "api" && "$2" == "user" ]]; then',
+            `  if [[ "${apiFail}" == "true" ]]; then echo "HTTP 401: Bad credentials" >&2; exit 1; fi`,
+            `  printf '%s' "${actor}"`,
+            'elif [[ "$1" == "pr" && "$2" == "comment" ]]; then',
+            `  printf '%s' "$7" > '${join(dir, 'body.txt')}'`,
+            'fi',
+          ].join('\n'),
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        writeFileSync(join(dir, 'calls.log'), '');
+        const res = spawnSync('bash', ['-c', block], {
+          env: {
+            ...process.env,
+            PATH: `${dir}:${process.env.PATH}`,
+            GITHUB_TOKEN: 'x',
+            PR: '7354',
+            REPO: 'QwenLM/qwen-code',
+            AUTOFIX_BOT: BOT,
+          },
+          encoding: 'utf8',
+        });
+        return {
+          status: res.status,
+          stdout: res.stdout ?? '',
+          calls: readFileSync(join(dir, 'calls.log'), 'utf8'),
+          body: existsSync(join(dir, 'body.txt'))
+            ? readFileSync(join(dir, 'body.txt'), 'utf8')
+            : '',
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    // Happy path: identity verified via gh api user, then the marker is posted
+    // with the scanner marker line in the bilingual collapsed format.
+    const ok = runRearm({ actor: BOT });
+    expect(ok.status).toBe(0);
+    expect(ok.calls).toContain('api user');
+    expect(ok.calls).toContain('pr comment');
+    expect(ok.stdout).toContain('re-armed PR #7354');
+    expect(ok.body).toContain('AutoFix re-armed');
+    expect(ok.body).toContain('<!-- autofix-rearm -->');
+    expect(ok.body).toContain('<details>');
+    expect(ok.body).toContain('中文说明');
+    // No line may be indented 4+ spaces, or the marker renders as a code block
+    // and the scanners' marker match silently fails.
+    expect(ok.body).not.toMatch(/^ {4,}/m);
+
+    // Actor mismatch: the PAT authenticates as someone else -> the guard exits
+    // non-zero and posts nothing (a mis-scoped PAT must not leave a stranded PR
+    // behind a fake "re-armed" line).
+    const mismatch = runRearm({ actor: 'someone-else' });
+    expect(mismatch.status).toBe(1);
+    expect(mismatch.calls).toContain('api user');
+    expect(mismatch.calls).not.toContain('pr comment');
+    expect(mismatch.body).toBe('');
+    expect(mismatch.stdout).toContain(`expected ${BOT}`);
+
+    // API failure: gh api user fails -> exits non-zero, posts nothing, and
+    // surfaces the captured gh stderr in the error message.
+    const failed = runRearm({ apiFail: true });
+    expect(failed.status).toBe(1);
+    expect(failed.calls).not.toContain('pr comment');
+    expect(failed.body).toBe('');
+    expect(failed.stdout).toContain('Failed to verify CI_DEV_BOT_PAT identity');
+    expect(failed.stdout).toContain('Bad credentials');
+  });
+
   it('replays the handoff decision and terminal-round transitions under bash', () => {
     // The agent step is bounded below the 120-minute job timeout so a runaway
     // agent fails the STEP, not the job, leaving the always() report step time to
