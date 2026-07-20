@@ -584,8 +584,17 @@ describe('WebShellSidebar workspace removal', () => {
   it('exposes removal for an untrusted removable workspace', () => {
     renderSidebar();
 
-    expect(workspaceAction('/tmp/danger')).toBeDefined();
+    const trigger = workspaceAction('/tmp/danger');
+    expect(trigger).toBeDefined();
     expect(workspaceAction('/tmp/project')).toBeUndefined();
+
+    act(() => click(trigger!));
+    const item = document.body.querySelector(
+      '[aria-label="Remove workspace: /tmp/danger"]',
+    );
+    const menu = item?.closest('[data-slot="dropdown-menu-content"]');
+    expect(menu?.classList.contains('w-auto')).toBe(true);
+    expect(menu?.classList.contains('min-w-40')).toBe(true);
   });
 
   it('removes the selected workspace and falls back to primary', async () => {
