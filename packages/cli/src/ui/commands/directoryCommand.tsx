@@ -93,13 +93,12 @@ function getPathCompletions(
       .map((e) => ({
         value: prefix + path.join(searchDir, e.name) + path.sep,
         isDirectory: true,
-      }))
-      .slice(0, 8);
+      }));
 
     // When the input ends with a separator (e.g. "learn/"), also include
     // the typed directory itself so the user can select it to cd into it
     // rather than being forced to pick a child (#7318).
-    if (endsWithSep && namePrefix === '') {
+    if (endsWithSep) {
       const selfPath = prefix + searchDir;
       const normalizedSelf = selfPath.endsWith(path.sep)
         ? selfPath
@@ -109,7 +108,7 @@ function getPathCompletions(
       }
     }
 
-    return children;
+    return children.slice(0, 8);
   } catch {
     return [];
   }
