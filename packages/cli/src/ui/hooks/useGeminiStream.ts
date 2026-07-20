@@ -3255,26 +3255,6 @@ export const useGeminiStream = (
           !historyCallIdsWithResponse.has(t.request.callId),
       );
       if (clientTools.length > 0) {
-        const finalizedClientTools = await finalizeToolResponses(
-          config,
-          clientTools.map((toolCall) => ({
-            callId: toolCall.request.callId,
-            toolName: toolCall.request.name,
-            responseParts: toolCall.response.responseParts,
-            persistedOutputFiles: toolCall.response.persistedOutputFiles,
-          })),
-        );
-        clientTools.forEach((toolCall, index) => {
-          config
-            .getChatRecordingService?.()
-            ?.recordToolResult?.(finalizedClientTools[index].responseParts, {
-              callId: toolCall.request.callId,
-              status: toolCall.status,
-              resultDisplay: toolCall.response.resultDisplay,
-              error: toolCall.response.error,
-              errorType: toolCall.response.errorType,
-            });
-        });
         markToolsAsSubmitted(clientTools.map((t) => t.request.callId));
       }
 

@@ -113,9 +113,13 @@ vi.mock('../../services/review-worktree-lease.js', () => ({
 vi.mock('../../dualOutput/DualOutputContext.js', () => ({
   useDualOutput: mockUseDualOutput,
 }));
+const mockFinalizeToolResponses = vi.hoisted(() => vi.fn());
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actualCoreModule = (await importOriginal()) as any;
+  mockFinalizeToolResponses.mockImplementation(
+    actualCoreModule.finalizeToolResponses,
+  );
   return {
     ...actualCoreModule,
     GeminiClient: MockedGeminiClientClass,
@@ -129,6 +133,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     clearActiveGoal: mockClearActiveGoal,
     runVisionBridge: mockRunVisionBridge,
     refreshMemoryAfterManagedWrite: mockRefreshMemoryAfterManagedWrite,
+    finalizeToolResponses: mockFinalizeToolResponses,
   };
 });
 
@@ -6817,7 +6822,7 @@ describe('useGeminiStream', () => {
   });
 
   describe('Memory Refresh on save_memory', () => {
-    it('should call performMemoryRefresh when a save_memory tool call completes successfully', async () => {
+    it('refreshes memory without finalizing client-only tool responses', async () => {
       const mockPerformMemoryRefresh = vi.fn().mockResolvedValue(undefined);
       const completedToolCall: TrackedCompletedToolCall = {
         request: {
@@ -6891,6 +6896,11 @@ describe('useGeminiStream', () => {
       await waitFor(() => {
         expect(mockPerformMemoryRefresh).toHaveBeenCalledTimes(1);
       });
+      expect(mockFinalizeToolResponses).not.toHaveBeenCalled();
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+      expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith([
+        'save-mem-call-1',
+      ]);
     });
 
     it('refreshes managed-memory instructions after interactive memory file writes', async () => {
