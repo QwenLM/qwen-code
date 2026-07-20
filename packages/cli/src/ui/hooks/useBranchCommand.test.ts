@@ -33,6 +33,14 @@ describe('useBranchCommand', () => {
   let setSessionName: ReturnType<typeof vi.fn>;
   let remount: ReturnType<typeof vi.fn>;
   let addItem: ReturnType<typeof vi.fn>;
+  let hasRunningTasks: ReturnType<typeof vi.fn>;
+  let getRunningMonitors: ReturnType<typeof vi.fn>;
+  let hasRunningShells: ReturnType<typeof vi.fn>;
+  let hasRunningWorkflows: ReturnType<typeof vi.fn>;
+  let resetBackgroundTasks: ReturnType<typeof vi.fn>;
+  let resetMonitors: ReturnType<typeof vi.fn>;
+  let resetShells: ReturnType<typeof vi.fn>;
+  let resetWorkflows: ReturnType<typeof vi.fn>;
   // Mock Config shape covers only what useBranchCommand touches.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let config: any;
@@ -85,6 +93,14 @@ describe('useBranchCommand', () => {
     setSessionName = vi.fn();
     remount = vi.fn();
     addItem = vi.fn();
+    hasRunningTasks = vi.fn().mockReturnValue(false);
+    getRunningMonitors = vi.fn().mockReturnValue([]);
+    hasRunningShells = vi.fn().mockReturnValue(false);
+    hasRunningWorkflows = vi.fn().mockReturnValue(false);
+    resetBackgroundTasks = vi.fn();
+    resetMonitors = vi.fn();
+    resetShells = vi.fn();
+    resetWorkflows = vi.fn();
     config = {
       getSessionId: () => '12345678-aaaa-bbbb-cccc-dddddddddddd',
       getSessionService: () => ({
@@ -98,7 +114,69 @@ describe('useBranchCommand', () => {
       getGeminiClient: () => ({ initialize: vi.fn() }),
       startNewSession: startNewSessionConfig,
       getDebugLogger: () => ({ warn: vi.fn() }),
+      getBackgroundTaskRegistry: () => ({
+        hasRunningTasks,
+        reset: resetBackgroundTasks,
+      }),
+      getMonitorRegistry: () => ({
+        getRunning: getRunningMonitors,
+        reset: resetMonitors,
+      }),
+      getBackgroundShellRegistry: () => ({
+        hasRunningEntries: hasRunningShells,
+        reset: resetShells,
+      }),
+      getWorkflowRunRegistry: () => ({
+        hasRunningEntries: hasRunningWorkflows,
+        reset: resetWorkflows,
+      }),
     };
+  });
+
+  it('does not branch while background work is running', async () => {
+    hasRunningTasks.mockReturnValue(true);
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('my-branch');
+    });
+
+    expect(finalize).not.toHaveBeenCalled();
+    expect(forkSession).not.toHaveBeenCalled();
+    expect(startNewSessionConfig).not.toHaveBeenCalled();
+    expect(addItem).toHaveBeenCalledWith(
+      {
+        type: 'error',
+        text: "Stop the current session's running background tasks before branching.",
+      },
+      expect.any(Number),
+    );
+  });
+
+  it('resets old-session background state only after the UI commits to the branch', async () => {
+    const order: string[] = [];
+    startNewSessionUI.mockImplementation(() => order.push('ui.start'));
+    clearItems.mockImplementation(() => order.push('ui.clear'));
+    loadHistory.mockImplementation(() => order.push('ui.load'));
+    resetBackgroundTasks.mockImplementation(() => order.push('reset.tasks'));
+    resetMonitors.mockImplementation(() => order.push('reset.monitors'));
+    resetShells.mockImplementation(() => order.push('reset.shells'));
+    resetWorkflows.mockImplementation(() => order.push('reset.workflows'));
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('my-branch');
+    });
+
+    expect(order).toEqual([
+      'ui.start',
+      'ui.clear',
+      'ui.load',
+      'reset.tasks',
+      'reset.monitors',
+      'reset.shells',
+      'reset.workflows',
+    ]);
   });
 
   it('persists and reloads the title before switching core or UI', async () => {
@@ -505,6 +583,10 @@ describe('useBranchCommand', () => {
     expect(startNewSessionUI).not.toHaveBeenCalled();
     expect(setSessionName).not.toHaveBeenCalled();
     expect(removeSession).toHaveBeenCalledTimes(1);
+    expect(resetBackgroundTasks).not.toHaveBeenCalled();
+    expect(resetMonitors).not.toHaveBeenCalled();
+    expect(resetShells).not.toHaveBeenCalled();
+    expect(resetWorkflows).not.toHaveBeenCalled();
     // User sees the failure.
     expect(addItem).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -557,6 +639,42 @@ describe('useBranchCommand', () => {
       }),
       expect.any(Number),
     );
+  });
+
+  it('preserves old-session background state when the UI session swap fails', async () => {
+    const oldSessionId = '12345678-aaaa-bbbb-cccc-dddddddddddd';
+    const parentResumed = {
+      conversation: { messages: [userRecord('parent msg')] },
+      filePath: `/tmp/${oldSessionId}.jsonl`,
+      lastCompletedUuid: 'uparent',
+    };
+    const forkResumed = {
+      conversation: { messages: [userRecord('parent msg')] },
+      filePath: '/tmp/new.jsonl',
+      lastCompletedUuid: 'uparent',
+    };
+    loadSession.mockImplementation(async (sid: string) =>
+      sid === oldSessionId ? parentResumed : forkResumed,
+    );
+    startNewSessionUI.mockImplementation(() => {
+      throw new Error('ui swap boom');
+    });
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('x');
+    });
+
+    expect(startNewSessionConfig).toHaveBeenNthCalledWith(
+      2,
+      oldSessionId,
+      parentResumed,
+    );
+    expect(resetBackgroundTasks).not.toHaveBeenCalled();
+    expect(resetMonitors).not.toHaveBeenCalled();
+    expect(resetShells).not.toHaveBeenCalled();
+    expect(resetWorkflows).not.toHaveBeenCalled();
+    expect(removeSession).toHaveBeenCalledTimes(1);
   });
 
   it('does not roll core back to parent when a post-UI-swap step throws', async () => {

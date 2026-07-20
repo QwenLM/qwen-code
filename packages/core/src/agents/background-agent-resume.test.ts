@@ -132,6 +132,7 @@ describe('BackgroundAgentResumeService', () => {
       subagentManager,
       hookSystem,
       monitorRegistry,
+      stubToolRegistry,
     };
   }
 
@@ -689,6 +690,86 @@ describe('BackgroundAgentResumeService', () => {
       prompt: 'Legacy background task',
     });
     expect(subagentManager.loadSubagent).toHaveBeenCalledWith('researcher');
+  });
+
+  it('persists a resumed legacy sidecar before completion is published', async () => {
+    const sessionId = 'session-legacy-resumed';
+    const agentId = 'agent-legacy-resumed';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Legacy resumed task',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: {
+          role: 'user',
+          parts: [{ text: 'Legacy resumed task' }],
+        },
+      }) + '\n',
+      'utf8',
+    );
+
+    const { service, subagentManager } = createService();
+    await expect(
+      service.loadPausedBackgroundAgents(sessionId),
+    ).resolves.toHaveLength(1);
+
+    let metaAtNotification: ReturnType<typeof readAgentMeta> | undefined;
+    registry.setNotificationCallback(() => {
+      metaAtNotification = readAgentMeta(metaPath);
+    });
+    const subagent = {
+      execute: vi.fn(async () => undefined),
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'done',
+    };
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await service.resumeBackgroundAgent(agentId, 'continue');
+    await vi.waitFor(() => {
+      expect(registry.get(agentId)?.status).toBe('completed');
+    });
+
+    expect(metaAtNotification).toMatchObject({
+      status: 'completed',
+      isBackgrounded: true,
+    });
+
+    registry = new BackgroundTaskRegistry();
+    const { service: restoredService } = createService();
+    const restored =
+      await restoredService.loadPausedBackgroundAgents(sessionId);
+
+    expect(restored).toHaveLength(1);
+    expect(restored[0]).toMatchObject({
+      agentId,
+      status: 'completed',
+      isBackgrounded: true,
+    });
   });
 
   it('fires SubagentStart hooks when resuming and injects hook context', async () => {
@@ -1950,10 +2031,14 @@ describe('BackgroundAgentResumeService', () => {
       getTerminateMode: () => AgentTerminateMode.GOAL,
       getFinalText: () => 'done',
     };
-    const { service, subagentManager, monitorRegistry } = createService();
+    const started: string[] = [];
+    registry.setRegisterCallback((entry) => started.push(entry.status));
+    const { service, subagentManager, monitorRegistry, stubToolRegistry } =
+      createService();
+    const dispose = vi.fn().mockResolvedValue(undefined);
     subagentManager.createAgentHeadless.mockResolvedValue({
       subagent,
-      dispose: vi.fn().mockResolvedValue(undefined),
+      dispose,
     });
 
     await expect(
@@ -1961,6 +2046,10 @@ describe('BackgroundAgentResumeService', () => {
     ).resolves.toBeUndefined();
 
     expect(subagent.execute).not.toHaveBeenCalled();
+    expect(started).toEqual([]);
+    expect(registry.get(agentId)?.status).toBe('paused');
+    expect(stubToolRegistry.stop).toHaveBeenCalledTimes(1);
+    expect(dispose).toHaveBeenCalledTimes(1);
     expect(monitorRegistry.setAgentNotificationCallback).toHaveBeenCalledWith(
       agentId,
       expect.any(Function),
@@ -1983,6 +2072,95 @@ describe('BackgroundAgentResumeService', () => {
         notify: false,
       },
     );
+  });
+
+  it('does not resurrect a task cancelled while its runtime is being reconstructed', async () => {
+    const sessionId = 'session-cancel-during-resume-setup';
+    const agentId = 'agent-cancel-during-resume-setup';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Cancel during resume setup',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: {
+          role: 'user',
+          parts: [{ text: 'Cancel during resume setup' }],
+        },
+      }) + '\n',
+      'utf8',
+    );
+    registry.register({
+      agentId,
+      description: 'Cancel during resume setup',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Cancel during resume setup',
+      outputFile,
+      metaPath,
+    });
+
+    const execute = vi.fn();
+    const subagent = {
+      execute,
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'done',
+    };
+    const dispose = vi.fn().mockResolvedValue(undefined);
+    const starts: string[] = [];
+    registry.setRegisterCallback((entry) => starts.push(entry.status));
+    const { service, subagentManager, stubToolRegistry } = createService();
+    let releaseSetup: (() => void) | undefined;
+    const setupGate = new Promise<void>((resolve) => {
+      releaseSetup = resolve;
+    });
+    subagentManager.createAgentHeadless.mockImplementation(async () => {
+      await setupGate;
+      return { subagent, dispose };
+    });
+
+    const resume = service.resumeBackgroundAgent(agentId, 'continue');
+    await vi.waitFor(() => {
+      expect(subagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
+      expect(registry.get(agentId)?.status).toBe('running');
+    });
+
+    registry.abortAll({ notify: false });
+    releaseSetup?.();
+
+    await expect(resume).resolves.toBeUndefined();
+    expect(registry.get(agentId)?.status).toBe('cancelled');
+    expect(readMetaStatus(metaPath)).toBe('running');
+    expect(execute).not.toHaveBeenCalled();
+    expect(starts).toEqual([]);
+    expect(stubToolRegistry.stop).toHaveBeenCalledTimes(1);
+    expect(dispose).toHaveBeenCalledTimes(1);
   });
 
   it('resumes fork agents from transcript bootstrap instead of current parent config', async () => {
@@ -3035,6 +3213,10 @@ describe('BackgroundAgentResumeService', () => {
     registry.complete(agentId, 'All done');
     const original = registry.get(agentId);
     expect(original?.notified).toBe(true);
+    const notifications: string[] = [];
+    registry.setNotificationCallback((_display, _model, meta) => {
+      notifications.push(meta.status);
+    });
 
     const restoredStates: Array<{
       status: string;
@@ -3050,20 +3232,37 @@ describe('BackgroundAgentResumeService', () => {
         });
       }
     });
+    const starts: string[] = [];
+    registry.setRegisterCallback((entry) => starts.push(entry.status));
 
     const { service, subagentManager } = createService();
-    subagentManager.createAgentHeadless.mockRejectedValue(
-      new Error('setup failed'),
+    let rejectSetup: ((error: Error) => void) | undefined;
+    subagentManager.createAgentHeadless.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectSetup = reject;
+        }),
     );
 
-    await expect(
-      service.reviveCompletedBackgroundAgent(agentId, 'keep going'),
-    ).resolves.toBeUndefined();
+    const revive = service.reviveCompletedBackgroundAgent(
+      agentId,
+      'keep going',
+    );
+    await vi.waitFor(() => {
+      expect(registry.get(agentId)?.status).toBe('running');
+      expect(subagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
+    });
+    expect(registry.queueMessage(agentId, 'queued during setup')).toBe(true);
+    rejectSetup?.(new Error('setup failed'));
+    await expect(revive).resolves.toBeUndefined();
 
     const restored = registry.get(agentId);
     expect(restored?.status).toBe('completed');
     expect(restored?.result).toBe('All done');
     expect(restored?.notified).toBe(true);
+    expect(restored?.pendingMessages).toEqual(['queued during setup']);
+    expect(starts).toEqual([]);
+    expect(notifications).toEqual([]);
     expect(restoredStates.at(-1)).toEqual({
       status: 'completed',
       notified: true,
@@ -3121,16 +3320,21 @@ describe('BackgroundAgentResumeService', () => {
     // Attach the callback only AFTER the initial completion so the assertion
     // counts the revived run's terminal notification in isolation.
     const notifications: string[] = [];
+    const lifecycle: string[] = [];
     registry.setNotificationCallback((_display, _model, meta) => {
       notifications.push(meta.status);
+      lifecycle.push('completed');
     });
     const started: string[] = [];
     registry.setRegisterCallback((entry) => {
       started.push(entry.status);
+      lifecycle.push('started');
     });
 
     const subagent = {
-      execute: vi.fn(async () => undefined),
+      execute: vi.fn(async () => {
+        lifecycle.push('execute');
+      }),
       setExternalMessageProvider: vi.fn(),
       getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
       getExecutionSummary: () => ({
@@ -3154,6 +3358,7 @@ describe('BackgroundAgentResumeService', () => {
     });
     expect(notifications).toEqual(['completed']);
     expect(started).toEqual(['running']);
+    expect(lifecycle).toEqual(['execute', 'started', 'completed']);
   });
 
   it('does not revive when the background concurrency cap is full', async () => {

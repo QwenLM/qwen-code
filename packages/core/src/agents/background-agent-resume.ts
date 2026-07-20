@@ -757,19 +757,23 @@ export class BackgroundAgentResumeService {
 
     const bgAbortController = new AbortController();
 
+    let ownedEntry: AgentTask;
     try {
-      registry.register({
-        ...existing,
-        status: 'running',
-        abortController: bgAbortController,
-        endTime: undefined,
-        result: undefined,
-        error: undefined,
-        resumeBlockedReason: undefined,
-        stats: undefined,
-        recentActivities: [],
-        pendingMessages: [...(existing.pendingMessages ?? [])],
-      });
+      ownedEntry = registry.register(
+        {
+          ...existing,
+          status: 'running',
+          abortController: bgAbortController,
+          endTime: undefined,
+          result: undefined,
+          error: undefined,
+          resumeBlockedReason: undefined,
+          stats: undefined,
+          recentActivities: [],
+          pendingMessages: [...(existing.pendingMessages ?? [])],
+        },
+        { suppressRegisterCallback: true },
+      );
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
@@ -780,16 +784,54 @@ export class BackgroundAgentResumeService {
         lastError: errorMessage,
         lastUpdatedAt: new Date().toISOString(),
       });
-      this.restorePausedEntry(agentId, { error: errorMessage });
+      this.restorePausedEntry(agentId, {
+        error: errorMessage,
+        suppressRegisterCallback: true,
+      });
       return undefined;
     }
 
     let cleanupOwnedMonitorNotifications: (() => void) | undefined;
     let cleanupJsonl: (() => void) | undefined;
+    let agentConfig: Config | undefined;
+    let restoreParentPM: (() => void) | undefined;
+    let subagentDispose: (() => Promise<void>) | undefined;
+    let runtimeLifecycleOwned = false;
+    let setupCleaned = false;
+
+    const cleanupPreparedRuntime = () => {
+      if (runtimeLifecycleOwned || setupCleaned) return;
+      setupCleaned = true;
+      cleanupOwnedMonitorNotifications?.();
+      cleanupJsonl?.();
+      if (agentConfig) {
+        void agentConfig
+          .getToolRegistry()
+          .stop()
+          .catch(() => {});
+      }
+      void subagentDispose?.().catch(() => {});
+      restoreParentPM?.();
+    };
+    const stillOwnsRunningEntry = () => {
+      const current = registry.get(agentId);
+      return (
+        !bgAbortController.signal.aborted &&
+        current === ownedEntry &&
+        current.status === 'running' &&
+        current.abortController === bgAbortController
+      );
+    };
+    const stopStaleSetup = () => {
+      if (stillOwnsRunningEntry()) return false;
+      cleanupPreparedRuntime();
+      return true;
+    };
 
     try {
       const subagentName = meta.subagentName ?? meta.agentType;
       const target = await this.resolveResumeTarget(subagentName);
+      if (stopStaleSetup()) return undefined;
       if (!target.subagentConfig && !target.isFork) {
         const reason =
           target.unavailableReason ||
@@ -798,7 +840,10 @@ export class BackgroundAgentResumeService {
           lastError: undefined,
           lastUpdatedAt: new Date().toISOString(),
         });
-        this.restorePausedEntry(agentId, { resumeBlockedReason: reason });
+        this.restorePausedEntry(agentId, {
+          resumeBlockedReason: reason,
+          suppressRegisterCallback: true,
+        });
         return undefined;
       }
 
@@ -822,12 +867,15 @@ export class BackgroundAgentResumeService {
       // continuing to read the parent's. Reusing `this.config`
       // directly here would short-circuit that isolation. See the
       // matching wrapper in `agent.ts:createApprovalModeOverride`.
-      const { config: agentConfig, cleanup: restoreParentPM } =
-        await createApprovalModeOverride(
-          this.config,
-          resolvedApprovalMode as ApprovalMode,
-          { persistedCliFlags: meta.persistedCliFlags },
-        );
+      const approvalOverride = await createApprovalModeOverride(
+        this.config,
+        resolvedApprovalMode as ApprovalMode,
+        { persistedCliFlags: meta.persistedCliFlags },
+      );
+      const activeAgentConfig = approvalOverride.config;
+      const activeRestoreParentPM = approvalOverride.cleanup;
+      agentConfig = activeAgentConfig;
+      restoreParentPM = activeRestoreParentPM;
       // Mirror the launch path's permission-bubbling gate (agent.ts): an
       // agent whose definition uses `approvalMode: bubble` surfaces
       // confirmations to the parent UI instead of auto-denying, in
@@ -838,7 +886,7 @@ export class BackgroundAgentResumeService {
           this.config.isInteractive(),
       );
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const bgConfig = Object.create(agentConfig) as any;
+      const bgConfig = Object.create(activeAgentConfig) as any;
       bgConfig.getShouldAvoidPermissionPrompts = () => !shouldBubble;
 
       const records = await jsonl.read<ChatRecord>(outputFile);
@@ -863,6 +911,7 @@ export class BackgroundAgentResumeService {
             )[0],
             ...recovery.history,
           ];
+      if (stopStaleSetup()) return undefined;
       const promptMessages = [...operation.continuationMessages];
       const continuationPrompt =
         promptMessages.join('\n\n').trim() ||
@@ -874,7 +923,11 @@ export class BackgroundAgentResumeService {
           lastError: undefined,
           lastUpdatedAt: new Date().toISOString(),
         });
-        this.restorePausedEntry(agentId, { resumeBlockedReason: reason });
+        this.restorePausedEntry(agentId, {
+          resumeBlockedReason: reason,
+          suppressRegisterCallback: true,
+        });
+        cleanupPreparedRuntime();
         return undefined;
       }
       if (target.isFork && !recovery.forkBootstrap) {
@@ -883,7 +936,11 @@ export class BackgroundAgentResumeService {
           lastError: undefined,
           lastUpdatedAt: new Date().toISOString(),
         });
-        this.restorePausedEntry(agentId, { resumeBlockedReason: reason });
+        this.restorePausedEntry(agentId, {
+          resumeBlockedReason: reason,
+          suppressRegisterCallback: true,
+        });
+        cleanupPreparedRuntime();
         return undefined;
       }
       if (
@@ -896,7 +953,11 @@ export class BackgroundAgentResumeService {
           lastError: undefined,
           lastUpdatedAt: new Date().toISOString(),
         });
-        this.restorePausedEntry(agentId, { resumeBlockedReason: reason });
+        this.restorePausedEntry(agentId, {
+          resumeBlockedReason: reason,
+          suppressRegisterCallback: true,
+        });
+        cleanupPreparedRuntime();
         return undefined;
       }
 
@@ -906,7 +967,6 @@ export class BackgroundAgentResumeService {
       // the force-rebuilt ToolRegistry don't leak across the resume
       // boundary. Stays undefined on the fork-resume path (forks share
       // the parent's registry + hook lifecycle).
-      let subagentDispose: (() => Promise<void>) | undefined;
       let subagent: AgentHeadless;
       if (target.isFork) {
         subagent = await this.createResumedForkSubagent(
@@ -927,6 +987,7 @@ export class BackgroundAgentResumeService {
         subagent = result.subagent;
         subagentDispose = result.dispose;
       }
+      if (stopStaleSetup()) return undefined;
 
       const projectRoot = this.config.getProjectRoot();
       cleanupJsonl = attachJsonlTranscriptWriter(bgEventEmitter, outputFile, {
@@ -945,6 +1006,7 @@ export class BackgroundAgentResumeService {
       const nextResumeCount = (meta.resumeCount ?? 0) + 1;
       patchAgentMeta(metaPath, {
         status: 'running',
+        isBackgrounded: true,
         lastUpdatedAt: new Date().toISOString(),
         resolvedApprovalMode,
         subagentName: target.agentName,
@@ -953,11 +1015,9 @@ export class BackgroundAgentResumeService {
         lastError: undefined,
       });
 
-      const pendingMessages = [
-        ...(registry.get(meta.agentId)?.pendingMessages ?? []),
-      ];
+      const pendingMessages = [...(ownedEntry.pendingMessages ?? [])];
       const registration: AgentTaskRegistration = {
-        ...existing,
+        ...ownedEntry,
         subagentType: target.agentName,
         isBackgrounded: true,
         status: 'running',
@@ -974,6 +1034,7 @@ export class BackgroundAgentResumeService {
       const entry = registry.register(registration, {
         suppressRegisterCallback: true,
       });
+      ownedEntry = entry;
       const lateContinuationMessages = operation.continuationMessages.slice(
         promptMessages.length,
       );
@@ -1023,6 +1084,7 @@ export class BackgroundAgentResumeService {
         resolvedMode,
         signal: bgAbortController.signal,
       });
+      if (stopStaleSetup()) return undefined;
       const bgEmitter = subagent.getCore().getEventEmitter();
       let liveToolCallCount = 0;
 
@@ -1082,12 +1144,12 @@ export class BackgroundAgentResumeService {
           );
           const stats = getCompletionStats(subagent, liveToolCallCount);
           if (terminateMode === AgentTerminateMode.GOAL) {
-            registry.complete(meta.agentId, finalText, stats);
             patchAgentMeta(metaPath, {
               status: 'completed',
               lastUpdatedAt: new Date().toISOString(),
               lastError: undefined,
             });
+            registry.complete(meta.agentId, finalText, stats);
           } else if (terminateMode === AgentTerminateMode.CANCELLED) {
             registry.finalizeCancelled(meta.agentId, finalText, stats);
             persistBackgroundCancellation(
@@ -1146,7 +1208,7 @@ export class BackgroundAgentResumeService {
           // run disposes its change-listeners on shared
           // SubagentManager / SkillManager. Without this, every resume
           // accumulates listeners for the rest of the session.
-          void agentConfig
+          void activeAgentConfig
             .getToolRegistry()
             .stop()
             .catch(() => {});
@@ -1158,7 +1220,7 @@ export class BackgroundAgentResumeService {
           // Restore parent PermissionManager's dangerous allow rules if
           // this override stripped them. See createApprovalModeOverride
           // strip-lifecycle comment in agent.ts.
-          restoreParentPM();
+          activeRestoreParentPM();
         }
       };
 
@@ -1173,11 +1235,16 @@ export class BackgroundAgentResumeService {
           runBody,
           normalizeResumedAgentDepth(meta.depth),
         );
-      void (target.isFork ? runInForkContext(framedRunBody) : framedRunBody());
+      const execution = target.isFork
+        ? runInForkContext(framedRunBody)
+        : framedRunBody();
+      runtimeLifecycleOwned = true;
+      registry.register(entry);
+      void execution;
       return entry;
     } catch (error) {
-      cleanupOwnedMonitorNotifications?.();
-      cleanupJsonl?.();
+      cleanupPreparedRuntime();
+      if (!stillOwnsRunningEntry()) return undefined;
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       debugLogger.warn(
@@ -1192,7 +1259,10 @@ export class BackgroundAgentResumeService {
         if (latest.abortController.signal.aborted) {
           registry.finalizeCancelled(agentId, errorMessage);
         } else {
-          this.restorePausedEntry(agentId, { error: errorMessage });
+          this.restorePausedEntry(agentId, {
+            error: errorMessage,
+            suppressRegisterCallback: true,
+          });
         }
       }
       return undefined;
