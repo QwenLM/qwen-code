@@ -458,6 +458,7 @@ vi.mock('./components/dialogs/GitDiffDialog', async () => {
   return {
     GitDiffDialog: () =>
       React.createElement(DialogShell, null, 'changes dialog'),
+    GitDiffContent: () => React.createElement('div', null, 'changes dialog'),
   };
 });
 
