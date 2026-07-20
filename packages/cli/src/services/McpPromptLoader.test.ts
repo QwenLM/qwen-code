@@ -109,6 +109,36 @@ describe('McpPromptLoader', () => {
       expect(result).toEqual({ trail: '' });
     });
 
+    it('should map positional args to optional parameters (#7314)', () => {
+      const loader = new McpPromptLoader(mockConfig);
+      const promptArgs: PromptArgument[] = [{ name: 'input', required: false }];
+      const userArgs = 'abc';
+      const result = loader.parseArgs(userArgs, promptArgs);
+      expect(result).toEqual({ input: 'abc' });
+    });
+
+    it('should map positional args to a mix of required and optional params (#7314)', () => {
+      const loader = new McpPromptLoader(mockConfig);
+      const promptArgs: PromptArgument[] = [
+        { name: 'name', required: true },
+        { name: 'detail', required: false },
+      ];
+      const userArgs = 'alice extra-info';
+      const result = loader.parseArgs(userArgs, promptArgs);
+      expect(result).toEqual({ name: 'alice', detail: 'extra-info' });
+    });
+
+    it('should not error when optional params lack positional values (#7314)', () => {
+      const loader = new McpPromptLoader(mockConfig);
+      const promptArgs: PromptArgument[] = [
+        { name: 'name', required: true },
+        { name: 'detail', required: false },
+      ];
+      const userArgs = 'alice';
+      const result = loader.parseArgs(userArgs, promptArgs);
+      expect(result).toEqual({ name: 'alice' });
+    });
+
     it('should treat empty required named arguments as provided', () => {
       const loader = new McpPromptLoader(mockConfig);
       const promptArgs: PromptArgument[] = [

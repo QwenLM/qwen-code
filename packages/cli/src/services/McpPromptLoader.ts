@@ -291,29 +291,39 @@ export class McpPromptLoader implements ICommandLoader {
       }
     }
 
+    // Include all args not filled by named args — both required and optional —
+    // so positional input maps to optional params too (#7314).
     const unfilledArgs = promptArgs.filter(
-      (arg) => arg.required && !Object.hasOwn(promptInputs, arg.name),
+      (arg) => !Object.hasOwn(promptInputs, arg.name),
     );
 
     if (unfilledArgs.length === 1) {
       // If we have only one unfilled arg, we don't require quotes we just
       // join all the given arguments together as if they were quoted.
       promptInputs[unfilledArgs[0].name] = positionalArgs.join(' ');
-    } else {
-      const missingArgs: string[] = [];
-      for (let i = 0; i < unfilledArgs.length; i++) {
-        if (positionalArgs.length > i) {
-          promptInputs[unfilledArgs[i].name] = positionalArgs[i];
-        } else {
-          missingArgs.push(unfilledArgs[i].name);
-        }
+    } else if (positionalArgs.length > 0) {
+      // Map positional args to unfilled args in declaration order.
+      for (
+        let i = 0;
+        i < unfilledArgs.length && i < positionalArgs.length;
+        i++
+      ) {
+        promptInputs[unfilledArgs[i].name] = positionalArgs[i];
       }
-      if (missingArgs.length > 0) {
-        const missingArgNames = missingArgs
-          .map((name) => `--${name}`)
-          .join(', ');
-        return new Error(`Missing required argument(s): ${missingArgNames}`);
-      }
+    }
+
+    // Only error when the user provided positional args but not enough to
+    // cover all required params. When no positional args were given (e.g.
+    // the user is still typing named args), leave required args unfilled
+    // and let the MCP server decide.
+    const missingRequired = promptArgs.filter(
+      (arg) => arg.required && !Object.hasOwn(promptInputs, arg.name),
+    );
+    if (missingRequired.length > 0 && positionalArgs.length > 0) {
+      const missingArgNames = missingRequired
+        .map((arg) => `--${arg.name}`)
+        .join(', ');
+      return new Error(`Missing required argument(s): ${missingArgNames}`);
     }
 
     return promptInputs;
