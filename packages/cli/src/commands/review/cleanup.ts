@@ -30,7 +30,7 @@ interface CleanupArgs {
   target: string;
 }
 
-function runCleanup(target: string): void {
+export function runCleanup(target: string): void {
   let removedAny = false;
   // Tracked separately from `removedAny`, because a failure is neither. Without
   // it, a run that could not delete something goes on to announce "Nothing to

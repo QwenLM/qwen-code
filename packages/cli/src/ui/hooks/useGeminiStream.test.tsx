@@ -97,9 +97,21 @@ const mockSetActiveGoal = vi.hoisted(() => vi.fn());
 const mockClearActiveGoal = vi.hoisted(() => vi.fn());
 const mockRefreshMemoryAfterManagedWrite = vi.hoisted(() => vi.fn());
 const mockCleanupReviewWorktreeLeases = vi.hoisted(() => vi.fn());
+const mockUseDualOutput = vi.hoisted(() => vi.fn());
+const mockDualOutput = vi.hoisted(() => ({
+  startAssistantMessage: vi.fn(),
+  processEvent: vi.fn(),
+  finalizeAssistantMessage: vi.fn(),
+  emitToolResult: vi.fn(),
+  emitUserMessage: vi.fn(),
+}));
 
 vi.mock('../../services/review-worktree-lease.js', () => ({
   cleanupReviewWorktreeLeases: mockCleanupReviewWorktreeLeases,
+}));
+
+vi.mock('../../dualOutput/DualOutputContext.js', () => ({
+  useDualOutput: mockUseDualOutput,
 }));
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
@@ -298,6 +310,7 @@ describe('useGeminiStream', () => {
     handleAtCommandSpy = vi.spyOn(atCommandProcessor, 'handleAtCommand');
     mockRunVisionBridge.mockReset();
     mockCleanupReviewWorktreeLeases.mockReset();
+    mockUseDualOutput.mockReset().mockReturnValue(null);
   });
 
   afterEach(() => {
@@ -8329,7 +8342,8 @@ describe('useGeminiStream', () => {
       );
     });
 
-    it('should commit thought to history on UserCancelled', async () => {
+    it('should commit thought and finalize dual output on UserCancelled', async () => {
+      mockUseDualOutput.mockReturnValue(mockDualOutput);
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
@@ -8356,6 +8370,8 @@ describe('useGeminiStream', () => {
           expect.any(Number),
         ),
       );
+      expect(mockDualOutput.startAssistantMessage).toHaveBeenCalledOnce();
+      expect(mockDualOutput.finalizeAssistantMessage).toHaveBeenCalledOnce();
       await waitFor(() =>
         expect(mockCleanupReviewWorktreeLeases).toHaveBeenCalledWith({
           sessionId: 'test-session-id',
