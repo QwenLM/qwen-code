@@ -92,6 +92,8 @@ describe('managed npm update', () => {
       '--global=false',
       '--no-save',
       '--package-lock=false',
+      '--no-audit',
+      '--no-fund',
       '@qwen-code/qwen-code@2.0.0',
     ]);
     expect(update.versionDir).toBe(
@@ -166,6 +168,8 @@ describe('managed npm update', () => {
         '--global=false',
         '--no-save',
         '--package-lock=false',
+        '--no-audit',
+        '--no-fund',
         '@qwen-code/qwen-code@2.0.0',
       ],
       expect.objectContaining({
@@ -173,6 +177,7 @@ describe('managed npm update', () => {
           NPM_CONFIG_USERCONFIG: path.resolve('config/npmrc'),
         }),
         stdio: 'ignore',
+        timeout: 10 * 60_000,
         windowsHide: true,
       }),
     );
@@ -286,6 +291,30 @@ describe('managed npm update', () => {
     expect(
       fs.existsSync(path.join(newer.launcherRoot, 'versions', active.version)),
     ).toBe(true);
+  });
+
+  it('reuses a valid payload activated concurrently for the same version', async () => {
+    const root = makeTemporaryDirectory();
+    const updateRoot = path.join(root, 'updates');
+    const bootstrap = writeBaseInstallation(root);
+    const first = prepareManagedNpmUpdate('2.0.0', bootstrap, updateRoot);
+    const second = prepareManagedNpmUpdate('2.0.0', bootstrap, updateRoot);
+    writeInstallation(first.stagingDir, '2.0.0');
+    writeInstallation(second.stagingDir, '2.0.0');
+
+    await Promise.all([
+      activateManagedNpmUpdate(first, '2.0.0', bootstrap),
+      activateManagedNpmUpdate(second, '2.0.0', bootstrap),
+    ]);
+
+    expect(
+      JSON.parse(
+        fs.readFileSync(path.join(first.launcherRoot, 'active.json'), 'utf8'),
+      ),
+    ).toMatchObject({ version: '2.0.0' });
+    expect(fs.existsSync(first.versionDir)).toBe(true);
+    expect(fs.existsSync(first.stagingDir)).toBe(false);
+    expect(fs.existsSync(second.stagingDir)).toBe(false);
   });
 
   it('isolates payloads for different launchers', async () => {

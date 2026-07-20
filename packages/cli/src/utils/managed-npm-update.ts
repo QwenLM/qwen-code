@@ -174,6 +174,8 @@ export function prepareManagedNpmUpdate(
       '--global=false',
       '--no-save',
       '--package-lock=false',
+      '--no-audit',
+      '--no-fund',
       `${PACKAGE_NAME}@${version}`,
     ],
   };
@@ -204,6 +206,7 @@ export async function installManagedNpmUpdate(
           cwd: update.stagingDir,
           env,
           stdio: 'ignore',
+          timeout: 10 * 60_000,
           windowsHide: true,
         },
       );
