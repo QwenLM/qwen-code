@@ -57,6 +57,7 @@ interface TranscriptMessageOptions {
 function isIgnoredWebShellStatus(text: string): boolean {
   return (
     text.startsWith('language_changed (unrecognized daemon event):') ||
+    text.startsWith('session_cwd_changed (unrecognized daemon event):') ||
     text.startsWith('Model switched: ')
   );
 }

@@ -996,6 +996,10 @@
   color: var(--warning-color);
 }
 
+.gitBranchChip[data-worktree='true'] {
+  color: var(--color-accent-fg, #8b5cf6);
+}
+
 .gitBranchIconWrap {
   position: relative;
   display: inline-flex;
