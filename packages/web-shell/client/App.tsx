@@ -455,6 +455,19 @@ export type WebShellComposerPlaceholders = Readonly<
   Partial<Record<WebShellComposerPlaceholderState, string>>
 >;
 
+export interface WebShellSlashCommand {
+  /** Slash command name without the leading slash, normalized to lower case. */
+  command: string;
+  /** Trimmed text following the command name. */
+  args: string;
+  /** Original text submitted from the composer. */
+  input: string;
+}
+
+export type WebShellSlashCommandHandler = (
+  command: WebShellSlashCommand,
+) => boolean | void;
+
 export interface WebShellProps {
   /** Called whenever the attached daemon session or workspace changes. */
   onSessionIdChange?: (
@@ -520,6 +533,11 @@ export interface WebShellProps {
   hiddenSlashCommands?: string[];
   /** Slash command category order. Defaults to custom, skill, system. */
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
+  /**
+   * Called before Web Shell handles a slash command. Return true to skip the
+   * built-in or daemon behavior after handling the command in the host.
+   */
+  onSlashCommand?: WebShellSlashCommandHandler;
   /** Built-in @ mention providers to enable. Defaults to all built-ins. */
   builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
   /** Additional @ mention categories shown alongside built-in files/extensions. */
@@ -1005,6 +1023,7 @@ export function App({
   onBugReport,
   hiddenSlashCommands,
   slashCommandCategoryOrder,
+  onSlashCommand,
   builtinAtProviders,
   atProviders,
   composerTagIcons,
@@ -4543,6 +4562,12 @@ export function App({
         const match = text.match(/^\/([\w-]+)/);
         if (match) {
           const cmd = match[1];
+          const handled = onSlashCommand?.({
+            command: cmd.toLowerCase(),
+            args: text.slice(match[0].length).trim(),
+            input: text,
+          });
+          if (handled) return true;
           if (hiddenCommands.has(normalizeHiddenCommand(cmd))) {
             if (promptBlocked) {
               return enqueuePrompt(
@@ -5383,6 +5408,7 @@ export function App({
       blockLocalCommandDuringTurn,
       openTasksPanel,
       hiddenCommands,
+      onSlashCommand,
       pushToast,
       reportError,
       runVisibleRecap,

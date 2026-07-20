@@ -189,6 +189,19 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 | `onThemeChange`     | `(theme: WebShellTheme) => void`                                                        | `/theme` 命令切换主题后触发                                                      |
 | `language`          | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn'`                                                    | UI 语言                                                                          |
 | `onLanguageChange`  | `(language: WebShellLanguage) => void`                                                  | `/language ui` 切换 UI 语言后触发                                                |
+| `onSlashCommand`    | `(command: WebShellSlashCommand) => boolean \| void`                                    | 斜杠命令进入默认处理前触发；返回 `true` 时由宿主接管并跳过默认行为               |
+
+宿主可以监听命令，也可以返回 `true` 接管对应操作：
+
+```tsx
+<WebShell
+  onSlashCommand={({ command, args, input }) => {
+    if (command !== 'deploy') return;
+    openDeployDialog({ environment: args, source: input });
+    return true;
+  }}
+/>
+```
 
 锁定工作区时，可以自定义 Sidebar 文件夹行的内容：
 

@@ -2259,6 +2259,60 @@ describe('App session callbacks', () => {
     expect(editorClear).not.toHaveBeenCalled();
   });
 
+  it('notifies the host before forwarding a slash command', async () => {
+    const onSlashCommand = vi.fn();
+    const { container } = renderApp({ onSlashCommand });
+    await flush();
+
+    testState.prompt = '/Deploy staging';
+    await clickSubmit(container);
+    await flush();
+
+    expect(onSlashCommand).toHaveBeenCalledWith({
+      command: 'deploy',
+      args: 'staging',
+      input: '/Deploy staging',
+    });
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      '/Deploy staging',
+      expect.any(Object),
+    );
+  });
+
+  it('lets the host handle a slash command instead of forwarding it', async () => {
+    const onSlashCommand = vi.fn(() => true);
+    const { container } = renderApp({ onSlashCommand });
+    await flush();
+
+    testState.prompt = '/deploy production';
+    await clickSubmit(container);
+    await flush();
+
+    expect(onSlashCommand).toHaveBeenCalledWith({
+      command: 'deploy',
+      args: 'production',
+      input: '/deploy production',
+    });
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('lets the host override a built-in slash command', async () => {
+    const onSlashCommand = vi.fn(() => true);
+    const { container } = renderApp({ onSlashCommand });
+    await flush();
+
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    expect(onSlashCommand).toHaveBeenCalledWith({
+      command: 'settings',
+      args: '',
+      input: '/settings',
+    });
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+  });
+
   it('forwards input annotations for /plan prompts in active sessions', async () => {
     const annotation: DaemonInputAnnotation = {
       type: 'reference',
