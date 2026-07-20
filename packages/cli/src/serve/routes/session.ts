@@ -1380,9 +1380,14 @@ export function registerSessionRoutes(
         try {
           // Compute allowed roots for the sessionCd containment check.
           const createAllowedRoots = [workspaceCwd];
-          const createRepoTop = await new GitWorktreeService(workspaceCwd)
-            .getRepoTopLevel()
-            .catch(() => null);
+          let createRepoTop: string | null = null;
+          try {
+            createRepoTop = await new GitWorktreeService(
+              workspaceCwd,
+            ).getRepoTopLevel();
+          } catch {
+            // Not a git repo or getRepoTopLevel unavailable.
+          }
           if (createRepoTop && createRepoTop !== workspaceCwd) {
             createAllowedRoots.push(createRepoTop);
           }
