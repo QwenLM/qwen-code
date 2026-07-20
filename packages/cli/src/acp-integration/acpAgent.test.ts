@@ -2266,6 +2266,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         installGoalTerminalObserver: vi.fn(),
         startCronScheduler: vi.fn(),
         beginClose: vi.fn().mockReturnValue(vi.fn()),
+        beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
+        waitForCloseGateToRelease: vi.fn().mockResolvedValue(undefined),
         waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
         cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
         assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
@@ -10369,6 +10371,8 @@ describe('QwenAgent extMethod renameSession routing', () => {
   let mockConfig: Config;
   let liveCancelPendingPrompt: ReturnType<typeof vi.fn>;
   let liveWaitForActiveTurnsToSettle: ReturnType<typeof vi.fn>;
+  let liveBeginCloseIfAvailable: ReturnType<typeof vi.fn>;
+  let liveWaitForCloseGateToRelease: ReturnType<typeof vi.fn>;
   let liveReleaseCloseGate: ReturnType<typeof vi.fn>;
   let liveBeginClose: ReturnType<typeof vi.fn>;
 
@@ -10382,6 +10386,8 @@ describe('QwenAgent extMethod renameSession routing', () => {
     capturedAgentFactory = undefined;
     liveCancelPendingPrompt = vi.fn().mockResolvedValue(undefined);
     liveWaitForActiveTurnsToSettle = vi.fn().mockResolvedValue(undefined);
+    liveBeginCloseIfAvailable = vi.fn(() => liveBeginClose());
+    liveWaitForCloseGateToRelease = vi.fn().mockResolvedValue(undefined);
     liveReleaseCloseGate = vi.fn();
     liveBeginClose = vi.fn().mockReturnValue(liveReleaseCloseGate);
 
@@ -10490,6 +10496,8 @@ describe('QwenAgent extMethod renameSession routing', () => {
           getConfig: vi.fn().mockReturnValue(innerConfig),
           cancelPendingPrompt: liveCancelPendingPrompt,
           beginClose: liveBeginClose,
+          beginCloseIfAvailable: liveBeginCloseIfAvailable,
+          waitForCloseGateToRelease: liveWaitForCloseGateToRelease,
           waitForActiveTurnsToSettle: liveWaitForActiveTurnsToSettle,
           assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
@@ -10886,6 +10894,79 @@ describe('QwenAgent extMethod renameSession routing', () => {
     await agentPromise;
   });
 
+  it('does not abort an active generation when the close gate is unavailable', async () => {
+    const recording = makeRecordingService();
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const controller = new AbortController();
+    const abort = vi.spyOn(controller, 'abort');
+    (
+      agent as unknown as {
+        generationControllers: Map<
+          string,
+          { sessionId: string; controller: AbortController }
+        >;
+      }
+    ).generationControllers.set('active-generation', {
+      sessionId: liveSessionId,
+      controller,
+    });
+    liveBeginClose.mockImplementationOnce(() => {
+      throw new Error('close gate unavailable');
+    });
+
+    await expect(
+      agent.extMethod('qwen/control/session/close', {
+        sessionId: liveSessionId,
+      }),
+    ).rejects.toThrow('close gate unavailable');
+    expect(abort).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('waits for a held close gate before disposing the live writer', async () => {
+    let gateHeld = true;
+    let releaseHeldGate!: () => void;
+    liveBeginCloseIfAvailable.mockImplementation(() =>
+      gateHeld ? null : liveBeginClose(),
+    );
+    liveWaitForCloseGateToRelease.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        releaseHeldGate = () => {
+          gateHeld = false;
+          resolve();
+        };
+      }),
+    );
+    const recording = makeRecordingService();
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    let settled = false;
+    const disposing = (
+      agent as unknown as { disposeSessions: () => Promise<void> }
+    )
+      .disposeSessions()
+      .finally(() => {
+        settled = true;
+      });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(recording.close).not.toHaveBeenCalled();
+
+    releaseHeldGate();
+    await disposing;
+    expect(recording.close).toHaveBeenCalledOnce();
+    expect(innerConfig.shutdown).toHaveBeenCalledOnce();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('times out a stuck close drain without releasing the live writer', async () => {
     const recording = makeRecordingService();
     const innerConfig = makeLiveSessionInnerConfig(recording);
@@ -11272,6 +11353,8 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         startCronScheduler: ReturnType<typeof vi.fn>;
         assertCanStartTurn: ReturnType<typeof vi.fn>;
         beginClose: ReturnType<typeof vi.fn>;
+        beginCloseIfAvailable: ReturnType<typeof vi.fn>;
+        waitForCloseGateToRelease: ReturnType<typeof vi.fn>;
         waitForActiveTurnsToSettle: ReturnType<typeof vi.fn>;
         sendUpdate: ReturnType<typeof vi.fn>;
         dispose: ReturnType<typeof vi.fn>;
@@ -11458,6 +11541,8 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         installGoalTerminalObserver: vi.fn(),
         startCronScheduler: vi.fn(),
         beginClose: vi.fn().mockReturnValue(releaseCloseGate),
+        beginCloseIfAvailable: vi.fn().mockReturnValue(releaseCloseGate),
+        waitForCloseGateToRelease: vi.fn().mockResolvedValue(undefined),
         waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
         cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
         assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
@@ -12440,6 +12525,8 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       getId: vi.fn().mockReturnValue('persisted-1'),
       getConfig: vi.fn().mockReturnValue(replacementConfig),
       beginClose: vi.fn().mockReturnValue(vi.fn()),
+      beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
+      waitForCloseGateToRelease: vi.fn().mockResolvedValue(undefined),
       cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
       waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
       dispose: replacementDispose,
@@ -12520,6 +12607,48 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  it('times out a live load drain and releases its close gate', async () => {
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: {
+        messages: [{ role: 'user', parts: [{ text: 'first' }] }],
+      },
+    });
+    const { agent, agentPromise } = await spawnAgent();
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+    const firstSession = lastSessionMock!;
+    const releaseCloseGate = vi.fn();
+    firstSession.beginClose.mockReturnValueOnce(releaseCloseGate);
+    firstSession.waitForActiveTurnsToSettle.mockReturnValueOnce(
+      new Promise<void>(() => {}),
+    );
+
+    vi.useFakeTimers();
+    try {
+      const result = agent
+        .loadSession({
+          cwd: '/tmp',
+          sessionId: 'persisted-1',
+          mcpServers: [],
+        })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      await expect(result).resolves.toMatchObject({
+        message: 'Session restore timed out after 30000ms',
+      });
+      expect(releaseCloseGate).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
   });
 
   it('loadSession rejects a live owner from another runtime base', async () => {

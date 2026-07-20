@@ -754,6 +754,24 @@ describe('Session', () => {
     releaseClose();
   });
 
+  it('does not reopen a disposed session when a close gate releases late', async () => {
+    const releaseClose = session.beginClose();
+    const closeGateCompletion = session.waitForCloseGateToRelease();
+
+    expect(session.beginCloseIfAvailable()).toBeNull();
+    session.dispose();
+    await expect(closeGateCompletion).resolves.toBeUndefined();
+    expect(() => session.beginCloseIfAvailable()).toThrow(
+      'Session has been disposed',
+    );
+    releaseClose();
+
+    expect(session.isIdle()).toBe(false);
+    await expect(session.assertCanStartTurn()).rejects.toMatchObject({
+      code: -32602,
+    });
+  });
+
   it('pins durable cron startup, prompt restart, and stop to the session runtime', async () => {
     const runtimeDir = path.resolve('runtime', 'cron-session');
     const observedStarts: string[] = [];

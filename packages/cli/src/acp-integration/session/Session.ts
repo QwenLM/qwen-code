@@ -1140,6 +1140,8 @@ export class Session implements SessionContext {
   // on a session whose registries are already unregistered.
   private disposed = false;
   private closing = false;
+  private closeGateCompletion: Promise<void> | null = null;
+  private resolveCloseGate: (() => void) | null = null;
   private unsubscribeChatRecordingFailure?: () => void;
 
   // Modular components
@@ -1547,14 +1549,37 @@ export class Session implements SessionContext {
       );
     }
     this.closing = true;
+    let resolveGate!: () => void;
+    const completion = new Promise<void>((resolve) => {
+      resolveGate = resolve;
+    });
+    this.closeGateCompletion = completion;
+    this.resolveCloseGate = resolveGate;
     let released = false;
     return () => {
       if (released) return;
       released = true;
+      if (this.closeGateCompletion === completion) {
+        this.closeGateCompletion = null;
+        this.resolveCloseGate = null;
+      }
+      resolveGate();
+      if (this.disposed) return;
       this.closing = false;
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
     };
+  }
+
+  beginCloseIfAvailable(): (() => void) | null {
+    if (this.disposed) {
+      throw RequestError.invalidParams(undefined, 'Session has been disposed');
+    }
+    return this.closing ? null : this.beginClose();
+  }
+
+  waitForCloseGateToRelease(): Promise<void> {
+    return this.closeGateCompletion ?? Promise.resolve();
   }
 
   async waitForActiveTurnsToSettle(): Promise<void> {
@@ -1597,6 +1622,9 @@ export class Session implements SessionContext {
   dispose(): void {
     this.disposed = true;
     this.closing = true;
+    this.resolveCloseGate?.();
+    this.resolveCloseGate = null;
+    this.closeGateCompletion = null;
     this.todoStopGuardQueuedPromptPriority = false;
     this.todoStopGuardDrainAutomaticQueuesWhenIdle = false;
     this.todoStopGuard.clearTrust();

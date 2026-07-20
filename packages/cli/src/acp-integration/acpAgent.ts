@@ -328,7 +328,7 @@ const POSIX_TMP_LOCAL_READ_ROOT = '/tmp';
 // aborts before the bridge's backstop timer fires.
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 const MCP_OAUTH_START_TIMEOUT_MS = 30_000;
-const SESSION_CLOSE_DRAIN_TIMEOUT_MS = 30_000;
+const SESSION_DRAIN_TIMEOUT_MS = 30_000;
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
 
@@ -464,14 +464,15 @@ async function shutdownSessionConfig(config: Config): Promise<void> {
   }
 }
 
-async function waitForSessionCloseDrain(
+async function waitForSessionDrain(
   operation: Promise<void>,
   timeoutMs: number,
+  kind: 'close' | 'restore',
 ): Promise<void> {
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(
-      () => reject(new Error(`Session close timed out after ${timeoutMs}ms`)),
+      () => reject(new Error(`Session ${kind} timed out after ${timeoutMs}ms`)),
       timeoutMs,
     );
     timer.unref();
@@ -480,6 +481,26 @@ async function waitForSessionCloseDrain(
     await Promise.race([operation, timeout]);
   } finally {
     if (timer) clearTimeout(timer);
+  }
+}
+
+async function beginSessionCloseAfterCurrentGate(
+  session: Session,
+  timeoutMs: number,
+): Promise<() => void> {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const releaseGate = session.beginCloseIfAvailable();
+    if (releaseGate) return releaseGate;
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      throw new Error(`Session close timed out after ${timeoutMs}ms`);
+    }
+    await waitForSessionDrain(
+      session.waitForCloseGateToRelease(),
+      remainingMs,
+      'close',
+    );
   }
 }
 
@@ -3300,7 +3321,11 @@ class QwenAgent implements Agent {
     const config = session.getConfig();
     const releaseGate = session.beginClose();
     try {
-      await session.waitForActiveTurnsToSettle();
+      await waitForSessionDrain(
+        session.waitForActiveTurnsToSettle(),
+        SESSION_DRAIN_TIMEOUT_MS,
+        'restore',
+      );
       const recorder = config.getChatRecordingService();
       const loadAuthoritative = () =>
         config.getSessionService().loadSession(sessionId);
@@ -3392,13 +3417,9 @@ class QwenAgent implements Agent {
       requireFlush?: boolean;
       drainTimeoutMs?: number;
       shutdownConfig?: boolean;
+      waitForCloseGate?: boolean;
     },
   ): Promise<void> {
-    for (const [requestId, generation] of this.generationControllers) {
-      if (generation.sessionId !== sessionId) continue;
-      generation.controller.abort();
-      this.generationControllers.delete(requestId);
-    }
     const session = this.sessions.get(sessionId);
     if (!session) {
       this.mcpPool?.releaseSession(sessionId);
@@ -3411,10 +3432,18 @@ class QwenAgent implements Agent {
       await recorder?.flush();
     }
 
-    const cancelClose = session.beginClose();
+    const drainTimeoutMs = opts?.drainTimeoutMs ?? SESSION_DRAIN_TIMEOUT_MS;
+    const cancelClose = opts?.waitForCloseGate
+      ? await beginSessionCloseAfterCurrentGate(session, drainTimeoutMs)
+      : session.beginClose();
+    for (const [requestId, generation] of this.generationControllers) {
+      if (generation.sessionId !== sessionId) continue;
+      generation.controller.abort();
+      this.generationControllers.delete(requestId);
+    }
     let removedFromStore = false;
     try {
-      await waitForSessionCloseDrain(
+      await waitForSessionDrain(
         (async () => {
           try {
             await session.cancelPendingPrompt();
@@ -3427,7 +3456,8 @@ class QwenAgent implements Agent {
           }
           await session.waitForActiveTurnsToSettle();
         })(),
-        opts?.drainTimeoutMs ?? SESSION_CLOSE_DRAIN_TIMEOUT_MS,
+        drainTimeoutMs,
+        'close',
       );
 
       recorder?.finalize();
@@ -3470,6 +3500,7 @@ class QwenAgent implements Agent {
       requireFlush?: boolean;
       drainTimeoutMs?: number;
       shutdownConfig?: boolean;
+      waitForCloseGate?: boolean;
     },
   ): Promise<void> {
     if (this.sessions.get(sessionId) !== session) {
@@ -3484,8 +3515,10 @@ class QwenAgent implements Agent {
     }
     this.generationControllers.clear();
     await Promise.allSettled(
-      [...this.sessions.keys()].map((sessionId) =>
-        this.closeStoredSession(sessionId),
+      [...this.sessions.entries()].map(([sessionId, session]) =>
+        this.discardStoredSessionIfCurrent(sessionId, session, {
+          waitForCloseGate: true,
+        }),
       ),
     );
     await Promise.allSettled(
