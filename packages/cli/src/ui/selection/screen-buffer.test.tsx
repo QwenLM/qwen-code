@@ -335,6 +335,45 @@ describe('ScreenBuffer (Ink frame-controller M0)', () => {
     expect(frame.boundaries[0].every((claim) => claim === null)).toBe(true);
   });
 
+  it('covers visible text after left clipping with boundary claims', () => {
+    current = render(
+      <Box width={3} height={2} flexDirection="column">
+        <Box width={3} height={1} overflow="hidden">
+          <Box position="absolute" marginLeft={-2}>
+            <Text
+              selectionFlow="flow"
+              selectionBreakAfter="soft"
+              selectionJoiner=" "
+            >
+              abcde
+            </Text>
+          </Box>
+          <Box position="absolute">
+            <Text selectable={false}>X</Text>
+          </Box>
+        </Box>
+        <Text selectionFlow="flow">fgh</Text>
+      </Box>,
+    );
+    const frame = getScreenBuffer(
+      current.stdout as unknown as NodeJS.WriteStream,
+    )!.frame!;
+
+    expect(frame.boundaries[0].slice(0, 3).map(Boolean)).toEqual([
+      false,
+      true,
+      true,
+    ]);
+    expect(
+      getSelectedText(frame, {
+        sx: 0,
+        sy: 0,
+        ex: frame.width - 1,
+        ey: frame.height - 1,
+      }),
+    ).toBe('de fgh');
+  });
+
   it('limits boundary claims to the rendered text width', () => {
     current = render(
       <Box width={5}>

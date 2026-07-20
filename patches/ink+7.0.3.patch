@@ -367,7 +367,7 @@ index c763b77..c94da37 100644
 +                        const boundaryWidth = semantic
 +                            ? Math.max(1, this.caches.getStringWidth(line))
 +                            : this.caches.getStringWidth(line);
-+                        const boundaryOrigin = semantic ? operation.x : x;
++                        const boundaryOrigin = x;
 +                        const startX = Math.max(0, boundaryOrigin, clip?.x1 ?? 0);
 +                        const endX = Math.min(this.width, boundaryOrigin + boundaryWidth, clip?.x2 ?? this.width);
 +                        const sourceBoundary = semantic?.boundaries[firstLineIndex + index] ?? null;
