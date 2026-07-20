@@ -146,6 +146,12 @@ export function selectForkHistory(
   let selected = history;
 
   if (typeof forkTurns === 'number') {
+    // includeCompressed is load-bearing here. getHistoryForForkWindow strips
+    // the startup reminder with includeCompressed:false, so a post-compression
+    // summary prefix can still lead this history. Detecting it here keeps that
+    // synthetic summary from being counted as a real user turn — which would
+    // consume one of the requested turns and seed the fork with a prefix it
+    // should not inherit.
     const syntheticPrefixLength = getStartupContextLength(history, {
       includeCompressed: true,
     });

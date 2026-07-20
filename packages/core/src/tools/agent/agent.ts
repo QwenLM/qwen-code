@@ -928,7 +928,7 @@ Forks are cheap because they share your prompt cache. Don't set \`model\` on a f
 }
 ## Writing the prompt
 
-Brief the agent like a smart colleague: make the delegated task, boundaries, and expected output explicit. Regular subagents have not seen this conversation; forks inherit all or the selected recent window.
+Brief the agent like a smart colleague: make the delegated task, boundaries, and expected output explicit. Regular subagents have not seen this conversation${isForkSubagentEnabled(this.config) ? '; forks inherit all or the selected recent window' : '.'}
 - Explain what you're trying to accomplish and why.
 - Describe what you've already learned or ruled out.
 - Give enough context about the surrounding problem that the agent can make judgment calls rather than just following a narrow instruction.
@@ -1530,6 +1530,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     const forkTurns = normalizeForkTurns(this.params.fork_turns);
     let rawHistory: Content[] = [];
     if (geminiClient) {
+      // The `all` and numeric paths curate history differently on purpose.
+      // `all` takes curated history directly. The numeric path reads
+      // *uncurated* history so the startup context can be sliced off on its own
+      // (getStartupContextLength) before curation coalesces it with the first
+      // real user turn; the startup prefix is then reattached to the bounded
+      // window from getHistoryForForkWindow (which curates *after* stripping
+      // startup). Sharing the curated `all` source here would drop the startup
+      // reminder into the first turn and break bounded selection.
       if (forkTurns === 'all') {
         rawHistory = selectForkHistory(
           geminiClient.getHistoryShallow?.(true) ??

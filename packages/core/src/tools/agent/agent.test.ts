@@ -311,6 +311,9 @@ describe('AgentTool', () => {
       expect(interactiveTool.description).toContain("Don't peek");
       expect(interactiveTool.description).toContain("Don't race");
       expect(interactiveTool.description).toContain('Writing a fork prompt');
+      expect(interactiveTool.description).toContain(
+        'forks inherit all or the selected recent window',
+      );
     });
 
     it('omits fork discipline but keeps "Writing the prompt" when non-interactive', async () => {
@@ -334,6 +337,8 @@ describe('AgentTool', () => {
       expect(nonInteractiveTool.description).toContain(
         'Never delegate understanding',
       );
+      // ...but its live fork reference is gated with the fork framework.
+      expect(nonInteractiveTool.description).not.toContain('forks inherit');
     });
 
     it('includes fork discipline when interactive', async () => {
