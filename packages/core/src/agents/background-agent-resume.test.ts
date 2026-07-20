@@ -160,6 +160,7 @@ describe('BackgroundAgentResumeService', () => {
       parentAgentId: null,
       createdAt: '2026-04-20T00:00:00.000Z',
       status: 'running',
+      isBackgrounded: true,
       subagentName: 'researcher',
       resolvedApprovalMode: 'auto-edit',
     });
@@ -287,15 +288,15 @@ describe('BackgroundAgentResumeService', () => {
     expect(registry.get(agentId)).toBeUndefined();
   });
 
-  it('does not restore completed foreground or unmarked legacy sidecars', async () => {
-    const sessionId = 'session-foreground-completed';
-    const foregroundAgentId = 'agent-foreground-completed';
-    const legacyAgentId = 'agent-legacy-completed';
-
-    for (const [agentId, isBackgrounded] of [
-      [foregroundAgentId, false],
-      [legacyAgentId, undefined],
-    ] as const) {
+  it('does not restore foreground or unmarked legacy sidecars', async () => {
+    const sessionId = 'session-non-background';
+    const cases = [
+      ['foreground-completed', 'completed', false],
+      ['legacy-completed', 'completed', undefined],
+      ['foreground-running', 'running', false],
+      ['legacy-running', 'running', undefined],
+    ] as const;
+    for (const [agentId, status, isBackgrounded] of cases) {
       writeAgentMeta(getAgentMetaPath(tempDir, sessionId, agentId), {
         agentId,
         agentType: 'researcher',
@@ -303,7 +304,7 @@ describe('BackgroundAgentResumeService', () => {
         parentSessionId: sessionId,
         parentAgentId: null,
         createdAt: '2026-04-20T00:00:00.000Z',
-        status: 'completed',
+        status,
         ...(isBackgrounded === undefined ? {} : { isBackgrounded }),
         subagentName: 'researcher',
       });
@@ -328,8 +329,9 @@ describe('BackgroundAgentResumeService', () => {
     const recovered = await service.loadPausedBackgroundAgents(sessionId);
 
     expect(recovered).toEqual([]);
-    expect(registry.get(foregroundAgentId)).toBeUndefined();
-    expect(registry.get(legacyAgentId)).toBeUndefined();
+    for (const [agentId] of cases) {
+      expect(registry.get(agentId)).toBeUndefined();
+    }
     expect(subagentManager.loadSubagent).not.toHaveBeenCalled();
   });
 
@@ -448,6 +450,7 @@ describe('BackgroundAgentResumeService', () => {
       parentAgentId: null,
       createdAt: '2026-04-20T00:00:00.000Z',
       status: 'running',
+      isBackgrounded: true,
       subagentName: 'researcher',
       model: 'qwen3-max',
     });
@@ -491,6 +494,7 @@ describe('BackgroundAgentResumeService', () => {
       parentAgentId: null,
       createdAt: '2026-04-20T00:00:00.000Z',
       status: 'running',
+      isBackgrounded: true,
       subagentName: FORK_SUBAGENT_TYPE,
       resolvedApprovalMode: 'default',
     });
@@ -536,6 +540,7 @@ describe('BackgroundAgentResumeService', () => {
       parentAgentId: null,
       createdAt: '2026-04-20T00:00:00.000Z',
       status: 'running',
+      isBackgrounded: true,
       subagentName: 'researcher',
       resolvedApprovalMode: 'default',
       model: 'gemini-2.5-pro',
@@ -575,6 +580,7 @@ describe('BackgroundAgentResumeService', () => {
       parentAgentId: null,
       createdAt: '2026-04-20T00:00:00.000Z',
       status: 'running',
+      isBackgrounded: true,
       subagentName: 'deleted-agent',
       resolvedApprovalMode: 'default',
     });
@@ -620,6 +626,7 @@ describe('BackgroundAgentResumeService', () => {
       parentAgentId: null,
       createdAt: '2026-04-20T00:00:00.000Z',
       status: 'running',
+      isBackgrounded: true,
       subagentName: 'researcher',
       resolvedApprovalMode: 'default',
       lastError: 'Temporary resume setup failed',
@@ -652,7 +659,7 @@ describe('BackgroundAgentResumeService', () => {
     expect(recovered[0]?.resumeBlockedReason).toBeUndefined();
   });
 
-  it('falls back to legacy agentType metadata when resume fields are missing', async () => {
+  it('falls back to agentType metadata when the subagent name is missing', async () => {
     const sessionId = 'session-legacy';
     const agentId = 'agent-legacy';
     const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
@@ -665,6 +672,7 @@ describe('BackgroundAgentResumeService', () => {
       parentAgentId: null,
       createdAt: '2026-04-20T00:00:00.000Z',
       status: 'running',
+      isBackgrounded: true,
     });
     fs.writeFileSync(
       getAgentJsonlPath(tempDir, sessionId, agentId),
@@ -692,7 +700,7 @@ describe('BackgroundAgentResumeService', () => {
     expect(subagentManager.loadSubagent).toHaveBeenCalledWith('researcher');
   });
 
-  it('persists a resumed legacy sidecar before completion is published', async () => {
+  it('persists a resumed sidecar before completion is published', async () => {
     const sessionId = 'session-legacy-resumed';
     const agentId = 'agent-legacy-resumed';
     const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
@@ -706,6 +714,7 @@ describe('BackgroundAgentResumeService', () => {
       parentAgentId: null,
       createdAt: '2026-04-20T00:00:00.000Z',
       status: 'running',
+      isBackgrounded: true,
     });
     fs.writeFileSync(
       outputFile,

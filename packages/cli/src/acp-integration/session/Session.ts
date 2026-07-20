@@ -1642,6 +1642,7 @@ export class Session implements SessionContext {
     this.resolveCloseGate?.();
     this.resolveCloseGate = null;
     this.closeGateCompletion = null;
+    this.config.getBackgroundTaskRegistry().abortAll({ notify: false });
     this.todoStopGuardQueuedPromptPriority = false;
     this.todoStopGuardDrainAutomaticQueuesWhenIdle = false;
     this.todoStopGuard.clearTrust();
@@ -2403,12 +2404,18 @@ export class Session implements SessionContext {
               parts = continuationParts!;
             } else if (isSlashInput) {
               // Handle slash command in ACP mode using capability-based filtering
+              const sessionIdBeforeCommand = this.config.getSessionId();
               const slashCommandResult = await handleSlashCommand(
                 inputText,
                 pendingSend,
                 this.config,
                 this.settings,
-              );
+              ).finally(() => {
+                if (this.config.getSessionId() !== sessionIdBeforeCommand) {
+                  this.pendingWorktreeNotice = null;
+                  this.pendingRecoveredAgentsNotice = null;
+                }
+              });
 
               parts = await this.#processSlashCommandResult(
                 slashCommandResult,

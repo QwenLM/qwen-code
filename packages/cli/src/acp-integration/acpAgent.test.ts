@@ -10882,6 +10882,13 @@ describe('QwenAgent extMethod renameSession routing', () => {
     expect(innerConfig.shutdown).toHaveBeenCalledOnce();
     expect(
       (
+        vi.mocked(Session).mock.results.at(-1)?.value as
+          | { dispose: ReturnType<typeof vi.fn> }
+          | undefined
+      )?.dispose,
+    ).toHaveBeenCalledOnce();
+    expect(
+      (
         agent as unknown as {
           getActiveSessions: () => Array<{ getId: () => string }>;
         }

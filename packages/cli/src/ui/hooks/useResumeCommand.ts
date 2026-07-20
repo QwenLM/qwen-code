@@ -178,11 +178,19 @@ export function useResumeCommand(
           ?.rebuildTurnBoundaries(sessionData.conversation.messages);
         await config.getGeminiClient()?.initialize?.();
 
-        const recovered = await config.loadPausedBackgroundAgents(sessionId);
-        if (recovered.length > 0) {
-          recoveredBackgroundAgentsNotice = config
-            .getBackgroundAgentResumeService()
-            .buildRecoveredBackgroundAgentsNotice(recovered.length);
+        try {
+          const recovered = await config.loadPausedBackgroundAgents(sessionId);
+          if (recovered.length > 0) {
+            recoveredBackgroundAgentsNotice = config
+              .getBackgroundAgentResumeService()
+              .buildRecoveredBackgroundAgentsNotice(recovered.length);
+          }
+        } catch (error) {
+          config
+            .getDebugLogger()
+            .warn(
+              `Background agent restore failed during /resume (non-fatal): ${error}`,
+            );
         }
 
         // 2. Swap UI. Once this commits, rolling core back is unsafe —
@@ -217,6 +225,17 @@ export function useResumeCommand(
           try {
             resetBackgroundStateForSessionSwitch(config);
             config.startNewSession(oldSessionId, undefined);
+            try {
+              await config
+                .getBackgroundAgentResumeService()
+                .loadPausedBackgroundAgents(oldSessionId);
+            } catch (restoreErr) {
+              config
+                .getDebugLogger()
+                .warn(
+                  `Old-session background agent restore after /resume rollback failed: ${restoreErr}`,
+                );
+            }
           } catch (rollbackErr) {
             config
               .getDebugLogger()

@@ -337,6 +337,13 @@ export function shouldDrainMessageQueue({
   );
 }
 
+export function shouldConsumeRecoveredAgentsNotice(
+  prompt: string,
+  shellModeActive: boolean,
+): boolean {
+  return !shellModeActive && !isSlashCommand(prompt) && !isBtwCommand(prompt);
+}
+
 export function getSpeculativeToolResult(response: unknown): {
   text: string;
   status: ToolCallStatus;
@@ -740,16 +747,6 @@ export const AppContainer = (props: AppContainerProps) => {
         mergeStartupWarnings(currentWarnings, config.getWarnings()),
       );
       profileCheckpoint('config_initialize_end');
-      setConfigInitialized(true);
-      profileCheckpoint('input_enabled');
-      // Profile finalize is intentionally NOT here. With PR-A's background
-      // MCP discovery, MCP-related events (`mcp_server_ready:*`,
-      // `mcp_first_tool_registered`, `mcp_all_servers_settled`,
-      // `gemini_tools_updated`) arrive AFTER `input_enabled`. The dedicated
-      // `useEffect` below (gated by `configInitialized`) defers finalize
-      // until MCP discovery settles or the 35s hard cap elapses — that way
-      // the profile captures the full MCP timeline without holding back
-      // the user-facing TTI.
 
       // Phase D-1: when launched with --worktree, gemini.tsx stashes a
       // one-shot notice on Config. Consume it here so it surfaces in the
@@ -797,18 +794,25 @@ export const AppContainer = (props: AppContainerProps) => {
           // Restore is best-effort — never block resume on it.
         }
 
-        const recovered = await config.loadPausedBackgroundAgents(
-          config.getSessionId(),
-        );
-        if (recovered.length > 0) {
-          historyManager.addItem(
-            {
-              type: MessageType.INFO,
-              text: config
-                .getBackgroundAgentResumeService()
-                .buildRecoveredBackgroundAgentsNotice(recovered.length),
-            },
-            Date.now(),
+        try {
+          const recovered = await config.loadPausedBackgroundAgents(
+            config.getSessionId(),
+          );
+          if (recovered.length > 0) {
+            historyManager.addItem(
+              {
+                type: MessageType.INFO,
+                text: config
+                  .getBackgroundAgentResumeService()
+                  .buildRecoveredBackgroundAgentsNotice(recovered.length),
+              },
+              Date.now(),
+            );
+          }
+        } catch (error) {
+          debugLogger.warn(
+            'Background agent restore failed (non-fatal):',
+            error,
           );
         }
 
@@ -858,6 +862,16 @@ export const AppContainer = (props: AppContainerProps) => {
           }
         }
       }
+      setConfigInitialized(true);
+      profileCheckpoint('input_enabled');
+      // Profile finalize is intentionally NOT here. With PR-A's background
+      // MCP discovery, MCP-related events (`mcp_server_ready:*`,
+      // `mcp_first_tool_registered`, `mcp_all_servers_settled`,
+      // `gemini_tools_updated`) arrive AFTER `input_enabled`. The dedicated
+      // `useEffect` below (gated by `configInitialized`) defers finalize
+      // until MCP discovery settles or the 35s hard cap elapses — that way
+      // the profile captures the full MCP timeline without holding back
+      // the user-facing TTI.
     })();
 
     // Register SessionEnd cleanup for process exit
@@ -2184,10 +2198,12 @@ export const AppContainer = (props: AppContainerProps) => {
         void handleSlashCommand('/quit');
         return;
       }
-      const recoveredAgentsNotice =
-        !isSlashCommand(userPromptText) && !isBtwCommand(userPromptText)
-          ? config.consumePendingRecoveredAgentsNotice()
-          : null;
+      const recoveredAgentsNotice = shouldConsumeRecoveredAgentsNotice(
+        userPromptText,
+        shellModeActive,
+      )
+        ? config.consumePendingRecoveredAgentsNotice()
+        : null;
       if (recoveredAgentsNotice) {
         submittedValue =
           `<system-reminder>\n${recoveredAgentsNotice}\n</system-reminder>\n\n` +
@@ -2376,6 +2392,7 @@ export const AppContainer = (props: AppContainerProps) => {
       config,
       geminiClient,
       historyManager,
+      shellModeActive,
       settings.merged.ui?.disableWorkflowKeywordTrigger,
     ],
   );

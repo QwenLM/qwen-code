@@ -45,11 +45,10 @@ sidecars:
 - `completed` remains `completed`, is marked already notified, and carries the
   transcript and metadata paths needed by `send_message` revival.
 
-New sidecars persist whether the original launch was backgrounded. Completed
-entries are restored only when that marker is explicitly true; foreground and
-legacy unmarked completed sidecars are skipped because their launch mode cannot
-be inferred safely. Legacy `running` sidecars retain the existing interrupted
-resume behavior.
+New sidecars persist whether the original launch was backgrounded. Entries are
+restored only when that marker is explicitly true; foreground and legacy
+unmarked sidecars are skipped because their launch mode and working-directory
+requirements cannot be inferred safely.
 
 Only the newest retained completed entries are restored. Running entries are
 never removed by this limit.
@@ -83,10 +82,10 @@ Worktree-isolated agents are restored for visibility but marked
 non-continuable. Their temporary worktree is finalized after the original turn
 and cannot be reconstructed safely from the transcript alone.
 
-The isolation marker is new metadata. A legacy interrupted sidecar written by a
-version that did not persist this field cannot be distinguished from an
-ordinary non-isolated run, so legacy `running` recovery retains the existing
-best-effort behavior. Newly written sidecars always persist the marker.
+The isolation and background markers are new metadata. A legacy interrupted
+sidecar cannot be distinguished safely from a foreground or caller-owned
+working-directory run, so it is not restored. Newly written background
+sidecars always persist both markers.
 
 The restore boundary necessarily loses the old runtime. The preserved task ID
 and transcript provide logical continuity. This PR deliberately keeps the

@@ -421,7 +421,7 @@ export class BackgroundAgentResumeService {
         if (
           !meta ||
           (meta.status !== 'running' && meta.status !== 'completed') ||
-          (meta.status === 'completed' && meta.isBackgrounded !== true)
+          meta.isBackgrounded !== true
         ) {
           continue;
         }

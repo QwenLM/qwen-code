@@ -42,6 +42,7 @@ import {
   isRenderModeToggleKey,
   mergeStartupWarnings,
   shouldAutoOpenSkillReview,
+  shouldConsumeRecoveredAgentsNotice,
   shouldDrainMessageQueue,
 } from './AppContainer.js';
 import {
@@ -1224,6 +1225,10 @@ describe('AppContainer State Management', () => {
 
       expect(consumeNotice).not.toHaveBeenCalled();
       expect(mockSubmitQuery).toHaveBeenCalledWith('/model');
+    });
+
+    it('does not consume the recovered-agents reminder in shell mode', () => {
+      expect(shouldConsumeRecoveredAgentsNotice('pwd', true)).toBe(false);
     });
 
     it('does not consume the recovered-agents reminder when quitting', () => {
@@ -3329,7 +3334,12 @@ describe('AppContainer State Management', () => {
           typeof mockConfig.getResumedSessionData
         >,
       );
-      vi.spyOn(mockConfig, 'loadPausedBackgroundAgents').mockResolvedValue([]);
+      let rejectAgentRestore: ((error: Error) => void) | undefined;
+      vi.spyOn(mockConfig, 'loadPausedBackgroundAgents').mockReturnValue(
+        new Promise((_, reject) => {
+          rejectAgentRestore = reject;
+        }),
+      );
 
       mockSettings = {
         ...mockSettings,
@@ -3354,7 +3364,14 @@ describe('AppContainer State Management', () => {
       );
 
       await vi.waitFor(() => {
-        expect(historyManager.loadHistory).toHaveBeenCalled();
+        expect(mockConfig.loadPausedBackgroundAgents).toHaveBeenCalled();
+      });
+      expect(capturedUIState.isConfigInitialized).toBe(false);
+      await act(async () => {
+        rejectAgentRestore?.(new Error('restore unavailable'));
+      });
+      await vi.waitFor(() => {
+        expect(capturedUIState.isConfigInitialized).toBe(true);
       });
 
       expect(historyManager.loadHistory).toHaveBeenCalledWith(

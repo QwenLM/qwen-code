@@ -597,6 +597,77 @@ describe('useResumeCommand', () => {
     );
   });
 
+  it('keeps /resume successful when background-agent restore fails', async () => {
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
+    const startNewSession = vi.fn();
+    const warn = vi.fn();
+    const config = {
+      getSessionId: () => 'old-session-id',
+      getTargetDir: () => '/tmp',
+      getGeminiClient: () => ({
+        initialize: vi.fn().mockResolvedValue(undefined),
+      }),
+      startNewSession: vi.fn(),
+      getBackgroundTaskRegistry: () => ({
+        hasRunningTasks: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getBackgroundShellRegistry: () => ({
+        getAll: vi.fn().mockReturnValue([]),
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getMonitorRegistry: () => ({
+        getRunning: vi.fn().mockReturnValue([]),
+        reset: vi.fn(),
+      }),
+      getWorkflowRunRegistry: () => ({
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+        abortAll: vi.fn(),
+      }),
+      loadPausedBackgroundAgents: vi
+        .fn()
+        .mockRejectedValue(new Error('restore unavailable')),
+      getChatRecordingService: () => ({ rebuildTurnBoundaries: vi.fn() }),
+      getDebugLogger: () => ({
+        warn,
+        debug: vi.fn(),
+        error: vi.fn(),
+      }),
+    } as unknown as import('@qwen-code/qwen-code-core').Config;
+
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        settings: mockSettings,
+        historyManager,
+        startNewSession,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.handleResume('session-restore-failure');
+    });
+
+    expect(startNewSession).toHaveBeenCalledWith('session-restore-failure');
+    expect(historyManager.clearItems).toHaveBeenCalledOnce();
+    expect(historyManager.loadHistory).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Background agent restore failed during /resume (non-fatal)',
+      ),
+    );
+    expect(historyManager.addItem).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error' }),
+      expect.any(Number),
+    );
+  });
+
   it('blocks resume when the current session still has running background work', async () => {
     const historyManager = {
       addItem: vi.fn(),
@@ -735,12 +806,13 @@ describe('useResumeCommand', () => {
   it('rolls core back to the old session when something fails after core swap but before UI swap', async () => {
     const startNewSession = vi.fn();
     const geminiClient = {
-      initialize: vi.fn().mockResolvedValue(undefined),
+      initialize: vi.fn().mockRejectedValue(new Error('resume init boom')),
     };
     const backgroundTaskReset = vi.fn();
     const backgroundShellReset = vi.fn();
     const monitorReset = vi.fn();
     const workflowReset = vi.fn();
+    const restoreOldRoster = vi.fn().mockResolvedValue([]);
 
     const config = {
       getSessionId: () => 'old-session-id',
@@ -765,11 +837,10 @@ describe('useResumeCommand', () => {
         reset: workflowReset,
         abortAll: vi.fn(),
       }),
-      loadPausedBackgroundAgents: vi.fn().mockResolvedValue([{}]),
+      loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
       getBackgroundAgentResumeService: () => ({
-        buildRecoveredBackgroundAgentsNotice: () => {
-          throw new Error('restore notice boom');
-        },
+        buildRecoveredBackgroundAgentsNotice: vi.fn(),
+        loadPausedBackgroundAgents: restoreOldRoster,
       }),
       getChatRecordingService: () => ({ rebuildTurnBoundaries: vi.fn() }),
       getDebugLogger: () => ({
@@ -813,6 +884,7 @@ describe('useResumeCommand', () => {
       'old-session-id',
       undefined,
     );
+    expect(restoreOldRoster).toHaveBeenCalledWith('old-session-id');
     // UI never swapped.
     expect(startNewSession).not.toHaveBeenCalled();
     expect(historyManager.clearItems).not.toHaveBeenCalled();
@@ -822,7 +894,7 @@ describe('useResumeCommand', () => {
       expect.objectContaining({
         type: 'error',
         text: expect.stringMatching(
-          /Failed to resume session.*restore notice boom/,
+          /Failed to resume session.*resume init boom/,
         ),
       }),
       expect.any(Number),

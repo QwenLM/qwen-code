@@ -114,8 +114,8 @@ export interface AgentMeta {
    */
   status?: 'running' | 'completed' | 'failed' | 'cancelled' | 'paused';
   /**
-   * Whether the original launch ran asynchronously. Completed entries are
-   * restored only when this is explicitly true so legacy foreground sidecars
+   * Whether the original launch ran asynchronously. Entries are restored only
+   * when this is explicitly true so foreground and unmarked legacy sidecars
    * are never exposed as reusable background agents.
    */
   isBackgrounded?: boolean;

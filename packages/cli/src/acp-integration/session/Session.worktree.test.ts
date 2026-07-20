@@ -145,6 +145,7 @@ describe('Session.pendingWorktreeNotice', () => {
       // Session constructor registers background-notification callbacks on
       // these registries; provide no-op stubs so construction succeeds.
       getBackgroundTaskRegistry: vi.fn().mockReturnValue({
+        abortAll: vi.fn(),
         setNotificationCallback: vi.fn(),
       }),
       getMonitorRegistry: vi.fn().mockReturnValue({
@@ -307,6 +308,58 @@ describe('Session.pendingWorktreeNotice', () => {
         { text: 'ordinary prompt' },
       ]),
     );
+    expect(session.pendingRecoveredAgentsNotice).toBeNull();
+  });
+
+  it('clears a recovered-agents notice when a slash command starts a new session', async () => {
+    const notice = 'Recovered agents are available.';
+    vi.mocked(handleSlashCommand).mockImplementationOnce(async () => {
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('new-session');
+      return {
+        type: 'submit_prompt',
+        content: [{ text: 'Prompt from command' }],
+      };
+    });
+    const session = new Session(
+      SESSION_ID,
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+    session.pendingRecoveredAgentsNotice = notice;
+
+    await session.prompt(makePromptRequest('/clear'));
+    await session.prompt(makePromptRequest('ordinary prompt'));
+
+    expect(session.pendingRecoveredAgentsNotice).toBeNull();
+    expect(
+      capturedMessages
+        .flat()
+        .some(
+          (part) =>
+            typeof (part as { text?: unknown }).text === 'string' &&
+            (part as { text: string }).text.includes(notice),
+        ),
+    ).toBe(false);
+  });
+
+  it('clears the notice when a session-changing slash command later fails', async () => {
+    vi.mocked(handleSlashCommand).mockImplementationOnce(async () => {
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('new-session');
+      throw new Error('clear failed');
+    });
+    const session = new Session(
+      SESSION_ID,
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+    session.pendingRecoveredAgentsNotice = 'Recovered agents are available.';
+
+    await expect(session.prompt(makePromptRequest('/clear'))).rejects.toThrow(
+      'clear failed',
+    );
+
     expect(session.pendingRecoveredAgentsNotice).toBeNull();
   });
 
