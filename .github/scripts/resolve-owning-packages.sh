@@ -20,13 +20,13 @@
 set -euo pipefail
 
 while IFS= read -r f; do
-  [[ -n "$f" ]] || continue
-  d="$(dirname "$f")"
-  while [[ "$d" == packages/?* ]]; do
-    if [[ -f "$d/package.json" ]]; then
-      printf '%s\n' "$d"
+  [[ -n "${f}" ]] || continue
+  d="$(dirname "${f}")"
+  while [[ "${d}" == packages/?* ]]; do
+    if [[ -f "${d}/package.json" ]]; then
+      printf '%s\n' "${d}"
       break
     fi
-    d="$(dirname "$d")"
+    d="$(dirname "${d}")"
   done
 done | sort -u

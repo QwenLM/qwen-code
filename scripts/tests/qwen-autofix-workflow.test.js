@@ -2638,9 +2638,9 @@ describe('qwen-autofix workflow', () => {
       '.github/scripts/resolve-owning-packages.sh',
       'utf8',
     );
-    expect(resolveScript).toContain('d="$(dirname "$f")"');
-    expect(resolveScript).toContain('[[ "$d" == packages/?* ]]');
-    expect(resolveScript).toContain('if [[ -f "$d/package.json" ]]; then');
+    expect(resolveScript).toContain('d="$(dirname "${f}")"');
+    expect(resolveScript).toContain('[[ "${d}" == packages/?* ]]');
+    expect(resolveScript).toContain('if [[ -f "${d}/package.json" ]]; then');
     expect(resolveScript).toContain('sort -u');
     // The review gate's freshness check is a STRUCTURAL guard: the script call
     // must run BEFORE the no-op/unchanged return, so a stale-schema PR the agent
