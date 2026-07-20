@@ -240,7 +240,7 @@ describe('managed npm update', () => {
       path.join(root, 'updates'),
     );
     writeInstallation(update.stagingDir, '2.0.0');
-    fs.writeFileSync(bootstrap, 'manually reinstalled launcher');
+    writeBaseInstallation(root, '1.1.0');
 
     await expect(
       activateManagedNpmUpdate(update, '2.0.0', bootstrap),
