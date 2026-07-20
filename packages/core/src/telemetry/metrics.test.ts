@@ -80,6 +80,7 @@ describe('Telemetry Metrics', () => {
   let recordPerformanceScoreModule: typeof import('./metrics.js').recordPerformanceScore;
   let recordPerformanceRegressionModule: typeof import('./metrics.js').recordPerformanceRegression;
   let recordBaselineComparisonModule: typeof import('./metrics.js').recordBaselineComparison;
+  let recordChannelMemoryRecallMetricsModule: typeof import('./metrics.js').recordChannelMemoryRecallMetrics;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -107,6 +108,8 @@ describe('Telemetry Metrics', () => {
     recordPerformanceRegressionModule =
       metricsJsModule.recordPerformanceRegression;
     recordBaselineComparisonModule = metricsJsModule.recordBaselineComparison;
+    recordChannelMemoryRecallMetricsModule =
+      metricsJsModule.recordChannelMemoryRecallMetrics;
 
     const otelApiModule = await import('@opentelemetry/api');
 
@@ -871,6 +874,66 @@ describe('Telemetry Metrics', () => {
 
       const attrs = mockCounterAddFn.mock.calls[0]?.[1] ?? {};
       expect(attrs['session.id']).toBe('cardinality-test');
+    });
+  });
+
+  describe('recordChannelMemoryRecallMetrics', () => {
+    it('does not record before metrics are initialized', () => {
+      recordChannelMemoryRecallMetricsModule({
+        durationMs: 12,
+        cache: 'hit',
+        result: 'selected',
+        selectedCount: 2,
+      });
+
+      expect(mockCounterAddFn).not.toHaveBeenCalled();
+      expect(mockHistogramRecordFn).not.toHaveBeenCalled();
+    });
+
+    it('records only bounded recall outcome attributes', () => {
+      initializeMetricsModule(makeFakeConfig({ sessionId: 'secret-session' }));
+      mockCounterAddFn.mockClear();
+      mockHistogramRecordFn.mockClear();
+
+      recordChannelMemoryRecallMetricsModule({
+        durationMs: 12.5,
+        cache: 'miss',
+        result: 'revision_unstable',
+        selectedCount: 1,
+      });
+
+      const attributes = {
+        cache: 'miss',
+        result: 'revision_unstable',
+      };
+      expect(mockCounterAddFn).toHaveBeenCalledWith(1, attributes);
+      expect(mockHistogramRecordFn).toHaveBeenNthCalledWith(
+        1,
+        12.5,
+        attributes,
+      );
+      expect(mockHistogramRecordFn).toHaveBeenNthCalledWith(2, 1, attributes);
+      expect(Object.keys(mockCounterAddFn.mock.calls[0]![1]!).sort()).toEqual([
+        'cache',
+        'result',
+      ]);
+    });
+
+    it('initializes dedicated channel memory recall instruments', () => {
+      initializeMetricsModule(makeFakeConfig({}));
+
+      expect(mockCreateCounterFn).toHaveBeenCalledWith(
+        'qwen-code.channel.memory.recall.count',
+        expect.any(Object),
+      );
+      expect(mockCreateHistogramFn).toHaveBeenCalledWith(
+        'qwen-code.channel.memory.recall.duration',
+        expect.objectContaining({ unit: 'ms' }),
+      );
+      expect(mockCreateHistogramFn).toHaveBeenCalledWith(
+        'qwen-code.channel.memory.recall.selected_count',
+        expect.any(Object),
+      );
     });
   });
 });

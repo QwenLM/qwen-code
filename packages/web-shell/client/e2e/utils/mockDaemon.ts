@@ -44,6 +44,7 @@ export interface WebShellDaemonScenario {
   providers: DaemonWorkspaceProvidersStatus;
   skills: DaemonWorkspaceSkillsStatus;
   settings: DaemonWorkspaceSettingsStatus;
+  voice: DaemonWorkspaceVoiceStatus;
   extensions: DaemonWorkspaceExtensionsStatus;
   extensionOperations: ExtensionActiveOperations;
   extensionUpdateCheck: ExtensionUpdateCheckResponse;
@@ -71,6 +72,7 @@ type ScenarioOverrides = Partial<
     | 'providers'
     | 'skills'
     | 'settings'
+    | 'voice'
     | 'extensions'
     | 'extensionOperations'
     | 'extensionUpdateCheck'
@@ -83,6 +85,7 @@ type ScenarioOverrides = Partial<
   providers?: Partial<DaemonWorkspaceProvidersStatus>;
   skills?: Partial<DaemonWorkspaceSkillsStatus>;
   settings?: Partial<DaemonWorkspaceSettingsStatus>;
+  voice?: Partial<DaemonWorkspaceVoiceStatus>;
   extensions?: Partial<DaemonWorkspaceExtensionsStatus>;
   extensionOperations?: Partial<ExtensionActiveOperations>;
   extensionUpdateCheck?: Partial<ExtensionUpdateCheckResponse>;
@@ -230,6 +233,17 @@ export function createWebShellDaemonScenario(
     ...(overrides.settings ?? {}),
   };
 
+  const voice: DaemonWorkspaceVoiceStatus = {
+    v: 1,
+    workspaceCwd,
+    enabled: false,
+    mode: 'hold',
+    language: 'en',
+    voiceModel: null,
+    availableVoiceModels: [],
+    ...(overrides.voice ?? {}),
+  };
+
   const extensions: DaemonWorkspaceExtensionsStatus = {
     v: 1,
     workspaceCwd,
@@ -282,6 +296,7 @@ export function createWebShellDaemonScenario(
     providers,
     skills,
     settings,
+    voice,
     extensions,
     extensionOperations,
     extensionUpdateCheck,
@@ -934,15 +949,7 @@ function workspaceTools(
 function workspaceVoice(
   scenario: WebShellDaemonScenario,
 ): DaemonWorkspaceVoiceStatus {
-  return {
-    v: 1,
-    workspaceCwd: scenario.workspaceCwd,
-    enabled: false,
-    mode: 'hold',
-    language: 'en',
-    voiceModel: null,
-    availableVoiceModels: [],
-  };
+  return scenario.voice;
 }
 
 async function json(route: Route, body: unknown, status = 200): Promise<void> {
