@@ -164,12 +164,6 @@ function syncFunctionCallsField(
 }
 
 /**
- * Single source of the pointer text that replaces an approved plan's
- * `functionCall.args.plan` (#6237). Shared by the tool scheduler's
- * post-approval rewrite and the load-side pass below so the two surfaces
- * cannot drift.
- */
-/**
  * Local mirror of the scheduler's `canonicalToolName` (kept here to avoid a
  * geminiChat -> coreToolScheduler import cycle): resolves legacy tool-name
  * aliases so the load-side plan redaction keeps matching sessions recorded
@@ -180,6 +174,12 @@ function canonicalPlanToolName(toolName: string | undefined): string {
   return (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
 }
 
+/**
+ * Single source of the pointer text that replaces an approved plan's
+ * `functionCall.args.plan` (#6237). Shared by the tool scheduler's
+ * post-approval rewrite and the load-side pass below so the two surfaces
+ * cannot drift.
+ */
 export function approvedPlanRedactionText(planPath: string): string {
   return (
     `[Plan approved and saved to ${planPath}. The plan text was ` +
@@ -3706,9 +3706,14 @@ export class GeminiChat {
     try {
       planPath = this.config.getPlanFilePath();
       savedPlan = fs.readFileSync(planPath, 'utf-8');
-    } catch {
+    } catch (err) {
       // No plan file (never saved, or save failed): leave history alone —
       // never swap plan text for a pointer to a file that is not there.
+      // Logged (unlike a bare swallow) so a --resume that silently skips
+      // the redaction is traceable under DEBUG.
+      debugLogger.debug(
+        `Skipping load-side plan redaction, plan file unavailable: ${err}`,
+      );
       return;
     }
     const redacted = redactApprovedPlansInHistory(
