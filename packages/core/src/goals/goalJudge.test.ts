@@ -437,6 +437,42 @@ describe('judgeGoal', () => {
     ).resolves.toMatchObject({ kind: 'met', ok: true });
   });
 
+  it('rejects evidence that only matches the serialized tool-result structure', async () => {
+    const client = makeMockClient({
+      history: [
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'run_tests',
+                response: { output: '18 tests passed' },
+              },
+            },
+          ],
+        } as Content,
+      ],
+      reply: JSON.stringify({
+        ok: true,
+        reason: 'tests passed',
+        evidence: ['"output":"18 tests passed"'],
+      }),
+    });
+    const config = makeConfig({ client });
+
+    await expect(
+      judgeGoal(config, {
+        condition: 'tests pass',
+        lastAssistantText: '',
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toMatchObject({
+      kind: 'not_met',
+      ok: false,
+      reason: expect.stringMatching(/evidence/i),
+    });
+  });
+
   it('preserves the judge reason when evidence is unverifiable', async () => {
     const client = makeMockClient({
       history: [{ role: 'model', parts: [{ text: 'some output' }] }],

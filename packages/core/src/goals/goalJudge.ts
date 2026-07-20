@@ -122,6 +122,11 @@ const JUDGE_REASON_FALLBACK =
 const UNVERIFIED_TERMINAL_REASON =
   'Goal judge terminal evidence was not found in assistant output or tool results.';
 const MAX_REASON_LEN = 240;
+// Evidence bounds for a terminal verdict, which needs only a few short verbatim
+// excerpts. MIN rejects trivially short snippets that could match by chance;
+// MAX keeps excerpts to quotable snippets rather than whole transcript dumps
+// (and bounds the substring-match cost); the item cap bounds the all-or-nothing
+// validation that a single bad excerpt can void.
 const MAX_EVIDENCE_ITEMS = 8;
 const MIN_EVIDENCE_LEN = 10;
 const MAX_EVIDENCE_LEN = 500;
@@ -372,6 +377,18 @@ function lastModelTextOf(transcript: Content[]): string {
   return '';
 }
 
+/**
+ * Collects the trusted evidence sources a terminal verdict may quote: visible
+ * assistant/model text (thought parts excluded) and the raw strings inside tool
+ * results. User prompts and the goal condition are deliberately absent so the
+ * judge cannot ground a verdict by echoing the condition back.
+ *
+ * Residual limitation: grounding proves an excerpt was *seen* in assistant
+ * output, not that it was *achieved*. The assistant may restate a target token
+ * while planning ("I still need to emit GOAL_TICK_5"), and a judge citing that
+ * token would ground successfully even though it was never produced. This is
+ * accepted as the narrower alternative to the pre-fix condition-copy vector.
+ */
 function collectEvidenceSources(transcript: Content[]): string[] {
   const sources: string[] = [];
   for (const content of transcript) {
@@ -385,7 +402,10 @@ function collectEvidenceSources(transcript: Content[]): string[] {
         modelTexts.push(part.text);
       }
       if (part.functionResponse) {
-        sources.push(safeStringify(part.functionResponse.response));
+        // Collect the raw string leaves only. Serializing the whole response
+        // would also let evidence match JSON keys/structure (e.g.
+        // `"output":"..."`), which is not visible output and would widen the
+        // grounding surface beyond verbatim tool results.
         sources.push(...collectResponseStrings(part.functionResponse.response));
       }
     }
@@ -489,6 +509,13 @@ function hasVerifiableEvidence(
   });
 }
 
+function unverifiedTerminalReason(judgeReason: string): string {
+  return `${UNVERIFIED_TERMINAL_REASON} Judge reason: ${judgeReason}`.slice(
+    0,
+    MAX_REASON_LEN,
+  );
+}
+
 function toJudgeResult(
   result: JudgeWireResult,
   evidenceSources: string[],
@@ -503,7 +530,7 @@ function toJudgeResult(
     return {
       kind: 'not_met',
       ok: false,
-      reason: `${UNVERIFIED_TERMINAL_REASON} Judge reason: ${result.reason}`,
+      reason: unverifiedTerminalReason(result.reason),
     };
   }
   if (result.impossible) {
@@ -518,10 +545,14 @@ function toJudgeResult(
     debugLogger.debug(
       `Goal judge impossible evidence unverifiable; judge said: ${result.reason}`,
     );
+    // Fail-closed trade-off: impossibility is often inferred from absence (a
+    // missing branch/remote/capability) rather than quotable text, so a
+    // legitimate impossible verdict without groundable evidence degrades to
+    // not_met and the loop runs to its iteration cap instead of stopping early.
     return {
       kind: 'not_met',
       ok: false,
-      reason: `${UNVERIFIED_TERMINAL_REASON} Judge reason: ${result.reason}`,
+      reason: unverifiedTerminalReason(result.reason),
     };
   }
   return { kind: 'not_met', ok: false, reason: result.reason };
