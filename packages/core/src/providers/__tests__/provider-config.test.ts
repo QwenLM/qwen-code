@@ -12,7 +12,6 @@ import {
   computeModelListVersion,
   findExistingProviderModels,
   findProviderByCredentials,
-  getAllProviderBaseUrls,
   getDefaultModelIds,
   resolveBaseUrl,
   shouldShowStep,
