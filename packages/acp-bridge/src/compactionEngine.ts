@@ -51,6 +51,7 @@ type CompactedSlot =
       kind: 'text' | 'thought';
       parentToolCallId?: string;
       chunks: string[];
+      sourceRecordIds?: readonly string[];
       lastEventId: number;
       lastMeta: unknown;
       lastEnvelopeMeta?: Record<string, unknown>;
@@ -63,6 +64,23 @@ interface ReplaySegment {
   events: BridgeEvent[];
   bytes: number;
   turnCount: number;
+}
+
+function replayRecordId(event: BridgeEvent): string | undefined {
+  if (event.type !== 'session_update') return undefined;
+  const data = event.data;
+  if (!data || typeof data !== 'object' || Array.isArray(data))
+    return undefined;
+  const update = (data as Record<string, unknown>)['update'];
+  if (!update || typeof update !== 'object' || Array.isArray(update)) {
+    return undefined;
+  }
+  const meta = (update as Record<string, unknown>)['_meta'];
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) {
+    return undefined;
+  }
+  const recordId = (meta as Record<string, unknown>)['qwen.session.recordId'];
+  return typeof recordId === 'string' ? recordId : undefined;
 }
 
 export interface ReplayWindowEviction {
@@ -107,7 +125,13 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
 
   private slots: CompactedSlot[] = [];
   private toolSlotIndex: Map<string, number> = new Map();
-  private textSlotIndex: Map<string, number> = new Map();
+  private textSlotIndex: Record<
+    'text' | 'thought',
+    Map<string, Array<{ sourceRecordIds?: readonly string[]; index: number }>>
+  > = {
+    text: new Map(),
+    thought: new Map(),
+  };
 
   constructor(opts: TurnBoundaryCompactionEngineOptions = {}) {
     this.maxReplayBytes = normalizeCompactedReplayMaxBytes(opts.maxReplayBytes);
@@ -162,21 +186,39 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     this.liveJournal = [];
     this.slots = [];
     this.toolSlotIndex.clear();
-    this.textSlotIndex.clear();
+    this.clearTextSlotIndex();
   }
 
   seedReplayEvents(events: BridgeEvent[]): void {
     if (this.closed) return;
     this.resetReplayWindow();
+    let recordEvents: BridgeEvent[] = [];
+    let recordId: string | undefined;
+    const flushRecord = () => {
+      this.addReplaySegment(recordEvents, 0);
+      recordEvents = [];
+      recordId = undefined;
+    };
     for (const event of events) {
       this.recordLastEventId(event);
       if (TRANSIENT_TYPES.has(event.type)) continue;
-      this.addReplaySegment([event], 0);
+      const nextRecordId = replayRecordId(event);
+      if (nextRecordId === undefined) {
+        flushRecord();
+        this.addReplaySegment([event], 0);
+        continue;
+      }
+      if (recordId !== undefined && recordId !== nextRecordId) {
+        flushRecord();
+      }
+      recordId = nextRecordId;
+      recordEvents.push(event);
     }
+    flushRecord();
     this.liveJournal = [];
     this.slots = [];
     this.toolSlotIndex.clear();
-    this.textSlotIndex.clear();
+    this.clearTextSlotIndex();
   }
 
   close(): void {
@@ -186,7 +228,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     this.liveJournal = [];
     this.slots = [];
     this.toolSlotIndex.clear();
-    this.textSlotIndex.clear();
+    this.clearTextSlotIndex();
   }
 
   private classifySessionUpdate(event: BridgeEvent): void {
@@ -200,6 +242,10 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
 
     switch (updateType) {
       case 'agent_message_chunk': {
+        if (hasTodoStopGuardDiscreteMeta(data?.update?._meta)) {
+          this.slots.push({ kind: 'misc', event });
+          break;
+        }
         this.mergeTextSlot('text', event, data);
         break;
       }
@@ -236,8 +282,8 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
             data?.update?._meta,
           );
           if (toolParent) {
-            this.textSlotIndex.delete(`text::${toolParent}`);
-            this.textSlotIndex.delete(`thought::${toolParent}`);
+            this.textSlotIndex.text.delete(toolParent);
+            this.textSlotIndex.thought.delete(toolParent);
           }
         }
         break;
@@ -273,13 +319,16 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     const text = data?.update?.content?.text ?? '';
     const meta = data?.update?._meta;
     const parentToolCallId = extractParentToolCallIdFromMeta(meta);
+    const sourceRecordIds = extractSourceRecordIdsFromMeta(meta);
 
     if (parentToolCallId != null) {
       // Subagent path: merge by (kind, parentToolCallId) regardless of
       // position. Parallel subagents interleave chunks; the index lets
       // us reassemble each subagent's stream without garbling.
-      const slotKey = `${kind}::${parentToolCallId}`;
-      const existingIdx = this.textSlotIndex.get(slotKey);
+      const entries = this.textSlotIndex[kind].get(parentToolCallId) ?? [];
+      const existingIdx = entries.find((entry) =>
+        stringArraysEqual(entry.sourceRecordIds, sourceRecordIds),
+      )?.index;
       if (existingIdx !== undefined) {
         const slot = this.slots[existingIdx] as Extract<
           CompactedSlot,
@@ -290,11 +339,13 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
         slot.lastMeta = meta ?? slot.lastMeta;
         slot.lastEnvelopeMeta = event._meta ?? slot.lastEnvelopeMeta;
       } else {
-        this.textSlotIndex.set(slotKey, this.slots.length);
+        entries.push({ sourceRecordIds, index: this.slots.length });
+        this.textSlotIndex[kind].set(parentToolCallId, entries);
         this.slots.push({
           kind,
           parentToolCallId,
           chunks: [text],
+          sourceRecordIds,
           lastEventId: event.id ?? 0,
           lastMeta: meta,
           lastEnvelopeMeta: event._meta,
@@ -308,7 +359,8 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
       if (
         lastSlot &&
         lastSlot.kind === kind &&
-        lastSlot.parentToolCallId == null
+        lastSlot.parentToolCallId == null &&
+        stringArraysEqual(lastSlot.sourceRecordIds, sourceRecordIds)
       ) {
         lastSlot.chunks.push(text);
         if (event.id !== undefined) lastSlot.lastEventId = event.id;
@@ -319,6 +371,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
           kind,
           parentToolCallId: undefined,
           chunks: [text],
+          sourceRecordIds,
           lastEventId: event.id ?? 0,
           lastMeta: meta,
           lastEnvelopeMeta: event._meta,
@@ -361,7 +414,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     this.liveJournal = [];
     this.slots = [];
     this.toolSlotIndex.clear();
-    this.textSlotIndex.clear();
+    this.clearTextSlotIndex();
   }
 
   private recordLastEventId(event: BridgeEvent): void {
@@ -464,6 +517,11 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     this.truncatedEvents = 0;
     this.truncatedTurns = 0;
   }
+
+  private clearTextSlotIndex(): void {
+    this.textSlotIndex.text.clear();
+    this.textSlotIndex.thought.clear();
+  }
 }
 
 function makeMergedSessionUpdateEvent(
@@ -510,6 +568,38 @@ function extractParentToolCallIdFromMeta(meta: unknown): string | undefined {
   return undefined;
 }
 
+function extractSourceRecordIdsFromMeta(
+  meta: unknown,
+): readonly string[] | undefined {
+  if (typeof meta !== 'object' || meta === null) return undefined;
+  const transcript = (meta as Record<string, unknown>)['qwenTranscript'];
+  if (typeof transcript !== 'object' || transcript === null) return undefined;
+  const ids = (transcript as Record<string, unknown>)['sourceRecordIds'];
+  if (!Array.isArray(ids)) return undefined;
+  const normalized = [
+    ...new Set(ids.filter((id): id is string => typeof id === 'string')),
+  ];
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function stringArraysEqual(
+  left: readonly string[] | undefined,
+  right: readonly string[] | undefined,
+): boolean {
+  if (left === right) return true;
+  if (!left || !right || left.length !== right.length) return false;
+  return left.every((value, index) => value === right[index]);
+}
+
+function hasTodoStopGuardDiscreteMeta(meta: unknown): boolean {
+  return (
+    typeof meta === 'object' &&
+    meta !== null &&
+    (meta as Record<string, unknown>)['qwenDiscreteMessage'] === true &&
+    (meta as Record<string, unknown>)['source'] === 'todo_stop_guard'
+  );
+}
+
 function mergeToolCallEvent(
   existing: BridgeEvent,
   incoming: BridgeEvent,
@@ -525,6 +615,11 @@ function mergeToolCallEvent(
       merged[key] = value;
     }
   }
+  const updateMeta = mergeTranscriptUpdateMeta(
+    existingUpdate['_meta'],
+    incomingUpdate['_meta'],
+  );
+  if (updateMeta !== undefined) merged['_meta'] = updateMeta;
   // Always use 'tool_call' as the compacted type
   merged['sessionUpdate'] = 'tool_call';
   const mergedMeta =
@@ -542,5 +637,33 @@ function mergeToolCallEvent(
       ...incomingData,
       update: merged,
     },
+  };
+}
+
+function mergeTranscriptUpdateMeta(
+  existing: unknown,
+  incoming: unknown,
+): unknown {
+  const existingRecord =
+    typeof existing === 'object' && existing !== null
+      ? (existing as Record<string, unknown>)
+      : undefined;
+  const incomingRecord =
+    typeof incoming === 'object' && incoming !== null
+      ? (incoming as Record<string, unknown>)
+      : undefined;
+  if (!existingRecord && !incomingRecord) return undefined;
+  const sourceRecordIds = [
+    ...new Set([
+      ...(extractSourceRecordIdsFromMeta(existingRecord) ?? []),
+      ...(extractSourceRecordIdsFromMeta(incomingRecord) ?? []),
+    ]),
+  ];
+  return {
+    ...(existingRecord ?? {}),
+    ...(incomingRecord ?? {}),
+    ...(sourceRecordIds.length > 0
+      ? { qwenTranscript: { sourceRecordIds } }
+      : {}),
   };
 }

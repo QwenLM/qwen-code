@@ -27,6 +27,7 @@ export {
   MAX_GOAL_ITERATIONS,
   GOAL_HOOK_TIMEOUT_MS,
   GOAL_HOOK_TIMEOUT_SECONDS,
+  getStopHookContinuationReason,
   createGoalStopHookCallback,
   abortGoalForStopHookCap,
   registerGoalHook,

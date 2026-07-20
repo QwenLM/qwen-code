@@ -378,7 +378,8 @@ export class CronScheduler {
     // tick takes over for subsequent fires of recurring jobs. Timers are
     // tracked in testFireTimers and cleared on stop()/destroy().
     if (process.env['QWEN_CODE_TEST_CRON_FAST'] === '1' && !job.durable) {
-      const delayMs = Number(process.env['QWEN_CODE_TEST_CRON_DELAY_MS']) || 5000;
+      const delayMs =
+        Number(process.env['QWEN_CODE_TEST_CRON_DELAY_MS']) || 5000;
       const timer = setTimeout(() => {
         this.testFireTimers.delete(id);
         this.forceFireJob(id);

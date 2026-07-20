@@ -12,6 +12,7 @@ import {
   useDaemonFollowupSuggestion,
   useStreamingState,
   useTranscriptBlocks,
+  useTranscriptHistory,
   useTranscriptStore,
   useWorkspace,
   useWorkspaceActions,
@@ -32,6 +33,7 @@ import { useQueuedPrompts } from '../hooks/useQueuedPrompts';
 import { isAskUserPermission } from '../utils/askUserPermission';
 import { isDaemonApprovalMode } from '../utils/sessionPreparation';
 import { isVisibleComposerModel } from '../utils/composerModels';
+import { shouldBlockComposerSubmit } from '../utils/composerInputState';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { hasMultipleWorkspaces, workspaceBasename } from '../utils/workspace';
 import { workspaceAccentColor } from '../utils/workspaceColor';
@@ -96,6 +98,8 @@ export interface ChatPaneProps {
     workspaceActions: DaemonWorkspaceActions,
   ) => void;
   messageTurnOutputs?: readonly TurnOutputKind[];
+  /** Allow prompt admission to recover a disconnected SSE stream. */
+  restartSseOnPrompt?: boolean;
 }
 
 /**
@@ -115,6 +119,7 @@ export function ChatPane({
   onRightPanelOpen,
   onPaneArtifactsChange,
   messageTurnOutputs,
+  restartSseOnPrompt = false,
 }: ChatPaneProps) {
   const { t } = useI18n();
   const connection = useConnection();
@@ -123,6 +128,7 @@ export function ChatPane({
   const workspace = useWorkspace();
   const messages = useMessages(t);
   const blocks = useTranscriptBlocks();
+  const transcriptHistory = useTranscriptHistory();
   const store = useTranscriptStore();
   const streamingState = useStreamingState();
   const { artifacts } = useSessionArtifacts();
@@ -247,7 +253,15 @@ export function ChatPane({
     ): boolean => {
       const trimmed = text.trim();
       if (!trimmed) return false;
-      if (connection.status !== 'connected') return false;
+      if (
+        shouldBlockComposerSubmit({
+          connectionStatus: connection.status,
+          hasSession: Boolean(connection.sessionId),
+          restartSseOnPrompt,
+        })
+      ) {
+        return false;
+      }
       const inputAnnotations = metadata?.inputAnnotations;
       if (streamingStateRef.current === 'idle') {
         actions
@@ -268,7 +282,15 @@ export function ChatPane({
         ? enqueuePrompt(trimmed, images, undefined, inputAnnotations)
         : enqueuePrompt(trimmed, images);
     },
-    [actions, clearFollowup, connection.status, enqueuePrompt, reportError],
+    [
+      actions,
+      clearFollowup,
+      connection.sessionId,
+      connection.status,
+      enqueuePrompt,
+      reportError,
+      restartSseOnPrompt,
+    ],
   );
 
   const handleConfirm = useCallback(
@@ -500,6 +522,10 @@ export function ChatPane({
           pendingApproval={pendingToolApproval}
           loadingTranscript={connection.loadingTranscript}
           catchingUp={connection.catchingUp}
+          hasOlderHistory={transcriptHistory.hasMore}
+          loadingOlderHistory={transcriptHistory.loading}
+          historyCapacityReached={transcriptHistory.capacityReached}
+          onLoadOlderHistory={transcriptHistory.loadMore}
           isResponding={isResponding}
           workspaceCwd={connection.workspaceCwd || ''}
           hideSessionTimeline
@@ -530,9 +556,10 @@ export function ChatPane({
               request={pendingToolApproval}
               onConfirm={handleConfirm}
               variant="floating"
-              // Several panes can show approvals at once; global Enter/Escape
-              // shortcuts aren't focus-scoped, so keep pane approvals
-              // click-only to avoid confirming the wrong session's request.
+              // Several panes can show approvals at once; don't auto-focus one
+              // pane's approval (it would steal focus from the pane the user is
+              // in). Keyboard handling is focus-scoped, so each pane's approval
+              // is still fully keyboard-operable once clicked/tabbed into.
               keyboardActive={false}
             />
           </div>
@@ -543,6 +570,7 @@ export function ChatPane({
               request={pendingAskUserApproval}
               onConfirm={handleConfirm}
               variant="floating"
+              keyboardActive={false}
             />
           </div>
         )}

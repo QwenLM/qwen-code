@@ -48,6 +48,93 @@ function createRegistry(): IPendingRequestRegistry {
 }
 
 describe('PermissionController', () => {
+  it('treats stream-json can_use_tool allow as explicit interaction without replacing the plan', async () => {
+    const context = createContext();
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+    vi.spyOn(controller, 'sendControlRequest').mockResolvedValue({
+      subtype: 'success',
+      request_id: 'request-plan',
+      response: {
+        behavior: 'allow',
+        updatedInput: { plan: 'Host-replaced plan' },
+      },
+    });
+    const onConfirm = vi.fn();
+    const request = {
+      callId: 'tool-call-plan',
+      name: 'exit_plan_mode',
+      args: { plan: 'Approved plan' },
+    };
+
+    controller.getToolCallUpdateCallback()([
+      {
+        status: 'awaiting_approval',
+        request,
+        invocation: {
+          requiresUserInteraction: () => true,
+        },
+        confirmationDetails: {
+          type: 'plan',
+          title: 'Approve plan',
+          plan: 'Approved plan',
+          onConfirm,
+        },
+      } as never,
+    ]);
+
+    await vi.waitFor(() => {
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+      );
+    });
+    expect(request.args).toEqual({ plan: 'Approved plan' });
+  });
+
+  it('fails closed without an interactive SDK even in yolo mode', async () => {
+    const context = createContext();
+    vi.mocked(context.config.getInputFormat).mockReturnValue('text');
+    context.permissionMode = 'yolo';
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+    const onConfirm = vi.fn();
+
+    controller.getToolCallUpdateCallback()([
+      {
+        status: 'awaiting_approval',
+        request: {
+          callId: 'tool-call-plan-no-sdk',
+          name: 'exit_plan_mode',
+          args: { plan: 'Plan' },
+        },
+        invocation: {
+          requiresUserInteraction: () => true,
+        },
+        confirmationDetails: {
+          type: 'plan',
+          title: 'Approve plan',
+          plan: 'Plan',
+          onConfirm,
+        },
+      } as never,
+    ]);
+
+    await vi.waitFor(() => {
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.Cancel,
+        expect.objectContaining({
+          cancelMessage: expect.stringContaining('mode selector'),
+        }),
+      );
+    });
+  });
+
   it('uses SDK canUseTool timeout for outgoing permission requests', async () => {
     const context = createContext(120_000);
     const controller = new PermissionController(
@@ -469,6 +556,50 @@ describe('PermissionController', () => {
     expect(respond).toHaveBeenCalledWith(
       ToolConfirmationOutcome.ProceedOnce,
       undefined,
+    );
+  });
+
+  it('includes teammate Plan shell warnings in permission suggestions', async () => {
+    const controller = new PermissionController(
+      createContext(120_000),
+      createRegistry(),
+      'PermissionController',
+    );
+    const send = vi.spyOn(controller, 'sendControlRequest').mockResolvedValue({
+      subtype: 'success',
+      request_id: 'teammate-warning',
+      response: { behavior: 'deny' },
+    });
+
+    await controller.handleTeammateApproval({
+      teammateName: 'worker',
+      toolName: 'run_shell_command',
+      toolInput: { command: "python -c 'print(1)'" },
+      confirmationDetails: {
+        type: 'exec',
+        title: 'Confirm shell',
+        command: "python -c 'print(1)'",
+        rootCommand: 'python',
+        hideAlwaysAllow: true,
+        warnings: ['Exact one-off approval required'],
+      },
+      respond: vi.fn().mockResolvedValue(undefined),
+      timestamp: 790,
+    });
+
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        permission_suggestions: expect.arrayContaining([
+          expect.objectContaining({
+            type: 'allow',
+            description: expect.stringContaining(
+              'Exact one-off approval required',
+            ),
+          }),
+        ]),
+      }),
+      undefined,
+      expect.any(AbortSignal),
     );
   });
 

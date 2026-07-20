@@ -6,7 +6,11 @@
 
 import type React from 'react';
 import { useEffect, useState } from 'react';
+import { promises as fs } from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { Box, Text } from 'ink';
+import wrapAnsi from 'wrap-ansi';
 import { DiffRenderer } from './DiffRenderer.js';
 import { RenderInline } from '../../utils/InlineMarkdownRenderer.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
@@ -24,8 +28,9 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { RadioSelectItem } from '../shared/RadioButtonSelect.js';
 import { RadioButtonSelect } from '../shared/RadioButtonSelect.js';
-import { MaxSizedBox } from '../shared/MaxSizedBox.js';
+import { MaxSizedBox, MINIMUM_MAX_HEIGHT } from '../shared/MaxSizedBox.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
+import { useLaunchEditor } from '../../hooks/useLaunchEditor.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
 import { theme } from '../../semantic-colors.js';
 import { t } from '../../../i18n/index.js';
@@ -89,7 +94,10 @@ export const ToolConfirmationMessage: React.FC<
     // with ProceedOnce, racing with the intended CLI outcome.
     onConfirm(outcome);
 
-    if (confirmationDetails.type === 'edit') {
+    if (
+      confirmationDetails.type === 'edit' &&
+      !confirmationDetails.skipIdeDiff
+    ) {
       if (config.getIdeMode() && isDiffingEnabled) {
         const cliOutcome =
           outcome === ToolConfirmationOutcome.Cancel ? 'rejected' : 'accepted';
@@ -103,11 +111,42 @@ export const ToolConfirmationMessage: React.FC<
 
   const isTrustedFolder = config.isTrustedFolder();
 
+  const launchEditor = useLaunchEditor();
+  const [planViewError, setPlanViewError] = useState<string | null>(null);
+
+  // #7001: a long plan can exceed the confirmation dialog's height budget and
+  // get truncated (with a "... N more lines not shown ..." cue since #6882),
+  // yet the user is asked to approve it. `o` writes the FULL plan to a temp
+  // file and opens it in the configured editor so the decision is informed;
+  // the dialog stays open (nothing is confirmed) while the user reads.
+  const openFullPlanInEditor = () => {
+    if (confirmationDetails.type !== 'plan') return;
+    setPlanViewError(null);
+    const openPlan = async () => {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-plan-'));
+      const planPath = path.join(dir, 'plan.md');
+      await fs.writeFile(planPath, confirmationDetails.plan);
+      await launchEditor(planPath);
+    };
+    void openPlan().catch((err: unknown) => {
+      setPlanViewError(err instanceof Error ? err.message : String(err));
+    });
+  };
+
   useKeypress(
     (key) => {
       if (!isFocused) return;
       if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
         handleConfirm(ToolConfirmationOutcome.Cancel);
+        return;
+      }
+      if (
+        key.name === 'o' &&
+        !key.ctrl &&
+        !key.meta &&
+        confirmationDetails.type === 'plan'
+      ) {
+        openFullPlanInEditor();
       }
     },
     { isActive: isFocused },
@@ -154,6 +193,27 @@ export const ToolConfirmationMessage: React.FC<
     return Math.max(availableTerminalHeight - surroundingElementsHeight, 1);
   }
 
+  // The warning box uses marginLeft={1} and paddingX={1}. Regular mode also
+  // renders inside the outer box's padding={1}.
+  const warningContentWidth = Math.max(
+    contentWidth - 3 - (compactMode ? 0 : 2),
+    1,
+  );
+
+  function warningsHeight(warnings: string[]): number {
+    if (warnings.length === 0) return 0;
+    const wrappedRows = warnings.reduce(
+      (sum, warning) =>
+        sum +
+        wrapAnsi(`⚠ ${warning}`, warningContentWidth, {
+          trim: false,
+          hard: true,
+        }).split('\n').length,
+      0,
+    );
+    return wrappedRows + 1;
+  }
+
   if (confirmationDetails.type === 'edit') {
     if (confirmationDetails.isModifying) {
       return (
@@ -179,7 +239,7 @@ export const ToolConfirmationMessage: React.FC<
       value: ToolConfirmationOutcome.ProceedOnce,
       key: 'Yes, allow once',
     });
-    if (isTrustedFolder) {
+    if (isTrustedFolder && !confirmationDetails.hideAlwaysAllow) {
       options.push({
         label: t('Yes, allow always'),
         value: ToolConfirmationOutcome.ProceedAlways,
@@ -204,14 +264,95 @@ export const ToolConfirmationMessage: React.FC<
       key: 'No, suggest changes (esc)',
     });
 
+    const warnings = confirmationDetails.warnings ?? [];
+    let bodyHeight = availableBodyContentHeight();
+    if (compactMode) {
+      bodyHeight = Math.min(
+        bodyHeight ?? COMPACT_BODY_MAX_LINES,
+        COMPACT_BODY_MAX_LINES,
+      );
+    }
+
+    const constrainWarnings =
+      warnings.length > 0 &&
+      bodyHeight !== undefined &&
+      warningsHeight(warnings) + MINIMUM_MAX_HEIGHT > bodyHeight;
+    let warningMaxHeight: number | undefined;
+    let warningMarginBottom = warnings.length > 0 ? 1 : 0;
+    let diffHeight = bodyHeight;
+    if (constrainWarnings && bodyHeight !== undefined) {
+      const desiredWarningHeight = Math.max(
+        warnings.length,
+        MINIMUM_MAX_HEIGHT,
+      );
+      warningMarginBottom =
+        bodyHeight >= desiredWarningHeight + MINIMUM_MAX_HEIGHT + 1 ? 1 : 0;
+      warningMaxHeight = Math.min(
+        desiredWarningHeight,
+        Math.max(
+          bodyHeight - MINIMUM_MAX_HEIGHT - warningMarginBottom,
+          MINIMUM_MAX_HEIGHT,
+        ),
+        bodyHeight,
+      );
+      diffHeight = bodyHeight - warningMaxHeight - warningMarginBottom;
+    } else if (diffHeight !== undefined) {
+      diffHeight = Math.max(diffHeight - warningsHeight(warnings), 1);
+    }
+
+    const renderedDiff =
+      diffHeight === undefined || diffHeight >= MINIMUM_MAX_HEIGHT ? (
+        <DiffRenderer
+          diffContent={confirmationDetails.fileDiff}
+          filename={confirmationDetails.fileName}
+          availableTerminalHeight={diffHeight}
+          contentWidth={contentWidth}
+          settings={settings}
+        />
+      ) : diffHeight === 1 ? (
+        <Text color={theme.text.secondary} wrap="truncate">
+          ... diff hidden ...
+        </Text>
+      ) : null;
+
     bodyContent = (
-      <DiffRenderer
-        diffContent={confirmationDetails.fileDiff}
-        filename={confirmationDetails.fileName}
-        availableTerminalHeight={availableBodyContentHeight()}
-        contentWidth={contentWidth}
-        settings={settings}
-      />
+      <Box flexDirection="column">
+        {warnings.length > 0 ? (
+          <Box
+            flexDirection="column"
+            paddingX={1}
+            marginLeft={1}
+            marginBottom={warningMarginBottom}
+          >
+            {constrainWarnings && warningMaxHeight === 1 ? (
+              <Text color={theme.status.warning} wrap="truncate">
+                ⚠ {warnings.at(-1)?.replace(/\r\n?|\n/g, ' ↵ ')}
+              </Text>
+            ) : constrainWarnings ? (
+              <MaxSizedBox
+                maxHeight={warningMaxHeight}
+                maxWidth={warningContentWidth}
+                overflowDirection="bottom"
+              >
+                {warnings.map((warning, idx) => (
+                  <Box key={idx}>
+                    <Text color={theme.status.warning} wrap="truncate">
+                      ⚠ {warning.replace(/\r\n?|\n/g, ' ↵ ')}
+                    </Text>
+                  </Box>
+                ))}
+              </MaxSizedBox>
+            ) : (
+              warnings.map((warning, idx) => (
+                <Text key={idx} color={theme.status.warning}>
+                  ⚠ {warning}
+                </Text>
+              ))
+            )}
+          </Box>
+        ) : null}
+        {renderedDiff}
+      </Box>
     );
   } else if (confirmationDetails.type === 'exec') {
     const executionProps =
@@ -262,23 +403,11 @@ export const ToolConfirmationMessage: React.FC<
     // list off-screen.
     //
     // Each warning may wrap across multiple visual rows on a narrow
-    // terminal. Account for that by computing `ceil(rendered_len /
-    // contentWidth)` per warning (rendered length includes the leading
-    // `⚠ ` glyph + space, so add 2). Falling back to a 1-row estimate
-    // when contentWidth is non-positive keeps the math defined for
-    // pathological inputs.
-    const warningPrefixLen = 2; // "⚠ "
-    const safeWidth = Math.max(contentWidth, 1);
+    // terminal. Account for the warning container's effective content width
+    // and use the same wrapping semantics as Ink's Text renderer.
     const warnings = executionProps.warnings ?? [];
     const warningsCount = warnings.length;
-    const wrappedWarningRows = warnings.reduce(
-      (sum, w) =>
-        sum + Math.max(Math.ceil((w.length + warningPrefixLen) / safeWidth), 1),
-      0,
-    );
-    // wrapped rows + 1 line for the marginTop separator (only when at
-    // least one warning is present).
-    const warningsHeight = warningsCount > 0 ? wrappedWarningRows + 1 : 0;
+    const reservedWarningsHeight = warningsHeight(warnings);
 
     let bodyContentHeight = availableBodyContentHeight();
     if (bodyContentHeight !== undefined) {
@@ -293,8 +422,11 @@ export const ToolConfirmationMessage: React.FC<
     // Subtract the warnings footprint last so it applies in both the
     // normal-height and compact-cap paths. Floor at 1 so a long warning
     // list never zeroes out the command body.
-    if (bodyContentHeight !== undefined && warningsHeight > 0) {
-      bodyContentHeight = Math.max(bodyContentHeight - warningsHeight, 1);
+    if (bodyContentHeight !== undefined && reservedWarningsHeight > 0) {
+      bodyContentHeight = Math.max(
+        bodyContentHeight - reservedWarningsHeight,
+        1,
+      );
     }
     bodyContent = (
       <Box flexDirection="column">
@@ -347,12 +479,15 @@ export const ToolConfirmationMessage: React.FC<
       value: ToolConfirmationOutcome.Cancel,
     });
 
-    const planHeight = compactMode
+    // Reserve one row for the "o open full plan" hint below the plan body.
+    const rawPlanHeight = compactMode
       ? Math.min(
           availableBodyContentHeight() ?? COMPACT_BODY_MAX_LINES,
           COMPACT_BODY_MAX_LINES,
         )
       : availableBodyContentHeight();
+    const planHeight =
+      rawPlanHeight === undefined ? undefined : Math.max(rawPlanHeight - 1, 1);
     bodyContent = (
       <Box flexDirection="column" paddingX={1} marginLeft={1}>
         <MarkdownDisplay
@@ -368,6 +503,17 @@ export const ToolConfirmationMessage: React.FC<
           // See #6867.
           enforceHeightBudget
         />
+        {/* The plan can be height-truncated above, and the user is about to
+            approve it — always offer a way to read the WHOLE thing. See #7001. */}
+        {planViewError ? (
+          <Text color={theme.status.error} wrap="truncate">
+            {planViewError}
+          </Text>
+        ) : (
+          <Text color={theme.text.secondary} wrap="truncate">
+            {t('o open full plan in editor')}
+          </Text>
+        )}
       </Box>
     );
   } else if (confirmationDetails.type === 'info') {
@@ -437,6 +583,7 @@ export const ToolConfirmationMessage: React.FC<
       <AskUserQuestionDialog
         confirmationDetails={confirmationDetails}
         isFocused={isFocused}
+        availableWidth={contentWidth}
         onConfirm={onConfirm}
       />
     );

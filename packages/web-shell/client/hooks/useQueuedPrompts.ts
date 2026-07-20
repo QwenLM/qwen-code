@@ -53,6 +53,21 @@ interface UseQueuedPromptsArgs {
 
 const MAX_COMPLETED_PROMPT_IDS = 100;
 
+/**
+ * Merge a restored prompt's text into the editor content. Restoration paths
+ * (failed submits, failed mid-turn inserts, queue clears) prepend the prompt
+ * above whatever the user is currently typing — but several of them can fire
+ * for the same prompt across reconnects/refreshes, and a user retrying an
+ * identical message produces the same text twice. Stacking those copies is
+ * what #7128 reports as "inputs concatenated after refresh", so restoring
+ * text that is already present at the top of the editor is a no-op.
+ */
+export function mergeRestoredPromptText(current: string, text: string): string {
+  if (!current.trim()) return text;
+  if (current === text || current.startsWith(`${text}\n`)) return current;
+  return `${text}\n${current}`;
+}
+
 type RefreshPendingPromptsResult =
   | 'refreshed'
   | 'skipped'
@@ -286,10 +301,17 @@ export function useQueuedPrompts({
         return;
       }
       const current = editorRef.current?.getText() ?? '';
-      const next = current.trim() ? `${text}\n${current}` : text;
-      editorRef.current?.setText(next);
-      if (images && images.length > 0) {
-        editorRef.current?.restoreImages(images);
+      const next = mergeRestoredPromptText(current, text);
+      if (next !== current) {
+        editorRef.current?.setText(next);
+        // Restore images only alongside a text change: restoreImages appends
+        // to the pasted-image list, so running it on a deduplicated restore
+        // (same prompt restored twice across reconnects/retries) would double
+        // the attachments while the text correctly stays single (#7134
+        // review follow-up).
+        if (images && images.length > 0) {
+          editorRef.current?.restoreImages(images);
+        }
       }
       editorRef.current?.focus();
     },

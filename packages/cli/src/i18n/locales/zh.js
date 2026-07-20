@@ -758,6 +758,7 @@ export default {
   'Tool Schema Compliance': 'Tool Schema 兼容性',
   // Settings enum options
   'Auto (detect from system)': '自动（从系统检测）',
+  'Auto (follow user input)': '自动（跟随用户输入）',
   'Auto (detect terminal theme)': '自动（检测终端主题）',
   Auto: '自动',
   Text: '文本',
@@ -911,7 +912,7 @@ export default {
     '请将要卸载的扩展名称作为位置参数。',
   'Enables an extension.': '启用扩展。',
   'The name of the extension to enable.': '要启用的扩展名称。',
-  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
+  'The scope to enable the extension in. If not set, will be enabled in all scopes.':
     '启用扩展的作用域。如果未设置，将在所有作用域中启用。',
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
     '扩展 "{{name}}" 已在作用域 "{{scope}}" 中启用。',
@@ -921,7 +922,7 @@ export default {
     '无效的作用域：{{scope}}。请使用 {{scopes}} 之一。',
   'Disables an extension.': '禁用扩展。',
   'The name of the extension to disable.': '要禁用的扩展名称。',
-  'The scope to disable the extenison in.': '禁用扩展的作用域。',
+  'The scope to disable the extension in.': '禁用扩展的作用域。',
   'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
     '扩展 "{{name}}" 已在作用域 "{{scope}}" 中禁用。',
   'Extension "{{name}}" successfully updated: {{oldVersion}} → {{newVersion}}.':
@@ -1763,7 +1764,11 @@ export default {
   'Press Ctrl+C again to exit.': '再次按 Ctrl+C 退出',
   'Press Ctrl+D again to exit.': '再次按 Ctrl+D 退出',
   'Press Esc again to clear.': '再次按 Esc 清除',
-  'Press ↑ to edit queued messages': '按 ↑ 编辑排队消息',
+  'Ctrl+Q to queue · ↑ to edit queued messages':
+    'Ctrl+Q 排到下一轮 · ↑ 编辑排队消息',
+  'Enter to steer · Ctrl+Q to queue':
+    'Enter 追加到当前任务 · Ctrl+Q 排到下一轮',
+  'Queue message for the next turn': '将消息排到下一轮',
 
   // ============================================================================
   // MCP Status
@@ -2017,6 +2022,7 @@ export default {
   'Press Ctrl+Y to retry': '按 Ctrl+Y 重试。',
   'No failed request to retry.': '没有可重试的失败请求。',
   'to retry last request': '重试上一次请求',
+  'to queue for the next turn': '排到下一轮',
 
   // ============================================================================
   // Coding Plan Authentication

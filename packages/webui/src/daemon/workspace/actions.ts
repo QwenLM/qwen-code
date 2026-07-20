@@ -9,8 +9,10 @@ import { withActionTimeout } from '../timing.js';
 import type {
   DaemonDirectoryListing,
   DaemonFileStat,
+  DaemonGoal,
   DaemonScheduledTask,
   DaemonWorkspaceActions,
+  DaemonWorkspacePathSuggestions,
 } from './types.js';
 
 const AGENT_GENERATE_TIMEOUT_MS = 330_000;
@@ -289,6 +291,30 @@ export function createDaemonWorkspaceActions({
       return withActionTimeout(
         client.workspaceSkills(),
         'Load skills timed out',
+      );
+    },
+
+    async setWorkspaceSkillEnabled(skillName, enabled) {
+      const client = requireClient(getClient, 'Set skill enabled failed');
+      return withActionTimeout(
+        client.setWorkspaceSkillEnabled(skillName, enabled),
+        'Set skill enabled timed out',
+      );
+    },
+
+    async installWorkspaceSkill(request) {
+      const client = requireClient(getClient, 'Install skill failed');
+      return withActionTimeout(
+        client.installWorkspaceSkill(request),
+        'Install skill timed out',
+      );
+    },
+
+    async deleteWorkspaceSkill(skillName, scope) {
+      const client = requireClient(getClient, 'Delete skill failed');
+      return withActionTimeout(
+        client.deleteWorkspaceSkill(skillName, scope),
+        'Delete skill timed out',
       );
     },
 
@@ -605,6 +631,57 @@ export function createDaemonWorkspaceActions({
       }
     },
 
+    // Goals. `GET /goals` is REST-only (like /scheduled-tasks) and not on the
+    // DaemonClient transport; the clear path reuses the existing per-session
+    // route so a page-level clear and a `/goal clear` in chat take the same
+    // code path in the daemon.
+    async listGoals() {
+      requireClient(getClient, 'List goals failed');
+      const url = createDaemonRequestUrl(baseUrl, '/goals');
+      const res = await withActionTimeout(
+        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+          headers: createDaemonHeaders(token),
+        }),
+        'List goals timed out',
+      );
+      if (!res.ok) {
+        throw new Error(await readDaemonError(res, 'GET /goals'));
+      }
+      const data = (await res.json()) as {
+        goals?: DaemonGoal[];
+        droppedCount?: number;
+      };
+      return {
+        goals: Array.isArray(data.goals) ? data.goals : [],
+        droppedCount:
+          typeof data.droppedCount === 'number' && data.droppedCount > 0
+            ? data.droppedCount
+            : 0,
+      };
+    },
+
+    async clearGoal(sessionId) {
+      requireClient(getClient, 'Clear goal failed');
+      const url = createDaemonRequestUrl(
+        baseUrl,
+        `/session/${encodeURIComponent(sessionId)}/goal/clear`,
+      );
+      const res = await withActionTimeout(
+        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+          method: 'POST',
+          headers: createDaemonJsonHeaders(token),
+          body: '{}',
+        }),
+        'Clear goal timed out',
+      );
+      if (!res.ok) {
+        throw new Error(
+          await readDaemonError(res, `POST /session/${sessionId}/goal/clear`),
+        );
+      }
+      return (await res.json()) as { cleared: boolean };
+    },
+
     async loadEnv() {
       const client = requireClient(getClient, 'Load env failed');
       return withActionTimeout(client.workspaceEnv(), 'Load env timed out');
@@ -795,6 +872,15 @@ export function createDaemonWorkspaceActions({
         client.addWorkspace(cwd, options),
         'Add workspace timed out',
       );
+    },
+
+    async suggestWorkspacePaths(prefix) {
+      const client = requireClient(getClient, 'Suggest workspace paths failed');
+      const result = await withActionTimeout(
+        client.workspacePathSuggestions(prefix),
+        'Suggest workspace paths timed out',
+      );
+      return result as DaemonWorkspacePathSuggestions;
     },
 
     async removeWorkspace(workspaceId, options) {

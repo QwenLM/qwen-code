@@ -112,6 +112,7 @@ import {
 } from '../../agents/agent-transcript.js';
 import type { BackgroundSlotReservation } from '../../agents/background-tasks.js';
 import { getGitBranch } from '../../utils/gitUtils.js';
+import { buildModelIdContext, resolveModelId } from '../../utils/modelId.js';
 
 // Memoize git branch per cwd for the agent-launch path. `getGitBranch`
 // shells out to `git rev-parse` synchronously; caching avoids the per-launch
@@ -591,6 +592,7 @@ function applyPersistedCliFlagOverrides(
 function capturePersistedCliFlags(
   config: Config,
   resolvedApprovalMode: ApprovalMode,
+  modelOverride?: string,
 ): AgentPersistedCliFlags {
   return {
     approvalMode: resolvedApprovalMode,
@@ -598,7 +600,7 @@ function capturePersistedCliFlags(
     safeMode: config.isSafeMode(),
     sandbox: config.getSandbox() ?? null,
     screenReader: config.getScreenReader(),
-    model: config.getModel(),
+    model: modelOverride ?? config.getModel(),
     maxSessionTurns: config.getMaxSessionTurns(),
     maxToolCalls: config.getMaxToolCalls(),
     maxSubagentDepth: config.getMaxSubagentDepth(),
@@ -652,15 +654,7 @@ export async function createApprovalModeOverride(
         ? base.getPrePlanMode()
         : baseApprovalMode
       : undefined;
-  const basePlanGateState =
-    mode === ApprovalMode.PLAN ? base.getPlanGateState() : undefined;
-  override.planGateState = basePlanGateState
-    ? {
-        ...basePlanGateState,
-        lastFindings: [...basePlanGateState.lastFindings],
-      }
-    : undefined;
-  override.planGateEntryCounter = override.planGateState?.entryId ?? 0;
+  override.approvalModeRevision = 0;
   override.autoModeDenialState = createDenialState();
   override.setApprovalMode = (
     nextMode: ApprovalMode,
@@ -762,8 +756,9 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
         },
         run_in_background: {
           type: 'boolean',
+          default: true,
           description:
-            'Set to true to run this agent in the background. You will be notified when it completes. Top-level session only: from within a sub-agent the task runs in the foreground and returns its result inline.',
+            'Defaults to true for top-level one-shot agents. Set to false to run in the foreground and return the result inline. Nested agents run in the foreground. Caller-owned working_dir launches default to foreground and cannot run in the background.',
         },
         ...(config.isAgentTeamEnabled()
           ? {
@@ -861,8 +856,8 @@ ${subagentDescriptions}
 
 ${
   isForkSubagentEnabled(this.config)
-    ? `When using the Agent tool, specify a subagent_type to select which agent type to use. If omitted, the general-purpose agent is used and returns its result to you inline. A fork (\`subagent_type: "fork"\`) runs detached and fire-and-forget — its result does NOT come back to you, so use it ONLY for work whose output you won't need. When you need the agent's findings back (review, audit, aggregation, verification), use a regular subagent, never a fork.`
-    : `When using the Agent tool, specify a subagent_type parameter to select which agent type to use. If omitted, the general-purpose agent is used.`
+    ? `When using the Agent tool, specify a subagent_type to select which agent type to use. If omitted, the general-purpose agent is used. Top-level one-shot agents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need the result inline before continuing. A fork (\`subagent_type: "fork"\`) runs detached and fire-and-forget — its result does NOT come back to you, so use it ONLY for work whose output you won't need. When you need the agent's findings back (review, audit, aggregation, verification), use a regular subagent, never a fork.`
+    : `When using the Agent tool, specify a subagent_type parameter to select which agent type to use. If omitted, the general-purpose agent is used. Top-level one-shot agents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need the result inline before continuing.`
 }
 
 When NOT to use the Agent tool:
@@ -875,21 +870,25 @@ ${teamGuidance}
 
 Usage notes:
 - Always include a short description (3-5 words) summarizing what the agent will do
-- Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses
-- When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.
+- Delegate only concrete, bounded tasks that can run independently.
+- Keep immediate critical-path work local when your next action depends on it.
+- Do not duplicate work between the parent and subagents.
+- Run agents concurrently only when their tasks are independent. For code changes, give concurrent agents disjoint write scopes; launch them in a single message with multiple tool uses.
+- A background agent reports its result through a completion notification in a later turn. A foreground agent returns its result inline. Agent results are not visible to the user, so relay the relevant outcome in your response.
+- While background agents run, continue meaningful non-overlapping work. Wait for an agent only when its result blocks the next required step.
 - Provide clear, detailed prompts so the agent can work autonomously and return exactly the information you need.
-- The agent's outputs should generally be trusted
+- Treat the agent's output as evidence, not as automatically correct. Verify factual claims, review code changes, and run relevant checks before integrating or relaying the result.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
-- If the user specifies that they want you to run agents "in parallel", you MUST send a single message with multiple Agent tool use content blocks. For example, if you need to launch both a build-validator agent and a test-runner agent in parallel, send a single message with both tool calls.
-- You can optionally set \`run_in_background: true\` to run the agent in the background. You will be notified when it completes. Use this when you have genuinely independent work to do in parallel and don't need the agent's results before you can proceed.
+- If the user asks for agents "in parallel", group independent launches in a single message with multiple Agent tool use content blocks. Do not parallelize overlapping code changes.
+- Top-level one-shot agents run in the background by default. Set \`run_in_background: false\` when the current turn must wait for the result before continuing. Nested agents run in the foreground. Caller-owned \`working_dir\` launches default to foreground and cannot run in the background.
 - You can optionally set \`isolation: "worktree"\` to run the agent in a temporary git worktree, giving it an isolated copy of the repository. The worktree is automatically cleaned up if the agent makes no changes; if changes are made, the worktree path and branch are returned in the result so you can review or merge them.
 ${
   isForkSubagentEnabled(this.config)
     ? `
 ## When to fork
 
-A fork (\`subagent_type: "fork"\`) runs detached and fire-and-forget: it inherits your full context, but its findings do NOT come back to you in a form you can act on. **Never fork work whose output you need** — reviews, audits, parallel investigations you must aggregate, verification, anything where you have to read or combine the results. For all of that, launch regular awaitable subagents instead (omit \`subagent_type\` for general-purpose, or name a specific type); each returns its result to you inline, and several in one message still run concurrently. Omitting \`subagent_type\` does NOT fork.
+A fork (\`subagent_type: "fork"\`) runs detached and fire-and-forget: it inherits your full context, but its findings do NOT come back to you in a form you can act on. **Never fork work whose output you need** — reviews, audits, parallel investigations you must aggregate, verification, anything where you have to read or combine the results. For all of that, launch regular subagents instead (omit \`subagent_type\` for general-purpose, or name a specific type). Regular top-level subagents report through background completion notifications by default; set \`run_in_background: false\` when you need the result inline in the current turn. Omitting \`subagent_type\` does NOT fork.
 
 Fork only when you genuinely won't need the result back — a detached background chore the user asked you to kick off and move on from. The criterion is qualitative: "will I need to read this output?" If yes, don't fork.
 
@@ -1009,9 +1008,8 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       ) {
         return 'Parameter "subagent_type" must be a non-empty string.';
       }
-      // Validate that the subagent exists (case-insensitive). `fork` is an
-      // explicit pseudo-type resolved by the dispatch logic (not a loadable
-      // subagent), so accept it regardless of the registered list; when
+      // `fork` is an explicit pseudo-type resolved by the dispatch logic (not
+      // a loadable subagent), so it never appears in the registered list; when
       // forking is unavailable, dispatch falls back to general-purpose.
       const lowerType = params.subagent_type.toLowerCase();
       if (lowerType !== FORK_SUBAGENT_TYPE) {
@@ -1020,8 +1018,13 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
         );
 
         if (!subagentExists) {
-          const availableNames = this.availableSubagents.map((s) => s.name);
-          return `Subagent "${params.subagent_type}" not found. Available subagents: ${availableNames.join(', ')}`;
+          // Not in the cached list — the agent file may have been created
+          // after this tool was initialized. Don't reject here: execution
+          // resolves the type via loadSubagent(), which reads from disk and
+          // fails with a clear "not found" error if the agent truly doesn't
+          // exist. Kick a refresh (validation must stay synchronous) so the
+          // cache and schema catch up for subsequent calls.
+          void this.refreshSubagents();
         }
       }
     }
@@ -2240,6 +2243,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     let restoreParentPM: () => void = () => {};
     let backgroundSlotReservation: BackgroundSlotReservation | undefined;
     let backgroundSlotReservationConsumed = false;
+    // Concrete model ID the sub-agent will run with, resolved from its model
+    // selector once subagentConfig is loaded. Used to enforce per-model
+    // background-agent concurrency caps (agents.maxParallelAgentsByModel).
+    let subagentModelId: string | undefined;
     const releaseBackgroundSlotReservation = () => {
       if (backgroundSlotReservation && !backgroundSlotReservationConsumed) {
         this.config
@@ -2252,10 +2259,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     try {
       // Forking is explicit: `subagent_type: "fork"` selects a fork, and only
       // when forking is available (interactive session). Any other value — or
-      // an omitted subagent_type — resolves to a real, awaitable subagent
-      // (general-purpose by default) whose result is returned inline. This
-      // keeps the long-standing "omit ⇒ awaitable general-purpose" contract
-      // that skills and callers depend on; a fork is opt-in, never the default.
+      // an omitted subagent_type — resolves to a regular subagent
+      // (general-purpose by default). Its execution mode is decided separately
+      // below; a fork is opt-in, never the default.
       const requestedType = this.params.subagent_type;
       const isForkRequested =
         requestedType?.toLowerCase() === FORK_SUBAGENT_TYPE;
@@ -2264,15 +2270,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         isForkSubagentEnabled(this.config) &&
         // v1: fork is a top-level-only capability. A sub-agent — which may now
         // carry the AgentTool via nesting — that requests a fork falls back to
-        // the awaitable general-purpose sub-agent (via effectiveSubagentType
-        // below) instead of opening a nested fork. Fork nesting is deferred
-        // past v1.
+        // a general-purpose sub-agent (via effectiveSubagentType below) instead
+        // of opening a nested fork. Fork nesting is deferred past v1.
         isTopLevelSession();
       const effectiveSubagentType = isFork
         ? undefined
         : isForkRequested
           ? // Explicit fork requested but unavailable (non-interactive) →
-            // fall back to the awaitable general-purpose subagent.
+            // fall back to the general-purpose subagent.
             DEFAULT_BUILTIN_SUBAGENT_TYPE
           : (requestedType ?? DEFAULT_BUILTIN_SUBAGENT_TYPE);
       if (isForkRequested && !isFork) {
@@ -2293,15 +2298,29 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           effectiveSubagentType!,
         );
         if (!loadedConfig) {
+          // loadSubagent() reads from disk, so reaching this point means the
+          // agent genuinely doesn't exist (validation no longer rejects on a
+          // stale cache miss). List what is available to help correct typos.
+          let notFoundMessage = `Subagent "${effectiveSubagentType}" not found`;
+          try {
+            const available = await this.subagentManager.listSubagents();
+            if (available.length > 0) {
+              notFoundMessage += `. Available subagents: ${available
+                .map((s) => s.name)
+                .join(', ')}`;
+            }
+          } catch {
+            // Listing is best-effort; the bare message is still actionable.
+          }
           return {
-            llmContent: `Subagent "${effectiveSubagentType}" not found`,
+            llmContent: notFoundMessage,
             returnDisplay: {
               type: 'task_execution' as const,
               subagentName: effectiveSubagentType!,
               taskDescription: this.params.description,
               taskPrompt: this.params.prompt,
               status: 'failed' as const,
-              terminateReason: `Subagent "${effectiveSubagentType}" not found`,
+              terminateReason: notFoundMessage,
             },
           };
         }
@@ -2322,7 +2341,20 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         updateOutput(this.currentDisplay);
       }
 
-      // OR the tool parameter with the agent definition's background flag.
+      // An explicit tool parameter wins. Otherwise, an agent-level background
+      // flag retains its existing meaning, and safe ordinary one-shot launches
+      // default to background. Caller-owned working_dir launches stay
+      // foreground unless explicitly configured for background, which the
+      // incompatibility guard below rejects. Unavailable fork requests retain
+      // their existing foreground general-purpose fallback.
+      //
+      // This is the source of truth for the background-classification rule. Two
+      // UI classifiers replicate it from tool-call args (they cannot see
+      // subagentConfig.background) and must be kept in sync when it changes:
+      //   - packages/web-shell/client/adapters/toolClassification.ts
+      //     (isBackgroundSubAgentToolCall)
+      //   - packages/desktop/packages/shared/src/agent/tool-matching.ts
+      //     (detectBackgroundEvents)
       //
       // Background delegation is top-level-only in v1, mirroring the fork
       // downgrade above: a nested launcher would be handed a completion
@@ -2334,8 +2366,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // Downgrade to an awaited foreground run instead of orphaning the
       // child's results.
       const backgroundRequested =
-        this.params.run_in_background === true ||
-        subagentConfig.background === true;
+        this.params.run_in_background ??
+        (subagentConfig.background === true ||
+          (!isForkRequested &&
+            this.params.working_dir === undefined &&
+            // A `name` passed without an active team falls through to a regular
+            // one-shot agent above; keep it foreground so both UI classifiers
+            // (which exclude `name`) stay consistent with core dispatch.
+            this.params.name === undefined));
       const shouldRunInBackground = backgroundRequested && isTopLevelSession();
       if (this.params.working_dir !== undefined && shouldRunInBackground) {
         // A caller-owned worktree has no lifecycle coupling to a backgrounded
@@ -2356,9 +2394,20 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         );
       }
 
-      if (!isFork && shouldRunInBackground) {
+      if (shouldRunInBackground) {
+        // Resolve the concrete model the sub-agent (or fork) will run with so the
+        // registry can apply a per-model cap. `subagentConfig.model` is a
+        // selector (omitted/"inherit"/"fast"/modelId/authType:modelId);
+        // resolveModelId maps it to the actual model ID, falling back to the
+        // parent's current model when the sub-agent inherits (forks always
+        // inherit, since FORK_AGENT has no model selector).
+        subagentModelId = resolveModelId(
+          subagentConfig.model,
+          buildModelIdContext(this.config),
+        )?.modelId;
         const registry = this.config.getBackgroundTaskRegistry();
-        backgroundSlotReservation = registry.tryReserveBackgroundSlot();
+        backgroundSlotReservation =
+          registry.tryReserveBackgroundSlot(subagentModelId);
         if (!backgroundSlotReservation) {
           const queuedCount = registry.getQueuedCount();
           const queueText =
@@ -2374,8 +2423,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             },
             updateOutput,
           );
-          backgroundSlotReservation =
-            await registry.waitForBackgroundSlot(signal);
+          backgroundSlotReservation = await registry.waitForBackgroundSlot(
+            signal,
+            subagentModelId,
+          );
         }
         this.updateDisplay(
           {
@@ -2802,6 +2853,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               agentId: hookOpts.agentId,
               description: this.params.description,
               subagentType: subagentConfig.name,
+              // Concrete model ID for per-model concurrency accounting; the
+              // slot reservation above was taken against this same model.
+              model: subagentModelId,
               isBackgrounded: true,
               status: 'running',
               startTime: Date.now(),
@@ -2912,6 +2966,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           persistedCliFlags: capturePersistedCliFlags(
             this.config,
             resolvedApprovalMode,
+            bgSubagent.getCore().modelConfig.model,
           ),
           subagentName: subagentConfig.name,
           agentColor: subagentConfig.color,
@@ -2919,6 +2974,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           // Persisted so resume restores the original nesting level; see
           // childLaunchDepth() for the rationale.
           depth: childLaunchDepth(),
+          model: subagentModelId,
         });
 
         // Subscribe to the subagent's tool-call event stream so the
@@ -3481,6 +3537,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           persistedCliFlags: capturePersistedCliFlags(
             this.config,
             resolvedApprovalMode,
+            subagent.getCore().modelConfig.model,
           ),
           subagentName: subagentConfig.name,
           agentColor: subagentConfig.color,

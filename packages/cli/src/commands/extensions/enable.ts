@@ -54,7 +54,7 @@ export const enableCommand: CommandModule = {
       })
       .option('scope', {
         describe: t(
-          'The scope to enable the extenison in. If not set, will be enabled in all scopes.',
+          'The scope to enable the extension in. If not set, will be enabled in all scopes.',
         ),
         type: 'string',
       })

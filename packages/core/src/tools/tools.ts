@@ -26,6 +26,9 @@ export interface ToolInvocation<
    */
   params: TParams;
 
+  /** Historical names accepted only when evaluating persisted permissions. */
+  readonly permissionAliases?: readonly string[];
+
   /**
    * Gets a pre-execution description of the tool operation.
    *
@@ -51,6 +54,13 @@ export interface ToolInvocation<
    * overridden by PermissionManager rules at L4.
    */
   getDefaultPermission(): Promise<PermissionDecision>;
+
+  /**
+   * Whether this invocation must be approved through an explicit host/user
+   * interaction. Permission rules and automatic approval modes cannot satisfy
+   * this requirement.
+   */
+  requiresUserInteraction?(): boolean;
 
   /**
    * Constructs the confirmation dialog details for this invocation.
@@ -99,6 +109,10 @@ export abstract class BaseToolInvocation<
    */
   getDefaultPermission(): Promise<PermissionDecision> {
     return Promise.resolve('allow');
+  }
+
+  requiresUserInteraction(): boolean {
+    return false;
   }
 
   /**
@@ -766,8 +780,8 @@ export interface ToolEditConfirmationDetails {
   ) => Promise<void>;
   /**
    * When true, the UI should not show "Always allow" options (ProceedAlwaysProject/User).
-   * Set by coreToolScheduler when PM has an explicit 'ask' rule that would override
-   * any 'allow' rule the user might add.
+   * Set when an explicit interaction or PM 'ask' rule cannot be replaced by
+   * a persisted allow rule.
    */
   hideAlwaysAllow?: boolean;
   fileName: string;
@@ -778,6 +792,10 @@ export interface ToolEditConfirmationDetails {
   isModifying?: boolean;
   /** Hide UI affordances that let the user edit the proposed content. */
   hideModify?: boolean;
+  /** Skip opening or resolving an IDE diff for this confirmation. */
+  skipIdeDiff?: boolean;
+  /** Informational warnings to render alongside the proposed diff. */
+  warnings?: string[];
 }
 
 export interface ToolConfirmationPayload {

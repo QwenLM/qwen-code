@@ -113,7 +113,7 @@ async function waitForPendingPrompt(
 }
 
 function turnCompleteFrame(promptId: string): string {
-  return `id: 1\nevent: turn_complete\ndata: {"id":1,"v":1,"type":"turn_complete","data":{"promptId":"${promptId}","stopReason":"end_turn"}}\n\n`;
+  return `id: 1\nevent: turn_complete\ndata: {"id":1,"v":1,"type":"turn_complete","promptId":"${promptId}","data":{"promptId":"${promptId}","stopReason":"end_turn"}}\n\n`;
 }
 
 describe('DaemonSessionClient', () => {

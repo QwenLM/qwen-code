@@ -10,15 +10,19 @@ import {
   APPROVAL_MODES,
   BTW_MAX_INPUT_LENGTH,
   GROUP_COLOR_OPTIONS,
+  GitWorktreeService,
   SessionService,
   SessionOrganizationError,
   SESSION_TRANSCRIPT_MAX_LIMIT,
+  SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
   SessionTranscriptPageTooLargeError,
   SessionTranscriptCursorCodec,
   SessionTranscriptReader,
   SessionTranscriptSnapshotUnavailableError,
   addDaemonRequestAttribute,
   runWithoutDebugLogSession,
+  writeWorktreeSessionMarker,
+  writeWorktreeSession,
   type ApprovalMode,
   type SessionGroupColor,
   type SessionGroupPresetColor,
@@ -55,6 +59,7 @@ import {
 } from '../server/request-helpers.js';
 import {
   InvalidCursorError,
+  getWorkspaceSessionInfoForResponse,
   listLiveWorkspaceSessionsForResponse,
   listWorkspaceSessionsForResponse,
   parseSessionPageSizeQuery,
@@ -73,6 +78,7 @@ import {
   parseSessionExportFormat,
   sessionExportFormatValues,
 } from '../server/session-export.js';
+import { setDaemonTelemetryWorkspace } from '../server/telemetry.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
 import { replayTranscriptRecordPage } from '../../acp-integration/session/history-replay-page.js';
 import { GENERATION_MAX_PROMPT_BYTES } from '../../acp-integration/generation.js';
@@ -99,12 +105,26 @@ interface RegisterSessionRoutesDeps {
   languageCodes: string[];
 }
 
-const WORKSPACE_TRANSCRIPT_PAGE_SOURCE_MAX_BYTES = 4 * 1024 * 1024;
 const WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
 const WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES = 64 * 1024;
 const TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR =
   'Transcript pagination state exceeds the safe limit';
 const GENERATION_HEARTBEAT_MS = 15_000;
+const PRIMARY_ONLY_LIVE_SESSION_ROUTES = [
+  'POST /session/:id/branch',
+  'POST /session/:id/fork',
+  'POST /session/:id/cd',
+] as const;
+type PrimaryOnlyLiveSessionRoute =
+  (typeof PRIMARY_ONLY_LIVE_SESSION_ROUTES)[number];
+
+function isPrimaryOnlyLiveSessionRoute(
+  route: string,
+): route is PrimaryOnlyLiveSessionRoute {
+  return (PRIMARY_ONLY_LIVE_SESSION_ROUTES as readonly string[]).includes(
+    route,
+  );
+}
 
 function formatGenerationSse(
   event: string,
@@ -259,6 +279,46 @@ function parseTranscriptCursorQuery(
     return null;
   }
   return rawCursor;
+}
+
+function parseTranscriptRecordBoundaryQuery(
+  rawBoundary: unknown,
+  res: Response,
+): string | undefined | null {
+  if (rawBoundary === undefined) return undefined;
+  if (
+    typeof rawBoundary !== 'string' ||
+    rawBoundary.trim() === '' ||
+    rawBoundary.length > 200
+  ) {
+    res.status(400).json({
+      error: '`beforeRecordId` must be a non-empty record id',
+      code: 'invalid_transcript_cursor',
+    });
+    return null;
+  }
+  return rawBoundary;
+}
+
+function parseHistoryPageSize(
+  body: Record<string, unknown>,
+  res: Response,
+): number | undefined | null {
+  const value = body['historyPageSize'];
+  if (value === undefined) return undefined;
+  if (
+    !Number.isSafeInteger(value) ||
+    (value as number) < 1 ||
+    (value as number) > SESSION_TRANSCRIPT_MAX_LIMIT
+  ) {
+    res.status(400).json({
+      error: `\`historyPageSize\` must be between 1 and ${SESSION_TRANSCRIPT_MAX_LIMIT}`,
+      code: 'invalid_transcript_limit',
+      maxLimit: SESSION_TRANSCRIPT_MAX_LIMIT,
+    });
+    return null;
+  }
+  return value as number;
 }
 
 function workspaceTranscriptCursorExceedsLimit(
@@ -429,6 +489,7 @@ export function registerSessionRoutes(
       return undefined;
     }
     if (workspaceRegistry.list().length === 1) {
+      setDaemonTelemetryWorkspace(res, workspaceRegistry.primary.workspaceCwd);
       return {
         runtime: workspaceRegistry.primary,
         workspaceCwd:
@@ -445,6 +506,7 @@ export function registerSessionRoutes(
       sendWorkspaceMismatch(res, key);
       return undefined;
     }
+    setDaemonTelemetryWorkspace(res, runtime.workspaceCwd);
     if (!runtime.primary && !runtime.trusted) {
       logSessionRoutingFailure('POST /session', 'untrusted_workspace', {
         workspaceId: runtime.workspaceId,
@@ -787,6 +849,7 @@ export function registerSessionRoutes(
       sendWorkspaceMismatch(res, key);
       return undefined;
     }
+    setDaemonTelemetryWorkspace(res, runtime.workspaceCwd);
     if (!runtime.primary && !runtime.trusted) {
       logSessionRoutingFailure(route, 'untrusted_workspace', {
         workspaceId: runtime.workspaceId,
@@ -836,12 +899,12 @@ export function registerSessionRoutes(
 
   const sendNonPrimarySessionRouteUnsupported = (
     res: Response,
-    route: string,
+    route: PrimaryOnlyLiveSessionRoute,
     sessionId: string,
     runtime: WorkspaceRuntime,
   ): void => {
     res.status(400).json({
-      error: `Route "${route}" is primary-only for non-primary workspace sessions in Phase 2a.`,
+      error: `Route "${route}" is only available for primary workspace sessions.`,
       code: 'non_primary_session_route_not_supported',
       sessionId,
       workspaceId: runtime.workspaceId,
@@ -920,6 +983,7 @@ export function registerSessionRoutes(
 
     if (workspaceRegistry.list().length === 1) {
       const runtime = workspaceRegistry.primary;
+      setDaemonTelemetryWorkspace(res, runtime.workspaceCwd);
       if (await activeInRuntime(runtime)) {
         return runtime;
       }
@@ -932,6 +996,7 @@ export function registerSessionRoutes(
       return undefined;
     }
     if (liveOwner.kind === 'found') {
+      setDaemonTelemetryWorkspace(res, liveOwner.runtime.workspaceCwd);
       if (
         !assertTrustedSessionOwner(res, route, sessionId, liveOwner.runtime)
       ) {
@@ -981,6 +1046,7 @@ export function registerSessionRoutes(
     }
     if (activeRuntimes.length === 1) {
       const runtime = activeRuntimes[0]!;
+      setDaemonTelemetryWorkspace(res, runtime.workspaceCwd);
       if (!assertTrustedSessionOwner(res, route, sessionId, runtime)) {
         return undefined;
       }
@@ -1058,21 +1124,32 @@ export function registerSessionRoutes(
     return key;
   };
 
-  const withMutableSession =
-    (
-      route: string,
-      handler: (
-        req: Request,
-        res: Response,
-        sessionId: string,
-      ) => Promise<void> | void,
-    ): RequestHandler =>
-    async (req, res) => {
+  const withPrimaryOnlyMutableSession = (
+    route: string,
+    handler: (
+      req: Request,
+      res: Response,
+      sessionId: string,
+    ) => Promise<void> | void,
+  ): RequestHandler => {
+    if (!isPrimaryOnlyLiveSessionRoute(route)) {
+      throw new Error(`Unregistered primary-only session route: ${route}`);
+    }
+    return async (req, res) => {
       const sessionId = requireSessionId(req, res);
       if (sessionId === null) return;
       const runtime = resolveLiveSessionRuntime(sessionId, res, route);
       if (!runtime) return;
       if (!runtime.primary) {
+        logSessionRoutingFailure(
+          route,
+          'non_primary_session_route_not_supported',
+          {
+            sessionId,
+            workspaceId: runtime.workspaceId,
+            workspaceCwd: runtime.workspaceCwd,
+          },
+        );
         sendNonPrimarySessionRouteUnsupported(res, route, sessionId, runtime);
         return;
       }
@@ -1084,6 +1161,7 @@ export function registerSessionRoutes(
         sendBridgeError(res, err, { route, sessionId });
       }
     };
+  };
 
   app.post('/session', mutate(), async (req, res) => {
     const body = safeBody(req);
@@ -1120,6 +1198,84 @@ export function registerSessionRoutes(
     }
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
+
+    // ── Worktree isolation ──────────────────────────────────────────
+    // When `worktree` is present, create a git worktree before spawning
+    // and relocate the session into it immediately after. The workspace
+    // runtime resolution still uses the main workspace cwd; only the
+    // child process's effective working directory changes.
+    let worktreeMeta:
+      | { slug: string; path: string; branch: string }
+      | undefined;
+    const rawWorktree = body['worktree'];
+    if (rawWorktree !== undefined && rawWorktree !== null) {
+      if (typeof rawWorktree !== 'object' || Array.isArray(rawWorktree)) {
+        res.status(400).json({
+          error:
+            '`worktree` must be an object (e.g. `{}` or `{"slug":"my-task"}`)',
+          code: 'invalid_worktree',
+        });
+        return;
+      }
+      const wtReq = rawWorktree as Record<string, unknown>;
+      let wtService: GitWorktreeService;
+      try {
+        wtService = new GitWorktreeService(workspaceCwd);
+      } catch {
+        res.status(500).json({
+          error: 'Failed to initialize worktree service',
+          code: 'worktree_init_failed',
+        });
+        return;
+      }
+      if (!(await wtService.isGitRepository())) {
+        res.status(400).json({
+          error: 'Worktree isolation requires a git repository',
+          code: 'worktree_not_git_repo',
+        });
+        return;
+      }
+      const rawSlug = wtReq['slug'];
+      let slug: string;
+      if (rawSlug === undefined || rawSlug === null) {
+        slug = GitWorktreeService.generateAutoSlug();
+      } else if (typeof rawSlug !== 'string' || rawSlug.length === 0) {
+        res.status(400).json({
+          error: '`worktree.slug` must be a non-empty string when provided',
+          code: 'worktree_invalid_slug',
+        });
+        return;
+      } else {
+        slug = rawSlug;
+      }
+      const slugError = GitWorktreeService.validateUserWorktreeSlug(slug);
+      if (slugError) {
+        res
+          .status(400)
+          .json({ error: slugError, code: 'worktree_invalid_slug' });
+        return;
+      }
+      const baseBranch = await wtService
+        .getCurrentBranch()
+        .catch(() => undefined);
+      const wtResult = await wtService.createUserWorktree(slug, baseBranch);
+      if (!wtResult.success || !wtResult.worktree) {
+        res.status(500).json({
+          error: wtResult.error ?? 'Failed to create worktree',
+          code: 'worktree_create_failed',
+        });
+        return;
+      }
+      worktreeMeta = {
+        slug,
+        path: wtResult.worktree.path,
+        branch: wtResult.worktree.branch,
+      };
+      // Worktree sessions must be independent — never coalesce onto an
+      // existing single-scope session that lives in the main checkout.
+      sessionScope = 'thread';
+    }
+
     try {
       const session = await runtime.bridge.spawnOrAttach({
         workspaceCwd,
@@ -1131,6 +1287,7 @@ export function registerSessionRoutes(
           ? { sourceType: source.sourceType }
           : {}),
         ...(source.sourceId !== undefined ? { sourceId: source.sourceId } : {}),
+        ...(worktreeMeta ? { worktree: worktreeMeta } : {}),
       });
       // Client may have disconnected during the 1–3s spawn window. If
       // so, the response can't be delivered. The session is otherwise
@@ -1185,6 +1342,12 @@ export function registerSessionRoutes(
               await new SessionService(runtime.workspaceCwd).removeSession(
                 session.sessionId,
               );
+              // Clean up the worktree if one was created for this session.
+              if (worktreeMeta) {
+                await new GitWorktreeService(workspaceCwd)
+                  .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
+                  .catch(() => {});
+              }
             }
           } catch {
             // Best-effort cleanup; channel.exited will eventually reap.
@@ -1207,8 +1370,78 @@ export function registerSessionRoutes(
         }
         return;
       }
+
+      // Relocate the freshly spawned session into its worktree. The
+      // cd chains onto the session's promptQueue, so it completes
+      // before any subsequent prompt is processed.
+      if (worktreeMeta) {
+        try {
+          await runtime.bridge.changeSessionCwd(session.sessionId, {
+            path: worktreeMeta.path,
+          });
+          await writeWorktreeSessionMarker(
+            worktreeMeta.path,
+            session.sessionId,
+          ).catch(() => {});
+          // Write the worktree sidecar so the session list can restore
+          // worktree metadata after a daemon restart.
+          await writeWorktreeSession(
+            new SessionService(workspaceCwd).getWorktreeSessionPath(
+              session.sessionId,
+            ),
+            {
+              slug: worktreeMeta.slug,
+              worktreePath: worktreeMeta.path,
+              worktreeBranch: worktreeMeta.branch,
+              originalCwd: workspaceCwd,
+              originalBranch: '',
+              originalHeadCommit: '',
+            },
+          ).catch(() => {});
+        } catch (cdErr) {
+          // cd failed — relocation is transactional: kill the session,
+          // remove the worktree, and return an error. Leaving the session
+          // alive with stale worktree metadata in the bridge entry would
+          // make GET /session/:id/status claim isolation the session
+          // doesn't have.
+          if (daemonLog) {
+            daemonLog.warn('worktree cd failed, rolling back', {
+              sessionId: session.sessionId,
+              error: cdErr instanceof Error ? cdErr.message : String(cdErr),
+            });
+          }
+          const killed = await runtime.bridge
+            .killSession(session.sessionId, { requireZeroAttaches: true })
+            .catch(() => false);
+          if (killed) {
+            await new SessionService(workspaceCwd)
+              .removeSession(session.sessionId)
+              .catch(() => {});
+          }
+          // cd failed so the session never entered the worktree — the
+          // worktree is unused regardless of whether the session was
+          // killed or another client keeps it alive in the main checkout.
+          await new GitWorktreeService(workspaceCwd)
+            .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
+            .catch(() => {});
+          res.status(500).json({
+            error: 'Failed to relocate session into worktree',
+            code: 'worktree_relocate_failed',
+          });
+          return;
+        }
+      }
+
       res.status(200).json(session);
     } catch (err) {
+      // Roll back the worktree if spawn failed — otherwise the directory
+      // and branch are orphaned (the agent-* stale cleanup won't collect
+      // user-named worktrees).
+      if (worktreeMeta) {
+        await new GitWorktreeService(workspaceCwd)
+          .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
+          .catch(() => {});
+      }
       sendBridgeError(res, err, { route: 'POST /session' });
     }
   });
@@ -1247,6 +1480,12 @@ export function registerSessionRoutes(
         releaseRestoreOwner();
         return;
       }
+      const historyPageSize =
+        action === 'load' ? parseHistoryPageSize(body ?? {}, res) : undefined;
+      if (historyPageSize === null) {
+        releaseRestoreOwner();
+        return;
+      }
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) {
         releaseRestoreOwner();
@@ -1268,6 +1507,7 @@ export function registerSessionRoutes(
                   sessionId,
                   workspaceCwd,
                   historyReplay: 'response',
+                  ...(historyPageSize !== undefined ? { historyPageSize } : {}),
                   ...(clientId !== undefined ? { clientId } : {}),
                   ...(approvalMode !== undefined ? { approvalMode } : {}),
                   ...metadata,
@@ -1328,7 +1568,7 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/branch',
     mutate(),
-    withMutableSession(
+    withPrimaryOnlyMutableSession(
       'POST /session/:id/branch',
       async (req, res, sessionId) => {
         const body = safeBody(req);
@@ -1370,7 +1610,7 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/fork',
     mutate(),
-    withMutableSession(
+    withPrimaryOnlyMutableSession(
       'POST /session/:id/fork',
       async (req, res, sessionId) => {
         const body = safeBody(req);
@@ -1397,29 +1637,32 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/cd',
     mutate(),
-    withMutableSession('POST /session/:id/cd', async (req, res, sessionId) => {
-      const body = safeBody(req);
-      const targetPath = body['path'];
-      if (
-        typeof targetPath !== 'string' ||
-        targetPath.length === 0 ||
-        !path.isAbsolute(targetPath)
-      ) {
-        res.status(400).json({
-          error: '`path` is required and must be an absolute path',
-          code: 'invalid_path',
-        });
-        return;
-      }
-      const clientId = parseClientIdHeader(req, res);
-      if (clientId === null) return;
-      const result = await bridge.changeSessionCwd(
-        sessionId,
-        { path: targetPath },
-        clientId !== undefined ? { clientId } : undefined,
-      );
-      res.status(200).json(result);
-    }),
+    withPrimaryOnlyMutableSession(
+      'POST /session/:id/cd',
+      async (req, res, sessionId) => {
+        const body = safeBody(req);
+        const targetPath = body['path'];
+        if (
+          typeof targetPath !== 'string' ||
+          targetPath.length === 0 ||
+          !path.isAbsolute(targetPath)
+        ) {
+          res.status(400).json({
+            error: '`path` is required and must be an absolute path',
+            code: 'invalid_path',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const result = await bridge.changeSessionCwd(
+          sessionId,
+          { path: targetPath },
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json(result);
+      },
+    ),
   );
 
   app.get('/session/:id/status', (req, res) => {
@@ -1482,6 +1725,18 @@ export function registerSessionRoutes(
     if (limit === null) return;
     const cursor = parseTranscriptCursorQuery(req.query['cursor'], res);
     if (cursor === null) return;
+    const beforeRecordId = parseTranscriptRecordBoundaryQuery(
+      req.query['beforeRecordId'],
+      res,
+    );
+    if (beforeRecordId === null) return;
+    if (cursor !== undefined && beforeRecordId !== undefined) {
+      res.status(400).json({
+        error: '`cursor` and `beforeRecordId` are mutually exclusive',
+        code: 'invalid_transcript_cursor',
+      });
+      return;
+    }
 
     try {
       const result = await archiveCoordinator.runSharedMany(
@@ -1498,6 +1753,7 @@ export function registerSessionRoutes(
             sessionId,
             ...(limit !== undefined ? { limit } : {}),
             ...(cursor !== undefined ? { cursor } : {}),
+            ...(beforeRecordId !== undefined ? { beforeRecordId } : {}),
           });
         },
       );
@@ -1533,6 +1789,18 @@ export function registerSessionRoutes(
     if (limit === null) return;
     const cursor = parseTranscriptCursorQuery(req.query['cursor'], res);
     if (cursor === null) return;
+    const beforeRecordId = parseTranscriptRecordBoundaryQuery(
+      req.query['beforeRecordId'],
+      res,
+    );
+    if (beforeRecordId === null) return;
+    if (cursor !== undefined && beforeRecordId !== undefined) {
+      res.status(400).json({
+        error: '`cursor` and `beforeRecordId` are mutually exclusive',
+        code: 'invalid_transcript_cursor',
+      });
+      return;
+    }
     if (cursor !== undefined && workspaceTranscriptCursorExceedsLimit(cursor)) {
       res.status(400).json({
         error: '`cursor` exceeds the maximum size',
@@ -1558,7 +1826,8 @@ export function registerSessionRoutes(
             page = await reader.readPage(sessionId, {
               ...(limit !== undefined ? { limit } : {}),
               ...(cursor !== undefined ? { cursor } : {}),
-              maxBytes: WORKSPACE_TRANSCRIPT_PAGE_SOURCE_MAX_BYTES,
+              ...(beforeRecordId !== undefined ? { beforeRecordId } : {}),
+              maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
             });
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
@@ -2809,13 +3078,6 @@ export function registerSessionRoutes(
           });
           return;
         }
-        if (parsedSource.sourceType !== undefined && view === 'organized') {
-          res.status(400).json({
-            error: '`sourceType` is not supported with `view=organized`',
-            code: 'invalid_session_source_filter',
-          });
-          return;
-        }
         const options = {
           ...(cursor !== undefined ? { cursor } : {}),
           ...(size !== undefined ? { size } : {}),
@@ -2904,6 +3166,43 @@ export function registerSessionRoutes(
   app.get(
     '/workspaces/:workspace/sessions',
     listWorkspaceSessionsHandler('workspace'),
+  );
+
+  const workspaceSessionInfoHandler =
+    (paramName: 'id' | 'workspace'): RequestHandler =>
+    async (req, res) => {
+      const route =
+        paramName === 'workspace'
+          ? 'GET /workspaces/:workspace/session-info'
+          : 'GET /workspace/:id/session-info';
+      const runtime = resolveRuntimeForCatalogRoute(req, res, paramName, route);
+      if (runtime === null) return;
+      const key = runtime.workspaceCwd;
+      try {
+        // Disk-scan aggregate: do not call this from hot paths / UI polls.
+        const info = await runWorkspaceInspectionWithLogPolicy(runtime, () =>
+          getWorkspaceSessionInfoForResponse(runtime.bridge, key, {
+            includeLive: !isReadOnlyWorkspaceInspection(runtime),
+          }),
+        );
+        res.status(200).json(info);
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: failed to read session-info for workspace ${safeLogValue(
+            key,
+          )}: ${safeLogValue(err instanceof Error ? err.message : String(err))}`,
+        );
+        res.status(500).json({
+          error: 'Failed to read session info',
+          code: 'session_info_failed',
+        });
+      }
+    };
+
+  app.get('/workspace/:id/session-info', workspaceSessionInfoHandler('id'));
+  app.get(
+    '/workspaces/:workspace/session-info',
+    workspaceSessionInfoHandler('workspace'),
   );
 
   app.post(

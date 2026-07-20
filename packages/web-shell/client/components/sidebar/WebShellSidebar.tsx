@@ -41,6 +41,7 @@ import {
   ArchiveRestoreIcon,
   DownloadIcon,
   FolderInputIcon,
+  GitForkIcon,
   PencilIcon,
   PinIcon,
   Trash2Icon,
@@ -52,6 +53,7 @@ import {
   SettingsIcon,
   SquarePenIcon,
   SunIcon,
+  TargetIcon,
 } from 'lucide-react';
 import { WebShellThemeId, type WebShellTheme } from '../../themeContext';
 import { useI18n } from '../../i18n';
@@ -123,6 +125,7 @@ export type WebShellSidebarFooterItem =
   | 'version'
   | 'theme'
   | 'scheduledTasks'
+  | 'goals'
   | 'sessionsOverview'
   | 'splitView'
   | 'daemonStatus'
@@ -153,6 +156,7 @@ const DEFAULT_FOOTER_ITEMS: readonly WebShellSidebarFooterItem[] = [
   'version',
   'theme',
   'scheduledTasks',
+  'goals',
   'sessionsOverview',
   'splitView',
   'daemonStatus',
@@ -208,6 +212,7 @@ interface WebShellSidebarProps {
   onOpenPlugins: () => void;
   onOpenDaemonStatus: () => void;
   onOpenScheduledTasks: () => void;
+  onOpenGoals: () => void;
   onOpenSessions: () => void;
   /**
    * Whether to offer the Session Overview entry point. Gated to large screens
@@ -218,7 +223,10 @@ interface WebShellSidebarProps {
   onOpenSplitView: () => void;
   /** Whether to offer the in-window split view (large screens only). */
   canOpenSplitView?: boolean;
-  onNewSession: (workspaceCwd?: string) => Promise<boolean> | boolean;
+  onNewSession: (
+    workspaceCwd?: string,
+    opts?: { worktree?: { slug?: string } },
+  ) => Promise<boolean> | boolean;
   onLoadSession: (
     sessionId: string,
     workspaceCwd?: string,
@@ -235,6 +243,11 @@ interface WebShellSidebarProps {
    */
   selectedWorkspaceCwd?: string;
   onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
+  /**
+   * Open the working-tree Changes dialog for a workspace. Forwarded to each
+   * trusted workspace's folder header, where a live git chip fires it on click.
+   */
+  onOpenGitDiff?: (workspaceCwd: string) => void;
   workspaces?: DaemonWorkspaceCapability[];
   lockedWorkspaceCwd?: string;
   lockedWorkspace?: WebShellSidebarLockedWorkspace;
@@ -408,6 +421,7 @@ export function WebShellSidebar({
   onOpenPlugins,
   onOpenDaemonStatus,
   onOpenScheduledTasks,
+  onOpenGoals,
   onOpenSessions,
   canOpenSessionsOverview,
   onOpenSplitView,
@@ -422,6 +436,7 @@ export function WebShellSidebar({
   sessionListReloadToken,
   selectedWorkspaceCwd,
   onSelectWorkspace,
+  onOpenGitDiff,
   workspaces: providedWorkspaces,
   lockedWorkspaceCwd,
   lockedWorkspace: lockedWorkspaceOptions,
@@ -649,6 +664,10 @@ export function WebShellSidebar({
   );
   const canExportSessions =
     connection.capabilities?.features?.includes('session_export') ?? false;
+  const canExportArchivedSessions =
+    connection.capabilities?.features?.includes(
+      'workspace_archived_session_export',
+    ) ?? false;
   const currentSessionIdentity = currentSessionId
     ? getSessionIdentity(currentSessionId, connection.workspaceCwd)
     : null;
@@ -739,6 +758,18 @@ export function WebShellSidebar({
       sessionArchiveEnabled,
       workspaceQualifiedRestCoreEnabled,
     ],
+  );
+  const getArchivedExportWorkspaceCwd = useCallback(
+    (session: DaemonSessionSummary) => {
+      const workspaceCwd = session.workspaceCwd || primaryWorkspaceCwd;
+      const sessionWorkspace = displayedWorkspaces.find(
+        (entry) => entry.cwd === workspaceCwd,
+      );
+      return canExportArchivedSessions && sessionWorkspace?.trusted === true
+        ? sessionWorkspace.cwd
+        : undefined;
+    },
+    [canExportArchivedSessions, displayedWorkspaces, primaryWorkspaceCwd],
   );
 
   useEffect(() => {
@@ -1175,6 +1206,11 @@ export function WebShellSidebar({
     [t, workspaceActions, workspace],
   );
 
+  const handleSuggestWorkspacePaths = useCallback(
+    (prefix: string) => workspaceActions.suggestWorkspacePaths(prefix),
+    [workspaceActions],
+  );
+
   const reconcileRemovedWorkspace = useCallback(
     async (removed: DaemonWorkspaceCapability) => {
       if (!workspaceRemovalMountedRef.current) return;
@@ -1351,14 +1387,14 @@ export function WebShellSidebar({
   ]);
 
   const handleNewSession = useCallback(
-    (workspaceCwd?: string) => {
+    (workspaceCwd?: string, opts?: { worktree?: { slug?: string } }) => {
       if (creatingSessionRef.current) return;
 
       creatingSessionRef.current = true;
       setCreatingSession(true);
       void (async () => {
         try {
-          const created = await onNewSession(workspaceCwd);
+          const created = await onNewSession(workspaceCwd, opts);
           if (created) {
             void reload().catch(() => undefined);
             bumpWorkspaceReload();
@@ -1500,8 +1536,11 @@ export function WebShellSidebar({
     (session: DaemonSessionSummary) => {
       const sessionId = session.sessionId;
       const sessionIdentity = getIdentityForSession(session);
+      const archived = session.isArchived === true;
       if (
-        !canExportSessions ||
+        (archived
+          ? !getArchivedExportWorkspaceCwd(session)
+          : !canExportSessions) ||
         exportingSessionIdsRef.current.has(sessionIdentity)
       ) {
         return;
@@ -1509,7 +1548,16 @@ export function WebShellSidebar({
       setSessionExporting(sessionId, true, session.workspaceCwd);
       void (async () => {
         try {
-          const result = await exportSession(sessionId, 'html');
+          let result;
+          if (archived) {
+            const workspaceCwd = getArchivedExportWorkspaceCwd(session);
+            if (!workspaceCwd) return;
+            result = await workspace.client
+              .workspaceByCwd(workspaceCwd)
+              .exportArchivedSession(sessionId, { format: 'html' });
+          } else {
+            result = await exportSession(sessionId, 'html');
+          }
           const blob = new Blob([result.content], {
             type: result.mimeType || 'text/html',
           });
@@ -1534,10 +1582,12 @@ export function WebShellSidebar({
     [
       canExportSessions,
       exportSession,
+      getArchivedExportWorkspaceCwd,
       getIdentityForSession,
       onError,
       setSessionExporting,
       t,
+      workspace.client,
     ],
   );
 
@@ -2329,6 +2379,7 @@ export function WebShellSidebar({
       const stamp = session.updatedAt || session.createdAt;
       const time = stamp ? formatRelativeTime(stamp, t) : '';
       const busy = busySessionIds.has(sessionIdentity);
+      const exporting = exportingSessionIds.has(sessionIdentity);
       const completedUnread =
         !isCurrentSession(session) && completedUnreadIds.has(sessionIdentity);
       const details = (
@@ -2403,6 +2454,15 @@ export function WebShellSidebar({
                           {details}
                         </DropdownMenuSubContent>
                       </DropdownMenuSub>
+                      {getArchivedExportWorkspaceCwd(session) && (
+                        <DropdownMenuItem
+                          disabled={exporting}
+                          onSelect={() => handleExportSession(session)}
+                        >
+                          <DownloadIcon />
+                          {t('sidebar.export')}
+                        </DropdownMenuItem>
+                      )}
                       {canMutateSessionArchive(session) && (
                         <DropdownMenuItem
                           onSelect={() => handleUnarchive(session)}
@@ -2429,7 +2489,6 @@ export function WebShellSidebar({
 
       const isCurrent = isCurrentSession(session);
       const isEditing = isCurrent && editingSessionId === session.sessionId;
-      const exporting = exportingSessionIds.has(sessionIdentity);
       const needsUserInput =
         !session.isWaitingForPermission && session.isWaitingForUserQuestion;
       const attentionLabel = session.isWaitingForPermission
@@ -2497,7 +2556,17 @@ export function WebShellSidebar({
                 </form>
               ) : (
                 <>
-                  <span className={styles.sessionText}>{label}</span>
+                  <span className={styles.sessionText}>
+                    {session.worktree && (
+                      <GitForkIcon
+                        size={11}
+                        strokeWidth={1.5}
+                        className={styles.sessionBadgeIcon}
+                        aria-label={t('sidebar.newWorktreeTask')}
+                      />
+                    )}
+                    {label}
+                  </span>
                   <div className={styles.sessionMetaSlot}>
                     {attentionLabel && (
                       <span
@@ -2690,6 +2759,7 @@ export function WebShellSidebar({
       editingName,
       editingSessionId,
       exportingSessionIds,
+      getArchivedExportWorkspaceCwd,
       getIdentityForSession,
       handleArchive,
       handleDeleteSession,
@@ -3336,6 +3406,20 @@ export function WebShellSidebar({
               {!collapsed && <span>{t('sidebar.scheduledTasks')}</span>}
             </button>
           )}
+          {footerItems.has('goals') && (
+            <button
+              className={styles.pluginButton}
+              type="button"
+              title={t('sidebar.goals')}
+              aria-label={t('sidebar.goals')}
+              onClick={onOpenGoals}
+            >
+              <span className={styles.navIcon}>
+                <TargetIcon size={16} strokeWidth={1.2} />
+              </span>
+              {!collapsed && <span>{t('sidebar.goals')}</span>}
+            </button>
+          )}
         </div>
         <div className={styles.body}>
           <div className={styles.sessionList}>
@@ -3440,11 +3524,6 @@ export function WebShellSidebar({
                             }
                             client={workspace.client}
                             reloadToken={workspaceSessionsReloadToken}
-                            primaryLabel={
-                              displayedWorkspaces.length > 1
-                                ? t('sidebar.workspacePrimary')
-                                : ''
-                            }
                             untrustedLabel={t('sidebar.workspaceUntrusted')}
                             readOnlyLabel={t('sidebar.workspaceReadOnly')}
                             trustToOpenLabel={t('sidebar.workspaceTrustToOpen')}
@@ -3458,6 +3537,12 @@ export function WebShellSidebar({
                             deleteGroupLabel={t('sidebar.groupDelete')}
                             groupActionsDisabled={groupBusy}
                             excludePinned
+                            onOpenGitDiff={onOpenGitDiff}
+                            onNewWorktreeSession={(cwd) =>
+                              handleNewSession(ws.primary ? undefined : cwd, {
+                                worktree: {},
+                              })
+                            }
                             formatTime={(iso) => formatRelativeTime(iso, t)}
                             searchQuery={searchQuery}
                             expanded={ws.primary ? projectExpanded : undefined}
@@ -3492,6 +3577,7 @@ export function WebShellSidebar({
                                 !ws.primary &&
                                 ws.removable === true;
                               if (!ws.trusted && !canRemove) return null;
+                              const wsCwd = ws.primary ? undefined : ws.cwd;
                               return (
                                 <div
                                   className={styles.workspaceHeaderActions}
@@ -3525,9 +3611,7 @@ export function WebShellSidebar({
                                         onClick={(event) => {
                                           event.preventDefault();
                                           event.stopPropagation();
-                                          handleNewSession(
-                                            ws.primary ? undefined : ws.cwd,
-                                          );
+                                          handleNewSession(wsCwd);
                                         }}
                                       >
                                         <SquarePenIcon
@@ -3733,6 +3817,7 @@ export function WebShellSidebar({
         <AddWorkspaceDialog
           onClose={() => setShowAddWorkspaceDialog(false)}
           onAdd={handleAddWorkspace}
+          onSuggest={handleSuggestWorkspacePaths}
         />
       )}
     </>

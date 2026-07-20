@@ -36,7 +36,36 @@ const SERVE_PRE_LISTEN_ROOTS = [
   },
 ];
 
+const ACP_RUNTIME_ROOT = {
+  label: 'ACP agent runtime',
+  suffixes: [
+    'packages/cli/src/acp-integration/acpAgent.ts',
+    'packages/cli/dist/src/acp-integration/acpAgent.js',
+  ],
+};
+
 const FORBIDDEN_SOURCE_INPUTS = [
+  {
+    label: 'Gemini runtime',
+    suffixes: [
+      'packages/cli/src/gemini.tsx',
+      'packages/cli/dist/src/gemini.js',
+    ],
+  },
+  {
+    label: 'ACP agent runtime',
+    suffixes: [
+      'packages/cli/src/acp-integration/acpAgent.ts',
+      'packages/cli/dist/src/acp-integration/acpAgent.js',
+    ],
+  },
+  {
+    label: 'ACP startup profiler',
+    suffixes: [
+      'packages/cli/src/utils/acp-startup-profiler.ts',
+      'packages/cli/dist/src/utils/acp-startup-profiler.js',
+    ],
+  },
   {
     label: 'Serve ACP compatibility shim',
     suffixes: [
@@ -93,6 +122,13 @@ const FORBIDDEN_VENDOR_PACKAGES = [
   { label: 'chokidar vendor package', packageName: 'chokidar' },
   { label: '@iarna/toml vendor package', packageName: '@iarna/toml' },
   { label: 'fzf vendor package', packageName: 'fzf' },
+];
+
+const FORBIDDEN_ACP_UI_PACKAGES = [
+  { label: 'Ink TUI runtime', packageName: 'ink' },
+  { label: 'React runtime', packageName: 'react' },
+  { label: 'React reconciler runtime', packageName: 'react-reconciler' },
+  { label: 'Yoga layout runtime', packageName: 'yoga-layout' },
 ];
 
 export function normalizeMetafilePath(filePath) {
@@ -198,6 +234,59 @@ function buildImportPath(entryOutputs, outputPath, parent) {
   return reversed.reverse();
 }
 
+export function findAcpImportBoundaryOffenders(metafile) {
+  const outputs = normalizeOutputs(metafile);
+  let entryOutput;
+
+  for (const [outputPath, output] of outputs) {
+    const inputs = Object.keys(output.inputs ?? {});
+    if (
+      inputs.some((input) =>
+        inputMatchesAnySuffix(input, ACP_RUNTIME_ROOT.suffixes),
+      )
+    ) {
+      entryOutput = outputPath;
+      break;
+    }
+  }
+
+  if (!entryOutput) {
+    throw new Error(
+      `Could not find bundled output for ${ACP_RUNTIME_ROOT.label} ` +
+        `(${ACP_RUNTIME_ROOT.suffixes.join(' or ')}).\n` +
+        `Run \`${METAFILE_BUILD_COMMAND}\` to produce the metafile.`,
+    );
+  }
+
+  const entryOutputs = [entryOutput];
+  const { closure, parent } = collectStaticClosure(outputs, entryOutputs);
+  const offenders = [];
+  const seen = new Set();
+
+  for (const outputPath of closure) {
+    const output = outputs.get(outputPath);
+    for (const input of Object.keys(output?.inputs ?? {})) {
+      const match = FORBIDDEN_ACP_UI_PACKAGES.find(({ packageName }) =>
+        inputMatchesPackage(input, packageName),
+      );
+      if (!match) continue;
+      const key = `${match.label}\0${outputPath}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      offenders.push({
+        label: match.label,
+        matchedInput: normalizeMetafilePath(input),
+        outputPath,
+        bytes: output?.bytes ?? 0,
+        importPath: buildImportPath(entryOutputs, outputPath, parent),
+      });
+    }
+  }
+
+  return offenders;
+}
+
 export function findServeFastPathBundleOffenders(metafile) {
   const outputs = normalizeOutputs(metafile);
   const entryOutputs = findServePreListenRootOutputs(outputs);
@@ -288,19 +377,54 @@ export function checkServeFastPathBundle({
   return { ok: offenders.length === 0, offenders };
 }
 
+export function checkAcpImportBoundary({
+  metafilePath = DEFAULT_METAFILE_PATH,
+} = {}) {
+  if (!existsSync(metafilePath)) {
+    throw new Error(
+      `Missing esbuild metafile at ${metafilePath}. ` +
+        `Run \`${METAFILE_BUILD_COMMAND}\` to produce it.`,
+    );
+  }
+
+  let metafile;
+  try {
+    metafile = JSON.parse(readFileSync(metafilePath, 'utf8'));
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Invalid esbuild metafile at ${metafilePath}: ${reason}. ` +
+        `Run \`${METAFILE_BUILD_COMMAND}\` to regenerate it.`,
+    );
+  }
+
+  const offenders = findAcpImportBoundaryOffenders(metafile);
+  return { ok: offenders.length === 0, offenders };
+}
+
 function main() {
   try {
-    const result = checkServeFastPathBundle();
-    if (result.ok) {
-      console.log('Serve fast-path bundle closure check passed.');
-      return;
+    const serveResult = checkServeFastPathBundle();
+    if (!serveResult.ok) {
+      console.error(
+        'Serve fast-path bundle closure includes pre-listen runtime modules:\n' +
+          formatServeFastPathBundleOffenders(serveResult.offenders),
+      );
+      process.exitCode = 1;
     }
 
-    console.error(
-      'Serve fast-path bundle closure includes pre-listen runtime modules:\n' +
-        formatServeFastPathBundleOffenders(result.offenders),
-    );
-    process.exitCode = 1;
+    const acpResult = checkAcpImportBoundary();
+    if (!acpResult.ok) {
+      console.error(
+        'ACP static import closure includes TUI runtime modules:\n' +
+          formatServeFastPathBundleOffenders(acpResult.offenders),
+      );
+      process.exitCode = 1;
+    }
+
+    if (serveResult.ok && acpResult.ok) {
+      console.log('Startup bundle closure checks passed.');
+    }
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;

@@ -113,6 +113,8 @@ export interface DaemonSessionProviderProps {
   maxQueued?: number;
   /** Maximum normalized transcript blocks retained in memory. */
   maxBlocks?: number;
+  /** Latest persisted records requested during an existing-session load. */
+  historyPageSize?: number;
   /** Hide this client's own user prompt echo when the daemon replays events. */
   suppressOwnUserEcho?: boolean;
   /** Attach raw daemon events to normalized transcript blocks for debugging. */
@@ -121,6 +123,8 @@ export interface DaemonSessionProviderProps {
   autoConnect?: boolean;
   /** Reconnect automatically after recoverable daemon/session failures. */
   autoReconnect?: boolean;
+  /** Restart the SSE event stream after each accepted prompt. */
+  restartEventStreamOnPrompt?: boolean;
   /** Initial reconnect delay in milliseconds. */
   reconnectDelayMs?: number;
   /** Maximum reconnect delay in milliseconds after backoff. */
@@ -350,10 +354,13 @@ export interface DaemonSessionActions {
    * `options.approvalMode` seeds the session's approval mode in the create
    * request itself, so the daemon applies it atomically at spawn instead of
    * requiring a follow-up `setApprovalMode` call.
+   *
+   * `options.sourceType` records immutable creator attribution.
    */
   createSession(options?: {
     workspaceCwd?: string;
     approvalMode?: DaemonApprovalMode;
+    sourceType?: string;
   }): Promise<DaemonSession>;
   attachSession(): Promise<void>;
   clearSession(): Promise<void>;

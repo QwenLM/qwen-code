@@ -76,6 +76,25 @@ describe('<MarkdownDisplay />', () => {
       expect(lastFrame()).toMatchSnapshot();
     });
 
+    it('continues gutter numbering for a fence carrying the start-line directive', () => {
+      // A tail produced by splitFencedMarkdown after 16 lines were committed.
+      const text =
+        '```javascript qwen-code:start-line=17\nconst a = 1;\nconst b = 2;\n```'.replace(
+          /\n/g,
+          eol,
+        );
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const frame = lastFrame() ?? '';
+      // Gutter continues at 17/18 instead of restarting at 1/2.
+      expect(frame).toContain('17');
+      expect(frame).toContain('18');
+      // The internal directive lives on the (unrendered) fence line, so it must
+      // never surface on screen.
+      expect(frame).not.toContain('qwen-code');
+    });
+
     it('handles unclosed (pending) code blocks', () => {
       const text = '```typescript\nlet y = 2;'.replace(/\n/g, eol);
       const { lastFrame } = renderWithProviders(

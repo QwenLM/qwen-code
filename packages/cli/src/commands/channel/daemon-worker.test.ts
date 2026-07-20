@@ -6,6 +6,7 @@ const mockLoadChannelsFromExtensions = vi.hoisted(() => vi.fn());
 const mockParseConfiguredChannels = vi.hoisted(() => vi.fn());
 const mockCreateChannel = vi.hoisted(() => vi.fn());
 const mockReadChannelMemory = vi.hoisted(() => vi.fn());
+const mockGetChannelMemoryRevision = vi.hoisted(() => vi.fn());
 const mockListChannelMemoryEntries = vi.hoisted(() => vi.fn());
 const mockAddChannelMemoryEntries = vi.hoisted(() => vi.fn());
 const mockUpdateChannelMemoryEntry = vi.hoisted(() => vi.fn());
@@ -17,6 +18,17 @@ const mockRegisterSessionCleanup = vi.hoisted(() => vi.fn());
 const mockSessionsPath = vi.hoisted(() => vi.fn(() => '/tmp/sessions.json'));
 const mockDaemonSessionRoutesPath = vi.hoisted(() =>
   vi.fn(() => '/tmp/qwen/channels/daemon/workspace-hash/routes.json'),
+);
+const mockDaemonObservedContactsPath = vi.hoisted(() =>
+  vi.fn(
+    () => '/tmp/qwen/channels/daemon/workspace-hash/observed-contacts.json',
+  ),
+);
+const mockObserveContact = vi.hoisted(() => vi.fn());
+const mockObservedContactStore = vi.hoisted(() =>
+  vi.fn(() => ({
+    observe: mockObserveContact,
+  })),
 );
 const mockLoadSettings = vi.hoisted(() =>
   vi.fn((_cwd?: string, _opts?: unknown) => ({
@@ -135,6 +147,7 @@ vi.mock('@qwen-code/acp-bridge/workspacePaths', () => ({
 vi.mock('@qwen-code/qwen-code-core', () => ({
   addChannelMemoryEntries: mockAddChannelMemoryEntries,
   clearChannelMemory: mockClearChannelMemory,
+  getChannelMemoryRevision: mockGetChannelMemoryRevision,
   listChannelMemoryEntries: mockListChannelMemoryEntries,
   readChannelMemory: mockReadChannelMemory,
   removeChannelMemoryEntries: mockRemoveChannelMemoryEntries,
@@ -156,6 +169,7 @@ vi.mock('./proxy.js', () => ({
 
 vi.mock('./runtime.js', () => ({
   createChannel: mockCreateChannel,
+  daemonObservedContactsPath: mockDaemonObservedContactsPath,
   daemonSessionRoutesPath: mockDaemonSessionRoutesPath,
   loadChannelsConfig: mockLoadChannelsConfig,
   loadChannelsFromExtensions: mockLoadChannelsFromExtensions,
@@ -165,6 +179,10 @@ vi.mock('./runtime.js', () => ({
   registerToolCallDispatch: mockRegisterToolCallDispatch,
   selectFirstModel: mockSelectFirstModel,
   sessionsPath: mockSessionsPath,
+}));
+
+vi.mock('./observed-contact-store.js', () => ({
+  ObservedChannelContactStore: mockObservedContactStore,
 }));
 
 vi.mock('@qwen-code/channel-base', () => ({
@@ -304,7 +322,7 @@ function stubProcessSend(send: NodeJS.Process['send'] | undefined): () => void {
 }
 
 describe('createDaemonSessionFactory', () => {
-  it('creates and loads daemon sessions with thread session scope', async () => {
+  it('tags created channel sessions without changing loaded sessions', async () => {
     const sdk = createSdk();
     const factory = createDaemonSessionFactory({
       client: sdk.client,
@@ -325,6 +343,7 @@ describe('createDaemonSessionFactory', () => {
         workspaceCwd: '/workspace',
         modelServiceId: 'qwen-plus',
         sessionScope: 'thread',
+        sourceType: 'channel',
       },
       'qwen-channel-worker',
     );
@@ -364,6 +383,7 @@ describe('createDaemonSessionFactory', () => {
         workspaceCwd: '/workspace',
         approvalMode: 'yolo',
         sessionScope: 'thread',
+        sourceType: 'channel',
       },
       'qwen-channel-worker',
     );
@@ -373,6 +393,44 @@ describe('createDaemonSessionFactory', () => {
       {
         workspaceCwd: '/workspace',
         approvalMode: 'yolo',
+        sessionScope: 'thread',
+      },
+      'qwen-channel-worker',
+    );
+  });
+
+  it('stamps channel sourceId on created sessions only', async () => {
+    const sdk = createSdk();
+    const factory = createDaemonSessionFactory({
+      client: sdk.client,
+      DaemonSessionClient: sdk.DaemonSessionClient,
+      clientId: 'qwen-channel-worker',
+    });
+
+    await factory({ workspaceCwd: '/workspace', sourceId: 'dingtalk-main' });
+    await factory({
+      workspaceCwd: '/workspace',
+      sessionId: 'existing-session',
+      sourceId: 'dingtalk-main',
+    });
+
+    expect(sdk.DaemonSessionClient.createOrAttach).toHaveBeenCalledWith(
+      sdk.client,
+      {
+        workspaceCwd: '/workspace',
+        sessionScope: 'thread',
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      },
+      'qwen-channel-worker',
+    );
+    // The load branch never re-stamps creation attribution: no sourceId in the
+    // load request even when the factory request carried one.
+    expect(sdk.DaemonSessionClient.load).toHaveBeenCalledWith(
+      sdk.client,
+      'existing-session',
+      {
+        workspaceCwd: '/workspace',
         sessionScope: 'thread',
       },
       'qwen-channel-worker',
@@ -640,6 +698,7 @@ describe('runChannelDaemonWorker', () => {
         router: mockSessionRouter.mock.results[0]!.value,
         channelMemory: {
           readChannelMemory: mockReadChannelMemory,
+          getChannelMemoryRevision: mockGetChannelMemoryRevision,
           listChannelMemoryEntries: mockListChannelMemoryEntries,
           addChannelMemoryEntries: mockAddChannelMemoryEntries,
           updateChannelMemoryEntry: mockUpdateChannelMemoryEntry,
@@ -649,8 +708,26 @@ describe('runChannelDaemonWorker', () => {
         memoryIntentClassifier: expect.objectContaining({
           classifyChannelMemoryIntent: expect.any(Function),
         }),
+        observedContacts: {
+          observe: expect.any(Function),
+        },
       }),
     );
+    expect(mockDaemonObservedContactsPath).toHaveBeenCalledWith('/workspace');
+    expect(mockObservedContactStore).toHaveBeenCalledWith(
+      '/tmp/qwen/channels/daemon/workspace-hash/observed-contacts.json',
+    );
+    const channelOptions = mockCreateChannel.mock.calls[0]![3] as {
+      observedContacts: {
+        observe(channelName: string, observation: unknown): unknown;
+      };
+    };
+    const observation = {
+      user: { id: '42', label: 'Ada' },
+      group: { id: 'group-1', label: 'group-1' },
+    };
+    channelOptions.observedContacts.observe('telegram', observation);
+    expect(mockObserveContact).toHaveBeenCalledWith('telegram', observation);
     expect(mockRegisterPermissionRelay).toHaveBeenCalledWith(
       bridgeFacade,
       mockSessionRouter.mock.results[0]!.value,

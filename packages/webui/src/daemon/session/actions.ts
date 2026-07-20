@@ -61,11 +61,15 @@ export interface CreateDaemonSessionActionsArgs {
   getCreateSessionRequest: () => CreateSessionRequest;
   createDetachedSession: (
     workspaceCwd?: string,
-    overrides?: Pick<CreateSessionRequest, 'approvalMode'>,
+    overrides?: Pick<
+      CreateSessionRequest,
+      'approvalMode' | 'sourceType' | 'worktree'
+    >,
   ) => Promise<DaemonSessionClient>;
   getConnection: () => DaemonConnectionState;
   hasSessionActivePrompt: () => boolean;
   resetCurrentSessionActivePrompt: () => void;
+  restartEventStream: (sessionId: string) => void;
   addNotice: AddDaemonSessionNotice;
   setConnection: Dispatch<SetStateAction<DaemonConnectionState>>;
   setPromptStatus: Dispatch<SetStateAction<DaemonPromptStatus>>;
@@ -129,6 +133,7 @@ export function createDaemonSessionActions({
   getConnection,
   hasSessionActivePrompt,
   resetCurrentSessionActivePrompt,
+  restartEventStream,
   addNotice,
   setConnection,
   setPromptStatus,
@@ -320,6 +325,9 @@ export function createDaemonSessionActions({
           promptRequest as Parameters<typeof session.submitPrompt>[0],
           ctrl.signal,
         );
+        if (activePromptsRef.current.get(sessionId)?.controller === ctrl) {
+          restartEventStream(sessionId);
+        }
         // The prompt is admitted to the session here — signal it before we wait
         // out the (possibly long) turn, so an admission-only caller can proceed.
         options?.onAdmitted?.();
@@ -613,6 +621,8 @@ export function createDaemonSessionActions({
     async createSession(options?: {
       workspaceCwd?: string;
       approvalMode?: DaemonApprovalMode;
+      sourceType?: string;
+      worktree?: { slug?: string };
     }) {
       try {
         manualSessionClearRef.current = false;
@@ -622,10 +632,17 @@ export function createDaemonSessionActions({
         // `setApprovalMode` round-trip. Approval mode is fail-closed at spawn:
         // an application failure aborts creation (this call rejects) rather than
         // leaving the session in a different mode than the caller requested.
-        const approvalOverride =
-          options?.approvalMode !== undefined
+        const requestOverrides = {
+          ...(options?.approvalMode !== undefined
             ? { approvalMode: options.approvalMode }
-            : {};
+            : {}),
+          ...(options?.sourceType !== undefined
+            ? { sourceType: options.sourceType }
+            : {}),
+          ...(options?.worktree !== undefined
+            ? { worktree: options.worktree }
+            : {}),
+        };
         const session = sessionRef.current;
         const activeSession =
           session && getConnection().sessionId === session.sessionId
@@ -638,7 +655,7 @@ export function createDaemonSessionActions({
               ...(options?.workspaceCwd !== undefined
                 ? { workspaceCwd: options.workspaceCwd }
                 : {}),
-              ...approvalOverride,
+              ...requestOverrides,
             }),
             'Create session timed out',
           );
@@ -647,7 +664,7 @@ export function createDaemonSessionActions({
         }
 
         const nextSession = await withActionTimeout(
-          createDetachedSession(options?.workspaceCwd, approvalOverride),
+          createDetachedSession(options?.workspaceCwd, requestOverrides),
           'Create session timed out',
         );
         if (manualSessionClearRef.current) {

@@ -34,6 +34,7 @@ describe('token plan provider', () => {
       'qwen3.7-plus',
       'qwen3.6-plus',
       'qwen3.7-max',
+      'qwen3.8-max-preview',
       'qwen3.6-flash',
       'deepseek-v4-pro',
       'deepseek-v4-flash',
@@ -66,6 +67,10 @@ describe('token plan provider', () => {
     expect(
       template.find((model) => model.id === 'qwen3.6-plus')?.generationConfig
         ?.modalities,
+    ).toEqual({ image: true, video: true });
+    expect(
+      template.find((model) => model.id === 'qwen3.8-max-preview')
+        ?.generationConfig?.modalities,
     ).toEqual({ image: true, video: true });
     expect(
       template.find((model) => model.id === 'kimi-k2.5')?.generationConfig

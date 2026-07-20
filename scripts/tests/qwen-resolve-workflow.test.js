@@ -241,8 +241,9 @@ describe('qwen resolve workflow', () => {
     const fallbackStep = step(reviewJob, 'Post fallback comment on failure');
 
     expect(runStep).toContain('failure_kind=$kind');
+    expect(runStep).toContain("OUTCOME='timeout'");
     expect(runStep).toContain(
-      'fail "Qwen review timed out after ${QWEN_TIMEOUT} minutes." 1 "timeout"',
+      'REASON="Qwen review timed out after ${attempt_timeout} seconds (of the ${QWEN_TIMEOUT}-minute budget)."',
     );
     expect(runStep).toContain('[ "$qwen_status" -eq 137 ]');
     expect(fallbackStep).toContain('FAILURE_KIND:');

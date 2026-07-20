@@ -55,6 +55,7 @@ interface DingTalkMessageData {
   msgtype?: string;
   conversationType?: string;
   conversationId?: string;
+  conversationTitle?: string;
   sessionWebhook?: string;
   senderId?: string;
   senderStaffId?: string;
@@ -1231,6 +1232,10 @@ export class DingtalkChannel extends ChannelBase {
         typeof data.conversationId === 'string'
           ? data.conversationId
           : undefined;
+      const conversationTitle =
+        typeof data.conversationTitle === 'string'
+          ? data.conversationTitle
+          : undefined;
       const isMentioned = Boolean(data.isInAtList);
       const senderNick =
         typeof data.senderNick === 'string' ? data.senderNick : undefined;
@@ -1310,6 +1315,9 @@ export class DingtalkChannel extends ChannelBase {
         senderId,
         senderName,
         chatId,
+        ...(isGroup && conversationTitle
+          ? { chatName: conversationTitle }
+          : {}),
         text: envelopeText,
         isGroup,
         isMentioned,

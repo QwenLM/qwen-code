@@ -25,6 +25,9 @@ const sdkMocks = vi.hoisted(() => {
   const workspaceMcpResources = vi.fn();
   const restartMcpServer = vi.fn();
   const workspaceSkills = vi.fn();
+  const setWorkspaceSkillEnabled = vi.fn();
+  const installWorkspaceSkill = vi.fn();
+  const deleteWorkspaceSkill = vi.fn();
   const workspaceAcpStatus = vi.fn();
   const workspaceAcpPreheat = vi.fn();
   const workspaceTools = vi.fn();
@@ -51,6 +54,9 @@ const sdkMocks = vi.hoisted(() => {
     workspaceMcpResources = workspaceMcpResources;
     restartMcpServer = restartMcpServer;
     workspaceSkills = workspaceSkills;
+    setWorkspaceSkillEnabled = setWorkspaceSkillEnabled;
+    installWorkspaceSkill = installWorkspaceSkill;
+    deleteWorkspaceSkill = deleteWorkspaceSkill;
     workspaceAcpStatus = workspaceAcpStatus;
     workspaceAcpPreheat = workspaceAcpPreheat;
     workspaceTools = workspaceTools;
@@ -78,6 +84,9 @@ const sdkMocks = vi.hoisted(() => {
     workspaceMcpResources,
     restartMcpServer,
     workspaceSkills,
+    setWorkspaceSkillEnabled,
+    installWorkspaceSkill,
+    deleteWorkspaceSkill,
     workspaceAcpStatus,
     workspaceAcpPreheat,
     workspaceTools,
@@ -127,6 +136,27 @@ const sdkMocks = vi.hoisted(() => {
         workspaceCwd: '/mock-workspace',
         initialized: true,
         skills: [],
+      });
+      setWorkspaceSkillEnabled.mockReset();
+      setWorkspaceSkillEnabled.mockResolvedValue({
+        skillName: 'review',
+        enabled: false,
+        changed: true,
+        activation: 'applied',
+        sessionsRefreshed: 1,
+        sessionsFailed: 0,
+      });
+      installWorkspaceSkill.mockReset();
+      installWorkspaceSkill.mockResolvedValue({
+        skillName: 'review',
+        scope: 'workspace',
+        installedPath: '/mock-workspace/.qwen/skills/review/SKILL.md',
+      });
+      deleteWorkspaceSkill.mockReset();
+      deleteWorkspaceSkill.mockResolvedValue({
+        skillName: 'review',
+        scope: 'workspace',
+        deleted: true,
       });
       workspaceAcpStatus.mockReset();
       workspaceAcpStatus.mockResolvedValue({ channelLive: true });
@@ -352,8 +382,17 @@ describe('DaemonWorkspaceProvider', () => {
     expect(typeof actions?.loadMcpStatus).toBe('function');
     expect(typeof actions?.reloadMcp).toBe('function');
     expect(typeof actions?.loadSkillsStatus).toBe('function');
+    expect(typeof actions?.setWorkspaceSkillEnabled).toBe('function');
+    expect(typeof actions?.installWorkspaceSkill).toBe('function');
+    expect(typeof actions?.deleteWorkspaceSkill).toBe('function');
     expect(typeof actions?.listAgents).toBe('function');
     expect(typeof actions?.globWorkspace).toBe('function');
+
+    await actions?.setWorkspaceSkillEnabled('review', false);
+    expect(sdkMocks.setWorkspaceSkillEnabled).toHaveBeenCalledWith(
+      'review',
+      false,
+    );
   });
 
   it('useOptionalDaemonWorkspace returns undefined without provider', async () => {
@@ -732,6 +771,7 @@ describe('DaemonWorkspaceProvider', () => {
         group: 'all',
         cursor: 'cursor-1',
         pageSize: 10,
+        sourceType: 'default',
       });
       return null;
     }
@@ -748,6 +788,7 @@ describe('DaemonWorkspaceProvider', () => {
         cursor: 'cursor-1',
         view: 'organized',
         group: 'all',
+        sourceType: 'default',
       },
     );
     expect(result?.data).toEqual([session]);

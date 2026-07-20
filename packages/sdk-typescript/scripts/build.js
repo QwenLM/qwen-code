@@ -53,14 +53,21 @@ const rootDir = join(__dirname, '..');
 // Bumped from 151KB to 154KB for extension management v2 catalog, activation,
 // mutation, and operation-polling APIs (~2.3KB).
 // Bumped from 154KB to 155KB after merging workspace skill-toggle APIs.
-// Bumped from 155KB to 160KB to accommodate recent growth and reduce churn
+// Bumped from 155KB to 160KB to accommodate recent growth and reduce churn,
 // from repeated 1KB bumps as new daemon APIs are added.
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 160 * 1024;
+// Bumped from 160KB to 161KB after merging upstream main.
+// Bumped from 161KB to 165KB for the Web Shell git-diff REST helpers
+// (workspaceGitDiff / workspaceGitDiffFile on both client classes) and the
+// ChatRecord transcript projection in the default UI API.
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 165 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
 // it's larger than the default barrel — but still budgeted so a future PR can't
 // silently bloat what browser consumers (agent-web) pull in. Current size ~29KB.
 const MAX_TRANSPORTS_BROWSER_BUNDLE_BYTES = 48 * 1024;
+// Measured with `npm run build && wc -c dist/daemon/transcript.js`.
+// Baseline for the initial projection implementation is ~66 KiB.
+const MAX_TRANSCRIPT_BROWSER_BUNDLE_BYTES = 192 * 1024;
 
 rmSync(join(rootDir, 'dist'), { recursive: true, force: true });
 mkdirSync(join(rootDir, 'dist'), { recursive: true });
@@ -73,6 +80,13 @@ execSync('tsc --project tsconfig.build.json', {
 try {
   execSync(
     'npx dts-bundle-generator --project tsconfig.build.json -o dist/index.d.ts src/index.ts',
+    {
+      stdio: 'inherit',
+      cwd: rootDir,
+    },
+  );
+  execSync(
+    'npx dts-bundle-generator --project tsconfig.build.json -o dist/daemon/transcript.d.ts src/daemon/transcript.ts',
     {
       stdio: 'inherit',
       cwd: rootDir,
@@ -92,6 +106,8 @@ try {
     error.message,
   );
 }
+
+assertTranscriptDeclaration(join(rootDir, 'dist', 'daemon', 'transcript.d.ts'));
 
 await esbuild.build({
   entryPoints: [join(rootDir, 'src', 'index.ts')],
@@ -187,6 +203,42 @@ await esbuild.build({
   treeShaking: true,
 });
 
+await esbuild.build({
+  entryPoints: [join(rootDir, 'src', 'daemon', 'transcript.ts')],
+  bundle: true,
+  format: 'esm',
+  platform: 'browser',
+  target: 'es2022',
+  outfile: join(rootDir, 'dist', 'daemon', 'transcript.js'),
+  sourcemap: false,
+  minify: true,
+  minifyWhitespace: true,
+  minifyIdentifiers: true,
+  minifySyntax: true,
+  legalComments: 'none',
+  keepNames: false,
+  treeShaking: true,
+});
+
+assertTranscriptBundle(join(rootDir, 'dist', 'daemon', 'transcript.js'));
+
+await esbuild.build({
+  entryPoints: [join(rootDir, 'src', 'daemon', 'transcript.ts')],
+  bundle: true,
+  format: 'cjs',
+  platform: 'node',
+  target: 'node22',
+  outfile: join(rootDir, 'dist', 'daemon', 'transcript.cjs'),
+  sourcemap: false,
+  minify: true,
+  minifyWhitespace: true,
+  minifyIdentifiers: true,
+  minifySyntax: true,
+  legalComments: 'none',
+  keepNames: false,
+  treeShaking: true,
+});
+
 assertTransportsBundle(join(rootDir, 'dist', 'daemon', 'transports.js'));
 
 await esbuild.build({
@@ -251,6 +303,31 @@ function assertTransportsBundle(filePath) {
     );
   }
   assertNoNodeBuiltins(filePath, 'Browser daemon transports bundle');
+}
+
+function assertTranscriptBundle(filePath) {
+  const size = statSync(filePath).size;
+  if (size > MAX_TRANSCRIPT_BROWSER_BUNDLE_BYTES) {
+    throw new Error(
+      `Browser daemon transcript bundle is ${size} bytes; expected <= ${MAX_TRANSCRIPT_BROWSER_BUNDLE_BYTES}`,
+    );
+  }
+  assertNoNodeBuiltins(filePath, 'Browser daemon transcript bundle');
+}
+
+function assertTranscriptDeclaration(filePath) {
+  const contents = readFileSync(filePath, 'utf8');
+  const forbiddenReferences = [
+    '@qwen-code/qwen-code-core',
+    '@qwen-code/acp-bridge',
+    'reference types="node"',
+  ];
+  const found = forbiddenReferences.find((token) => contents.includes(token));
+  if (found) {
+    throw new Error(
+      `Daemon transcript declaration leaks an internal dependency: ${found}`,
+    );
+  }
 }
 
 // Node-builtin guard, shared by the budget-checked default daemon barrel and

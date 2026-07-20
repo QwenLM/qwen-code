@@ -27,6 +27,7 @@ import type {
 import { useI18n } from '../../i18n';
 import { getComposerTagIconUrl } from '../../utils/composerTag';
 import { cssUrlValue } from '../../utils/cssUrlVar';
+import { workspaceBasename } from '../../utils/workspace';
 import { DialogShell } from './DialogShell';
 import {
   buildCron,
@@ -89,14 +90,6 @@ interface ScheduledTasksDialogProps {
   /** Forces all task operations through this workspace's route. */
   lockedWorkspace?: DaemonWorkspaceCapability;
   onError: (error: unknown, fallback: string) => void;
-}
-
-/** A short, human-readable label for a workspace card badge / picker option:
- * the cwd's last path segment, marked when it's the primary. */
-function workspaceLabel(cwd: string, primary: boolean, t: TranslateFn): string {
-  const segments = cwd.split(/[\\/]/).filter(Boolean);
-  const base = segments[segments.length - 1] || cwd;
-  return primary ? `${base} ${t('scheduledTasks.workspacePrimaryTag')}` : base;
 }
 
 /** A stable per-card identity. Task ids are unique only WITHIN a workspace's
@@ -1147,7 +1140,7 @@ export function ScheduledTasksDialog({
                 >
                   {operableWorkspaces.map((ws) => (
                     <option key={ws.id} value={workspaceActionId(ws) ?? ''}>
-                      {workspaceLabel(ws.cwd, ws.primary, t)}
+                      {workspaceBasename(ws.cwd)}
                     </option>
                   ))}
                 </select>
@@ -1462,7 +1455,7 @@ export function ScheduledTasksDialog({
                     <span className={styles.workspaceIcon} aria-hidden="true">
                       ⌂
                     </span>
-                    {workspaceLabel(task.workspaceCwd, !task.workspaceId, t)}
+                    {workspaceBasename(task.workspaceCwd)}
                   </span>
                 )}
                 <span className={styles.schedulePill}>

@@ -3,6 +3,7 @@ import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import {
   addChannelMemoryEntries,
   clearChannelMemory,
+  getChannelMemoryRevision,
   listChannelMemoryEntries,
   readChannelMemory,
   removeChannelMemoryEntries,
@@ -51,6 +52,7 @@ import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { resolveProxyUrl } from './proxy.js';
 import {
   createChannel,
+  daemonObservedContactsPath,
   daemonSessionRoutesPath,
   loadChannelsConfig,
   loadChannelsFromExtensions,
@@ -62,6 +64,7 @@ import {
   type ParsedChannel,
 } from './runtime.js';
 import { BridgeChannelMemoryIntentClassifier } from './memory-intent-classifier.js';
+import { ObservedChannelContactStore } from './observed-contact-store.js';
 
 const SESSION_SHELL_COMMAND_FEATURE = 'session_shell_command';
 const MAX_ACTIVE_WEBHOOK_TASKS = 16;
@@ -71,7 +74,7 @@ interface DaemonCapabilitiesLike {
   features: string[];
   workspaceCwd?: string;
   /**
-   * Registered runtimes on a multi-workspace daemon (Phase 2a `/capabilities`).
+   * Registered runtimes advertised by a multi-workspace daemon.
    * Absent on legacy single-workspace daemons, where `workspaceCwd` is used.
    */
   workspaces?: Array<{
@@ -94,6 +97,8 @@ interface DaemonSessionClientStaticLike {
       modelServiceId?: string;
       sessionScope: 'thread';
       approvalMode?: string;
+      sourceType?: string;
+      sourceId?: string;
     },
     clientId?: string,
   ): Promise<DaemonChannelSessionClient>;
@@ -176,7 +181,16 @@ export function createDaemonSessionFactory({
     }
     return await DaemonSessionClient.createOrAttach(
       client,
-      daemonReq,
+      {
+        ...daemonReq,
+        sourceType: 'channel',
+        // sourceId = channel instance name (e.g. feishu-main): distinguishes
+        // channel instances on the daemon data plane; the channel kind
+        // (dingtalk/feishu) is derivable from the name via the channel config.
+        // The load branch above deliberately omits it: loading never re-stamps
+        // creation attribution.
+        ...(req.sourceId ? { sourceId: req.sourceId } : {}),
+      },
       clientId,
     );
   };
@@ -409,6 +423,9 @@ export async function runChannelDaemonWorker(
   );
   validateChannelWorkspaces(parsed, daemonWorkspace);
   const modelServiceId = selectFirstModel(parsed, 'Daemon worker');
+  const observedContacts = new ObservedChannelContactStore(
+    daemonObservedContactsPath(daemonWorkspace),
+  );
 
   const bridge = new DaemonChannelBridge({
     cwd: daemonWorkspace,
@@ -477,6 +494,7 @@ export async function runChannelDaemonWorker(
             router: createdRouter,
             channelMemory: {
               readChannelMemory,
+              getChannelMemoryRevision,
               listChannelMemoryEntries,
               addChannelMemoryEntries,
               updateChannelMemoryEntry,
@@ -487,6 +505,11 @@ export async function runChannelDaemonWorker(
               bridgeFacade,
               config.cwd,
             ),
+            observedContacts: {
+              observe: (channelName, observation) => {
+                observedContacts.observe(channelName, observation);
+              },
+            },
           }),
           startupSignal,
         ),

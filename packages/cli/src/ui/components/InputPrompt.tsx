@@ -61,6 +61,7 @@ import {
 import {
   isLiveAgentPanelVisibleEntry,
   LIVE_AGENT_PANEL_MAX_ROWS,
+  getLiveAgentPanelVpMaxRows,
 } from './background-view/liveAgentPanelVisibility.js';
 import { panelDisplayOrder } from './background-view/agent-forest.js';
 import { FEEDBACK_DIALOG_KEYS } from '../FeedbackDialog.js';
@@ -165,7 +166,7 @@ export function expandPendingPastePlaceholders(
 
 export interface InputPromptProps {
   buffer: TextBuffer;
-  onSubmit: (value: string) => void;
+  onSubmit: (value: string, options?: { deferUntilIdle?: boolean }) => void;
   userMessages: readonly string[];
   onClearScreen: () => void;
   config: Config;
@@ -271,12 +272,18 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   // `livePanelSelectedIndex - 1` indexes the same agent the user sees
   // highlighted. Filtering alone (snapshot order, newest-first, unsliced)
   // opened the wrong agent's detail on Enter.
+  // Window by the same cap the panel actually renders (VP mode uses a
+  // height-aware cap via getLiveAgentPanelVpMaxRows in DefaultAppLayout)
+  // so the keyboard selection can't address a row that is scrolled off.
+  const liveAgentPanelMaxRows = settings.merged.ui?.useTerminalBuffer
+    ? getLiveAgentPanelVpMaxRows(uiState.terminalHeight)
+    : LIVE_AGENT_PANEL_MAX_ROWS;
   const getVisibleBgAgents = useCallback(
     () =>
       panelDisplayOrder(
         bgEntries.filter((e) => isLiveAgentPanelVisibleEntry(e, Date.now())),
-      ).slice(-LIVE_AGENT_PANEL_MAX_ROWS),
-    [bgEntries],
+      ).slice(-liveAgentPanelMaxRows),
+    [bgEntries, liveAgentPanelMaxRows],
   );
   const hasActiveToolConfirmation = useMemo(
     () =>
@@ -585,7 +592,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const resetHistoryNavRef = useRef<() => void>(() => {});
 
   const handleSubmitAndClear = useCallback(
-    (submittedValue: string) => {
+    (submittedValue: string, deferUntilIdle = false) => {
       exportCompletion.reset();
       // Expand any large paste placeholders to their full content before submitting
       let finalValue = submittedValue;
@@ -610,7 +617,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // if onSubmit triggers a re-render while the buffer still holds the old value.
       buffer.setText('');
       clearPromptStash(targetDir);
-      onSubmit(finalValue);
+      if (deferUntilIdle) {
+        onSubmit(finalValue, { deferUntilIdle: true });
+      } else {
+        onSubmit(finalValue);
+      }
 
       // Reset history navigation so the next Up-arrow starts from the newest
       // entry rather than advancing from whatever index the user picked.
@@ -1330,7 +1341,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       };
 
       // If the command is a perfect match, pressing enter should execute it.
-      if (completion.isPerfectMatch && keyMatchers[Command.RETURN](key)) {
+      // Use SUBMIT (which requires shift: false) instead of RETURN to avoid
+      // intercepting Shift+Enter as submit when the user wants a newline.
+      if (completion.isPerfectMatch && keyMatchers[Command.SUBMIT](key)) {
         if (
           showCompletionSuggestions &&
           exportCompletion.navigatedRef.current &&
@@ -1640,6 +1653,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           if (nextCommand !== null) buffer.setText(nextCommand);
           return true;
         }
+      }
+
+      if (keyMatchers[Command.QUEUE_MESSAGE](key)) {
+        if (buffer.text.trim()) {
+          handleSubmitAndClear(buffer.text, true);
+        }
+        return true;
       }
 
       if (keyMatchers[Command.SUBMIT](key)) {

@@ -70,6 +70,8 @@ import {
   type RosterPlan,
 } from './roster.js';
 import { BRIEFS } from './agent-briefs.js';
+import { chunkIdsProblem } from './diff-plan.js';
+import { shellQuotePath } from './shell-quote.js';
 
 export interface CoverageFromTranscripts {
   /** True only when every chunk was reviewed by an agent that could and did. */
@@ -117,6 +119,12 @@ export interface CoverageFromTranscripts {
    */
   missingRoles: string[];
   /**
+   * The exact `agent-prompt` selector that rebuilds each missing brief, in the
+   * same order as its `missingRoles` entries would list them per-role. For
+   * stderr, never for the body: a human-facing label does not name its role id.
+   */
+  missingRoleSelectors: string[];
+  /**
    * Required agents that never opened the brief they were pointed at.
    *
    * The launch prompt names the brief rather than containing it — a 4 652-character
@@ -132,6 +140,17 @@ export interface CoverageFromTranscripts {
   uncoverableChunks: number[];
   /** Chunk ids a working agent actually reviewed. */
   coveredChunks: number[];
+  /**
+   * The pre-formed disclosure entries (`rewrittenPrompts`, `missingRoles`,
+   * `unreadBriefs`), as `{subject, reason}` pairs in push order — for
+   * `compose-review`, which dedupes caller echoes by subject and groups
+   * same-reason subjects into one sentence. The prose twins above remain for
+   * the stderr formatting; REPARSING them was the bug: a reason is free-form
+   * text (labels carry ` — ` for an invariant's file, error interpolations
+   * can carry anything), so a subject/reason boundary recovered from rendered
+   * prose garbles exactly the entries it matters for.
+   */
+  disclosures: Array<{ subject: string; reason: string }>;
 }
 
 /** The plan, as far as coverage needs it. The roster reads more of it — see RosterPlan. */
@@ -151,14 +170,9 @@ function readPlan(path: string): { plan: Plan; mtimeMs: number } {
   // Chunk ids are matched against what the launch prompts say and rendered into
   // the review body. A non-integer or duplicate id would silently never match,
   // and the chunk it stands for would be reported as unreviewed forever.
-  const ids = plan.chunks.map((c) => c?.id);
-  if (ids.some((id) => !Number.isSafeInteger(id) || (id as number) < 1)) {
-    throw new Error(
-      `coverage: ${path} has a chunk with no positive integer id`,
-    );
-  }
-  if (new Set(ids).size !== ids.length) {
-    throw new Error(`coverage: ${path} has duplicate chunk ids`);
+  const problem = chunkIdsProblem(plan.chunks.map((c) => c?.id));
+  if (problem) {
+    throw new Error(`coverage: ${path} has ${problem}`);
   }
   return { plan, mtimeMs: statSync(path).mtimeMs };
 }
@@ -233,19 +247,21 @@ function merge(ranges: Array<[number, number]>): Array<[number, number]> {
 
 const UNCOVERABLE_RE = /^\s*Uncoverable:\s*chunk\s+(\d+)\b/im;
 
+/** The exact rebuild flags for one required agent — operator-facing (stderr). */
+function selectorOf(req: RequiredAgent): string {
+  if (req.role === 'chunk') return `--chunk ${req.chunk}`;
+  // The file path is copy-pasted into a shell like the plan path is — a heavy
+  // file under a space-bearing directory would split the selector unquoted.
+  return req.file
+    ? `--role ${req.role} --file ${shellQuotePath(req.file)}`
+    : `--role ${req.role}`;
+}
+
 /** A required agent, named the way a reader has to act on it. */
 function roleLabel(req: RequiredAgent): string {
   if (req.role === 'chunk') return `chunk ${req.chunk}`;
   const base = BRIEFS[req.role].label;
   return req.file ? `${base} — ${req.file}` : base;
-}
-
-/** The exact call that would have built it. An error a reader can act on names the fix. */
-function promptFlags(req: RequiredAgent): string {
-  if (req.role === 'chunk') return `--chunk ${req.chunk}`;
-  return req.file
-    ? `--role ${req.role} --file ${req.file}`
-    : `--role ${req.role}`;
 }
 
 /** Something a reader can act on. `agentName` is `general-purpose` for all of them. */
@@ -280,8 +296,74 @@ export function coverageFromTranscripts(
   const idleAgents: string[] = [];
   const unopenedAgents: string[] = [];
   const rewrittenPrompts: string[] = [];
+  const disclosures: Array<{ subject: string; reason: string }> = [];
+  // The one source for both registers: the structural entry feeds the posted
+  // body (compose-review), and the returned prose feeds the stderr arrays —
+  // maintained as a pair, an edit to one and not the other would silently
+  // diverge what the operator reads from what the author was told.
+  const disclose = (subject: string, reason: string): string => {
+    disclosures.push({ subject, reason });
+    return `${subject} — ${reason}`;
+  };
   const covered = new Set<number>();
   const uncoverable = new Set<number>();
+
+  // Hoisted from the roster section below: when NO role was briefed at all, the
+  // roster collapses to one line covering the whole run, and repeating "none was
+  // built" once per chunk transcript would put N more copies of the same fact
+  // into the posted body, right next to the line that already states it.
+  const rosterForRun = requiredAgents(plan as unknown as RosterPlan);
+  // ONE predicate for "was this prompt built", everywhere. A partial write can
+  // leave a zero-byte record, and the Step 4/5 classifier already reads that as
+  // not-built — a `Map.has()` here would read the same file as built, so an
+  // all-empty record dir would dodge the single collapsed diagnosis and surface
+  // as a pile of false built-but-not-launched failures instead.
+  const builtOf = (key: string): string | undefined => {
+    const b = built.get(key);
+    return b !== undefined && b.trim() !== '' ? b : undefined;
+  };
+  const nothingBuiltAtAll =
+    rosterForRun.length > 1 && rosterForRun.every((r) => !builtOf(r.key));
+
+  // A failed attempt superseded by a compliant one must stop counting, or the
+  // report can never converge: the relaunch its own FIX line prescribes adds a
+  // SECOND transcript, the first stays in idle/blind/unopened/rewritten, `ok`
+  // stays false, and the same FIX prints forever. A record's failure flags are
+  // suppressed when ANOTHER record satisfies the same target — same chunk served
+  // by a verbatim launch that opened the diff, or same built prompt delivered
+  // verbatim to an agent that opened its brief.
+  const chunkSatisfied = (c: number, self: AgentRecord): boolean => {
+    const b = builtOf(`chunk-${c}`);
+    if (b === undefined) return false;
+    return records.some(
+      (r) =>
+        r !== self &&
+        assignedChunk(r) === c &&
+        wasDeliveredVerbatim(r.launchPrompt, b) &&
+        r.diffToolCalls > 0,
+    );
+  };
+  const keySatisfied = (rec: AgentRecord): boolean => {
+    for (const key of built.keys()) {
+      const b = builtOf(key);
+      if (b === undefined) continue;
+      if (!wasDeliveredVerbatim(rec.launchPrompt, b)) continue;
+      const needle = JSON.stringify(briefPath(planPath, key));
+      if (
+        records.some(
+          (r) =>
+            r !== rec &&
+            wasDeliveredVerbatim(r.launchPrompt, b) &&
+            r.successfulCallArgs.some((a) => a.includes(needle)),
+        )
+      ) {
+        return true;
+      }
+    }
+    return false;
+  };
+  const superseded = (rec: AgentRecord, chunk: number | null): boolean =>
+    chunk !== null ? chunkSatisfied(chunk, rec) : keySatisfied(rec);
 
   for (const rec of records) {
     const chunk = assignedChunk(rec);
@@ -293,7 +375,7 @@ export function coverageFromTranscripts(
     // handed it.
     const given = wasGivenTheDiff(rec, plan.diffPathAbsolute);
     if (chunk !== null && !given) {
-      blindAgents.push(name);
+      if (!superseded(rec, chunk)) blindAgents.push(name);
       continue; // Its silence proves nothing about the diff; the prompt failed.
     }
 
@@ -304,7 +386,7 @@ export function coverageFromTranscripts(
     // is too long. A zero-tool-call agent that merely copied the template must not
     // be credited with a disclosed gap — that is the whiff wearing a costume.
     if (rec.successfulToolCalls === 0) {
-      idleAgents.push(name);
+      if (!superseded(rec, chunk)) idleAgents.push(name);
       continue;
     }
 
@@ -318,25 +400,49 @@ export function coverageFromTranscripts(
     // The prompt the CLI built for this chunk, against the prompt the harness
     // recorded the agent being launched with. Nothing else in the run can see the
     // difference: a paraphrase keeps the diff path, so every other check passes.
+    let rewrittenThisRecord = false;
     if (chunk !== null) {
-      const b = built.get(`chunk-${chunk}`);
+      const b = builtOf(`chunk-${chunk}`);
       if (b === undefined) {
-        rewrittenPrompts.push(
-          `${name} — no prompt was built for it (\`agent-prompt\` never ran for this chunk)`,
-        );
+        // No internal command in this label: `compose-review` pushes it into the
+        // posted body as-is, and the PR author cannot run `agent-prompt`. The
+        // rebuild command rides the rewritten-launches remediation line, on stderr.
+        // Suppressed when nothing was built at all — the collapsed roster line
+        // already says so once, for the whole run.
+        rewrittenThisRecord = true;
+        if (!nothingBuiltAtAll && !superseded(rec, chunk)) {
+          rewrittenPrompts.push(
+            disclose(
+              name,
+              'ran on a prompt the run wrote itself (none was built for this ' +
+                'chunk), so the brief with its method and rules never reached it',
+            ),
+          );
+        }
       } else if (!wasDeliveredVerbatim(rec.launchPrompt, b)) {
-        rewrittenPrompts.push(
-          `${name} — launched with a prompt that is not the one the CLI built`,
-        );
+        rewrittenThisRecord = true;
+        if (!superseded(rec, chunk)) {
+          rewrittenPrompts.push(
+            disclose(
+              name,
+              'launched with a prompt that is not the one the CLI built',
+            ),
+          );
+        }
       }
     }
 
     const told = pointedAt(rec.launchPrompt, plan);
 
     // Pointed at lines, and never opened the file they live in. It did work, so it
-    // is not idle. It just did not do *this* work.
+    // is not idle. It just did not do *this* work. Not reported for an agent
+    // already flagged rewritten: the repairs contradict (rebuild the prompt vs.
+    // relaunch the same one), the rebuild subsumes the relaunch, and an operator
+    // handed both for one agent follows whichever came last.
     if (told.length > 0 && rec.diffToolCalls === 0) {
-      unopenedAgents.push(name);
+      if (!rewrittenThisRecord && !superseded(rec, chunk)) {
+        unopenedAgents.push(name);
+      }
       continue;
     }
 
@@ -375,21 +481,129 @@ export function coverageFromTranscripts(
   // caller does not write, and matched against the prompts the CLI recorded itself
   // emitting.
   const missingRoles: string[] = [];
+  // The exact rebuild selector for each missing brief, for stderr: a label like
+  // `Test coverage matrix (whole-diff)` does not tell the operator to pass
+  // `--role test-matrix`, and guessing wrong means a full-roster rerun.
+  const missingRoleSelectors: string[] = [];
   const unreadBriefs: string[] = [];
-  for (const req of requiredAgents(plan as unknown as RosterPlan)) {
-    const b = built.get(req.key);
+  const roster = rosterForRun;
+
+  // A role with no recorded prompt says one thing only: the brief never reached an
+  // agent. It does *not* say nobody reviewed the dimension — an orchestrator that
+  // writes the launch itself gets an agent that runs, reads the diff and reports real
+  // findings, having never seen the severity bar or the finding format the brief
+  // carries. Dogfooded on #7012: this gate reported all twelve roles "never ran" on a
+  // review that posted two Criticals with line numbers. Both readings are bad; they
+  // are not the same bad, and they are not fixed the same way, so the text may not
+  // pick the one it cannot prove.
+  const briefless = roster.filter((r) => !builtOf(r.key));
+
+  // Every role briefless is one failure — the run did not use the prompt builder —
+  // not N. Said once per dimension it becomes N lines that bury the single fact
+  // explaining all of them, and those N lines are what a PR author reads as the
+  // review: on #7012 the whole CHANGES_REQUESTED body was twelve of them, while the
+  // findings that needed acting on sat inline, below the fold.
+  const nobodyBuiltAnything =
+    roster.length > 1 && briefless.length === roster.length;
+  if (nobodyBuiltAnything) {
+    // Phrased to read under the `Not reviewed: ` prefix `compose-review` renders it
+    // with, which is where a PR author meets it.
+    missingRoles.push(
+      disclose(
+        'every dimension',
+        `none of the ${roster.length} required agents is on record as ` +
+          `launched with a prompt this skill built, so this diff was ` +
+          `reviewed, if at all, from prompts the run wrote for itself: no ` +
+          `record shows the severity bar, the finding format or this ` +
+          `project's own rules reaching an agent`,
+      ),
+    );
+  }
+
+  // Injective: one transcript may satisfy ONE roster requirement. Without this,
+  // pasting the whole roster output to a single agent yields one transcript that
+  // verbatim-contains every block, matches every requirement independently, and
+  // certifies an N-agent fan-out with one reader. And injective by MAXIMUM
+  // matching, not greedy claim order: with T1 containing blocks A+B and T2
+  // containing only A, a greedy pass claims T1 for A and reports B missing while
+  // the valid assignment (T2→A, T1→B) exists — a compliant repair permanently
+  // capped by transcript order. Kuhn's augmenting paths, seeded on the edges
+  // where the transcript also opened the requirement's brief, then extended over
+  // all verbatim edges.
+  const buildable = roster.filter((r) => builtOf(r.key) !== undefined);
+  const openedBrief = (rec: AgentRecord, key: string): boolean => {
+    const needle = JSON.stringify(briefPath(planPath, key));
+    return rec.successfulCallArgs.some((a) => a.includes(needle));
+  };
+  const candidatesOf = buildable.map((req) => {
+    const b = builtOf(req.key) as string;
+    return records.filter((r) => wasDeliveredVerbatim(r.launchPrompt, b));
+  });
+  const openedOfReq = buildable.map((req, i) =>
+    candidatesOf[i].filter((r) => openedBrief(r, req.key)),
+  );
+  const matchedRec = new Map<AgentRecord, number>();
+  const augment = (
+    i: number,
+    edges: AgentRecord[][],
+    seen: Set<AgentRecord>,
+  ): boolean => {
+    for (const rec of edges[i]) {
+      if (seen.has(rec)) continue;
+      seen.add(rec);
+      const j = matchedRec.get(rec);
+      if (j === undefined || augment(j, edges, seen)) {
+        matchedRec.set(rec, i);
+        return true;
+      }
+    }
+    return false;
+  };
+  for (let i = 0; i < buildable.length; i++) {
+    augment(i, openedOfReq, new Set());
+  }
+  for (let i = 0; i < buildable.length; i++) {
+    if (![...matchedRec.values()].includes(i)) {
+      augment(i, candidatesOf, new Set());
+    }
+  }
+  const assignment = new Map<number, AgentRecord>();
+  for (const [rec, i] of matchedRec) assignment.set(i, rec);
+
+  let buildableIdx = -1;
+  for (const req of roster) {
+    const b = builtOf(req.key);
     if (b === undefined) {
-      missingRoles.push(
-        `${roleLabel(req)} — no prompt was built for it ` +
-          `(\`agent-prompt ${promptFlags(req)}\` never ran)`,
-      );
+      if (!nobodyBuiltAnything) {
+        missingRoles.push(
+          disclose(
+            roleLabel(req),
+            'no record shows its brief reaching an agent, so this dimension ' +
+              'was reviewed, if at all, from a prompt the run wrote for itself',
+          ),
+        );
+      }
+      missingRoleSelectors.push(selectorOf(req));
       continue;
     }
-    const agent = records.find((r) => wasDeliveredVerbatim(r.launchPrompt, b));
-    if (!agent) {
+    buildableIdx += 1;
+    const pick = assignment.get(buildableIdx);
+    if (pick === undefined) {
+      // Not assignable even under a MAXIMUM matching — so this is provably a
+      // shortage of transcripts, not an artifact of claim order.
+      const anyMatch = candidatesOf[buildableIdx].length > 0;
       missingRoles.push(
-        `${roleLabel(req)} — its prompt was built, but no agent was launched with it`,
+        disclose(
+          roleLabel(req),
+          anyMatch
+            ? 'its prompt reached only an agent already credited with ' +
+                'another block; one agent was given several blocks, and one ' +
+                'transcript cannot certify two dimensions'
+            : 'its prompt was built, but no agent on record was launched ' +
+                'with it',
+        ),
       );
+      missingRoleSelectors.push(selectorOf(req));
       continue;
     }
     // The launch prompt points at the brief rather than containing it, because a
@@ -406,13 +620,22 @@ export function coverageFromTranscripts(
     // The brief as a whole JSON string value (`successfulCallArgs` are already
     // serialized args): a bare substring would credit `${brief}.bak` for the brief,
     // the same trap `parseTranscript` avoids for the diff path.
-    const opened = agent.successfulCallArgs.some((a) =>
+    // The ASSIGNED transcript must have opened this requirement's brief. The
+    // matching SEEDS on brief-opening edges, but maximizing satisfied
+    // requirements can displace an opened match onto an unopened edge — so an
+    // unread flag here describes this assignment, not an impossibility. That is
+    // the right trade: missing-role claims stay provable, and an unread brief
+    // still caps.
+    const opened = pick.successfulCallArgs.some((a) =>
       a.includes(JSON.stringify(brief)),
     );
     if (!opened) {
       unreadBriefs.push(
-        `${roleLabel(req)} — never opened its brief (${brief}), so it reviewed ` +
-          'without the instructions it was launched to follow',
+        disclose(
+          roleLabel(req),
+          `never opened its brief (${brief}), so it reviewed without the ` +
+            'instructions it was launched to follow',
+        ),
       );
     }
   }
@@ -441,12 +664,158 @@ export function coverageFromTranscripts(
     unopenedAgents,
     rewrittenPrompts,
     missingRoles,
+    missingRoleSelectors,
+    disclosures,
     unreadBriefs,
     missingChunks,
     uncoverableChunks: [...uncoverable].sort((a, b) => a - b),
     coveredChunks: [...covered].sort((a, b) => a - b),
   };
 }
+
+/**
+ * How a Step 4/5 step's agents got their prompt — four shapes, four different fixes.
+ *
+ * `ok` — an agent was launched with the prompt the CLI built and opened its brief.
+ * `not-built` — `agent-prompt --role <r>` never ran. Decided before the transcripts
+ *   are consulted (there is no brief whose open could be looked for), so it proves
+ *   the builder was skipped — NOT that no agent ran: a hand-written launch with no
+ *   brief on disk is invisible to this check, and the texts below say "if at all"
+ *   because of it.
+ * `not-launched` — the prompt was built and nothing was launched with it.
+ * `rewritten` — an agent ran and opened the brief, but no agent got the built prompt
+ *   intact: the orchestrator wrote the launch itself.
+ * `brief-unread` — an agent got the built prompt and never opened the brief it names.
+ */
+type Delivery =
+  | 'ok'
+  | 'not-built'
+  | 'not-launched'
+  | 'rewritten'
+  | 'brief-unread';
+
+/**
+ * Two sentences per failed shape, for two different readers.
+ *
+ * `gap` goes into the posted review body, under `Not reviewed:` — a PR author
+ * reads it, so it says what the review cannot certify and names no internal
+ * command (`agent-prompt --findings …` is not something an author can run, and on
+ * #7012 fourteen lines of exactly that register WERE the public review). `fix` is
+ * the per-shape remediation, printed to stderr where the orchestrator reads — the
+ * four shapes exist because the four fixes differ, and that precision belongs to
+ * the reader who relaunches agents, not the one who reads the verdict.
+ */
+interface GapEntry {
+  /** Author-facing: what this review cannot certify, and why. */
+  gap: string;
+  /** Orchestrator-facing: the exact fix, printed to stderr. */
+  fix: string;
+}
+type GapText = Record<Exclude<Delivery, 'ok'>, GapEntry>;
+
+/**
+ * The one rebuild command, spelled once. Role-aware where the roles genuinely
+ * differ: an empty findings file is a legitimate early reverse-audit round and a
+ * vacuous verification — a verifier that saw no findings clears the delivery
+ * floor while verifying nothing, so the verify advice must not invite it. And
+ * `--rules` rides along in both: `agent-prompt` rewrites the brief on every
+ * build, so a rebuild without the rules file silently ships a rules-free brief
+ * that every delivery check still passes.
+ */
+const rebuildFix = (role: 'verify' | 'reverse-audit', noun: string): string =>
+  `build the prompt with \`"\${QWEN_CODE_CLI:-qwen}" review agent-prompt ` +
+  `--plan <plan> --role ${role} --findings <file> [--rules <rules file>] ` +
+  `[--round <k>]\` ` +
+  (role === 'reverse-audit'
+    ? `(an early round with nothing confirmed passes an empty file; `
+    : `(pass the shard's findings, never an empty file — a verifier that sees ` +
+      `no findings verifies nothing; `) +
+  `pass --rules whenever the review loaded any, or the rebuilt brief silently ` +
+  `drops the project rules) and launch an agent with EXACTLY what it prints — ` +
+  `no hand-added ${noun} number` +
+  // --round bakes in a ROUND number. Verify's noun is "shard", and a
+  // parenthetical claiming --round bakes it in would send the reader to the
+  // wrong flag — shards are already told apart by their findings digest.
+  (role === 'reverse-audit' ? ` (--round bakes it in)` : ``) +
+  `, no summary of your own, no rewording`;
+
+const REVERSE_AUDIT_GAP: GapText = {
+  // Not "no auditor ran": a run that skipped the builder and hand-wrote the
+  // launch leaves no brief file to open, so this shape is reached before the
+  // transcripts are ever consulted — the check cannot see that auditor, and it
+  // may not claim to. Same honest construction as the roster texts: what is
+  // provable ("no brief was built"), then what that costs ("if at all").
+  'not-built': {
+    gap:
+      'no auditor was launched with a prompt this skill builds — the pass ' +
+      'that hunts what the rest of the review missed ran, if at all, without ' +
+      'the method its brief carries',
+    fix: rebuildFix('reverse-audit', 'round'),
+  },
+  // Same reach limit as `not-built`: a hand-written auditor that never opened
+  // the brief lands here too (`rewritten` requires the brief-open), so this text
+  // may not claim the pass did not run — only that it cannot be certified.
+  'not-launched': {
+    gap:
+      'its prompt was built, but no agent was launched with it — the pass ' +
+      'that hunts what the rest of the review missed ran, if at all, without ' +
+      'the method its brief carries, and cannot be certified',
+    fix: rebuildFix('reverse-audit', 'round'),
+  },
+  // `rewritten` is reached only after a successful call OPENED the brief — so
+  // this text may not claim the method never arrived; the brief carries it, and
+  // it demonstrably did. What is missing is the launch the CLI built: the folded
+  // findings, the exact ranges, the guarantee the skill certifies against.
+  rewritten: {
+    gap:
+      'an auditor ran and opened its brief, but no agent was launched with the ' +
+      'prompt the CLI built — the launch was written by hand, and what the ' +
+      'agent was actually asked is not what this skill certifies',
+    fix: rebuildFix('reverse-audit', 'round'),
+  },
+  'brief-unread': {
+    gap:
+      'it was launched with the built prompt but never opened its brief, so it ' +
+      'audited without the gaps-only method and the finding format it was ' +
+      'launched to follow',
+    fix:
+      'relaunch with the same printed prompt — the agent must OPEN the brief ' +
+      'file the prompt names; that read is the receipt',
+  },
+};
+
+const VERIFY_GAP: GapText = {
+  // Same reach limit as the reverse-audit text above: `not-built` is decided
+  // before the transcripts are consulted, so it may not assert nobody ran.
+  'not-built': {
+    gap:
+      'the review posts findings, but no verifier was launched with a prompt ' +
+      'this skill builds — they were ruled on, if at all, without the verdict ' +
+      'bar its brief carries',
+    fix: rebuildFix('verify', 'shard'),
+  },
+  'not-launched': {
+    gap:
+      'its prompt was built, but no agent was launched with it, so the posted ' +
+      'findings cannot be counted as verified',
+    fix: rebuildFix('verify', 'shard'),
+  },
+  rewritten: {
+    gap:
+      'a verifier ran and opened its brief, but no agent was launched with the ' +
+      'prompt the CLI built — the launch was written by hand, and the posted ' +
+      'findings cannot be counted as verified against it',
+    fix: rebuildFix('verify', 'shard'),
+  },
+  'brief-unread': {
+    gap:
+      'it was launched with the built prompt but never opened its brief, so it ' +
+      'ruled on the findings without the verdict bar it was launched to apply',
+    fix:
+      'relaunch with the same printed prompt — the agent must OPEN the brief ' +
+      'file the prompt names; that read is the receipt',
+  },
+};
 
 export interface VerificationReport {
   /** True when every required Step 4/5 agent ran and read its brief. */
@@ -455,8 +824,24 @@ export interface VerificationReport {
    * Self-explanatory gap lines, shaped to drop straight into
    * `unreviewedDimensions` — each carries its own ` — ` reason, so
    * `compose-review` renders it verbatim rather than appending the whiff sentence.
+   * These reach the POSTED review body: author-facing register, no internal
+   * commands.
    */
   gaps: string[];
+  /**
+   * The per-shape fix for each gap, in the same order — for stderr, where the
+   * orchestrator reads. Never rendered into the body.
+   */
+  remediation: string[];
+  /**
+   * True when this review posts findings and NO verifier's delivery came back
+   * clean — the structured form of the `verification — …` gap line, for the
+   * verdict computation. A Request changes is "earned by a confirmed
+   * Critical", and this is the bit that says the confirmation never happened;
+   * parsing the gap text for it would put the verdict at the mercy of a
+   * wording change.
+   */
+  unverifiedFindings: boolean;
 }
 
 /**
@@ -492,26 +877,54 @@ export function verificationGaps(
   const records = readTranscripts(mtimeMs, env, plan.diffPathAbsolute);
   const built = readRecordedPrompts(planPath);
   const gaps: string[] = [];
+  const remediation: string[] = [];
 
-  // A role whose prompt the CLI recorded, and which an agent was then launched with
-  // verbatim AND opened the brief it points at. The same two-author proof the
-  // roster check uses — a delivered launch prompt and a successful call naming the
-  // brief file — asked of a key rather than a plan-derived role.
-  const ranAndReadBrief = (key: string): boolean => {
+  // How a step's agents actually got their prompt. The floor needs the four shapes
+  // apart, not one boolean, because the fix for each is different — and a refusal
+  // that names the wrong one is a refusal that gets argued with.
+  //
+  // Dogfooded, exactly that happened: an auditor HAD run and HAD opened its brief;
+  // the orchestrator had merely rewritten the launch prompt. The gap said "no agent
+  // was launched with it that opened its brief" — false as written. The orchestrator
+  // read it, called it "a transcript visibility issue", and reported an **Approve**
+  // over the capped verdict. It was wrong about the mechanism and right that the
+  // message did not describe what happened. So the message describes what happened.
+  const deliveryOf = (key: string): Delivery => {
     const b = built.get(key);
-    if (b === undefined || b.trim() === '') return false;
-    const brief = briefPath(planPath, key);
+    if (b === undefined || b.trim() === '') return 'not-built';
     // Match the brief as a whole JSON string value, quotes included — the same
     // lesson `parseTranscript` learned for the diff path: a bare substring credits
     // `…/x.brief.md.bak` for `…/x.brief.md`. `successfulCallArgs` are already
     // `JSON.stringify(args)`, so the quoted path is what a real read of the brief
     // leaves in them.
-    const needle = JSON.stringify(brief);
-    return records.some(
-      (r) =>
-        wasDeliveredVerbatim(r.launchPrompt, b) &&
-        r.successfulCallArgs.some((a) => a.includes(needle)),
+    const needle = JSON.stringify(briefPath(planPath, key));
+    const opened = (r: AgentRecord) =>
+      r.successfulCallArgs.some((a) => a.includes(needle));
+    const gotTheBuiltPrompt = records.filter((r) =>
+      wasDeliveredVerbatim(r.launchPrompt, b),
     );
+    if (gotTheBuiltPrompt.some(opened)) return 'ok';
+    if (gotTheBuiltPrompt.length > 0) return 'brief-unread';
+    // Nothing was launched with the built prompt. Did anything open this key's brief
+    // anyway? Then an agent DID run — on a launch the orchestrator wrote itself. A
+    // different failure, with a different fix, and the one the message used to deny.
+    if (records.some(opened)) return 'rewritten';
+    return 'not-launched';
+  };
+
+  /** The best shape across a step's keys — the floor is one agent, not all of them. */
+  const bestDelivery = (keys: string[]): Delivery => {
+    if (keys.length === 0) return 'not-built';
+    const rank: Record<Delivery, number> = {
+      ok: 0,
+      'brief-unread': 1,
+      rewritten: 2,
+      'not-launched': 3,
+      'not-built': 4,
+    };
+    return keys
+      .map(deliveryOf)
+      .sort((a, b) => rank[a] - rank[b])[0] as Delivery;
   };
 
   // Step 5: reverse audit. Required on EVERY high-effort review — it is the pass
@@ -525,14 +938,17 @@ export function verificationGaps(
   const reverseKeys = [...built.keys()].filter(
     (k) => k === 'reverse-audit' || k.startsWith('reverse-audit--'),
   );
-  if (!reverseKeys.some(ranAndReadBrief)) {
-    gaps.push(
-      reverseKeys.length === 0
-        ? 'reverse audit — no auditor ran (Step 5 builds its prompt with ' +
-            '`agent-prompt --role reverse-audit`; none was recorded, so the pass ' +
-            'that looks for what Step 3 missed was skipped)'
-        : 'reverse audit — its prompt was built, but no agent was launched with ' +
-            'it that opened its brief, so the reverse-audit pass did not run',
+  const reverse = bestDelivery(reverseKeys);
+  if (reverse !== 'ok') {
+    gaps.push(`reverse audit — ${REVERSE_AUDIT_GAP[reverse].gap}`);
+    // The fix template carries `--plan <plan>`; a literal `<plan>` pasted into a
+    // POSIX shell parses as input redirection, so the one repair round Step 6
+    // prescribes could never run. This function is handed the real path.
+    remediation.push(
+      `reverse audit: ${REVERSE_AUDIT_GAP[reverse].fix.replace(
+        '--plan <plan>',
+        () => `--plan ${shellQuotePath(planPath)}`,
+      )}`,
     );
   }
 
@@ -543,18 +959,30 @@ export function verificationGaps(
   // non-deterministic body Criticals, and excludes deterministic `[build]`/`[test]`
   // findings, which are pre-confirmed and skip verification by design. A review that
   // confirmed nothing has nothing to verify.
-  if (opts.postsFindings && !ranAndReadBrief('verify')) {
-    gaps.push(
-      built.has('verify')
-        ? 'verification — its prompt was built, but no agent was launched with it ' +
-            'that opened its brief, so the posted findings were not verified'
-        : 'verification — the review posts findings, but no verifier ran (Step 4 ' +
-            'builds its prompt with `agent-prompt --role verify`; none was ' +
-            'recorded, so the findings were not verified)',
+  let unverifiedFindings = false;
+  if (opts.postsFindings) {
+    // The whole key family: `verify--<digest>` per shard (the record now folds
+    // the findings in, so a launch that dropped them matches nothing), plus the
+    // bare legacy key. Floor of one, as documented.
+    const verifyKeys = [...built.keys()].filter(
+      (k) => k === 'verify' || k.startsWith('verify--'),
     );
+    const verify = bestDelivery(verifyKeys);
+    if (verify !== 'ok') {
+      unverifiedFindings = true;
+      gaps.push(`verification — ${VERIFY_GAP[verify].gap}`);
+      remediation.push(
+        `verification: ${VERIFY_GAP[verify].fix.replace(
+          '--plan <plan>',
+          // A function replacer: a plain string gives `$&`/`$\`` special
+          // meaning, and a path is not a place for replacement patterns.
+          () => `--plan ${shellQuotePath(planPath)}`,
+        )}`,
+      );
+    }
   }
 
-  return { ok: gaps.length === 0, gaps };
+  return { ok: gaps.length === 0, gaps, remediation, unverifiedFindings };
 }
 
 export { TranscriptsUnavailableError };

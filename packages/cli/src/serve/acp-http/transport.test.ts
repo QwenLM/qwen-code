@@ -879,6 +879,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     nextBridge?: FakeBridge;
     fsFactory?: WorkspaceFileSystemFactory;
     boundWorkspace?: string;
+    daemonEnv?: Readonly<NodeJS.ProcessEnv>;
   }): Promise<void> {
     server.closeAllConnections?.();
     await new Promise<void>((r) => server.close(() => r()));
@@ -890,6 +891,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       boundWorkspace,
       workspace: fakeWorkspace,
       enabled: true,
+      daemonEnv: opts.daemonEnv,
       fsFactory: opts.fsFactory,
       sessionShellCommandEnabled: opts.sessionShellCommandEnabled,
       workspaceRememberLane: new WorkspaceRememberTaskLane(
@@ -988,6 +990,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     sessionId: string,
     state: 'active' | 'archived' = 'active',
     parentSessionId?: string,
+    sourceType?: string,
+    sourceId?: string,
   ): Promise<void> {
     const chatsDir = path.join(
       new Storage('/ws').getProjectDir(),
@@ -1019,6 +1023,23 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           type: 'system',
           subtype: 'parent_session',
           systemPayload: { parentSessionId },
+          cwd: '/ws',
+        }),
+      );
+    }
+    if (sourceType !== undefined) {
+      lines.push(
+        JSON.stringify({
+          uuid: `${sessionId}-source-1`,
+          parentUuid: `${sessionId}-user-1`,
+          sessionId,
+          timestamp: '2026-06-30T00:00:00.000Z',
+          type: 'system',
+          subtype: 'session_source',
+          systemPayload: {
+            sourceType,
+            ...(sourceId !== undefined ? { sourceId } : {}),
+          },
           cwd: '/ws',
         }),
       );
@@ -5233,7 +5254,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   });
 
   it('dispatches _qwen/workspace/setup-github', async () => {
-    await restartServer({ fsFactory: makeFileFsFactory({}) });
+    await restartServer({
+      fsFactory: makeFileFsFactory({}),
+      daemonEnv: { HTTPS_PROXY: 'http://runtime-proxy.example:8080' },
+    });
     const connId = await initialize();
     const connStream = await openStream(connId);
     const got = takeFrames(connStream, 1);
@@ -5258,6 +5282,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect.objectContaining({
         cwd: '/ws',
         workspaceRoot: '/ws',
+        proxy: 'http://runtime-proxy.example:8080',
         abortSignal: expect.any(AbortSignal),
         fileOps: expect.any(Object),
       }),
@@ -6669,6 +6694,50 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
+    it('session/list organized default source includes legacy sessions', async () => {
+      await withRuntimeDir(async () => {
+        const legacyId = '550e8400-e29b-41d4-a716-446655440014';
+        const defaultId = '550e8400-e29b-41d4-a716-446655440015';
+        const scheduledId = '550e8400-e29b-41d4-a716-446655440016';
+        await writeStoredSession(legacyId);
+        await writeStoredSession(defaultId, 'active', undefined, 'default');
+        await writeStoredSession(
+          scheduledId,
+          'active',
+          undefined,
+          'scheduled_task',
+          'task-1',
+        );
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        const reader = frameReader(await streamRes);
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 87,
+          method: 'session/list',
+          params: {
+            workspaceCwd: '/ws',
+            view: 'organized',
+            group: 'all',
+            sourceType: 'default',
+            _meta: { size: 20 },
+          },
+        });
+        const frame = (await reader.next()) as {
+          result: { sessions: Array<{ sessionId: string }> };
+        };
+        expect(
+          frame.result.sessions.map((session) => session.sessionId),
+        ).toEqual(expect.arrayContaining([legacyId, defaultId]));
+        expect(
+          frame.result.sessions.map((session) => session.sessionId),
+        ).not.toContain(scheduledId);
+        reader.close();
+      });
+    });
+
     it('session/list group=ungrouped excludes color-tagged sessions', async () => {
       await withRuntimeDir(async () => {
         const sessionId = '550e8400-e29b-41d4-a716-446655440012';
@@ -7936,6 +8005,7 @@ describe('ACP WebSocket transport security', () => {
       allowedOrigins?: { allowAny: boolean; origins: Set<string> };
       checkRate?: (key: string, tier: string) => boolean;
       cdpTunnelOverWs?: boolean;
+      daemonEnv?: Readonly<NodeJS.ProcessEnv>;
     } = {},
   ) {
     return new Promise<void>((resolve) => {
@@ -7946,6 +8016,7 @@ describe('ACP WebSocket transport security', () => {
         boundWorkspace: '/ws',
         workspace: fakeWorkspace,
         enabled: true,
+        daemonEnv: opts.daemonEnv,
         token: opts.token,
         allowedOrigins: opts.allowedOrigins,
         workspaceRememberLane: new WorkspaceRememberTaskLane(
@@ -8142,8 +8213,11 @@ describe('ACP WebSocket transport security', () => {
   });
 
   it('passes a custom CDP MCP command through to the runtime config', async () => {
-    process.env['QWEN_CDP_MCP_COMMAND'] = '/opt/custom/cdp-adapter';
-    await startServer({ cdpTunnelOverWs: true });
+    process.env['QWEN_CDP_MCP_COMMAND'] = '/opt/process/cdp-adapter';
+    await startServer({
+      cdpTunnelOverWs: true,
+      daemonEnv: { QWEN_CDP_MCP_COMMAND: '/opt/custom/cdp-adapter' },
+    });
     const ws = await wsConnect();
     await initializeCdpBridge(ws);
 

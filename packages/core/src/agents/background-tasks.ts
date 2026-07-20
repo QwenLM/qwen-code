@@ -51,6 +51,7 @@ export const BACKGROUND_AGENT_CONCURRENCY_ENV =
 
 function normalizeBackgroundApprovalOutcome(
   outcome: Parameters<BackgroundApproval['respond']>[0],
+  confirmationDetails: BackgroundApproval['confirmationDetails'],
 ): Parameters<BackgroundApproval['respond']>[0] {
   if (
     outcome === ToolConfirmationOutcome.ProceedAlways ||
@@ -59,7 +60,13 @@ function normalizeBackgroundApprovalOutcome(
     outcome === ToolConfirmationOutcome.ProceedAlwaysServer ||
     outcome === ToolConfirmationOutcome.ProceedAlwaysTool
   ) {
-    return ToolConfirmationOutcome.ProceedOnce;
+    if (
+      confirmationDetails.type === 'plan' &&
+      outcome === ToolConfirmationOutcome.ProceedAlways
+    ) {
+      return outcome;
+    }
+    return ToolConfirmationOutcome.Cancel;
   }
   return outcome;
 }
@@ -88,6 +95,38 @@ export function resolveMaxConcurrentBackgroundAgents(
 
 export const MAX_CONCURRENT_BACKGROUND_AGENTS =
   resolveMaxConcurrentBackgroundAgents();
+
+/**
+ * Normalize the `agents.maxParallelAgentsByModel` setting into a clean
+ * model-ID → cap map. Drops entries whose key is blank or whose value is not
+ * a positive integer (mirrors the validation the global cap goes through) so
+ * a malformed settings file degrades to "no per-model cap" rather than
+ * throwing at construction.
+ */
+function normalizePerModelConcurrency(
+  raw: ReadonlyMap<string, number> | Record<string, number> | undefined,
+): Map<string, number> {
+  const result = new Map<string, number>();
+  if (!raw) {
+    return result;
+  }
+  const entries = raw instanceof Map ? raw.entries() : Object.entries(raw);
+  for (const [model, value] of entries) {
+    const key = model?.trim();
+    if (!key) {
+      continue;
+    }
+    if (!Number.isInteger(value) || value < 1) {
+      debugLogger.warn(
+        `Invalid maxParallelAgentsByModel[${JSON.stringify(model)}]=` +
+          `${JSON.stringify(value)}; ignoring (must be a positive integer).`,
+      );
+      continue;
+    }
+    result.set(key, value);
+  }
+  return result;
+}
 
 /**
  * Cap on how many fully-finalized terminal entries (those that have
@@ -234,6 +273,13 @@ export interface AgentTask extends TaskBase {
    */
   agentId: string;
   subagentType?: string;
+  /**
+   * Concrete model ID this agent runs with (resolved from the subagent's
+   * model selector at launch time). Used to enforce per-model concurrency
+   * caps (`agents.maxParallelAgentsByModel`); undefined when the model
+   * could not be resolved, in which case only the global cap applies.
+   */
+  model?: string;
   /**
    * AgentId of the sub-agent that spawned this one; null when launched
    * from the top-level session. Drives the nested-agent tree display in
@@ -394,14 +440,32 @@ type MessageWaiter = () => void;
 
 export interface BackgroundTaskRegistryOptions {
   maxConcurrentBackgroundAgents?: number;
+  /**
+   * Per-model concurrency caps keyed by concrete model ID. Each value is the
+   * maximum number of background sub-agents that may run concurrently on that
+   * model. A model not present here is bounded only by the global
+   * `maxConcurrentBackgroundAgents` cap. Useful when a model has a lower
+   * concurrency capacity than the rest of the fleet.
+   */
+  maxConcurrentBackgroundAgentsByModel?:
+    | ReadonlyMap<string, number>
+    | Record<string, number>;
 }
 
 export interface BackgroundSlotReservation {
   readonly id: symbol;
+  /**
+   * Concrete model ID the slot was reserved for; undefined when the launch
+   * path could not resolve a model. Carried so the per-model cap can be
+   * checked consistently across reserve → consume → release.
+   */
+  readonly model?: string;
 }
 
 interface BackgroundSlotWaiter {
   readonly signal?: AbortSignal;
+  /** Concrete model ID the waiter needs a slot for (per-model cap check). */
+  readonly model?: string;
   readonly resolve: (reservation: BackgroundSlotReservation) => void;
   readonly reject: (error: Error) => void;
   readonly onAbort: () => void;
@@ -414,8 +478,19 @@ export class BackgroundTaskRegistry {
   private readonly agents = new Map<string, AgentTask>();
   private readonly messageWaiters = new Map<string, Set<MessageWaiter>>();
   private readonly waitQueue: BackgroundSlotWaiter[] = [];
-  private readonly reservedBackgroundSlots = new Set<symbol>();
+  // Maps each outstanding slot reservation to the concrete model ID it was
+  // reserved for (undefined when unresolved). A Map rather than a Set so the
+  // per-model cap can count reservations against the same model the running
+  // agents are tallied under.
+  private readonly reservedBackgroundSlots = new Map<
+    symbol,
+    string | undefined
+  >();
   private readonly maxConcurrentBackgroundAgents: number;
+  // Per-model concurrency caps keyed by concrete model ID. Empty when no
+  // `agents.maxParallelAgentsByModel` is configured, in which case only the
+  // global cap is enforced.
+  private readonly maxConcurrentBackgroundAgentsByModel: Map<string, number>;
   private notificationCallback?: BackgroundNotificationCallback;
   private registerCallback?: BackgroundRegisterCallback;
   private statusChangeCallback?: BackgroundStatusChangeCallback;
@@ -429,15 +504,33 @@ export class BackgroundTaskRegistry {
       Number.isInteger(configured) && configured >= 1
         ? configured
         : MAX_CONCURRENT_BACKGROUND_AGENTS;
-  }
-
-  canStartBackgroundAgent(): boolean {
-    return (
-      this.getClaimedBackgroundSlotCount() < this.maxConcurrentBackgroundAgents
+    this.maxConcurrentBackgroundAgentsByModel = normalizePerModelConcurrency(
+      options.maxConcurrentBackgroundAgentsByModel,
     );
   }
 
-  assertCanStartBackgroundAgent(): void {
+  /**
+   * Whether a new background agent may start. Always bounded by the global
+   * cap; when `model` is given and a per-model cap is configured for it, the
+   * per-model cap must also have room.
+   */
+  canStartBackgroundAgent(model?: string): boolean {
+    if (
+      this.getClaimedBackgroundSlotCount() >= this.maxConcurrentBackgroundAgents
+    ) {
+      return false;
+    }
+    const perModelCap = this.resolvePerModelCap(model);
+    if (
+      perModelCap !== undefined &&
+      this.getClaimedBackgroundSlotCount(model) >= perModelCap
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  assertCanStartBackgroundAgent(model?: string): void {
     const claimed = this.getClaimedBackgroundSlotCount();
     if (claimed >= this.maxConcurrentBackgroundAgents) {
       debugLogger.warn(
@@ -451,15 +544,40 @@ export class BackgroundTaskRegistry {
           `agent first.`,
       );
     }
+    const perModelCap = this.resolvePerModelCap(model);
+    if (perModelCap !== undefined) {
+      const claimedForModel = this.getClaimedBackgroundSlotCount(model);
+      if (claimedForModel >= perModelCap) {
+        debugLogger.warn(
+          `Background agent per-model concurrency cap reached for ` +
+            `${JSON.stringify(model)}: ${claimedForModel}/${perModelCap}. ` +
+            `Refusing new background agent.`,
+        );
+        throw new Error(
+          `Cannot start background agent: maximum concurrent background agents ` +
+            `for model "${model}" (${perModelCap}) reached. Stop an existing ` +
+            `agent on that model first.`,
+        );
+      }
+    }
+  }
+
+  /** Configured per-model cap for `model`, or undefined when none applies. */
+  private resolvePerModelCap(model?: string): number | undefined {
+    if (model === undefined) {
+      return undefined;
+    }
+    return this.maxConcurrentBackgroundAgentsByModel.get(model);
   }
 
   async waitForBackgroundSlot(
     signal?: AbortSignal,
+    model?: string,
   ): Promise<BackgroundSlotReservation> {
     if (signal?.aborted) {
       throw new Error(BACKGROUND_SLOT_WAIT_CANCELLED);
     }
-    const reservation = this.tryReserveBackgroundSlot();
+    const reservation = this.tryReserveBackgroundSlot(model);
     if (reservation) {
       return reservation;
     }
@@ -474,6 +592,7 @@ export class BackgroundTaskRegistry {
       };
       const waiter: BackgroundSlotWaiter = {
         signal,
+        model,
         resolve,
         reject,
         onAbort,
@@ -483,11 +602,13 @@ export class BackgroundTaskRegistry {
     });
   }
 
-  tryReserveBackgroundSlot(): BackgroundSlotReservation | undefined {
-    if (!this.canStartBackgroundAgent()) {
+  tryReserveBackgroundSlot(
+    model?: string,
+  ): BackgroundSlotReservation | undefined {
+    if (!this.canStartBackgroundAgent(model)) {
       return undefined;
     }
-    return this.reserveBackgroundSlot();
+    return this.reserveBackgroundSlot(model);
   }
 
   getQueuedCount(): number {
@@ -513,7 +634,7 @@ export class BackgroundTaskRegistry {
         if (options.slotReservation) {
           this.consumeBackgroundSlot(options.slotReservation);
         } else {
-          this.assertCanStartBackgroundAgent();
+          this.assertCanStartBackgroundAgent(registration.model);
         }
       }
     }
@@ -841,9 +962,13 @@ export class BackgroundTaskRegistry {
     );
     this.emitApprovalChange(entry);
     try {
+      const normalizedOutcome = normalizeBackgroundApprovalOutcome(
+        outcome,
+        approval.confirmationDetails,
+      );
       await approval.respond(
-        normalizeBackgroundApprovalOutcome(outcome),
-        payload,
+        normalizedOutcome,
+        normalizedOutcome === outcome ? payload : undefined,
       );
     } catch (error) {
       debugLogger.error(
@@ -945,23 +1070,50 @@ export class BackgroundTaskRegistry {
     return Array.from(this.agents.values());
   }
 
-  private getRunningBackgroundCount(): number {
-    return Array.from(this.agents.values()).filter(
-      (entry) =>
+  // Counts backgrounded agents that still occupy a slot: running, or
+  // cancelled-but-not-yet-finalized. When `model` is given, only agents on
+  // that model are counted (per-model cap); otherwise all of them (global).
+  private getRunningBackgroundCount(model?: string): number {
+    let count = 0;
+    for (const entry of this.agents.values()) {
+      const occupiesSlot =
         entry.isBackgrounded &&
         (entry.status === 'running' ||
-          (entry.status === 'cancelled' && !entry.notified)),
-    ).length;
+          (entry.status === 'cancelled' && !entry.notified));
+      if (!occupiesSlot) {
+        continue;
+      }
+      if (model === undefined || entry.model === model) {
+        count++;
+      }
+    }
+    return count;
   }
 
-  private getClaimedBackgroundSlotCount(): number {
-    return this.getRunningBackgroundCount() + this.reservedBackgroundSlots.size;
+  private getReservedBackgroundSlotCount(model?: string): number {
+    if (model === undefined) {
+      return this.reservedBackgroundSlots.size;
+    }
+    let count = 0;
+    for (const slotModel of this.reservedBackgroundSlots.values()) {
+      if (slotModel === model) {
+        count++;
+      }
+    }
+    return count;
   }
 
-  private reserveBackgroundSlot(): BackgroundSlotReservation {
-    const reservation = { id: Symbol('background-slot') };
-    this.reservedBackgroundSlots.add(reservation.id);
-    return reservation;
+  private getClaimedBackgroundSlotCount(model?: string): number {
+    return (
+      this.getRunningBackgroundCount(model) +
+      this.getReservedBackgroundSlotCount(model)
+    );
+  }
+
+  private reserveBackgroundSlot(model?: string): BackgroundSlotReservation {
+    const id = Symbol('background-slot');
+    this.reservedBackgroundSlots.set(id, model);
+    return { id, model };
   }
 
   private consumeBackgroundSlot(reservation: BackgroundSlotReservation): void {
@@ -973,14 +1125,29 @@ export class BackgroundTaskRegistry {
   }
 
   private drainWaitQueue(): void {
-    while (this.waitQueue.length > 0 && this.canStartBackgroundAgent()) {
-      const waiter = this.waitQueue.shift()!;
+    for (let i = 0; i < this.waitQueue.length; ) {
+      // Once the global cap is hit no remaining waiter can be served,
+      // regardless of model — bail out instead of scanning the rest.
+      if (
+        this.getClaimedBackgroundSlotCount() >=
+        this.maxConcurrentBackgroundAgents
+      ) {
+        break;
+      }
+      const waiter = this.waitQueue[i]!;
+      // A waiter whose model is at its per-model cap stays queued even while
+      // a different model's waiter behind it can still be served.
+      if (!this.canStartBackgroundAgent(waiter.model)) {
+        i++;
+        continue;
+      }
+      this.waitQueue.splice(i, 1);
       waiter.signal?.removeEventListener('abort', waiter.onAbort);
       if (waiter.signal?.aborted) {
         waiter.reject(new Error(BACKGROUND_SLOT_WAIT_CANCELLED));
         continue;
       }
-      waiter.resolve(this.reserveBackgroundSlot());
+      waiter.resolve(this.reserveBackgroundSlot(waiter.model));
     }
   }
 

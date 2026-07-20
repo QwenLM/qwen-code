@@ -23,6 +23,21 @@ function makeTextChunk(id: number, text: string): BridgeEvent {
   };
 }
 
+function makeDiscreteTextChunk(
+  id: number,
+  text: string,
+  attempt: number,
+): BridgeEvent {
+  const event = makeTextChunk(id, text);
+  (event.data as { update: Record<string, unknown> }).update['_meta'] = {
+    source: 'todo_stop_guard',
+    qwenDiscreteMessage: true,
+    attempt,
+    maxAttempts: 2,
+  };
+  return event;
+}
+
 function makeThoughtChunk(id: number, text: string): BridgeEvent {
   return {
     id,
@@ -226,6 +241,41 @@ describe('TurnBoundaryCompactionEngine', () => {
       };
       expect(data.update.sessionUpdate).toBe('agent_thought_chunk');
       expect(data.update.content.text).toBe('Let me think...');
+    });
+
+    it('preserves discrete agent messages and their metadata', () => {
+      const engine = new TurnBoundaryCompactionEngine();
+      engine.ingest(makeTextChunk(1, 'Before'));
+      engine.ingest(makeDiscreteTextChunk(2, 'Guard one', 1));
+      engine.ingest(makeDiscreteTextChunk(3, 'Guard two', 2));
+      engine.ingest(makeDiscreteTextChunk(4, 'Guard exhausted', 2));
+      engine.ingest(makeTextChunk(5, 'After'));
+      engine.ingest(makeTurnComplete(6));
+
+      const events = engine.snapshot().compactedTurns;
+      expect(extractTexts(events)).toEqual([
+        'Before',
+        'Guard one',
+        'Guard two',
+        'Guard exhausted',
+        'After',
+      ]);
+      const guardEvents = events.filter((event) => {
+        const data = event.data as {
+          update?: { _meta?: Record<string, unknown> };
+        };
+        return data.update?._meta?.['source'] === 'todo_stop_guard';
+      });
+      expect(guardEvents).toHaveLength(3);
+      expect(
+        guardEvents.map((event) => {
+          const data = event.data as {
+            update: { _meta: Record<string, unknown> };
+          };
+          return data.update._meta['attempt'];
+        }),
+      ).toEqual([1, 2, 2]);
+      expect(guardEvents.map((event) => event.id)).toEqual([2, 3, 4]);
     });
 
     it('keeps user messages as-is', () => {
@@ -838,6 +888,87 @@ describe('TurnBoundaryCompactionEngine', () => {
   });
 });
 
+describe('transcript record provenance compaction', () => {
+  function updateOf(event: BridgeEvent): Record<string, unknown> {
+    return (event.data as { update: Record<string, unknown> }).update;
+  }
+
+  function withSources(
+    event: BridgeEvent,
+    sourceRecordIds: string[],
+  ): BridgeEvent {
+    const update = (event.data as { update: Record<string, unknown> }).update;
+    update['_meta'] = { qwenTranscript: { sourceRecordIds } };
+    return event;
+  }
+
+  it('merges text within one record but not across record boundaries', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(withSources(makeTextChunk(1, 'one '), ['record-a']));
+    engine.ingest(withSources(makeTextChunk(2, 'two'), ['record-a']));
+    engine.ingest(withSources(makeTextChunk(3, 'three'), ['record-b']));
+    engine.ingest(makeTurnComplete(4));
+
+    const textEvents = engine
+      .snapshot()
+      .compactedTurns.filter(
+        (event) =>
+          event.type === 'session_update' &&
+          updateOf(event)['sessionUpdate'] === 'agent_message_chunk',
+      );
+    expect(
+      textEvents.map(
+        (event) => (updateOf(event)['content'] as { text: string }).text,
+      ),
+    ).toEqual(['one two', 'three']);
+  });
+
+  it('uses structured source identity for interleaved subagent chunks', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    const first = makeTextChunkWithParent(1, 'first', 'task::x');
+    const second = makeTextChunkWithParent(2, 'second', 'task::x');
+    engine.ingest(withSources(first, ['a::b', 'c']));
+    engine.ingest(withSources(second, ['a', 'b::c']));
+    engine.ingest(makeTurnComplete(3));
+
+    const textEvents = engine
+      .snapshot()
+      .compactedTurns.filter(
+        (event) =>
+          event.type === 'session_update' &&
+          updateOf(event)['sessionUpdate'] === 'agent_message_chunk',
+      );
+    expect(textEvents).toHaveLength(2);
+  });
+
+  it('unions tool start and result source ids in event order', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(
+      withSources(makeToolCall(1, '__proto__', 'running'), ['start-record']),
+    );
+    engine.ingest(
+      withSources(makeToolCallUpdate(2, '__proto__', 'completed'), [
+        'result-record',
+        'start-record',
+      ]),
+    );
+    engine.ingest(makeTurnComplete(3));
+
+    const toolEvent = engine
+      .snapshot()
+      .compactedTurns.find(
+        (event) =>
+          event.type === 'session_update' &&
+          updateOf(event)['toolCallId'] === '__proto__',
+      );
+    expect(updateOf(toolEvent!)['_meta']).toMatchObject({
+      qwenTranscript: {
+        sourceRecordIds: ['start-record', 'result-record'],
+      },
+    });
+  });
+});
+
 describe('EventBus + CompactionEngine integration', () => {
   it('seedReplayEvents advances replay state without populating the ring or liveJournal', async () => {
     const engine = new TurnBoundaryCompactionEngine();
@@ -930,6 +1061,39 @@ describe('EventBus + CompactionEngine integration', () => {
         'truncatedTurns'
       ],
     ).toBeUndefined();
+  });
+
+  it('seedReplayEvents evicts whole persisted records', () => {
+    const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 512 });
+    const bus = new EventBus(100, undefined, engine);
+    const update = (recordId: string, text: string) => ({
+      type: 'session_update' as const,
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `${text}-${'x'.repeat(600)}` },
+          _meta: { 'qwen.session.recordId': recordId },
+        },
+      },
+    });
+
+    bus.seedReplayEvents([
+      update('old-record', 'old-1'),
+      update('old-record', 'old-2'),
+      update('new-record', 'new-1'),
+      update('new-record', 'new-2'),
+    ]);
+
+    const snapshot = bus.snapshotReplay()!;
+    expect(snapshot.compactedTurns[0]?.type).toBe('history_truncated');
+    expect(extractTexts(snapshot.compactedTurns)).toEqual([
+      `new-1-${'x'.repeat(600)}`,
+      `new-2-${'x'.repeat(600)}`,
+    ]);
+    expect(snapshot.compactedTurns[0]?.data).toMatchObject({
+      truncatedEvents: 2,
+      retainedEvents: 2,
+    });
   });
 
   it('seedReplayEvents replaces prior replay and truncation state', () => {

@@ -263,7 +263,14 @@ export function extractToolResults(
 
       // Detect background tasks/shells from results
       if (entry) {
-        const bgEvents = detectBackgroundEvents(toolUseId, entry, resultStr, isError, turnId);
+        const bgEvents = detectBackgroundEvents(
+          toolUseId,
+          entry,
+          resultStr,
+          isError,
+          turnId,
+          sdkParentToolUseId ?? undefined,
+        );
         events.push(...bgEvents);
       }
     }
@@ -395,15 +402,41 @@ function detectBackgroundEvents(
   resultStr: string,
   isError: boolean,
   turnId?: string,
+  parentToolUseId?: string,
 ): AgentEvent[] {
   const events: AgentEvent[] = [];
 
   // Background Task detection — Task/Agent tool with agentId in result.
-  // Only trigger when the tool was explicitly launched with run_in_background: true.
-  // Without this guard, foreground Agent tools whose result text happens to contain
-  // "agentId:" would be spuriously marked as backgrounded — and since no task_completed
-  // event ever arrives for them, they'd stay stuck in 'backgrounded' status forever.
-  const wasRunInBackground = entry.input?.run_in_background === true;
+  // Qwen Agent calls default to background unless they explicitly opt out or
+  // use a launch shape that stays foreground. Task keeps its provider-specific
+  // explicit opt-in behavior.
+  //
+  // NOTE: This heuristic (top-level `agent` call, no explicit
+  // `run_in_background`, no `working_dir`, no named teammate) mirrors two other
+  // implementations that must stay in sync:
+  //   - core dispatch (source of truth): packages/core/src/tools/agent/agent.ts
+  //     (`backgroundRequested`/`shouldRunInBackground` in AgentTool.execute)
+  //   - web-shell UI: packages/web-shell/client/adapters/toolClassification.ts
+  //     (`isBackgroundSubAgentToolCall`)
+  // If the routing rule changes in core, update all three. This copy does not
+  // have the web-shell's `rawOutput.status === 'background'` fallback.
+  const normalizedToolName = entry.name.toLowerCase();
+  const isTopLevelQwenAgent =
+    normalizedToolName === 'agent' && parentToolUseId === undefined;
+  const defaultsToBackground =
+    isTopLevelQwenAgent &&
+    entry.input.run_in_background === undefined &&
+    entry.input.working_dir === undefined &&
+    entry.input.name === undefined &&
+    // Core keeps fork fallbacks in the foreground (`!isForkRequested` in
+    // AgentTool.execute), so an omitted-flag `subagent_type: "fork"` call must
+    // not be classified as background here.
+    (typeof entry.input.subagent_type !== 'string' ||
+      entry.input.subagent_type.toLowerCase() !== 'fork');
+  const wasRunInBackground =
+    (entry.input.run_in_background === true &&
+      (normalizedToolName !== 'agent' || isTopLevelQwenAgent)) ||
+    defaultsToBackground;
   if (isParentTaskTool(entry.name) && wasRunInBackground && !isError && resultStr) {
     const agentIdMatch = resultStr.match(/agentId:\s*([a-zA-Z0-9_-]+)/);
     if (agentIdMatch?.[1]) {

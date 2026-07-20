@@ -391,7 +391,7 @@ export class TelegramChannel extends ChannelBase {
   private buildEnvelope(
     msg: {
       from: { id: number; first_name: string; last_name?: string };
-      chat: { id: number; type: string };
+      chat: { id: number; type: string; title?: string };
       message_thread_id?: number;
       reply_to_message?: { from?: { id: number }; text?: string };
     },
@@ -436,6 +436,7 @@ export class TelegramChannel extends ChannelBase {
         msg.from.first_name +
         (msg.from.last_name ? ` ${msg.from.last_name}` : ''),
       chatId: String(msg.chat.id),
+      ...(isGroup && msg.chat.title ? { chatName: msg.chat.title } : {}),
       threadId:
         typeof msg.message_thread_id === 'number'
           ? String(msg.message_thread_id)

@@ -68,6 +68,12 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   },
   useStreamingState: () => streamingStateValue,
   useTranscriptBlocks: () => [],
+  useTranscriptHistory: () => ({
+    hasMore: false,
+    loading: false,
+    capacityReached: false,
+    loadMore: vi.fn(),
+  }),
   useTranscriptStore: () => ({
     dispatch: transcriptDispatch,
   }),
@@ -199,6 +205,7 @@ vi.mock('./messages/AskUserQuestion', () => ({
   AskUserQuestion: (props: any) => (
     <button
       data-testid="ask-approval"
+      data-keyboard-active={String(props.keyboardActive)}
       onClick={() => props.onConfirm(props.request.id, 'opt')}
     >
       ask
@@ -493,6 +500,32 @@ describe('ChatPane', () => {
     expect(enqueuePrompt).not.toHaveBeenCalled();
   });
 
+  it('submits while disconnected when prompt SSE restart is enabled', () => {
+    connectionState.status = 'disconnected';
+    render({ restartSseOnPrompt: true });
+
+    act(() => {
+      latestOnSubmit!('hi');
+    });
+
+    expect(sendPrompt).toHaveBeenCalledWith(
+      'hi',
+      expect.objectContaining({ onAdmitted: expect.any(Function) }),
+    );
+  });
+
+  it('does not submit without a recoverable disconnected session', () => {
+    connectionState.status = 'disconnected';
+    connectionState.sessionId = undefined;
+    render({ restartSseOnPrompt: true });
+
+    act(() => {
+      latestOnSubmit!('hi');
+    });
+
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
   it('reports an idle prompt failure to the pane error handler', async () => {
     const onError = vi.fn();
     sendPrompt.mockRejectedValueOnce(new Error('disconnected'));
@@ -549,6 +582,12 @@ describe('ChatPane', () => {
     };
     render();
     expect(testid('ask-approval')).not.toBeNull();
+    // Like the tool-approval path, a pane's question must not auto-grab focus —
+    // several panes can show at once and stealing focus would yank it from the
+    // pane the user is in.
+    expect(testid('ask-approval')?.getAttribute('data-keyboard-active')).toBe(
+      'false',
+    );
     // AskUserQuestion is not a tool approval, so MessageList gets no inline one.
     expect(testid('pane-messages')?.getAttribute('data-approval')).toBe('no');
   });

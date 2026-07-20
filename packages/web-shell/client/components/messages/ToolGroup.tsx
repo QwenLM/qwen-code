@@ -52,6 +52,7 @@ import {
   toolContainsCallId,
 } from './toolFormatting';
 import { useI18n } from '../../i18n';
+import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import { CompactModeContext, TodoTimelineContext } from '../../App';
 import {
   type ToolHeaderExtraRenderInfo,
@@ -1042,7 +1043,10 @@ function areSubToolsEqual(
  * Keeps the rendering pipeline plain-text-compatible for all other tools. */
 const SESSION_LINK_RE = /\[([^\]]+)\]\(qwen-session:\/\/([^)]+)\)/g;
 
-function renderWithSessionLinks(text: string): ReactNode {
+function renderWithSessionLinks(
+  text: string,
+  renderMode: 'interactive' | 'readonly',
+): ReactNode {
   if (!text || !text.includes('qwen-session://')) return text;
   const parts: ReactNode[] = [];
   let lastIndex = 0;
@@ -1054,21 +1058,27 @@ function renderWithSessionLinks(text: string): ReactNode {
     }
     const sessionId = match[2];
     parts.push(
-      <a
-        key={match.index}
-        href="#"
-        role="button"
-        style={{ textDecoration: 'underline', cursor: 'pointer' }}
-        onClick={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          window.dispatchEvent(
-            new CustomEvent('qwen:open-session', { detail: sessionId }),
-          );
-        }}
-      >
-        {match[1]}
-      </a>,
+      renderMode === 'readonly' ? (
+        <span key={match.index} style={{ textDecoration: 'underline' }}>
+          {match[1]}
+        </span>
+      ) : (
+        <a
+          key={match.index}
+          href="#"
+          role="button"
+          style={{ textDecoration: 'underline', cursor: 'pointer' }}
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            window.dispatchEvent(
+              new CustomEvent('qwen:open-session', { detail: sessionId }),
+            );
+          }}
+        >
+          {match[1]}
+        </a>
+      ),
     );
     lastIndex = match.index + match[0].length;
   }
@@ -1087,6 +1097,7 @@ export const ToolLine = memo(function ToolLine({
   hideCollapsedOutput = false,
 }: ToolLineProps) {
   const { t } = useI18n();
+  const transcriptRenderMode = useTranscriptRenderMode();
   const compactMode = useContext(CompactModeContext);
   const [expanded, setExpanded] = useState(
     () => forceExpanded || (!compactMode && shouldAutoExpand(tool)),
@@ -1323,7 +1334,7 @@ export const ToolLine = memo(function ToolLine({
           fall back to the raw result summary so the row isn't blank. */}
       {(!summaryOnly || expanded) && isTodo && !hasTodoList && result && (
         <div className={styles.lineOutput}>
-          {renderWithSessionLinks(result)}
+          {renderWithSessionLinks(result, transcriptRenderMode)}
         </div>
       )}
       {showExpandedSummaryPanel && (
@@ -1332,7 +1343,7 @@ export const ToolLine = memo(function ToolLine({
             <div
               className={`${styles.lineOutput} ${styles.expandedLineOutput}`}
             >
-              {renderWithSessionLinks(result)}
+              {renderWithSessionLinks(result, transcriptRenderMode)}
             </div>
           )}
         </ToolExpandedCard>
@@ -1350,7 +1361,7 @@ export const ToolLine = memo(function ToolLine({
                 : styles.lineOutput
             }
           >
-            {renderWithSessionLinks(result)}
+            {renderWithSessionLinks(result, transcriptRenderMode)}
           </div>
         )}
       {!isTodo && expanded && detailView && (
@@ -1394,6 +1405,7 @@ export const ToolGroup = memo(function ToolGroup({
   const compactMode = useContext(CompactModeContext);
   const [chatExpanded, setChatExpanded] = useState(false);
   const hasRunningTool = hasActiveTool(tools);
+  const hasFailedTool = tools.some((tool) => tool.status === 'failed');
   const activeTool = tools.length > 0 ? getActiveTool(tools) : undefined;
   const singleTool = tools.length === 1 ? tools[0] : undefined;
   const summaryIconTool = tools[0] ?? activeTool;
@@ -1439,6 +1451,7 @@ export const ToolGroup = memo(function ToolGroup({
               <ToolGroupIcon />
             )}
           </span>
+          {hasFailedTool && <StatusIcon status="failed" />}
           <span
             className={
               hasRunningTool

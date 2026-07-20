@@ -33,6 +33,7 @@ import {
   type ToolCallPreparation,
 } from '../tool-call-preparation.js';
 import { InvalidStreamError } from '../invalid-stream-error.js';
+import { normalizeMcpToolName } from '../../utils/tool-name-utils.js';
 
 const debugLogger = createDebugLogger('CONVERTER');
 const SPLIT_TOOL_MEDIA_TEXT = '(attached media from previous tool call)';
@@ -607,7 +608,7 @@ function processContent(
         id: callId || `call_${toolCallIndex}`,
         type: 'function' as const,
         function: {
-          name: part.functionCall.name || '',
+          name: normalizeMcpToolName(part.functionCall.name || ''),
           arguments: JSON.stringify(part.functionCall.args || {}),
         },
       });
@@ -1113,6 +1114,54 @@ function canBeStandaloneThinkingTagPrefix(text: string): boolean {
   });
 }
 
+function classifyContentOnlyThinkingTagPrefix(
+  text: string,
+  streamFinished: boolean,
+): 'clean' | 'pending' | 'suspicious' | 'leaked' {
+  const candidate = text.trimStart().toLowerCase();
+  if (!candidate) return 'clean';
+
+  const consumeTag = (
+    value: string,
+    closing: boolean,
+  ): number | null | undefined => {
+    const match = LEADING_THINKING_TAG_PATTERN.exec(value)?.[0];
+    if (match) {
+      return match.trimStart().startsWith('</') === closing
+        ? match.length
+        : undefined;
+    }
+
+    if (!canBeStandaloneThinkingTagPrefix(value)) return undefined;
+    if (!value || value === '<') return null;
+    return closing === value.startsWith('</') ? null : undefined;
+  };
+
+  let rest = candidate;
+  for (const closing of [false, true, false]) {
+    const tagLength = consumeTag(rest, closing);
+    if (tagLength === null) return 'pending';
+    if (tagLength === undefined) return 'clean';
+    rest = rest.slice(tagLength).trimStart();
+  }
+
+  let depth = 1;
+  let hasNestedOpening = false;
+  for (;;) {
+    const nextTag = THINKING_TAG_PATTERN.exec(rest);
+    if (!nextTag) break;
+
+    const closing = nextTag[0].startsWith('</');
+    depth += closing ? -1 : 1;
+    if (depth === 0) return 'clean';
+    hasNestedOpening ||= !closing;
+    rest = rest.slice(nextTag.index + nextTag[0].length);
+  }
+
+  if (!hasNestedOpening) return 'pending';
+  return streamFinished ? 'leaked' : 'suspicious';
+}
+
 function throwProtocolTagLeak(requestContext: RequestContext): never {
   requestContext.pendingThinkingTagCandidate = undefined;
   requestContext.pendingUntrustedResponseParts = undefined;
@@ -1440,11 +1489,26 @@ export function convertOpenAIChunkToGemini(
     }
     const combinedCandidateText =
       (pendingTagCandidate?.text ?? '') + visibleText;
+    const hasStructuredReasoning =
+      requestContext.hasStructuredReasoningContent === true;
+    const detectContentOnlyThinkingTagLeaks =
+      requestContext.responseParsingOptions?.contentOnlyThinkingTagLeaks ===
+      true;
+    const contentOnlyThinkingState =
+      hasStructuredReasoning ||
+      requestContext.hasVisibleContent === true ||
+      !detectContentOnlyThinkingTagLeaks
+        ? 'clean'
+        : classifyContentOnlyThinkingTagPrefix(
+            combinedCandidateText,
+            Boolean(choice.finish_reason),
+          );
     const canStartTagCandidate =
-      requestContext.hasStructuredReasoningContent === true &&
       requestContext.hasVisibleContent !== true &&
       visibleText.length > 0 &&
-      canBeStandaloneThinkingTagPrefix(combinedCandidateText);
+      ((hasStructuredReasoning &&
+        canBeStandaloneThinkingTagPrefix(combinedCandidateText)) ||
+        contentOnlyThinkingState !== 'clean');
 
     if (pendingTagCandidate || canStartTagCandidate) {
       const closingTag = STANDALONE_CLOSING_THINKING_TAG_PATTERN.exec(
@@ -1457,15 +1521,25 @@ export function convertOpenAIChunkToGemini(
       const openingTag = STANDALONE_OPENING_THINKING_TAG_PATTERN.test(
         combinedCandidateText,
       );
-      const isPossibleTag = canBeStandaloneThinkingTagPrefix(
-        combinedCandidateText,
-      );
+      const isPossibleTag =
+        canBeStandaloneThinkingTagPrefix(combinedCandidateText) ||
+        contentOnlyThinkingState === 'pending' ||
+        contentOnlyThinkingState === 'suspicious';
       const finishedWhitespaceCandidate =
         Boolean(choice.finish_reason) &&
         !closingTagName &&
         !/\S/.test(combinedCandidateText);
+      const releaseContentOnlyCandidate =
+        contentOnlyThinkingState === 'pending' &&
+        (Boolean(choice.finish_reason) ||
+          combinedCandidateText.trimStart().length >
+            MAX_THINKING_TAG_CANDIDATE_LENGTH);
 
-      if (openingTag) {
+      if (contentOnlyThinkingState === 'leaked') {
+        throwProtocolTagLeak(requestContext);
+      }
+
+      if (openingTag && hasStructuredReasoning) {
         throwProtocolTagLeak(requestContext);
       }
 
@@ -1473,7 +1547,7 @@ export function convertOpenAIChunkToGemini(
         throwProtocolTagLeak(requestContext);
       }
 
-      if (finishedWhitespaceCandidate) {
+      if (finishedWhitespaceCandidate || releaseContentOnlyCandidate) {
         parts = parts.filter((part) => !getVisibleText(part));
         if (combinedCandidateText) {
           parts.push({ text: combinedCandidateText });

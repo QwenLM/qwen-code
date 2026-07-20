@@ -86,6 +86,9 @@ export default defineConfig(({ command }) => ({
       // without it the SPA fallback returns index.html in dev and the dialog
       // fails JSON parsing / reports an HTTP error on open.
       '/scheduled-tasks': daemonProxy,
+      // Goals page (`GET /goals`). Without it the SPA fallback returns
+      // index.html in dev and the page fails JSON parsing on open.
+      '/goals': daemonProxy,
       // Token-usage dashboard (Daemon Status "统计" tab). Same reason as the
       // routes above — without it the SPA fallback returns index.html in dev and
       // the tab fails JSON parsing on `GET /usage/dashboard`.

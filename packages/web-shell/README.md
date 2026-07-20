@@ -136,20 +136,48 @@ export function App() {
 > **注意**：不要在已有 `DaemonSessionProvider` 下使用
 > `WebShellWithProviders`，否则会创建嵌套的重复 Provider。
 
+### 3. 只读 ChatRecord JSONL
+
+`WebShellTranscript` 只接收已经投影完成的 blocks，不连接 daemon，也不提供 composer、
+审批或 session mutation。浏览器宿主可以逐行解析 JSONL，再通过 SDK 的 opt-in facade
+投影：
+
+```tsx
+import { projectChatRecordsToDaemonTranscript } from '@qwen-code/sdk/daemon/transcript';
+import { WebShellTranscript } from '@qwen-code/web-shell';
+
+const records = jsonl
+  .split(/\r?\n/)
+  .filter((line) => line.trim())
+  .map((line) => JSON.parse(line) as unknown);
+const projection = projectChatRecordsToDaemonTranscript(records);
+
+<WebShellTranscript
+  blocks={projection.blocks}
+  theme="dark"
+  language="zh-CN"
+  style={{ height: 640 }}
+/>;
+```
+
+宿主应显示 `projection.diagnostics`，并在 `complete=false` 或 `truncated=true` 时提示
+历史可能不完整。组件需要一个可用高度；自定义 renderer 的副作用仍由宿主负责。
+
 ## Props
 
 ### WebShellWithProviders
 
 包含 `WebShell` 的所有 Props，加上 Provider 配置：
 
-| 属性               | 类型     | 说明                                                                                 |
-| ------------------ | -------- | ------------------------------------------------------------------------------------ |
-| `baseUrl`          | `string` | daemon API 地址，未传时使用 `window.location.origin`                                 |
-| `token`            | `string` | daemon API Bearer token                                                              |
-| `sessionId`        | `string` | 要连接的 session id；未传或 `undefined` 时保持空页面                                 |
-| `workspaceId`      | `string` | 已注册工作区 id，主要用于定位已有 session；不会注册或锁定工作区                      |
-| `workspaceCwd`     | `string` | 已注册工作区路径，语义同 `workspaceId`；不会注册或锁定工作区，且优先于 `workspaceId` |
-| `lockWorkspaceCwd` | `string` | 锁定到指定工作区路径；未注册时自动持久注册，并隐藏其他工作区及添加、移除和选择入口   |
+| 属性                 | 类型      | 说明                                                                                 |
+| -------------------- | --------- | ------------------------------------------------------------------------------------ |
+| `baseUrl`            | `string`  | daemon API 地址，未传时使用 `window.location.origin`                                 |
+| `token`              | `string`  | daemon API Bearer token                                                              |
+| `sessionId`          | `string`  | 要连接的 session id；未传或 `undefined` 时保持空页面                                 |
+| `workspaceId`        | `string`  | 已注册工作区 id，主要用于定位已有 session；不会注册或锁定工作区                      |
+| `workspaceCwd`       | `string`  | 已注册工作区路径，语义同 `workspaceId`；不会注册或锁定工作区，且优先于 `workspaceId` |
+| `lockWorkspaceCwd`   | `string`  | 锁定到指定工作区路径；未注册时自动持久注册，并隐藏其他工作区及添加、移除和选择入口   |
+| `restartSseOnPrompt` | `boolean` | 每次 prompt 被 daemon 接收后重建 SSE；默认关闭                                       |
 
 ### WebShell
 
