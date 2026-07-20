@@ -76,6 +76,11 @@ import type {
   DaemonWorkspaceMcpInitializeResult,
   DaemonWorkspaceMcpToolsStatus,
   DaemonWorkspaceMcpResourcesStatus,
+  DaemonWorkspaceRuntimeStatus,
+  DaemonWorkspaceRuntimeOperationStatus,
+  DaemonWorkspaceRuntimeOperationsStatus,
+  DaemonWorkspaceMcpConfigStatus,
+  DaemonWorkspaceMcpConfigMutationResult,
   DaemonWorkspaceMemoryStatus,
   DaemonWorkspacePreflightStatus,
   DaemonWorkspaceProvidersStatus,
@@ -295,6 +300,8 @@ export interface DaemonClientOptions {
 const DEFAULT_SESSION_LIST_PAGE_SIZE = 20;
 
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+const DEFAULT_WORKSPACE_RUNTIME_PREPARE_TIMEOUT_MS = 60_000;
+const WORKSPACE_RUNTIME_CLIENT_HEADROOM_MS = 5_000;
 const VOICE_TRANSCRIPTION_DEFAULT_TIMEOUT_MS = 65_000;
 const GITHUB_SETUP_DEFAULT_TIMEOUT_MS = 90_000;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
@@ -987,6 +994,46 @@ export class DaemonClient {
     );
   }
 
+  async setWorkspaceMcpConfig(
+    name: string,
+    scope: 'user',
+    config: Record<string, unknown>,
+  ): Promise<DaemonWorkspaceMcpConfigMutationResult> {
+    return await this.jsonRequest<DaemonWorkspaceMcpConfigMutationResult>(
+      `/workspace/config/mcp/servers/${urlEncode(name)}`,
+      'PUT /workspace/config/mcp/servers/:name',
+      { method: 'PUT', body: { scope, config }, mode: 'rest' },
+    );
+  }
+
+  async removeWorkspaceMcpConfig(
+    name: string,
+    scope: 'user',
+  ): Promise<DaemonWorkspaceMcpConfigMutationResult> {
+    return await this.jsonRequest<DaemonWorkspaceMcpConfigMutationResult>(
+      `/workspace/config/mcp/servers/${urlEncode(name)}?scope=${urlEncode(scope)}`,
+      'DELETE /workspace/config/mcp/servers/:name',
+      { method: 'DELETE', mode: 'rest' },
+    );
+  }
+
+  async setUserConfigMcpServerEnabled(
+    serverName: string,
+    enabled: boolean,
+  ): Promise<DaemonMcpManageResult> {
+    const action = enabled ? 'enable' : 'disable';
+    return await this.jsonRequest<DaemonMcpManageResult>(
+      `/workspace/config/mcp/${urlEncode(serverName)}/${action}`,
+      'POST /workspace/config/mcp/:server/:action',
+      {
+        method: 'POST',
+        body: {},
+        mode: 'rest',
+        timeoutMs: MCP_RESTART_DEFAULT_TIMEOUT_MS,
+      },
+    );
+  }
+
   async initializeWorkspaceMcp(): Promise<DaemonWorkspaceMcpInitializeResult> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/workspace/mcp/initialize`,
@@ -1165,6 +1212,97 @@ export class DaemonClient {
       '/workspace/extensions',
       'GET /workspace/extensions',
       { mode: 'rest' },
+    );
+  }
+
+  async installWorkspaceConfigExtension(
+    params: ExtensionInstallRequest,
+  ): Promise<ExtensionInstallResponse> {
+    return await this.jsonRequest<ExtensionInstallResponse>(
+      '/workspace/config/extensions/install',
+      'POST /workspace/config/extensions/install',
+      { method: 'POST', body: params, mode: 'rest' },
+    );
+  }
+
+  async workspaceConfigExtensionOperationStatus(
+    operationId: string,
+    timeoutMs?: number,
+  ): Promise<ExtensionOperationStatus> {
+    return await this.jsonRequest<ExtensionOperationStatus>(
+      `/workspace/config/extensions/operations/${urlEncode(operationId)}`,
+      'GET /workspace/config/extensions/operations/:operationId',
+      { mode: 'rest', timeoutMs },
+    );
+  }
+
+  async activeWorkspaceConfigExtensionOperations(): Promise<ExtensionActiveOperations> {
+    return await this.jsonRequest<ExtensionActiveOperations>(
+      '/workspace/config/extensions/operations',
+      'GET /workspace/config/extensions/operations',
+      { mode: 'rest' },
+    );
+  }
+
+  async respondToWorkspaceConfigExtensionInteraction(
+    operationId: string,
+    interactionId: string,
+    response: ExtensionInteractionResponse,
+  ): Promise<ExtensionInteractionResponseResult> {
+    return await this.jsonRequest<ExtensionInteractionResponseResult>(
+      `/workspace/config/extensions/operations/${urlEncode(operationId)}/interactions/${urlEncode(interactionId)}`,
+      'POST /workspace/config/extensions/operations/:operationId/interactions/:interactionId',
+      { method: 'POST', body: response, mode: 'rest' },
+    );
+  }
+
+  async checkWorkspaceConfigExtensionUpdates(): Promise<ExtensionUpdateCheckResponse> {
+    return await this.jsonRequest<ExtensionUpdateCheckResponse>(
+      '/workspace/config/extensions/check-updates',
+      'POST /workspace/config/extensions/check-updates',
+      { method: 'POST', body: {}, mode: 'rest' },
+    );
+  }
+
+  async enableWorkspaceConfigExtension(
+    name: string,
+    params: ExtensionScopeRequest & { scope: 'user' },
+  ): Promise<ExtensionMutationResponse> {
+    return await this.jsonRequest<ExtensionMutationResponse>(
+      `/workspace/config/extensions/${urlEncode(name)}/enable`,
+      'POST /workspace/config/extensions/:name/enable',
+      { method: 'POST', body: params, mode: 'rest' },
+    );
+  }
+
+  async disableWorkspaceConfigExtension(
+    name: string,
+    params: ExtensionScopeRequest & { scope: 'user' },
+  ): Promise<ExtensionMutationResponse> {
+    return await this.jsonRequest<ExtensionMutationResponse>(
+      `/workspace/config/extensions/${urlEncode(name)}/disable`,
+      'POST /workspace/config/extensions/:name/disable',
+      { method: 'POST', body: params, mode: 'rest' },
+    );
+  }
+
+  async updateWorkspaceConfigExtension(
+    name: string,
+  ): Promise<ExtensionMutationResponse> {
+    return await this.jsonRequest<ExtensionMutationResponse>(
+      `/workspace/config/extensions/${urlEncode(name)}/update`,
+      'POST /workspace/config/extensions/:name/update',
+      { method: 'POST', body: {}, mode: 'rest' },
+    );
+  }
+
+  async uninstallWorkspaceConfigExtension(
+    name: string,
+  ): Promise<ExtensionMutationResponse> {
+    return await this.jsonRequest<ExtensionMutationResponse>(
+      `/workspace/config/extensions/${urlEncode(name)}`,
+      'DELETE /workspace/config/extensions/:name',
+      { method: 'DELETE', mode: 'rest' },
     );
   }
 
@@ -1373,9 +1511,16 @@ export class DaemonClient {
     } = {},
   ): Promise<ExtensionOperationStatus> {
     const pollIntervalMs = options.pollIntervalMs ?? 1_000;
-    const timeoutMs = options.timeoutMs ?? 10 * 60_000;
-    const hasDeadline = timeoutMs !== Number.POSITIVE_INFINITY;
-    const deadline = Date.now() + timeoutMs;
+    const now = Date.now();
+    const clientDeadline =
+      options.timeoutMs === undefined ? undefined : now + options.timeoutMs;
+    const deadline =
+      handle.deadlineAt === undefined
+        ? now + (options.timeoutMs ?? 10 * 60_000)
+        : clientDeadline === undefined
+          ? handle.deadlineAt
+          : Math.min(handle.deadlineAt, clientDeadline);
+    const hasDeadline = deadline !== Number.POSITIVE_INFINITY;
     const timeoutError = () =>
       new Error(
         `Timed out waiting for extension operation ${handle.operationId}. The server operation was not cancelled.`,
@@ -2830,6 +2975,27 @@ export class DaemonClient {
     );
   }
 
+  installWorkspaceConfigSkill(
+    request: DaemonSkillInstallRequest & { scope: 'global' },
+  ): Promise<DaemonSkillMutationResult> {
+    return this.jsonRequest('/workspace/config/skills/install', 'Skill', {
+      method: 'POST',
+      body: request,
+      mode: 'rest',
+    });
+  }
+
+  deleteWorkspaceConfigSkill(
+    skillName: string,
+    scope: 'global',
+  ): Promise<DaemonSkillMutationResult> {
+    return this.jsonRequest(
+      `/workspace/config/skills/${urlEncode(skillName)}?scope=${urlEncode(scope)}`,
+      'Skill',
+      { method: 'DELETE', mode: 'rest' },
+    );
+  }
+
   async workspaceSettings(opts?: {
     clientId?: string;
   }): Promise<DaemonWorkspaceSettingsStatus> {
@@ -4154,6 +4320,193 @@ export class WorkspaceDaemonClient {
     return this.get('/mcp', 'GET /workspaces/:workspace/mcp');
   }
 
+  ensureWorkspaceRuntime(): Promise<DaemonWorkspaceRuntimeStatus> {
+    return this.restPost(
+      '/runtime/ensure',
+      'POST /workspaces/:workspace/runtime/ensure',
+      {},
+      undefined,
+      DEFAULT_WORKSPACE_RUNTIME_PREPARE_TIMEOUT_MS +
+        WORKSPACE_RUNTIME_CLIENT_HEADROOM_MS,
+    );
+  }
+
+  workspaceRuntimeStatus(
+    timeoutMs?: number,
+  ): Promise<DaemonWorkspaceRuntimeStatus> {
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/runtime/status',
+      'GET /workspaces/:workspace/runtime/status',
+      { mode: 'rest', timeoutMs },
+    );
+  }
+
+  workspaceRuntimeOperation(
+    operationId: string,
+    timeoutMs?: number,
+  ): Promise<DaemonWorkspaceRuntimeOperationStatus> {
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      `/runtime/operations/${urlEncode(operationId)}`,
+      'GET /workspaces/:workspace/runtime/operations/:operationId',
+      { mode: 'rest', timeoutMs },
+    );
+  }
+
+  activeWorkspaceRuntimeOperations(
+    timeoutMs?: number,
+  ): Promise<DaemonWorkspaceRuntimeOperationsStatus> {
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/runtime/operations',
+      'GET /workspaces/:workspace/runtime/operations',
+      { mode: 'rest', timeoutMs },
+    );
+  }
+
+  workspaceRuntimeExtensions(): Promise<DaemonWorkspaceExtensionsStatus> {
+    return this.restGet(
+      '/runtime/extensions',
+      'GET /workspaces/:workspace/runtime/extensions',
+    );
+  }
+
+  workspaceRuntimeMcp(timeoutMs?: number): Promise<DaemonWorkspaceMcpStatus> {
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/runtime/mcp',
+      'GET /workspaces/:workspace/runtime/mcp',
+      { mode: 'rest', timeoutMs },
+    );
+  }
+
+  reloadWorkspaceRuntimeMcp(
+    timeoutMs?: number,
+  ): Promise<DaemonWorkspaceRuntimeStatus> {
+    const serverTimeoutMs =
+      timeoutMs ?? DEFAULT_WORKSPACE_RUNTIME_PREPARE_TIMEOUT_MS;
+    return this.restPost(
+      '/runtime/mcp/reload',
+      'POST /workspaces/:workspace/runtime/mcp/reload',
+      timeoutMs === undefined ? {} : { timeoutMs },
+      undefined,
+      serverTimeoutMs + WORKSPACE_RUNTIME_CLIENT_HEADROOM_MS,
+    );
+  }
+
+  workspaceRuntimeMcpTools(
+    serverName: string,
+  ): Promise<DaemonWorkspaceMcpToolsStatus> {
+    return this.restGet(
+      `/runtime/mcp/${urlEncode(serverName)}/tools`,
+      'GET /workspaces/:workspace/runtime/mcp/:server/tools',
+    );
+  }
+
+  workspaceRuntimeMcpResources(
+    serverName: string,
+  ): Promise<DaemonWorkspaceMcpResourcesStatus> {
+    return this.restGet(
+      `/runtime/mcp/${urlEncode(serverName)}/resources`,
+      'GET /workspaces/:workspace/runtime/mcp/:server/resources',
+    );
+  }
+
+  restartWorkspaceRuntimeMcpServer(
+    serverName: string,
+  ): Promise<DaemonMcpRestartResult> {
+    return this.restPost(
+      `/runtime/mcp/${urlEncode(serverName)}/restart`,
+      'POST /workspaces/:workspace/runtime/mcp/:server/restart',
+      {},
+      undefined,
+      MCP_RESTART_DEFAULT_TIMEOUT_MS,
+    );
+  }
+
+  manageWorkspaceRuntimeMcpServer(
+    serverName: string,
+    action: Exclude<DaemonMcpManageAction, 'enable' | 'disable'>,
+  ): Promise<DaemonMcpManageResult> {
+    return this.restPost(
+      `/runtime/mcp/${urlEncode(serverName)}/${urlEncode(action)}`,
+      'POST /workspaces/:workspace/runtime/mcp/:server/:action',
+      {},
+      undefined,
+      MCP_RESTART_DEFAULT_TIMEOUT_MS,
+    );
+  }
+
+  setWorkspaceConfigMcpServerEnabled(
+    serverName: string,
+    enabled: boolean,
+  ): Promise<DaemonMcpManageResult> {
+    const action = enabled ? 'enable' : 'disable';
+    return this.restPost(
+      `/config/mcp/${urlEncode(serverName)}/${action}`,
+      'POST /workspaces/:workspace/config/mcp/:server/:action',
+      {},
+      undefined,
+      MCP_RESTART_DEFAULT_TIMEOUT_MS,
+    );
+  }
+
+  workspaceRuntimeSkills(): Promise<DaemonWorkspaceSkillsStatus> {
+    return this.restGet(
+      '/runtime/skills',
+      'GET /workspaces/:workspace/runtime/skills',
+    );
+  }
+
+  workspaceConfigSkills(): Promise<DaemonWorkspaceSkillsStatus> {
+    return this.restGet(
+      '/config/skills',
+      'GET /workspaces/:workspace/config/skills',
+    );
+  }
+
+  workspaceRuntimeTools(): Promise<DaemonWorkspaceToolsStatus> {
+    return this.restGet(
+      '/runtime/tools',
+      'GET /workspaces/:workspace/runtime/tools',
+    );
+  }
+
+  workspaceMcpConfig(): Promise<DaemonWorkspaceMcpConfigStatus> {
+    return this.restGet(
+      '/config/mcp/servers',
+      'GET /workspaces/:workspace/config/mcp/servers',
+    );
+  }
+
+  setWorkspaceMcpConfig(
+    name: string,
+    config: Record<string, unknown>,
+  ): Promise<DaemonWorkspaceMcpConfigMutationResult> {
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      `/config/mcp/servers/${urlEncode(name)}`,
+      'PUT /workspaces/:workspace/config/mcp/servers/:name',
+      {
+        method: 'PUT',
+        body: { scope: 'workspace', config },
+        mode: 'rest',
+      },
+    );
+  }
+
+  removeWorkspaceMcpConfig(
+    name: string,
+  ): Promise<DaemonWorkspaceMcpConfigMutationResult> {
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      `/config/mcp/servers/${urlEncode(name)}?scope=workspace`,
+      'DELETE /workspaces/:workspace/config/mcp/servers/:name',
+      { method: 'DELETE', mode: 'rest' },
+    );
+  }
+
   initializeWorkspaceMcp(): Promise<DaemonWorkspaceMcpInitializeResult> {
     return this.post(
       '/mcp/initialize',
@@ -4238,6 +4591,39 @@ export class WorkspaceDaemonClient {
 
   workspaceSkills(): Promise<DaemonWorkspaceSkillsStatus> {
     return this.get('/skills', 'GET /workspaces/:workspace/skills');
+  }
+
+  installWorkspaceConfigSkill(
+    request: DaemonSkillInstallRequest & { scope: 'workspace' },
+  ): Promise<DaemonSkillMutationResult> {
+    return this.restPost(
+      '/config/skills/install',
+      'POST /workspaces/:workspace/config/skills/install',
+      request,
+    );
+  }
+
+  deleteWorkspaceConfigSkill(
+    skillName: string,
+    scope: 'workspace',
+  ): Promise<DaemonSkillMutationResult> {
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      `/config/skills/${urlEncode(skillName)}?scope=${urlEncode(scope)}`,
+      'DELETE /workspaces/:workspace/config/skills/:name',
+      { method: 'DELETE', mode: 'rest' },
+    );
+  }
+
+  setWorkspaceConfigSkillEnabled(
+    skillName: string,
+    enabled: boolean,
+  ): Promise<DaemonSkillToggleResult> {
+    return this.restPost(
+      `/config/skills/${urlEncode(skillName)}/enable`,
+      'POST /workspaces/:workspace/config/skills/:name/enable',
+      { enabled },
+    );
   }
 
   workspaceProviders(): Promise<DaemonWorkspaceProvidersStatus> {
@@ -4799,6 +5185,66 @@ export class WorkspaceDaemonClient {
     );
   }
 
+  workspaceConfigExtensions(): Promise<DaemonWorkspaceExtensionsStatus> {
+    return this.restGet(
+      '/config/extensions',
+      'GET /workspaces/:workspace/config/extensions',
+    );
+  }
+
+  workspaceConfigExtensionOperationStatus(
+    operationId: string,
+    timeoutMs?: number,
+  ): Promise<ExtensionOperationStatus> {
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      `/config/extensions/operations/${urlEncode(operationId)}`,
+      'GET /workspaces/:workspace/config/extensions/operations/:operationId',
+      { mode: 'rest', timeoutMs },
+    );
+  }
+
+  activeWorkspaceConfigExtensionOperations(): Promise<ExtensionActiveOperations> {
+    return this.restGet(
+      '/config/extensions/operations',
+      'GET /workspaces/:workspace/config/extensions/operations',
+    );
+  }
+
+  respondToWorkspaceConfigExtensionInteraction(
+    operationId: string,
+    interactionId: string,
+    response: ExtensionInteractionResponse,
+  ): Promise<ExtensionInteractionResponseResult> {
+    return this.restPost(
+      `/config/extensions/operations/${urlEncode(operationId)}/interactions/${urlEncode(interactionId)}`,
+      'POST /workspaces/:workspace/config/extensions/operations/:operationId/interactions/:interactionId',
+      response,
+    );
+  }
+
+  enableWorkspaceConfigExtension(
+    name: string,
+    params: ExtensionScopeRequest & { scope: 'workspace' },
+  ): Promise<ExtensionMutationResponse> {
+    return this.restPost(
+      `/config/extensions/${urlEncode(name)}/enable`,
+      'POST /workspaces/:workspace/config/extensions/:name/enable',
+      params,
+    );
+  }
+
+  disableWorkspaceConfigExtension(
+    name: string,
+    params: ExtensionScopeRequest & { scope: 'workspace' },
+  ): Promise<ExtensionMutationResponse> {
+    return this.restPost(
+      `/config/extensions/${urlEncode(name)}/disable`,
+      'POST /workspaces/:workspace/config/extensions/:name/disable',
+      params,
+    );
+  }
+
   setExtensionActivation(
     extensionId: string,
     state: ExtensionActivationState,
@@ -4856,6 +5302,30 @@ export class WorkspaceDaemonClient {
       path,
       label,
       { method: 'POST', body, clientId, timeoutMs },
+    );
+  }
+
+  private restGet<T>(path: string, label: string): Promise<T> {
+    return this.client.workspaceJsonRequest<T>(
+      this.workspaceSelector,
+      path,
+      label,
+      { mode: 'rest' },
+    );
+  }
+
+  private restPost<T>(
+    path: string,
+    label: string,
+    body: unknown,
+    clientId?: string,
+    timeoutMs?: number,
+  ): Promise<T> {
+    return this.client.workspaceJsonRequest<T>(
+      this.workspaceSelector,
+      path,
+      label,
+      { method: 'POST', body, clientId, timeoutMs, mode: 'rest' },
     );
   }
 }

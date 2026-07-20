@@ -455,7 +455,7 @@ export interface DaemonStatusReport {
     eventRingSize: number;
     promptDeadlineMs: number | null;
     writerIdleTimeoutMs: number | null;
-    channelIdleTimeoutMs: number;
+    channelIdleTimeoutMs: number | null;
     sessionIdleTimeoutMs: number;
     acpConnectionCap: number | null;
     compactedReplayMaxBytes: number;
@@ -1189,6 +1189,8 @@ export interface DaemonWorkspaceMcpStatus {
   v: 1;
   workspaceCwd: string;
   initialized: boolean;
+  runtimeEpoch?: number;
+  source?: 'live' | 'cache' | 'config';
   discoveryState?: DaemonMcpDiscoveryState;
   servers: DaemonWorkspaceMcpServerStatus[];
   errors?: DaemonStatusCell[];
@@ -1204,6 +1206,69 @@ export interface DaemonWorkspaceMcpStatus {
    * Older daemons omit the field.
    */
   budgets?: DaemonMcpBudgetStatusCell[];
+}
+
+export type DaemonWorkspaceRuntimeCapability =
+  | 'extensions'
+  | 'mcp'
+  | 'skills'
+  | 'tools';
+
+export interface DaemonWorkspaceRuntimeCapabilityStatus {
+  state: 'not_started' | 'starting' | 'ready' | 'stale' | 'error';
+  desiredGeneration?: number;
+  appliedGeneration?: number;
+  runtimeEpoch?: number;
+  appliedEpoch?: number;
+  error?: { code: string; message: string };
+}
+
+export interface DaemonWorkspaceRuntimeStatus {
+  v: 1;
+  workspaceCwd: string;
+  state: 'cold' | 'starting' | 'active' | 'idle' | 'stopping' | 'error';
+  runtimeLive: boolean;
+  runtimeEpoch?: number;
+  capabilities: Partial<
+    Record<
+      DaemonWorkspaceRuntimeCapability,
+      DaemonWorkspaceRuntimeCapabilityStatus
+    >
+  >;
+}
+
+export interface DaemonWorkspaceRuntimeOperationStatus {
+  v: 1;
+  operationId: string;
+  workspaceCwd: string;
+  kind: 'mcp';
+  action: string;
+  target: string;
+  state: 'running' | 'waiting_for_input' | 'succeeded' | 'failed';
+  deadlineAt?: string;
+  authUrl?: string;
+  error?: { code: string; message: string };
+}
+
+export interface DaemonWorkspaceRuntimeOperationsStatus {
+  v: 1;
+  operations: DaemonWorkspaceRuntimeOperationStatus[];
+}
+
+export interface DaemonWorkspaceMcpConfigStatus {
+  v: 1;
+  effective: Record<string, unknown>;
+  user: Record<string, unknown>;
+  workspace: Record<string, unknown>;
+  disabledServers: string[];
+  disabledServerScopes?: Record<string, Array<'user' | 'workspace'>>;
+}
+
+export interface DaemonWorkspaceMcpConfigMutationResult {
+  name: string;
+  scope: 'user' | 'workspace';
+  config?: Record<string, unknown>;
+  activation: 'applied' | 'reconciling' | 'deferred' | 'partial';
 }
 
 /** Response of `POST /workspace/mcp/initialize`. */
@@ -1227,6 +1292,7 @@ export interface DaemonWorkspaceMcpToolsStatus {
   workspaceCwd: string;
   serverName: string;
   initialized: boolean;
+  runtimeEpoch?: number;
   acpChannelLive: boolean;
   tools: DaemonWorkspaceMcpToolStatus[];
   errors?: DaemonStatusCell[];
@@ -1255,6 +1321,7 @@ export interface DaemonWorkspaceMcpResourcesStatus {
   workspaceCwd: string;
   serverName: string;
   initialized: boolean;
+  runtimeEpoch?: number;
   acpChannelLive: boolean;
   resources: DaemonWorkspaceMcpResourceStatus[];
   errors?: DaemonStatusCell[];
@@ -1279,6 +1346,8 @@ export interface DaemonWorkspaceSkillsStatus {
   v: 1;
   workspaceCwd: string;
   initialized: boolean;
+  runtimeEpoch?: number;
+  source?: 'live' | 'cache' | 'config';
   skills: DaemonWorkspaceSkillStatus[];
   errors?: DaemonStatusCell[];
 }
@@ -1771,6 +1840,7 @@ export interface DaemonWorkspaceToolsStatus {
   v: 1;
   workspaceCwd: string;
   initialized: true;
+  runtimeEpoch?: number;
   acpChannelLive: boolean;
   tools: DaemonWorkspaceToolStatus[];
   errors?: DaemonStatusCell[];
@@ -2163,7 +2233,11 @@ export interface DaemonToolToggleResult {
   enabled: boolean;
 }
 
-export type DaemonSkillToggleActivation = 'applied' | 'deferred' | 'partial';
+export type DaemonSkillToggleActivation =
+  | 'applied'
+  | 'reconciling'
+  | 'deferred'
+  | 'partial';
 
 export interface DaemonSkillToggleResult {
   skillName: string;
@@ -2192,6 +2266,7 @@ export interface DaemonSkillMutationResult {
   scope: DaemonSkillScope;
   installedPath?: string;
   deleted?: boolean;
+  activation?: DaemonSkillToggleActivation;
 }
 
 export interface DaemonSettingDescriptor {
@@ -2644,6 +2719,11 @@ export interface DaemonMcpManageResult {
   messages?: string[];
   authUrl?: string;
   pending?: boolean;
+  runtimeEpoch?: number;
+  operationId?: string;
+  deadlineAt?: string;
+  activation?: 'applied' | 'reconciling' | 'deferred' | 'partial';
+  warning?: string;
 }
 
 /**
@@ -3173,6 +3253,8 @@ export interface DaemonExtensionEntry {
   description?: string;
   version: string;
   isActive: boolean;
+  defaultActivation?: ExtensionActivationState;
+  workspaceActivation?: 'inherit' | ExtensionActivationState;
   path: string;
   source?: string;
   installType?: DaemonExtensionInstallType;
@@ -3188,6 +3270,9 @@ export interface DaemonWorkspaceExtensionsStatus {
   v: 1;
   workspaceCwd: string;
   initialized: boolean;
+  runtimeEpoch?: number;
+  desiredGeneration?: number;
+  appliedGeneration?: number;
   extensions: DaemonExtensionEntry[];
   errors?: DaemonStatusCell[];
 }
@@ -3235,7 +3320,6 @@ export interface WorkspaceExtensionProjectionEntry {
   version: string;
   defaultActivation: ExtensionActivationState;
   workspaceActivation: ExtensionWorkspaceActivation;
-  effectiveActivation: ExtensionActivationState;
   activationSource:
     | 'cli_override'
     | 'workspace_override'
@@ -3256,6 +3340,7 @@ export interface WorkspaceExtensionProjection {
 export interface ExtensionInstallResponse {
   accepted: true;
   operationId: string;
+  deadlineAt?: number;
 }
 
 export type ExtensionMutationResponse = ExtensionInstallResponse;
@@ -3287,6 +3372,7 @@ export interface ExtensionOperationResult {
   updated?: boolean;
   reason?: string;
   states?: Record<string, DaemonExtensionUpdateState>;
+  activation?: 'applied' | 'deferred' | 'partial';
 }
 
 export interface ExtensionOperationStatus {
@@ -3297,6 +3383,7 @@ export interface ExtensionOperationStatus {
   phase?: 'preparing' | 'committing' | 'reconciling';
   createdAt: number;
   updatedAt: number;
+  deadlineAt?: number;
   source?: string;
   name?: string;
   result?: ExtensionOperationResult;
