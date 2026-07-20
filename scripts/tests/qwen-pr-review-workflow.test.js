@@ -82,6 +82,9 @@ function runScenario(scenario, { timeoutMinutes = 180 } = {}) {
         '  abort_no_status) r success false "[API Error: Connection error.]" ;;',
         '  abort_status_suffix) r success false "[API Error: Rate limit exceeded (Status: RESOURCE_EXHAUSTED)]" ;;',
         '  abort_long_body) EPAD=$(printf "A%.0s" $(seq 1 750)); r success false "[API Error: upstream returned an unparseable error body: ${EPAD}]" ;;',
+        '  abort_appended) r success false "Partial review text streamed before the connection dropped.[API Error: Connection error.]" ;;',
+        '  abort_appended_long) EPAD=$(printf "A%.0s" $(seq 1 750)); r success false "Partial review text streamed before the error.[API Error: upstream returned an unparseable error body: ${EPAD}]" ;;',
+        '  abort_with_suffix) r success false "[API Error: Rate limit exceeded]\\nPossible quota limitations in place or slow response times detected. Please wait and try again later." ;;',
         '  success_mentions_api_error) PAD=$(printf "x%.0s" $(seq 1 600)); r success false "This PR detects the [API Error: ...] pattern and routes to retry. quota and rate.?limit keywords cover the common messages. ${PAD} Review complete: COMMENT posted (0 Critical, 1 Suggestion inline)." ;;',
         '  success_quotes_status_code) PAD=$(printf "x%.0s" $(seq 1 700)); r success false "This PR adds retry for [API Error: 429 quota exceeded] and similar. ${PAD} Verdict: COMMENT, 0 Critical." ;;',
         '  errresult) r error true "connection dropped mid-review" ;;',
@@ -178,12 +181,34 @@ describe('qwen pr review transient retry', () => {
   });
 
   it('detects an abort whose error body exceeds the 600-byte tail window', () => {
-    // The [API Error: prefix falls outside tail -c 600, but the
-    // whole-result check still catches it.
     const r = runScenario('abort_long_body');
     expect(r.line).toContain('FAIL');
     expect(r.line).not.toContain('kind=[quota]');
     expect(r.attempts).toBe(2);
+  });
+
+  it('detects the production abort shape: error appended to partial review', () => {
+    // BaseJsonOutputAdapter appendText puts the error last, after any
+    // partial review text the model already streamed.
+    const r = runScenario('abort_appended');
+    expect(r.line).toContain('FAIL');
+    expect(r.line).not.toContain('kind=[quota]');
+    expect(r.attempts).toBe(2);
+  });
+
+  it('detects a long error appended to partial review (exceeds any fixed window)', () => {
+    const r = runScenario('abort_appended_long');
+    expect(r.line).toContain('FAIL');
+    expect(r.line).not.toContain('kind=[quota]');
+    expect(r.attempts).toBe(2);
+  });
+
+  it('detects an abort with a rate-limit guidance suffix after the ]', () => {
+    // "Rate limit exceeded" + "quota limitations" in the suffix → quota
+    // bucket → no retry (1 attempt).
+    const r = runScenario('abort_with_suffix');
+    expect(r.line).toContain('FAIL kind=[quota]');
+    expect(r.attempts).toBe(1);
   });
 
   it('does NOT misclassify a successful review that mentions [API Error: ...] in its summary', () => {
