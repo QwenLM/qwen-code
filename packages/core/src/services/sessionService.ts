@@ -394,13 +394,20 @@ export class SessionService {
 
     // Worktree sessions record cwd as the worktree path (different project
     // hash). Check the sidecar's originalCwd to recover membership.
-    const sidecar = await readWorktreeSession(
-      this.getWorktreeSessionPath(sessionId),
-    ).catch(() => null);
-    return (
-      sidecar != null &&
-      getProjectHash(sidecar.originalCwd) === this.projectHash
-    );
+    // Try both active and archived paths since archiveSessions moves the
+    // sidecar file.
+    for (const state of ['active', 'archived'] as const) {
+      const sidecar = await readWorktreeSession(
+        this.getWorktreeSessionPathForArchiveState(sessionId, state),
+      ).catch(() => null);
+      if (
+        sidecar != null &&
+        getProjectHash(sidecar.originalCwd) === this.projectHash
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**

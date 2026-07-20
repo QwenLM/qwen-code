@@ -1006,7 +1006,7 @@ describe('CoreToolScheduler', () => {
     );
 
     expect(siblingWouldOtherwiseAllow).toBe(true);
-    expect(siblingPermission).toHaveBeenCalledTimes(2);
+    expect(siblingPermission).toHaveBeenCalledOnce();
     const latestCalls = onToolCallsUpdate.mock.calls.at(-1)?.[0] as ToolCall[];
     expect(
       latestCalls.find(
@@ -7581,6 +7581,674 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
     const completedCalls = onAllToolCallsComplete.mock
       .calls[0][0] as ToolCall[];
     expect(completedCalls[0].status).toBe('cancelled');
+  });
+});
+
+describe('CoreToolScheduler Plan shell routing', () => {
+  const unknownWarning =
+    'Plan mode could not determine whether this shell command is read-only. Approval applies only to this exact invocation once; it may modify system state, and Plan mode will remain active.';
+
+  function buildPlanShellScheduler(options: {
+    tools: MockTool[];
+    mode?: () => ApprovalMode;
+    revision?: () => number;
+    interactive?: boolean;
+    ideMode?: boolean;
+    permissionManager?: unknown;
+    messageBus?: MessageBus;
+    disableHooks?: boolean;
+    avoidPermissionPrompts?: boolean;
+    targetDir?: () => string;
+  }) {
+    const tools = new Map(options.tools.map((tool) => [tool.name, tool]));
+    const registry = {
+      getTool: (name: string) => tools.get(name),
+      ensureTool: async (name: string) => tools.get(name),
+      getToolByName: (name: string) => tools.get(name),
+      getFunctionDeclarations: () => [],
+      tools,
+      discovery: {},
+      registerTool: () => {},
+      getToolByDisplayName: (name: string) => tools.get(name),
+      getTools: () => [...tools.values()],
+      discoverTools: async () => {},
+      getAllTools: () => [...tools.values()],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const config = {
+      getSessionId: () => 'plan-shell-session',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: options.mode ?? (() => ApprovalMode.PLAN),
+      getApprovalModeRevision: options.revision ?? (() => 0),
+      getSdkMode: () => false,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getToolRegistry: () => registry,
+      getPermissionManager: () => options.permissionManager,
+      getTargetDir: options.targetDir ?? (() => '/tmp'),
+      getConditionalRulesRegistry: () => undefined,
+      getSkillManager: () => undefined,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      isInteractive: () => options.interactive ?? true,
+      getIdeMode: () => options.ideMode ?? false,
+      getExperimentalZedIntegration: () => false,
+      getInputFormat: () => InputFormat.TEXT,
+      getChatRecordingService: () => undefined,
+      getMessageBus: () => options.messageBus,
+      getDisableAllHooks: () => options.disableHooks ?? true,
+      getShouldAvoidPermissionPrompts: () =>
+        options.avoidPermissionPrompts ?? false,
+      getOnPersistPermissionRule: () => undefined,
+    } as unknown as Config;
+
+    return {
+      scheduler: new CoreToolScheduler({
+        config,
+        onAllToolCallsComplete,
+        onToolCallsUpdate,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      }),
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+    };
+  }
+
+  function request(
+    callId: string,
+    command: string,
+    name: string = ToolNames.SHELL,
+  ) {
+    return {
+      callId,
+      name,
+      args: { command },
+      isClientInitiated: false,
+      prompt_id: `prompt-${callId}`,
+    };
+  }
+
+  function shellTool(
+    options: {
+      name?: string;
+      permission?: PermissionDecision;
+      confirmation?: () => Promise<ToolCallConfirmationDetails>;
+      execute?: ReturnType<typeof vi.fn>;
+    } = {},
+  ) {
+    return new MockTool({
+      name: options.name ?? ToolNames.SHELL,
+      getDefaultPermission: async () => options.permission ?? 'allow',
+      getConfirmationDetails:
+        options.confirmation ??
+        (async () => ({
+          type: 'exec',
+          title: 'Confirm shell',
+          command: 'shell command',
+          rootCommand: 'shell',
+          onConfirm: async () => undefined,
+        })),
+      execute:
+        options.execute ??
+        vi.fn().mockResolvedValue({
+          llmContent: 'ok',
+          returnDisplay: 'ok',
+        }),
+    });
+  }
+
+  it.each([
+    [ToolNames.SHELL, 'git status'],
+    [ToolNames.MONITOR, "/bin/bash -c 'git status &' ignored"],
+  ])('executes read-only %s calls without a prompt', async (name, command) => {
+    const getConfirmationDetails = vi.fn();
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const { scheduler, onAllToolCallsComplete } = buildPlanShellScheduler({
+      tools: [
+        shellTool({
+          name,
+          confirmation: getConfirmationDetails,
+          execute,
+        }),
+      ],
+    });
+
+    await scheduler.schedule(
+      [request(`read-${name}`, command, name)],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(getConfirmationDetails).not.toHaveBeenCalled();
+  });
+
+  it('limits PM-confirmed read-only shell calls to exact one-off approval', async () => {
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const { scheduler, onToolCallsUpdate } = buildPlanShellScheduler({
+      tools: [
+        shellTool({
+          permission: 'ask',
+          confirmation: async () => ({
+            type: 'exec',
+            title: 'Confirm shell',
+            command: 'git status',
+            rootCommand: 'git',
+            onConfirm,
+          }),
+          execute,
+        }),
+      ],
+    });
+
+    await scheduler.schedule(
+      [request('read-ask', 'git status')],
+      new AbortController().signal,
+    );
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    expect(waiting.confirmationDetails).toMatchObject({
+      hideAlwaysAllow: true,
+    });
+
+    await waiting.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+      { permissionRules: ['Bash(git status)'] },
+    );
+
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
+    expect(onConfirm).toHaveBeenCalledWith(
+      ToolConfirmationOutcome.ProceedOnce,
+      undefined,
+    );
+  });
+
+  it.each([ToolNames.SHELL, ToolNames.MONITOR])(
+    'blocks known writes for %s without requesting confirmation',
+    async (name) => {
+      const getConfirmationDetails = vi.fn();
+      const execute = vi.fn();
+      const { scheduler, onAllToolCallsComplete } = buildPlanShellScheduler({
+        tools: [
+          shellTool({ name, confirmation: getConfirmationDetails, execute }),
+        ],
+      });
+
+      await scheduler.schedule(
+        [request(`write-${name}`, 'touch changed.txt', name)],
+        new AbortController().signal,
+      );
+      await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+      const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+      expect(completed[0].status).toBe('error');
+      expect(JSON.stringify(completed[0])).toContain(
+        'classified as state-modifying',
+      );
+      expect(getConfirmationDetails).not.toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
+    },
+  );
+
+  it('forces unknown PM-allowed commands through exact one-off approval every time', async () => {
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const tool = shellTool({
+      confirmation: async () => ({
+        type: 'exec',
+        title: 'Confirm shell',
+        command: "python -c 'print(1)'",
+        rootCommand: 'python',
+        onConfirm,
+      }),
+      execute,
+    });
+    const { scheduler, onAllToolCallsComplete, onToolCallsUpdate } =
+      buildPlanShellScheduler({ tools: [tool] });
+
+    await scheduler.schedule(
+      [request('unknown-1', "python -c 'print(1)'")],
+      new AbortController().signal,
+    );
+    const first = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    expect(first.confirmationDetails).toMatchObject({
+      hideAlwaysAllow: true,
+      warnings: [unknownWarning],
+    });
+    await first.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+      { permissionRules: ['Bash(python:*)'] },
+    );
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1));
+    expect(onConfirm).toHaveBeenCalledWith(
+      ToolConfirmationOutcome.ProceedOnce,
+      undefined,
+    );
+
+    onToolCallsUpdate.mockClear();
+    onAllToolCallsComplete.mockClear();
+    await scheduler.schedule(
+      [request('unknown-2', "python -c 'print(1)'")],
+      new AbortController().signal,
+    );
+    const second = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    expect(second.request.callId).toBe('unknown-2');
+    await second.confirmationDetails.onConfirm(ToolConfirmationOutcome.Cancel);
+  });
+
+  it('invalidates exact approval when ambient cwd moves while pending', async () => {
+    const rawCommand = "python -c 'print(1)'";
+    let targetDir = '/tmp/one';
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const execute = vi.fn();
+    const { scheduler, onToolCallsUpdate } = buildPlanShellScheduler({
+      tools: [
+        shellTool({
+          confirmation: async () => ({
+            type: 'exec',
+            title: 'Confirm shell',
+            command: rawCommand,
+            rootCommand: 'python',
+            onConfirm,
+          }),
+          execute,
+        }),
+      ],
+      targetDir: () => targetDir,
+    });
+    const shellRequest = request('ambient-cwd', rawCommand);
+
+    await scheduler.schedule([shellRequest], new AbortController().signal);
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    targetDir = '/tmp/two';
+    await waiting.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+
+    expect(onConfirm).toHaveBeenCalledWith(
+      ToolConfirmationOutcome.Cancel,
+      expect.objectContaining({ cancelMessage: expect.any(String) }),
+    );
+    expect(execute).not.toHaveBeenCalled();
+    expect(shellRequest.args).toEqual({ command: rawCommand });
+  });
+
+  it('keeps the bound cwd after exact approval is consumed', async () => {
+    const rawCommand = "python -c 'print(1)'";
+    let targetDir = '/tmp/one';
+    const onConfirm = vi.fn().mockImplementation(async () => {
+      targetDir = '/tmp/two';
+    });
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const { scheduler, onToolCallsUpdate } = buildPlanShellScheduler({
+      tools: [
+        shellTool({
+          confirmation: async () => ({
+            type: 'exec',
+            title: 'Confirm shell',
+            command: rawCommand,
+            rootCommand: 'python',
+            onConfirm,
+          }),
+          execute,
+        }),
+      ],
+      targetDir: () => targetDir,
+    });
+    const shellRequest = request('consumed-cwd', rawCommand);
+
+    await scheduler.schedule([shellRequest], new AbortController().signal);
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    await waiting.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
+    expect(execute).toHaveBeenCalledWith({
+      command: rawCommand,
+      directory: '/tmp/one',
+    });
+    expect(targetDir).toBe('/tmp/two');
+    expect(shellRequest.args).toEqual({ command: rawCommand });
+  });
+
+  it('atomically consumes only the first Plan shell response', async () => {
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const execute = vi.fn();
+    const { scheduler, onToolCallsUpdate } = buildPlanShellScheduler({
+      tools: [
+        shellTool({
+          confirmation: async () => ({
+            type: 'exec',
+            title: 'Confirm shell',
+            command: "python -c 'print(1)'",
+            rootCommand: 'python',
+            onConfirm,
+          }),
+          execute,
+        }),
+      ],
+    });
+    await scheduler.schedule(
+      [request('racing', "python -c 'print(1)'")],
+      new AbortController().signal,
+    );
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+
+    await Promise.all([
+      waiting.confirmationDetails.onConfirm(
+        ToolConfirmationOutcome.ProceedAlwaysProject,
+      ),
+      waiting.confirmationDetails.onConfirm(
+        ToolConfirmationOutcome.ProceedOnce,
+      ),
+    ]);
+
+    expect(onConfirm).toHaveBeenCalledOnce();
+    expect(onConfirm).toHaveBeenCalledWith(
+      ToolConfirmationOutcome.Cancel,
+      expect.objectContaining({ cancelMessage: expect.any(String) }),
+    );
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('does not auto-approve a Plan shell from a sibling Always decision', async () => {
+    const infoExecute = vi.fn().mockResolvedValue({
+      llmContent: 'info',
+      returnDisplay: 'info',
+    });
+    const shellExecute = vi.fn();
+    const infoTool = new MockTool({
+      name: ToolNames.WEB_FETCH,
+      getDefaultPermission: async () => 'ask',
+      getConfirmationDetails: async () => ({
+        type: 'info',
+        title: 'Confirm fetch',
+        prompt: 'Fetch docs?',
+        onConfirm: async () => undefined,
+      }),
+      execute: infoExecute,
+    });
+    const { scheduler, onToolCallsUpdate } = buildPlanShellScheduler({
+      tools: [infoTool, shellTool({ execute: shellExecute })],
+    });
+    await scheduler.schedule(
+      [
+        {
+          callId: 'sibling-info',
+          name: ToolNames.WEB_FETCH,
+          args: { url: 'https://example.com' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-sibling-info',
+        },
+        request('sibling-shell', "python -c 'print(1)'"),
+      ],
+      new AbortController().signal,
+    );
+    const waitingCalls = onToolCallsUpdate.mock.calls
+      .flatMap((call) => call[0] as ToolCall[])
+      .filter(
+        (call): call is WaitingToolCall =>
+          ['sibling-info', 'sibling-shell'].includes(call.request.callId) &&
+          call.status === 'awaiting_approval',
+      );
+    const infoWaiting = waitingCalls.find(
+      (call) => call.request.callId === 'sibling-info',
+    );
+    expect(infoWaiting).toBeDefined();
+    await infoWaiting!.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedAlwaysProject,
+    );
+
+    const latestShell = onToolCallsUpdate.mock.calls
+      .flatMap((call) => call[0] as ToolCall[])
+      .filter((call) => call.request.callId === 'sibling-shell')
+      .at(-1);
+    expect(latestShell?.status).toBe('awaiting_approval');
+    expect(shellExecute).not.toHaveBeenCalled();
+    if (latestShell?.status === 'awaiting_approval') {
+      await latestShell.confirmationDetails.onConfirm(
+        ToolConfirmationOutcome.Cancel,
+      );
+    }
+  });
+
+  it('invalidates approval after Plan mode exits and re-enters', async () => {
+    let mode = ApprovalMode.PLAN;
+    let revision = 1;
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const execute = vi.fn();
+    const { scheduler, onToolCallsUpdate } = buildPlanShellScheduler({
+      tools: [
+        shellTool({
+          confirmation: async () => ({
+            type: 'exec',
+            title: 'Confirm shell',
+            command: "python -c 'print(1)'",
+            rootCommand: 'python',
+            onConfirm,
+          }),
+          execute,
+        }),
+      ],
+      mode: () => mode,
+      revision: () => revision,
+    });
+    await scheduler.schedule(
+      [request('stale', "python -c 'print(1)'")],
+      new AbortController().signal,
+    );
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    mode = ApprovalMode.DEFAULT;
+    revision++;
+    mode = ApprovalMode.PLAN;
+    revision++;
+
+    await waiting.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+
+    expect(onConfirm).toHaveBeenCalledWith(
+      ToolConfirmationOutcome.Cancel,
+      expect.objectContaining({
+        cancelMessage: expect.stringContaining('no longer valid'),
+      }),
+    );
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('fails closed for unknown commands without an approval host', async () => {
+    const execute = vi.fn();
+    const { scheduler, onAllToolCallsComplete } = buildPlanShellScheduler({
+      tools: [shellTool({ execute })],
+      interactive: false,
+    });
+    await scheduler.schedule(
+      [request('headless', "python -c 'print(1)'")],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    expect(JSON.stringify(onAllToolCallsComplete.mock.calls[0][0])).toContain(
+      'no approval surface is available',
+    );
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('keeps wrapped sed warnings and bypasses IDE auto-diff acceptance', async () => {
+    vi.mocked(IdeClient.getInstance).mockClear();
+    const rawCommand = "bash -c 'sed -i s/a/b/ file.txt'";
+    const { scheduler, onToolCallsUpdate } = buildPlanShellScheduler({
+      tools: [
+        shellTool({
+          confirmation: async () => ({
+            type: 'edit',
+            title: 'Confirm sed edit',
+            fileName: 'file.txt',
+            filePath: '/tmp/file.txt',
+            fileDiff: 'diff',
+            originalContent: 'a',
+            newContent: 'b',
+            onConfirm: async () => undefined,
+          }),
+        }),
+      ],
+      ideMode: true,
+    });
+    await scheduler.schedule(
+      [request('wrapped-sed', rawCommand)],
+      new AbortController().signal,
+    );
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+
+    expect(waiting.confirmationDetails).toMatchObject({
+      type: 'edit',
+      hideAlwaysAllow: true,
+      hideModify: true,
+      skipIdeDiff: true,
+      warnings: [unknownWarning, `Exact shell command: \`${rawCommand}\``],
+    });
+    expect(IdeClient.getInstance).not.toHaveBeenCalled();
+    await waiting.confirmationDetails.onConfirm(ToolConfirmationOutcome.Cancel);
+  });
+
+  it('rejects PermissionRequest hook parameter rewrites', async () => {
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const execute = vi.fn();
+    const messageBus = {
+      request: vi.fn().mockResolvedValue({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: 'permission-hook',
+        success: true,
+        output: {
+          hookSpecificOutput: {
+            decision: {
+              behavior: 'allow',
+              updatedInput: { command: 'touch changed.txt' },
+            },
+          },
+        },
+      } satisfies HookExecutionResponse),
+    } as unknown as MessageBus;
+    const { scheduler, onAllToolCallsComplete } = buildPlanShellScheduler({
+      tools: [
+        shellTool({
+          confirmation: async () => ({
+            type: 'exec',
+            title: 'Confirm shell',
+            command: "python -c 'print(1)'",
+            rootCommand: 'python',
+            onConfirm,
+          }),
+          execute,
+        }),
+      ],
+      messageBus,
+      disableHooks: false,
+    });
+
+    await scheduler.schedule(
+      [request('hook-rewrite', "python -c 'print(1)'")],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    expect(onConfirm).toHaveBeenCalledWith(
+      ToolConfirmationOutcome.Cancel,
+      expect.objectContaining({
+        cancelMessage: expect.stringContaining('exact invocation changed'),
+      }),
+    );
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('revalidates Plan shell context after a pending permission hook', async () => {
+    let revision = 1;
+    const execute = vi.fn();
+    const messageBus = {
+      request: vi.fn().mockImplementation(async () => {
+        revision++;
+        return {
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: 'permission-hook-no-decision',
+          success: false,
+        } satisfies HookExecutionResponse;
+      }),
+    } as unknown as MessageBus;
+    const { scheduler, onAllToolCallsComplete, onToolCallsUpdate } =
+      buildPlanShellScheduler({
+        tools: [shellTool({ execute })],
+        revision: () => revision,
+        messageBus,
+        disableHooks: false,
+      });
+
+    await scheduler.schedule(
+      [request('hook-stale', "python -c 'print(1)'")],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    expect(
+      onToolCallsUpdate.mock.calls
+        .flatMap((call) => call[0] as ToolCall[])
+        .some((call) => call.status === 'awaiting_approval'),
+    ).toBe(false);
+    expect(JSON.stringify(onAllToolCallsComplete.mock.calls[0][0])).toContain(
+      'no longer valid',
+    );
+    expect(execute).not.toHaveBeenCalled();
   });
 });
 

@@ -67,6 +67,14 @@ export * from './core/reasoning-effort.js';
 export * from './core/coreToolScheduler.js';
 export * from './core/permissionFlow.js';
 export * from './core/permission-helpers.js';
+/** @internal */
+export {
+  type PlanModeShellDecision,
+  evaluatePlanModeShellPolicy,
+  validatePlanModeShellContext,
+  decoratePlanModeShellConfirmation,
+  validatePlanModeShellApproval,
+} from './core/plan-mode-shell-policy.js';
 export * from './core/geminiChat.js';
 export * from './core/geminiRequest.js';
 export * from './core/inlineMediaLimit.js';
@@ -261,6 +269,7 @@ export type {
 } from './services/session-transcript-reader.js';
 export * from './utils/conversation-chain.js';
 export * from './utils/transcript-records.js';
+export * from './utils/conversation-branches.js';
 export * from './services/sessionTitle.js';
 export * from './services/sleepInhibitor.js';
 // Named exports keep @internal test helpers out of the barrel.

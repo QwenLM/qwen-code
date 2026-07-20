@@ -1238,6 +1238,52 @@ describe('coverage is recomputed, never accepted', () => {
     ).toHaveLength(1);
   });
 
+  it('a chunk whose launch failure is already disclosed leaves the nobody-read sentence — cause, not consequence twice', () => {
+    // #7166's first post-grouping body carried seventeen chunks in BOTH the
+    // "nobody read them" sentence and the not-launched roster sentence: the
+    // consequence restated beside its cause. The cap and remediation keep the
+    // full list; only the posted sentence dedupes.
+    const p = plan();
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    // chunk 2 reviewed properly; chunk 1 built and never launched — its
+    // territory therefore unread, and its cause on record.
+    transcript('a2', goodPrompt(2), { toolCalls: 2 });
+    const r = composeReview({ planPath: p, env: ENV, modelId: MODEL });
+    expect(r.cappedBy).toContain('chunk-nobody-read'); // the cap keeps the fact
+    expect(r.remediation.join(' ')).toContain('chunks nobody read');
+    expect(r.body).toContain('chunk 1');
+    // …but only under its cause: no second sentence restating the consequence.
+    expect(r.body).not.toContain('nobody read them');
+  });
+
+  it('keeps the nobody-read sentence for a chunk with no disclosed cause', () => {
+    // The 3A shape: chunks are not roster requirements, so an unread chunk has
+    // no launch-side disclosure to explain it — the receipt sentence is the
+    // only place the author learns those lines went unread.
+    const p = join(dir, 'plan-3a.json');
+    writeFileSync(
+      p,
+      JSON.stringify({
+        diffPathAbsolute: DIFF,
+        srcDiffLines: 100,
+        diffLines: 200,
+        files: [
+          { path: 'a.ts', kind: 'source', removedLines: 0, heavy: false },
+        ],
+        chunks: [
+          { id: 1, startLine: 1, endLine: 100 },
+          { id: 2, startLine: 101, endLine: 200 },
+        ],
+      }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    const r = composeReview({ planPath: p, env: ENV, modelId: MODEL });
+    expect(r.body).toContain('nobody read them');
+    expect(r.body).toMatch(/chunk 1, chunk 2 — no agent reported covering/);
+  });
+
   it('does not merge two invariant files under one label — the em-dash is part of the subject', () => {
     // An invariant agent's label legitimately carries an em-dash segment
     // (`Invariant agent A … — src/foo.ts`). A first-dash dedup key would
@@ -1311,9 +1357,12 @@ describe('coverage is recomputed, never accepted', () => {
     );
     expect(r.remediation.join(' ')).toMatch(/do not relaunch the old prompt/);
     // Blind agents read nothing, so the chunks they owned are also chunks
-    // nobody read — that disclosure's repair must ride along too. Deleting the
-    // missingReceipts push used to fail no test: no fixture reached it.
-    expect(r.body).toContain('no agent reported covering');
+    // nobody read — the CAP and the repair ride along, while the posted body
+    // says it once, under the cause: the blind sentence already explains the
+    // unread territory, and restating it as "nobody read them" beside it was
+    // the #7166 double-disclosure.
+    expect(r.cappedBy).toContain('chunk-nobody-read');
+    expect(r.body).not.toContain('no agent reported covering');
     expect(r.remediation.join(' ')).toMatch(
       /chunks nobody read: build each with/,
     );

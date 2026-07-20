@@ -576,11 +576,26 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     // as a line too long to read, which is true of an *uncoverable* chunk and a
     // fabrication about one nobody receipted — the author would be told the diff
     // defeated the reader, when in fact no reader turned up.
-    notReviewedParts.push(
-      `Not reviewed: ${missingReceipts
-        .map((id) => `chunk ${id}`)
-        .join(', ')} — no agent reported covering these; nobody read them.`,
+    //
+    // But a chunk whose disclosure entry already says WHY it went unread — its
+    // launch never happened, or happened on a rewritten prompt — is one fact,
+    // not two: "nobody read chunk 2" beside "chunk 2 — its prompt was built,
+    // but no agent on record was launched with it" restates the consequence
+    // next to its cause, and #7166's first post-grouping body carried
+    // seventeen chunks twice exactly this way. The cap and the remediation
+    // above keep the FULL list — only the posted sentence dedupes, and only
+    // for subjects another sentence already explains.
+    const disclosedSubjects = new Set(coverageEntries.map((e) => e.subject));
+    const unexplainedReceipts = missingReceipts.filter(
+      (id) => !disclosedSubjects.has(`chunk ${id}`),
     );
+    if (unexplainedReceipts.length > 0) {
+      notReviewedParts.push(
+        `Not reviewed: ${unexplainedReceipts
+          .map((id) => `chunk ${id}`)
+          .join(', ')} — no agent reported covering these; nobody read them.`,
+      );
+    }
   }
   if (uncoverable.length > 0) {
     notReviewedParts.push(

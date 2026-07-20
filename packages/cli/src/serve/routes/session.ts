@@ -1557,24 +1557,39 @@ export function registerSessionRoutes(
         // metadata and the session cwd is the main workspace root. Read the
         // sidecar, relocate the session, and populate the bridge entry.
         if (!session.worktree) {
+          const svc = new SessionService(workspaceCwd);
           const sidecar = await readWorktreeSession(
-            new SessionService(workspaceCwd).getWorktreeSessionPath(sessionId),
+            svc.getWorktreeSessionPath(sessionId),
           ).catch(() => null);
           if (sidecar) {
-            const wt = {
-              slug: sidecar.slug,
-              path: sidecar.worktreePath,
-              branch: sidecar.worktreeBranch,
-            };
-            try {
-              await runtime.bridge.changeSessionCwd(sessionId, {
-                path: wt.path,
-              });
-              runtime.bridge.setSessionWorktree(sessionId, wt);
-              Object.assign(session, { worktree: wt });
-            } catch {
-              // Worktree directory may have been removed; the session
-              // continues in the main workspace without isolation.
+            // Validate containment: the worktree path must be under
+            // <originalCwd>/.qwen/worktrees/ to prevent a tampered sidecar
+            // from redirecting file operations elsewhere.
+            const expectedParent = sidecar.originalCwd + '/.qwen/worktrees/';
+            if (sidecar.worktreePath.startsWith(expectedParent)) {
+              const wt = {
+                slug: sidecar.slug,
+                path: sidecar.worktreePath,
+                branch: sidecar.worktreeBranch,
+              };
+              try {
+                await runtime.bridge.changeSessionCwd(sessionId, {
+                  path: wt.path,
+                });
+                runtime.bridge.setSessionWorktree(sessionId, wt);
+                Object.assign(session, { worktree: wt });
+              } catch (restoreErr) {
+                if (daemonLog) {
+                  daemonLog.warn('worktree restore failed on load/resume', {
+                    sessionId,
+                    worktreePath: wt.path,
+                    error:
+                      restoreErr instanceof Error
+                        ? restoreErr.message
+                        : String(restoreErr),
+                  });
+                }
+              }
             }
           }
         }
