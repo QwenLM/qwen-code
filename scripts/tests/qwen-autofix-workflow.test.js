@@ -3278,6 +3278,298 @@ describe('qwen-autofix workflow', () => {
     ).toBe(0);
   });
 
+  it('re-arms a stranded PR from a marker instead of a deleted comment', () => {
+    // Recovery used to mean `gh api -X DELETE` on the bot's own eval marker:
+    // raw API access, an erased audit trail, undiscoverable. `@qwen-code
+    // /retry` posts an autofix-rearm marker instead, which must do BOTH halves
+    // of what the deletion did - release the watermark those older markers
+    // held, and reset the round counter - or the PR stays stuck.
+    const scan =
+      workflow.match(
+        /- name: 'Scan for PRs with new feedback'[\s\S]*?(?=\n {6}- name: )/,
+      )?.[0] ?? '';
+    const block = scan.match(
+      /(MARKERS="\$\(jq[\s\S]*?ROUND="\$\(jq[^\n]*\n)/,
+    )?.[1];
+    expect(block).toBeTruthy();
+
+    const BOT = 'qwen-code-dev-bot';
+    const evalMarker = (at, ts, round) => ({
+      user: { login: BOT },
+      created_at: at,
+      body: `<!-- autofix-eval ts=${ts} acted=false round=${round} win=none -->`,
+    });
+    const run = (comments) => {
+      const dir = mkdtempSync(join(tmpdir(), 'rearm-'));
+      writeFileSync(join(dir, 'ic.json'), JSON.stringify(comments));
+      const out = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -uo pipefail\n${block}\nprintf '%s|%s|%s' "$EVAL_WM" "$REARM_KEY" "$ROUND"`,
+        ],
+        {
+          env: { ...process.env, WORKDIR: dir, AUTOFIX_BOT: BOT },
+          encoding: 'utf8',
+        },
+      );
+      rmSync(dir, { recursive: true, force: true });
+      return out.split('|');
+    };
+
+    const evaluated = [
+      evalMarker('2026-07-20T08:00:00Z', '2026-07-20T07:00:00Z', 1),
+      evalMarker('2026-07-20T09:00:00Z', '2026-07-20T08:30:00Z', 2),
+    ];
+    // Stranded: the watermark sits at the newest evaluated feedback and the
+    // round has climbed, so the scan reports "nothing new" forever.
+    const [wmBefore, keyBefore, roundBefore] = run(evaluated);
+    expect(wmBefore).toBe('2026-07-20T08:30:00Z');
+    expect(keyBefore).toBe('none');
+    expect(roundBefore).toBe('2');
+
+    // After /retry both halves clear: no marker holds the watermark, and the
+    // marker opens a fresh counting window so the round restarts at 0.
+    const [wmAfter, keyAfter, roundAfter] = run([
+      ...evaluated,
+      {
+        user: { login: BOT },
+        created_at: '2026-07-20T10:00:00Z',
+        body: '<!-- autofix-rearm -->',
+      },
+    ]);
+    expect(wmAfter).toBe('');
+    expect(keyAfter).toBe('2026-07-20T10:00:00Z');
+    expect(roundAfter).toBe('0');
+
+    // A marker written AFTER the re-arm counts again (the exception is scoped
+    // to the re-arm instant, it does not disable the watermark forever).
+    const [wmNext] = run([
+      ...evaluated,
+      {
+        user: { login: BOT },
+        created_at: '2026-07-20T10:00:00Z',
+        body: '<!-- autofix-rearm -->',
+      },
+      evalMarker('2026-07-20T11:00:00Z', '2026-07-20T10:30:00Z', 1),
+    ]);
+    expect(wmNext).toBe('2026-07-20T10:30:00Z');
+
+    // A re-arm posted by anyone other than the bot is ignored: both scanners
+    // filter markers by author, so a spoofed comment must not re-arm.
+    const [wmSpoof] = run([
+      ...evaluated,
+      {
+        user: { login: 'someone-else' },
+        created_at: '2026-07-20T10:00:00Z',
+        body: '<!-- autofix-rearm -->',
+      },
+    ]);
+    expect(wmSpoof).toBe('2026-07-20T08:30:00Z');
+  });
+
+  it('address-side stale check mirrors the scan-side re-arm logic under bash', () => {
+    // The scan-side and address-side jq blocks are copy-pasted (~40 lines
+    // each, 4 jq expressions). Drift between them is the class of bug the
+    // re-arm feature prevents: a queued address job could stamp an
+    // old-sequence eval marker into a fresh window after /retry. This test
+    // runs the address-side block under bash with the same fixtures and
+    // asserts identical outputs.
+    const block = prepareBranchAndFeedbackStep.match(
+      /(LIVE_MARKS="\$\(jq[\s\S]*?LIVE_MAX_ROUND="\$\(jq[^\n]*\n)/,
+    )?.[1];
+    expect(block).toBeTruthy();
+
+    const BOT = 'qwen-code-dev-bot';
+    const evalMarker = (at, ts, round) => ({
+      user: { login: BOT },
+      created_at: at,
+      body: `<!-- autofix-eval ts=${ts} acted=false round=${round} win=none -->`,
+    });
+    const run = (comments) => {
+      const dir = mkdtempSync(join(tmpdir(), 'rearm-live-'));
+      writeFileSync(join(dir, 'ic.json'), JSON.stringify(comments));
+      const out = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -uo pipefail\n${block}\nprintf '%s|%s|%s' "$LIVE_EVAL_WM" "$LIVE_REARM_KEY" "$LIVE_MAX_ROUND"`,
+        ],
+        {
+          env: { ...process.env, WORKDIR: dir, AUTOFIX_BOT: BOT },
+          encoding: 'utf8',
+        },
+      );
+      rmSync(dir, { recursive: true, force: true });
+      return out.split('|');
+    };
+
+    const evaluated = [
+      evalMarker('2026-07-20T08:00:00Z', '2026-07-20T07:00:00Z', 1),
+      evalMarker('2026-07-20T09:00:00Z', '2026-07-20T08:30:00Z', 2),
+    ];
+    const [wmBefore, keyBefore, roundBefore] = run(evaluated);
+    expect(wmBefore).toBe('2026-07-20T08:30:00Z');
+    expect(keyBefore).toBe('none');
+    expect(roundBefore).toBe('2');
+
+    const [wmAfter, keyAfter, roundAfter] = run([
+      ...evaluated,
+      {
+        user: { login: BOT },
+        created_at: '2026-07-20T10:00:00Z',
+        body: '<!-- autofix-rearm -->',
+      },
+    ]);
+    expect(wmAfter).toBe('');
+    expect(keyAfter).toBe('2026-07-20T10:00:00Z');
+    expect(roundAfter).toBe('0');
+
+    const [wmNext] = run([
+      ...evaluated,
+      {
+        user: { login: BOT },
+        created_at: '2026-07-20T10:00:00Z',
+        body: '<!-- autofix-rearm -->',
+      },
+      evalMarker('2026-07-20T11:00:00Z', '2026-07-20T10:30:00Z', 1),
+    ]);
+    expect(wmNext).toBe('2026-07-20T10:30:00Z');
+
+    const [wmSpoof] = run([
+      ...evaluated,
+      {
+        user: { login: 'someone-else' },
+        created_at: '2026-07-20T10:00:00Z',
+        body: '<!-- autofix-rearm -->',
+      },
+    ]);
+    expect(wmSpoof).toBe('2026-07-20T08:30:00Z');
+  });
+
+  it('routes @qwen-code /retry through the takeover command authorization', () => {
+    // Prefilter must let the command reach route at all, and the marker must
+    // be a CONTROL comment so the agent never sees it as feedback to address.
+    expect(workflow).toContain(
+      "startsWith(github.event.comment.body, '@qwen-code /retry')",
+    );
+    expect(workflow).toContain("RETRY_COMMAND: '@qwen-code /retry'");
+    expect(workflow).toContain('<!-- autofix-rearm -->');
+    expect(workflow).toContain('<!-- (autofix-eval|autofix-rearm|qwen-triage|');
+    // Verify all four filter sites (scan + 3 address) include autofix-rearm
+    const filterMatches = [
+      ...workflow.matchAll(/autofix-eval\|autofix-rearm\|qwen-triage/g),
+    ];
+    expect(filterMatches.length).toBeGreaterThanOrEqual(4);
+    // The re-arm marker is posted by the bot itself (both scanners filter by
+    // that login), so the job verifies the PAT identity before commenting.
+    const job = workflow.match(
+      /- name: 'Post re-arm marker'[\s\S]*?(?=\n {2}[a-z-]+:\n)/,
+    )?.[0];
+    expect(job).toBeTruthy();
+    expect(job).toContain("gh api user --jq '.login'");
+    expect(job).toContain('expected ${AUTOFIX_BOT}');
+    expect(job).toContain('gh pr comment "${PR}"');
+    // Re-arm reuses the takeover command's authorization rather than adding a
+    // second policy: same live permission check, same author rules.
+    expect(routeStep).toContain("RETRY_REQ=''");
+    expect(routeStep).toContain(
+      'RETRY_PR="$(sanitize_number "${ISSUE_NUMBER}")"',
+    );
+    expect(routeStep).toContain('retry_pr=${RETRY_PR}');
+  });
+
+  it('behaviorally posts the re-arm marker only after verifying the PAT identity', () => {
+    // The retry-command job's bash is extracted and executed against a stubbed
+    // `gh` so the identity guard and the posted comment body are exercised, not
+    // merely string-matched: a malformed printf body or a broken quote escape
+    // would post a marker the scanners ignore while still printing "re-armed",
+    // and the structural toContain('<!-- autofix-rearm -->') check matches the
+    // marker at several workflow sites so it would not catch a typo in the body.
+    const BOT = 'qwen-code-dev-bot';
+    const rearmStep = workflow.match(
+      /- name: 'Post re-arm marker'\n {8}run: \|-\n {10}([\s\S]*?)\n\n {2}takeover-ack:/,
+    )?.[1];
+    expect(rearmStep).toBeTruthy();
+    const block = rearmStep.replace(/\n {10}/g, '\n');
+
+    const runRearm = ({ actor = BOT, apiFail = false } = {}) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-rearm-'));
+      try {
+        writeFileSync(
+          join(dir, 'gh'),
+          [
+            '#!/bin/bash',
+            `echo "$1 $2" >> '${join(dir, 'calls.log')}'`,
+            'if [[ "$1" == "api" && "$2" == "user" ]]; then',
+            `  if [[ "${apiFail}" == "true" ]]; then echo "HTTP 401: Bad credentials" >&2; exit 1; fi`,
+            `  printf '%s' "${actor}"`,
+            'elif [[ "$1" == "pr" && "$2" == "comment" ]]; then',
+            `  printf '%s' "$7" > '${join(dir, 'body.txt')}'`,
+            'fi',
+          ].join('\n'),
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        writeFileSync(join(dir, 'calls.log'), '');
+        const res = spawnSync('bash', ['-c', block], {
+          env: {
+            ...process.env,
+            PATH: `${dir}:${process.env.PATH}`,
+            GITHUB_TOKEN: 'x',
+            PR: '7354',
+            REPO: 'QwenLM/qwen-code',
+            AUTOFIX_BOT: BOT,
+          },
+          encoding: 'utf8',
+        });
+        return {
+          status: res.status,
+          stdout: res.stdout ?? '',
+          calls: readFileSync(join(dir, 'calls.log'), 'utf8'),
+          body: existsSync(join(dir, 'body.txt'))
+            ? readFileSync(join(dir, 'body.txt'), 'utf8')
+            : '',
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    // Happy path: identity verified via gh api user, then the marker is posted
+    // with the scanner marker line in the bilingual collapsed format.
+    const ok = runRearm({ actor: BOT });
+    expect(ok.status).toBe(0);
+    expect(ok.calls).toContain('api user');
+    expect(ok.calls).toContain('pr comment');
+    expect(ok.stdout).toContain('re-armed PR #7354');
+    expect(ok.body).toContain('AutoFix re-armed');
+    expect(ok.body).toContain('<!-- autofix-rearm -->');
+    expect(ok.body).toContain('<details>');
+    expect(ok.body).toContain('中文说明');
+    // No line may be indented 4+ spaces, or the marker renders as a code block
+    // and the scanners' marker match silently fails.
+    expect(ok.body).not.toMatch(/^ {4,}/m);
+
+    // Actor mismatch: the PAT authenticates as someone else -> the guard exits
+    // non-zero and posts nothing (a mis-scoped PAT must not leave a stranded PR
+    // behind a fake "re-armed" line).
+    const mismatch = runRearm({ actor: 'someone-else' });
+    expect(mismatch.status).toBe(1);
+    expect(mismatch.calls).toContain('api user');
+    expect(mismatch.calls).not.toContain('pr comment');
+    expect(mismatch.body).toBe('');
+    expect(mismatch.stdout).toContain(`expected ${BOT}`);
+
+    // API failure: gh api user fails -> exits non-zero, posts nothing, and
+    // surfaces the captured gh stderr in the error message.
+    const failed = runRearm({ apiFail: true });
+    expect(failed.status).toBe(1);
+    expect(failed.calls).not.toContain('pr comment');
+    expect(failed.body).toBe('');
+    expect(failed.stdout).toContain('Failed to verify CI_DEV_BOT_PAT identity');
+    expect(failed.stdout).toContain('Bad credentials');
+  });
+
   it('replays the handoff decision and terminal-round transitions under bash', () => {
     // The agent step is bounded below the 120-minute job timeout so a runaway
     // agent fails the STEP, not the job, leaving the always() report step time to

@@ -55,6 +55,9 @@ const MEMORY_DREAM_COUNT = `${SERVICE_NAME}.memory.dream.count`;
 const MEMORY_DREAM_DURATION = `${SERVICE_NAME}.memory.dream.duration`;
 const MEMORY_RECALL_COUNT = `${SERVICE_NAME}.memory.recall.count`;
 const MEMORY_RECALL_DURATION = `${SERVICE_NAME}.memory.recall.duration`;
+const CHANNEL_MEMORY_RECALL_COUNT = `${SERVICE_NAME}.channel.memory.recall.count`;
+const CHANNEL_MEMORY_RECALL_DURATION = `${SERVICE_NAME}.channel.memory.recall.duration`;
+const CHANNEL_MEMORY_RECALL_SELECTED_COUNT = `${SERVICE_NAME}.channel.memory.recall.selected_count`;
 
 const baseMetricDefinition = {
   // session.id on metrics is opt-in: each session is a new value, so
@@ -400,6 +403,9 @@ let memoryDreamCounter: Counter | undefined;
 let memoryDreamDurationHistogram: Histogram | undefined;
 let memoryRecallCounter: Counter | undefined;
 let memoryRecallDurationHistogram: Histogram | undefined;
+let channelMemoryRecallCounter: Counter | undefined;
+let channelMemoryRecallDurationHistogram: Histogram | undefined;
+let channelMemoryRecallSelectedCountHistogram: Histogram | undefined;
 
 let isMetricsInitialized = false;
 let isPerformanceMonitoringEnabled = false;
@@ -502,6 +508,32 @@ export function initializeMetrics(config: TelemetryRuntimeConfig): void {
     {
       description: 'Duration of auto-memory recall operations in milliseconds.',
       unit: 'ms',
+      valueType: ValueType.INT,
+    },
+  );
+  channelMemoryRecallCounter = meter.createCounter(
+    CHANNEL_MEMORY_RECALL_COUNT,
+    {
+      description:
+        'Counts channel memory recall attempts by cache path and bounded result.',
+      valueType: ValueType.INT,
+    },
+  );
+  channelMemoryRecallDurationHistogram = meter.createHistogram(
+    CHANNEL_MEMORY_RECALL_DURATION,
+    {
+      description: 'Duration of channel memory recall attempts.',
+      unit: 'ms',
+      valueType: ValueType.DOUBLE,
+      advice: {
+        explicitBucketBoundaries: [0.1, 0.5, 1, 2, 5, 10, 25, 50, 100, 250],
+      },
+    },
+  );
+  channelMemoryRecallSelectedCountHistogram = meter.createHistogram(
+    CHANNEL_MEMORY_RECALL_SELECTED_COUNT,
+    {
+      description: 'Number of channel memory entries selected per attempt.',
       valueType: ValueType.INT,
     },
   );
@@ -1032,4 +1064,26 @@ export function recordMemoryRecallMetrics(
     ...common,
     strategy: attrs.strategy,
   });
+}
+
+export function recordChannelMemoryRecallMetrics(observation: {
+  durationMs: number;
+  cache: 'hit' | 'miss' | 'bypass';
+  result: 'selected' | 'empty' | 'stale' | 'read_error' | 'revision_unstable';
+  selectedCount: number;
+}): void {
+  if (!isMetricsInitialized) return;
+  const attributes = {
+    cache: observation.cache,
+    result: observation.result,
+  };
+  channelMemoryRecallCounter?.add(1, attributes);
+  channelMemoryRecallDurationHistogram?.record(
+    observation.durationMs,
+    attributes,
+  );
+  channelMemoryRecallSelectedCountHistogram?.record(
+    observation.selectedCount,
+    attributes,
+  );
 }

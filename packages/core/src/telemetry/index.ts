@@ -136,6 +136,7 @@ export {
   recordMemoryExtractMetrics,
   recordMemoryDreamMetrics,
   recordMemoryRecallMetrics,
+  recordChannelMemoryRecallMetrics,
   // Performance monitoring types
   PerformanceMetricType,
   MemoryMetricType,
