@@ -55,6 +55,66 @@ const wasmBinaryPlugin = {
   },
 };
 
+// `@opentelemetry/sdk-node` eagerly require()s every exporter package to
+// support `OTEL_*_EXPORTER` env-based auto-configuration, which would drag
+// both OTLP protocol chains (~2 MiB) back into the sdk-impl static closure
+// and defeat the per-protocol dynamic imports in
+// `packages/core/src/telemetry/sdk-{impl,exporters-grpc,exporters-http}.ts`
+// (issue #7264). qwen-code always passes explicit `spanProcessors` /
+// `logRecordProcessors` to NodeSDK, so those env code paths are unreachable
+// for traces and logs. Stub the exporter packages ONLY when imported by
+// sdk-node itself — our own protocol modules keep resolving the real ones.
+// The stubbed constructors throw so an unexpectedly reached env path (e.g.
+// `OTEL_METRICS_EXPORTER=otlp`) fails loudly instead of exporting nowhere;
+// NodeSDK.start() is wrapped in try/catch in `sdk.ts`.
+const SDK_NODE_STUBBED_EXPORTERS = new RegExp(
+  '^@opentelemetry/(' +
+    [
+      'exporter-trace-otlp-(grpc|http|proto)',
+      'exporter-logs-otlp-(grpc|http|proto)',
+      'exporter-metrics-otlp-(grpc|http|proto)',
+      'exporter-zipkin',
+      'exporter-prometheus',
+    ].join('|') +
+    ')$',
+);
+
+const sdkNodeExporterStubPlugin = {
+  name: 'sdk-node-exporter-stub',
+  setup(build) {
+    build.onResolve({ filter: /^@opentelemetry\/exporter-/ }, (args) => {
+      if (!SDK_NODE_STUBBED_EXPORTERS.test(args.path)) return null;
+      if (!args.importer.includes(`@opentelemetry${path.sep}sdk-node`)) {
+        return null;
+      }
+      return { path: args.path, namespace: 'sdk-node-exporter-stub' };
+    });
+    build.onLoad(
+      { filter: /.*/, namespace: 'sdk-node-exporter-stub' },
+      (args) => ({
+        contents: `
+          const throwStubbed = (name) => {
+            throw new Error(
+              'qwen-code bundles @opentelemetry/sdk-node without ' +
+                ${JSON.stringify(args.path)} + ' (env-based exporter ' +
+                'selection is unsupported; configure telemetry via ' +
+                'qwen-code settings instead). Attempted to construct: ' + name,
+            );
+          };
+          const handler = {
+            get: (_t, prop) =>
+              typeof prop === 'string'
+                ? function stubbedExporter() { throwStubbed(prop); }
+                : undefined,
+          };
+          module.exports = new Proxy({}, handler);
+        `,
+        loader: 'js',
+      }),
+    );
+  },
+};
+
 const external = [
   '@lydell/node-pty',
   'node-pty',
@@ -141,7 +201,11 @@ const mainBuild = esbuild.build({
     __filename: '__qwen_filename',
   },
   loader: { '.node': 'file' },
-  plugins: [wasmBinaryPlugin, wasmLoader({ mode: 'embedded' })],
+  plugins: [
+    sdkNodeExporterStubPlugin,
+    wasmBinaryPlugin,
+    wasmLoader({ mode: 'embedded' }),
+  ],
   metafile: true,
   write: true,
   keepNames: true,

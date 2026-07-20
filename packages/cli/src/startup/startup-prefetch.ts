@@ -257,9 +257,7 @@ export function startPostRenderPrefetches(
   }
 
   if (options.initializeTelemetry) {
-    runDeferredTask('telemetry_init', () => {
-      initializeTelemetry(config);
-    });
+    runDeferredTask('telemetry_init', () => initializeTelemetry(config));
   }
 
   if (config.isInteractive()) {

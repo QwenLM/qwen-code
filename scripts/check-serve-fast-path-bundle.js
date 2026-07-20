@@ -44,6 +44,19 @@ const ACP_RUNTIME_ROOT = {
   ],
 };
 
+// The telemetry protocol split (issue #7264) keeps the OTLP exporter chains
+// behind dynamic import()s inside sdk-impl.ts itself. Its static closure may
+// keep NodeSDK and the instrumentations, but must not reach the gRPC cluster
+// or the shared OTLP serialization layer, which only the protocol modules
+// (sdk-exporters-grpc.ts / sdk-exporters-http.ts) are allowed to load.
+const SDK_IMPL_ROOT = {
+  label: 'telemetry sdk-impl',
+  suffixes: [
+    'packages/core/src/telemetry/sdk-impl.ts',
+    'packages/core/dist/src/telemetry/sdk-impl.js',
+  ],
+};
+
 const FORBIDDEN_SOURCE_INPUTS = [
   {
     label: 'Gemini runtime',
@@ -129,6 +142,55 @@ const FORBIDDEN_ACP_UI_PACKAGES = [
   { label: 'React runtime', packageName: 'react' },
   { label: 'React reconciler runtime', packageName: 'react-reconciler' },
   { label: 'Yoga layout runtime', packageName: 'yoga-layout' },
+];
+
+// Heavy telemetry SDK packages must stay behind the dynamic import() in
+// packages/core/src/telemetry/sdk.ts (issue #4748). Cheap packages that are
+// legitimately eager (@opentelemetry/api, semantic-conventions, core,
+// resources, api-logs) are intentionally NOT listed.
+//
+// The protocol-chain subset is additionally forbidden from the sdk-impl
+// static closure (issue #7264): @opentelemetry/otlp-transformer sits in the
+// shared serialization layer both the HTTP and gRPC exporter packages pull
+// in, so it catches a static re-import of either protocol module.
+const FORBIDDEN_OTLP_PROTOCOL_PACKAGES = [
+  { label: 'gRPC runtime', packageName: '@grpc/grpc-js' },
+  { label: 'gRPC proto loader', packageName: '@grpc/proto-loader' },
+  { label: 'protobufjs runtime', packageName: 'protobufjs' },
+  {
+    label: 'OTLP transformer',
+    packageName: '@opentelemetry/otlp-transformer',
+  },
+  {
+    label: 'OTLP gRPC trace exporter',
+    packageName: '@opentelemetry/exporter-trace-otlp-grpc',
+  },
+  {
+    label: 'OTLP gRPC log exporter',
+    packageName: '@opentelemetry/exporter-logs-otlp-grpc',
+  },
+  {
+    label: 'OTLP gRPC metric exporter',
+    packageName: '@opentelemetry/exporter-metrics-otlp-grpc',
+  },
+];
+
+const FORBIDDEN_ACP_TELEMETRY_PACKAGES = [
+  ...FORBIDDEN_OTLP_PROTOCOL_PACKAGES,
+  { label: 'OTel NodeSDK', packageName: '@opentelemetry/sdk-node' },
+  {
+    label: 'OTel HTTP instrumentation',
+    packageName: '@opentelemetry/instrumentation-http',
+  },
+  {
+    label: 'OTel undici instrumentation',
+    packageName: '@opentelemetry/instrumentation-undici',
+  },
+];
+
+const FORBIDDEN_ACP_PACKAGES = [
+  ...FORBIDDEN_ACP_UI_PACKAGES,
+  ...FORBIDDEN_ACP_TELEMETRY_PACKAGES,
 ];
 
 export function normalizeMetafilePath(filePath) {
@@ -235,16 +297,28 @@ function buildImportPath(entryOutputs, outputPath, parent) {
 }
 
 export function findAcpImportBoundaryOffenders(metafile) {
+  return findRootClosureOffenders(
+    metafile,
+    ACP_RUNTIME_ROOT,
+    FORBIDDEN_ACP_PACKAGES,
+  );
+}
+
+export function findSdkImplProtocolOffenders(metafile) {
+  return findRootClosureOffenders(
+    metafile,
+    SDK_IMPL_ROOT,
+    FORBIDDEN_OTLP_PROTOCOL_PACKAGES,
+  );
+}
+
+function findRootClosureOffenders(metafile, root, forbiddenPackages) {
   const outputs = normalizeOutputs(metafile);
   let entryOutput;
 
   for (const [outputPath, output] of outputs) {
     const inputs = Object.keys(output.inputs ?? {});
-    if (
-      inputs.some((input) =>
-        inputMatchesAnySuffix(input, ACP_RUNTIME_ROOT.suffixes),
-      )
-    ) {
+    if (inputs.some((input) => inputMatchesAnySuffix(input, root.suffixes))) {
       entryOutput = outputPath;
       break;
     }
@@ -252,8 +326,8 @@ export function findAcpImportBoundaryOffenders(metafile) {
 
   if (!entryOutput) {
     throw new Error(
-      `Could not find bundled output for ${ACP_RUNTIME_ROOT.label} ` +
-        `(${ACP_RUNTIME_ROOT.suffixes.join(' or ')}).\n` +
+      `Could not find bundled output for ${root.label} ` +
+        `(${root.suffixes.join(' or ')}).\n` +
         `Run \`${METAFILE_BUILD_COMMAND}\` to produce the metafile.`,
     );
   }
@@ -266,7 +340,7 @@ export function findAcpImportBoundaryOffenders(metafile) {
   for (const outputPath of closure) {
     const output = outputs.get(outputPath);
     for (const input of Object.keys(output?.inputs ?? {})) {
-      const match = FORBIDDEN_ACP_UI_PACKAGES.find(({ packageName }) =>
+      const match = forbiddenPackages.find(({ packageName }) =>
         inputMatchesPackage(input, packageName),
       );
       if (!match) continue;
@@ -353,9 +427,7 @@ export function formatServeFastPathBundleOffenders(offenders) {
     .join('\n');
 }
 
-export function checkServeFastPathBundle({
-  metafilePath = DEFAULT_METAFILE_PATH,
-} = {}) {
+function readMetafile(metafilePath) {
   if (!existsSync(metafilePath)) {
     throw new Error(
       `Missing esbuild metafile at ${metafilePath}. ` +
@@ -363,9 +435,8 @@ export function checkServeFastPathBundle({
     );
   }
 
-  let metafile;
   try {
-    metafile = JSON.parse(readFileSync(metafilePath, 'utf8'));
+    return JSON.parse(readFileSync(metafilePath, 'utf8'));
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     throw new Error(
@@ -373,32 +444,28 @@ export function checkServeFastPathBundle({
         `Run \`${METAFILE_BUILD_COMMAND}\` to regenerate it.`,
     );
   }
-  const offenders = findServeFastPathBundleOffenders(metafile);
+}
+
+export function checkServeFastPathBundle({
+  metafilePath = DEFAULT_METAFILE_PATH,
+} = {}) {
+  const offenders = findServeFastPathBundleOffenders(
+    readMetafile(metafilePath),
+  );
   return { ok: offenders.length === 0, offenders };
 }
 
 export function checkAcpImportBoundary({
   metafilePath = DEFAULT_METAFILE_PATH,
 } = {}) {
-  if (!existsSync(metafilePath)) {
-    throw new Error(
-      `Missing esbuild metafile at ${metafilePath}. ` +
-        `Run \`${METAFILE_BUILD_COMMAND}\` to produce it.`,
-    );
-  }
+  const offenders = findAcpImportBoundaryOffenders(readMetafile(metafilePath));
+  return { ok: offenders.length === 0, offenders };
+}
 
-  let metafile;
-  try {
-    metafile = JSON.parse(readFileSync(metafilePath, 'utf8'));
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    throw new Error(
-      `Invalid esbuild metafile at ${metafilePath}: ${reason}. ` +
-        `Run \`${METAFILE_BUILD_COMMAND}\` to regenerate it.`,
-    );
-  }
-
-  const offenders = findAcpImportBoundaryOffenders(metafile);
+export function checkSdkImplProtocolBoundary({
+  metafilePath = DEFAULT_METAFILE_PATH,
+} = {}) {
+  const offenders = findSdkImplProtocolOffenders(readMetafile(metafilePath));
   return { ok: offenders.length === 0, offenders };
 }
 
@@ -422,7 +489,16 @@ function main() {
       process.exitCode = 1;
     }
 
-    if (serveResult.ok && acpResult.ok) {
+    const sdkImplResult = checkSdkImplProtocolBoundary();
+    if (!sdkImplResult.ok) {
+      console.error(
+        'Telemetry sdk-impl static closure includes OTLP protocol chain modules:\n' +
+          formatServeFastPathBundleOffenders(sdkImplResult.offenders),
+      );
+      process.exitCode = 1;
+    }
+
+    if (serveResult.ok && acpResult.ok && sdkImplResult.ok) {
       console.log('Startup bundle closure checks passed.');
     }
   } catch (error) {

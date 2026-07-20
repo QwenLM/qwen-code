@@ -2189,7 +2189,14 @@ export class Config {
       this.telemetrySettings.enabled &&
       !this.telemetryInitializationDeferred
     ) {
-      initializeTelemetry(this);
+      // Fire-and-forget: the SDK module loads asynchronously (issue #4748),
+      // and spans/logs emitted before it settles are dropped by the
+      // isTelemetrySdkInitialized() gates — same as the deferred TUI path.
+      // Promise.resolve guards against auto-mocked initializeTelemetry
+      // returning undefined in tests.
+      void Promise.resolve(initializeTelemetry(this)).catch((error) => {
+        this.debugLogger.error('Failed to initialize telemetry:', error);
+      });
     }
 
     const proxyUrl = this.getProxy();
