@@ -387,6 +387,51 @@ describe('useComposerCore tags', () => {
     expect(editor.textContent).not.toContain('orders');
   });
 
+  it('restores draft top tags after ArrowDown exits prompt history', async () => {
+    const historyText = 'previous prompt';
+    const draftText = 'draft prompt';
+    const draftTag = {
+      id: 'file:draft.txt',
+      value: 'draft.txt',
+      serialized: '@draft.txt',
+    };
+    await mount();
+
+    act(() => {
+      latest!.setText(historyText);
+      latest!.submitText();
+      latest!.setText(draftText);
+      latest!.addTags([draftTag]);
+    });
+
+    const editor = container!.querySelector('.cm-content')!;
+    act(() => {
+      editor.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowUp',
+          code: 'ArrowUp',
+          bubbles: true,
+        }),
+      );
+    });
+
+    expect(latest!.getText()).toBe(historyText);
+    expect(latest!.composerTags).toEqual([]);
+
+    act(() => {
+      editor.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowDown',
+          code: 'ArrowDown',
+          bubbles: true,
+        }),
+      );
+    });
+
+    expect(latest!.getText()).toBe(draftText);
+    expect(latest!.composerTags).toEqual([draftTag]);
+  });
+
   it('restores tags when Tab or a search-result selection recalls history', async () => {
     const serialized = '<context id="search-orders">orders</context>';
     const prompt = `inspect ${serialized} now`;

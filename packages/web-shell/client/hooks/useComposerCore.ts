@@ -1417,6 +1417,24 @@ export function useComposerCore(
   const [composerTags, setComposerTags] = useState<WebShellComposerTag[]>([]);
   const composerTagsRef = useRef<WebShellComposerTag[]>([]);
   composerTagsRef.current = composerTags;
+  const historyDraftComposerTagsRef = useRef<WebShellComposerTag[] | null>(
+    null,
+  );
+  const rememberPromptHistoryDraftTags = useCallback(() => {
+    if (historyDraftComposerTagsRef.current !== null) return;
+    historyDraftComposerTagsRef.current = [...composerTagsRef.current];
+  }, []);
+  const restorePromptHistoryDraftTags = useCallback(() => {
+    const tags = historyDraftComposerTagsRef.current;
+    if (tags === null) return;
+    historyDraftComposerTagsRef.current = null;
+    const restoredTags = [...tags];
+    composerTagsRef.current = restoredTags;
+    setComposerTags(restoredTags);
+  }, []);
+  const clearPromptHistoryDraftTags = useCallback(() => {
+    historyDraftComposerTagsRef.current = null;
+  }, []);
   const clearRestoredComposerTags = useCallback(() => {
     composerTagsRef.current = [];
     setComposerTags([]);
@@ -1761,10 +1779,13 @@ export function useComposerCore(
     const current = view.state.doc.toString();
     const prev = history.navigateUp(current);
     if (prev !== null) {
+      if (!shellModeRef.current) {
+        rememberPromptHistoryDraftTags();
+      }
       restoreHistoryEntry(view, prev);
     }
     view.focus();
-  }, [restoreHistoryEntry]);
+  }, [rememberPromptHistoryDraftTags, restoreHistoryEntry]);
 
   const navigateNextHistory = useCallback(() => {
     if (disabledRef.current) return;
@@ -1784,10 +1805,15 @@ export function useComposerCore(
       : historyActionsRef.current;
     const next = history.navigateDown();
     if (next !== null) {
+      const returningToPromptDraft =
+        !shellModeRef.current && !history.isNavigating();
       restoreHistoryEntry(view, next);
+      if (returningToPromptDraft) {
+        restorePromptHistoryDraftTags();
+      }
     }
     view.focus();
-  }, [restoreHistoryEntry]);
+  }, [restoreHistoryEntry, restorePromptHistoryDraftTags]);
 
   // ---- Create CodeMirror EditorView ----
   useEffect(() => {
@@ -1922,6 +1948,7 @@ export function useComposerCore(
           historyActionsRef.current.reset();
         }
         historyBrowseActiveRef.current = false;
+        clearPromptHistoryDraftTags();
         setComposerTags([]);
         setPastedImages([]);
         view.dispatch({
@@ -2128,6 +2155,7 @@ export function useComposerCore(
           const current = view.state.doc.toString();
           const prev = history.navigateUp(current);
           if (prev === null) return false;
+          rememberPromptHistoryDraftTags();
           historyBrowseActiveRef.current = true;
           restoreHistoryEntry(view, prev);
           return true;
@@ -2171,8 +2199,12 @@ export function useComposerCore(
           if (next === null) {
             return onFocusFooterRef.current?.() ?? false;
           }
-          historyBrowseActiveRef.current = history.isNavigating();
+          const returningToPromptDraft = !history.isNavigating();
+          historyBrowseActiveRef.current = !returningToPromptDraft;
           restoreHistoryEntry(view, next);
+          if (returningToPromptDraft) {
+            restorePromptHistoryDraftTags();
+          }
           return true;
         },
       },
