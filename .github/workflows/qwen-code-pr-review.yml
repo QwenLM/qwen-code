@@ -729,7 +729,7 @@ jobs:
           # loop below can try once more; a QUOTA-exhausted 429 is NOT retried
           # in-run (its reset is typically hours away — burning a runner on it
           # helps nobody), and a real timeout or a hard/config failure never
-          # retries. Same detection as before; only the disposition is new.
+          # retries.
           OUTCOME=''
           REASON=''
           KIND=''
@@ -794,8 +794,22 @@ jobs:
               REASON="Qwen review ended in an error result (subtype=${RESULT_SUBTYPE}, is_error=${RESULT_IS_ERROR})."
               return
             fi
-            case "$RESULT_TEXT" in
-              *"[API Error"*)
+            # The stream-json adapter appends the formatted API error last
+            # (BaseJsonOutputAdapter appendText), so an aborted run's result
+            # ENDS with "[API Error: …]" — optionally followed by a rate-limit
+            # guidance suffix. A review that merely *discusses* API errors
+            # quotes them mid-prose and keeps writing afterwards. Strip the
+            # known suffixes, rtrim, then check the trailing shape.
+            BODY="$RESULT_TEXT"
+            for S in \
+              'Possible quota limitations in place or slow response times detected. Please wait and try again later.' \
+              'Please wait and try again later. To increase your limits, request a quota increase through AI Studio, or switch to another /auth method' \
+              'Please wait and try again later. To increase your limits, request a quota increase through Vertex, or switch to another /auth method'; do
+              BODY="${BODY%"$S"}"
+            done
+            BODY="${BODY%"${BODY##*[![:space:]]}"}"
+            case "$BODY" in
+              *"[API Error: "*"]")
                 if printf '%s' "$RESULT_TEXT" | grep -qiE 'quota.*(exhaust|exceed|limit|reset)'; then
                   OUTCOME='quota'
                   KIND='quota'

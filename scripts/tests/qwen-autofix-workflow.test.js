@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
@@ -2219,7 +2219,9 @@ describe('qwen-autofix workflow', () => {
       reviewAddressReportStep,
       publishPrStep,
     ]) {
-      expect(step).toContain("MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'");
+      expect(step).toContain(
+        "MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'",
+      );
       expect(step).toContain('MODEL_DISPLAY="${MODEL:-default}"');
       expect(step).toContain(footer);
     }
@@ -2360,7 +2362,10 @@ describe('qwen-autofix workflow', () => {
       ),
     );
     expect(prepareBranchAndFeedbackStep).not.toContain('git clean');
-    expect(prepareBranchAndFeedbackStep).not.toContain('git diff --quiet');
+    // The prepare step must not gate the unconditional build-output restore on
+    // a diff check; `git diff --quiet` only appears in a comment documenting
+    // the verification gate, never as an executed guard here.
+    expect(prepareBranchAndFeedbackStep).not.toContain('if git diff --quiet');
   });
 
   it('clears persistent autofix workdirs before agent steps run', () => {
@@ -2561,6 +2566,16 @@ describe('qwen-autofix workflow', () => {
       expect(step).not.toContain(
         'bash .github/scripts/check-settings-schema.sh',
       );
+      // The owning-package resolver is likewise a shared script staged from the
+      // trusted base, invoked (not inlined) so the two gates cannot drift into
+      // resolving packages differently. The old inline detection must be gone.
+      expect(step).toContain(
+        'bash "${RUNNER_TEMP}/resolve-owning-packages.sh"',
+      );
+      expect(step).not.toContain("grep -oE '^packages/[^/]+'");
+      expect(step).not.toContain(
+        'bash .github/scripts/resolve-owning-packages.sh',
+      );
       expect(step).toContain(
         'No package changes detected; skipping package tests.',
       );
@@ -2571,6 +2586,12 @@ describe('qwen-autofix workflow', () => {
     expect(
       workflow.match(
         /cp \.github\/scripts\/check-settings-schema\.sh "\$\{RUNNER_TEMP\}\/check-settings-schema\.sh"/g,
+      ) ?? [],
+    ).toHaveLength(2);
+    // The owning-package resolver is staged the same way, in the same steps.
+    expect(
+      workflow.match(
+        /cp \.github\/scripts\/resolve-owning-packages\.sh "\$\{RUNNER_TEMP\}\/resolve-owning-packages\.sh"/g,
       ) ?? [],
     ).toHaveLength(2);
     // In the issue-autofix job the staging must happen BEFORE the verify gate's
@@ -2609,6 +2630,22 @@ describe('qwen-autofix workflow', () => {
     expect(schemaScript).toContain('is out of date');
     expect(schemaScript).toContain('git status --porcelain');
     expect(schemaScript).toContain('outcome=failed');
+    // The owning-package resolver maps each changed path to the longest-prefix
+    // npm WORKSPACE, expanded from the ON-DISK root package.json workspaces
+    // globs (so a workspace the branch adds is included — node_modules is the
+    // base's), not "any ancestor dir with a package.json" (a fixture inside a
+    // workspace's src tree is not a workspace). It fails loudly on an empty set.
+    const resolveScript = readFileSync(
+      '.github/scripts/resolve-owning-packages.sh',
+      'utf8',
+    );
+    expect(resolveScript).toContain('readFileSync("package.json"');
+    expect(resolveScript).not.toContain('npm query .workspace');
+    expect(resolveScript).toContain(
+      '[[ "${f}" == "${w}"/* && "${#w}" -gt "${#best}" ]]',
+    );
+    expect(resolveScript).toContain('no workspaces resolved from package.json');
+    expect(resolveScript).toContain('sort -u');
     // The review gate's freshness check is a STRUCTURAL guard: the script call
     // must run BEFORE the no-op/unchanged return, so a stale-schema PR the agent
     // wrongly no-ops fails (outcome=failed) instead of being reported as evaluated
@@ -2770,6 +2807,184 @@ describe('qwen-autofix workflow', () => {
       'failure.md',
     ]) {
       expect(issueAutofixReportStep).toContain(filename);
+    }
+  });
+
+  it('resolver maps each changed file to its longest-prefix workspace from the on-disk manifest', () => {
+    // Reads the on-disk root package.json workspaces globs (NO npm install), so
+    // it sees workspaces the branch ADDS — node_modules would only have the
+    // base's. Set up a new top-level and a new nested workspace, a fixture
+    // package.json inside a workspace's src tree (NOT a workspace), a
+    // !-excluded workspace, and a non-workspace dir.
+    const script = resolve('.github/scripts/resolve-owning-packages.sh');
+    const dir = mkdtempSync(join(tmpdir(), 'ws-'));
+    try {
+      writeFileSync(
+        join(dir, 'package.json'),
+        JSON.stringify({
+          name: 'root',
+          private: true,
+          workspaces: [
+            'packages/*',
+            'packages/channels/*',
+            '!packages/desktop',
+          ],
+        }),
+      );
+      for (const pkg of [
+        'packages/cli',
+        'packages/brandnew', // a new top-level workspace the branch adds
+        'packages/channels/base',
+        'packages/channels/newchannel', // a new nested workspace the branch adds
+        'packages/desktop', // excluded by the ! glob
+        'packages/cli/src/commands/examples/starter', // fixture, NOT a workspace
+      ]) {
+        mkdirSync(join(dir, pkg), { recursive: true });
+        writeFileSync(join(dir, pkg, 'package.json'), '{}');
+      }
+      mkdirSync(join(dir, 'packages/sdk-python'), { recursive: true }); // no manifest
+      const changed =
+        [
+          'packages/cli/src/commands/examples/starter/src/index.ts', // -> packages/cli
+          'packages/brandnew/src/z.ts', // -> packages/brandnew (branch-added)
+          'packages/channels/newchannel/src/y.ts', // -> newchannel (branch-added nested)
+          'packages/desktop/src/d.ts', // excluded workspace -> dropped
+          'packages/sdk-python/foo.py', // no manifest -> dropped
+          'README.md', // outside packages/ -> dropped
+        ].join('\n') + '\n';
+      const out = execFileSync('bash', [script], {
+        input: changed,
+        cwd: dir,
+        encoding: 'utf8',
+      }).trim();
+      expect(out.split('\n').sort()).toEqual([
+        'packages/brandnew',
+        'packages/channels/newchannel',
+        'packages/cli',
+      ]);
+      expect(out).not.toContain('examples/starter'); // fixture never owns
+      expect(out).not.toContain('sdk-python');
+      expect(out).not.toContain('packages/desktop'); // ! negation honoured
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('resolver fails loudly when the manifest declares no workspaces', () => {
+    // An empty workspace set (unreadable/missing workspaces) must be a hard,
+    // non-zero exit — not a silent empty output that reads as "no package
+    // changes" and skips the gate. The call sites carry no `|| true`.
+    const script = resolve('.github/scripts/resolve-owning-packages.sh');
+    const dir = mkdtempSync(join(tmpdir(), 'nows-'));
+    try {
+      writeFileSync(
+        join(dir, 'package.json'),
+        JSON.stringify({ name: 'root' }),
+      );
+      let threw = false;
+      let stderr = '';
+      try {
+        execFileSync('bash', [script], {
+          input: 'packages/cli/src/x.ts\n',
+          cwd: dir,
+          encoding: 'utf8',
+        });
+      } catch (e) {
+        threw = true;
+        stderr = e.stderr?.toString() ?? '';
+      }
+      expect(threw).toBe(true);
+      expect(stderr).toContain('no workspaces resolved from package.json');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('handoff frames a committed-but-unpushed change as NOT pushed, an abort as neutral', () => {
+    // Keyed on COMMITTED, not OUTCOME. When the agent committed but nothing was
+    // pushed, the address-summary.md can read like a success and cite the
+    // now-discarded commit, so the handoff must say it was NOT pushed. An abort
+    // / pre-gate failure made no commit (COMMITTED unset) and must stay neutral,
+    // since there is no commit to call discarded.
+    const body = reviewAddressReportStep.match(
+      /if \[\[ -n "\$\{DETAIL_FILE\}" \]\]; then\n[\s\S]*?\n {14}fi/,
+    )?.[0];
+    expect(body).toBeTruthy();
+    const run = (committed) => {
+      const dir = mkdtempSync(join(tmpdir(), 'hoff-'));
+      try {
+        writeFileSync(join(dir, 'd.md'), 'Done. Single commit abc1234.\n');
+        return execFileSync('bash', ['-c', body], {
+          env: {
+            ...process.env,
+            DETAIL_FILE: join(dir, 'd.md'),
+            COMMITTED: committed,
+          },
+          encoding: 'utf8',
+        });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const committed = run('true');
+    expect(committed).toContain('This change was NOT pushed');
+    // Do not assert the gate ran — a pre-gate failure.md abort also lands here.
+    expect(committed).not.toContain('did NOT pass the verification gate');
+    expect(committed).not.toContain('What I found before stopping');
+    // No commit (abort / pre-gate failure) keeps the neutral framing.
+    expect(run('')).toContain('What I found before stopping');
+    expect(run('')).not.toContain('This change was NOT pushed');
+  });
+
+  it('verify gate records committed=true only on a real diff (exit 1), not a git error (128)', () => {
+    // The handoff's "was NOT pushed" wording keys on this output; it is recorded
+    // at the top of the step, before any gate can exit. `git diff --quiet` exits
+    // 1 for a real diff but 128 on a bad ref — only 1 is a commit, so a git
+    // error must not be misreported as a discarded commit. Drive the extracted
+    // snippet with a stubbed git whose exit is scripted.
+    const snippet = verificationGateSteps[1].match(
+      /committed_rc=0[\s\S]*?committed=true[^\n]*\n\s*fi/,
+    )?.[0];
+    expect(snippet).toBeTruthy();
+    const run = (gitDiffExit) => {
+      const dir = mkdtempSync(join(tmpdir(), 'committed-'));
+      const out = join(dir, 'gh_output');
+      const bin = join(dir, 'bin');
+      writeFileSync(out, '');
+      mkdirSync(bin);
+      // Stub git: `diff --quiet` exits 0 (no commit) or 1 (branch changed).
+      writeFileSync(
+        join(bin, 'git'),
+        `#!/usr/bin/env bash\nexit ${gitDiffExit}\n`,
+      );
+      chmodSync(join(bin, 'git'), 0o755);
+      try {
+        execFileSync('bash', ['-c', `export BRANCH=feat\n${snippet}`], {
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            GITHUB_OUTPUT: out,
+          },
+          encoding: 'utf8',
+        });
+      } catch {
+        // The snippet's own `if` swallows git's exit; no throw expected.
+      }
+      const result = readFileSync(out, 'utf8');
+      rmSync(dir, { recursive: true, force: true });
+      return result;
+    };
+    // git diff --quiet exits 1 => branch has a commit => committed=true.
+    expect(run(1)).toContain('committed=true');
+    // exits 0 => no new commit => nothing recorded.
+    expect(run(0)).not.toContain('committed=true');
+    // exits 128 => bad ref / git error => NOT treated as a commit.
+    expect(run(128)).not.toContain('committed=true');
+    // Neither gate carries an EXIT trap: the wording keys on committed, so an
+    // outcome=failed-forcing trap (which would also fire on pre-commit
+    // failures) must not creep back into either verify step.
+    for (const gate of verificationGateSteps) {
+      expect(gate).not.toMatch(/\btrap\b/);
     }
   });
 
