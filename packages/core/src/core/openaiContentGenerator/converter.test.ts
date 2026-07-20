@@ -3855,6 +3855,42 @@ describe('OpenAIContentConverter', () => {
       expect(response.usageMetadata?.thoughtsTokenCount).toBe(5);
     });
 
+    it('estimates normalized cumulative reasoning without a completion count', () => {
+      const context = withStreamParser();
+      for (const reasoning_content of ['先仔细想', '先仔细想再检查']) {
+        converter.convertOpenAIChunkToGemini(
+          {
+            object: 'chat.completion.chunk',
+            id: 'chunk-cumulative-reasoning',
+            created: 123,
+            model: 'test-model',
+            choices: [
+              {
+                index: 0,
+                delta: { reasoning_content },
+                finish_reason: null,
+                logprobs: null,
+              },
+            ],
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          context,
+        );
+      }
+      const response = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-cumulative-reasoning-usage',
+          created: 123,
+          model: 'test-model',
+          choices: [],
+          usage: { prompt_tokens: 1, completion_tokens: 0, total_tokens: 1 },
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      expect(response.usageMetadata?.thoughtsTokenCount).toBe(8);
+    });
+
     it('clamps estimated streaming reasoning tokens to completion tokens', () => {
       const context = withStreamParser();
       converter.convertOpenAIChunkToGemini(
