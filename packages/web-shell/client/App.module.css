@@ -624,6 +624,42 @@
   padding: 16px 20px;
 }
 
+.managementRuntimeState {
+  min-height: 240px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--muted-foreground);
+  text-align: center;
+}
+
+.managementRuntimeError {
+  color: var(--destructive);
+  font-weight: 600;
+}
+
+.managementRuntimeErrorDetail {
+  max-width: 560px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.managementRuntimeRetry {
+  padding: 7px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--background);
+  color: var(--foreground);
+  cursor: pointer;
+}
+
+.managementRuntimeRetry:hover,
+.managementRuntimeRetry:focus-visible {
+  background: var(--accent);
+}
+
 /* The chat view (message list + composer) stays mounted while a panel is shown,
    just hidden — so the composer keeps its unsent draft and attachments instead
    of losing them on unmount. */

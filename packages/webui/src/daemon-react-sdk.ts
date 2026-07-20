@@ -260,6 +260,8 @@ export type {
   DaemonWorkspaceActions,
   /** Internal workspace context value (client + actions + status + error). */
   DaemonWorkspaceContextValue,
+  DaemonWorkspaceExtensionViewEntry,
+  DaemonWorkspaceSkillsViewStatus,
   /** Props accepted by `<DaemonWorkspaceProvider>`. */
   DaemonWorkspaceProviderProps,
   /** Workspace connection lifecycle: `'idle' | 'connecting' | 'connected' | 'error'`. */
@@ -348,6 +350,8 @@ export type {
   DaemonWorkspaceMcpResourceStatus,
   /** All resources from a single MCP server. */
   DaemonWorkspaceMcpResourcesStatus,
+  /** Workspace runtime operation owned by the daemon. */
+  DaemonWorkspaceRuntimeOperationStatus,
   /** Memory file entry: path, scope, byte size. */
   DaemonWorkspaceMemoryFile,
   /** Skill status: name, description, level, model-invocable flag. */

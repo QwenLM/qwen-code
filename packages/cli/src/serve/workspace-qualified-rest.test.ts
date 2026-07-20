@@ -64,13 +64,14 @@ function makeBridge(): AcpSessionBridge {
       v: 1,
       resources: [],
     })),
+    isChannelLive: vi.fn(() => false),
     getDaemonStatusSnapshot: vi.fn(() => ({
       limits: {
         maxSessions: 20,
         maxPendingPromptsPerSession: 5,
         eventRingSize: 8000,
         compactedReplayMaxBytes: 4 * 1024 * 1024,
-        channelIdleTimeoutMs: 0,
+        channelIdleTimeoutMs: null,
         sessionIdleTimeoutMs: 1_800_000,
       },
       sessionCount: 0,
@@ -256,6 +257,9 @@ async function makeHarness(opts?: {
     primaryCwd,
     secondaryCwd,
     secondaryId: secondary.workspaceId,
+    secondaryBridge: secondary.bridge,
+    primaryRuntime: primary,
+    secondaryRuntime: secondary,
     secondaryWorkspaceService,
     persistSetting,
   };
@@ -774,6 +778,18 @@ describe('workspace-qualified core REST', () => {
 
   it('routes workspace-qualified MCP control through the selected runtime', async () => {
     const h = await makeHarness({ token: 'secret' });
+    vi.mocked(h.secondaryBridge.isChannelLive).mockReturnValue(true);
+    vi.mocked(
+      h.secondaryWorkspaceService.getWorkspaceMcpStatus,
+    ).mockResolvedValue({
+      v: 1,
+      workspaceCwd: h.secondaryCwd,
+      initialized: true,
+      source: 'live',
+      runtimeEpoch: 1,
+      discoveryState: 'completed',
+      servers: [],
+    });
     try {
       const restart = await request(h.app)
         .post(
@@ -802,6 +818,28 @@ describe('workspace-qualified core REST', () => {
         action: 'enable',
         clientId: 'client-1',
       });
+      expect(h.secondaryBridge.manageMcpServer).toHaveBeenCalledWith(
+        'docs',
+        'enable',
+        'client-1',
+      );
+
+      const approve = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/mcp/docs/approve`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .set('Host', host())
+        .send({});
+      expect(approve.status).toBe(200);
+      expect(approve.body.operationId).toEqual(expect.any(String));
+      expect(h.secondaryBridge.manageMcpServer).toHaveBeenCalledWith(
+        'docs',
+        'approve',
+        'client-1',
+        expect.any(String),
+      );
 
       const add = await request(h.app)
         .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/mcp/servers`)

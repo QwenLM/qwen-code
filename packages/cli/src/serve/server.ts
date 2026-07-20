@@ -1332,6 +1332,8 @@ export function createServeApp(
     const persistSetting = deps.persistSetting;
     registerWorkspaceSettingsRoutes(app, {
       boundWorkspace: primaryBoundWorkspace,
+      workspaceRuntime: primaryRuntime,
+      workspaceRegistry,
       mutate,
       safeBody,
       persistSetting: async (...args) => {
@@ -1340,6 +1342,7 @@ export function createServeApp(
       broadcastSettingsChanged,
       parseAndValidateClientId: (req, res) =>
         parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+      sendBridgeError,
     });
     registerWorkspaceQualifiedSettingsRoutes(app, {
       workspaceRegistry,
@@ -1349,6 +1352,7 @@ export function createServeApp(
         await persistSetting(...args);
       },
       invalidateServeFeaturesCache,
+      sendBridgeError,
     });
   }
   registerWorkspacePermissionsRoutes(app, {
@@ -1447,6 +1451,7 @@ export function createServeApp(
 
   registerWorkspaceMcpControlRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
+    workspaceRuntime: workspaceRegistry.primary,
     bridge: primaryBridge,
     workspace: primaryWorkspace,
     mutate,

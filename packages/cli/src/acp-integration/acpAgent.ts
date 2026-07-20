@@ -239,6 +239,7 @@ import {
   ACP_PREFLIGHT_KINDS,
   STATUS_SCHEMA_VERSION,
   SERVE_CONTROL_EXT_METHODS,
+  SERVE_WORKSPACE_NOTIFICATION_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
   mapDomainErrorToErrorKind,
   type AcpPreflightKind,
@@ -2951,6 +2952,23 @@ class QwenAgent implements Agent {
     return this.workspaceMcpDiscoveryConfig ?? this.config;
   }
 
+  private async notifyMcpAuthenticationCompleted(
+    operationId: string | undefined,
+    serverName: string,
+  ): Promise<void> {
+    if (operationId === undefined) return;
+    await this.connection
+      .extNotification(
+        SERVE_WORKSPACE_NOTIFICATION_EXT_METHODS.mcpAuthenticationCompleted,
+        { v: 1, operationId, serverName },
+      )
+      .catch((error: unknown) => {
+        debugLogger.debug(
+          `MCP OAuth completion notification failed for ${serverName}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+  }
+
   private getLiveMcpConfigs(serverName: string): Config[] {
     return [
       ...new Set([
@@ -4498,28 +4516,7 @@ class QwenAgent implements Agent {
         };
       }
 
-      let registry = config.getToolRegistry();
-      let allTools = registry?.getAllTools() ?? [];
-      if (
-        allTools.filter(
-          (t) => t instanceof DiscoveredMCPTool && t.serverName === serverName,
-        ).length === 0
-      ) {
-        for (const session of this.getActiveSessions()) {
-          const sessionRegistry = session.getConfig().getToolRegistry();
-          const sessionTools = sessionRegistry?.getAllTools() ?? [];
-          if (
-            sessionTools.some(
-              (t) =>
-                t instanceof DiscoveredMCPTool && t.serverName === serverName,
-            )
-          ) {
-            registry = sessionRegistry;
-            allTools = sessionTools;
-            break;
-          }
-        }
-      }
+      const allTools = config.getToolRegistry()?.getAllTools() ?? [];
       const tools: ServeWorkspaceMcpToolStatus[] = allTools
         .filter(
           (tool): tool is DiscoveredMCPTool =>
@@ -4575,78 +4572,20 @@ class QwenAgent implements Agent {
     }
   }
 
-  /**
-   * Resolve the resources discovered for one server, with the same
-   * pool-mode fallback `buildWorkspaceMcpToolsStatus` uses for tools: the
-   * workspace `Config`'s `ResourceRegistry` is authoritative in
-   * single-session mode, but in pool mode resources are registered into
-   * per-session registries (`SessionMcpView.applyResources`), leaving the
-   * workspace registry empty. Fall back to the first active session that
-   * has this server's resources.
-   */
   private resolveServerMcpResources(
     config: Config,
     serverName: string,
   ): DiscoveredMCPResource[] {
-    // Defensive optional-call mirrors useAtCompletion.ts: a partial Config
-    // (older snapshot or a test stub) may not expose the registry accessor,
-    // and a missing registry must degrade to "no resources" rather than
-    // throwing and collapsing the whole /mcp status into an error cell.
-    const resources =
-      config.getResourceRegistry?.()?.getResourcesByServer(serverName) ?? [];
-    if (resources.length > 0) {
-      return resources;
-    }
-    for (const session of this.getActiveSessions()) {
-      try {
-        const sessionResources =
-          session
-            .getConfig()
-            .getResourceRegistry?.()
-            ?.getResourcesByServer(serverName) ?? [];
-        if (sessionResources.length > 0) {
-          return sessionResources;
-        }
-      } catch {
-        // A degraded session must not collapse the base /workspace/mcp
-        // status — skip it and keep scanning. (The counts ride that status,
-        // so one bad session shouldn't blank out every server's row.)
-      }
-    }
-    return resources;
+    return (
+      config.getResourceRegistry?.()?.getResourcesByServer(serverName) ?? []
+    );
   }
 
-  /**
-   * Resolve the prompts discovered for one server, mirroring
-   * {@link resolveServerMcpResources}. Used only for the per-server
-   * `promptCount` on the base status — prompts have no drill-down
-   * endpoint (they surface as slash commands).
-   */
   private resolveServerMcpPrompts(
     config: Config,
     serverName: string,
   ): DiscoveredMCPPrompt[] {
-    // Defensive optional-call — see resolveServerMcpResources.
-    const prompts =
-      config.getPromptRegistry?.()?.getPromptsByServer(serverName) ?? [];
-    if (prompts.length > 0) {
-      return prompts;
-    }
-    for (const session of this.getActiveSessions()) {
-      try {
-        const sessionPrompts =
-          session
-            .getConfig()
-            .getPromptRegistry?.()
-            ?.getPromptsByServer(serverName) ?? [];
-        if (sessionPrompts.length > 0) {
-          return sessionPrompts;
-        }
-      } catch {
-        // See resolveServerMcpResources — skip a degraded session.
-      }
-    }
-    return prompts;
+    return config.getPromptRegistry?.()?.getPromptsByServer(serverName) ?? [];
   }
 
   private buildWorkspaceMcpResourcesStatus(
@@ -7075,6 +7014,7 @@ class QwenAgent implements Agent {
       case SERVE_CONTROL_EXT_METHODS.workspaceMcpManage: {
         const serverName = params['serverName'];
         const action = params['action'];
+        const operationId = params['operationId'];
         if (typeof serverName !== 'string' || serverName.length === 0) {
           throw RequestError.invalidParams(
             undefined,
@@ -7093,18 +7033,70 @@ class QwenAgent implements Agent {
             'Invalid or missing MCP manage action',
           );
         }
-        const config = this.getWorkspaceMcpConfig(serverName);
-        const servers = config.getMcpServers() ?? {};
+        if (operationId !== undefined && typeof operationId !== 'string') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid MCP operationId',
+          );
+        }
+        let config: Config;
+        try {
+          config = this.getWorkspaceMcpConfig(serverName);
+        } catch (error) {
+          if (action === 'authenticate') {
+            await this.notifyMcpAuthenticationCompleted(
+              operationId,
+              serverName,
+            );
+          }
+          throw error;
+        }
+        let servers: ReturnType<Config['getMcpServers']>;
+        try {
+          servers = config.getMcpServers();
+        } catch (error) {
+          if (action === 'authenticate') {
+            await this.notifyMcpAuthenticationCompleted(
+              operationId,
+              serverName,
+            );
+          }
+          throw error;
+        }
+        servers ??= {};
         const server = servers[serverName];
         if (!server) {
+          if (action === 'authenticate') {
+            await this.notifyMcpAuthenticationCompleted(
+              operationId,
+              serverName,
+            );
+          }
           throw new RequestError(
             -32004,
             `MCP server not configured: ${JSON.stringify(serverName)}`,
             { errorKind: 'mcp_server_not_found', serverName },
           );
         }
-        const toolRegistry = config.getToolRegistry();
+        let toolRegistry: ReturnType<Config['getToolRegistry']>;
+        try {
+          toolRegistry = config.getToolRegistry();
+        } catch (error) {
+          if (action === 'authenticate') {
+            await this.notifyMcpAuthenticationCompleted(
+              operationId,
+              serverName,
+            );
+          }
+          throw error;
+        }
         if (!toolRegistry) {
+          if (action === 'authenticate') {
+            await this.notifyMcpAuthenticationCompleted(
+              operationId,
+              serverName,
+            );
+          }
           throw RequestError.internalError(
             undefined,
             'ToolRegistry unavailable on this Config',
@@ -7136,8 +7128,8 @@ class QwenAgent implements Agent {
         }
 
         if (action === 'enable') {
-          const settings = loadSettings(config.getTargetDir());
           let settingsChanged = false;
+          const settings = loadSettings(config.getTargetDir());
           for (const scope of [SettingScope.User, SettingScope.Workspace]) {
             const scopeSettings = settings.forScope(scope).settings;
             const currentExcluded = scopeSettings.mcp?.excluded || [];
@@ -7173,18 +7165,19 @@ class QwenAgent implements Agent {
         }
 
         if (action === 'disable') {
-          const settings = loadSettings(config.getTargetDir());
-          const userSettings = settings.forScope(SettingScope.User).settings;
-          const workspaceSettings = settings.forScope(
-            SettingScope.Workspace,
-          ).settings;
-          let targetScope = SettingScope.User;
           if (server.extensionName) {
             throw RequestError.invalidParams(
               undefined,
               `Cannot disable extension MCP server: ${serverName}`,
             );
           }
+          let settingsChanged = false;
+          const settings = loadSettings(config.getTargetDir());
+          const userSettings = settings.forScope(SettingScope.User).settings;
+          const workspaceSettings = settings.forScope(
+            SettingScope.Workspace,
+          ).settings;
+          let targetScope = SettingScope.User;
           if (
             server.scope === 'project' ||
             server.scope === 'workspace' ||
@@ -7196,7 +7189,6 @@ class QwenAgent implements Agent {
           }
           const scopeSettings = settings.forScope(targetScope).settings;
           const currentExcluded = scopeSettings.mcp?.excluded || [];
-          let settingsChanged = false;
           if (!matchesAnyServerPattern(serverName, currentExcluded)) {
             settings.setValue(targetScope, 'mcp.excluded', [
               ...currentExcluded,
@@ -7228,6 +7220,7 @@ class QwenAgent implements Agent {
         if (action === 'clear-auth') {
           const tokenStorage = new MCPOAuthTokenStorage();
           await tokenStorage.deleteCredentials(serverName);
+          this.mcpAuthenticationResults.delete(serverName);
           await this.reconcileMcpServerAcrossLiveConfigs(
             serverName,
             'disconnect',
@@ -7333,6 +7326,10 @@ class QwenAgent implements Agent {
               );
               appEvents.removeListener(AppEvent.OauthAuthUrl, authUrlListener);
               this.pendingMcpAuthentications.delete(serverName);
+              await this.notifyMcpAuthenticationCompleted(
+                operationId,
+                serverName,
+              );
             }
           })();
         }

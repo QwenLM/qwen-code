@@ -22,9 +22,11 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { getWorkspaceRuntimeCoordinator } from '../workspace-runtime-coordinator.js';
 
 interface RegisterWorkspaceMcpControlRoutesDeps {
   boundWorkspace: string;
+  workspaceRuntime: WorkspaceRuntime;
   bridge: AcpSessionBridge;
   workspace: DaemonWorkspaceService;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
@@ -42,6 +44,7 @@ export function registerWorkspaceMcpControlRoutes(
 ): void {
   const {
     boundWorkspace,
+    workspaceRuntime,
     bridge,
     workspace,
     mutate,
@@ -55,8 +58,11 @@ export function registerWorkspaceMcpControlRoutes(
     '/workspace/mcp/initialize',
     mutate({ strict: true }),
     async (_req, res) => {
+      if (!requireTrustedWorkspaceRuntime(workspaceRuntime, res)) return;
       try {
-        const result = await bridge.initializeWorkspaceMcp();
+        const result = await getWorkspaceRuntimeCoordinator(
+          workspaceRuntime,
+        ).runMcpRuntimeMutation(async () => bridge.initializeWorkspaceMcp());
         res.status(202).json(result);
       } catch (err) {
         sendBridgeError(res, err, { route: 'POST /workspace/mcp/initialize' });
@@ -68,8 +74,11 @@ export function registerWorkspaceMcpControlRoutes(
     '/workspace/mcp/reload',
     mutate({ strict: true }),
     async (_req, res) => {
+      if (!requireTrustedWorkspaceRuntime(workspaceRuntime, res)) return;
       try {
-        const result = await bridge.reloadWorkspaceMcp();
+        const result = await getWorkspaceRuntimeCoordinator(
+          workspaceRuntime,
+        ).runMcpRuntimeMutation(async () => bridge.reloadWorkspaceMcp());
         res.status(202).json(result);
       } catch (err) {
         sendBridgeError(res, err, { route: 'POST /workspace/mcp/reload' });
@@ -81,6 +90,7 @@ export function registerWorkspaceMcpControlRoutes(
     '/workspace/mcp/:server/restart',
     mutate({ strict: true }),
     async (req, res) => {
+      if (!requireTrustedWorkspaceRuntime(workspaceRuntime, res)) return;
       const serverName = req.params['server'];
       if (!serverName || typeof serverName !== 'string') {
         res.status(400).json({
@@ -125,10 +135,15 @@ export function registerWorkspaceMcpControlRoutes(
           'POST /workspace/mcp/:server/restart',
           clientId,
         );
-        const result = await workspace.restartMcpServer(
-          ctx,
-          serverName,
-          entryIndex !== undefined ? { entryIndex } : undefined,
+        const result = await getWorkspaceRuntimeCoordinator(
+          workspaceRuntime,
+        ).runMcpRuntimeMutation(
+          async () =>
+            await workspace.restartMcpServer(
+              ctx,
+              serverName,
+              entryIndex !== undefined ? { entryIndex } : undefined,
+            ),
         );
         res.status(200).json(result);
       } catch (err) {
@@ -150,6 +165,7 @@ export function registerWorkspaceMcpControlRoutes(
       `/workspace/mcp/:server/${routeAction}`,
       mutate({ strict: true }),
       async (req, res) => {
+        if (!requireTrustedWorkspaceRuntime(workspaceRuntime, res)) return;
         const serverName = req.params['server'];
         if (!serverName || typeof serverName !== 'string') {
           res.status(400).json({
@@ -168,11 +184,34 @@ export function registerWorkspaceMcpControlRoutes(
         const clientId = parseAndValidateClientId(req, res);
         if (clientId === null) return;
         try {
-          const result = await bridge.manageMcpServer(
-            serverName,
-            bridgeAction,
-            clientId,
-          );
+          const result =
+            bridgeAction === 'enable' || bridgeAction === 'disable'
+              ? await getWorkspaceRuntimeCoordinator(
+                  workspaceRuntime,
+                ).runMcpRuntimeMutation(() =>
+                  bridge.manageMcpServer(serverName, bridgeAction, clientId),
+                )
+              : await getWorkspaceRuntimeCoordinator(
+                  workspaceRuntime,
+                ).runMcpOperation(
+                  serverName,
+                  bridgeAction,
+                  (operationId, deadlineAt) =>
+                    deadlineAt === undefined
+                      ? bridge.manageMcpServer(
+                          serverName,
+                          bridgeAction,
+                          clientId,
+                          operationId,
+                        )
+                      : bridge.manageMcpServer(
+                          serverName,
+                          bridgeAction,
+                          clientId,
+                          operationId,
+                          deadlineAt,
+                        ),
+                );
           res.status(200).json(result);
         } catch (err) {
           sendBridgeError(res, err, {
@@ -187,6 +226,7 @@ export function registerWorkspaceMcpControlRoutes(
     '/workspace/mcp/servers',
     mutate({ strict: true }),
     async (req, res) => {
+      if (!requireTrustedWorkspaceRuntime(workspaceRuntime, res)) return;
       const body = safeBody(req);
       const name = body['name'];
       if (!validateMcpRuntimeServerName(name, res)) return;
@@ -214,10 +254,15 @@ export function registerWorkspaceMcpControlRoutes(
         return;
       }
       try {
-        const result = await bridge.addRuntimeMcpServer(
-          name,
-          config as Record<string, unknown>,
-          clientId,
+        const result = await getWorkspaceRuntimeCoordinator(
+          workspaceRuntime,
+        ).runMcpRuntimeMutation(
+          async () =>
+            await bridge.addRuntimeMcpServer(
+              name,
+              config as Record<string, unknown>,
+              clientId,
+            ),
         );
         res.status(200).json(result);
       } catch (err) {
@@ -232,6 +277,7 @@ export function registerWorkspaceMcpControlRoutes(
     '/workspace/mcp/servers/:name',
     mutate({ strict: true }),
     async (req, res) => {
+      if (!requireTrustedWorkspaceRuntime(workspaceRuntime, res)) return;
       const name = req.params['name'] ?? '';
       if (!validateMcpRuntimeServerName(name, res)) return;
       const clientId = parseAndValidateClientId(req, res);
@@ -245,7 +291,11 @@ export function registerWorkspaceMcpControlRoutes(
         return;
       }
       try {
-        const result = await bridge.removeRuntimeMcpServer(name, clientId);
+        const result = await getWorkspaceRuntimeCoordinator(
+          workspaceRuntime,
+        ).runMcpRuntimeMutation(
+          async () => await bridge.removeRuntimeMcpServer(name, clientId),
+        );
         res.status(200).json(result);
       } catch (err) {
         sendBridgeError(res, err, {
@@ -287,7 +337,11 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
       if (!runtime) return;
       const route = 'POST /workspaces/:workspace/mcp/initialize';
       try {
-        const result = await runtime.bridge.initializeWorkspaceMcp();
+        const result = await getWorkspaceRuntimeCoordinator(
+          runtime,
+        ).runMcpRuntimeMutation(async () =>
+          runtime.bridge.initializeWorkspaceMcp(),
+        );
         res.status(202).json(result);
       } catch (err) {
         deps.sendBridgeError(res, err, { route });
@@ -307,7 +361,11 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
       if (!runtime) return;
       const route = 'POST /workspaces/:workspace/mcp/reload';
       try {
-        const result = await runtime.bridge.reloadWorkspaceMcp();
+        const result = await getWorkspaceRuntimeCoordinator(
+          runtime,
+        ).runMcpRuntimeMutation(async () =>
+          runtime.bridge.reloadWorkspaceMcp(),
+        );
         res.status(202).json(result);
       } catch (err) {
         deps.sendBridgeError(res, err, { route });
@@ -373,10 +431,15 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
           route,
           clientId,
         );
-        const result = await runtime.workspaceService.restartMcpServer(
-          ctx,
-          serverName,
-          entryIndex !== undefined ? { entryIndex } : undefined,
+        const result = await getWorkspaceRuntimeCoordinator(
+          runtime,
+        ).runMcpRuntimeMutation(
+          async () =>
+            await runtime.workspaceService.restartMcpServer(
+              ctx,
+              serverName,
+              entryIndex !== undefined ? { entryIndex } : undefined,
+            ),
         );
         res.status(200).json(result);
       } catch (err) {
@@ -425,11 +488,36 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
         if (clientId === null) return;
         const route = `POST /workspaces/:workspace/mcp/:server/${routeAction}`;
         try {
-          const result = await runtime.bridge.manageMcpServer(
-            serverName,
-            bridgeAction,
-            clientId,
-          );
+          const result =
+            bridgeAction === 'enable' || bridgeAction === 'disable'
+              ? await getWorkspaceRuntimeCoordinator(
+                  runtime,
+                ).runMcpRuntimeMutation(() =>
+                  runtime.bridge.manageMcpServer(
+                    serverName,
+                    bridgeAction,
+                    clientId,
+                  ),
+                )
+              : await getWorkspaceRuntimeCoordinator(runtime).runMcpOperation(
+                  serverName,
+                  bridgeAction,
+                  (operationId, deadlineAt) =>
+                    deadlineAt === undefined
+                      ? runtime.bridge.manageMcpServer(
+                          serverName,
+                          bridgeAction,
+                          clientId,
+                          operationId,
+                        )
+                      : runtime.bridge.manageMcpServer(
+                          serverName,
+                          bridgeAction,
+                          clientId,
+                          operationId,
+                          deadlineAt,
+                        ),
+                );
           res.status(200).json(result);
         } catch (err) {
           deps.sendBridgeError(res, err, { route });
@@ -480,10 +568,15 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
       }
       const route = 'POST /workspaces/:workspace/mcp/servers';
       try {
-        const result = await runtime.bridge.addRuntimeMcpServer(
-          name,
-          config as Record<string, unknown>,
-          clientId,
+        const result = await getWorkspaceRuntimeCoordinator(
+          runtime,
+        ).runMcpRuntimeMutation(
+          async () =>
+            await runtime.bridge.addRuntimeMcpServer(
+              name,
+              config as Record<string, unknown>,
+              clientId,
+            ),
         );
         res.status(200).json(result);
       } catch (err) {
@@ -520,9 +613,11 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
       }
       const route = 'DELETE /workspaces/:workspace/mcp/servers/:name';
       try {
-        const result = await runtime.bridge.removeRuntimeMcpServer(
-          name,
-          clientId,
+        const result = await getWorkspaceRuntimeCoordinator(
+          runtime,
+        ).runMcpRuntimeMutation(
+          async () =>
+            await runtime.bridge.removeRuntimeMcpServer(name, clientId),
         );
         res.status(200).json(result);
       } catch (err) {

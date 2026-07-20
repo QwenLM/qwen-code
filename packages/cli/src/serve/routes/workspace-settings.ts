@@ -6,10 +6,7 @@
 
 import type { Application, Request, Response } from 'express';
 import { loadSettings, SettingScope } from '../../config/settings.js';
-import {
-  redactMcpServersSetting,
-  restoreRedactedMcpServersSetting,
-} from '../../config/mcp-server-secrets.js';
+import { redactMcpServersSetting } from '../../config/mcp-server-secrets.js';
 import type {
   SettingEnumOption,
   SettingsType,
@@ -22,12 +19,27 @@ import {
   validateSettingValue,
 } from '../../utils/settingsUtils.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { WorkspaceDrainingError } from '../acp-session-bridge.js';
+import type { SendBridgeError } from '../server/error-response.js';
 import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
 } from '../workspace-route-runtime.js';
-import type { WorkspaceRegistry } from '../workspace-registry.js';
+import type {
+  WorkspaceRegistry,
+  WorkspaceRuntime,
+} from '../workspace-registry.js';
+import { getWorkspaceRuntimeCoordinator } from '../workspace-runtime-coordinator.js';
+import {
+  parseMcpServerMutation,
+  prepareMcpServersSettingWrite,
+  registerWorkspaceMcpConfigRoutes,
+  registerWorkspaceQualifiedMcpConfigRoutes,
+  scheduleMcpConfiguration,
+  withMcpServerMutationLock,
+  type McpServerSettingMutation,
+} from './workspace-mcp-config.js';
 
 const TUI_ONLY_SETTINGS = new Set([
   'general.vimMode',
@@ -58,12 +70,6 @@ const WEB_SHELL_SETTINGS = new Set([
 // workspace-only by design.
 const VALID_WRITE_SCOPES = new Set(['workspace', 'user']);
 const QUALIFIED_WRITE_SCOPES = new Set(['workspace']);
-const mcpServerMutationQueues = new Map<string, Promise<void>>();
-
-interface McpServerSettingMutation {
-  operation: 'set' | 'remove';
-  name: string;
-}
 
 interface SettingDescriptor {
   key: string;
@@ -179,69 +185,18 @@ function prepareSettingWrite(
   if (key !== 'mcpServers') {
     return { persistedValue: value, publicValue: value };
   }
-  const existing =
-    loadSettings(workspace).forScope(scope).settings.mcpServers ?? {};
-  let nextValue = value;
-  if (mcpServerMutation) {
-    const servers = { ...existing };
-    if (mcpServerMutation.operation === 'set') {
-      servers[mcpServerMutation.name] = value as (typeof servers)[string];
-    } else {
-      delete servers[mcpServerMutation.name];
-    }
-    nextValue = servers;
-  }
-  const persistedValue = restoreRedactedMcpServersSetting(nextValue, existing);
-  return {
-    persistedValue,
-    publicValue: redactMcpServersSetting(persistedValue),
-  };
-}
-
-function parseMcpServerMutation(
-  key: string,
-  value: unknown,
-): McpServerSettingMutation | undefined {
-  if (value === undefined) return undefined;
-  if (key !== 'mcpServers' || typeof value !== 'object' || value === null) {
-    throw new Error('mcpServerMutation is only valid for mcpServers');
-  }
-  const operation = (value as Record<string, unknown>)['operation'];
-  const name = (value as Record<string, unknown>)['name'];
-  if (
-    (operation !== 'set' && operation !== 'remove') ||
-    typeof name !== 'string' ||
-    !name.trim()
-  ) {
-    throw new Error('mcpServerMutation requires a valid operation and name');
-  }
-  return { operation, name };
-}
-
-async function withMcpServerMutationLock<T>(
-  workspace: string,
-  scope: SettingScope,
-  operation: () => Promise<T>,
-): Promise<T> {
-  const key = `${workspace}\0${scope}`;
-  const previous = mcpServerMutationQueues.get(key) ?? Promise.resolve();
-  const run = previous.catch(() => undefined).then(operation);
-  const tail = run.then(
-    () => undefined,
-    () => undefined,
+  return prepareMcpServersSettingWrite(
+    workspace,
+    scope,
+    value,
+    mcpServerMutation,
   );
-  mcpServerMutationQueues.set(key, tail);
-  try {
-    return await run;
-  } finally {
-    if (mcpServerMutationQueues.get(key) === tail) {
-      mcpServerMutationQueues.delete(key);
-    }
-  }
 }
 
 export interface WorkspaceSettingsRouteDeps {
   boundWorkspace: string;
+  workspaceRuntime: WorkspaceRuntime;
+  workspaceRegistry?: WorkspaceRegistry;
   mutate: (opts?: { strict?: boolean }) => import('express').RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
   persistSetting: (
@@ -260,6 +215,7 @@ export interface WorkspaceSettingsRouteDeps {
     req: Request,
     res: Response,
   ) => string | undefined | null;
+  sendBridgeError: SendBridgeError;
 }
 
 export function registerWorkspaceSettingsRoutes(
@@ -276,6 +232,8 @@ export function registerWorkspaceSettingsRoutes(
   } = deps;
 
   const allowedKeys = getAllowedKeys();
+
+  registerWorkspaceMcpConfigRoutes(app, deps);
 
   app.get('/workspace/settings', (_req: Request, res: Response) => {
     try {
@@ -427,11 +385,22 @@ export function registerWorkspaceSettingsRoutes(
         );
       }
 
+      const activation = mcpServerMutation
+        ? scheduleMcpConfiguration(
+            scope === 'user'
+              ? (deps.workspaceRegistry?.listManaged() ?? [
+                  deps.workspaceRuntime,
+                ])
+              : [deps.workspaceRuntime],
+          )
+        : undefined;
+
       res.status(200).json({
         key,
         scope,
         value: publicValue,
         requiresRestart: def.requiresRestart,
+        ...(activation ? { activation } : {}),
       });
     },
   );
@@ -441,13 +410,15 @@ export function registerWorkspaceQualifiedSettingsRoutes(
   app: Application,
   deps: Pick<
     WorkspaceSettingsRouteDeps,
-    'mutate' | 'safeBody' | 'persistSetting'
+    'mutate' | 'safeBody' | 'persistSetting' | 'sendBridgeError'
   > & {
     workspaceRegistry: WorkspaceRegistry;
     invalidateServeFeaturesCache: () => void;
   },
 ): void {
   const allowedKeys = getAllowedKeys();
+
+  registerWorkspaceQualifiedMcpConfigRoutes(app, deps);
 
   app.get('/workspaces/:workspace/settings', (req: Request, res: Response) => {
     const runtime = resolveWorkspaceRuntimeFromParam(
@@ -581,16 +552,29 @@ export function registerWorkspaceQualifiedSettingsRoutes(
             prepared.persistedValue,
           );
         };
-        if (mcpServerMutation) {
-          await withMcpServerMutationLock(
-            runtime.workspaceCwd,
-            settingScope,
-            persist,
-          );
-        } else {
-          await persist();
-        }
+        await getWorkspaceRuntimeCoordinator(runtime).runManagementOperation(
+          async () => {
+            if (mcpServerMutation) {
+              await withMcpServerMutationLock(
+                runtime.workspaceCwd,
+                settingScope,
+                persist,
+              );
+            } else {
+              await persist();
+            }
+          },
+        );
       } catch (err) {
+        if (err instanceof WorkspaceDrainingError) {
+          deps.sendBridgeError(res, err, {
+            route: 'POST /workspaces/:workspace/settings',
+            key,
+            scope,
+            workspace: runtime.workspaceCwd,
+          });
+          return;
+        }
         writeStderrLine(
           `qwen serve: POST /workspaces/:workspace/settings persist error (key=${key}, scope=${scope}, workspace=${runtime.workspaceCwd}): ${
             err instanceof Error ? err.message : String(err)
@@ -609,11 +593,15 @@ export function registerWorkspaceQualifiedSettingsRoutes(
         data: { key, value: publicValue, scope },
         ...(clientId ? { originatorClientId: clientId } : {}),
       });
+      const activation = mcpServerMutation
+        ? scheduleMcpConfiguration([runtime])
+        : undefined;
       res.status(200).json({
         key,
         scope,
         value: publicValue,
         requiresRestart: def.requiresRestart,
+        ...(activation ? { activation } : {}),
       });
     },
   );

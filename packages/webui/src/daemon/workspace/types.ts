@@ -32,9 +32,6 @@ import type {
   DaemonMcpRestartResult,
   DaemonMcpManageAction,
   DaemonMcpManageResult,
-  DaemonRuntimeMcpAddRequest,
-  DaemonRuntimeMcpAddResult,
-  DaemonRuntimeMcpRemoveResult,
   DaemonUpdateAgentRequest,
   DaemonWorkspaceAgentDetail,
   DaemonWorkspaceAgentsStatus,
@@ -47,7 +44,11 @@ import type {
   DaemonWorkspaceFileWriteRequest,
   DaemonWorkspaceFileWriteResult,
   DaemonWorkspaceMcpStatus,
-  DaemonWorkspaceMcpInitializeResult,
+  DaemonWorkspaceRuntimeOperationStatus,
+  DaemonWorkspaceRuntimeOperationsStatus,
+  DaemonWorkspaceRuntimeStatus,
+  DaemonWorkspaceMcpConfigStatus,
+  DaemonWorkspaceMcpConfigMutationResult,
   DaemonWorkspaceMcpToolsStatus,
   DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMemoryStatus,
@@ -347,10 +348,24 @@ export interface DaemonWorkspaceActions {
   /** Restore an archived session to the active directory. Idempotent. */
   unarchiveSession(sessionId: string): Promise<boolean>;
 
+  // Workspace runtime
+  ensureRuntime(): Promise<DaemonWorkspaceRuntimeStatus>;
+
   // MCP
-  loadMcpStatus(): Promise<DaemonWorkspaceMcpStatus>;
-  initializeMcp(): Promise<DaemonWorkspaceMcpInitializeResult>;
-  reloadMcp(): Promise<DaemonWorkspaceMcpInitializeResult>;
+  loadMcpStatus(timeoutMs?: number): Promise<DaemonWorkspaceMcpViewStatus>;
+  initializeMcp(): Promise<DaemonWorkspaceRuntimeStatus>;
+  reloadMcp(): Promise<DaemonWorkspaceRuntimeStatus>;
+  waitForMcpRuntime(): Promise<DaemonWorkspaceRuntimeStatus>;
+  loadMcpConfig(): Promise<DaemonWorkspaceMcpConfigStatus>;
+  setMcpConfig(
+    name: string,
+    scope: 'user' | 'workspace',
+    config: Record<string, unknown>,
+  ): Promise<DaemonWorkspaceMcpConfigMutationResult>;
+  removeMcpConfig(
+    name: string,
+    scope: 'user' | 'workspace',
+  ): Promise<DaemonWorkspaceMcpConfigMutationResult>;
   loadMcpTools(serverName: string): Promise<DaemonWorkspaceMcpToolsStatus>;
   loadMcpResources(
     serverName: string,
@@ -359,12 +374,15 @@ export interface DaemonWorkspaceActions {
   manageMcpServer(
     serverName: string,
     action: DaemonMcpManageAction,
+    scope?: 'user' | 'workspace',
   ): Promise<DaemonMcpManageResult>;
-  addRuntimeMcpServer(
-    request: DaemonRuntimeMcpAddRequest,
-  ): Promise<DaemonRuntimeMcpAddResult>;
-  removeRuntimeMcpServer(name: string): Promise<DaemonRuntimeMcpRemoveResult>;
-
+  mcpOperationStatus(
+    operationId: string,
+    timeoutMs?: number,
+  ): Promise<DaemonWorkspaceRuntimeOperationStatus>;
+  activeMcpOperations(
+    timeoutMs?: number,
+  ): Promise<DaemonWorkspaceRuntimeOperationsStatus>;
   // Daemon status (read-only)
   loadDaemonStatus(
     detail?: DaemonStatusReportDetail,
@@ -491,6 +509,7 @@ export interface DaemonWorkspaceActions {
   ): Promise<ExtensionInstallResponse>;
   extensionOperationStatus(
     operationId: string,
+    timeoutMs?: number,
   ): Promise<ExtensionOperationStatus>;
   activeExtensionOperations(): Promise<ExtensionActiveOperations>;
   respondToExtensionInteraction(
@@ -552,4 +571,31 @@ export interface DaemonWorkspaceActions {
     workspaceId: string,
     options?: { force?: boolean; timeoutMs?: number },
   ): Promise<DaemonWorkspaceRemovalResult>;
+}
+
+export type DaemonWorkspaceExtensionViewEntry =
+  DaemonWorkspaceExtensionsStatus['extensions'][number];
+
+export type DaemonWorkspaceExtensionsViewStatus = Omit<
+  DaemonWorkspaceExtensionsStatus,
+  'extensions'
+> & {
+  extensions: DaemonWorkspaceExtensionViewEntry[];
+};
+
+export interface DaemonWorkspaceSkillsViewStatus
+  extends DaemonWorkspaceSkillsStatus {
+  runtimeState?: 'not_started' | 'starting' | 'ready' | 'stale' | 'error';
+  coordinatorRuntimeEpoch?: number;
+  capabilityRuntimeEpoch?: number;
+  runtimeCatalogEpoch?: number;
+  runtimeCatalogInitialized?: boolean;
+  runtimeCatalogSource?: DaemonWorkspaceSkillsStatus['source'];
+  runtimeSkills?: DaemonWorkspaceSkillsStatus['skills'];
+}
+
+export interface DaemonWorkspaceMcpViewStatus extends DaemonWorkspaceMcpStatus {
+  runtimeState?: 'not_started' | 'starting' | 'ready' | 'stale' | 'error';
+  coordinatorRuntimeEpoch?: number;
+  capabilityRuntimeEpoch?: number;
 }
