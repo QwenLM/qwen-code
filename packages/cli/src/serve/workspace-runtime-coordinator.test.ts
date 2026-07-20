@@ -1963,6 +1963,48 @@ describe('WorkspaceRuntimeCoordinator', () => {
     }
   });
 
+  it('does not deadlock when epoch flips during a physical lane reconciliation', async () => {
+    const h = makeRuntime();
+    h.setLive(true);
+    let finishMcpStatus!: (value: ServeWorkspaceMcpStatus) => void;
+    h.getWorkspaceMcpStatus.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishMcpStatus = resolve;
+        }),
+    );
+    const coordinator = new WorkspaceRuntimeCoordinator(h.runtime);
+
+    expect(coordinator.reconcileMcpConfiguration()).toBe('reconciling');
+    await vi.waitFor(() =>
+      expect(h.getWorkspaceMcpStatus).toHaveBeenCalledOnce(),
+    );
+
+    // Flip the epoch while the physical lane is blocked in prepareMcp.
+    // Before the fix, resumeCapabilityInBackground awaited inside the
+    // lane re-acquired the same lane → circular wait → permanent hang.
+    h.setLive(false);
+    h.setLive(true);
+    finishMcpStatus({
+      v: 1,
+      workspaceCwd: '/workspace',
+      initialized: true,
+      source: 'live',
+      runtimeEpoch: 1,
+      discoveryState: 'completed',
+      servers: [],
+    });
+
+    // The reconciliation must settle (not hang).
+    await vi.waitFor(
+      () => {
+        const state = coordinator.status().capabilities.mcp?.state;
+        expect(state).not.toBe('starting');
+      },
+      { timeout: 5000 },
+    );
+  });
+
   it('is owned by the workspace runtime and stops accepting work after dispose', async () => {
     const h = makeRuntime();
     const coordinator = getWorkspaceRuntimeCoordinator(h.runtime);

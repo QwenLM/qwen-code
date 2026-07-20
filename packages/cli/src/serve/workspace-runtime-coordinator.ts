@@ -75,7 +75,11 @@ function wait(ms: number): Promise<void> {
   });
 }
 
-class WorkspaceRuntimeStillStartingError extends Error {}
+export class WorkspaceRuntimeStillStartingError extends Error {
+  constructor() {
+    super('Workspace runtime is still starting');
+  }
+}
 class WorkspaceRuntimeEpochChangedError extends WorkspaceRuntimeStillStartingError {}
 
 export function isWorkspaceRuntimeDrainingError(error: unknown): boolean {
@@ -233,6 +237,9 @@ export class WorkspaceRuntimeCoordinator {
     this.draining = true;
     this.mcpOperations.dispose();
     this.deferredConfigurationReconciliation.clear();
+    this.inFlight.clear();
+    this.backgroundResume.clear();
+    this.capabilityPhysicalTail.clear();
   }
 
   private runtimeEpoch(): number {
@@ -586,7 +593,11 @@ export class WorkspaceRuntimeCoordinator {
           revision,
         );
         if (!completed) {
-          await this.resumeCapabilityInBackground('mcp', revision, deadline);
+          void this.resumeCapabilityInBackground(
+            'mcp',
+            revision,
+            deadline,
+          ).catch(() => undefined);
         }
         return result;
       });
@@ -703,11 +714,11 @@ export class WorkspaceRuntimeCoordinator {
             revision,
           );
           if (!completed) {
-            await this.resumeCapabilityInBackground(
+            void this.resumeCapabilityInBackground(
               capability,
               revision,
               deadline,
-            );
+            ).catch(() => undefined);
           }
         }),
       )

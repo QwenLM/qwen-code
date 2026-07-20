@@ -16658,6 +16658,45 @@ describe('activePromptCount and lastActivityAt', () => {
     await bridge.shutdown();
   });
 
+  it('killSession calls connection.cancel with the killed sessionId', async () => {
+    let rejectPrompt: ((error?: unknown) => void) | undefined;
+    const handle = makeChannel({
+      promptImpl: () =>
+        new Promise<PromptResponse>((_resolve, reject) => {
+          rejectPrompt = reject;
+        }),
+      cancelImpl: () => {
+        rejectPrompt?.(new Error('cancelled'));
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    const promptResult = bridge
+      .sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'test' }],
+      })
+      .then(
+        () => ({ ok: true as const }),
+        (error) => ({ ok: false as const, error }),
+      );
+
+    await vi.waitFor(() => {
+      expect(handle.agent.promptCalls).toHaveLength(1);
+    });
+
+    await bridge.killSession(session.sessionId);
+
+    expect(handle.agent.cancelCalls).toHaveLength(1);
+    expect(handle.agent.cancelCalls[0]?.sessionId).toBe(session.sessionId);
+
+    await promptResult;
+    await bridge.shutdown();
+  });
+
   it('activePromptCount returns to 0 when channel crashes during a hung prompt', async () => {
     const handle = makeChannel({
       promptImpl: () => new Promise<PromptResponse>(() => {}),

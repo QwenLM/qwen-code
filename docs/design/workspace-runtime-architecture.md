@@ -871,7 +871,7 @@ Catalog GET 始终保持只读，不以“页面加载”为理由启动 ACP。
    daemon-local config GET 仍可读，global config owner 不受 primary trust 影响。
 8. **SDK transport**：REST、ACP HTTP/WS 模式下 Workspace client 都不会把 daemon
    runtime 路由误发为 ACP method。
-9. **连续 lease**：idle timeout 为 `0` 时不自动回收；显式极小正值时，preheat、
+9. **连续 lease**：未配置 idle timeout（`null`）时不自动回收；`0` 配置明确失败（启动时 `TypeError`）；显式极小正值时，preheat、
    capability RPC 与最终状态投影不跨 epoch，物理回收只发生在外层
    runtime-control lease 释放后。
 10. **OAuth 排空**：认证 pending 时删除配置或 reload，Catalog 缺失不释放 auth

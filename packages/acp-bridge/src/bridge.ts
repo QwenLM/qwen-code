@@ -2349,6 +2349,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         throw error;
       }
 
+      // A successful newSession disproves a prior timeout signal.
+      ci.sessionSpawnResetPending = false;
+
       // Late-shutdown re-check (BUy4U): shutdown() may have flipped
       // while we were in `connection.newSession` (~1s on cold start).
       if (shuttingDown) {
