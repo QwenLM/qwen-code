@@ -15967,6 +15967,56 @@ describe('preheat', () => {
       vi.useRealTimers();
     }
   });
+
+  it('kills channel via deferred spawn-reset when concurrent workspace control completes (#7308)', async () => {
+    vi.useFakeTimers();
+    try {
+      const releaseControl = deferred<void>();
+      const handle = makeChannel({
+        newSessionImpl: () =>
+          new Promise<NewSessionResponse>(() => {
+            /* never resolves — forces initializeTimeoutMs expiry */
+          }),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        channelIdleTimeoutMs: 60_000,
+        initializeTimeoutMs: 5_000,
+      });
+
+      await bridge.preheat();
+
+      // Start a workspace-control request that hangs, keeping the
+      // channel "busy" so the spawn-reset kill is deferred.
+      const controlPromise = bridge.withWorkspaceRuntimeControl!(
+        () => releaseControl.promise,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Spawn will time out because newSessionImpl never resolves.
+      const spawnPromise = bridge
+        .spawnOrAttach({ workspaceCwd: WS_A, sessionScope: 'thread' })
+        .catch((e: unknown) => e);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      const spawnError = await spawnPromise;
+      expect(spawnError).toBeInstanceOf(BridgeTimeoutError);
+
+      // Channel must survive: workspace control is still in flight.
+      expect(handle.killed).toBe(false);
+
+      // Resolve the workspace-control request; the deferred kill fires.
+      releaseControl.resolve(undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      await controlPromise;
+
+      expect(handle.killed).toBe(true);
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

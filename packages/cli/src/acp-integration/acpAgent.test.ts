@@ -11991,6 +11991,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
     mockMcpApprovals.getState.mockReturnValue('approved');
     mockMcpApprovals.setState.mockResolvedValue(undefined);
     mockGetPendingGatedMcpServers.mockReset();
+    mockMcpAuthenticate.mockReset();
     mockGetPendingGatedMcpServers.mockReturnValue([]);
     mockConnectionState.reset();
     capturedAgentFactory = undefined;
