@@ -305,26 +305,70 @@ describe('release note classification', () => {
     }
   });
 
-  it('wires reclassification and exclusion to the same automatic label', () => {
-    const workflow = readFileSync(
-      join(import.meta.dirname, '../workflows/classify-release-notes.yml'),
+  it('wires batch labeling and exclusion through release.yml', () => {
+    const release = readFileSync(
+      join(import.meta.dirname, '../workflows/release.yml'),
       'utf8',
     );
-    const release = readFileSync(
+    const changelog = readFileSync(
       join(import.meta.dirname, '../release.yml'),
       'utf8',
     );
 
-    for (const action of ['synchronize', 'edited', 'labeled', 'unlabeled']) {
-      assert.match(workflow, new RegExp(`- '${action}'`));
+    assert.match(changelog, /- 'skip-changelog-auto'/);
+    assert.match(release, /classify-release-notes\.mjs --batch/);
+    assert.match(release, /Auto-label internal CI PRs/);
+  });
+
+  it('batch mode labels qualifying PRs from stdin', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'release-note-classifier-'));
+    try {
+      const labeled = join(dir, 'labeled.txt');
+      const gh = join(dir, 'gh');
+      writeFileSync(
+        gh,
+        [
+          '#!/usr/bin/env node',
+          'const args = process.argv.slice(2);',
+          "if (args[0] === 'api' && args.includes('.[] | .filename, (.previous_filename // empty)')) {",
+          "  const num = args.find((a, i) => args[i-1] === 'pulls' || /^repos\\/.+\\/pulls\\/\\d+\\/files$/.test(a));",
+          "  process.stdout.write('.github/workflows/ci.yml\\n');",
+          '  process.exit(0);',
+          '}',
+          "if (args[0] === 'pr' && args[1] === 'edit') {",
+          `  require('node:fs').appendFileSync(${JSON.stringify(labeled)}, args[2] + '\\n');`,
+          '  process.exit(0);',
+          '}',
+          'process.exit(1);',
+        ].join('\n'),
+      );
+      chmodSync(gh, 0o755);
+
+      const input = JSON.stringify([
+        { number: 10, title: 'ci: speed up checks', labels: [] },
+        { number: 11, title: 'feat: new feature', labels: [] },
+      ]);
+
+      const output = execFileSync(
+        process.execPath,
+        [join(import.meta.dirname, 'classify-release-notes.mjs'), '--batch'],
+        {
+          encoding: 'utf8',
+          input,
+          env: {
+            ...process.env,
+            GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+            PATH: `${dir}:${process.env.PATH}`,
+          },
+        },
+      );
+
+      assert.match(output, /Labeled: 10/);
+      assert.doesNotMatch(output, /11/);
+      const labeledContent = readFileSync(labeled, 'utf8').trim();
+      assert.equal(labeledContent, '10');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
-    assert.match(workflow, /AUTO_LABEL: 'skip-changelog-auto'/);
-    assert.match(
-      workflow,
-      /github\.event\.label\.name != 'skip-changelog-auto'/,
-    );
-    assert.match(workflow, /classification failed; including this PR/);
-    assert.doesNotMatch(workflow, /decision=unchanged/);
-    assert.match(release, /- 'skip-changelog-auto'/);
   });
 });

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -55,7 +56,23 @@ export function shouldAutoSkipChangelog({ title, labels = [], files = [] }) {
   );
 }
 
-function main() {
+function fetchFiles(repo, number) {
+  return execFileSync(
+    'gh',
+    [
+      'api',
+      '--paginate',
+      `repos/${repo}/pulls/${number}/files`,
+      '--jq',
+      '.[] | .filename, (.previous_filename // empty)',
+    ],
+    { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 },
+  )
+    .split(/\r?\n/)
+    .filter(Boolean);
+}
+
+function mainSingle() {
   const repo = process.env.GITHUB_REPOSITORY || '';
   const number = process.env.PR_NUMBER || '';
   if (
@@ -71,32 +88,61 @@ function main() {
     execFileSync(
       'gh',
       ['pr', 'view', number, '--repo', repo, '--json', 'title,labels'],
-      {
-        encoding: 'utf8',
-      },
+      { encoding: 'utf8' },
     ),
   );
-  const files = execFileSync(
-    'gh',
-    [
-      'api',
-      '--paginate',
-      `repos/${repo}/pulls/${number}/files`,
-      '--jq',
-      '.[] | .filename, (.previous_filename // empty)',
-    ],
-    { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 },
-  )
-    .split(/\r?\n/)
-    .filter(Boolean);
+  const files = fetchFiles(repo, number);
   process.stdout.write(
     `${shouldAutoSkipChangelog({ ...metadata, files }) ? 'skip' : 'include'}\n`,
   );
+}
+
+function mainBatch() {
+  const repo = process.env.GITHUB_REPOSITORY || '';
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
+    throw new Error('GITHUB_REPOSITORY must be set to owner/repo.');
+  }
+
+  const input = JSON.parse(readFileSync(0, 'utf8'));
+  const prs = Array.isArray(input) ? input : [];
+  const labeled = [];
+
+  for (const pr of prs) {
+    const number = String(pr.number);
+    if (!/^[1-9]\d*$/.test(number)) continue;
+    try {
+      const files = fetchFiles(repo, number);
+      if (shouldAutoSkipChangelog({ ...pr, files })) {
+        execFileSync('gh', [
+          'pr',
+          'edit',
+          number,
+          '--repo',
+          repo,
+          '--add-label',
+          AUTO_LABEL,
+        ]);
+        labeled.push(number);
+      }
+    } catch {
+      process.stderr.write(
+        `::warning::Failed to classify PR #${number}; skipping.\n`,
+      );
+    }
+  }
+
+  if (labeled.length > 0) {
+    process.stdout.write(`Labeled: ${labeled.join(', ')}\n`);
+  }
 }
 
 if (
   process.argv[1] &&
   path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
-  main();
+  if (process.argv.includes('--batch')) {
+    mainBatch();
+  } else {
+    mainSingle();
+  }
 }
