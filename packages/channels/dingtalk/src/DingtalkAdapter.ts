@@ -713,7 +713,7 @@ export class DingtalkChannel extends ChannelBase {
 
         const detail = sanitizeLogText(await resp.text().catch(() => ''), 500);
         process.stderr.write(
-          `[DingTalk:${this.name}] emotion/${endpoint} failed: ${resp.status} ${detail}\n`,
+          `[DingTalk:${this.name}] emotion/${endpoint} failed after ${attempt + 1}/${EMOTION_MAX_ATTEMPTS} attempts: ${resp.status} ${detail}\n`,
         );
         return;
       }
