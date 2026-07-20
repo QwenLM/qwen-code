@@ -227,6 +227,7 @@ export function createWorkspaceTrustReconciler(
       }
     } catch (error) {
       if (contained) {
+        entry.current = undefined;
         options.registry.blockReplacement(entry, errorMessage(error));
       } else {
         options.registry.blockReplacement(
