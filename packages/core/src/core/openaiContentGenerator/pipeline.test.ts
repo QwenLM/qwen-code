@@ -686,12 +686,12 @@ describe('ContentGenerationPipeline', () => {
         expectedToolChoice: undefined,
       },
       {
-        name: 'keep thinking disabled for standard DashScope qwen3.8',
+        name: 'apply the qwen3.8 constraint across DashScope endpoints',
         baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
         reasoning: undefined,
         includeThoughts: false,
-        expectedThinking: false,
-        expectedToolChoice: 'required',
+        expectedThinking: true,
+        expectedToolChoice: undefined,
       },
       {
         name: 'honor the config-level opt-out for Token Plan qwen3.8',

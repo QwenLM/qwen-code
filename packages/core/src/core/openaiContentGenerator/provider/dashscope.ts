@@ -35,22 +35,6 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     return { contentOnlyThinkingTagLeaks: true };
   }
 
-  static isTokenPlanProvider(
-    contentGeneratorConfig: ContentGeneratorConfig,
-  ): boolean {
-    try {
-      const hostname = new URL(
-        contentGeneratorConfig.baseUrl ?? '',
-      ).hostname.toLowerCase();
-      return (
-        hostname.startsWith('token-plan.') &&
-        hostname.endsWith('.maas.aliyuncs.com')
-      );
-    } catch {
-      return false;
-    }
-  }
-
   /**
    * Determines whether to use the DashScope-compatible provider.
    * Covers dashscope.aliyuncs.com, dashscope-intl.aliyuncs.com,
@@ -94,9 +78,9 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         hostname.endsWith('.dashscope-intl.aliyuncs.com'));
 
     const isTokenPlanOrigin =
-      DashScopeOpenAICompatibleProvider.isTokenPlanProvider(
-        contentGeneratorConfig,
-      );
+      hostname !== null &&
+      hostname.startsWith('token-plan.') &&
+      hostname.endsWith('.maas.aliyuncs.com');
 
     // Internal Alibaba domains proxying to DashScope-compatible APIs.
     // Covers *.alibaba-inc.com and *.aliyun-inc.com.

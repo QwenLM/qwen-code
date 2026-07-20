@@ -814,14 +814,13 @@ export class ContentGenerationPipeline {
     // In both cases we want the wire shape to actually disable thinking,
     // not just remove the effort knob — otherwise providers whose default
     // is "thinking enabled" (DeepSeek V4+, qwen3) keep paying thinking
-    // latency/cost. Token Plan qwen3.8 is handled separately because its API
+    // latency/cost. DashScope qwen3.8 is handled separately because the model
     // rejects disabled thinking.
     const model = (context.model ?? '').toLowerCase();
-    const isQwen38TokenPlan =
-      model === 'qwen3.8-max-preview' &&
-      DashScopeOpenAICompatibleProvider.isTokenPlanProvider(
-        this.contentGeneratorConfig,
-      );
+    const isDashScope = DashScopeOpenAICompatibleProvider.isDashScopeProvider(
+      this.contentGeneratorConfig,
+    );
+    const requiresThinking = model === 'qwen3.8-max-preview' && isDashScope;
     const reasoningDisabled =
       request.config?.thinkingConfig?.includeThoughts === false ||
       this.contentGeneratorConfig.reasoning === false;
@@ -848,13 +847,9 @@ export class ContentGenerationPipeline {
       // start with `qwen` but is the most common hybrid-thinking model
       // for first-time users, so it must be covered.
       if (model.startsWith('qwen') || model === 'coder-model') {
-        if (
-          DashScopeOpenAICompatibleProvider.isDashScopeProvider(
-            this.contentGeneratorConfig,
-          )
-        ) {
+        if (isDashScope) {
           if (
-            !isQwen38TokenPlan ||
+            !requiresThinking ||
             this.contentGeneratorConfig.reasoning === false
           ) {
             typed['enable_thinking'] = false;
@@ -909,9 +904,9 @@ export class ContentGenerationPipeline {
       }
     }
 
-    if (isQwen38TokenPlan) {
+    if (requiresThinking) {
       const typed = providerRequest as unknown as Record<string, unknown>;
-      // Token Plan rejects forced tool selection while thinking is enabled.
+      // qwen3.8 rejects forced tool selection while thinking is enabled.
       if (
         typed['enable_thinking'] !== false &&
         typed['tool_choice'] === 'required'
