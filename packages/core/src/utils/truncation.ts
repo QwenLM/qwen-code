@@ -46,6 +46,7 @@ export async function truncateAndSaveToFile(
   threshold: number,
   truncateLines: number,
   keep: 'head' | 'tail' | 'both' = 'both',
+  previewChars = threshold,
 ): Promise<{ content: string; outputFile?: string }> {
   // Fast path: when no line cap applies (per-tool char budgets pass
   // truncateLines = Infinity) and content is within the char threshold, return
@@ -86,12 +87,13 @@ export async function truncateAndSaveToFile(
 
   // Collect head lines within budget. If a single line exceeds the
   // remaining budget, include a truncated slice of it.
+  const previewBudget = Math.max(0, previewChars);
   const headBudget =
     keep === 'head'
-      ? threshold
+      ? previewBudget
       : keep === 'tail'
         ? 0
-        : Math.floor(threshold / 5);
+        : Math.floor(previewBudget / 5);
   const beginning: string[] = [];
   let headChars = 0;
   for (let i = 0; i < Math.min(headCount, lines.length); i++) {
@@ -110,7 +112,9 @@ export async function truncateAndSaveToFile(
   // Collect tail lines within remaining budget. If a single line exceeds
   // the remaining budget, include a truncated slice of it.
   const tailBudget =
-    keep === 'head' ? 0 : Math.max(threshold - headChars - separator.length, 0);
+    keep === 'head'
+      ? 0
+      : Math.max(previewBudget - headChars - separator.length, 0);
   const end: string[] = [];
   let tailChars = 0;
   const tailStart = Math.max(lines.length - tailCount, beginning.length);
@@ -200,6 +204,7 @@ export async function truncateToolOutput(
     threshold?: number;
     lines?: number;
     keep?: 'head' | 'tail' | 'both';
+    previewChars?: number;
   },
   promptId?: string,
 ): Promise<{ content: string; outputFile?: string }> {
@@ -210,6 +215,7 @@ export async function truncateToolOutput(
     limits?.threshold ?? config.getTruncateToolOutputThreshold();
   const lines = limits?.lines ?? config.getTruncateToolOutputLines();
   const keep = limits?.keep ?? 'both';
+  const previewChars = limits?.previewChars ?? threshold;
 
   if (threshold <= 0 || lines <= 0) {
     return { content };
@@ -232,6 +238,7 @@ export async function truncateToolOutput(
     threshold,
     lines,
     keep,
+    previewChars,
   );
 
   if (result.outputFile) {
@@ -410,10 +417,9 @@ export async function persistAndTruncateToolResult(
       bytesWritten: 0,
     };
   }
-  const toolResultsDir = config.storage.getToolResultsDir();
-  const outputFile = path.join(toolResultsDir, `${safeCallId}.txt`);
-
   try {
+    const toolResultsDir = config.storage.getToolResultsDir();
+    const outputFile = path.join(toolResultsDir, `${safeCallId}.txt`);
     await fs.mkdir(toolResultsDir, { recursive: true });
     await atomicWriteFile(outputFile, content, {
       mode: 0o600,
@@ -428,9 +434,7 @@ export async function persistAndTruncateToolResult(
       bytesWritten: byteSize,
     };
   } catch (error) {
-    // Rollback budget reservation on write failure
-    config.trackToolResultBytes(-byteSize);
-    debugLogger.warn(`Failed to persist tool result to ${outputFile}:`, error);
+    debugLogger.warn('Failed to persist tool result:', error);
     try {
       const fallback = await truncateAndSaveToFile(
         content,
@@ -439,8 +443,17 @@ export async function persistAndTruncateToolResult(
         config.getTruncateToolOutputThreshold(),
         config.getTruncateToolOutputLines(),
       );
+      if (fallback.outputFile) {
+        return {
+          content: fallback.content,
+          outputFile: fallback.outputFile,
+          bytesWritten: byteSize,
+        };
+      }
+      config.trackToolResultBytes(-byteSize);
       return { content: fallback.content, bytesWritten: 0 };
     } catch (fallbackError) {
+      config.trackToolResultBytes(-byteSize);
       debugLogger.warn('Fallback truncation also failed:', fallbackError);
       return {
         content: buildStub(content, byteSize, '(disk persistence unavailable)'),

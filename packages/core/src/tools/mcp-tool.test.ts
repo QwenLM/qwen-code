@@ -1003,8 +1003,10 @@ describe('DiscoveredMCPTool', () => {
       );
       const combinedText = textParts.map((p: Part) => p.text).join('');
       expect(combinedText.length).toBeLessThan(largeText.length);
+      expect(combinedText.length).toBeLessThan(10_000);
       expect(combinedText).toContain('CONTENT TRUNCATED');
-      expect(result.returnDisplay).toContain('CONTENT TRUNCATED');
+      expect(result.returnDisplay).toBe(largeText);
+      expect(result.persistedOutputFiles).toHaveLength(1);
     });
 
     it('should truncate large text results from callable tool execution', async () => {
@@ -1040,8 +1042,10 @@ describe('DiscoveredMCPTool', () => {
       );
       const combinedText = textParts.map((p: Part) => p.text).join('');
       expect(combinedText.length).toBeLessThan(largeText.length);
+      expect(combinedText.length).toBeLessThan(10_000);
       expect(combinedText).toContain('CONTENT TRUNCATED');
-      expect(result.returnDisplay).toContain('CONTENT TRUNCATED');
+      expect(result.returnDisplay).toBe(largeText);
+      expect(result.persistedOutputFiles).toHaveLength(1);
     });
 
     it('should not truncate small text results', async () => {

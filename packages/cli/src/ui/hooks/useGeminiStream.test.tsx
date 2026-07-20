@@ -3161,6 +3161,22 @@ describe('useGeminiStream', () => {
   });
 
   it('suppresses duplicate provider tool-call ids before TUI scheduling', async () => {
+    const recordToolResult = vi.fn();
+    (
+      mockConfig as Config & {
+        getToolOutputBatchBudget: () => number;
+        getChatRecordingService: () => {
+          recordToolResult: typeof recordToolResult;
+        };
+      }
+    ).getToolOutputBatchBudget = () => 10_000;
+    (
+      mockConfig as Config & {
+        getChatRecordingService: () => {
+          recordToolResult: typeof recordToolResult;
+        };
+      }
+    ).getChatRecordingService = () => ({ recordToolResult });
     let capturedOnComplete:
       | ((completedTools: TrackedToolCall[]) => Promise<void>)
       | null = null;
@@ -3269,13 +3285,16 @@ describe('useGeminiStream', () => {
             functionResponse: {
               id: 'tool-dup',
               name: 'shell',
-              response: { output: 'first' },
+              response: {
+                output: `Tool output was too large and has been truncated${'x'.repeat(14_000)}`,
+              },
             },
           },
         ],
         resultDisplay: 'first',
         error: undefined,
         errorType: undefined,
+        persistedOutputFiles: [],
       },
       tool: {
         name: 'shell',
@@ -3299,11 +3318,25 @@ describe('useGeminiStream', () => {
     });
     const toolResultParts = mockSendMessageStream.mock.calls[1][0] as Part[];
     expect(toolResultParts).toHaveLength(2);
-    expect(toolResultParts[0].functionResponse?.response?.['output']).toBe(
-      'first',
+    expect(toolResultParts[0].functionResponse?.response?.['output']).toContain(
+      'Tool output truncated.',
     );
     expect(toolResultParts[1].functionResponse?.response?.['error']).toContain(
       'Duplicate provider tool call id "tool-dup"',
+    );
+    const wireLength = toolResultParts.reduce((sum, part) => {
+      const response = part.functionResponse?.response;
+      const output = response?.['output'];
+      const error = response?.['error'];
+      return (
+        sum +
+        (typeof output === 'string' ? output.length : 0) +
+        (typeof error === 'string' ? error.length : 0)
+      );
+    }, 0);
+    expect(wireLength).toBeLessThanOrEqual(10_000);
+    expect(recordToolResult.mock.calls.flatMap((call) => call[0])).toEqual(
+      toolResultParts,
     );
     expect(client.recordCompletedToolCall).toHaveBeenCalledTimes(1);
   });

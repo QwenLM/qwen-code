@@ -165,6 +165,68 @@ describe('startSpeculation', () => {
 
     await abortSpeculation(state);
   });
+
+  it('hard-caps an aggregate speculative tool response', async () => {
+    const execute = vi.fn().mockImplementation(async () => ({
+      llmContent: `Tool output was too large and has been truncated${'x'.repeat(7000)}`,
+      returnDisplay: 'full display',
+      persistedOutputFiles: [],
+    }));
+    const toolRegistry = {
+      ensureTool: vi.fn().mockResolvedValue({
+        build: vi.fn().mockReturnValue({ execute }),
+      }),
+    };
+    const config = {
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
+      getToolOutputBatchBudget: vi.fn().mockReturnValue(10_000),
+    } as unknown as Config;
+
+    forkedAgentMocks.runForkedAgent.mockResolvedValue({
+      jsonResult: { suggestion: '' },
+    });
+    forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+      if (forkedAgentMocks.sendMessageStream.mock.calls.length === 1) {
+        yield {
+          type: 'chunk',
+          value: {
+            candidates: [
+              {
+                content: {
+                  parts: ['one', 'two'].map((id) => ({
+                    functionCall: {
+                      id,
+                      name: 'read_file',
+                      args: { path: `${id}.ts` },
+                    },
+                  })),
+                },
+              },
+            ],
+          },
+        };
+      }
+    });
+
+    const state = await startSpeculation(config, 'read files');
+    await vi.waitFor(() => expect(state.status).toBe('completed'));
+
+    const parts = state.messages[2].parts ?? [];
+    const total = parts.reduce((sum, part) => {
+      const output = part.functionResponse?.response?.['output'];
+      return sum + (typeof output === 'string' ? output.length : 0);
+    }, 0);
+    expect(total).toBeLessThanOrEqual(10_000);
+    expect(parts.map((part) => part.functionResponse?.id)).toEqual([
+      'one',
+      'two',
+    ]);
+
+    await abortSpeculation(state);
+  });
 });
 
 describe.each([

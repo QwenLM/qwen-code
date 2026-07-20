@@ -3003,6 +3003,9 @@ describe('ShellTool', () => {
           );
           const hintIdx = content.indexOf('foreground command ran for');
           expect(hintIdx).toBeGreaterThan(truncIdx);
+          expect(result.persistedOutputFiles).toEqual([
+            '/tmp/qwen-temp/shell_mocked.output',
+          ]);
         } finally {
           // Restore even if assertions throw — otherwise the
           // truncateToolOutput spy leaks into subsequent tests.
@@ -3031,7 +3034,7 @@ describe('ShellTool', () => {
             output: 'short line\n'.repeat(50),
             exitCode: 0,
           });
-          await promise;
+          const result = await promise;
 
           // Shell must pass lines: Infinity so the global line cap can't
           // undercut its declared 30k char budget.
@@ -3039,8 +3042,12 @@ describe('ShellTool', () => {
             expect.anything(),
             ShellTool.Name,
             expect.any(String),
-            expect.objectContaining({ lines: Number.POSITIVE_INFINITY }),
+            expect.objectContaining({
+              lines: Number.POSITIVE_INFINITY,
+              previewChars: 4000,
+            }),
           );
+          expect(result.persistedOutputFiles).toEqual([]);
         } finally {
           spy.mockRestore();
         }

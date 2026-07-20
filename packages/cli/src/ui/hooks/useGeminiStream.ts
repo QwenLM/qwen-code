@@ -24,6 +24,7 @@ import {
   type ServerGeminiStreamEvent as GeminiEvent,
   type ThoughtSummary,
   type ToolCallRequestInfo,
+  type ToolCallResponseInfo,
   type GeminiErrorEventValue,
   type ActiveGoal,
   type SteerInput,
@@ -68,6 +69,7 @@ import {
   findRepeatedDuplicateProviderToolCall,
   AutonomousLoopTickResolver,
   refreshMemoryAfterManagedWrite,
+  finalizeToolResponses,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -158,7 +160,11 @@ const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE =
 interface PendingDuplicateToolResponses {
   executableCallIds: Set<string>;
   promptId: string | undefined;
-  responseParts: Part[];
+  callOrder: string[];
+  duplicateResponses: Array<{
+    request: ToolCallRequestInfo;
+    response: ToolCallResponseInfo;
+  }>;
 }
 
 interface ResolvedSteerMessages {
@@ -527,7 +533,10 @@ export const useGeminiStream = (
   >([]);
   const immediateDuplicateToolResponsesRef = useRef<{
     promptId: string | undefined;
-    responseParts: Part[];
+    responses: Array<{
+      request: ToolCallRequestInfo;
+      response: ToolCallResponseInfo;
+    }>;
   } | null>(null);
   // --- Real-time token display ---
   // Accumulates output character count across the whole turn (not per API call).
@@ -2248,7 +2257,10 @@ export const useGeminiStream = (
         !loopDetectedRef.current
       ) {
         const executableToolCallRequests: ToolCallRequestInfo[] = [];
-        const duplicateResponseParts: Part[] = [];
+        const duplicateResponses: Array<{
+          request: ToolCallRequestInfo;
+          response: ToolCallResponseInfo;
+        }> = [];
         let duplicatePromptId: string | undefined;
         const historyCallIdsWithResponse: Set<string> = geminiClient
           ? geminiClient.getHistoryFunctionResponseIds()
@@ -2292,7 +2304,7 @@ export const useGeminiStream = (
               `[processGeminiStreamEvents] Suppressing duplicate provider tool-call id: ${providerCallId} (tool: ${request.name})`,
             );
             dualOutput?.emitToolResult(request, response);
-            duplicateResponseParts.push(...response.responseParts);
+            duplicateResponses.push({ request, response });
             duplicatePromptId ??= request.prompt_id;
             continue;
           }
@@ -2301,7 +2313,7 @@ export const useGeminiStream = (
           executableToolCallRequests.push(request);
         }
 
-        if (duplicateResponseParts.length > 0) {
+        if (duplicateResponses.length > 0) {
           if (executableToolCallRequests.length > 0) {
             pendingDuplicateToolResponsesRef.current.push({
               executableCallIds: new Set(
@@ -2309,12 +2321,13 @@ export const useGeminiStream = (
               ),
               promptId:
                 duplicatePromptId ?? executableToolCallRequests[0]?.prompt_id,
-              responseParts: duplicateResponseParts,
+              callOrder: toolCallRequests.map((request) => request.callId),
+              duplicateResponses,
             });
           } else {
             immediateDuplicateToolResponsesRef.current = {
               promptId: duplicatePromptId,
-              responseParts: duplicateResponseParts,
+              responses: duplicateResponses,
             };
           }
         }
@@ -2885,8 +2898,35 @@ export const useGeminiStream = (
             immediateDuplicateToolResponsesRef.current;
           if (immediateDuplicateToolResponses) {
             immediateDuplicateToolResponsesRef.current = null;
+            const finalized = await finalizeToolResponses(
+              config,
+              immediateDuplicateToolResponses.responses.map(
+                ({ request, response }) => ({
+                  callId: request.callId,
+                  toolName: request.name,
+                  responseParts: response.responseParts,
+                  persistedOutputFiles: response.persistedOutputFiles,
+                }),
+              ),
+            );
+            const responseParts = finalized.flatMap(
+              (entry) => entry.responseParts,
+            );
+            immediateDuplicateToolResponses.responses.forEach(
+              ({ request, response }, index) => {
+                config
+                  .getChatRecordingService?.()
+                  ?.recordToolResult?.(finalized[index].responseParts, {
+                    callId: request.callId,
+                    status: response.error ? 'error' : 'success',
+                    resultDisplay: response.resultDisplay,
+                    error: response.error,
+                    errorType: response.errorType,
+                  });
+              },
+            );
             await submitQuery(
-              immediateDuplicateToolResponses.responseParts,
+              responseParts,
               SendMessageType.ToolResult,
               immediateDuplicateToolResponses.promptId,
             );
@@ -3215,6 +3255,26 @@ export const useGeminiStream = (
           !historyCallIdsWithResponse.has(t.request.callId),
       );
       if (clientTools.length > 0) {
+        const finalizedClientTools = await finalizeToolResponses(
+          config,
+          clientTools.map((toolCall) => ({
+            callId: toolCall.request.callId,
+            toolName: toolCall.request.name,
+            responseParts: toolCall.response.responseParts,
+            persistedOutputFiles: toolCall.response.persistedOutputFiles,
+          })),
+        );
+        clientTools.forEach((toolCall, index) => {
+          config
+            .getChatRecordingService?.()
+            ?.recordToolResult?.(finalizedClientTools[index].responseParts, {
+              callId: toolCall.request.callId,
+              status: toolCall.status,
+              resultDisplay: toolCall.response.resultDisplay,
+              error: toolCall.response.error,
+              errorType: toolCall.response.errorType,
+            });
+        });
         markToolsAsSubmitted(clientTools.map((t) => t.request.callId));
       }
 
@@ -3269,8 +3329,8 @@ export const useGeminiStream = (
           }
           return !isReady;
         });
-      const pendingDuplicateResponseParts = readyDuplicateBatches.flatMap(
-        (batch) => batch.responseParts,
+      const pendingDuplicateResponses = readyDuplicateBatches.flatMap(
+        (batch) => batch.duplicateResponses,
       );
       const pendingDuplicatePromptId = readyDuplicateBatches[0]?.promptId;
 
@@ -3281,12 +3341,76 @@ export const useGeminiStream = (
         );
       }
 
-      if (
-        geminiTools.length === 0 &&
-        pendingDuplicateResponseParts.length === 0
-      ) {
+      if (geminiTools.length === 0 && pendingDuplicateResponses.length === 0) {
         return;
       }
+
+      type ReadyToolResponse = {
+        request: ToolCallRequestInfo;
+        response: ToolCallResponseInfo;
+        status: 'success' | 'error' | 'cancelled';
+      };
+      const executableQueues = new Map<string, ReadyToolResponse[]>();
+      for (const toolCall of geminiTools) {
+        const queue = executableQueues.get(toolCall.request.callId) ?? [];
+        queue.push({
+          request: toolCall.request,
+          response: toolCall.response,
+          status: toolCall.status,
+        });
+        executableQueues.set(toolCall.request.callId, queue);
+      }
+      const duplicateQueues = new Map<string, ReadyToolResponse[]>();
+      for (const duplicate of pendingDuplicateResponses) {
+        const queue = duplicateQueues.get(duplicate.request.callId) ?? [];
+        queue.push({
+          ...duplicate,
+          status: duplicate.response.error ? 'error' : 'success',
+        });
+        duplicateQueues.set(duplicate.request.callId, queue);
+      }
+      const orderedResponses: ReadyToolResponse[] = [];
+      for (const batch of readyDuplicateBatches) {
+        for (const callId of batch.callOrder) {
+          const executable = executableQueues.get(callId)?.shift();
+          if (executable) {
+            orderedResponses.push(executable);
+            continue;
+          }
+          const duplicate = duplicateQueues.get(callId)?.shift();
+          if (duplicate) orderedResponses.push(duplicate);
+        }
+      }
+      for (const queue of executableQueues.values()) {
+        orderedResponses.push(...queue);
+      }
+      for (const queue of duplicateQueues.values()) {
+        orderedResponses.push(...queue);
+      }
+
+      const finalizedResponses = await finalizeToolResponses(
+        config,
+        orderedResponses.map(({ request, response }) => ({
+          callId: request.callId,
+          toolName: request.name,
+          responseParts: response.responseParts,
+          persistedOutputFiles: response.persistedOutputFiles,
+        })),
+      );
+      const responsesToSend = finalizedResponses.flatMap(
+        (entry) => entry.responseParts,
+      );
+      orderedResponses.forEach(({ request, response, status }, index) => {
+        config
+          .getChatRecordingService?.()
+          ?.recordToolResult?.(finalizedResponses[index].responseParts, {
+            callId: request.callId,
+            status,
+            resultDisplay: response.resultDisplay,
+            error: response.error,
+            errorType: response.errorType,
+          });
+      });
 
       if (
         turnCancelledRef.current ||
@@ -3303,16 +3427,13 @@ export const useGeminiStream = (
         (tc) => tc.status === 'cancelled',
       );
 
-      if (allToolsCancelled && pendingDuplicateResponseParts.length === 0) {
+      if (allToolsCancelled && pendingDuplicateResponses.length === 0) {
         if (geminiClient) {
           // We need to manually add the function responses to the history
           // so the model knows the tools were cancelled.
-          const combinedParts = geminiTools.flatMap(
-            (toolCall) => toolCall.response.responseParts,
-          );
           geminiClient.addHistory({
             role: 'user',
-            parts: combinedParts,
+            parts: responsesToSend,
           });
 
           // Report cancellation to arena (safety net — cancelOngoingRequest
@@ -3326,10 +3447,6 @@ export const useGeminiStream = (
         return;
       }
 
-      const responsesToSend: Part[] = geminiTools.flatMap(
-        (toolCall) => toolCall.response.responseParts,
-      );
-      responsesToSend.push(...pendingDuplicateResponseParts);
       const callIdsToMarkAsSubmitted = geminiTools.map(
         (toolCall) => toolCall.request.callId,
       );

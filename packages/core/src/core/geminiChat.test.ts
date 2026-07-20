@@ -2066,6 +2066,57 @@ describe('GeminiChat', async () => {
       );
     });
 
+    it('caps function responses at the provider send boundary without changing user text', async () => {
+      (
+        mockConfig as Config & {
+          getToolOutputBatchBudget: () => number;
+        }
+      ).getToolOutputBatchBudget = () => 100;
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamResponse({
+          candidates: [
+            {
+              content: { role: 'model', parts: [{ text: 'done' }] },
+              finishReason: 'STOP',
+              index: 0,
+              safetyRatings: [],
+            },
+          ],
+          usageMetadata: { totalTokenCount: 1 },
+        } as unknown as GenerateContentResponse),
+      );
+      const userText = 'ordinary user text must stay unchanged';
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        {
+          message: [
+            { text: userText },
+            {
+              functionResponse: {
+                id: 'large-tool',
+                name: 'shell',
+                response: { output: 'x'.repeat(1000) },
+              },
+            },
+          ],
+        },
+        'prompt-send-guard',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      const request = vi.mocked(mockContentGenerator.generateContentStream).mock
+        .calls[0][0];
+      const sentParts = (request.contents as Content[])[0].parts ?? [];
+      expect(sentParts[0].text).toBe(userText);
+      const output = sentParts[1].functionResponse?.response?.['output'];
+      expect(typeof output).toBe('string');
+      expect((output as string).length).toBeLessThanOrEqual(100);
+      expect(chat.getHistory()[0].parts).toEqual(sentParts);
+    });
+
     it('keeps historical image refs stable and reattaches only recent image bytes', async () => {
       vi.mocked(mockConfig.getChatCompression).mockReturnValue({
         maxRecentImagesToRetain: 1,

@@ -351,6 +351,7 @@ describe('AgentCore.prepareTools', () => {
     toolConfig: ToolConfig | undefined,
     fnDeclarations: FunctionDeclaration[],
     maxSubagentDepth = 5,
+    toolOutputBatchBudget = Number.POSITIVE_INFINITY,
   ): {
     core: AgentCore;
     debugSpy: ReturnType<typeof vi.fn>;
@@ -370,6 +371,8 @@ describe('AgentCore.prepareTools', () => {
         getFunctionDeclarationsFiltered: getFunctionDeclarationsFilteredSpy,
       }),
       getMaxSubagentDepth: vi.fn().mockReturnValue(maxSubagentDepth),
+      getToolOutputBatchBudget: vi.fn().mockReturnValue(toolOutputBatchBudget),
+      getToolResultBytesWritten: vi.fn().mockReturnValue(500 * 1024 * 1024),
     } as unknown as Config;
 
     const core = new AgentCore(
@@ -654,6 +657,39 @@ describe('AgentCore.prepareTools', () => {
       expect(response?.error).not.toContain('not found');
     },
   );
+
+  it('hard-caps the aggregate subagent tool response', async () => {
+    const { core } = buildAgentForTools(undefined, [], 5, 1000);
+    const missingName = `missing_${'a'.repeat(2000)}`;
+
+    const result = await core.processFunctionCalls(
+      [
+        { name: missingName, args: {} },
+        { name: missingName, args: {} },
+      ],
+      new AbortController(),
+      'prompt-budget',
+      1,
+      [],
+    );
+
+    const parts = result.messages[0].parts ?? [];
+    const total = parts.reduce((sum, part) => {
+      const response = part.functionResponse?.response;
+      const output = response?.['output'];
+      const error = response?.['error'];
+      return (
+        sum +
+        (typeof output === 'string' ? output.length : 0) +
+        (typeof error === 'string' ? error.length : 0)
+      );
+    }, 0);
+    expect(total).toBeLessThanOrEqual(1000);
+    const responseIds = parts.map((part) => part.functionResponse?.id);
+    expect(new Set(responseIds).size).toBe(2);
+    expect(responseIds[0]).toMatch(/-0$/);
+    expect(responseIds[1]).toMatch(/-1$/);
+  });
 
   // ─── Nested sub-agents ──────────────────────────────────────────
   // The AgentTool is depth-gated: available to a sub-agent only while

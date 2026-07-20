@@ -493,6 +493,12 @@ export interface ToolResult {
   llmContent: PartListUnion;
 
   /**
+   * Producer output artifacts persisted before final aggregation.
+   * Internal runtimes use these paths to avoid writing the same output again.
+   */
+  persistedOutputFiles?: string[];
+
+  /**
    * Markdown string for user display.
    * This provides a user-friendly summary or visualization of the result.
    * NOTE: This might also be considered UI-specific and could potentially be
