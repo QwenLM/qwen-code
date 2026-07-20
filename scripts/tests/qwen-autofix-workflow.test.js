@@ -2631,17 +2631,20 @@ describe('qwen-autofix workflow', () => {
     expect(schemaScript).toContain('git status --porcelain');
     expect(schemaScript).toContain('outcome=failed');
     // The owning-package resolver maps each changed path to the longest-prefix
-    // npm WORKSPACE (from `npm query .workspace`), not "any ancestor dir with a
-    // package.json" — a fixture package.json inside a workspace's src tree is
-    // not a workspace and must not shadow the owning workspace's tests.
+    // npm WORKSPACE, expanded from the ON-DISK root package.json workspaces
+    // globs (so a workspace the branch adds is included — node_modules is the
+    // base's), not "any ancestor dir with a package.json" (a fixture inside a
+    // workspace's src tree is not a workspace). It fails loudly on an empty set.
     const resolveScript = readFileSync(
       '.github/scripts/resolve-owning-packages.sh',
       'utf8',
     );
-    expect(resolveScript).toContain('npm query .workspace --json');
+    expect(resolveScript).toContain('readFileSync("package.json"');
+    expect(resolveScript).not.toContain('npm query .workspace');
     expect(resolveScript).toContain(
       '[[ "${f}" == "${w}"/* && "${#w}" -gt "${#best}" ]]',
     );
+    expect(resolveScript).toContain('no workspaces resolved from package.json');
     expect(resolveScript).toContain('sort -u');
     // The review gate's freshness check is a STRUCTURAL guard: the script call
     // must run BEFORE the no-op/unchanged return, so a stale-schema PR the agent
@@ -2807,13 +2810,12 @@ describe('qwen-autofix workflow', () => {
     }
   });
 
-  it('resolver maps each changed file to its longest-prefix npm workspace, not a fixture package', () => {
-    // Run the real staged resolver against a REAL minimal npm workspace: a
-    // nested workspace (packages/channels/base), a fixture package.json inside
-    // packages/cli's src tree (NOT a workspace), and a non-workspace dir
-    // (packages/sdk-python). "Nearest package.json" would resolve a change
-    // under the fixture to the fixture and silently skip packages/cli's tests;
-    // longest-workspace-prefix resolves it to packages/cli.
+  it('resolver maps each changed file to its longest-prefix workspace from the on-disk manifest', () => {
+    // Reads the on-disk root package.json workspaces globs (NO npm install), so
+    // it sees workspaces the branch ADDS — node_modules would only have the
+    // base's. Set up a new top-level and a new nested workspace, a fixture
+    // package.json inside a workspace's src tree (NOT a workspace), a
+    // !-excluded workspace, and a non-workspace dir.
     const script = resolve('.github/scripts/resolve-owning-packages.sh');
     const dir = mkdtempSync(join(tmpdir(), 'ws-'));
     try {
@@ -2822,56 +2824,77 @@ describe('qwen-autofix workflow', () => {
         JSON.stringify({
           name: 'root',
           private: true,
-          workspaces: ['packages/cli', 'packages/channels/*'],
+          workspaces: [
+            'packages/*',
+            'packages/channels/*',
+            '!packages/desktop',
+          ],
         }),
       );
-      for (const [pkg, name] of [
-        ['packages/cli', '@x/cli'],
-        ['packages/channels/base', '@x/base'],
-        ['packages/channels/dingtalk', '@x/dingtalk'],
-        // A fixture package inside cli's src tree — has a package.json but is
-        // NOT a workspace, so it must never be an owning package.
-        ['packages/cli/src/commands/examples/starter', '@x/starter'],
-        // Directly under packages/ but not matched by any workspace glob.
-        ['packages/sdk-python', '@x/py'],
+      for (const pkg of [
+        'packages/cli',
+        'packages/brandnew', // a new top-level workspace the branch adds
+        'packages/channels/base',
+        'packages/channels/newchannel', // a new nested workspace the branch adds
+        'packages/desktop', // excluded by the ! glob
+        'packages/cli/src/commands/examples/starter', // fixture, NOT a workspace
       ]) {
         mkdirSync(join(dir, pkg), { recursive: true });
-        writeFileSync(join(dir, pkg, 'package.json'), JSON.stringify({ name }));
+        writeFileSync(join(dir, pkg, 'package.json'), '{}');
       }
-      // Strip the parent `npm run test` context (npm_config_*, INIT_CWD) so npm
-      // resolves THIS temp workspace, not the repo the test runs from.
-      const env = Object.fromEntries(
-        Object.entries(process.env).filter(
-          ([k]) => !/^npm_/i.test(k) && k !== 'INIT_CWD',
-        ),
-      );
-      execFileSync(
-        'npm',
-        ['install', '--ignore-scripts', '--no-audit', '--no-fund'],
-        { cwd: dir, env, stdio: 'ignore' },
-      );
+      mkdirSync(join(dir, 'packages/sdk-python'), { recursive: true }); // no manifest
       const changed =
         [
           'packages/cli/src/commands/examples/starter/src/index.ts', // -> packages/cli
-          'packages/channels/base/src/x.ts', // -> packages/channels/base
-          'packages/cli/src/serve/server.ts', // -> packages/cli
-          'packages/sdk-python/foo.py', // not a workspace -> dropped
-          'packages/README.md', // no owning workspace -> dropped
-          '.github/workflows/qwen-autofix.yml', // outside packages/ -> dropped
+          'packages/brandnew/src/z.ts', // -> packages/brandnew (branch-added)
+          'packages/channels/newchannel/src/y.ts', // -> newchannel (branch-added nested)
+          'packages/desktop/src/d.ts', // excluded workspace -> dropped
+          'packages/sdk-python/foo.py', // no manifest -> dropped
+          'README.md', // outside packages/ -> dropped
         ].join('\n') + '\n';
       const out = execFileSync('bash', [script], {
         input: changed,
         cwd: dir,
-        env,
         encoding: 'utf8',
       }).trim();
       expect(out.split('\n').sort()).toEqual([
-        'packages/channels/base',
+        'packages/brandnew',
+        'packages/channels/newchannel',
         'packages/cli',
       ]);
-      // The fixture package must never own a file (that would skip cli's tests).
-      expect(out).not.toContain('examples/starter');
+      expect(out).not.toContain('examples/starter'); // fixture never owns
       expect(out).not.toContain('sdk-python');
+      expect(out).not.toContain('packages/desktop'); // ! negation honoured
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('resolver fails loudly when the manifest declares no workspaces', () => {
+    // An empty workspace set (unreadable/missing workspaces) must be a hard,
+    // non-zero exit — not a silent empty output that reads as "no package
+    // changes" and skips the gate. The call sites carry no `|| true`.
+    const script = resolve('.github/scripts/resolve-owning-packages.sh');
+    const dir = mkdtempSync(join(tmpdir(), 'nows-'));
+    try {
+      writeFileSync(
+        join(dir, 'package.json'),
+        JSON.stringify({ name: 'root' }),
+      );
+      let threw = false;
+      let stderr = '';
+      try {
+        execFileSync('bash', [script], {
+          input: 'packages/cli/src/x.ts\n',
+          cwd: dir,
+          encoding: 'utf8',
+        });
+      } catch (e) {
+        threw = true;
+        stderr = e.stderr?.toString() ?? '';
+      }
+      expect(threw).toBe(true);
+      expect(stderr).toContain('no workspaces resolved from package.json');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -2913,13 +2936,14 @@ describe('qwen-autofix workflow', () => {
     expect(run('')).not.toContain('This change was NOT pushed');
   });
 
-  it('verify gate records committed=true only when the branch has a new commit', () => {
+  it('verify gate records committed=true only on a real diff (exit 1), not a git error (128)', () => {
     // The handoff's "was NOT pushed" wording keys on this output; it is recorded
-    // right after checkout, before any gate can exit, so it reflects "the agent
-    // committed" independent of whether a later gate failed. Extract the snippet
-    // and drive it with a stubbed git whose `diff --quiet` exit is scripted.
+    // at the top of the step, before any gate can exit. `git diff --quiet` exits
+    // 1 for a real diff but 128 on a bad ref — only 1 is a commit, so a git
+    // error must not be misreported as a discarded commit. Drive the extracted
+    // snippet with a stubbed git whose exit is scripted.
     const snippet = verificationGateSteps[1].match(
-      /if ! git diff --quiet "origin[\s\S]*?committed=true[^\n]*\n\s*fi/,
+      /committed_rc=0[\s\S]*?committed=true[^\n]*\n\s*fi/,
     )?.[0];
     expect(snippet).toBeTruthy();
     const run = (gitDiffExit) => {
@@ -2954,6 +2978,8 @@ describe('qwen-autofix workflow', () => {
     expect(run(1)).toContain('committed=true');
     // exits 0 => no new commit => nothing recorded.
     expect(run(0)).not.toContain('committed=true');
+    // exits 128 => bad ref / git error => NOT treated as a commit.
+    expect(run(128)).not.toContain('committed=true');
     // Neither gate carries an EXIT trap: the wording keys on committed, so an
     // outcome=failed-forcing trap (which would also fire on pre-commit
     // failures) must not creep back into either verify step.

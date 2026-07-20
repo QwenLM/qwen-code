@@ -1036,13 +1036,18 @@ jobs:
           # Run changed/related tests for the packages this fix touches.
           # --changed follows the import graph so transitive breakage is caught.
           # Full regression is covered by regular CI on the PR after the push.
-          # Map each changed file to its OWNING package — the nearest ancestor
-          # with a package.json — via the trusted staged resolver, shared with
-          # the other verify gate so both resolve packages identically. A flat
-          # 'packages/<dir>' assumption ENOENT-crashes on nested packages like
-          # packages/channels/base, whose container has no package.json.
+          # Map each changed file to its OWNING npm workspace via the trusted
+          # staged resolver, shared with the other verify gate so both resolve
+          # packages identically. It expands the on-disk root package.json
+          # workspaces globs (so a workspace the branch ADDS is included) and
+          # takes each file's longest-prefix workspace — never a flat
+          # 'packages/<dir>' (ENOENT-crashes on nested packages) nor a fixture
+          # package.json inside a workspace's src tree (would skip the owning
+          # workspace's tests). No '|| true': a resolver error (missing node, an
+          # unreadable manifest) must fail the gate loudly rather than silently
+          # skip package tests; legitimate no-match input already exits 0 empty.
           CHANGED_PKGS="$(git diff --name-only "origin/main...${BRANCH}" \
-            | bash "${RUNNER_TEMP}/resolve-owning-packages.sh" || true)"
+            | bash "${RUNNER_TEMP}/resolve-owning-packages.sh")"
           if [[ -z "${CHANGED_PKGS}" ]]; then
             echo 'No package changes detected; skipping package tests.'
           else
@@ -2424,6 +2429,20 @@ jobs:
         if: |-
           ${{ always() && steps.prepare.outputs.stale != 'true' }}
         run: |-
+          # Record whether the agent left a commit FIRST — this is a ref-only
+          # diff, so it runs before the failure.md early-exits and covers an
+          # agent that commits and then aborts. The failure handoff keys its
+          # "was NOT pushed / commit discarded" wording on this, NOT on
+          # outcome=failed: abort / pre-commit-gate paths that never committed
+          # keep the neutral framing. `git diff --quiet` exits 1 for a real diff
+          # (committed) but 128 on a bad ref — only 1 counts as a commit, so a
+          # git error is not misreported as a discarded commit.
+          committed_rc=0
+          git diff --quiet "origin/${BRANCH}...${BRANCH}" || committed_rc=$?
+          if [[ "${committed_rc}" -eq 1 ]]; then
+            echo "committed=true" >> "${GITHUB_OUTPUT}"
+          fi
+
           if [[ -f "${WORKDIR}/failure.md" && -n "$(git status --porcelain)" ]]; then
             echo "❌ Agent wrote failure.md after leaving a dirty workspace:"
             git status --short
@@ -2444,17 +2463,6 @@ jobs:
           # hook still runs branch code on the host).
           git config core.hooksPath /dev/null
           git checkout "${BRANCH}"
-
-          # Record whether the agent left a commit, BEFORE any gate below can
-          # exit. The failure handoff keys its "was NOT pushed / commit
-          # discarded" wording on this, NOT on outcome=failed: an intentional
-          # agent abort (failure.md, no commit) and a pre-commit gate failure
-          # (e.g. the schema gate) never made a commit, so they must keep the
-          # neutral framing. A non-empty diff against the unmodified remote head
-          # means the agent committed.
-          if ! git diff --quiet "origin/${BRANCH}...${BRANCH}"; then
-            echo "committed=true" >> "${GITHUB_OUTPUT}"
-          fi
 
           # Settings-schema freshness is a STRUCTURAL guard, checked BEFORE the
           # no-op/unchanged return: on a stale-schema PR the agent can wrongly
@@ -2498,13 +2506,18 @@ jobs:
           # Test changed/related files for the packages this PR touches.
           # --changed follows the import graph so transitive breakage is caught.
           # Full regression is covered by regular CI on the PR after the push.
-          # Map each changed file to its OWNING package — the nearest ancestor
-          # with a package.json — via the trusted staged resolver, shared with
-          # the other verify gate so both resolve packages identically. A flat
-          # 'packages/<dir>' assumption ENOENT-crashes on nested packages like
-          # packages/channels/base, whose container has no package.json.
+          # Map each changed file to its OWNING npm workspace via the trusted
+          # staged resolver, shared with the other verify gate so both resolve
+          # packages identically. It expands the on-disk root package.json
+          # workspaces globs (so a workspace the branch ADDS is included) and
+          # takes each file's longest-prefix workspace — never a flat
+          # 'packages/<dir>' (ENOENT-crashes on nested packages) nor a fixture
+          # package.json inside a workspace's src tree (would skip the owning
+          # workspace's tests). No '|| true': a resolver error (missing node, an
+          # unreadable manifest) must fail the gate loudly rather than silently
+          # skip package tests; legitimate no-match input already exits 0 empty.
           CHANGED_PKGS="$(git diff --name-only "origin/main...${BRANCH}" \
-            | bash "${RUNNER_TEMP}/resolve-owning-packages.sh" || true)"
+            | bash "${RUNNER_TEMP}/resolve-owning-packages.sh")"
           if [[ -z "${CHANGED_PKGS}" ]]; then
             echo 'No package changes detected; skipping package tests.'
           else

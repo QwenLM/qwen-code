@@ -7,24 +7,55 @@
 # npm workspace of each: the workspace whose location is the LONGEST matching
 # path prefix of the file.
 #
-# The workspace set is the authoritative `npm query .workspace` list, NOT "any
-# ancestor directory that has a package.json". Fixture/example packages such as
-# packages/cli/src/commands/extensions/examples/starter carry their own
-# package.json but are NOT workspaces — a nearest-package.json walk resolves a
-# change there to the fixture (whose test script is not Vitest), silently
-# SKIPPING packages/cli's own tests. Longest-workspace-prefix instead resolves
-# it to packages/cli. Nested workspaces (packages/channels/base) match exactly;
-# non-workspace paths (packages/sdk-python, a top-level packages/README.md, and
-# the intentionally-excluded packages/desktop) match nothing and are dropped.
+# The workspace set is expanded from the ON-DISK root package.json `workspaces`
+# globs, NOT from `npm query`/node_modules: node_modules reflects the BASE
+# checkout the gate installed, so a workspace the PR branch ADDS (a new channel
+# adapter, a new sdk — the issue-fix job's whole purpose) would be invisible and
+# its tests silently skipped. It is also NOT "any ancestor dir with a
+# package.json": a fixture/example package inside a workspace's src tree (e.g.
+# packages/cli/src/commands/extensions/examples/starter) has a package.json but
+# is not a workspace, so resolving a change there to the fixture would skip
+# packages/cli's own tests. Expanding the globs (shallow `dir/*` + literals,
+# honouring `!` negations, keeping dirs that contain a package.json) matches
+# what `npm run --workspace` accepts downstream and reflects the branch.
 #
-# `npm query` reads node_modules, which the calling gate has installed. Staged
-# to RUNNER_TEMP from the trusted base checkout (never the PR branch) alongside
-# check-settings-schema.sh, and invoked with the repository as the working
-# directory so both `npm query` and the prefix match resolve against the tree.
+# Invoked with the repository as the working directory. Staged to RUNNER_TEMP
+# from the trusted base checkout (never the PR branch) alongside
+# check-settings-schema.sh.
 set -euo pipefail
 
-workspaces="$(npm query .workspace --json \
-  | node -e 'let s="";process.stdin.on("data",(d)=>{s+=d}).on("end",()=>{process.stdout.write(JSON.parse(s).map((w)=>w.location).join("\n"))})')"
+workspaces="$(node -e '
+  const fs = require("fs");
+  const path = require("path");
+  const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+  let globs = pkg.workspaces || [];
+  if (!Array.isArray(globs)) globs = globs.packages || [];
+  const positive = [];
+  const negative = [];
+  for (const g of globs) (g[0] === "!" ? negative : positive).push(g.replace(/^!/, ""));
+  const hasManifest = (d) => {
+    try { return fs.statSync(path.join(d, "package.json")).isFile(); }
+    catch { return false; }
+  };
+  const expand = (g) => {
+    const star = g.indexOf("*");
+    if (star === -1) return [g];
+    const parent = g.slice(0, star).replace(/\/$/, "");
+    let entries = [];
+    try { entries = fs.readdirSync(parent, { withFileTypes: true }); }
+    catch { return []; }
+    return entries.filter((e) => e.isDirectory()).map((e) => path.posix.join(parent, e.name));
+  };
+  const dirs = new Set();
+  for (const g of positive) for (const d of expand(g)) if (hasManifest(d)) dirs.add(d);
+  for (const g of negative) { for (const d of expand(g)) dirs.delete(d); dirs.delete(g); }
+  process.stdout.write([...dirs].sort().join("\n"));
+')"
+
+if [[ -z "${workspaces}" ]]; then
+  echo "resolve-owning-packages: no workspaces resolved from package.json" >&2
+  exit 1
+fi
 
 while IFS= read -r f || [[ -n "${f}" ]]; do
   [[ -n "${f}" ]] || continue
