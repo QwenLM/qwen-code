@@ -10,6 +10,57 @@
 
 import { execFileSync } from 'node:child_process';
 
+// ---------------------------------------------------------------------------
+// Transient-error retry
+// ---------------------------------------------------------------------------
+
+const MAX_RETRIES = 2;
+const BASE_DELAY_MS = 3_000;
+
+/** Block the current thread without burning CPU (no busy-wait). */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+const TRANSIENT_RE =
+  /HTTP 5\d{2}|server is currently unavailable|service unavailable|bad gateway|internal server error/i;
+
+function isTransientGhError(err: unknown): boolean {
+  const stderr =
+    typeof (err as { stderr?: unknown }).stderr === 'string'
+      ? ((err as { stderr: string }).stderr as string)
+      : '';
+  const msg = err instanceof Error ? err.message : '';
+  return TRANSIENT_RE.test(stderr) || TRANSIENT_RE.test(msg);
+}
+
+/**
+ * `execFileSync('gh', …)` with automatic retry on transient GitHub errors
+ * (HTTP 5xx / "server is currently unavailable"). Non-transient failures
+ * throw immediately.
+ */
+function execGhWithRetry(args: string[], options: { input?: string }): string {
+  const execOptions: Parameters<typeof execFileSync>[2] = {
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+    env: ghEnv(),
+    ...(options.input !== undefined ? { input: options.input } : {}),
+  };
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return (execFileSync('gh', args, execOptions) as string)
+        .replace(/\r\n/g, '\n')
+        .trim();
+    } catch (err) {
+      if (attempt < MAX_RETRIES && isTransientGhError(err)) {
+        sleepSync(BASE_DELAY_MS * (attempt + 1));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 let ghHost: string | undefined;
 
 const HOSTNAME_RE = /^[A-Za-z0-9.-]+(?::\d+)?$/;
@@ -49,6 +100,7 @@ export function ghEnv(): NodeJS.ProcessEnv | undefined {
 
 /**
  * Run `gh` with args. Returns stdout, trimmed and CRLF-normalised.
+ * Retries automatically on transient GitHub errors (HTTP 5xx).
  *
  * `maxBuffer` is raised well past Node's 1 MiB default: paginated fetches
  * on comment-heavy PRs routinely exceed it, and the resulting ENOBUFS kills
@@ -57,17 +109,12 @@ export function ghEnv(): NodeJS.ProcessEnv | undefined {
  * still bounding a runaway response.
  */
 export function gh(...args: string[]): string {
-  return execFileSync('gh', args, {
-    encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024,
-    env: ghEnv(),
-  })
-    .replace(/\r\n/g, '\n')
-    .trim();
+  return execGhWithRetry(args, {});
 }
 
 /**
  * Run `gh` with `input` on its stdin. Returns stdout, trimmed.
+ * Retries automatically on transient GitHub errors (HTTP 5xx).
  *
  * Exists so a caller can send bytes it already holds in memory instead of a
  * pathname `gh` would re-open. Passing `--input <file>` re-reads the file at
@@ -77,14 +124,7 @@ export function gh(...args: string[]): string {
  * closes that window: the bytes checked are the bytes posted.
  */
 export function ghWithInput(input: string, ...args: string[]): string {
-  return execFileSync('gh', args, {
-    encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024,
-    env: ghEnv(),
-    input,
-  })
-    .replace(/\r\n/g, '\n')
-    .trim();
+  return execGhWithRetry(args, { input });
 }
 
 /**
@@ -185,13 +225,25 @@ export function currentUser(): string {
  * Verify `gh` is installed and authenticated. Throws a clear error if not —
  * subcommands call this first so missing-auth failures don't show up as
  * cryptic 401s mid-run.
+ *
+ * Retries once after a short delay: the OS keyring can transiently fail to
+ * unlock (observed on macOS when the keyring prompt races with process
+ * startup), and a single retry avoids a spurious "not authenticated" abort
+ * that forces the orchestrating model to debug and re-run the subcommand.
  */
 export function ensureAuthenticated(): void {
-  try {
-    execFileSync('gh', ['auth', 'status'], { stdio: 'pipe', env: ghEnv() });
-  } catch {
-    throw new Error(
-      'gh CLI is not authenticated. Run `gh auth login` and retry.',
-    );
+  for (let attempt = 0; ; attempt++) {
+    try {
+      execFileSync('gh', ['auth', 'status'], { stdio: 'pipe', env: ghEnv() });
+      return;
+    } catch {
+      if (attempt === 0) {
+        sleepSync(2_000);
+        continue;
+      }
+      throw new Error(
+        'gh CLI is not authenticated. Run `gh auth login` and retry.',
+      );
+    }
   }
 }
